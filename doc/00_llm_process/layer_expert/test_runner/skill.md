@@ -87,6 +87,37 @@ against the monitor timeout) and `SIMPLE_SYSTEM_TEST` (`1` for paths containing
   lane). Treat low coverage on a green lane as an **attribution** question
   before concluding the lane is vacuous.
 
+## The light daemon clamps `--timeout` at 600s — and env vars do NOT lift it
+
+`LIGHT_REQUEST_MAX_TIMEOUT_MS = 600000` (`src/app/test_daemon/light_protocol.spl:1-2`).
+`light_request_timeout_ms_from_seconds` clamps any larger `--timeout` down to it,
+so `--timeout 3000` silently becomes 600s. **`SIMPLE_TIMEOUT_SECONDS=0` does not
+raise this ceiling** — that env var disables the separate 60s CPU guard, which is
+a different limit.
+
+Two distinct limits, two distinct symptoms — do not confuse them:
+
+| limit | where | symptom | knob |
+|---|---|---|---|
+| CPU guard, ~60s | resource monitor | exit **143** (SIGTERM) at ~62s, message names `SIMPLE_TIMEOUT_SECONDS` | `SIMPLE_TIMEOUT_SECONDS=0` |
+| daemon request cap, 600s | `light_protocol.spl:1-2` | `ERROR: test daemon timed out`, or exit 255 + `Process timed out`, **no `Results:` line** | none — see workaround |
+
+A spec whose real runtime exceeds 600s **cannot be verified by a plain
+`bin/simple test <spec>`**: it reports a daemon timeout instead of a verdict.
+Observed 2026-08-04 on `test/01_unit/os/crypto/x25519mlkem768_pinned_workload_spec.spl`
+(~13 min wall). Three attempts produced no verdict line; the run that finally
+reported `Results: 8 total, 8 passed, 0 failed` only did so because it was
+launched **detached**, so daemon-side execution outlived the client's give-up.
+
+Consequences for measurement:
+
+- A daemon timeout is **not** a failure and **not** a pass. Record it as a
+  timeout, exactly like the exit-255 case.
+- Do not "fix" such a spec by raising `--timeout`; the clamp ignores you. Either
+  run detached and read the log, or reduce the spec's real cost.
+- A spec that cannot be run by its normal command is not runnable. File it as a
+  concrete todo rather than leaving it as folklore.
+
 ## Adjacent tooling: `simple clean`
 
 `src/app/clean/main.spl` — manual + automatic temp/cache cleanup. Auto mode is
@@ -100,6 +131,9 @@ is set, so it cannot silently delete a session's artifacts.
   green GPU-offload lanes; carries the `@exec_limit` and render-budget traps
   together with the evidence map.
 - [statement_coverage](../../feature_expert/statement_coverage/skill.md)
+- [x25519mlkem768_acceleration](../../feature_expert/x25519mlkem768_acceleration/skill.md) —
+  hit the 600s daemon clamp above; also the reference case for scoring the
+  verdict line rather than the exit code on crypto evidence specs.
 - [browser_engine layer](../browser_engine/skill.md) — the render-budget
   silent-truncation hazard is the sibling trap to `@exec_limit`; a
   long-running renderer spec usually needs BOTH.

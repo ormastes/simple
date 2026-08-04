@@ -833,3 +833,105 @@ implementation-active
   differential-oracle entry point and the `:503` removal, and verify the ABBA
   span ordering in the **native** lane above rather than on the seed. Still no
   physical SIMD or GPU performance PASS is claimed.
+
+## 2026-08-04 — parse blocker cleared, campaign source landed, SIMD path measured
+
+### Landed on main
+
+- `e6217b01475` — campaign source (92 files, all additions) plus two modules the
+  campaign imports that existed only in a jj working-copy snapshot:
+  `src/lib/common/platform_measurement_observation.spl` and
+  `src/lib/common/encoding/sha256_contract.spl`. Their absence made importing
+  specs fail at an *unrelated* call site: an unresolved `use` is only a WARN, so
+  one missing leaf poisoned the graph and surfaced as `function ... not found`
+  somewhere else entirely.
+- `d8a8fbc5164` — `X25519_MLKEM768_PINNED_SERVER_X25519_SHA256` was **63 hex
+  chars**, the trailing `4` dropped. `_executed_row_hex64` rejects any value
+  whose `len() != 64`, so Set B failed on every call and returned before Set C
+  could run. Value recovered by reproducing the sibling constant exactly:
+  `sha256(RFC 7748 Alice pubkey)` = `300c9c96...d63425ae` matches the in-repo
+  client constant bit for bit. Derived, not hand-entered.
+
+### Measured verdicts (`SIMPLE_TIMEOUT_SECONDS=0` on every run)
+
+| spec | verdict |
+|---|---|
+| `x25519mlkem768_avx2_full_operation_receipt_spec` | `4 total, 4 passed, 0 failed` |
+| `x25519mlkem768_evidence_contract_spec` | `11 total, 11 passed, 0 failed` |
+| `x25519mlkem768_executed_row_composer_spec` | `8 total, 8 passed, 0 failed` |
+| `x25519mlkem768_pinned_workload_spec` | `8 total, 8 passed, 0 failed` (uncommitted tree) |
+| `x25519mlkem768_simd_operation_evidence_spec` | `4 total, 4 passed, 0 failed` (uncommitted tree) |
+| `matrix_receipt`, `measurement_qualification`, `performance_attestation`, `qualified_timing` | **TIMEOUT, no `Results:` line** |
+
+Timeouts are recorded as timeouts. They are not passes and not failures.
+
+### The SIMD backend question, resolved against the earlier finding
+
+The prior note "seed returns SIMD backend 0 by design — Rust stub" is **too
+broad**. Verified at source: `simple_runtime::value::simd_int_ops::mul_i32x8`
+uses `_mm256_loadu_si256` / `_mm256_mullo_epi32` / `_mm256_storeu_si256` behind a
+runtime `is_x86_feature_detected!("avx2")` guard, with a scalar fallback — 57
+such intrinsic uses in that file. So `std.simd`'s integer vector ops are **real
+AVX2**, and a Simple-level kernel built on them genuinely executes AVX2. The
+"stub" characterisation applies to the ML-KEM NTT batch hook, not to the vector
+ops.
+
+`mlkem_ntt_simd_backend()` means **"is the native SIMD NTT batch path usable"**,
+not "does this CPU have a vector unit". Consumers pin this:
+`execution_policy.spl:111-117` tests `native_backend == 1/2/3` and `:136` emits
+"requested SIMD candidate is unavailable on this host". Reporting CPU capability
+there is wrong twice over — it fabricates the recorded backend, and it opens the
+gate at `ml_kem_ntt.spl:223/298` onto `mlkem_ntt_simd_batch`.
+
+### Uncommitted, verified but not landed
+
+- `src/lib/nogc_sync_mut/simd.spl` — `MlKemNttSimdReceipt`,
+  `mlkem_ntt_simd_backend/reset/receipt/batch`, the last being an AVX2 NTT batch
+  kernel (five butterfly layers at stride >= 8 through `simd_mul_i32x8` /
+  `simd_add_i32x8` / `simd_sub_i32x8`; stride-4 and stride-2 layers stay scalar
+  and are not counted as chunks).
+- `src/os/crypto/ml_kem.spl`, `ml_kem_kpke.spl`, `ml_kem_ntt.spl` — the nine
+  `ml_kem_*_checked*` functions, `trait MlKemNttBatchProvider`, `ntt_simd` /
+  `intt_simd`. Implicit rejection preserved constant-time via
+  `_ct_select_bytes(_ct_bytes_eq(c, c_prime), k_prime, k_implicit)`
+  (`ml_kem.spl:380-381`, `:517-518`); no secret-dependent early return.
+- `test/fixtures/crypto/x25519mlkem768/` — 25 files, restored at the **newest**
+  blob per path (`manifest.sdn` has 43 revisions, `sspec_family_migration_manifest.sdn`
+  39; picking an arbitrary commit would install stale content that looks fine).
+
+**These 731 added lines across three key-generation files are NEW work, not
+recovered loss.** `1c74085cfce` is not an ancestor of `main`. Checked directly:
+`ml_kem.spl` was 335 lines at `118c636ead8^` (before the wipe), 0 during it, and
+335 at `7f5a55fa46e` (the revert) and on main today — the revert was **complete**.
+`ml_kem_keygen_checked` has zero definitions at every point in main's history.
+Treat this as new crypto needing review, not as a repair.
+
+### What the 8/8 does and does not prove
+
+During that run `mlkem_ntt_simd_backend()` returned **1** and both source files
+were frozen beforehand (`simd.spl` 12:54:45, `ml_kem_ntt.spl` 12:35:24; run
+12:56:30-13:09:38). So the gate was open and the AVX2 kernel really executed on
+the keygen path, and the spec checks outputs against pinned SHA-256 constants —
+a wrong NTT would break those digests. That is genuine bit-correctness evidence
+for one workload.
+
+**Superseded as vacuous:** an earlier `keygen_driver` PASS with
+`ek_match=true dk_match=true` ran while `backend` was 0. With the gate shut it
+compared scalar against scalar and proved nothing about the kernel.
+
+### Blockers, unchanged or newly specific
+
+1. `test/01_unit/os/crypto/x25519mlkem768_pinned_workload_spec.spl` now exceeds
+   the light daemon cap. `LIGHT_REQUEST_MAX_TIMEOUT_MS = 600000`
+   (`src/app/test_daemon/light_protocol.spl:1-2`) clamps `--timeout`, and
+   `SIMPLE_TIMEOUT_SECONDS=0` does **not** lift it. A plain `bin/simple test`
+   reports `test daemon timed out` instead of a verdict; the passing run only
+   completed because it was launched detached and outlived the client. Needs a
+   concrete todo — a spec that cannot be run by its normal command is not
+   runnable.
+2. `qualified_timing.spl:187-194` accumulates `material = material + ...`
+   quadratically into an interpreted `sha256_text`: 10 calls at 30 samples plus
+   1 at 1025 samples = **124s CPU**. Needs native codegen or a cheaper digest.
+3. The backend matrix spec still emits no `Results:` line even after the fixture
+   restore, so the spec that pins the backend-id encoding provides no coverage
+   of it yet.
