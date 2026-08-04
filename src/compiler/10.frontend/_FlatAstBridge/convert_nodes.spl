@@ -296,6 +296,44 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
         return Type(kind: TypeKind.Named("i16", []), span: make_span())
     if type_expr_idx > 32 and type_expr_idx < 34:
         return Type(kind: TypeKind.Named("i32", []), span: make_span())
+    # Same stage3 imported-module-val misread as the guards above, for the
+    # aggregate/erased fixed tags 5..12. Hit for real on the stage3 self-host
+    # lane: `TYPE_ANY` (12) misread, so every `any`-annotated STRUCT FIELD fell
+    # through the whole == chain to the `type_expr_idx < 34 -> TypeKind.Infer`
+    # catch-all at the bottom of this function. HIR then carried
+    # HirTypeKind.Infer into MIR lower_type, whose Infer arm is `error_fatal`
+    # -- so `struct BackendPort { run_fn: any, ... }` aborted the build with
+    # "bootstrap flat MIR type registration failed: unsupported MIR type kind"
+    # (the printed kind is an opaque `<enum@0x..>` handle; its runtime
+    # discriminant 3031551406 = DefaultHasher("Infer") is what identified it).
+    # Ordered literal bounds pin these on the raw integer path, exactly as the
+    # primitive and Option guards above do.
+    #
+    # Family enumeration (fixed low tags 0..33) and why the rest are NOT
+    # guarded here: 0 (TYPE_VOID) is already short-circuited to Infer by the
+    # `<= 0` guard at the top of this function, so its `== TYPE_VOID` arm is
+    # unreachable either way; 10 (TYPE_STRUCT) and 24..26 (UNION/INTERSECTION/
+    # REFINEMENT) have no arm in the == chain at all and reach the same Infer
+    # catch-all whether or not the constant reads back correctly; 13 (TYPE_NIL)
+    # and 19..23 (RESULT/FUTURE/POLL/TASK/GENERIC_ERASED) map to names
+    # ("nil"/"Result"/"Future"/"Poll"/"Task"/"Generic") that the HIR name
+    # resolver (20.hir/hir_lowering/types.spl) does NOT accept, so pinning them
+    # would trade one failure mode for an "unresolved type" diagnostic rather
+    # than fix anything -- they are recorded here, unguarded, on purpose.
+    if type_expr_idx > 4 and type_expr_idx < 6:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("i64", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx > 5 and type_expr_idx < 7:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("text", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx > 6 and type_expr_idx < 8:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("bool", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx > 7 and type_expr_idx < 9:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("Any", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx > 8 and type_expr_idx < 10:
+        return Type(kind: TypeKind.Named("Dict", []), span: make_span())
+    if type_expr_idx > 10 and type_expr_idx < 12:
+        return Type(kind: TypeKind.Named("fn", []), span: make_span())
+    if type_expr_idx > 11 and type_expr_idx < 13:
+        return Type(kind: TypeKind.Named("Any", []), span: make_span())
     if type_expr_idx == TYPE_VOID:
         return Type(kind: TypeKind.Named("void", []), span: make_span())
     if type_expr_idx == TYPE_BOOL:
