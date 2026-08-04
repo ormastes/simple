@@ -2,8 +2,9 @@
 
 ## Status
 
-Physical JSON owner fixed and crossed by the full closure. A separate native
-fluent-method dispatch defect is reproduced and requires a compiler-owner fix.
+Physical JSON owner fixed and crossed by the full closure. The native
+fluent-method dispatch defect has a reviewed MIR-owner fix and executable
+regression; rebuilt-compiler runtime verification remains pending.
 
 ## Phase 4 symptom
 
@@ -24,5 +25,13 @@ When the focused contract executes `generate_sbom_json`, native execution exits
 `JsonArrayBuilder.build -> serialize_sbom -> generate_sbom_json`: the terminal
 `JsonBuilder.build()` after `field_array_raw()` was lowered to the unrelated
 same-named `JsonArrayBuilder.build()` method. Document construction alone
-passes. The regression must execute JSON serialization after the MIR method
-return-provenance fix; weakening it to model-only behavior is not acceptance.
+passes.
+
+The MIR repair derives result provenance from the resolved method SymbolId's
+declared `HirTypeKind.Named` return type, stores its module-qualified composite
+layout key, applies consistently to instance/static/trait calls, and prevents a
+weaker bare-name fallback from overwriting it. The regression now executes both
+builders' same-named terminal methods and `generate_sbom_json`. A rebuilt
+compiler could not yet be linked with the narrow bootstrap runtime (optional
+Cranelift/GUI symbols are absent), and the admitted Stage3 lacks the LLVM
+feature, so no runtime PASS is claimed until the next current-head bootstrap.
