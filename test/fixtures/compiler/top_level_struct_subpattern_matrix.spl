@@ -47,11 +47,15 @@ halves had to be fixed to make them pass:
   (`runtime error: field access on nil receiver`, SIGILL) -- a nested struct
   field of a top-level class pattern was extracted with `rt_enum_payload`,
   which answers the nil sentinel for a plain struct pointer.
-* `d2_seq_*` selects the RIGHT arm -- element literal test and array length
-  discriminator both work over a struct-field slot -- but binds the wrong
-  VALUES (`a` comes back as `<value:0x6>` and `b` as `1` for `xs = [6, 8]`).
-  That is a JIT binder defect, still OPEN, and is tallied separately as
-  `OPENCOUNT` so it stays measured on every run instead of being deleted:
+* `d2_seq_*` selected the RIGHT arm -- element literal test and array length
+  discriminator both worked over a struct-field slot -- but bound the wrong
+  VALUES (`a` came back as `<value:0x6>` and `b` as `1` for `xs = [6, 8]`).
+  Root cause was the binding TYPE, not the addressing: `collect_pattern_bindings`
+  resolved payload field types only for real ENUM variants, so the positional
+  class spelling `Holder([a, b], (c, d))` -- which the parser hands over as
+  `Pattern::Enum` with a STRUCT name -- typed every field ANY, which typed the
+  array ELEMENTS ANY, and MIR then picked generic boxing. FIXED, now inside the
+  BADCOUNT gate:
   doc/08_tracking/bug/sequence_subpattern_of_struct_field_binds_garbage_2026-08-04.md
 """
 
@@ -216,15 +220,15 @@ fn main() -> i64:
     bad = bad + check("d4_hit", d4_pos(Deep3(w: Wrap2(p: Point(x: 1, y: 9), n: 2), t: 5)), 8)
     bad = bad + check("d4_miss", d4_pos(Deep3(w: Wrap2(p: Point(x: 1, y: 4), n: 2), t: 5)), 512)
 
-    # OPEN, tallied separately -- see the docstring. These four rows are still
-    # EXECUTED and still print PASS/FAIL every run; they are simply not part of
-    # the BADCOUNT gate while the binder defect they pin is open. They pass on
-    # the interpreter and fail on the JIT.
+    # Previously OPEN (the JIT bound `a` as an undecoded `<value:0x6>` and `b`
+    # as `1`), now inside the BADCOUNT gate. `open_bad` is kept as a live,
+    # always-printed tally so a future regression of this family reappears as a
+    # non-zero OPENCOUNT rather than silently vanishing from the file.
     var open_bad = 0
-    open_bad = open_bad + check("d2_seq_hit", d2_seq(Holder(xs: [0, 7], t: (2, 5))), 14)
-    open_bad = open_bad + check("d2_seq_miss", d2_seq(Holder(xs: [3, 4], t: (2, 5))), 114)
-    open_bad = open_bad + check("d2_seq_len1", d2_seq_len(Holder(xs: [6], t: (2, 5))), 13)
-    open_bad = open_bad + check("d2_seq_len2", d2_seq_len(Holder(xs: [6, 8], t: (2, 5))), 121)
+    bad = bad + check("d2_seq_hit", d2_seq(Holder(xs: [0, 7], t: (2, 5))), 14)
+    bad = bad + check("d2_seq_miss", d2_seq(Holder(xs: [3, 4], t: (2, 5))), 114)
+    bad = bad + check("d2_seq_len1", d2_seq_len(Holder(xs: [6], t: (2, 5))), 13)
+    bad = bad + check("d2_seq_len2", d2_seq_len(Holder(xs: [6, 8], t: (2, 5))), 121)
 
     bad = bad + check("d1_text_hit", d1_text(Named(s: "hi", k: 7)), 7)
     bad = bad + check("d1_text_miss", d1_text(Named(s: "bye", k: 7)), 107)

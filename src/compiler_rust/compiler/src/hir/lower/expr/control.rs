@@ -1542,7 +1542,27 @@ impl Lowerer {
                 if let Some(patterns) = payload {
                     // Try to find the enum type and variant to get field types
                     // Use expected_ty as a hint when enum_name is wildcard
-                    let field_types = self.get_enum_variant_field_types_with_hint(enum_name, variant_name, expected_ty);
+                    // Fall back to the STRUCT field list for the positional
+                    // class spelling `case Holder([a, b], (c, d))`: the parser
+                    // cannot tell it from an enum variant, so it arrives here
+                    // as `Pattern::Enum` with a struct name in `variant`, and
+                    // the enum lookup answers `None`. Without this fallback
+                    // every field sub-pattern was typed ANY, which typed the
+                    // ARRAY elements ANY too (the `Pattern::Array` arm below
+                    // resolves its element type from `expected_ty`) and left
+                    // `bind_sequence` emitting ANY-typed `Let`s over an
+                    // ANY-typed local — so `case Holder([a, b], ...)` selected
+                    // the right arm and then surfaced `a` as an undecoded
+                    // tagged `<value:0x6>` and `b` as `1` on the JIT.
+                    // `bind_struct_fields` / `struct_fields_condition` already
+                    // resolve the same struct by the same name; this is the
+                    // binding-TYPE half of that same resolution.
+                    let field_types = self
+                        .get_enum_variant_field_types_with_hint(enum_name, variant_name, expected_ty)
+                        .or_else(|| {
+                            self.struct_field_list(variant_name)
+                                .map(|fields| fields.into_iter().map(|(_, ty)| ty).collect())
+                        });
 
                     for (i, p) in patterns.iter().enumerate() {
                         let field_ty = field_types
@@ -1553,10 +1573,20 @@ impl Lowerer {
                     }
                 }
             }
-            Pattern::Struct { name: _, fields } => {
-                // Struct pattern like Point { x, y }
-                for (_field_name, field_pattern) in fields {
-                    self.collect_pattern_bindings(field_pattern, TypeId::ANY, bindings);
+            Pattern::Struct { name, fields } => {
+                // Struct pattern like `Point { x, y }`. Resolve each field's
+                // DECLARED type by name, for the same reason as the positional
+                // spelling above: an ANY-typed binding makes MIR pick generic
+                // boxing, which surfaces an i64 as a misformatted value at use
+                // sites and mistypes array elements one level down.
+                let struct_fields = self.struct_field_list(name);
+                for (field_name, field_pattern) in fields {
+                    let field_ty = struct_fields
+                        .as_ref()
+                        .and_then(|f| f.iter().find(|(n, _)| n == field_name))
+                        .map(|(_, ty)| *ty)
+                        .unwrap_or(TypeId::ANY);
+                    self.collect_pattern_bindings(field_pattern, field_ty, bindings);
                 }
             }
             Pattern::Array(patterns) => {
