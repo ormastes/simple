@@ -23,6 +23,8 @@ the honesty claims, not just a pass:
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
     simple_web_layout_render_html_gpu_first_decision,
+    web_gpu_paint_last_dispatch_receipt,
+    web_gpu_paint_last_dispatch_receipt_reset,
     web_gpu_paint_mode,
     web_gpu_paint_backend_verdict}
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
@@ -112,6 +114,38 @@ describe "gpu-first present decision honesty":
             if decision.contains("source=cpu_mirror") or decision.contains("source=cpu_fallback"):
                 expect(claims_gpu).to_be(false)
                 expect(decision).to_contain(":offloaded=none")
+            i = i + 1
+
+    it "never reports gpu_backend_used unless the dispatch readback proves a device":
+        simple_web_layout_set_render_budget_floor_ms(900000)
+
+        step("Sweep every gpu-paint-candidate backend plus an explicit CPU backend")
+        # The `[web-gpu-paint]` dispatch marker derived `gpu_backend_used` from
+        # `_backend_is_cpu(readback.source)` — a backend-NAME classifier fed a
+        # readback-SOURCE string. No source ("device_readback", "cpu_mirror",
+        # "cpu_fallback", ...) is ever in that classifier's vocabulary, so the
+        # flag was a constant `true`: `webgpu` and even `cpu_simd` reported
+        # `gpu_backend_used=true` beside their own `readback_source=cpu_mirror`.
+        # The claim and the readback are one claim and must agree.
+        val names = ["vulkan", "metal", "cuda", "opencl", "webgpu", "rocm", "cpu_simd"]
+        var i = 0
+        while i < names.len():
+            val name = names[i]
+            web_gpu_paint_last_dispatch_receipt_reset()
+            simple_web_layout_render_html_gpu_first_decision(
+                FILL_HTML, SURFACE_W, SURFACE_H, name)
+            val receipt = web_gpu_paint_last_dispatch_receipt()
+            # An empty receipt means the backend never reached dispatch
+            # (Engine2D declined to construct); nothing to assert for it.
+            if receipt != "":
+                step("A GPU claim must be backed by a device_readback source")
+                if receipt.contains("gpu_backend_used=true"):
+                    expect(receipt).to_contain("readback_source=device_readback")
+
+                step("A CPU-sourced readback must never claim the GPU was used")
+                if (receipt.contains("readback_source=cpu_mirror")
+                    or receipt.contains("readback_source=cpu_fallback")):
+                    expect(receipt).to_contain("gpu_backend_used=false")
             i = i + 1
 
     it "maps the SIMPLE_WEB_GPU_PAINT routing env to exactly one of the three modes":

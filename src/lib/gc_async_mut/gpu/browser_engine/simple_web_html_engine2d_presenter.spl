@@ -119,8 +119,20 @@ class _WebGpuPaintTimingState:
 # single-render-thread contract; move it into BrowserRenderer before concurrent
 # renderers are admitted.
 var _web_gpu_paint_timing_states: [_WebGpuPaintTimingState] = []
+# Last per-frame GPU-paint dispatch receipt — the same record the
+# `[web-gpu-paint]` marker prints. Exposed so a spec can assert the
+# `gpu_backend_used` claim against the readback source that produced it:
+# a print-only diagnostic is unguarded, and this one over-claimed on every
+# backend precisely because nothing could observe it.
+var _web_gpu_paint_last_dispatch_receipt: text = ""
 val WEB_GPU_PAINT_TIMING_CACHE_MAX: i32 = 16
 val WEB_GPU_PAINT_MIN_MARGIN_US: i64 = 100
+
+pub fn web_gpu_paint_last_dispatch_receipt() -> text:
+    _web_gpu_paint_last_dispatch_receipt
+
+pub fn web_gpu_paint_last_dispatch_receipt_reset():
+    _web_gpu_paint_last_dispatch_receipt = ""
 
 # Bounding box of every pixel where the GPU-composited fills differ from the CPU
 # ground-truth framebuffer. If the GPU readback length is wrong (backend cannot
@@ -408,8 +420,18 @@ fn present_gpu_paint_readback(frame: WebGpuPaintFrame, backend_name: text, base:
                         blit_count = 1
                         blit_pixels = dirty.w * dirty.h
             val out = engine.read_pixels_with_source()
-            val gpu_backend_used = not _backend_is_cpu(out.source.trim().lower())
-            print "[web-gpu-paint] backend={backend_name} dispatch rect={rect_count} gradient=0 blit={blit_count} blit_pixels={blit_pixels} readback_source={out.source} gpu_backend_used={gpu_backend_used} pixels={out.pixels.len()}"
+            # `gpu_backend_used` reports whether the DEVICE produced these
+            # pixels, so it must be bound to the same readback evidence the
+            # gpu-first decision string uses — not to a backend-NAME
+            # classifier. `_backend_is_cpu` answers "is this backend name a CPU
+            # backend"; a readback SOURCE ("cpu_mirror", "cpu_fallback",
+            # "device_readback", ...) is never in its vocabulary, so feeding it
+            # one made this flag a constant `true` for every backend that
+            # constructed successfully but presented in software.
+            val gpu_backend_used = _web_gpu_readback_device_proven(out, width * height)
+            val receipt = "backend={backend_name} dispatch rect={rect_count} gradient=0 blit={blit_count} blit_pixels={blit_pixels} readback_source={out.source} gpu_backend_used={gpu_backend_used} handle={out.backend_handle} device_identity={out.device_identity} pixels={out.pixels.len()}"
+            _web_gpu_paint_last_dispatch_receipt = receipt
+            print "[web-gpu-paint] {receipt}"
             engine.shutdown()
             out
         Err(_):
