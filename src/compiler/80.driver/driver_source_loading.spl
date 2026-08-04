@@ -13,6 +13,7 @@ use compiler.borrow.borrow_check.nll.{NLLError, nllerror_format_related}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 use compiler.traits.trait_coherence.{CoherenceError}
 use compiler.traits.trait_validation.{TraitError}
+use compiler.frontend.core.parser_preprocessor.{_pp_preprocess_conditionals}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -488,7 +489,12 @@ pub fn _driver_entry_import_module_paths(content: text) -> [text]:
     form exercised directly (content-only, no backing file) by
     test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl
     and test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl."""
-    _driver_entry_import_module_paths_text_fallback(content)
+    # Closure discovery must observe the same declaration conditions as the
+    # parser. Scanning raw text made false-gated imports pull unsupported
+    # modules into the closure and HIR-lower them anyway (notably the generic
+    # async Future graph in the native full CLI).
+    val active_content = _pp_preprocess_conditionals(content)
+    _driver_entry_import_module_paths_text_fallback(active_content)
 
 fn _driver_entry_sibling_path(line: text) -> text:
     if line.starts_with("mod "):
@@ -708,7 +714,11 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
         if rt_file_exists(lib_base + "/__init__.spl"):
             return lib_base + "/__init__.spl"
         val lib_subpath = rel.substring(4)
-        for family in ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]:
+        # Unqualified std.* owns the ordinary no-GC synchronous surface.
+        # Async-first resolution selected nogc_async_mut/io.spl for `std.io`,
+        # dragging Future<T> into native CLI closure discovery even though the
+        # caller requested only sync time/file/process helpers.
+        for family in ["nogc_sync_mut", "common", "nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "gc_sync_mut", "gc_sync_immut", "gc_async_mut", "gc_async_immut", "nogc_async_mut_noalloc"]:
             val family_base = "src/lib/" + family + "/" + lib_subpath
             if rt_file_exists(family_base + ".spl"):
                 return family_base + ".spl"

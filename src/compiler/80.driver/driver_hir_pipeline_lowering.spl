@@ -17,7 +17,7 @@ use compiler.driver.driver_source_pipeline_impl.{dtrace, driver_end_transient_pa
 use compiler.driver.driver_source_loading.{_driver_is_bootstrap_entry_source}
 use compiler.driver.driver_bootstrap.{bootstrap_entry_module_name}
 use compiler.driver.driver_orchestration.{driver_streaming_surface_enabled}
-use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_error, log_phase}
+use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_error, log_phase, log_build_progress}
 use compiler.driver.driver_hir_pipeline_passes.{
     run_typecheck_warn_pass,
     run_safety_warn_pass
@@ -59,16 +59,26 @@ impl CompilerDriver:
         if par_had_error_get():
             val _ended = driver_end_transient_parse_scope()
             return Err("parse error in {source.path} (see [parser_error] output above)")
+        # Keep HIR lowering inside the active transient scope. Only the
+        # completed HIR graph and its diagnostics need to survive; pausing
+        # before lowering made every intermediate expression/block allocation
+        # permanent across the whole Stage4 entry closure.
+        val hir_module = lowering.lower_parser_module_unstub(module)
         if not rt_transient_array_scope_pause():
             val _ended = driver_end_transient_parse_scope()
             return Err("transient parser scope pause failed for {source.path}")
-        val hir_module = lowering.lower_parser_module_unstub(module)
         if not rt_transient_heap_promote(hir_module):
             val _ended = driver_end_transient_parse_scope()
             return Err("HIR ownership promotion failed for {source.path}")
         if not rt_transient_heap_promote(lowering.errors):
             val _ended = driver_end_transient_parse_scope()
             return Err("HIR diagnostic ownership promotion failed for {source.path}")
+        if not rt_transient_heap_promote(lowering.diagnostic_messages):
+            val _ended = driver_end_transient_parse_scope()
+            return Err("HIR diagnostic message ownership promotion failed for {source.path}")
+        if not rt_transient_heap_promote(lowering.diagnostic_recovered):
+            val _ended = driver_end_transient_parse_scope()
+            return Err("HIR diagnostic recovery ownership promotion failed for {source.path}")
         if not driver_end_transient_parse_scope():
             return Err("transient parser scope end failed for {source.path}")
         Ok(hir_module)
@@ -117,7 +127,22 @@ impl CompilerDriver:
                 self.ctx.add_error("Streaming HIR lowering error: {lower_result.unwrap_err()}")
                 return (self.ctx, false)
             val hir_module = lower_result.unwrap()
-            _driver_collect_hir_errors(self.ctx, source.module_name, lowering.errors)
+            # LoweringError contains Span and can be Any-erased across the
+            # full-closure Stage4 ABI. Use the HIR owner's flat projections,
+            # as the regular lowering path does, so diagnostics reach the
+            # CompileContext before this partial HIR is retained.
+            val module_error_count: i64 = lowering.lowering_error_count()
+            var module_error_idx = 0
+            while module_error_idx < module_error_count:
+                val module_error_message: text = lowering.lowering_error_message_at(
+                    module_error_idx, source.module_name)
+                val module_error_recovered: bool = lowering.lowering_error_is_recovered_at(
+                    module_error_idx)
+                if module_error_recovered:
+                    self.ctx.add_warning(module_error_message)
+                else:
+                    self.ctx.add_error(module_error_message)
+                module_error_idx = module_error_idx + 1
             if self.ctx.errors.len() > 0:
                 return (self.ctx, false)
             lowered_by_surface[surface_index] = hir_module

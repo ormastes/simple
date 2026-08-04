@@ -7,111 +7,146 @@
 use std.spec.*
 use compiler.frontend.frontend.{preprocess_conditionals}
 use compiler.frontend.core.cfg_platform.{cfg_detect_arch}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.parser.{parser_has_errors}
 
 describe "Preprocessor @when/@cfg":
     describe "@when block directives":
         it "@when(true) includes block":
-            # @when(true):
-            #     val x = 1
-            # @end
-            # The block should be included when condition is true
-            expect("@when(true):\n    val x = 1\n@end").to_contain("@when(true)")
+            val out = preprocess_conditionals("@when(true):\n    val x = 1\n@end\n")
+            expect(out.contains("val x = 1")).to_be(true)
+            expect(out.contains("@when")).to_be(false)
 
         it "@when(false) excludes block":
-            # @when(false):
-            #     val x = 1
-            # @end
-            # The block should be excluded when condition is false
-            expect("@when(false):\n    val x = 1\n@end").to_contain("@when(false)")
+            val out = preprocess_conditionals("@when(false):\n    val x = 1\n@end\n")
+            expect(out.contains("val x = 1")).to_be(false)
 
         it "@when/@elif/@else/@end full chain":
-            # @when(false):
-            #     val branch = "first"
-            # @elif(true):
-            #     val branch = "second"
-            # @else:
-            #     val branch = "third"
-            # @end
-            # Only the @elif branch should be included
-            expect("@when(false):\n@elif(true):\n@else:\n@end").to_contain("@elif(true)")
+            val out = preprocess_conditionals("@when(false):\n    val branch = \"first\"\n@elif(true):\n    val branch = \"second\"\n@else:\n    val branch = \"third\"\n@end\n")
+            expect(out.contains("first")).to_be(false)
+            expect(out.contains("second")).to_be(true)
+            expect(out.contains("third")).to_be(false)
 
         it "@else branch activates when all prior false":
-            # @when(false):
-            #     val x = 1
-            # @elif(false):
-            #     val x = 2
-            # @else:
-            #     val x = 3
-            # @end
-            # The @else branch should be the active one
-            expect("@when(false):\n@elif(false):\n@else:\n@end").to_contain("@else:")
+            val out = preprocess_conditionals("@when(false):\n    val branch = \"first\"\n@elif(false):\n    val branch = \"second\"\n@else:\n    val branch = \"third\"\n@end\n")
+            expect(out.contains("first")).to_be(false)
+            expect(out.contains("second")).to_be(false)
+            expect(out.contains("third")).to_be(true)
 
     describe "nested @when blocks":
         it "nested @when blocks work correctly":
-            # @when(true):
-            #     @when(true):
-            #         val inner = 1
-            #     @end
-            # @end
-            # Nested blocks should both be evaluated
-            expect("@when(true):\n    @when(true):\n    @end\n@end").to_contain("    @when(true)")
+            val out = preprocess_conditionals("@when(true):\n    @when(true):\n        val inner = 1\n    @end\n@end\n")
+            expect(out.contains("val inner = 1")).to_be(true)
 
         it "nested @when false in true parent excludes inner":
-            # @when(true):
-            #     @when(false):
-            #         val inner = 1
-            #     @end
-            # @end
-            expect("@when(true):\n    @when(false):\n    @end\n@end").to_contain("@when(false)")
+            val out = preprocess_conditionals("@when(true):\n    @when(false):\n        val inner = 1\n    @end\n@end\n")
+            expect(out.contains("val inner = 1")).to_be(false)
 
     describe "boolean conditions":
         it "@when(linux and x86_64) uses boolean AND":
-            # Tests combined OS + arch condition
-            expect("@when(linux and x86_64):").to_contain(" and ")
+            val out = preprocess_conditionals("@when(true and true):\n    val included = 1\n@end\n")
+            expect(out.contains("val included = 1")).to_be(true)
 
         it "@when(not windows) uses boolean NOT":
-            # Tests negated condition
-            expect("@when(not windows):").to_contain("not windows")
+            val out = preprocess_conditionals("@when(not false):\n    val included = 1\n@end\n")
+            expect(out.contains("val included = 1")).to_be(true)
 
         it "@when(linux or macos) uses boolean OR":
-            # Tests OR condition
-            expect("@when(linux or macos):").to_contain(" or ")
+            val out = preprocess_conditionals("@when(false or true):\n    val included = 1\n@end\n")
+            expect(out.contains("val included = 1")).to_be(true)
 
     describe "@cfg per-declaration":
         it "@cfg(true) includes following declaration":
-            # @cfg(true)
-            # fn included(): ...
-            # The function should be available
-            expect("@cfg(true)\nfn included():").to_start_with("@cfg(true)")
+            val out = preprocess_conditionals("@cfg(true)\nfn included():\n    1\n")
+            expect(out.contains("fn included():")).to_be(true)
 
         it "@cfg(false) excludes following declaration":
-            # @cfg(false)
-            # fn excluded(): ...
-            # The function should NOT be available
-            expect("@cfg(false)\nfn excluded():").to_contain("@cfg(false)")
+            val out = preprocess_conditionals("@cfg(false)\nfn excluded():\n    1\n")
+            expect(out.contains("fn excluded():")).to_be(false)
 
         it "@cfg with key-value form":
-            # @cfg("os", "linux")
-            # fn linux_only(): ...
-            # Key-value form is converted to os=linux for evaluation
-            expect("@cfg(\"os\", \"linux\")\nfn linux_only():").to_contain("\"linux\"")
+            val arch = cfg_detect_arch()
+            val condition = if arch == "unknown": "true" else: "\"arch\", \"{arch}\""
+            val out = preprocess_conditionals("@cfg({condition})\nfn host_only():\n    1\n")
+            expect(out.contains("fn host_only():")).to_be(true)
 
     describe "line count preservation":
         it "blanked directives preserve line count":
             # All @when/@elif/@else/@end lines are replaced with empty lines
             # so that diagnostics line numbers remain correct
             val before = "@when(true):\nval x = 1\n@end"
-            val after = "\nval x = 1\n"
+            val after = preprocess_conditionals(before)
             expect(before.split("\n").len()).to_equal(after.split("\n").len())
 
-    describe "platform conditions":
-        it "@when(linux) detects Linux":
-            # Should be true on Linux hosts
-            expect("@when(linux):").to_contain("linux")
+        it "false cfg keeps skipping a declaration across blank body lines":
+            val src = "@cfg(false)\nfn excluded():\n    \"\"\"Paragraph one.\n\n    Args:\n        value: must remain excluded\n    \"\"\"\n    val hidden = 1\n\nfn included():\n    val visible = 2\n"
+            val out = preprocess_conditionals(src)
+            expect(out.contains("Paragraph one.")).to_equal(false)
+            expect(out.contains("value: must remain excluded")).to_equal(false)
+            expect(out.contains("val hidden = 1")).to_equal(false)
+            expect(out.contains("fn included():")).to_equal(true)
+            expect(out.contains("val visible = 2")).to_equal(true)
+            expect(src.split("\n").len()).to_equal(out.split("\n").len())
 
-        it "@when(unix) detects Unix-like systems":
-            # Should be true on Linux, macOS, FreeBSD, etc.
-            expect("@when(unix):").to_contain("unix")
+        it "false cfg keeps skipping across a comment-only body line":
+            val src = "@cfg(false)\nfn excluded():\n# comment does not end the excluded body\n    val hidden = 1\n\nfn included():\n    val visible = 2\n"
+            val out = preprocess_conditionals(src)
+            expect(out.contains("comment does not end the excluded body")).to_equal(false)
+            expect(out.contains("val hidden = 1")).to_equal(false)
+            expect(out.contains("fn included():")).to_equal(true)
+            expect(out.contains("val visible = 2")).to_equal(true)
+            expect(src.split("\n").len()).to_equal(out.split("\n").len())
+
+        it "false cfg does not cross an indentation boundary":
+            val src = "    @cfg(false)\n\nfn included():\n    val visible = 2\n"
+            val out = preprocess_conditionals(src)
+            expect(out.contains("fn included():")).to_equal(true)
+            expect(out.contains("val visible = 2")).to_equal(true)
+            expect(src.split("\n").len()).to_equal(out.split("\n").len())
+
+        it "false cfg suppresses a same-indent decorator stack and body":
+            val src = "@cfg(false)\n@export(\"hidden\")\nfn excluded():\n    val hidden = 1\n\nfn included():\n    val visible = 2\n"
+            val out = preprocess_conditionals(src)
+            expect(out.contains("@export")).to_equal(false)
+            expect(out.contains("fn excluded():")).to_equal(false)
+            expect(out.contains("val hidden = 1")).to_equal(false)
+            expect(out.contains("fn included():")).to_equal(true)
+            expect(src.split("\n").len()).to_equal(out.split("\n").len())
+
+        it "outer false cfg suppresses a stacked cfg declaration":
+            val src = "@cfg(false)\n@cfg(true)\nfn excluded():\n    val hidden = 1\n\nfn included():\n    val visible = 2\n"
+            val out = preprocess_conditionals(src)
+            expect(out.contains("fn excluded():")).to_equal(false)
+            expect(out.contains("val hidden = 1")).to_equal(false)
+            expect(out.contains("fn included():")).to_equal(true)
+            expect(src.split("\n").len()).to_equal(out.split("\n").len())
+
+        it "true cfg preserves the following decorator and declaration":
+            val src = "@cfg(true)\n@export(\"visible\")\nfn included():\n    val visible = 2\n"
+            val out = preprocess_conditionals(src)
+            expect(out.contains("@export(\"visible\")")).to_equal(true)
+            expect(out.contains("fn included():")).to_equal(true)
+            expect(out.contains("val visible = 2")).to_equal(true)
+            expect(src.split("\n").len()).to_equal(out.split("\n").len())
+
+    describe "platform conditions":
+        it "@when detects the current host architecture":
+            val arch = cfg_detect_arch()
+            val host_condition = if arch == "unknown": "true" else: arch
+            val out = preprocess_conditionals("@when({host_condition}):\n    val current_host = 1\n@end\n")
+            expect(out.contains("val current_host = 1")).to_be(true)
+
+        it "@when rejects an impossible architecture":
+            val out = preprocess_conditionals("@when(__not_a_real_arch__):\n    val impossible_host = 1\n@end\n")
+            expect(out.contains("val impossible_host = 1")).to_be(false)
+
+    it "false cfg output parses without leaking the excluded declaration":
+        val src = "@cfg(false)\n@export(\"hidden\")\nfn excluded():\n    \"\"\"Hidden documentation.\"\"\"\n    1\n\nfn included():\n    2\n"
+        val out = preprocess_conditionals(src)
+        val module = parse_and_build_module(out, "preprocessor_false_cfg_scope.spl")
+        expect(parser_has_errors()).to_be(false)
+        expect(module.functions.contains("included")).to_be(true)
+        expect(module.functions.contains("excluded")).to_be(false)
 
 # ================================================================
 # Task #45 residual — source-driven same-name @cfg/@when arch dispatch
@@ -151,22 +186,28 @@ describe "Preprocessor @when/@cfg":
 describe "Task #45 residual — same-name arch dispatch (source-driven)":
     it "reassembles spaced key value cfg conditions":
         val arch = cfg_detect_arch()
-        val src = "@cfg(arch = \"{arch}\")\nfn single_equals() -> text:\n    \"kept-single\"\n\n@cfg(arch == \"{arch}\")\nfn double_equals() -> text:\n    \"kept-double\"\n"
+        val single_condition = if arch == "unknown": "true" else: "arch = \"{arch}\""
+        val double_condition = if arch == "unknown": "true" else: "arch == \"{arch}\""
+        val src = "@cfg({single_condition})\nfn single_equals() -> text:\n    \"kept-single\"\n\n@cfg({double_condition})\nfn double_equals() -> text:\n    \"kept-double\"\n"
         val out = preprocess_conditionals(src)
         expect(out.contains("kept-single")).to_equal(true)
         expect(out.contains("kept-double")).to_equal(true)
 
-    it "keeps the host-matching @cfg variant, x86_64 declared first (order A)":
-        val src = "@cfg(x86_64)\nfn arch_name() -> text:\n    \"x86_64\"\n\n@cfg(arm64)\nfn arch_name() -> text:\n    \"arm64\"\n"
+    it "keeps the host-matching @cfg variant when declared first (order A)":
+        val arch = cfg_detect_arch()
+        val host_condition = if arch == "unknown": "true" else: "arch = \"{arch}\""
+        val src = "@cfg({host_condition})\nfn arch_name() -> text:\n    \"host-match\"\n\n@cfg(arch = \"__not_a_real_arch__\")\nfn arch_name() -> text:\n    \"non-match\"\n"
         val out = preprocess_conditionals(src)
-        expect(out.contains("\"x86_64\"")).to_equal(true)
-        expect(out.contains("\"arm64\"")).to_equal(false)
+        expect(out.contains("\"host-match\"")).to_be(true)
+        expect(out.contains("\"non-match\"")).to_be(false)
 
-    it "keeps the host-matching @cfg variant, arm64 declared first (order B — the #45 regression order)":
-        val src = "@cfg(arm64)\nfn arch_name() -> text:\n    \"arm64\"\n\n@cfg(x86_64)\nfn arch_name() -> text:\n    \"x86_64\"\n"
+    it "keeps the host-matching @cfg variant when declared second (order B — the #45 regression order)":
+        val arch = cfg_detect_arch()
+        val host_condition = if arch == "unknown": "true" else: "arch = \"{arch}\""
+        val src = "@cfg(arch = \"__not_a_real_arch__\")\nfn arch_name() -> text:\n    \"non-match\"\n\n@cfg({host_condition})\nfn arch_name() -> text:\n    \"host-match\"\n"
         val out = preprocess_conditionals(src)
-        expect(out.contains("\"x86_64\"")).to_equal(true)
-        expect(out.contains("\"arm64\"")).to_equal(false)
+        expect(out.contains("\"host-match\"")).to_be(true)
+        expect(out.contains("\"non-match\"")).to_be(false)
 
     it "@when sibling path: keeps the host-matching block-form variant regardless of order":
         # cfg_eval_key_value/cfg_detect_arch (compiler.core.cfg_platform) is
@@ -177,7 +218,9 @@ describe "Task #45 residual — same-name arch dispatch (source-driven)":
         # source: the false-condition block is blanked in its entirety
         # before parsing, same as @cfg, so no duplicate name ever reaches
         # the parser/interpreter to race on declaration order.
-        val src = "@when(arm64)\nfn arch_name() -> text:\n    \"arm64\"\n@end\n\n@when(x86_64)\nfn arch_name() -> text:\n    \"x86_64\"\n@end\n"
+        val arch = cfg_detect_arch()
+        val host_condition = if arch == "unknown": "true" else: arch
+        val src = "@when(__not_a_real_arch__)\nfn arch_name() -> text:\n    \"non-match\"\n@end\n\n@when({host_condition})\nfn arch_name() -> text:\n    \"host-match\"\n@end\n"
         val out = preprocess_conditionals(src)
-        expect(out.contains("\"x86_64\"")).to_equal(true)
-        expect(out.contains("\"arm64\"")).to_equal(false)
+        expect(out.contains("\"host-match\"")).to_be(true)
+        expect(out.contains("\"non-match\"")).to_be(false)

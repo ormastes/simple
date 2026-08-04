@@ -385,6 +385,30 @@ impl HirLowering:
             case ExprKind.Call(callee, args):
                 val call_callee_t: Expr = callee
                 val call_args_t: [CallArg] = args
+                # `range(start, end)` is the call spelling of the compiler's
+                # range expression.  Lower it at the HIR owner before normal
+                # name lookup: bootstrap compiler-core modules are lowered
+                # before the prelude helper is visible, but their counted
+                # loops still need the real HirExprKind.Range so MIR can use
+                # lower_for_range rather than an unresolved direct call.
+                match call_callee_t.kind:
+                    case ExprKind.Ident(range_name):
+                        if range_name == "range" and call_args_t.len() == 2 and
+                           not call_args_t[0].has_name and not call_args_t[1].has_name:
+                            val range_start: CallArg = call_args_t[0]
+                            val range_end: CallArg = call_args_t[1]
+                            return HirExpr(
+                                kind: HirExprKind.Range(
+                                    Some(self.lower_hir_expr(range_start.value)),
+                                    Some(self.lower_hir_expr(range_end.value)),
+                                    false,
+                                    nil
+                                ),
+                                type_: nil,
+                                span: e.span
+                            )
+                    case _:
+                        pass
                 # `i32(x)` / `f64(x)`: fixed-width primitive type name used as
                 # a callee is a numeric CAST (see primitive_cast_type_kind).
                 # Lower it as HirExprKind.Cast -- the callee name would

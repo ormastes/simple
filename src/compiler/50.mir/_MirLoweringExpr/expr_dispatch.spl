@@ -1297,7 +1297,7 @@ impl MirLowering:
         # crashes at runtime.
         match index.kind:
             case Range(_, _, _, _):
-                self.error("unsupported array/string slice index a[start:end] (no native array-slice lowering; cannot safely lower to a value)", nil)
+                self.error_fatal("unsupported array/string slice index a[start:end] (no native array-slice lowering; cannot safely lower to a value)", nil)
                 return self.builder.emit_const_int(0)
             case _: ()
         # Runtime arrays are tagged handles, not raw element pointers.
@@ -2231,9 +2231,12 @@ impl MirLowering:
                                 # guaranteed wrong for a struct-typed operand
                                 # (raw pointer arithmetic/compare), so fail
                                 # loudly instead of silently returning garbage.
-                                # Message prefix matches _mir_error_is_fatal's
-                                # allowlist (80.driver/driver_pipeline.spl).
-                                self.error("unresolved method call: operator overload for struct {binop_struct_name} (no matching __add__/__sub__/__mul__/__div__/__eq__/__lt__/__gt__ impl)", Some(expr_value.span))
+                                # Bootstrap lowering drains the explicit fatal
+                                # bit and does not inherit the normal driver's
+                                # legacy message-prefix escalation.  Mark this
+                                # at the owner so no bootstrap path can retain
+                                # the const-zero SSA placeholder below.
+                                self.error_fatal("unresolved method call: operator overload for struct {binop_struct_name} (no matching __add__/__sub__/__mul__/__div__/__eq__/__lt__/__gt__ impl)", Some(expr_value.span))
                                 var b_err_op = self.builder
                                 val err_op_temp = b_err_op.emit_const_int(0)
                                 self.builder = b_err_op
@@ -2960,7 +2963,8 @@ impl MirLowering:
                 self.lower_nograd_block(body)
 
             case Range(start, end, inclusive, step):
-                self.lower_range(start, end, inclusive, step)
+                self.error_fatal("unsupported standalone range value (counted for-range lowering is supported)", Some(expr_value.span))
+                self.builder.emit_const_int(0)
 
             # Async/Await expressions
             case Await(future_expr):

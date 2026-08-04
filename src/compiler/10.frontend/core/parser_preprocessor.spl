@@ -400,10 +400,11 @@ fn _pp_preprocess_conditionals(source: text) -> text:
             continue
 
         if skip_until_dedent:
-            if ot == "":
+            if ot == "" or ot.starts_with("#"):
+                # Blank and comment-only lines do not dedent a declaration.
+                # A column-zero comment inside a false-gated body must not
+                # make the next indented body line visible.
                 final_lines.push("")
-                skip_until_dedent = false
-                skip_indent = -1
                 i = i + 1
                 continue
             var cur_indent: i64 = 0
@@ -433,11 +434,27 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 # Condition true: blank @cfg line, keep declaration
                 final_lines.push("")
             else:
-                # Condition false: blank @cfg line + following declaration
+                # Condition false: blank @cfg line, any same-indent decorator
+                # stack, and the following declaration.  Looking at only the
+                # immediate next line leaks declarations such as
+                # `@cfg(false)\n@export(...)\nfn ...` back into the parser.
                 final_lines.push("")
-                # Calculate indent of the next declaration line
-                if i + 1 < out_lines.len():
-                    val next_line = out_lines[i + 1]
+                var cfg_indent: i64 = 0
+                var cfg_i: i64 = 0
+                for _ in ol:
+                    if cfg_i >= ol.len(): break
+                    val cfg_c = ol[cfg_i]
+                    if cfg_c == " ":
+                        cfg_indent = cfg_indent + 1
+                    elif cfg_c == "\t":
+                        cfg_indent = cfg_indent + 4
+                    else:
+                        break
+                    cfg_i = cfg_i + 1
+                var next_index = i + 1
+                var found_declaration = false
+                while next_index < out_lines.len() and not found_declaration:
+                    val next_line = out_lines[next_index]
                     val next_trimmed = next_line.trim()
                     var next_indent: i64 = 0
                     var ni: i64 = 0
@@ -451,9 +468,22 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                         else:
                             break
                         ni = ni + 1
-                    # Blank the declaration line
-                    i = i + 1
+                    # Blank only preamble/decorator lines and a declaration
+                    # at the cfg indentation. A different indentation starts
+                    # a separate scope and must remain untouched.
+                    val is_preamble = next_trimmed == "" or next_trimmed.starts_with("#")
+                    val is_decorator = next_indent == cfg_indent and next_trimmed.starts_with("@")
+                    if is_preamble or is_decorator:
+                        final_lines.push("")
+                        i = next_index
+                        next_index = next_index + 1
+                        continue
+                    if next_indent != cfg_indent:
+                        found_declaration = true
+                        continue
                     final_lines.push("")
+                    i = next_index
+                    found_declaration = true
                     # If declaration ends with ':', blank its body too
                     if next_trimmed.ends_with(":"):
                         skip_until_dedent = true
