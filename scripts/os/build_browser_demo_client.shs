@@ -54,6 +54,13 @@ validate_clang_23_1_toolchain
 CLANG="$CLANG_23_1"
 LINKER="$LLD_23_1"
 AR="$LLVM_AR_23_1"
+NM_CANDIDATE="${SIMPLE_NM:-${LLVM_NM:-$(dirname -- "$CLANG_23_1")/llvm-nm}}"
+NM="$(command -v "$NM_CANDIDATE" 2>/dev/null || true)"
+[ -n "$NM" ] || {
+    echo "Clang 23.1 toolchain: llvm-nm not found: $NM_CANDIDATE" >&2
+    exit 1
+}
+clang_23_1_require "$NM" llvm-nm
 
 # The sysroot (crt0.o, libsimpleos_c.a, headers, simpleos.ld) is a BUILD PRODUCT,
 # not a tracked file, so a freshly created worktree has none and the link below
@@ -132,7 +139,7 @@ machine="$(od -An -tu1 -j 18 -N 2 "$OUT" | awk 'NF >= 2 { print $1 + 256 * $2; e
 
 # getpid must be a real resolved definition, not an unresolved import that a
 # weak stub could later bind to nil. Guard the property this script exists for.
-if nm "$OUT" 2>/dev/null | grep -qE '^ +U getpid$'; then
+if "$NM" "$OUT" 2>/dev/null | grep -qE '^ +U getpid$'; then
     echo "browser-demo ELF has unresolved getpid: $OUT" >&2
     exit 1
 fi
@@ -147,10 +154,12 @@ EVIDENCE="$OUT_DIR/clang-23.1-evidence.txt"
     echo "lld_version=$($LINKER --version | head -n 1)"
     echo "llvm_ar=$AR"
     echo "llvm_ar_version=$($AR --version | head -n 1)"
+    echo "llvm_nm=$NM"
+    echo "llvm_nm_version=$($NM --version | head -n 1)"
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$CLANG" "$LINKER" "$AR" "$OUT"
+        sha256sum "$CLANG" "$LINKER" "$AR" "$NM" "$OUT"
     else
-        shasum -a 256 "$CLANG" "$LINKER" "$AR" "$OUT"
+        shasum -a 256 "$CLANG" "$LINKER" "$AR" "$NM" "$OUT"
     fi
 } >"$EVIDENCE"
 
