@@ -602,10 +602,10 @@ impl MirTextCodegen for MirToLlvm:
             case SetField(base, field, value): self.translate_set_field(base, field, value)
             case Cast(dest, operand, target): self.translate_cast_dispatch(dest, operand, target)
             case Bitcast(dest, operand, target): self.translate_bitcast(dest, operand, target)
-            case Call(dest, func, args):
+            case Call(_, _, _):
                 if bootstrap_debug:
                     print "[mir-to-llvm] instruction:call index={index}"
-                self.translate_call(dest, func, args)
+                self.translate_call_at(instructions, index)
             case CallIndirect(dest, ptr, args, sig): self.translate_call_indirect(dest, ptr, args, sig)
             case Intrinsic(dest, name, args): self.translate_intrinsic(dest, name, args)
             case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers):
@@ -1379,18 +1379,40 @@ impl MirTextCodegen for MirToLlvm:
             case Transpose:
                 self.emit_unsupported_panic("LLVM backend does not support Transpose lowering")
 
-    me translate_call(dest: LocalId?, func: MirOperand, args: [MirOperand]):
+    me translate_call_at(instructions: [MirInst], index: i64):
+        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        if bootstrap_debug:
+            print "[mir-to-llvm] call:entry index={index}"
+        val inst: MirInst = instructions[index]
+        var dest: LocalId? = nil
+        var func = mir_operand_const_int(0)
+        var args: [MirOperand] = []
+        match inst.kind:
+            case Call(found_dest, found_func, found_args):
+                dest = found_dest
+                func = found_func
+                args = found_args
+            case _:
+                return
+        if bootstrap_debug:
+            print "[mir-to-llvm] call:matched index={index}"
         # Decay-safe optional access (NOT `match dest: case Some/nil`): the
         # seed's cross-module optional payloads can DECAY to the bare object
         # (LocalId, not Some(LocalId)) — a match then exhausts without
         # matching any arm ("invalid pattern ... object value LocalId").
         # `!= nil` and `??` handle both the wrapped and decayed shapes.
-        val dest_id = if dest != nil: self.local_id_value(dest ?? LocalId(id: 0)) else: 0
-        val dest_name: text? = if dest != nil: Some(self.get_local(dest_id)) else: nil
-        var func_name = self.translate_operand(func)
+        val has_dest = dest != nil
+        val dest_id = if has_dest: (dest ?? LocalId(id: 0)).id else: 0
+        val dest_name = if has_dest: self.get_local(dest_id) else: ""
+        if bootstrap_debug:
+            print "[mir-to-llvm] call:dest index={index} present={has_dest}"
+        val callee_operands: [MirOperand] = [func]
+        var func_name = self.translate_operand_at(callee_operands, 0)
+        if bootstrap_debug:
+            print "[mir-to-llvm] call:callee index={index}"
         match func.kind:
             case Copy(local) | Move(local):
-                func_name = self.value_as_type(func_name, self.get_operand_type(func), "ptr")
+                func_name = self.value_as_type(func_name, self.get_operand_type_at(callee_operands, 0), "ptr")
             case _:
                 ()
         val bare_name_for_call = if func_name.starts_with("@"): func_name[1:] else: func_name
@@ -1410,15 +1432,17 @@ impl MirTextCodegen for MirToLlvm:
         var arg_tys: [text] = []
         var arg_i = 0
         while arg_i < args.len():
+            if bootstrap_debug:
+                print "[mir-to-llvm] call:arg-before index={index} arg={arg_i}"
             val arg = args[arg_i]
-            var arg_val = self.translate_operand(arg)
-            val maybe_arg_ty = self.get_operand_type(arg)
+            var arg_val = self.translate_operand_at(args, arg_i)
+            val maybe_arg_ty = self.get_operand_type_at(args, arg_i)
             var arg_ty = self.valid_llvm_type(maybe_arg_ty)
             match arg.kind:
                 case Copy(local) | Move(local):
-                    if self.bool_locals.has(self.local_id_value(local)):
+                    if self.bool_locals.has(local.id):
                         arg_ty = "i1"
-                    if self.ptr_locals.has(self.local_id_value(local)):
+                    if self.ptr_locals.has(local.id):
                         arg_ty = "ptr"
                 case _:
                     ()
@@ -1435,7 +1459,7 @@ impl MirTextCodegen for MirToLlvm:
                 if call_func_name == "@rt_enum_new" and arg_i == 2 and arg_ty == "double":
                     arg_val = self.store_field_bits(arg_val, arg_ty, param_ty)
                 elif is_print_raw_fmt:
-                    arg_val = self.value_as_type_signed(arg_val, arg_ty, param_ty, self.get_operand_unsigned(arg))
+                    arg_val = self.value_as_type_signed(arg_val, arg_ty, param_ty, self.get_operand_unsigned_at(args, arg_i))
                 else:
                     arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
                 arg_ty = self.valid_llvm_type(param_ty)
@@ -1443,6 +1467,8 @@ impl MirTextCodegen for MirToLlvm:
                 arg_val = self.ret_value_for_type(arg_ty, "0")
             arg_parts = arg_parts.push("{arg_ty} {arg_val}")
             arg_tys = arg_tys.push(arg_ty)
+            if bootstrap_debug:
+                print "[mir-to-llvm] call:arg-after index={index} arg={arg_i} type={arg_ty}"
             arg_i = arg_i + 1
         val args_str = arg_parts.join(", ")
         # Reconcile arg count with the callee's declared parameter count. If a
@@ -1458,8 +1484,8 @@ impl MirTextCodegen for MirToLlvm:
         val declared_param_count = self.lookup_function_param_count(call_func_name)
         if declared_param_count >= 0 and declared_param_count != args.len():
             call_sig = "({arg_tys.join(\", \")}) "
-        match dest_name:
-            Some(name):
+        if has_dest:
+                val name = dest_name
                 var ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
                 var known_ret_ty = self.lookup_function_return_type(call_func_name)
                 if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
@@ -1490,11 +1516,94 @@ impl MirTextCodegen for MirToLlvm:
                 # sext's. See is_unsigned_mir_kind / lookup_function_return_unsigned.
                 self.unsigned_locals[dest_id] = self.lookup_function_return_unsigned(call_func_name)
                 self.builder.emit("  {name} = call {ret_ty} {call_sig}{call_func_name}({args_str})")
-            nil:
-                val ret_ty = "void"
-                self.builder.emit("  call {ret_ty} {call_sig}{call_func_name}({args_str})")
+        else:
+            self.builder.emit("  call void {call_sig}{call_func_name}({args_str})")
+        if bootstrap_debug:
+            print "[mir-to-llvm] call:emit index={index} present={has_dest}"
 
     # === Required: helpers ===
+
+    me llvm_type_text_at(types: [MirType], index: i64) -> text:
+        val ty = types[index]
+        match ty.kind:
+            case MirTypeKind.I64 | MirTypeKind.U64: "i64"
+            case MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.Char: "i32"
+            case MirTypeKind.I16 | MirTypeKind.U16: "i16"
+            case MirTypeKind.I8 | MirTypeKind.U8: "i8"
+            case MirTypeKind.F64: "double"
+            case MirTypeKind.F32: "float"
+            case MirTypeKind.Bool: "i1"
+            case MirTypeKind.Unit | MirTypeKind.Never: "void"
+            case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_) | MirTypeKind.Function(_, _) | MirTypeKind.Opaque(_): "ptr"
+            case MirTypeKind.Struct(_) | MirTypeKind.Enum(_) | MirTypeKind.Tuple(_) | MirTypeKind.Array(_, _) | MirTypeKind.Dict(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Union(_): "ptr"
+            case MirTypeKind.Promise(_) | MirTypeKind.Generator(_, _) | MirTypeKind.ActorType(_): "ptr"
+            case _: self.native_int_type
+
+    me translate_operand_at(operands: [MirOperand], index: i64) -> text:
+        val operand = operands[index]
+        match operand.kind:
+            case Copy(local) | Move(local):
+                self.local_value_text(local.id)
+            case Const(const_val, const_ty):
+                match const_ty.kind:
+                    case FuncPtr(signature):
+                        match const_val:
+                            case Str(name):
+                                val resolved = self.llvm_function_symbol_name(name)
+                                val return_types: [MirType] = [signature.return_type]
+                                self.remember_function_return_type(resolved, self.llvm_type_text_at(return_types, 0))
+                                self.unknown_func_decls[resolved] = true
+                                "@{resolved}"
+                            case _: self.translate_const_operand_at(operands, index)
+                    case Function(_, ret):
+                        match const_val:
+                            case Str(name):
+                                val resolved = self.llvm_function_symbol_name(name)
+                                val return_types: [MirType] = [ret]
+                                self.remember_function_return_type(resolved, self.llvm_type_text_at(return_types, 0))
+                                self.unknown_func_decls[resolved] = true
+                                "@{resolved}"
+                            case _: self.translate_const_operand_at(operands, index)
+                    case _: self.translate_const_operand_at(operands, index)
+
+    me translate_const_operand_at(operands: [MirOperand], index: i64) -> text:
+        val operand = operands[index]
+        match operand.kind:
+            case Const(value, _):
+                match value:
+                    case Int(v): "{v}"
+                    case Float(v): "{v}"
+                    case Bool(v): if v: "1" else: "0"
+                    case Str(v):
+                        val global_name = self.add_string_global(v)
+                        val str_len = v.len() + 1
+                        val nit = self.native_int()
+                        "getelementptr inbounds ([{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0)"
+                    case Zero: "0"
+                    case Array(elements): "zeroinitializer  ; array ({elements.len()} elements)"
+                    case Tuple(elements): "zeroinitializer  ; tuple ({elements.len()} elements)"
+                    case Struct(_): "zeroinitializer  ; struct"
+            case _: "0"
+
+    fn get_operand_type_at(operands: [MirOperand], index: i64) -> text:
+        val operand = operands[index]
+        match operand.kind:
+            case Copy(local) | Move(local): self.get_local_type(local.id)
+            case Const(_, const_ty):
+                val types: [MirType] = [const_ty]
+                self.llvm_type_text_at(types, 0)
+            case _: self.native_int()
+
+    fn get_operand_unsigned_at(operands: [MirOperand], index: i64) -> bool:
+        val operand = operands[index]
+        match operand.kind:
+            case Copy(local) | Move(local):
+                if self.unsigned_locals.contains_key(local.id): self.unsigned_locals[local.id] else: false
+            case Const(_, type_):
+                match type_.kind:
+                    case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: true
+                    case _: false
+            case _: false
 
     me translate_operand(operand: MirOperand) -> text:
         """Translate MIR operand to LLVM value."""

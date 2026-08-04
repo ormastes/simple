@@ -1,6 +1,7 @@
 use compiler.mir.mir_instruction_graph.{MirBlock, MirInst}
-use compiler.mir.mir_instruction_support.{BlockId, mir_operand_const_int}
+use compiler.mir.mir_instruction_support.{BlockId, mir_operand_const_int, mir_operand_copy}
 use compiler.mir.mir_instruction_kinds.{MirInstKind, MirTerminator}
+use compiler.mir.mir_types.{LocalId}
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -199,3 +200,58 @@ describe "bootstrap MIR-to-LLVM owner mutation":
                 expect(args.len()).to_equal(0)
             case _:
                 expect(false).to_equal(true)
+
+    it "routes Call payloads through indexed aggregate-safe helpers":
+        val codegen = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+        ) ?? ""
+
+        expect(codegen).to_contain("self.translate_call_at(instructions, index)")
+        expect(codegen).to_contain("me translate_call_at(instructions: [MirInst], index: i64):")
+        expect(codegen.contains("self.translate_call(dest, func, args)")).to_equal(false)
+        expect(codegen).to_contain("self.translate_operand_at(callee_operands, 0)")
+        expect(codegen).to_contain("self.translate_operand_at(args, arg_i)")
+        expect(codegen).to_contain("self.get_operand_type_at(args, arg_i)")
+        expect(codegen).to_contain("self.get_operand_unsigned_at(args, arg_i)")
+        expect(codegen).to_contain("if has_dest:")
+        expect(codegen).to_contain("else:\n            self.builder.emit(\"  call void")
+
+    it "keeps present nil and typed Call payloads distinct":
+        val present = MirInst(
+            kind: MirInstKind.Call(
+                Some(LocalId(id: 0)),
+                mir_operand_copy(LocalId(id: 1)),
+                [mir_operand_copy(LocalId(id: 2))]
+            ),
+            span: nil
+        )
+        val absent = MirInst(
+            kind: MirInstKind.Call(nil, mir_operand_const_int(0), []),
+            span: nil
+        )
+        val instructions: [MirInst] = [present, absent]
+        match instructions[0].kind:
+            case MirInstKind.Call(dest, callee, args):
+                expect(dest != nil).to_equal(true)
+                expect(args.len()).to_equal(1)
+                match callee.kind:
+                    case Copy(local): expect(local.id).to_equal(1)
+                    case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+        match instructions[1].kind:
+            case MirInstKind.Call(dest, _, args):
+                expect(dest == nil).to_equal(true)
+                expect(args.len()).to_equal(0)
+            case _: expect(false).to_equal(true)
+
+    it "keeps Call progress markers bootstrap-debug gated":
+        val codegen = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+        ) ?? ""
+        expect(codegen).to_contain("[mir-to-llvm] call:entry")
+        expect(codegen).to_contain("[mir-to-llvm] call:matched")
+        expect(codegen).to_contain("[mir-to-llvm] call:dest")
+        expect(codegen).to_contain("[mir-to-llvm] call:callee")
+        expect(codegen).to_contain("[mir-to-llvm] call:arg-before")
+        expect(codegen).to_contain("[mir-to-llvm] call:arg-after")
+        expect(codegen).to_contain("[mir-to-llvm] call:emit")
