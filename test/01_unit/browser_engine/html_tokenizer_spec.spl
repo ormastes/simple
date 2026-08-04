@@ -77,6 +77,27 @@ fn _all_character_data(html: text) -> text:
             out = out + tok.data
     out
 
+fn _shapes(html: text) -> text:
+    """Whole token stream as `KIND[tag|data]`, so a malformed-input case
+    pins the exact sequence instead of one sampled field."""
+    var out: [text] = []
+    for tok in _tokenize(html):
+        var kind = "?"
+        if tok.token_kind == HtmlTokenKind.StartTag:
+            kind = "S"
+        elif tok.token_kind == HtmlTokenKind.EndTag:
+            kind = "E"
+        elif tok.token_kind == HtmlTokenKind.Character:
+            kind = "C"
+        elif tok.token_kind == HtmlTokenKind.Comment:
+            kind = "M"
+        elif tok.token_kind == HtmlTokenKind.Doctype:
+            kind = "D"
+        elif tok.token_kind == HtmlTokenKind.Eof:
+            kind = "F"
+        out.push(kind + "[" + tok.tag_name + "|" + tok.data + "]")
+    out.join(" ")
+
 # ============================================================================
 # AC-1: WHATWG tokenizer — basic tags
 # ============================================================================
@@ -308,3 +329,92 @@ describe "HtmlTokenizer script and raw text states":
                     gt_tag_count = gt_tag_count + 1
             i = i + 1
         expect(gt_tag_count).to_equal(0)
+
+    it "AC-1: keeps raw text open to EOF when the end tag never arrives":
+        expect(_shapes("<script>a")).to_equal("S[script|] C[|a] F[|]")
+
+    it "AC-1: ends raw text only on the real end tag, then resumes data":
+        expect(_shapes("<script>a<b</script>c")).to_equal(
+            "S[script|] C[|a<b] E[script|] C[|c] F[|]"
+        )
+
+    it "AC-1: treats <textarea> and <title> bodies as raw text":
+        expect(_shapes("<textarea><b>x</b></textarea>")).to_equal(
+            "S[textarea|] C[|<b>x</b>] E[textarea|] F[|]"
+        )
+        expect(_shapes("<title><b>x</b></title>")).to_equal(
+            "S[title|] C[|<b>x</b>] E[title|] F[|]"
+        )
+
+# ============================================================================
+# AC-1: WHATWG tokenizer — malformed markup recovery
+# ============================================================================
+
+describe "HtmlTokenizer malformed markup":
+    it "AC-1: emits a bare '<' as character data when no tag name follows":
+        expect(_shapes("a < b")).to_equal("C[|a ] C[|<] C[| b] F[|]")
+        expect(_shapes("<>x")).to_equal("C[|<] C[|>x] F[|]")
+
+    it "AC-1: recovers an unterminated tag as character data":
+        expect(_shapes("<div class='a")).to_equal(
+            "C[|<] C[|div class='a] F[|]"
+        )
+
+    it "AC-1: drops attributes on an end tag and keeps the tag name":
+        expect(_shapes("</div class='a'>")).to_equal("E[div|] F[|]")
+
+    it "AC-1: emits a nameless end tag for '</ >'":
+        expect(_shapes("</ >a")).to_equal("E[|] C[|a] F[|]")
+
+    it "AC-1: discards CDATA and other bogus bang constructs":
+        expect(_shapes("<![CDATA[x]]>y")).to_equal("C[|y] F[|]")
+        expect(_shapes("<!x>y")).to_equal("C[|y] F[|]")
+
+    it "AC-1: keeps the doctype root name and drops the public identifier":
+        expect(_shapes("<!DOCTYPE HTML PUBLIC 'x'>")).to_equal("D[HTML|] F[|]")
+
+    it "AC-1: emits an empty comment for the abrupt '<!--->' form":
+        expect(_shapes("<!-- a -->b<!--->c")).to_equal(
+            "M[| a ] C[|b] M[|] C[|c] F[|]"
+        )
+
+    it "AC-1: lowercases tag and attribute names on a start tag":
+        expect(_shapes("<DIV CLASS='A'>x</DIV>")).to_equal(
+            "S[div|] C[|x] E[div|] F[|]"
+        )
+        expect(_attr_value(_first_start_tag("<DIV CLASS='A'>"), "class")).to_equal(
+            "A"
+        )
+
+    it "AC-1: parses quoted, unquoted and valueless attributes together":
+        val tok = _first_start_tag("<a b=\"c d\" e=f g>")
+        expect(tok.attrs.len()).to_equal(3)
+        expect(_attr_value(tok, "b")).to_equal("c d")
+        expect(_attr_value(tok, "e")).to_equal("f")
+        expect(_attr_value(tok, "g")).to_equal("")
+
+# ============================================================================
+# AC-1: WHATWG tokenizer — character reference edge cases
+# ============================================================================
+
+describe "HtmlTokenizer character reference edges":
+    it "AC-1: keeps an unmatched reference tail verbatim":
+        expect(_all_character_data("&#x41;&#66;&notit;")).to_equal(
+            "AB" + text.from_char_code(172) + "it;"
+        )
+
+    it "AC-1: applies the legacy no-semicolon form only where allowed":
+        expect(_all_character_data("&amp&lt;")).to_equal("&<")
+
+    it "AC-1: replaces null, surrogate and out-of-range code points":
+        val replacement = text.from_char_code(65533)
+        expect(_all_character_data("&#0;")).to_equal(replacement)
+        expect(_all_character_data("&#xD800;")).to_equal(replacement)
+        expect(_all_character_data("&#x110000;")).to_equal(replacement)
+
+    it "AC-1: remaps the windows-1252 C1 range":
+        expect(_all_character_data("&#x80;")).to_equal(text.from_char_code(8364))
+
+    it "AC-1: decodes references inside attribute values":
+        val tok = _first_start_tag("<a href='?x=1&amp;y=2&notit;'>")
+        expect(_attr_value(tok, "href")).to_equal("?x=1&y=2&notit;")

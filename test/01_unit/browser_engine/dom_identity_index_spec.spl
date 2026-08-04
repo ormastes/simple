@@ -318,3 +318,119 @@ describe "Generation-qualified DOM identity index":
         check_stale_routes_and_index_release(
             fixture.index, fixture.deep_route, replacement
         )
+
+    # @req REQ-WEB-BROWSER-004
+    it "admits only canonical positive generation values":
+        expect(DomDocumentGeneration.create(0)).to_equal(
+            Err("invalid_generation")
+        )
+        expect(DomDocumentGeneration.create(-1)).to_equal(
+            Err("invalid_generation")
+        )
+        expect(_generation(5).value).to_equal(5)
+        val advanced = match _generation(5).next():
+            Ok(value): value
+            Err(reason): fail("Expected successor generation: {reason}")
+        expect(advanced.value).to_equal(6)
+        expect(DomDocumentGeneration(
+            value: 9223372036854775807
+        ).next()).to_equal(Err("generation_exhausted"))
+
+    # @req REQ-WEB-BROWSER-004
+    it "round-trips route text and rejects every non-canonical form":
+        val route = DomNodeRoute(generation: _generation(1), node_id: 7)
+        expect(dom_node_route_text(route)).to_equal("dom-route-v1:1:7")
+        expect(dom_node_route_parse("dom-route-v1:1:7")).to_equal(Ok(route))
+        expect(dom_node_route_parse("nope")).to_equal(Err("invalid_route"))
+        expect(dom_node_route_parse("dom-route-v2:1:7")).to_equal(
+            Err("invalid_route")
+        )
+        expect(dom_node_route_parse("dom-route-v1:1:7:1")).to_equal(
+            Err("invalid_route")
+        )
+        expect(dom_node_route_parse("dom-route-v1:0:1")).to_equal(
+            Err("invalid_route")
+        )
+        expect(dom_node_route_parse("dom-route-v1:01:1")).to_equal(
+            Err("invalid_route")
+        )
+        expect(dom_node_route_parse("dom-route-v1:1:-1")).to_equal(
+            Err("invalid_route")
+        )
+        expect(dom_node_route_parse("dom-route-v1:1:")).to_equal(
+            Err("invalid_route")
+        )
+
+    # @req REQ-WEB-BROWSER-004
+    it "separates malformed layout targets from targets that are absent":
+        val index = _index(
+            "<body><div id='a'><input id='i' type='hidden'></div>" +
+            "<form id='f'><input id='r' type='radio' name='n'></form>" +
+            "</body>",
+            1
+        )
+        expect(index.route_for_layout_target_key("id:")).to_equal(
+            Err("invalid_target")
+        )
+        expect(index.route_for_layout_target_key("q:1")).to_equal(
+            Err("invalid_target")
+        )
+        expect(index.route_for_layout_target_key("path:-1")).to_equal(
+            Err("invalid_target")
+        )
+        expect(index.route_for_layout_target_key("id:zzz")).to_equal(
+            Err("target_not_found")
+        )
+        expect(index.route_for_layout_target_key("path:99")).to_equal(
+            Err("target_not_found")
+        )
+        val first_div = _route(index, "a")
+        expect(index.route_for_layout_target_key("path:0")).to_equal(
+            Ok(first_div)
+        )
+        expect(index.layout_target_key_for_route(first_div)).to_equal(
+            Some("path:0")
+        )
+        expect(index.author_id_for_route(first_div)).to_equal(Some("a"))
+        expect(index.route_for_author_id("")).to_be_nil()
+        expect(index.route_for_author_id("zzz")).to_be_nil()
+
+    # @req REQ-WEB-BROWSER-004
+    it "refuses every association lookup made with a foreign generation":
+        val index = _index(
+            "<body><div id='a'><input id='i' type='hidden'></div>" +
+            "<form id='f'><input id='r' type='radio' name='n'></form>" +
+            "</body>",
+            1
+        )
+        val live = _route(index, "r")
+        expect(index.contains_route(live)).to_be(true)
+        expect(index.form_owner_for_route(live)).to_equal(
+            Some(_route(index, "f"))
+        )
+        val foreign = DomNodeRoute(
+            generation: _generation(2), node_id: live.node_id
+        )
+        expect(index.contains_route(foreign)).to_be(false)
+        expect(index.form_owner_for_route(foreign)).to_be_nil()
+        expect(index.control_for_label_route(foreign)).to_be_nil()
+        expect(index.radio_group_for_route(foreign)).to_be_nil()
+        expect(index.author_id_for_route(foreign)).to_be_nil()
+        expect(index.path_for_route(foreign)).to_be_nil()
+        expect(index.event_path_for_route(foreign).len()).to_equal(0)
+
+    # @req REQ-WEB-BROWSER-004
+    it "counts exactly one visit per node in each of the two build passes":
+        val index = _index(
+            "<body><div id='a'><input id='i' type='hidden'></div>" +
+            "<form id='f'><input id='r' type='radio' name='n'></form>" +
+            "</body>",
+            1
+        )
+        expect(index.counters.pass_count).to_equal(2)
+        expect(index.counters.node_count).to_equal(8)
+        expect(index.counters.build_visit_count).to_equal(16)
+        expect(index.counters.duplicate_author_id_count).to_equal(0)
+        expect(index.counters.resolved_association_count).to_equal(1)
+        expect(index.counters.unresolved_association_count).to_equal(0)
+        expect(index.counters.layout_relation_count).to_equal(4)
