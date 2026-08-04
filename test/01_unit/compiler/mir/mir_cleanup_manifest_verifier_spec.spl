@@ -1,0 +1,222 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.{
+    BlockId, LocalId, MirBody, MirBuilder, MirCallUnwindContract,
+    MirConstValue, MirExceptionCleanupContract, MirFacetCleanupEntryContract,
+    MirFunction, MirInstructionSite, MirModule, MirOperand, MirOperandKind,
+    MirSignature, MirTerminator, MirType, MirTypeKind,
+    mir_call_terminator_create, mir_operand_const_int, mir_operand_copy,
+    mir_operand_move, validate_mir_exception_cfg,
+    validate_mir_exception_module
+}
+
+fn cleanup_manifest_builder(name: text, symbol_id: i64) -> MirBuilder:
+    var builder = MirBuilder.new()
+    builder.begin_function(
+        SymbolId(id: symbol_id), name,
+        MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        Span.empty())
+    builder
+
+fn cleanup_release_operand() -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(
+            "aspect_execution_context_release_facet_descriptor_or_panic"),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+            params: [
+                MirType(kind: MirTypeKind.Opaque("AspectExecutionContext")),
+                MirType(kind: MirTypeKind.Opaque(
+                    "__simple_facet_descriptor_lease_abi"))],
+            return_type: MirType.unit(), is_variadic: false)))))
+
+fn cleanup_manifest_entry(
+    owner: LocalId, lease: LocalId, block: BlockId, instruction_index: i64
+) -> MirFacetCleanupEntryContract:
+    MirFacetCleanupEntryContract(
+        owner: owner, lease: lease, present: nil, guard_block: nil,
+        release_site: MirInstructionSite(
+            block: block, instruction_index: instruction_index),
+        continue_block: nil,
+        release_symbol:
+            "aspect_execution_context_release_facet_descriptor_or_panic")
+
+fn reverse_cleanup_body(name: text, symbol_id: i64) -> MirBody:
+    var builder = cleanup_manifest_builder(name, symbol_id)
+    val normal = builder.new_block(Some("normal"))
+    val unwind = builder.new_block(Some("unwind"))
+    val outer_owner = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
+        "AspectExecutionContext")))
+    val outer_lease = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
+        "__simple_facet_descriptor_lease_abi")))
+    val inner_owner = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
+        "AspectExecutionContext")))
+    val inner_lease = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
+        "__simple_facet_descriptor_lease_abi")))
+    builder.set_terminator(mir_call_terminator_create(
+        nil, mir_operand_const_int(1), [], normal,
+        MirCallUnwindContract.MayUnwind, Some(unwind)).unwrap())
+    builder.switch_to_block(unwind)
+    val token = builder.emit_landing_pad()
+    builder.emit_call(cleanup_release_operand(),
+        [mir_operand_copy(inner_owner), mir_operand_copy(inner_lease)],
+        MirType.unit())
+    builder.emit_call(cleanup_release_operand(),
+        [mir_operand_copy(outer_owner), mir_operand_copy(outer_lease)],
+        MirType.unit())
+    builder.terminate_resume(mir_operand_move(token))
+    builder.switch_to_block(normal)
+    builder.terminate_return(nil)
+    var body = MirBody.from_function(builder.end_function())
+    body.exception_cleanup_contracts = [MirExceptionCleanupContract(
+        unwind_entry: unwind, token: token,
+        entries: [
+            cleanup_manifest_entry(inner_owner, inner_lease, unwind, 1),
+            cleanup_manifest_entry(outer_owner, outer_lease, unwind, 2)])]
+    body
+
+fn cleanup_block_index(body: MirBody, block: BlockId) -> i64:
+    var index = 0
+    while index < body.blocks.len():
+        if body.blocks[index].id.id == block.id:
+            return index
+        index = index + 1
+    -1
+
+fn cleanup_manifest_function(body: MirBody) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 1201), name: body.name,
+        signature: MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: body.locals, blocks: body.blocks,
+        entry_block: BlockId.entry(), span: Span.empty(),
+        generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {},
+        exception_cleanup_contracts: body.exception_cleanup_contracts)
+
+describe "MIR cleanup manifest exact acceptance":
+    it "accepts nested unconditional entries only in reverse release order":
+        val body = reverse_cleanup_body("nested_reverse", 1101)
+        expect(body.exception_cleanup_contracts[0].entries.len()).to_equal(2)
+        expect(validate_mir_exception_cfg(body).is_ok()).to_be(true)
+
+    it "rejects reordered and duplicate extra release execution":
+        var reordered = reverse_cleanup_body("reordered", 1102)
+        var contract = reordered.exception_cleanup_contracts[0]
+        val first = contract.entries[0]
+        contract.entries[0] = contract.entries[1]
+        contract.entries[1] = first
+        reordered.exception_cleanup_contracts[0] = contract
+        expect(validate_mir_exception_cfg(reordered).unwrap_err()).to_contain(
+            "missing or reordered")
+
+        var duplicate_extra = reverse_cleanup_body("duplicate_extra", 1103)
+        val unwind = duplicate_extra.exception_cleanup_contracts[0].unwind_entry
+        val block_index = cleanup_block_index(duplicate_extra, unwind)
+        var block = duplicate_extra.blocks[block_index]
+        block.instructions.push(block.instructions[2])
+        duplicate_extra.blocks[block_index] = block
+        expect(validate_mir_exception_cfg(
+            duplicate_extra).unwrap_err()).to_contain("extra release")
+
+    it "rejects stale locals and blocks plus wrong lease and presence types":
+        var stale_local = reverse_cleanup_body("stale_local", 1104)
+        var stale_local_contract = stale_local.exception_cleanup_contracts[0]
+        var stale_local_entry = stale_local_contract.entries[0]
+        stale_local_entry.lease = LocalId(id: 99999)
+        stale_local_contract.entries[0] = stale_local_entry
+        stale_local.exception_cleanup_contracts[0] = stale_local_contract
+        expect(validate_mir_exception_cfg(stale_local).unwrap_err()).to_contain(
+            "stale local")
+
+        var stale_block = reverse_cleanup_body("stale_block", 1105)
+        var stale_block_contract = stale_block.exception_cleanup_contracts[0]
+        var stale_block_entry = stale_block_contract.entries[0]
+        stale_block_entry.release_site = MirInstructionSite(
+            block: BlockId(id: 99999), instruction_index: 1)
+        stale_block_contract.entries[0] = stale_block_entry
+        stale_block.exception_cleanup_contracts[0] = stale_block_contract
+        expect(validate_mir_exception_cfg(stale_block).unwrap_err()).to_contain(
+            "stale release block")
+
+        var wrong_lease = reverse_cleanup_body("wrong_lease", 1106)
+        var wrong_lease_contract = wrong_lease.exception_cleanup_contracts[0]
+        var wrong_lease_entry = wrong_lease_contract.entries[0]
+        wrong_lease_entry.lease = wrong_lease_entry.owner
+        wrong_lease_contract.entries[0] = wrong_lease_entry
+        wrong_lease.exception_cleanup_contracts[0] = wrong_lease_contract
+        expect(validate_mir_exception_cfg(wrong_lease).unwrap_err()).to_contain(
+            "owner or lease type is not exact")
+
+        var wrong_present = reverse_cleanup_body("wrong_present", 1107)
+        var wrong_present_contract = wrong_present.exception_cleanup_contracts[0]
+        var wrong_present_entry = wrong_present_contract.entries[0]
+        wrong_present_entry.present = Some(wrong_present_entry.owner)
+        wrong_present_entry.guard_block = Some(
+            wrong_present_contract.unwind_entry)
+        wrong_present_entry.continue_block = Some(
+            wrong_present_contract.unwind_entry)
+        wrong_present_contract.entries[0] = wrong_present_entry
+        wrong_present.exception_cleanup_contracts[0] = wrong_present_contract
+        expect(validate_mir_exception_cfg(wrong_present).unwrap_err()).to_contain(
+            "presence guard is not Bool")
+
+    it "rejects a join reached with different manifest cursors":
+        var builder = cleanup_manifest_builder("cursor_join", 1108)
+        val normal = builder.new_block(Some("normal"))
+        val unwind = builder.new_block(Some("unwind"))
+        val release = builder.new_block(Some("release"))
+        val bypass = builder.new_block(Some("bypass"))
+        val join = builder.new_block(Some("join"))
+        val owner = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
+            "AspectExecutionContext")))
+        val lease = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
+            "__simple_facet_descriptor_lease_abi")))
+        val condition = builder.new_temp(MirType.bool())
+        builder.set_terminator(mir_call_terminator_create(
+            nil, mir_operand_const_int(1), [], normal,
+            MirCallUnwindContract.MayUnwind, Some(unwind)).unwrap())
+        builder.switch_to_block(unwind)
+        val token = builder.emit_landing_pad()
+        builder.terminate_if(mir_operand_copy(condition), release, bypass)
+        builder.switch_to_block(release)
+        builder.emit_call(cleanup_release_operand(),
+            [mir_operand_copy(owner), mir_operand_copy(lease)], MirType.unit())
+        builder.terminate_goto(join)
+        builder.switch_to_block(bypass)
+        builder.terminate_goto(join)
+        builder.switch_to_block(join)
+        builder.terminate_resume(mir_operand_move(token))
+        builder.switch_to_block(normal)
+        builder.terminate_return(nil)
+        var body = MirBody.from_function(builder.end_function())
+        body.exception_cleanup_contracts = [MirExceptionCleanupContract(
+            unwind_entry: unwind, token: token,
+            entries: [cleanup_manifest_entry(owner, lease, release, 0)])]
+        expect(validate_mir_exception_cfg(body).unwrap_err()).to_contain(
+            "join has inconsistent manifest order")
+
+    it "rejects an orphan manifest and rejects stale metadata at the final typed gate":
+        var orphan = reverse_cleanup_body("orphan", 1109)
+        var orphan_contract = orphan.exception_cleanup_contracts[0]
+        orphan_contract.unwind_entry = BlockId(id: 99999)
+        orphan.exception_cleanup_contracts[0] = orphan_contract
+        expect(validate_mir_exception_cfg(orphan).unwrap_err()).to_contain(
+            "orphan facet cleanup manifest")
+
+        var stale = reverse_cleanup_body("final_gate_stale", 1110)
+        var stale_contract = stale.exception_cleanup_contracts[0]
+        var stale_entry = stale_contract.entries[0]
+        stale_entry.release_site = MirInstructionSite(
+            block: BlockId(id: 99999), instruction_index: 1)
+        stale_contract.entries[0] = stale_entry
+        stale.exception_cleanup_contracts[0] = stale_contract
+        val function = cleanup_manifest_function(stale)
+        val module = MirModule(
+            name: "final_gate_stale",
+            functions: {function.symbol: function},
+            statics: {}, constants: {}, types: {},
+            facet_binding_plans: [], prepared_advice_slots: [])
+        expect(validate_mir_exception_module(
+            module, "at final backend handoff").unwrap_err()).to_contain(
+            "stale release block")
