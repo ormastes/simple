@@ -1,0 +1,168 @@
+# @req NFR-012
+use std.spec.*
+use std.sffi.io.{file_read_text}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768SelectionMode,
+    X25519MlKem768VerificationPolicy, X25519MlKem768Config,
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION
+}
+use os.crypto.x25519_mlkem768.execution_policy.{
+    x25519_mlkem768_resolve_simd_candidate_for_test,
+    x25519_mlkem768_resolve_simd_candidate_with_stage4_provenance_for_test,
+    x25519_mlkem768_resolve_vulkan_candidate
+}
+
+val _SOURCE_REVISION: text =
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val _BINARY_DIGEST: text =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val _PROVENANCE_DIGEST: text =
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+fn _stage4_provenance() -> text:
+    "schema=simple-bootstrap-stage4-provenance-v2\n" +
+    "status=pass\n" +
+    "artifact_kind=pure-simple-full-cli\n" +
+    "output_sha256=" + _BINARY_DIGEST + "\n" +
+    "source_revision_kind=content-sha256\n" +
+    "source_revision=" + _SOURCE_REVISION + "\n" +
+    "source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling\n" +
+    "completed_gate=stage4-essential-tools-smoke\n"
+
+fn _simd_config(backend: X25519MlKem768Backend) -> X25519MlKem768Config:
+    X25519MlKem768Config(
+        implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        profile_version: X25519_MLKEM768_PROFILE_VERSION,
+        requested_backend: backend,
+        selection_mode: X25519MlKem768SelectionMode.Require,
+        verification_policy:
+            X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+        minimum_batch: 1,
+        batch_size: 1)
+
+fn _simd_evidence_digests(
+    backend: X25519MlKem768Backend, native_backend: i64
+) -> [text]:
+    match x25519_mlkem768_resolve_simd_candidate_with_stage4_provenance_for_test(
+            _simd_config(backend), "provenance-contract", native_backend,
+            _stage4_provenance(), _BINARY_DIGEST, _PROVENANCE_DIGEST):
+        case Ok(evidence): [evidence.source_digest, evidence.artifact_digest]
+        case Err(reason): [reason, ""]
+
+describe "X25519MLKEM768 SIMD source provenance contract":
+    it "should bind AVX2 NEON and RVV evidence to the admitted Stage-4 build (NFR-012)":
+        step("Compare every ISA record with the build source and binary digests")
+        for pair in [
+                _simd_evidence_digests(X25519MlKem768Backend.Avx2, 1),
+                _simd_evidence_digests(X25519MlKem768Backend.Neon, 2),
+                _simd_evidence_digests(X25519MlKem768Backend.Rvv, 3)]:
+            expect(pair[0]).to_equal(_SOURCE_REVISION)
+            expect(pair[1]).to_equal(_BINARY_DIGEST)
+
+    it "should reject implicit or mismatched build provenance (NFR-012)":
+        step("Require an admitted sidecar bound to the actual running binary")
+        val implicit = match x25519_mlkem768_resolve_simd_candidate_for_test(
+                _simd_config(X25519MlKem768Backend.Avx2),
+                "provenance-contract", 1):
+            case Ok(_): "accepted"
+            case Err(reason): reason
+        expect(implicit).to_equal(
+            "requested SIMD candidate requires admitted Stage-4 build provenance")
+        val mismatched = match x25519_mlkem768_resolve_simd_candidate_with_stage4_provenance_for_test(
+                _simd_config(X25519MlKem768Backend.Avx2),
+                "provenance-contract", 1, _stage4_provenance(),
+                _SOURCE_REVISION, _PROVENANCE_DIGEST):
+            case Ok(_): "accepted"
+            case Err(reason): reason
+        expect(mismatched).to_equal(
+            "requested SIMD candidate build provenance rejected: stage4-output-sha256-mismatch")
+        val admitted_provenance = _stage4_provenance()
+        val wrong_root_provenance = admitted_provenance.replace(
+            "src/compiler:src/lib:src/app:src/runtime:examples/10_tooling",
+            "src/app")
+        val wrong_roots = match x25519_mlkem768_resolve_simd_candidate_with_stage4_provenance_for_test(
+                _simd_config(X25519MlKem768Backend.Avx2),
+                "provenance-contract", 1, wrong_root_provenance,
+                _BINARY_DIGEST, _PROVENANCE_DIGEST):
+            case Ok(_): "accepted"
+            case Err(reason): reason
+        expect(wrong_roots).to_equal(
+            "requested SIMD candidate build provenance rejected: stage4-source-roots-invalid")
+
+        step("Reject ambiguous provenance with a duplicated source-roots key")
+        val duplicate_root_provenance = admitted_provenance +
+            "source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling\n"
+        val duplicate_roots = match x25519_mlkem768_resolve_simd_candidate_with_stage4_provenance_for_test(
+                _simd_config(X25519MlKem768Backend.Avx2),
+                "provenance-contract", 1, duplicate_root_provenance,
+                _BINARY_DIGEST, _PROVENANCE_DIGEST):
+            case Ok(_): "accepted"
+            case Err(reason): reason
+        expect(duplicate_roots).to_equal(
+            "requested SIMD candidate build provenance rejected: stage4-source-roots-invalid")
+
+    it "should validate Vulkan candidate configuration before backend admission (NFR-012)":
+        step("Reject a zero-batch Vulkan configuration at the shared policy gate")
+        val invalid = X25519MlKem768Config(
+            implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+            profile_version: X25519_MLKEM768_PROFILE_VERSION,
+            requested_backend: X25519MlKem768Backend.Vulkan,
+            selection_mode: X25519MlKem768SelectionMode.Require,
+            verification_policy:
+                X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+            minimum_batch: 1,
+            batch_size: 0)
+        match x25519_mlkem768_resolve_vulkan_candidate(invalid, "keygen"):
+            case Ok(_): fail("invalid Vulkan configuration was accepted")
+            case Err(reason): expect(reason).to_contain("batch_size must be positive")
+
+    it "should keep source verification out of the operation hot path (NFR-012)":
+        step("Inspect SIMD operation modules for filesystem hashing calls")
+        val policy = file_read_text(
+            "src/os/crypto/x25519_mlkem768/execution_policy.spl")
+        expect(policy.contains("file_hash_sha256")).to_be(false)
+        expect(policy.contains("file_read_text")).to_be(false)
+        expect(policy.contains("rt_process_run")).to_be(false)
+        expect(policy.contains("process_run(")).to_be(false)
+        expect(policy.contains(
+            "b4aee39c491c3aba19b48efe3c30c723128533a85e30f3fb4361fc46e2bf47c5"
+        )).to_be(false)
+
+    it "should include the SIMD runtime in pure-Simple native builds (NFR-012)":
+        step("Inspect the native runtime compiler source and object lists")
+        val compiler = file_read_text(
+            "src/compiler/70.backend/backend/runtime_compiler.spl")
+        expect(compiler).to_contain("runtime_simd_dispatch")
+        expect(compiler).to_contain(
+            "{" + "rt_dir" + "}/{" + "name" + "}.c")
+        expect(compiler).to_contain("comp_args.push(src_path)")
+        val stage4 = file_read_text(
+            "scripts/check/lib/stage4-candidate-provenance.shs")
+        expect(stage4).to_contain(
+            "source_roots=src/compiler:src/lib:src/app:src/runtime:" +
+            "examples/10_tooling")
+
+    it "should require admission and report the observed SIMD path without GPU claims (NFR-012)":
+        step("Inspect the public SIMD operation boundary and receipt mapping")
+        val contract = file_read_text(
+            "src/lib/common/crypto/x25519_mlkem768/contract.spl")
+        val hybrid = file_read_text(
+            "src/os/crypto/x25519_mlkem768/hybrid.spl")
+        val simd_evidence = file_read_text(
+            "src/os/crypto/x25519_mlkem768/simd_operation_evidence.spl")
+        expect(contract).to_contain("struct X25519MlKem768SimdAdmission:")
+        expect(contract).to_contain("simd_chunk_hits: i64")
+        expect(contract).to_contain("observed_rvv_vlen_bits: i64")
+        expect(hybrid).to_contain(
+            "admission: X25519MlKem768SimdAdmission")
+        expect(hybrid).to_contain("mlkem_ntt_simd_receipt()")
+        expect(hybrid).to_contain(
+            "x25519_mlkem768_simd_operation_evidence(")
+        expect(simd_evidence).to_contain(
+            "updated.simd_chunk_hits = receipt.chunk_hits")
+        expect(simd_evidence).to_contain(
+            "updated.observed_rvv_vlen_bits = receipt.observed_rvv_vlen_bits")
+        expect(simd_evidence).to_contain("updated.kernel_invocations = 0")
+        expect(simd_evidence).to_contain("updated.compiled = false")
+        expect(simd_evidence).to_contain("updated.submitted = false")

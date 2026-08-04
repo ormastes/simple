@@ -1,0 +1,337 @@
+# X25519MLKEM768 backend selection policy.
+#
+# Specialized implementations are promoted only after their native evidence
+# rows pass. Until then Automatic resolves to the hardened scalar oracle and a
+# forced specialized backend fails closed instead of fabricating acceleration.
+
+mod os.crypto.x25519_mlkem768.execution_policy
+
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768SelectionMode,
+    X25519MlKem768VerificationPolicy,
+    X25519MlKem768Config, X25519MlKem768Evidence,
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION}
+use std.simd.{mlkem_ntt_simd_backend}
+use std.common.crypto.sha256.{sha256_text}
+use lib.common.provenance.stage4_compiler_provenance.{
+    stage4_compiler_provenance_from_text,
+    stage4_compiler_provenance_reason}
+
+fn _backend_name(backend: X25519MlKem768Backend) -> text:
+    if backend == X25519MlKem768Backend.Automatic: return "automatic"
+    if backend == X25519MlKem768Backend.ScalarCpu: return "scalar-cpu"
+    if backend == X25519MlKem768Backend.Avx2: return "avx2"
+    if backend == X25519MlKem768Backend.Neon: return "neon"
+    if backend == X25519MlKem768Backend.Rvv: return "rvv"
+    if backend == X25519MlKem768Backend.Cuda: return "cuda"
+    if backend == X25519MlKem768Backend.Vulkan: return "vulkan"
+    "metal"
+
+fn _selection_name(mode: X25519MlKem768SelectionMode) -> text:
+    if mode == X25519MlKem768SelectionMode.Require: "require" else: "suggest"
+
+fn _verification_name() -> text:
+    # _config_error rejects every other policy before evidence is constructed.
+    "absolute-and-scalar"
+
+fn _configuration_digest(config: X25519MlKem768Config) -> text:
+    sha256_text(
+        "implementation=" + config.implementation_version +
+        ";profile=" + config.profile_version +
+        ";backend=" + _backend_name(config.requested_backend) +
+        ";selection=" + _selection_name(config.selection_mode) +
+        ";verification=" + _verification_name() +
+        ";minimum_batch=" + config.minimum_batch.to_text() +
+        ";batch_size=" + config.batch_size.to_text())
+
+fn _config_error(config: X25519MlKem768Config) -> text:
+    if config.batch_size < 1:
+        return "X25519MLKEM768 batch_size must be positive"
+    if config.minimum_batch < 1:
+        return "X25519MLKEM768 minimum_batch must be positive"
+    if config.batch_size < config.minimum_batch:
+        return "X25519MLKEM768 batch_size is below minimum_batch"
+    if config.implementation_version != X25519_MLKEM768_IMPLEMENTATION_VERSION:
+        return "unsupported X25519MLKEM768 implementation version"
+    if config.profile_version != X25519_MLKEM768_PROFILE_VERSION:
+        return "unsupported X25519MLKEM768 profile version"
+    if config.verification_policy !=
+            X25519MlKem768VerificationPolicy.AbsoluteAndScalar:
+        return "unsupported X25519MLKEM768 verification policy"
+    ""
+
+fn _scalar_evidence(operation: text, config: X25519MlKem768Config,
+        attempts: [text]) -> X25519MlKem768Evidence:
+    X25519MlKem768Evidence(
+        requested_backend: config.requested_backend,
+        selected_backend: X25519MlKem768Backend.ScalarCpu,
+        attempts: attempts,
+        fallback_used: false,
+        fallback_reason: "",
+        implementation_version: config.implementation_version,
+        profile_version: config.profile_version,
+        configuration_digest: _configuration_digest(config),
+        input_fixture_digest: "",
+        source_digest: "",
+        artifact_digest: "",
+        execution_proof_digest: "",
+        kernel_invocations: 0,
+        simd_chunk_hits: 0,
+        observed_rvv_vlen_bits: 0,
+        operation: operation,
+        batch_size: config.batch_size,
+        output_digest: "",
+        executor_identity: "pure-simple-scalar",
+        compiled: false,
+        submitted: false,
+        fence_completed: false,
+        device_readback: false,
+        oracle_match: false
+    )
+
+fn x25519_mlkem768_resolve_backend(config: X25519MlKem768Config,
+        operation: text) -> Result<X25519MlKem768Evidence, text>:
+    val config_error = _config_error(config)
+    if config_error != "":
+        return Err(config_error)
+    if config.requested_backend == X25519MlKem768Backend.Automatic:
+        return Ok(_scalar_evidence(operation, config, ["automatic:scalar-cpu"]))
+    if config.requested_backend == X25519MlKem768Backend.ScalarCpu:
+        return Ok(_scalar_evidence(operation, config, ["forced:scalar-cpu"]))
+    if config.selection_mode == X25519MlKem768SelectionMode.Suggest:
+        var evidence = _scalar_evidence(operation, config,
+            ["requested specialized backend is not promoted", "fallback:scalar-cpu"])
+        evidence.fallback_used = true
+        evidence.fallback_reason = "requested specialized backend is not promoted"
+        return Ok(evidence)
+    Err("requested X25519MLKEM768 backend has no promoted native implementation")
+
+fn _simd_candidate_available(backend: X25519MlKem768Backend,
+        native_backend: i64) -> bool:
+    if backend == X25519MlKem768Backend.Avx2:
+        return native_backend == 1
+    if backend == X25519MlKem768Backend.Neon:
+        return native_backend == 2
+    if backend == X25519MlKem768Backend.Rvv:
+        return native_backend == 3
+    false
+
+fn _simd_candidate_name(backend: X25519MlKem768Backend) -> text:
+    if backend == X25519MlKem768Backend.Avx2:
+        return "native-avx2-candidate"
+    if backend == X25519MlKem768Backend.Neon:
+        return "native-neon-candidate"
+    if backend == X25519MlKem768Backend.Rvv:
+        return "native-rvv-candidate"
+    "not-a-simd-candidate"
+
+fn _resolve_simd_candidate(config: X25519MlKem768Config,
+        operation: text, native_backend: i64, source_digest: text,
+        artifact_digest: text) -> Result<X25519MlKem768Evidence, text>:
+    val config_error = _config_error(config)
+    if config_error != "":
+        return Err(config_error)
+    if not _simd_candidate_available(config.requested_backend, native_backend):
+        return Err("requested SIMD candidate is unavailable on this host")
+    if source_digest.len() != 64 or artifact_digest.len() != 64:
+        return Err("requested SIMD candidate requires admitted Stage-4 build provenance")
+    Ok(X25519MlKem768Evidence(
+        requested_backend: config.requested_backend,
+        selected_backend: config.requested_backend,
+        attempts: ["candidate-only: not production-promoted"],
+        fallback_used: false,
+        fallback_reason: "",
+        implementation_version: config.implementation_version,
+        profile_version: config.profile_version,
+        configuration_digest: _configuration_digest(config),
+        input_fixture_digest: "",
+        source_digest: source_digest,
+        artifact_digest: artifact_digest,
+        execution_proof_digest: "",
+        kernel_invocations: 0,
+        simd_chunk_hits: 0,
+        observed_rvv_vlen_bits: 0,
+        operation: operation,
+        batch_size: config.batch_size,
+        output_digest: "",
+        executor_identity: _simd_candidate_name(config.requested_backend),
+        compiled: false,
+        submitted: false,
+        fence_completed: false,
+        device_readback: false,
+        oracle_match: false
+    ))
+
+fn x25519_mlkem768_resolve_simd_candidate(config: X25519MlKem768Config,
+        operation: text) -> Result<X25519MlKem768Evidence, text>:
+    """Resolve an evidence-only SIMD candidate; never used by production TLS."""
+    _resolve_simd_candidate(
+        config, operation, mlkem_ntt_simd_backend(), "", "")
+
+fn _simd_provenance_field(encoded: text, key: text) -> text:
+    val prefix = key + "="
+    var found = ""
+    for line in encoded.split("\n"):
+        if line.starts_with(prefix):
+            if found != "":
+                return ""
+            found = line.substring(prefix.len(), line.len()).trim()
+    found
+
+fn _resolve_simd_candidate_with_stage4_provenance(
+        config: X25519MlKem768Config, operation: text, native_backend: i64,
+        encoded_provenance: text, actual_binary_sha256: text,
+        actual_provenance_sha256: text
+) -> Result<X25519MlKem768Evidence, text>:
+    if _simd_provenance_field(encoded_provenance, "source_roots") !=
+            "src/compiler:src/lib:src/app:src/runtime:examples/10_tooling":
+        return Err(
+            "requested SIMD candidate build provenance rejected: stage4-source-roots-invalid")
+    val provenance = stage4_compiler_provenance_from_text(encoded_provenance)
+    val reason = stage4_compiler_provenance_reason(
+        provenance, actual_binary_sha256, actual_provenance_sha256)
+    if reason != "ready":
+        return Err("requested SIMD candidate build provenance rejected: " + reason)
+    _resolve_simd_candidate(
+        config, operation, native_backend,
+        provenance.source_revision, provenance.output_sha256)
+
+fn x25519_mlkem768_resolve_simd_candidate_with_stage4_provenance(
+        config: X25519MlKem768Config, operation: text,
+        encoded_provenance: text, actual_binary_sha256: text,
+        actual_provenance_sha256: text
+) -> Result<X25519MlKem768Evidence, text>:
+    """Resolve a SIMD candidate bound to an admitted running Stage-4 build."""
+    _resolve_simd_candidate_with_stage4_provenance(
+        config, operation, mlkem_ntt_simd_backend(), encoded_provenance,
+        actual_binary_sha256, actual_provenance_sha256)
+
+fn x25519_mlkem768_resolve_simd_candidate_for_test(
+        config: X25519MlKem768Config, operation: text,
+        native_backend: i64) -> Result<X25519MlKem768Evidence, text>:
+    """Exercise fail-closed selection without admitted build provenance."""
+    _resolve_simd_candidate(config, operation, native_backend, "", "")
+
+fn x25519_mlkem768_resolve_simd_candidate_with_stage4_provenance_for_test(
+        config: X25519MlKem768Config, operation: text, native_backend: i64,
+        encoded_provenance: text, actual_binary_sha256: text,
+        actual_provenance_sha256: text
+) -> Result<X25519MlKem768Evidence, text>:
+    """Exercise admitted provenance with an injected ISA receipt; runs no kernel."""
+    _resolve_simd_candidate_with_stage4_provenance(
+        config, operation, native_backend, encoded_provenance,
+        actual_binary_sha256, actual_provenance_sha256)
+
+fn x25519_mlkem768_resolve_cuda_candidate(config: X25519MlKem768Config,
+        operation: text) -> Result<X25519MlKem768Evidence, text>:
+    """Resolve an evidence-only CUDA candidate; never used by production TLS."""
+    val config_error = _config_error(config)
+    if config_error != "":
+        return Err(config_error)
+    if config.requested_backend != X25519MlKem768Backend.Cuda:
+        return Err("requested backend is not the CUDA candidate")
+    Ok(X25519MlKem768Evidence(
+        requested_backend: config.requested_backend,
+        selected_backend: X25519MlKem768Backend.Cuda,
+        attempts: ["candidate-only: not production-promoted"],
+        fallback_used: false,
+        fallback_reason: "",
+        implementation_version: config.implementation_version,
+        profile_version: config.profile_version,
+        configuration_digest: _configuration_digest(config),
+        input_fixture_digest: "",
+        source_digest: "",
+        artifact_digest: "",
+        execution_proof_digest: "",
+        kernel_invocations: 0,
+        simd_chunk_hits: 0,
+        observed_rvv_vlen_bits: 0,
+        operation: operation,
+        batch_size: config.batch_size,
+        output_digest: "",
+        executor_identity: "",
+        compiled: false,
+        submitted: false,
+        fence_completed: false,
+        device_readback: false,
+        oracle_match: false
+    ))
+
+fn x25519_mlkem768_resolve_metal_candidate(config: X25519MlKem768Config,
+        operation: text) -> Result<X25519MlKem768Evidence, text>:
+    """Resolve an evidence-only Metal candidate; never used by production TLS."""
+    val config_error = _config_error(config)
+    if config_error != "":
+        return Err(config_error)
+    if config.requested_backend != X25519MlKem768Backend.Metal:
+        return Err("requested backend is not the Metal candidate")
+    Ok(X25519MlKem768Evidence(
+        requested_backend: config.requested_backend,
+        selected_backend: X25519MlKem768Backend.Metal,
+        attempts: ["candidate-only: native evidence pending"],
+        fallback_used: false,
+        fallback_reason: "",
+        implementation_version: config.implementation_version,
+        profile_version: config.profile_version,
+        configuration_digest: _configuration_digest(config),
+        input_fixture_digest: "",
+        source_digest: "",
+        artifact_digest: "",
+        execution_proof_digest: "",
+        kernel_invocations: 0,
+        simd_chunk_hits: 0,
+        observed_rvv_vlen_bits: 0,
+        operation: operation,
+        batch_size: config.batch_size,
+        output_digest: "",
+        executor_identity: "",
+        compiled: false,
+        submitted: false,
+        fence_completed: false,
+        device_readback: false,
+        oracle_match: false
+    ))
+
+fn x25519_mlkem768_resolve_vulkan_candidate(config: X25519MlKem768Config,
+        operation: text) -> Result<X25519MlKem768Evidence, text>:
+    """Resolve an evidence-only Vulkan candidate; never used by production TLS."""
+    val config_error = _config_error(config)
+    if config_error != "":
+        return Err(config_error)
+    if config.requested_backend != X25519MlKem768Backend.Vulkan:
+        return Err("requested backend is not the Vulkan candidate")
+    Ok(X25519MlKem768Evidence(
+        requested_backend: config.requested_backend,
+        selected_backend: X25519MlKem768Backend.Vulkan,
+        attempts: ["candidate-only: pinned SPIR-V evidence pending"],
+        fallback_used: false,
+        fallback_reason: "",
+        implementation_version: config.implementation_version,
+        profile_version: config.profile_version,
+        configuration_digest: _configuration_digest(config),
+        input_fixture_digest: "",
+        source_digest: "",
+        artifact_digest: "",
+        execution_proof_digest: "",
+        kernel_invocations: 0,
+        simd_chunk_hits: 0,
+        observed_rvv_vlen_bits: 0,
+        operation: operation,
+        batch_size: config.batch_size,
+        output_digest: "",
+        executor_identity: "",
+        compiled: false,
+        submitted: false,
+        fence_completed: false,
+        device_readback: false,
+        oracle_match: false
+    ))
+
+export x25519_mlkem768_resolve_backend, x25519_mlkem768_resolve_simd_candidate
+export x25519_mlkem768_resolve_simd_candidate_for_test
+export x25519_mlkem768_resolve_simd_candidate_with_stage4_provenance
+export x25519_mlkem768_resolve_simd_candidate_with_stage4_provenance_for_test
+export x25519_mlkem768_resolve_cuda_candidate
+export x25519_mlkem768_resolve_metal_candidate
+export x25519_mlkem768_resolve_vulkan_candidate
