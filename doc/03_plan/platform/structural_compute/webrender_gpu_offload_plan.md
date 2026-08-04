@@ -109,20 +109,57 @@ the backend_vulkan provenance fix).
 **Coverage (2026-08-04).** Measured with `SIMPLE_COVERAGE=1` (test_runner
 epilogue injection; commit `1a6c1e362a5`).
 
-| module | 2026-08-02 | corrected baseline | current | ≥90% |
+> **RETRACTION (defect D, `27f864e35e8`).** An earlier revision of this
+> section published the numbers below as measured coverage and stated that
+> "every target module now clears the 90% `@cover` target". **That claim was
+> false and is withdrawn.** Every figure in the "reported" column was
+> inflated by a collector defect that conflated line hits across files, and
+> on the four modules measured under identical conditions **three fall below
+> 90%**. The honest figures are in the second table.
+
+Previously reported (INFLATED — do not cite):
+
+| module | 2026-08-02 | corrected baseline | reported | claimed ≥90% |
 |---|---|---|---|---|
-| `selector_matcher.spl` | 97% | 97% | **98%** | yes |
-| `dom_limits.spl` | 100% | — | **100%** | yes |
-| `style_block_resolve.spl` | 77% | 77% | **99%** | yes |
-| `style_block_parse.spl` | 72% | 77% | **96%** | yes |
-| `html_tokenizer.spl` | 64% | 90% | **98%** | yes |
-| `html_tree_builder.spl` | 28% | 72% | **95%** | yes |
-| `dom_identity_index.spl` | 50% | 51% | **98%** | yes |
+| `selector_matcher.spl` | 97% | 97% | 98% | yes |
+| `dom_limits.spl` | 100% | — | 100% | yes |
+| `style_block_resolve.spl` | 77% | 77% | 99% | yes |
+| `style_block_parse.spl` | 72% | 77% | 96% | yes |
+| `html_tokenizer.spl` | 64% | 90% | 98% | yes |
+| `html_tree_builder.spl` | 28% | 72% | 95% | yes |
+| `dom_identity_index.spl` | 50% | 51% | 98% | yes |
 
-**Every target module now clears the 90% `@cover` target.**
+**Honest coverage after the defect-D fix.** Same specs, same binary, fix B
+held constant, only the hit key varying. **Every module dropped; none rose.**
 
-**Most of the original gap was tooling, not untested code.** Three defects
-were found in the coverage tool itself:
+| module | reported | honest | ≥90% | comparability |
+|---|---|---|---|---|
+| `..._paint_tiles_gpu.spl` | 100% | **96%** | yes | exact |
+| `style_block_resolve.spl` | 99% | **87%** | no | exact |
+| `selector_matcher.spl` | 98% | **87%** | no | exact |
+| `style_block_parse.spl` | 96% | **85%** | no | exact |
+| `html_tree_builder.spl` | 85% | 79% | no | narrower spec set |
+| `html_tokenizer.spl` | 79% | 74% | no | narrower spec set |
+| `dom_identity_index.spl` | 63% | 59% | no | narrower spec set |
+| `..._engine2d_presenter.spl` | 48% | 35% | no | narrower spec set |
+| `dom.spl` | 87% | 62% | no | narrower spec set |
+
+The first four rows reproduced the previously-published figures exactly
+(96/99/98/100) under the pre-fix key, which is what establishes that the
+instrument matched the original conditions — so their honest values are
+directly comparable and the drop is real. The remaining rows were measured
+against a narrower spec set than the original headline numbers, so **both**
+of their columns sit below the full-corpus value; read those rows as the
+instrument delta, not as the module's true coverage. A full-corpus
+re-measurement with the fixed instrument is still outstanding.
+
+Only `..._paint_tiles_gpu.spl` and `dom_limits.spl` are presently
+substantiated at ≥90%. **The 90% goal is not met on the parser and style
+modules and must not be reported as met.**
+
+**Most of the original gap was tooling, not untested code.** Four defects
+were found in the coverage tool itself — the first three inflating nothing
+(they under-reported), the fourth inflating everything:
 
 - **A (fixed, `9c598987bb7`)** — `_cov_report_for_file` stripped only
   `static `, so `pub fn` bodies were charged to the *previous* declaration and
@@ -155,7 +192,45 @@ were found in the coverage tool itself:
 
   This was also the true mechanism behind `dom.spl` measuring 1% despite the
   38/38 DOM lane exercising it heavily — the earlier "under-attribution"
-  framing was directionally right but never named the cause.
+  framing was directionally right but never named the cause. Note the
+  post-defect-B figures quoted here (95%, 98%) are themselves inflated by
+  defect D; see the retraction above for the honest values.
+
+- **D (fixed, `27f864e35e8`)** — the collector conflated line hits **across
+  files**, so an executed line in file A marked the same line number in file
+  B as covered whenever B's enclosing function had also been called. Unlike
+  A/B/C this defect inflated, and it inflated everything.
+
+  The cause sat deeper than the reporter: `span_to_location` returned the
+  literal `"<source>"` as the file for *every* recorded line, so the collector
+  pooled all files into one bucket (`total_files: 1` on a multi-file run).
+  Keying on `(file, line)` was not merely absent reporter-side — the
+  information did not exist. The fix has `span_to_location` read
+  `CURRENT_EXEC_MODULE`, a thread-local already saved and restored around
+  `execute_function_body`; no new AST field and no new thread-local were
+  needed, the plumbing existed and coverage simply wasn't reading it. The
+  reporter then keys hits on `(file, line)`, reconciling absolute recorded
+  paths against relative `@cover` targets by `/`-anchored suffix match. The
+  enclosing-function gate is unchanged.
+
+  Proof by construction: a fixture where file A executes lines 3–11 and file
+  B's lines 4–11 never execute (guard always false) while B's enclosing
+  function IS called. Honest coverage for B is 2/10 = 20%; the pre-fix
+  collector reported **100% (10/10)** — 80 points of inflation. Negative
+  control after the fix: one called and one uncalled function reports
+  **50% (3/6)**, not 100%. No-regression control: a genuinely fully-executed
+  file still reports 100% (9/9).
+
+  Residual, left open and bounded: flattened module top-level statements still
+  file under `<entry>`, so one fixture reports 66% (2/3) where honest is 3/3.
+  That direction **under**-reports and is bounded at ≤2 lines (≤0.9%) per
+  campaign module. A `ModuleExecScope` guard was built and then **reverted** —
+  it did not reach the flatten path, and `CURRENT_EXEC_MODULE` also feeds
+  overload tie-breaking, so it carried regression risk for no proven benefit.
+  Also filed: `record_condition_coverage` has the same hardcoded `"<source>"`
+  at ~12 sites. Side effect of the fix: the debugger's breakpoint file
+  matching consumed the same placeholder and is now repaired.
+  Detail: `doc/08_tracking/bug/coverage_cross_file_line_conflation_2026-08-04.md`.
 
 **The gate is still doing work — do not relax it.** Defect B was closed by
 making instance-method calls genuinely reach `record_function_call`, never by
