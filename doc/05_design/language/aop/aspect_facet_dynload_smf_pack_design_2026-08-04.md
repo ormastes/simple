@@ -2541,3 +2541,90 @@ interpreter stores scalar `i64` values only. Therefore no backend may map the
 token to `ptr`, zero, nil, abort, return, or a normal branch as a placeholder;
 unsupported consumers retain E-MIR-UNWIND002, while lowering retains
 E-MIR-UNWIND001 only when no cleanup successor owner is available.
+
+<!-- codex-design -->
+#### Future exact facet-cleanup manifest
+
+The CFG verifier can authenticate the release ABI today, but a MIR body does
+not retain which leases were live at each unwind edge. It therefore cannot
+prove release count or reverse-acquisition order. The future representation
+must attach typed metadata to `MirFunction` and expose the same metadata through
+`MirBody`; block labels are diagnostic text and must never participate in this
+proof.
+
+The minimal metadata API is:
+
+```simple
+struct MirInstructionSite:
+    block: BlockId
+    instruction_index: i64
+
+struct MirFacetCleanupEntryContract:
+    owner: LocalId
+    lease: LocalId
+    present: LocalId?
+    guard_block: BlockId?
+    release_site: MirInstructionSite
+    continue_block: BlockId?
+    release_symbol: text
+
+struct MirExceptionCleanupContract:
+    unwind_entry: BlockId
+    token: LocalId
+    entries: [MirFacetCleanupEntryContract]
+```
+
+`entries` is the required execution order, already reversed across lexical
+scope and acquisition order by `emit_facet_cleanup_from`. An unconditional
+entry has nil `present`, `guard_block`, and `continue_block`. A guarded entry
+names the exact presence local, the block whose terminator tests it, the exact
+release instruction site, and the common continuation. The release symbol is
+retained per entry rather than inferred from a block label. Owner and lease are
+locals because the current producer records `runtime_owner` and
+`descriptor_lease` as local `Copy`/`Move` operands; lowering must reject a
+non-local operand before creating the manifest.
+
+`emit_facet_unwind_cleanup_successor` snapshots all live
+`FacetCleanupScope.entries`, emits the CFG, and appends one contract only after
+all referenced blocks and instruction indices are final. `MirFunction` owns
+`exception_cleanup_contracts: [MirExceptionCleanupContract]`; `MirBody` carries
+that field through `from_function`. MIR JSON/SMF serialization must preserve it.
+Every MIR transform must either preserve/remap all referenced local, block, and
+instruction identities or explicitly invalidate the module before the final
+gate. Silent metadata dropping is an E-MIR-UNWIND003 failure.
+
+Verifier semantics for each contract are:
+
+1. The contract is unique for `unwind_entry`; its block begins with
+   `LandingPad(token)`, and the corresponding `MayUnwind` edge targets it.
+2. Each owner local has `Opaque("AspectExecutionContext")` type and each lease
+   has `Opaque("__simple_facet_descriptor_lease_abi")` type. The optional
+   presence local is `Bool`. No entry repeats the same lease local.
+3. The instruction at every `release_site` is a destination-free call to the
+   named exact release symbol, with the canonical non-variadic two-parameter
+   Unit signature and arguments `Copy`/`Move(owner), Copy`/`Move(lease)` in that
+   order. No unmanifested release call is allowed in the region.
+4. An unconditional site occurs exactly once on every path at its position in
+   `entries`. For a guarded entry, `guard_block` ends in `If(present,
+   release_block, continue_block)`; the true arm contains exactly the declared
+   release site then reaches `continue_block`, while the false arm reaches the
+   same continuation without that release. Neither arm may execute the release
+   twice or bypass a later entry.
+5. A forward data-flow state `(block, next_entry_index)` consumes manifest
+   entries in order. At joins, incoming states must agree. Every terminal state
+   must have consumed all entries and must `Resume(token)`. Existing external
+   predecessor, dominance, acyclicity, and token-linearity checks remain
+   mandatory.
+6. A landing pad with facet-release calls but no contract, a contract with no
+   matching landing pad, stale sites, missing/extra/reordered releases, swapped
+   arguments, or a guard on any other local fails closed with
+   E-MIR-UNWIND003.
+
+Focused verifier tests must cover: two unconditional leases in reverse order;
+nested scopes; guarded true and false paths; two independently guarded entries;
+missing, duplicate, extra, and reordered release sites; swapped owner/lease;
+wrong owner/lease/guard types; wrong guard block or continuation; a join with
+different manifest cursors; stale block/local/instruction identities after an
+optimizer rewrite; and JSON/SMF round-trip preservation. The production test
+must mutate MIR after optimization and prove the final backend gate rejects a
+stale manifest.
