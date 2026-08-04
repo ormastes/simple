@@ -25,7 +25,7 @@ Unrelated dirty files and active workspaces are outside this lane. New language 
 N/A: this is a narrowly scoped convention and grammar-removal audit; one merge owner can review the complete diff and focused evidence without splitting interfaces or manual flow helpers.
 
 ## Phase
-verify-warn; sync-ready
+documentation-follow-up; sync-ready
 
 ## Log
 - dev: Created state file with 7 acceptance criteria (type: code-quality).
@@ -44,3 +44,4 @@ verify-warn; sync-ready
 - compiler-wide check: The canonical `check src/compiler` path reproduced the already tracked per-file diagnostic startup blocker. Its default worker hit the 60-second CPU guard; the supported 300-second override still spent more than two minutes on the first delegated file. The bounded run was stopped and evidence appended to `bootstrap_diagnostic_multifile_check_startup_blocker_2026-08-02.md` instead of allowing an hours-long sweep.
 - final rebase: Rebasing onto `main@origin` `14b0b` increased the tracked file count safely from 110166 to 110264. A single documentation conflict revealed that upstream had already merged a stronger trait-compatible compiler fix; the alternate local compiler change and regression were dropped, leaving no compiler source delta in this lane.
 - final audit: Focused lifecycle behavior remains 4/4 PASS, generated manual remains 108 lines with 0 stubs, owner-regression evidence was 19/19 during blocker diagnosis, direct-runtime guards and changed-file diagnostics passed, and the targeted placeholder/unwanted-grammar scan found only prose explicitly documenting rejected syntax. Final status is WARN rather than PASS because the deployed binary identifies as the Rust seed and the pure-Simple full CLI build hit the bounded opaque pre-object checkpoint.
+- documentation follow-up: Expanded the canonical lifecycle guide and guide index, added the existing-grammar rule to the SPipe skill, and added a compact canonical-owner entry to `doc/00_llm_process/llm_wiki.md`. Private overlay wiki trees are not present in this checkout; `.codex`/`.agents`/SPipe-agent/Gemini updates are N/A because this follow-up changes feature lookup guidance, not their workflow contract.

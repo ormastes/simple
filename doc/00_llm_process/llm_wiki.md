@@ -83,6 +83,30 @@ verify that the caller actually crosses the worker/library boundary.
 Add a compact entry here when repeated ambiguity causes an agent to choose the
 wrong repository subsystem. Link detailed guides instead of duplicating them.
 
+## Robust lifecycle persistence
+
+- **Canonical owner:** `std.lifecycle_persistence`, implemented under
+  `src/lib/common/lifecycle_persistence/`.
+- **Representation:** ordinary Simple structs, enums, constructors, functions,
+  annotations, and SDN metadata.
+- **No dedicated grammar:** do not invent `life`, `virtual life`, `transition`,
+  or `recovery ... for ...` declarations for this feature.
+- **Boundary:** graph, transition, and recovery-registration validation does
+  not prove durable storage, restart recovery, boot restoration, power-cut
+  safety, or formal correctness; those claims need separate evidence.
+- **Identity:** persist durable keys such as the existing `EntityKey` owner,
+  never direct pointers, runtime `+T` handles, or snapshot-local references.
+- **Guide:** `doc/07_guide/lib/lifecycle_persistence.md`.
+- **Executable evidence:**
+  `test/03_system/feature/language/robust_lifecycle_persistence_spec.spl`.
+
+### Agent lookup rule
+
+When a request mentions robust lifecycle persistence, search
+`std.lifecycle_persistence` and the guide first. Propose new grammar only after
+accepted requirements demonstrate that existing Simple forms cannot express
+the required semantics.
+
 ## SimpleOS I/O and audio
 
 - **Canonical event owner:** `std.common.io.simple_device_event`.

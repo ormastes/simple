@@ -179,6 +179,17 @@ workflow/tooling behavior changed but the matching guide, skill, agent,
 command, or generated/manual spec docs are stale. The documentation freshness
 gate is part of completion, not a release follow-up.
 
+For lifecycle-persistence lanes, use the canonical
+`std.lifecycle_persistence` model and
+`doc/07_guide/lib/lifecycle_persistence.md`. Express levels, dependency edges,
+transitions, recovery registrations, and policies with ordinary structs,
+enums, constructors, functions, annotations, and SDN. Do not introduce
+`life`, `virtual life`, `transition`, or `recovery ... for ...` grammar merely
+as feature-local DSL sugar. Any grammar expansion needs its own selected
+requirements and parser/compiler compatibility evidence. SPipe scenarios must
+distinguish metadata validation from real durability evidence such as storage,
+restart, boot, or power-cut behavior.
+
 For formal-verification evidence, generated Lean/BYL artifacts must stay
 separate from manual theorem or constraint files. A SPipe scenario, generated
 manual, or hardening report may cite generated artifacts only when it also names

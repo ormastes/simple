@@ -3,6 +3,11 @@
 Simple models lifecycle persistence with the ordinary language. There are no
 `life`, `virtual life`, `transition`, or `recovery` declarations.
 
+The canonical owner is `std.lifecycle_persistence`, implemented in
+`src/lib/common/lifecycle_persistence/` and re-exported by each supported
+runtime family. Treat lifecycle levels, edges, transitions, and recovery
+registrations as validated data; keep recovery behavior in ordinary functions.
+
 ## Import
 
 ```simple
@@ -66,3 +71,20 @@ The focused model scenario is
 `test/03_system/feature/language/robust_lifecycle_persistence_spec.spl`; its
 mirrored operator manual is under `doc/06_spec/03_system/feature/language/`.
 
+## Development workflow
+
+When extending this model through SPipe:
+
+1. Search the existing type, function, constructor, annotation, and SDN
+   surfaces before proposing syntax.
+2. Record lifecycle semantics as ordinary structs, enums, functions, and
+   persisted metadata unless an accepted requirement proves those forms
+   insufficient.
+3. Keep durability claims separate from metadata validation. Storage, restart,
+   boot, and power-cut behavior require their own executable evidence.
+4. Update this guide, the mirrored SPipe manual, and the LLM wiki entry whenever
+   the canonical owner or public contract changes.
+
+Do not add parser keywords or compiler branches merely to make lifecycle
+examples read like a DSL. A grammar proposal requires separate research,
+selected requirements, compatibility analysis, and parser/compiler evidence.

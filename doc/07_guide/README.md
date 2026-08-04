@@ -170,6 +170,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [library/library_smf.md](library/library_smf.md) | Library SMF creation and usage |
 | [library/engine3d.md](library/engine3d.md) | 3D engine library |
 | [lib/shared_multilingual_gpu_fonts.md](lib/shared_multilingual_gpu_fonts.md) | Pinned multilingual fonts, shared rendering, and GPU emission |
+| [lib/lifecycle_persistence.md](lib/lifecycle_persistence.md) | Lifecycle persistence metadata using ordinary Simple structs, enums, functions, and SDN |
 
 ## Theme
 
