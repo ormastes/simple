@@ -29,19 +29,26 @@ use compiler.common.structural_contracts.facet_artifact.{
 }
 use compiler.loader.loader.advice_binding_registry.{
     AdviceBindingRecord, AdviceBindingCounters, AdviceDisabledPathFootprint,
+    AdviceDispatchInvocationReceipt,
     advice_lookup_slot, advice_unbind_generation,
     advice_disabled_path_footprint, advice_dispatch_projection_invalidate,
-    advice_dispatch_projection as loader_advice_dispatch_projection
+    advice_dispatch_projection_prepare, advice_dispatch_permit_invoke_native,
+    advice_dispatch_projection_finalize, advice_merge_counter_delta
 }
 use os.smf.dynsmf_session.{DynSmfSession, dynsmf_id_disabled}
 use os.smf.smf_generation.{GenerationToken, LifecycleManager}
 use std.aop.facet.{FacetGenerationLease, FacetAcquireError}
 use std.common.algorithm_utils.{sorted}
+use std.nogc_sync_mut.concurrent.mutex.{mutex_with_lock_keeping}
 use app.startup.aspect_pack_io_port.{
     AspectPackIoRequest, AspectPackIoPort, aspect_pack_io_port_unavailable
 }
 use app.startup.aspect_lazy_singleflight.{
     AspectLazyFlightRole, AspectLazySingleFlight
+}
+use app.startup.aspect_lifecycle_gate.{AspectLifecycleGate}
+use app.startup.aspect_advice_dispatch_ledger.{
+    AspectAdviceDispatchLedger, AspectPreparedAdviceClaim
 }
 use app.startup.aspect_facet_runtime_contract.{
     AspectApplicationPhase, AspectApplicationOperation,
@@ -67,6 +74,8 @@ class AspectExecutionContext:
     loader: ModuleLoader
     pack_io: AspectPackIoPort
     lazy_singleflight: AspectLazySingleFlight
+    lifecycle_gate: AspectLifecycleGate
+    advice_dispatch_ledger: AspectAdviceDispatchLedger
     phase: AspectApplicationPhase
 
 # Compatibility facade: existing constructors, methods, and public fields keep
@@ -103,6 +112,8 @@ impl AspectExecutionContext:
             loader: moduleloader_with_defaults(),
             pack_io: aspect_pack_io_port_unavailable(),
             lazy_singleflight: AspectLazySingleFlight.create(),
+            lifecycle_gate: AspectLifecycleGate.create(),
+            advice_dispatch_ledger: AspectAdviceDispatchLedger.create(),
             phase: AspectApplicationPhase.Startup
         ))
 
@@ -516,23 +527,90 @@ impl AspectExecutionContext:
         slot_id: text,
         form: text
     ) -> Result<[i64], text>:
-        self.loader = loader
+        # Compatibility parameter only. Dispatch never installs a caller
+        # snapshot; prepare validates the context's canonical loader owner.
+        _ = loader
         self.invoke_prepared_advice(slot_id, form)
 
-    # Intrinsic-facing operation. It can reach dispatch state only through this
-    # reference capsule and always writes the returned canonical lifecycle and
-    # registry values back before exposing success or failure.
-    me fn invoke_prepared_advice(slot_id: text, form: text) -> Result<[i64], text>:
-        val outcome = loader_advice_dispatch_projection(
+    me fn prepare_advice_dispatch_under_gate(
+        slot_id: text, form: text
+    ) -> Result<AspectPreparedAdviceClaim, text>:
+        val prepared = advice_dispatch_projection_prepare(
             self.coordinator.advice_projection,
             self.coordinator.advice_bindings,
             self.coordinator.lifecycle,
             self.loader, slot_id, form)
+        self.coordinator.lifecycle = prepared.lifecycle
+        self.coordinator.advice_bindings = advice_merge_counter_delta(
+            self.coordinator.advice_bindings, prepared.counter_delta)
+        if prepared.status != "prepared" or prepared.permit == nil:
+            return Err(prepared.reason)
+        val permit = prepared.permit.unwrap()
+        val claimed = self.advice_dispatch_ledger.claim(permit.permit_id)
+        if claimed.is_err():
+            val claim_error = claimed.unwrap_err()
+            val rejected = AdviceDispatchInvocationReceipt(
+                permit_id: "unclaimed-application-permit",
+                status: "failed",
+                reason: claim_error,
+                invoked_count: 0,
+                return_values: [])
+            val finalized = advice_dispatch_projection_finalize(
+                permit, rejected,
+                self.coordinator.advice_bindings,
+                self.coordinator.lifecycle)
+            self.coordinator.advice_bindings = finalized.registry
+            self.coordinator.lifecycle = finalized.lifecycle
+            return Err(claim_error)
+        val claim_id = claimed.unwrap()
+        Ok(AspectPreparedAdviceClaim(claim_id: claim_id, permit: permit))
+
+    me fn finalize_advice_dispatch_under_gate(
+        claim: AspectPreparedAdviceClaim,
+        receipt: AdviceDispatchInvocationReceipt
+    ) -> Result<[i64], text>:
+        var effective_receipt = receipt
+        val claim_owned = self.advice_dispatch_ledger.owns(
+            claim.claim_id, claim.permit.permit_id)
+        if not claim_owned:
+            effective_receipt = AdviceDispatchInvocationReceipt(
+                permit_id: "invalid-application-claim",
+                status: "failed",
+                reason: "E-AF010 prepared advice dispatch claim is missing or mismatched",
+                invoked_count: 0,
+                return_values: [])
+        val outcome = advice_dispatch_projection_finalize(
+            claim.permit, effective_receipt,
+            self.coordinator.advice_bindings,
+            self.coordinator.lifecycle)
         self.coordinator.advice_bindings = outcome.registry
         self.coordinator.lifecycle = outcome.lifecycle
+        if claim_owned:
+            self.advice_dispatch_ledger.terminalize(
+                claim.claim_id, claim.permit.permit_id)?
         if outcome.status != "dispatched":
             return Err(outcome.reason)
         Ok(outcome.return_values)
+
+    # Intrinsic-facing split dispatch. Canonical pin state is installed before
+    # unlock; native callbacks run without lifecycle ownership; finalization
+    # starts from then-current state and always installs its returned state.
+    me fn invoke_prepared_advice(slot_id: text, form: text) -> Result<[i64], text>:
+        val prepared = mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.prepare_advice_dispatch_under_gate(slot_id, form))
+        if prepared.is_err():
+            return Err(prepared.unwrap_err())
+        val claim = prepared.unwrap()
+        val receipt = advice_dispatch_permit_invoke_native(claim.permit)
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.finalize_advice_dispatch_under_gate(claim, receipt))
+
+    fn advice_dispatch_in_flight_count() -> i64:
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.advice_dispatch_ledger.in_flight_count())
 
     # First-use boundary: resolve the visible witness and pin that record's
     # exact published generation as one application-runtime operation.

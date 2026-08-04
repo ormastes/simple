@@ -1,0 +1,42 @@
+# Application-private in-flight prepared-advice invocation ledger.
+#
+# Claim IDs are context-local monotonic identities, deliberately independent
+# of loader permit IDs: valid empty permits may share one deterministic permit
+# identity. AspectExecutionContext mutates this ledger only inside its lifecycle
+# mutex scope.
+
+use compiler.loader.loader.advice_binding_registry.{AdviceDispatchPermit}
+
+class AspectAdviceDispatchLedger:
+    next_claim_id: i64
+    claims: Dict<text, text>
+
+impl AspectAdviceDispatchLedger:
+    static fn create() -> AspectAdviceDispatchLedger:
+        AspectAdviceDispatchLedger(next_claim_id: 1, claims: {})
+
+    me fn claim(permit_id: text) -> Result<text, text>:
+        if permit_id == "":
+            return Err("E-AF010 prepared advice permit identity is empty")
+        val claim_id = "advice-dispatch-claim:{self.next_claim_id}"
+        self.next_claim_id = self.next_claim_id + 1
+        self.claims[claim_id] = permit_id
+        Ok(claim_id)
+
+    fn owns(claim_id: text, permit_id: text) -> bool:
+        self.claims.has(claim_id) and self.claims[claim_id] == permit_id
+
+    me fn terminalize(claim_id: text, permit_id: text) -> Result<(), text>:
+        if not self.owns(claim_id, permit_id):
+            return Err("E-AF010 prepared advice dispatch claim is missing or mismatched")
+        self.claims = self.claims.remove(claim_id)
+        Ok(())
+
+    fn in_flight_count() -> i64:
+        self.claims.keys().len()
+
+struct AspectPreparedAdviceClaim:
+    claim_id: text
+    permit: AdviceDispatchPermit
+
+export AspectAdviceDispatchLedger, AspectPreparedAdviceClaim

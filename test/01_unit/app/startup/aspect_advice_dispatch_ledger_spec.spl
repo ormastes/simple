@@ -1,0 +1,35 @@
+# @req REQ-AF-008
+# @cover src/app/startup/aspect_advice_dispatch_ledger.spl 90%
+
+use std.spec.*
+use app.startup.aspect_advice_dispatch_ledger.{AspectAdviceDispatchLedger}
+
+describe "Prepared advice application claim ledger":
+    it "assigns distinct monotonic claims to one deterministic permit ID":
+        val ledger = AspectAdviceDispatchLedger.create()
+        val first = ledger.claim("empty-slot|before|0|0").unwrap()
+        val second = ledger.claim("empty-slot|before|0|0").unwrap()
+        if first == second:
+            fail("repeated empty permits shared one application claim")
+        expect(first).to_equal("advice-dispatch-claim:1")
+        expect(second).to_equal("advice-dispatch-claim:2")
+        expect(ledger.in_flight_count()).to_equal(2)
+        ledger.terminalize(first, "empty-slot|before|0|0").unwrap()
+        ledger.terminalize(second, "empty-slot|before|0|0").unwrap()
+        expect(ledger.in_flight_count()).to_equal(0)
+
+    it "rejects mismatched terminalization and consumed claim replay":
+        val ledger = AspectAdviceDispatchLedger.create()
+        val claim = ledger.claim("permit-a").unwrap()
+        if ledger.terminalize(claim, "permit-b").is_ok():
+            fail("mismatched permit terminalized an application claim")
+        ledger.terminalize(claim, "permit-a").unwrap()
+        if ledger.terminalize(claim, "permit-a").is_ok():
+            fail("consumed application claim was terminalized twice")
+
+    it "rejects an empty loader permit identity without consuming sequence":
+        val ledger = AspectAdviceDispatchLedger.create()
+        if ledger.claim("").is_ok():
+            fail("empty loader permit identity received an application claim")
+        expect(ledger.claim("permit-a").unwrap()).to_equal(
+            "advice-dispatch-claim:1")

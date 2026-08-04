@@ -371,15 +371,29 @@ describe "Application aspect runtime policy owner":
             app_advice_catalog(), app_aspect_session(),
             LifecycleManager.new_manager(),
             AspectPackTrustPolicy.ordinary_unsigned(), 2, 2, 2).unwrap()
+        runtime.loader.global_symbols["canonical-loader-marker"] = (
+            "canonical-owner", 17)
         val before = runtime.advice_dispatch_slot(
             moduleloader_with_defaults(), "security.audit.prepared", "before")
         expect(before.unwrap().len()).to_equal(0)
+        expect(runtime.loader.global_symbols[
+            "canonical-loader-marker"][1]).to_equal(17)
         expect(runtime.advice_binding_counters().dispatch_attempts).to_equal(1)
+        expect(runtime.advice_dispatch_in_flight_count()).to_equal(0)
+
+        # Empty permits have deterministic loader IDs; application claim IDs
+        # remain monotonic and are removed after each completed dispatch.
+        val repeated = runtime.advice_dispatch_slot(
+            moduleloader_with_defaults(), "security.audit.prepared", "before")
+        expect(repeated.unwrap().len()).to_equal(0)
+        expect(runtime.advice_binding_counters().dispatch_attempts).to_equal(2)
+        expect(runtime.advice_dispatch_in_flight_count()).to_equal(0)
 
         val around = runtime.advice_dispatch_slot(
             moduleloader_with_defaults(), "security.audit.prepared", "around")
         expect(around.unwrap_err()).to_contain("exactly-once proceed path")
         expect(runtime.advice_binding_counters().around_rejections).to_equal(1)
+        expect(runtime.advice_dispatch_in_flight_count()).to_equal(0)
 
     it "returns from the compiler fail-stop wrapper only after successful dispatch":
         val context = AspectApplicationRuntime.create(
@@ -415,6 +429,7 @@ describe "Application aspect runtime policy owner":
         expect(first.advice_binding_counters().dispatch_invocations).to_equal(1)
         expect(second.advice_binding_counters().dispatch_attempts).to_equal(0)
         expect(first.published_generation_pin_count("fixture.debug").unwrap()).to_equal(0)
+        expect(first.advice_dispatch_in_flight_count()).to_equal(0)
 
         val witness = facet_witness_method_symbol("fixture_debug", "summary")
         first.loader.global_symbols[witness] = (
