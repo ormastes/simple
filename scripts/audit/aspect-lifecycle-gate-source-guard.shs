@@ -73,6 +73,11 @@ fi
 runtime_source="src/app/startup/aspect_application_runtime.spl"
 capture_source="src/app/startup/aspect_lifecycle_capture_contract.spl"
 lazy_source="src/app/startup/aspect_lazy_activation_transition.spl"
+facet_lifecycle_source="src/app/startup/aspect_facet_lifecycle_transition.spl"
+unload_source="src/app/startup/aspect_unload_transition.spl"
+prepared_transition_source="src/app/startup/aspect_prepared_advice_transition.spl"
+pack_transition_source="src/app/startup/aspect_pack_activation_transition.spl"
+prepared_abi_source="src/app/startup/aspect_prepared_advice_compiler_abi.spl"
 
 if has_locked_method "$runtime_source"; then
     echo "FAIL: lifecycle locked helper remains on the exported context method surface" >&2
@@ -83,6 +88,20 @@ if has_locked_export "$runtime_source"; then
     echo "FAIL: lifecycle locked helper is exported" >&2
     exit 1
 fi
+
+for transition_source in \
+    "$lazy_source" \
+    "$facet_lifecycle_source" \
+    "$unload_source" \
+    "$prepared_transition_source" \
+    "$pack_transition_source"
+do
+    if rg -n '^use .*AspectExecutionContext|aspect_application_runtime|mutex_with_lock' \
+        "$transition_source"; then
+        echo "FAIL: transition leaf imports runtime context or mutex ownership: ${transition_source}" >&2
+        exit 1
+    fi
+done
 
 for box_name in \
     AspectGenerationTokenBox \
@@ -138,6 +157,53 @@ fi
 
 if has_discarded_release "$runtime_source"; then
     echo "FAIL: lazy completion discards descriptor release failure" >&2
+    exit 1
+fi
+
+for transition_call in \
+    aspect_published_advice_lookup \
+    aspect_published_facet_method_acquire \
+    aspect_published_facet_descriptor_acquire \
+    aspect_published_facet_descriptor_release \
+    aspect_unload_transition
+do
+    call_line=$(rg -n "val transitioned = ${transition_call}\\(" "$runtime_source" | cut -d: -f1)
+    install_line=$(rg -n 'context\.coordinator = transitioned\.coordinator' "$runtime_source" | \
+        awk -F: -v call_line="$call_line" '$1 > call_line { print $1; exit }')
+    if [ -z "$call_line" ] || [ -z "$install_line" ]; then
+        echo "FAIL: mutating transition lacks unconditional coordinator installation: ${transition_call}" >&2
+        exit 1
+    fi
+done
+
+prepare_line=$(rg -n 'aspect_prepared_advice_prepare\(' "$runtime_source" | tail -n 1 | cut -d: -f1)
+native_line=$(rg -n 'advice_dispatch_permit_invoke_native\(' "$runtime_source" | tail -n 1 | cut -d: -f1)
+finish_line=$(rg -n 'aspect_prepared_advice_finish\(' "$runtime_source" | tail -n 1 | cut -d: -f1)
+if [ "$(rg -c 'advice_dispatch_permit_invoke_native\(' "$runtime_source")" -ne 1 ] || \
+    [ "$prepare_line" -ge "$native_line" ] || [ "$native_line" -ge "$finish_line" ]; then
+    echo "FAIL: prepared native invocation is not the sole unlocked prepare/finish middle phase" >&2
+    exit 1
+fi
+
+if rg -n 'prepared_advice_dispatch_context_invoke_or_panic_or_panic' \
+    src test; then
+    echo "FAIL: collided prepared-advice panic ABI symbol" >&2
+    exit 1
+fi
+for prepared_symbol in \
+    prepared_advice_dispatch_context_invoke \
+    prepared_advice_dispatch_context_invoke_or_panic
+do
+    if ! rg -q "^fn ${prepared_symbol}\\(" "$prepared_abi_source" || \
+        ! rg -q "^export ${prepared_symbol}$" "$prepared_abi_source" || \
+        rg -q "^fn ${prepared_symbol}\\(|^export ${prepared_symbol}$" "$runtime_source"; then
+        echo "FAIL: prepared-advice ABI symbol owner is unstable: ${prepared_symbol}" >&2
+        exit 1
+    fi
+done
+if ! rg -q 'export use app.startup.aspect_prepared_advice_compiler_abi' \
+    src/app/startup/__init__.spl; then
+    echo "FAIL: startup facade does not re-export prepared-advice ABI leaf" >&2
     exit 1
 fi
 

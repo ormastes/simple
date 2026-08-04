@@ -17,20 +17,17 @@ use compiler.loader.loader.aspect_activation.{
     AspectActivationResult
 }
 use compiler.loader.loader.module_loader.{
-    ModuleLoader, moduleloader_with_defaults, moduleloader_unload
+    ModuleLoader, moduleloader_with_defaults
 }
 use compiler.loader.loader.facet_binding_registry.{
-    FacetBindingRecord, facet_lookup, facet_unbind_generation,
-    facet_witness_method_entry
+    FacetBindingRecord
 }
 use compiler.common.structural_contracts.facet_artifact.{
     FacetWitnessMethodEntry
 }
 use compiler.loader.loader.advice_binding_registry.{
     AdviceBindingRecord, AdviceBindingCounters, AdviceDisabledPathFootprint,
-    advice_lookup_slot, advice_unbind_generation,
-    advice_disabled_path_footprint, advice_dispatch_projection_invalidate,
-    advice_dispatch_permit_invoke_native
+    advice_disabled_path_footprint, advice_dispatch_permit_invoke_native
 }
 use os.smf.dynsmf_session.{DynSmfSession, dynsmf_id_disabled}
 use os.smf.smf_generation.{GenerationToken, LifecycleManager}
@@ -67,14 +64,24 @@ use app.startup.aspect_prepared_advice_transition.{
     aspect_prepared_advice_prepare,
     aspect_prepared_advice_finish
 }
+use app.startup.aspect_facet_lifecycle_transition.{
+    aspect_generation_acquire, aspect_generation_release,
+    aspect_generation_pin_count, aspect_published_facet_lookup,
+    aspect_published_advice_lookup, aspect_facet_lease_acquire,
+    aspect_facet_lease_release, aspect_published_facet_acquire,
+    aspect_published_facet_method_acquire,
+    aspect_published_facet_descriptor_acquire,
+    aspect_published_facet_descriptor_release,
+    aspect_published_facet_handle_validate,
+    aspect_published_facet_contract_validate,
+    aspect_published_facet_method_address
+}
+use app.startup.aspect_unload_transition.{aspect_unload_transition}
 use app.startup.aspect_facet_runtime_contract.{
     AspectApplicationPhase, AspectApplicationOperation,
     PublishedFacetDescriptorLease,
     aspect_application_is_mission, aspect_application_is_operational,
     aspect_application_mission_catalog_valid,
-    aspect_published_facet_descriptor_validate,
-    aspect_published_facet_descriptor_contract_validate,
-    aspect_published_facet_descriptor_method_address,
     aspect_facet_acquire_error_from_runtime_text,
     aspect_facet_acquire_error_required_absent,
     aspect_application_lazy_facet_route
@@ -456,39 +463,21 @@ impl AspectExecutionContext:
 fn aspect_execution_context_acquire_published_generation_locked(
     context: AspectExecutionContext, aspect_id: text
 ) -> Result<GenerationToken, text>:
-        if not context.coordinator.published.has(aspect_id):
-            return Err("E-AF004 aspect has no published generation: {aspect_id}")
-        if context.coordinator.published[aspect_id].state != "active":
-            return Err("E-AF004 aspect generation is quiescing: {aspect_id}")
-        val activation = context.coordinator.published[aspect_id]
-        val generation = activation.generation
-        val acquired = context.coordinator.lifecycle.acquire_generation_token_for(
-            activation.activation_key, generation)?
-        context.coordinator.lifecycle = acquired.0
-        Ok(acquired.1)
+    val transitioned = aspect_generation_acquire(context.coordinator, aspect_id)?
+    context.coordinator = transitioned.coordinator
+    Ok(transitioned.token)
 
 fn aspect_execution_context_release_published_generation_locked(
     context: AspectExecutionContext, token: GenerationToken
 ) -> Result<(), text>:
-        var published = false
-        for aspect_id in context.coordinator.published.keys():
-            val activation = context.coordinator.published[aspect_id]
-            if activation.activation_key == token.owner_key and activation.generation == token.generation_id:
-                published = true
-        if not published:
-            return Err("E-AF004 generation is not published by this application: {token.generation_id}")
-        val lifecycle = context.coordinator.lifecycle.release_generation_token(token)?
-        context.coordinator.lifecycle = lifecycle
-        Ok(())
+    val transitioned = aspect_generation_release(context.coordinator, token)?
+    context.coordinator = transitioned.coordinator
+    Ok(())
 
 fn aspect_execution_context_published_generation_pin_count_locked(
     context: AspectExecutionContext, aspect_id: text
 ) -> Result<i64, text>:
-        if not context.coordinator.published.has(aspect_id):
-            return Err("E-AF004 aspect has no published generation: {aspect_id}")
-        val activation = context.coordinator.published[aspect_id]
-        Ok(context.coordinator.lifecycle.generation_pin_count_for(
-            activation.activation_key, activation.generation) as i64)
+    aspect_generation_pin_count(context.coordinator, aspect_id)
 
 impl AspectExecutionContext:
 
@@ -517,11 +506,9 @@ fn aspect_execution_context_lookup_published_facet_locked(
     implemented_business_interfaces: [text],
     facet_interface_id: text
 ) -> Result<FacetBindingRecord?, text>:
-        facet_lookup(
-            context.coordinator.facet_bindings,
-            concrete_type_id,
-            implemented_business_interfaces,
-            facet_interface_id)
+    aspect_published_facet_lookup(
+        context.coordinator, concrete_type_id,
+        implemented_business_interfaces, facet_interface_id)
 
 impl AspectExecutionContext:
 
@@ -537,10 +524,10 @@ impl AspectExecutionContext:
 fn aspect_execution_context_lookup_published_advice_locked(
     context: AspectExecutionContext, slot_id: text
 ) -> Result<[AdviceBindingRecord], text>:
-        val lookup = advice_lookup_slot(
-            context.coordinator.advice_bindings, slot_id)?
-        context.coordinator.advice_bindings = lookup.registry
-        Ok(lookup.chain)
+    val transitioned = aspect_published_advice_lookup(
+        context.coordinator, slot_id)?
+    context.coordinator = transitioned.coordinator
+    Ok(transitioned.chain)
 
 impl AspectExecutionContext:
 
@@ -640,16 +627,11 @@ fn aspect_execution_context_acquire_published_facet_locked(
     implemented_business_interfaces: [text],
     facet_interface_id: text
 ) -> Result<(FacetBindingRecord, FacetGenerationLease)?, text>:
-        val binding = aspect_execution_context_lookup_published_facet_locked(
-            context,
-            concrete_type_id, implemented_business_interfaces,
-            facet_interface_id)?
-        if binding == nil:
-            return Ok(nil)
-        val record = binding.unwrap()
-        val lease = aspect_execution_context_acquire_facet_generation_lease_locked(
-            context, record.aspect_id)?
-        Ok(Some((record, lease)))
+    val transitioned = aspect_published_facet_acquire(
+        context.coordinator, concrete_type_id,
+        implemented_business_interfaces, facet_interface_id)?
+    context.coordinator = transitioned.coordinator
+    Ok(transitioned.acquired)
 
 impl AspectExecutionContext:
 
@@ -681,19 +663,13 @@ fn aspect_execution_context_acquire_published_facet_method_locked(
     facet_interface_id: text,
     method_name: text
 ) -> Result<(FacetWitnessMethodEntry, FacetGenerationLease)?, text>:
-        val acquired = aspect_execution_context_acquire_published_facet_locked(
-            context,
-            concrete_type_id, implemented_business_interfaces,
-            facet_interface_id)?
-        if acquired == nil:
-            return Ok(nil)
-        val pair = acquired.unwrap()
-        val method = facet_witness_method_entry(pair.0, method_name)
-        if method.is_err():
-            aspect_execution_context_release_facet_generation_lease_locked(
-                context, pair.1)?
-            return Err(method.unwrap_err())
-        Ok(Some((method.unwrap(), pair.1)))
+    val transitioned = aspect_published_facet_method_acquire(
+        context.coordinator, concrete_type_id,
+        implemented_business_interfaces, facet_interface_id, method_name)
+    context.coordinator = transitioned.coordinator
+    if val reason = transitioned.error:
+        return Err(reason)
+    Ok(transitioned.acquired)
 
 impl AspectExecutionContext:
 
@@ -722,27 +698,13 @@ fn aspect_execution_context_acquire_published_facet_descriptor_locked(
     implemented_business_interfaces: [text],
     facet_interface_id: text
 ) -> Result<PublishedFacetDescriptorLease?, text>:
-        val acquired = aspect_execution_context_acquire_published_facet_locked(
-            context,
-            concrete_type_id, implemented_business_interfaces,
-            facet_interface_id)?
-        if acquired == nil:
-            return Ok(nil)
-        val pair = acquired.unwrap()
-        val record = pair.0
-        val descriptor = record.witness_descriptor
-        val validation = aspect_published_facet_descriptor_validate(record)
-        if validation.is_err():
-            aspect_execution_context_release_facet_generation_lease_locked(
-                context, pair.1)?
-            return Err(validation.unwrap_err())
-        Ok(Some(PublishedFacetDescriptorLease(
-            aspect_id: record.aspect_id,
-            binding_id: record.binding_id,
-            facet_interface_id: record.facet_interface_id,
-            facet_contract_abi_hash: record.facet_contract_abi_hash,
-            witness_descriptor: descriptor,
-            generation_lease: pair.1)))
+    val transitioned = aspect_published_facet_descriptor_acquire(
+        context.coordinator, concrete_type_id,
+        implemented_business_interfaces, facet_interface_id)
+    context.coordinator = transitioned.coordinator
+    if val reason = transitioned.error:
+        return Err(reason)
+    Ok(transitioned.acquired)
 
 impl AspectExecutionContext:
 
@@ -759,29 +721,18 @@ fn aspect_execution_context_release_published_facet_descriptor_locked(
     context: AspectExecutionContext,
     acquired: PublishedFacetDescriptorLease
 ) -> Result<(), text>:
-        if acquired.aspect_id != acquired.generation_lease.aspect_id:
-            # The compiler-generated wrapper is private, but a corrupted
-            # handle still must not strand its canonical generation token.
-            aspect_execution_context_release_facet_generation_lease_locked(
-                context, acquired.generation_lease)?
-            return Err("E-AF004 facet descriptor lease aspect identity is inconsistent")
-        aspect_execution_context_release_facet_generation_lease_locked(
-            context, acquired.generation_lease)
+    val transitioned = aspect_published_facet_descriptor_release(
+        context.coordinator, acquired)
+    context.coordinator = transitioned.coordinator
+    if val reason = transitioned.error:
+        return Err(reason)
+    Ok(())
 
 fn aspect_execution_context_published_facet_descriptor_handle_validate_locked(
     context: AspectExecutionContext,
     acquired: PublishedFacetDescriptorLease
 ) -> Result<(), text>:
-        if acquired.aspect_id != acquired.generation_lease.aspect_id:
-            return Err("E-AF004 facet descriptor lease aspect identity is inconsistent")
-        if not context.coordinator.published.has(acquired.aspect_id):
-            return Err("E-AF004 facet descriptor generation is no longer published")
-        val activation = context.coordinator.published[acquired.aspect_id]
-        if activation.generation != acquired.generation_lease.generation_id:
-            return Err("E-AF004 facet descriptor generation identity is inconsistent")
-        if not activation.owners.contains(acquired.witness_descriptor.owner_id):
-            return Err("E-AF002 facet descriptor owner is not retained by its generation")
-        Ok(())
+    aspect_published_facet_handle_validate(context.coordinator, acquired)
 
 impl AspectExecutionContext:
 
@@ -813,11 +764,9 @@ fn aspect_execution_context_validate_published_facet_descriptor_contract_locked(
     expected_abi_hash: text,
     expected_method_names: [text]
 ) -> Result<(), text>:
-        aspect_execution_context_published_facet_descriptor_handle_validate_locked(
-            context, acquired)?
-        aspect_published_facet_descriptor_contract_validate(
-            acquired, expected_facet_interface_id, expected_abi_hash,
-            expected_method_names)
+    aspect_published_facet_contract_validate(
+        context.coordinator, acquired, expected_facet_interface_id,
+        expected_abi_hash, expected_method_names)
 
 impl AspectExecutionContext:
 
@@ -841,10 +790,8 @@ fn aspect_execution_context_published_facet_descriptor_method_address_locked(
     ordinal: i64,
     expected_name: text
 ) -> Result<i64, text>:
-        aspect_execution_context_published_facet_descriptor_handle_validate_locked(
-            context, acquired)?
-        aspect_published_facet_descriptor_method_address(
-            acquired, ordinal, expected_name)
+    aspect_published_facet_method_address(
+        context.coordinator, acquired, ordinal, expected_name)
 
 impl AspectExecutionContext:
 
@@ -859,13 +806,10 @@ impl AspectExecutionContext:
 fn aspect_execution_context_acquire_facet_generation_lease_locked(
     context: AspectExecutionContext, aspect_id: text
 ) -> Result<FacetGenerationLease, text>:
-        val token = aspect_execution_context_acquire_published_generation_locked(
-            context, aspect_id)?
-        Ok(FacetGenerationLease(
-            aspect_id: aspect_id,
-            generation_id: token.generation_id,
-            token_id: token.token_id
-        ))
+    val transitioned = aspect_facet_lease_acquire(
+        context.coordinator, aspect_id)?
+    context.coordinator = transitioned.0
+    Ok(transitioned.1)
 
 impl AspectExecutionContext:
 
@@ -879,17 +823,10 @@ impl AspectExecutionContext:
 fn aspect_execution_context_release_facet_generation_lease_locked(
     context: AspectExecutionContext, lease: FacetGenerationLease
 ) -> Result<(), text>:
-        if not context.coordinator.published.has(lease.aspect_id):
-            return Err("E-AF004 facet lease aspect is not published: {lease.aspect_id}")
-        val activation = context.coordinator.published[lease.aspect_id]
-        if activation.generation != lease.generation_id:
-            return Err("E-AF004 facet lease generation does not match publication")
-        aspect_execution_context_release_published_generation_locked(
-            context, GenerationToken(
-            owner_key: activation.activation_key,
-            generation_id: lease.generation_id,
-            token_id: lease.token_id
-        ))
+    val transitioned = aspect_facet_lease_release(
+        context.coordinator, lease)?
+    context.coordinator = transitioned.coordinator
+    Ok(())
 
 impl AspectExecutionContext:
 
@@ -908,84 +845,13 @@ impl AspectExecutionContext:
 fn aspect_execution_context_unload_published_aspect_locked(
     context: AspectExecutionContext, aspect_id: text
 ) -> Result<text, text>:
-        context.authorize(AspectApplicationOperation.Unload)?
-        if not context.coordinator.published.has(aspect_id):
-            return Err("E-AF004 aspect has no published generation: {aspect_id}")
-        var activation = context.coordinator.published[aspect_id]
-        val generation = activation.generation
-        # Compute the complete retirement transition before mutating the
-        # runtime. A quiesce error therefore preserves the active publication;
-        # successful installation removes visibility together with closing
-        # acquisition, before the first drain check.
-        val facet_bindings = facet_unbind_generation(
-            context.coordinator.facet_bindings,
-            activation.activation_key,
-            generation)
-        val advice_bindings = advice_unbind_generation(
-            context.coordinator.advice_bindings,
-            activation.activation_key,
-            generation)
-        val advice_projection = advice_dispatch_projection_invalidate(
-            context.coordinator.advice_projection,
-            activation.activation_key,
-            generation)
-        val quiesced = context.coordinator.lifecycle.quiesce_generation_for(
-            activation.activation_key, generation)?
-        activation.bindings = []
-        activation.advices = []
-        activation.state = "quiescing"
-        context.coordinator.facet_bindings = facet_bindings
-        context.coordinator.advice_bindings = advice_bindings
-        context.coordinator.advice_projection = advice_projection
-        context.coordinator.lifecycle = quiesced
-        context.coordinator.published[aspect_id] = activation
-        if not context.coordinator.lifecycle.generation_is_drained_for(
-            activation.activation_key, generation):
-            return Ok("quiescing")
-
-        # Validate every cache pin before changing executable state so the
-        # cleanup sequence cannot discover a missing resource halfway through.
-        for module_key in activation.module_keys:
-            if context.provider_cache.module_ref_count(
-                module_key, context.loader.lifecycle.smf_cache_mgr) <= 0:
-                return Err("E-APACK003 published aspect module has no cache pin: {module_key.module_id}")
-
-        for owner_id in activation.owners:
-            moduleloader_unload(context.loader, owner_id)
-        for module_key in activation.module_keys:
-            context.provider_cache.release_module(
-                module_key, context.loader.lifecycle.smf_cache_mgr)?
-        for module_key in activation.module_keys:
-            _ = context.provider_cache.invalidate_provider(
-                module_key.provider, context.loader.lifecycle.smf_cache_mgr)
-
-        val completed = context.coordinator.lifecycle.complete_generation_unload_for(
-            activation.activation_key, generation)?
-        context.coordinator.lifecycle = completed
-        context.coordinator.published = context.coordinator.published.remove(aspect_id)
-        Ok("unloaded")
-
-# Canonical prepared-advice ABI owner. Backend bridges must pass this typed
-# context reference explicitly; no global/current-context lookup exists.
-fn prepared_advice_dispatch_context_invoke(
-    context: AspectExecutionContext,
-    slot_id: text,
-    form: text
-) -> Result<[i64], text>:
-    context.invoke_prepared_advice(slot_id, form)
-
-# Fail-stop ABI for compiler-injected prepared advice. The Result-returning
-# operation synchronously writes the released-token lifecycle state before an
-# error reaches this wrapper, so panic cannot strand an acquired generation.
-fn prepared_advice_dispatch_context_invoke_or_panic(
-    context: AspectExecutionContext,
-    slot_id: text,
-    form: text
-) -> ():
-    val dispatched = prepared_advice_dispatch_context_invoke(
-        context, slot_id, form)
-    if dispatched.is_err():
-        panic(dispatched.unwrap_err())
+    val transitioned = aspect_unload_transition(
+        context.authorize(AspectApplicationOperation.Unload),
+        context.coordinator, context.loader, context.provider_cache, aspect_id)
+    context.coordinator = transitioned.coordinator
+    if transitioned.status == "failed":
+        return Err(transitioned.reason)
+    Ok(transitioned.status)
 
 
 export AspectApplicationPhase
@@ -994,5 +860,3 @@ export AspectExecutionContext
 export AspectApplicationRuntime
 export aspect_facet_acquire_error_from_runtime_text
 export aspect_facet_acquire_error_required_absent
-export prepared_advice_dispatch_context_invoke
-export prepared_advice_dispatch_context_invoke_or_panic
