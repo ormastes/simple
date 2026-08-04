@@ -170,11 +170,24 @@ bin/simple lint /tmp/test_ui001.spl
 UI typed-core migration (Phases 0–10 + Phase 11 prelude):
 - `src/lib/common/ui/widget.spl` — `WidgetKind`/`LayoutKind` enums + 26 fluent methods on `WidgetNode`
 - `src/lib/common/ui/color.spl` — typed `Color` with `from_hex`/`to_hex`/`to_rgba_css`
-- `src/lib/common/ui/action.spl` — `Action`/`CommonAction`/`IntoAction`
+- `src/lib/common/ui/action.spl` — **CORRECTED 2026-08-04:** this session shipped only a
+  `class Action` stub. `CommonAction` and `IntoAction` were **never written** here; both, plus
+  the `enum Action` this line describes, first landed on 2026-08-04 in `b02b7410e6f`
+  ("fix(ui): implement CommonAction/Action/IntoAction — the Phase 5 typed-action API was never
+  written"). Verified by `git show b02b7410e6f~1:src/lib/common/ui/action.spl`, whose only
+  declarations are `class Action` and `fn into_wire_name`. Until that commit,
+  `test/01_unit/app/ui/typed_action_spec.spl` imported three names that were declared nowhere
+  in `src/` and was honestly red at `Results: 19 total, 0 passed, 19 failed` — an unresolved
+  `use` is only a warning, so the spec loaded and the reason it failed was invisible.
 - `src/lib/common/ui/theme_registry.spl` — dep-inversion hub
 - `src/lib/common/ui/design_tokens.spl` — `Spacing`/`Radius`/`Elevation`/`SurfaceRole`/`TextRole`
 - `src/lib/common/ui/{ios,glass}/{theme,builder,tokens,numeric_tokens}.spl` — Phase 7 module rename
-- `test/01_unit/app/ui/wire_golden/wire_golden_spec.spl` — wire byte oracle (4/4)
+- `test/01_unit/app/ui/wire_golden/wire_golden_spec.spl` — wire byte oracle. **CORRECTED
+  2026-08-04: NOT 4/4.** Measured at `53492af8dc4bb95e8bb11c18ec813f63e065b479` with
+  `SIMPLE_TIMEOUT_SECONDS=0 bin/simple test <spec> --timeout 3000`, verbatim verdict:
+  `Results: 4 total, 2 passed, 2 failed`. The lane that landed `b02b7410e6f` reports the same
+  `2 passed, 2 failed` from before that commit, so the typed-action work neither caused nor
+  cleared these two failures. The `4/4` claimed here is not a measurement.
 - `test/01_unit/app/ui/{token_resolution,typed_action,responsive_widget,color}_spec.spl` — Phase 4-6 + 11
 - `test/01_unit/compiler/lint_ui_rules_spec.spl` — Phase 8 lint rule logic (22/22)
 - `src/compiler/90.tools/lint/main.spl:1049-1180` — UI001/2/3 implementations
@@ -195,7 +208,7 @@ RFCs / docs:
 
 | Gate | Command | Expected |
 |---|---|---|
-| Wire stability | `bin/simple test test/01_unit/app/ui/wire_golden/wire_golden_spec.spl` | 4/4 |
+| Wire stability | `bin/simple test test/01_unit/app/ui/wire_golden/wire_golden_spec.spl` | 4/4 — **NOT MET.** Measured 2026-08-04 at `53492af8dc4`: `Results: 4 total, 2 passed, 2 failed` |
 | Backend matrix | `bin/simple test test/01_unit/app/ui/backend_matrix_spec.spl` | 7/7 |
 | IPC protocol | `bin/simple test test/01_unit/app/ui/ipc_protocol_spec.spl` | 15/15 |
 | Token resolution | `bin/simple test test/01_unit/app/ui/token_resolution_spec.spl` | 45/45 |
