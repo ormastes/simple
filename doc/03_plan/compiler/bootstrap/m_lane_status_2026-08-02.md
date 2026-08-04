@@ -432,3 +432,94 @@ Independently of all five: the M1 attribution ON-path is **+50.5% against a
 <15% target**, and the plan concludes no lock-shape variant will close it. Every
 lane that reports through attribution inherits that. It should be re-scoped or
 re-targeted explicitly rather than left as a standing open number.
+---
+
+# Addendum 2026-08-04 — M6 and M8 exit criteria CLOSED (sabotage-verified)
+
+This addendum supersedes the M6 and M8 rows of the summary table above. Both
+lanes' stated exit criteria are now **met**, and — unlike the original "DONE"
+marks — each is backed by a **sabotage cycle**: break what the test covers,
+observe RED, restore, observe GREEN. Green-both-ways is exactly how M6/M8 were
+mismarked the first time, so a green run alone was not accepted as evidence.
+
+**Binary identity:** all runs below used `bin/simple`, which is the **RUST
+SEED** (`strings bin/simple | grep -c "enum construction: unregistered enum"`
+= 0; a bootstrap binary answers 2). Every run passed `--no-session-daemon`,
+because a persistent test daemon freezes its environment at daemon start and
+would serve a previous run's env to the spec.
+
+## M6 — generational slotmap: consumer migrated, stale handles proven rejected
+
+**Exit criterion (plan §M6):** "migrate one ECS store as proof."
+
+**Met.** `WmWorld` (the window manager's ECS world,
+`src/os/services/wm/wm_world.spl`) now holds its window registry as
+`win_handles: GenArena<u64>`. `GenArena` is no longer a library with zero
+consumers.
+
+Deliverable test: `test/01_unit/os/services/wm/wm_world_gen_arena_stale_handle_spec.spl`
+(6 examples). Each stale-handle example holds a handle across a despawn, lets a
+NEW window recycle the very same arena slot, then demands the OLD handle resolve
+to nothing.
+
+| step | change | result |
+|------|--------|--------|
+| baseline | none | **GREEN** 6/6, exit 0 |
+| sabotage | dropped `stored_gen != h.generation` from `GenArena.get` (`gen_arena.spl`) — i.e. the generation check removed, keeping only the liveness check | **RED** exit 1, 2 failures |
+| restore | file byte-identical to origin | **GREEN** 6/6, exit 0 |
+
+The sabotage was applied to the **library implementation**, not to a spec-local
+shim. Independently confirmed by a deliberately-wrong-oracle probe that, with
+the check removed, `window_id_for_handle(stale)` returns **4242** — the new
+occupant's id — i.e. a genuine use-after-free/ABA alias. With the check present
+it returns 0.
+
+## M8 — `simple mem` CLI: `trace` and `gpu` implemented, real dispatch arm covered
+
+**Exit criteria:** the six verbs plan §M8 requires, and a spec that can fail on
+a broken CLI.
+
+**Met at the source-entry layer** (see the reachability caveat below).
+`cmd_trace` and `cmd_gpu` exist in `src/app/mem/main.spl` and are dispatched;
+they are implementations, not stubs. `test/03_system/app/mem_cli_spec.spl` is
+now 15 examples (was 7).
+
+Two circularity fixes carried by that spec:
+- The verb list it asserts, `PLAN_REQUIRED_VERBS`, is **hardcoded from the
+  plan**, not read from `print_help()`. The old claim "all help-listed verbs
+  dispatch" could not fail, because help listed exactly what was implemented.
+- A second `describe` block drives the **real** dispatch arm in
+  `src/app/cli/_CliMain/main_and_help.spl` (run as a source program under
+  `SIMPLE_MODULE_LIMIT=0` via `env`), with a negative control asserting an
+  unrelated subcommand does **not** route to the mem entry.
+
+| step | change | result |
+|------|--------|--------|
+| baseline | none | **GREEN** 15/15, exit 0 |
+| sabotage A | renamed the CLI dispatch tag `"mem"` -> `"mem-SABOTAGE-TAG"` | **RED** exit 1 — dispatch example fails; **the other 13 stay green**, which is precisely why the old 7/7 suite could never have caught an unreachable subcommand |
+| sabotage B | renamed the `"gpu"` verb arm | **RED** exit 1, 3 gpu examples fail |
+| sabotage C | renamed the `"trace"` verb arm | **RED** exit 1, 2 trace examples fail |
+| restore | all files byte-identical to origin | **GREEN** 15/15, exit 0 |
+
+### Reachability caveat — state the layer, do not overclaim
+
+Verified layer: **pure-Simple source entry**. `--mem-infra=` and the `simple mem`
+subcommand exist only in the pure-Simple CLI. The deployed `bin/simple` is the
+Rust seed and answers `bin/simple mem help` with `error: file not found: mem`.
+Implementation and routing are proven; **end-to-end delivery through the
+deployed binary still needs a self-hosted redeploy** and is NOT claimed here.
+
+## Test-runner semantics discovered while verifying (affects how any sabotage is read)
+
+`bin/simple test` reports **only the LAST failure per example**, and a failing
+`expect` does **not** abort the rest of the example body. Verified with a
+three-example probe: an example containing two failing expects printed only the
+second one.
+
+Consequence for anyone reading a sabotage log: an example showing one failure
+message may have failed several assertions. During M6 verification this made the
+headline read `expected 0 to be greater than 0` (the rejection counter, the last
+assertion) rather than `expected 4242 to equal 0` (the stale-id check just above
+it) — both fired. **Count failing examples, not failure messages.** As always,
+bare `assert x == y` in an `it` block is inert; these specs use
+`expect` / `assert_true` / `assert_false` throughout.
