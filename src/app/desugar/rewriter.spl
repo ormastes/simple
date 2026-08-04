@@ -129,23 +129,38 @@ fn rewrite_static_patterns(line: text) -> text:
                 val after_ident = ci + ident_len
 
                 # Check if followed by .identifier
-                if after_ident + 2 < llen and line[after_ident:after_ident + 1] == ".":
+                # The member needs one char after the dot, so the last index
+                # touched is after_ident + 1. Requiring after_ident + 2 dropped
+                # every single-character member that ended the line.
+                if after_ident + 1 < llen and line[after_ident:after_ident + 1] == ".":
                     val after_dot = after_ident + 1
                     val next_ch = line[after_dot:after_dot + 1]
 
                     # Check for lowercase method or uppercase constant
                     if is_lower_or_underscore(next_ch) or is_upper(next_ch):
                         val member_name = extract_word(line[after_dot:])
-                        val after_member = after_dot + member_name.len()
+                        var after_member = after_dot + member_name.len()
 
-                        # Distinguish between method call and constant access
-                        var is_method_call = false
-                        if after_member < llen and line[after_member:after_member + 1] == "(":
-                            is_method_call = true
-
-                        # Rewrite both cases: Type.member -> Type__member
-                        # The parenthesis check helps distinguish, but we rewrite both
+                        # Rewrite Type.member -> Type__member, then keep
+                        # consuming further `.Segment` parts so a nested access
+                        # like Outer.Inner.CONSTANT collapses all the way to
+                        # Outer__Inner__CONSTANT instead of stopping after the
+                        # first dot.
+                        #
+                        # Only an UPPERCASE next segment continues the chain: it
+                        # is a nested type or a constant, so it belongs to the
+                        # static path. A lowercase segment is a method or field
+                        # on the value that was just produced, and rewriting it
+                        # would turn `Config.NAME.len()` into the nonexistent
+                        # `Config__NAME__len()`.
                         result = result + ident + "__" + member_name
+                        while after_member + 1 < llen and line[after_member:after_member + 1] == ".":
+                            val chain_start = after_member + 1
+                            if not is_upper(line[chain_start:chain_start + 1]):
+                                break
+                            val chain_name = extract_word(line[chain_start:])
+                            result = result + "__" + chain_name
+                            after_member = chain_start + chain_name.len()
                         ci = after_member
                         continue
 
