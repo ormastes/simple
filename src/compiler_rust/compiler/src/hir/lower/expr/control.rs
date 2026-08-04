@@ -1672,6 +1672,72 @@ impl Lowerer {
         let expr_hir = self.lower_expr(expr, ctx)?;
         let default_hir = self.lower_expr(default, ctx)?;
 
+        // Statically non-nullable scalars can NEVER legitimately be nil, and the
+        // runtime nil sentinel IS the raw integer 3 (TAG_SPECIAL = 0b011), so
+        // emitting a runtime `expr != nil` check on a raw scalar turns the real
+        // value 3 into the default (`x.index_of(..) ?? d` returned d when the
+        // real answer was 3 — see
+        // doc/08_tracking/bug/coalesce_raw_i64_sentinel_collision_2026-08-02.md).
+        // For these types `??` is the identity: lower to the left operand
+        // directly, no runtime check. STRING/ANY/UNKNOWN and every registered
+        // type (incl. `T?`, which resolves to a Pointer TypeId) keep the
+        // runtime nil check below.
+        // Known caveat (tracked in the plan doc
+        // doc/03_plan/compiler/type_system/seed_hirtype_optional_plan.md):
+        // `first/last/get` are currently *typed* bare `T` while being
+        // genuinely optional — they need an Optional TypeId to take the
+        // checked path; that is the root fix this static rule is staged under.
+        // The scalar TypeId alone is NOT sufficient evidence of presence, because
+        // the method result-type table in `hir/lower/expr/mod.rs` deliberately
+        // types several *genuinely optional* accessors as bare `T`
+        // (`[T].first/last/get/min/max/pop`, `{K:V}.get/remove`). Trusting the
+        // TypeId there made `[].first() ?? -1` and `{}.get(k) ?? -1` return the
+        // raw sentinel `3` instead of `-1` — the sentinel leaking out as an
+        // integer, which is strictly worse than the bug being fixed. Those
+        // accessors therefore keep the runtime nil check.
+        //
+        // Retyping them to `T?` (`HirType::Pointer`, what `at` already does) is
+        // the type-system-level root fix and is tracked in
+        // doc/03_plan/compiler/type_system/seed_hirtype_optional_plan.md. It is
+        // NOT done here: `at` itself is currently broken in value position on
+        // the JIT (`xs.at(0)` prints `<enum@0x..>` and `val a: i64 = xs.at(1)`
+        // binds 3200464915713, while `xs.first()` is correct), so moving the
+        // widely-used accessors onto that lane today would import a larger
+        // defect than it removes.
+        let receiver_is_optional_accessor = matches!(
+            expr,
+            Expr::MethodCall { method, .. }
+                if matches!(
+                    method.as_str(),
+                    "first" | "last" | "get" | "min" | "max" | "pop" | "remove" | "at"
+                )
+        );
+        let statically_non_nullable = !receiver_is_optional_accessor
+            && matches!(
+            expr_hir.ty,
+            TypeId::BOOL
+                | TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::F32
+                | TypeId::F64
+                | TypeId::CHAR
+        );
+        if std::env::var("SIMPLE_DEBUG_COALESCE").is_ok() {
+            eprintln!(
+                "[coalesce] operand ty={:?} optional_accessor={} non_nullable={}",
+                expr_hir.ty, receiver_is_optional_accessor, statically_non_nullable
+            );
+        }
+        if statically_non_nullable {
+            return Ok(expr_hir);
+        }
+
         // Create a nil check: expr != nil
         let nil_expr = HirExpr {
             kind: HirExprKind::Nil,

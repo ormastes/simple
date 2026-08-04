@@ -713,3 +713,63 @@ fn test_exists_check_in_while_body_tail_is_not_coerced() {
         "a `.?` in a while body was treated as the function's return value: {repr}"
     );
 }
+
+
+/// `??` on a statically non-nullable scalar must lower to the left operand with
+/// NO runtime nil check.
+///
+/// The runtime nil sentinel IS the raw integer 3 (`TAG_SPECIAL = 0b011`, empty
+/// payload), so an `expr != nil` test emitted against a raw `i64` cannot tell a
+/// genuine 3 from absence: `xs[3] ?? -1` yielded `-1`, and `val n = 3; n ?? 777`
+/// yielded `777`. Only the value 3 collides (swept -5..27); the fix is
+/// type-directed rather than a literal-3 special case, so every other raw scalar
+/// producer is covered too.
+///
+/// See doc/08_tracking/bug/coalesce_raw_i64_sentinel_collision_2026-08-02.md.
+#[test]
+fn test_coalesce_on_raw_scalar_emits_no_nil_check() {
+    let module = parse_and_lower("fn f(n: i64) -> i64:\n    return n ?? -1\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(
+        !repr.contains("NotEq"),
+        "`??` on a raw i64 emitted a nil comparison; the sentinel IS 3 so a real 3 \
+         becomes the default: {repr}"
+    );
+    assert!(
+        !repr.contains("rt_unwrap_or_self"),
+        "`??` on a raw i64 must be the identity, not an unwrap: {repr}"
+    );
+}
+
+/// The counter-direction guard: an accessor the method result-type table types
+/// as bare `T` while it is *genuinely* optional (`first`/`last`/`get`/`min`/
+/// `max`/`pop`/`remove`/`at`) must KEEP the runtime nil check.
+///
+/// Keying the shortcut on the scalar `TypeId` alone regressed `[].first() ?? -1`
+/// and `{}.get(k) ?? -1` from `-1` to `3` — the raw sentinel leaking out as an
+/// integer, strictly worse than the bug being fixed.
+#[test]
+fn test_coalesce_on_optional_accessor_keeps_nil_check() {
+    let module = parse_and_lower("fn f(xs: [i64]) -> i64:\n    return xs.first() ?? -1\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(
+        repr.contains("rt_unwrap_or_self"),
+        "`first()` is genuinely optional despite typing as bare `T`; dropping its \
+         nil check leaks the raw sentinel 3: {repr}"
+    );
+}
+
+/// `??` on a declared optional (`T?`, a `HirType::Pointer` TypeId) is never
+/// eligible for the shortcut, whatever the inner scalar is.
+#[test]
+fn test_coalesce_on_declared_optional_keeps_nil_check() {
+    let module = parse_and_lower("fn f(v: i64?) -> i64:\n    return v ?? -1\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(
+        repr.contains("rt_unwrap_or_self"),
+        "`??` on a declared `i64?` must keep the presence check: {repr}"
+    );
+}
