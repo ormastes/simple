@@ -630,17 +630,20 @@ impl Lowerer {
                 // check must NOT fire — it would call rt_enum_check_discriminant on an
                 // object pointer and always return false (silent no-match).
                 // The type system already guarantees the object is of that class at the
-                // call site, so the condition is always true unless the subject enum
-                // itself owns this variant name.
+                // call site, so the CLASS half of the test is always true — but the
+                // FIELD half is not, and returning a bare `Bool(true)` here discarded
+                // `payload` outright. See `class_pattern_condition`.
                 let is_class_pattern = !subject_enum_owns_variant
                     && self.module.types.lookup(variant.as_str()).map_or(false, |tid| {
                         matches!(self.module.types.get(tid), Some(HirType::Struct { .. }))
                     });
                 if is_class_pattern {
-                    return Ok(HirExpr {
-                        kind: HirExprKind::Bool(true),
-                        ty: TypeId::BOOL,
-                    });
+                    let payload = match pattern {
+                        Pattern::Enum { payload, .. } => payload.as_ref(),
+                        _ => None,
+                    };
+                    let variant = variant.clone();
+                    return Ok(self.class_pattern_condition(&subject_ref, &variant, payload, ctx));
                 }
 
                 // Use rt_enum_check_discriminant(subject, expected_disc) -> bool
@@ -709,10 +712,14 @@ impl Lowerer {
                     kind: HirExprKind::Bool(true),
                     ty: TypeId::BOOL,
                 })),
-            Pattern::Struct { .. } => Ok(HirExpr {
-                kind: HirExprKind::Bool(true),
-                ty: TypeId::BOOL,
-            }),
+            // Named-field spelling. Same rule as the positional twin above: the
+            // class itself is fixed by the type system, the FIELD sub-patterns
+            // are not, and this used to be an unconditional `Bool(true)`.
+            Pattern::Struct { name, fields } => {
+                let name = name.clone();
+                let fields = fields.clone();
+                Ok(self.named_struct_pattern_condition(&subject_ref, &name, &fields, ctx))
+            }
         }
     }
 
@@ -1241,6 +1248,82 @@ impl Lowerer {
             });
         }
         combined
+    }
+
+    /// Top-level refutability test for the positional class spelling
+    /// `case Point(0, y):`.
+    ///
+    /// Shared by the expression twin ([`Self::lower_pattern_condition`]) and the
+    /// statement twin (`lower_pattern_condition_stmt` in
+    /// hir/lower/stmt_lowering.rs — the one match ARMS take) so the two cannot
+    /// drift.
+    ///
+    /// A struct pattern is irrefutable *on the class*: the type system already
+    /// fixed which class the subject is, and a discriminant check would read an
+    /// object pointer's enum header and never match. Its FIELD sub-patterns are
+    /// a different question, and both twins used to answer it by returning a
+    /// bare `Bool(true)` while discarding `payload` entirely. That is the same
+    /// shape as the enum-payload defect fixed in
+    /// [`Self::nested_payload_condition`] — the tag half handled, the payload
+    /// half dropped — so `case Point(0, y):` matched EVERY `Point` and made
+    /// every later arm unreachable, silently and with exit 0.
+    ///
+    /// Only the TOP-LEVEL position was wrong. A struct pattern nested in an enum
+    /// payload, an array element or a tuple element routes through
+    /// [`Self::subpattern_condition`], which has tested struct fields since
+    /// `5ce2f653a49`. Recursion (depth 3+, literal fields, array/tuple field
+    /// sub-patterns) is likewise [`Self::struct_fields_condition`]'s; this is
+    /// only the entry point.
+    ///
+    /// `None` from the walk means every field is irrefutable — the one case
+    /// where `Bool(true)` is the correct answer, not a dropped test.
+    pub(crate) fn class_pattern_condition(
+        &mut self,
+        subject_ref: &HirExpr,
+        struct_name: &str,
+        payload: Option<&Vec<Pattern>>,
+        ctx: &mut FunctionContext,
+    ) -> HirExpr {
+        let tested = payload.and_then(|fields| {
+            let positional: Vec<(usize, &Pattern)> = fields.iter().enumerate().collect();
+            self.struct_fields_condition(subject_ref, struct_name, &positional, ctx)
+        });
+        tested.unwrap_or(HirExpr {
+            kind: HirExprKind::Bool(true),
+            ty: TypeId::BOOL,
+        })
+    }
+
+    /// Top-level refutability test for the named-field spelling
+    /// `case Point { x: 0, y: b }:` (`Pattern::Struct`), the twin of
+    /// [`Self::class_pattern_condition`].
+    ///
+    /// A field name that does not resolve leaves the pattern irrefutable rather
+    /// than inventing an index — the same under-report rule
+    /// [`Self::subpattern_condition`] already applies to this spelling.
+    pub(crate) fn named_struct_pattern_condition(
+        &mut self,
+        subject_ref: &HirExpr,
+        struct_name: &str,
+        fields: &[(String, Pattern)],
+        ctx: &mut FunctionContext,
+    ) -> HirExpr {
+        let irrefutable = HirExpr {
+            kind: HirExprKind::Bool(true),
+            ty: TypeId::BOOL,
+        };
+        let Some(struct_fields) = self.struct_field_list(struct_name) else {
+            return irrefutable;
+        };
+        let mut positional: Vec<(usize, &Pattern)> = Vec::new();
+        for (field_name, field_pattern) in fields {
+            let Some(idx) = struct_fields.iter().position(|(n, _)| n == field_name) else {
+                return irrefutable;
+            };
+            positional.push((idx, field_pattern));
+        }
+        self.struct_fields_condition(subject_ref, struct_name, &positional, ctx)
+            .unwrap_or(irrefutable)
     }
 
     /// Look up the field types for an enum variant.

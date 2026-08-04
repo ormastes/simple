@@ -1187,6 +1187,41 @@ impl Lowerer {
                 None
             };
 
+            // Top-level positional class pattern (`case Wrap2(Point(0, b), n):`).
+            // The per-slot loop below is written for ENUM payload extraction and
+            // has exactly one class-aware branch — the `Identifier` one. Every
+            // other sub-pattern kind fell into an `rt_enum_payload`-based branch,
+            // which answers the nil sentinel for a plain struct pointer, so a
+            // NESTED struct/array/tuple field of a top-level class pattern was
+            // bound from nil: `runtime error: field access on nil receiver`,
+            // SIGILL, core dumped — not a wrong answer, a crash.
+            //
+            // `bind_struct_fields` is the field-offset walk that is already the
+            // single owner of this addressing everywhere else (nested payload
+            // slots, array elements, tuple elements), it recurses through
+            // `bind_subpattern` for non-identifier fields, and it applies the
+            // same `local.ty` patching as the inline `Identifier` branch. Its
+            // `already_bound` guard makes the delegation idempotent. Routing the
+            // whole payload through it also keeps the binder addressing
+            // identical to `class_pattern_condition`'s test addressing, so an
+            // arm cannot be selected on one field and bound from another.
+            if class_struct_fields.is_some() {
+                let positional: Vec<(usize, &Pattern)> = payload_patterns.iter().enumerate().collect();
+                let struct_name = enum_variant.clone();
+                self.bind_struct_fields(
+                    &HirExpr {
+                        kind: HirExprKind::Local(subject_idx),
+                        ty: subject_ty,
+                    },
+                    &struct_name,
+                    &positional,
+                    &binding_type_map,
+                    ctx,
+                    &mut binding_stmts,
+                );
+                return binding_stmts;
+            }
+
             for (i, p) in payload_patterns.iter().enumerate() {
                 if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = p {
                     if let Some(local_idx) = ctx.local_map.get(name) {
@@ -1195,48 +1230,13 @@ impl Lowerer {
                         // instead of ANY, so MIR lowering can insert proper unboxing
                         let binding_ty = binding_type_map.get(name).copied().unwrap_or(TypeId::ANY);
 
-                        let value = if let Some(ref struct_fields) = class_struct_fields {
-                            // Positional class/struct pattern: bind payload[i] to field i
-                            // in declaration order via FieldAccess (byte-offset load).
-                            //
-                            // Class/struct instances in the compiled path are allocated
-                            // via rt_alloc as plain flat memory with 8-byte-aligned fields
-                            // at sequential offsets 0, 8, 16, … — NOT as RuntimeObjects.
-                            // FieldAccess { field_index: i } lowers to FieldGet with
-                            // byte_offset = i * 8, which is the correct layout.
-                            //
-                            // Use the struct's own field type for the expression so that
-                            // the MIR lowering/codegen applies the right load width and
-                            // avoids spurious boxing/unboxing.  The Let ty is set to the
-                            // same field type (not ANY) so that downstream type consumers
-                            // (e.g. string interpolation) know the value's true type.
-                            //
-                            // IMPORTANT: the local was added by `extract_pattern_bindings`
-                            // with type ANY (because that helper only resolves enum variant
-                            // field types, not class fields).  The MIR lowering reads
-                            // `local.ty` (not `HirStmt::Let.ty`) to determine
-                            // effective_declared_ty, so we must patch the local's type now
-                            // to match the concrete field type, otherwise the MIR Store
-                            // uses ANY and the value is mis-formatted at runtime.
-                            let field_ty = struct_fields.get(i).map(|(_, ty)| *ty).unwrap_or(TypeId::ANY);
-                            // Patch the local's type to the concrete field type.
-                            if field_ty != TypeId::ANY {
-                                if let Some(local) = ctx.locals.get_mut(local_idx) {
-                                    local.ty = field_ty;
-                                }
-                            }
-                            HirExpr {
-                                kind: HirExprKind::FieldAccess {
-                                    receiver: Box::new(HirExpr {
-                                        kind: HirExprKind::Local(subject_idx),
-                                        ty: subject_ty,
-                                    }),
-                                    field_index: i,
-                                },
-                                ty: field_ty,
-                            }
-                        } else {
-                            // Enum variant payload extraction (original path).
+                        // Enum variant payload extraction. The positional
+                        // class/struct spelling never reaches here: it is claimed
+                        // by the `bind_struct_fields` delegation above, which owns
+                        // the FieldAccess byte-offset form and the `local.ty`
+                        // patching that goes with it. Keeping a second copy of
+                        // that form here is what let the two drift.
+                        let value = {
                             // Extract payload from enum subject, then bind to locals.
                             // For multi-field variants, `rt_enum_payload` returns the
                             // wrapper *array* (heap pointer) — its type is opaque (ANY),
@@ -1329,21 +1329,9 @@ impl Lowerer {
                             }
                         };
 
-                        // Use the value's own type for the Let declaration.
-                        // For class patterns, value.ty is the struct's field type (e.g.
-                        // TypeId::I64), NOT the binding_type_map entry (which is ANY for
-                        // class patterns since collect_pattern_bindings only resolves enum
-                        // variant field types). Using the value type ensures the MIR Store
-                        // and subsequent uses see the correct concrete type rather than ANY,
-                        // preventing misformatting (e.g. i64 field printed as float zero).
-                        let let_ty = if class_struct_fields.is_some() {
-                            value.ty
-                        } else {
-                            binding_ty
-                        };
                         binding_stmts.push(HirStmt::Let {
                             local_index: local_idx,
-                            ty: let_ty,
+                            ty: binding_ty,
                             value: Some(value),
                         });
                     }
@@ -2161,10 +2149,16 @@ impl Lowerer {
                     kind: HirExprKind::Bool(true),
                     ty: TypeId::BOOL,
                 })),
-            Pattern::Struct { .. } => Ok(HirExpr {
-                kind: HirExprKind::Bool(true),
-                ty: TypeId::BOOL,
-            }),
+            // Named-field spelling `case Point { x: 0, y: b }:`. Same rule as the
+            // positional class spelling below: the class is fixed by the type
+            // system, the FIELD sub-patterns are not, and this used to be an
+            // unconditional `Bool(true)` that discarded every field test. Shared
+            // with the expression twin via `named_struct_pattern_condition`.
+            Pattern::Struct { name, fields } => {
+                let name = name.clone();
+                let fields = fields.clone();
+                Ok(self.named_struct_pattern_condition(&subject_ref, &name, &fields, ctx))
+            }
             Pattern::Enum { name: _, variant, .. } => {
                 // Warn-only, DEFAULT OFF. This is the statement-form half of the
                 // JIT's pattern decision -- proved by instrumentation to be the
@@ -2223,8 +2217,10 @@ impl Lowerer {
                 // check must NOT fire — it would call rt_enum_check_discriminant on an
                 // object pointer and always return false (silent no-match).
                 // The type system already guarantees the object is of that class at the
-                // call site, so the condition is always true unless the subject enum
-                // itself owns this variant name.
+                // call site, so the CLASS half of the test is always true — but the
+                // FIELD half is not, and returning a bare `Bool(true)` here discarded
+                // `payload` outright, making `case Point(0, y):` match EVERY Point.
+                // See `class_pattern_condition` (hir/lower/expr/control.rs).
                 // Guard rule (kept in sync with build_pattern_binding_stmts):
                 // a subject KNOWN to be an enum never takes the class path —
                 // even when the local `variants` list is empty (imported
@@ -2255,10 +2251,12 @@ impl Lowerer {
                         matches!(self.module.types.get(tid), Some(HirType::Struct { .. }))
                     });
                 if is_class_pattern {
-                    return Ok(HirExpr {
-                        kind: HirExprKind::Bool(true),
-                        ty: TypeId::BOOL,
-                    });
+                    let payload = match pattern {
+                        Pattern::Enum { payload, .. } => payload.as_ref(),
+                        _ => None,
+                    };
+                    let variant = variant.clone();
+                    return Ok(self.class_pattern_condition(&subject_ref, &variant, payload, ctx));
                 }
 
                 // Use rt_enum_check_discriminant(subject, expected_disc) -> bool
