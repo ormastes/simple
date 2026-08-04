@@ -2576,6 +2576,8 @@ struct MirExceptionCleanupContract:
 cleanup contract requires at least one release entry; only an explicitly
 ordinary unwind contract may be empty. This prevents a transform from deleting
 all releases and laundering the cleanup pad as a valid empty facet manifest.
+The unwind-successor producer selects `OrdinaryUnwind` exactly when its final
+release-entry list is empty; any non-empty list is emitted as `FacetCleanup`.
 
 `entries` is the required execution order, already reversed across lexical
 scope and acquisition order by `emit_facet_cleanup_from`. An unconditional
