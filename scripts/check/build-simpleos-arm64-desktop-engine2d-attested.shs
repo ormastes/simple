@@ -11,6 +11,7 @@ cd "$ROOT_DIR"
 . scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs
 . scripts/check/lib/qemu-frozen-source-admission.shs
 . scripts/check/lib/clang-23-1-toolchain.shs
+. scripts/check/lib/llvm-23-1-signed-provider.shs
 
 COMPILER=""
 COMPILER_REJECTION_REASON=""
@@ -32,6 +33,7 @@ MANIFEST_TMP="${BUILD_MANIFEST}.tmp.$$"
 SELF_TEST_DIR=""
 
 cleanup() {
+    llvm_23_1_cleanup_isolated_keyring
     rm -f "$MANIFEST_TMP" "$GENERATED_LOG_CONFIG"
     if [ -n "$SELF_TEST_DIR" ]; then
         rm -f "$SELF_TEST_DIR/clean-simple" \
@@ -88,8 +90,11 @@ attest_authenticated_llvm_23_1_builder() {
     case "$LLVM_PROVIDER_SOURCE_DIR" in
         *[!A-Za-z0-9_./-]*) fail_build "llvm-23-1-source-dir-unsafe" ;;
     esac
+    llvm_23_1_prepare_isolated_keyring ||
+        fail_build "llvm-23-1-signing-key-rejected"
     LLVM_PROVIDER_BUILDER_RECEIPT="$(
-        sh "$LLVM_23_1_PROVIDER_BUILDER" --source-dir "$LLVM_PROVIDER_SOURCE_DIR" \
+        env GNUPGHOME="$LLVM_23_1_SIGNED_GNUPGHOME" \
+            sh "$LLVM_23_1_PROVIDER_BUILDER" --source-dir "$LLVM_PROVIDER_SOURCE_DIR" \
             --prefix "$LLVM_PROVIDER_PREFIX" --verify-only
     )" || fail_build "llvm-23-1-signed-builder-rejected"
     LLVM_PROVIDER_TAG="$(provider_receipt_field "$LLVM_PROVIDER_BUILDER_RECEIPT" LLVM_TAG)" ||
@@ -397,6 +402,8 @@ qemu_admission_begin arm64 \
     scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs \
     scripts/check/lib/qemu-frozen-source-admission.shs \
     scripts/check/lib/clang-23-1-toolchain.shs \
+    scripts/check/lib/llvm-23-1-signed-provider.shs \
+    scripts/setup/keys/llvm-release-tobias-hieta.asc \
     scripts/setup/build-llvm-23-1-provider.shs ||
     fail_build "frozen-source-admission-rejected"
 
@@ -540,6 +547,8 @@ qemu_admission_publish "$KERNEL" "$FROZEN_BUILD_MANIFEST" \
     scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs \
     scripts/check/lib/qemu-frozen-source-admission.shs \
     scripts/check/lib/clang-23-1-toolchain.shs \
+    scripts/check/lib/llvm-23-1-signed-provider.shs \
+    scripts/setup/keys/llvm-release-tobias-hieta.asc \
     scripts/setup/build-llvm-23-1-provider.shs || {
     rm -f "$BUILD_MANIFEST" "$FROZEN_BUILD_MANIFEST"
     fail_build "frozen-source-admission-rejected"

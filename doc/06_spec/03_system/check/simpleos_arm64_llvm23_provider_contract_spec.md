@@ -19,6 +19,11 @@ signed `llvmorg-23.1.0-rc2` peeled commit
 `561093d94eb7156dea780c1c71a779824ef90e5b`. The builder receipt, source path,
 tag, and commit are recorded; QMP repeats that authenticated verification before
 launching the artifact.
+Both paths import only the checked-in Tobias Hieta release key into a fresh
+temporary `GNUPGHOME`, require primary fingerprint
+`D574BD5D1D0E98895E3BF90044F2485E45D59042`, and pass that isolated keyring to
+the builder. Host GPG keyring contents therefore cannot satisfy this check. The
+key and isolated-keyring helper are frozen source inputs.
 
 Providers installed before this contract may lack `opt`, `llc`, `llvm-config`,
 or `llvm-objcopy`. Re-run
@@ -38,6 +43,12 @@ The companion shell gate
 `scripts/check/check-simpleos-arm64-llvm23-provider-contract.shs` executes
 negative cases for a provider tool escaping its prefix, an LLVM 18 tool, and a
 retargeted tag receipt. It does not merely inspect source text.
+It also rejects an untrusted signer fingerprint through the isolated-keyring
+auth path, preserves a caller-provided keyring path, and (with
+`SIMPLE_LLVM_23_1_TEST_SOURCE_DIR` set to the signed checkout) invokes the
+actual builder `--verify-only` path under the isolated `GNUPGHOME`. The
+regression expects the later missing-provider error, proving `git verify-tag`
+completed with the pinned key before provider validation.
 
 This is **host-provider readiness** for an ARM64 SimpleOS native build. It
 does not prove that a compiler runs inside the ARM64 guest or that guest output

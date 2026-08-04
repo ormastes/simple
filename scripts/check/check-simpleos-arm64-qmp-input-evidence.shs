@@ -12,6 +12,7 @@ cd "$ROOT_DIR"
 . scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs
 . scripts/check/lib/qemu-frozen-source-admission.shs
 . scripts/check/lib/clang-23-1-toolchain.shs
+. scripts/check/lib/llvm-23-1-signed-provider.shs
 
 KERNEL="build/os/simpleos_arm64_desktop_engine2d.elf"
 DISK="build/os/fat32-arm64-desktop.img"
@@ -43,6 +44,7 @@ cleanup() {
         wait "$QEMU_PID" >/dev/null 2>&1 || true
     fi
     rm -f "$QMP_SOCKET"
+    llvm_23_1_cleanup_isolated_keyring
 }
 trap cleanup EXIT INT TERM
 
@@ -321,8 +323,11 @@ esac
     fail_evidence "canonical-build-manifest-simple-llvm-prefix-mismatch"
 [ -f "$LLVM_23_1_PROVIDER_BUILDER" ] && [ ! -L "$LLVM_23_1_PROVIDER_BUILDER" ] ||
     fail_evidence "canonical-build-manifest-llvm-provider-builder-unavailable"
+llvm_23_1_prepare_isolated_keyring ||
+    fail_evidence "canonical-build-manifest-llvm-provider-signing-key-rejected"
 LLVM_PROVIDER_REVERIFY_RECEIPT="$(
-    sh "$LLVM_23_1_PROVIDER_BUILDER" --source-dir "$MANIFEST_LLVM_PROVIDER_SOURCE_DIR" \
+    env GNUPGHOME="$LLVM_23_1_SIGNED_GNUPGHOME" \
+        sh "$LLVM_23_1_PROVIDER_BUILDER" --source-dir "$MANIFEST_LLVM_PROVIDER_SOURCE_DIR" \
         --prefix "$MANIFEST_LLVM_PREFIX" --verify-only
 )" || fail_evidence "canonical-build-manifest-llvm-provider-signed-builder-rejected"
 printf '%s\n' "$LLVM_PROVIDER_REVERIFY_RECEIPT" | grep -qx "LLVM_TAG=$LLVM_23_1_EXPECTED_TAG" ||
