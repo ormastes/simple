@@ -87,6 +87,22 @@ fn exception_inst_dest_id(inst: MirInstKind) -> i64:
         case ScalableVecFence(_) | MirSimdStore(_, _, _): -1
         case MirSimdScatter(_, _, _) | MirWarpSync(_): -1
 
+fn exception_inst_definition_count_for_local(
+    inst: MirInstKind, local: LocalId
+) -> i64:
+    match inst:
+        case InlineAsm(_, _, _, outputs, _):
+            var count = 0
+            for output in outputs:
+                match output.kind:
+                    case Out | LateOut | InOut:
+                        if exception_operand_local(output.operand) == local.id:
+                            count = count + 1
+                    case In: ()
+            count
+        case _:
+            if exception_inst_dest_id(inst) == local.id: 1 else: 0
+
 fn exception_terminator_dest_id(term: MirTerminator) -> i64:
     match term:
         case CallTerminator(dest, _, _, _, _, _): exception_optional_dest_id(dest)
@@ -182,8 +198,8 @@ fn exception_definition_count(body: MirBody, local: LocalId) -> i64:
     var count = 0
     for block in body.blocks:
         for instruction in block.instructions:
-            if exception_inst_dest_id(instruction.kind) == local.id:
-                count = count + 1
+            count = count + exception_inst_definition_count_for_local(
+                instruction.kind, local)
         if exception_terminator_dest_id(block.terminator) == local.id:
             count = count + 1
     count
@@ -191,7 +207,8 @@ fn exception_definition_count(body: MirBody, local: LocalId) -> i64:
 fn exception_definition_block(body: MirBody, local: LocalId) -> BlockId?:
     for block in body.blocks:
         for instruction in block.instructions:
-            if exception_inst_dest_id(instruction.kind) == local.id:
+            if exception_inst_definition_count_for_local(
+                instruction.kind, local) > 0:
                 return Some(block.id)
         if exception_terminator_dest_id(block.terminator) == local.id:
             return Some(block.id)
@@ -200,7 +217,8 @@ fn exception_definition_block(body: MirBody, local: LocalId) -> BlockId?:
 fn exception_has_instruction_definition(body: MirBody, local: LocalId) -> bool:
     for block in body.blocks:
         for instruction in block.instructions:
-            if exception_inst_dest_id(instruction.kind) == local.id:
+            if exception_inst_definition_count_for_local(
+                instruction.kind, local) > 0:
                 return true
     false
 
@@ -224,6 +242,49 @@ fn exception_owner_has_canonical_bitcast(body: MirBody, owner: LocalId) -> bool:
                         case _: return false
                 case _: ()
     false
+
+fn exception_owner_source_struct_symbol(body: MirBody, owner: LocalId) -> i64:
+    for block in body.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case Bitcast(dest, source, target):
+                    if dest.id != owner.id:
+                        continue
+                    match target.kind:
+                        case Opaque(name):
+                            if name != "AspectExecutionContext": return -1
+                        case _: return -1
+                    val source_type = exception_local_type(
+                        body, exception_operand_local(source))
+                    if source_type == nil:
+                        return -1
+                    match source_type.unwrap():
+                        case Struct(symbol): return symbol.id
+                        case _: return -1
+                case _: ()
+    -1
+
+fn exception_module_context_symbol(module: MirModule) -> i64:
+    var context_symbol = -1
+    for symbol in module.types.keys():
+        if module.types[symbol].name == "AspectExecutionContext":
+            if context_symbol >= 0:
+                return -1
+            context_symbol = symbol.id
+    context_symbol
+
+fn exception_validate_cleanup_owner_nominals(
+    module: MirModule, function: MirFunction
+) -> Result<(), text>:
+    val body = MirBody.from_function(function)
+    val canonical_symbol = exception_module_context_symbol(module)
+    for contract in function.exception_cleanup_contracts:
+        for entry in contract.entries:
+            val symbol_id = exception_owner_source_struct_symbol(body, entry.owner)
+            if symbol_id < 0 or symbol_id != canonical_symbol:
+                return exception_cfg_error(
+                    "facet cleanup manifest owner source is not canonical AspectExecutionContext")
+    Ok(())
 
 fn exception_definition_dominates_unwind_calls(
     body: MirBody, local: LocalId, unwind_entry: BlockId
@@ -660,8 +721,6 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
                 matching_contract = Some(contract)
         if matching_contract == nil:
             return exception_cfg_error("facet cleanup landing pad has no manifest")
-        if not has_facet_release and matching_contract != nil:
-            return exception_cfg_error("orphan facet cleanup manifest has no release calls")
         if matching_contract != nil:
             val manifest_validation = exception_validate_cleanup_manifest(
                 body, matching_contract.unwrap(), region)
@@ -721,6 +780,10 @@ fn validate_mir_exception_module(module: MirModule, phase: text) -> Result<(), t
         val validation = validate_mir_exception_cfg(MirBody.from_function(function))
         if validation.is_err():
             return Err("{validation.unwrap_err()} in function '{function.name}' {phase}")
+        val nominal_validation = exception_validate_cleanup_owner_nominals(
+            module, function)
+        if nominal_validation.is_err():
+            return Err("{nominal_validation.unwrap_err()} in function '{function.name}' {phase}")
     Ok(())
 
 fn validate_mir_exception_module_gate_or_panic(module: MirModule, phase: text):

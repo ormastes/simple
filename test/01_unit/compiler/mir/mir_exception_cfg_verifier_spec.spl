@@ -1,9 +1,10 @@
 use std.spec.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
+use compiler.frontend.parser_types_expr.{AsmConstraintKind, AsmLocation}
 use compiler.mir.{
     BlockId, LocalId, MirBody, MirBuilder, MirCallUnwindContract,
-    MirConstValue, MirInst, MirInstKind, MirOperand, MirOperandKind,
+    MirAsmOperand, MirConstValue, MirInst, MirInstKind, MirOperand, MirOperandKind,
     MirExceptionCleanupContract, MirFacetCleanupEntryContract,
     MirInstructionSite, MirSignature, MirTerminator, MirType, MirTypeKind,
     mir_call_terminator_create, mir_operand_const_int,
@@ -315,6 +316,25 @@ describe "MIR exception CFG verifier":
                 release_symbol:
                     "aspect_execution_context_release_facet_descriptor_or_panic")])]
         expect(validate_mir_exception_cfg(body).is_ok()).to_be(true)
+
+        var asm_redefined = body
+        var asm_entry = asm_redefined.blocks[0]
+        asm_entry.instructions.push(MirInst(kind: MirInstKind.InlineAsm(
+            "", true, [], [
+                MirAsmOperand(
+                    name: "owner", kind: AsmConstraintKind.Out,
+                    location: AsmLocation.Reg, operand: mir_operand_copy(owner)),
+                MirAsmOperand(
+                    name: "lease", kind: AsmConstraintKind.InOut,
+                    location: AsmLocation.Reg, operand: mir_operand_copy(lease)),
+                MirAsmOperand(
+                    name: "present", kind: AsmConstraintKind.LateOut,
+                    location: AsmLocation.Reg, operand: mir_operand_copy(present))],
+            []), span: nil))
+        asm_redefined.blocks[0] = asm_entry
+        expect(validate_mir_exception_cfg(
+            asm_redefined).unwrap_err()).to_contain(
+            "local must have exactly one definition")
 
         var wrong_guard = body
         var contract = wrong_guard.exception_cleanup_contracts[0]

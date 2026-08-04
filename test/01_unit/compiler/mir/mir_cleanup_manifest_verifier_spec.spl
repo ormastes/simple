@@ -6,7 +6,7 @@ use compiler.mir.{
     MirConstValue, MirExceptionCleanupContract, MirFacetCleanupEntryContract,
     MirFunction, MirInst, MirInstKind, MirInstructionSite, MirModule,
     MirOperand, MirOperandKind,
-    MirSignature, MirTerminator, MirType, MirTypeKind,
+    MirSignature, MirTerminator, MirType, MirTypeDef, MirTypeDefKind, MirTypeKind,
     mir_call_terminator_create, mir_operand_const_int, mir_operand_copy,
     mir_operand_move, validate_mir_exception_cfg,
     validate_mir_exception_module
@@ -56,7 +56,7 @@ fn reverse_cleanup_body(name: text, symbol_id: i64) -> MirBody:
     builder.emit_const(outer_lease, MirConstValue.Zero,
         MirType(kind: MirTypeKind.Opaque("__simple_facet_descriptor_lease_abi")))
     val inner_context = builder.new_temp(MirType(kind: MirTypeKind.Struct(
-        SymbolId(id: 8002))))
+        SymbolId(id: 8001))))
     val inner_owner = builder.emit_bitcast(
         mir_operand_copy(inner_context),
         MirType(kind: MirTypeKind.Opaque("AspectExecutionContext")))
@@ -140,6 +140,23 @@ describe "MIR cleanup manifest exact acceptance":
         deleted.exception_cleanup_contracts = []
         expect(validate_mir_exception_cfg(deleted).unwrap_err()).to_contain(
             "facet cleanup landing pad has no manifest")
+
+    it "accepts a mandatory empty manifest for a zero-release landing pad":
+        var builder = cleanup_manifest_builder("empty_cleanup", 1116)
+        val normal = builder.new_block(Some("normal"))
+        val unwind = builder.new_block(Some("unwind"))
+        builder.set_terminator(mir_call_terminator_create(
+            nil, mir_operand_const_int(1), [], normal,
+            MirCallUnwindContract.MayUnwind, Some(unwind)).unwrap())
+        builder.switch_to_block(unwind)
+        val token = builder.emit_landing_pad()
+        builder.terminate_resume(mir_operand_move(token))
+        builder.switch_to_block(normal)
+        builder.terminate_return(nil)
+        var body = MirBody.from_function(builder.end_function())
+        body.exception_cleanup_contracts = [MirExceptionCleanupContract(
+            unwind_entry: unwind, token: token, entries: [])]
+        expect(validate_mir_exception_cfg(body).is_ok()).to_be(true)
 
     it "rejects fabricated, missing, repeated, and post-call local definitions":
         var fabricated = reverse_cleanup_body("fabricated_owner", 1112)
@@ -286,6 +303,78 @@ describe "MIR cleanup manifest exact acceptance":
             entries: [cleanup_manifest_entry(owner, lease, release, 0)])]
         expect(validate_mir_exception_cfg(body).unwrap_err()).to_contain(
             "join has inconsistent manifest order")
+
+    it "checks dominance against every MayUnwind call sharing one target":
+        var builder = cleanup_manifest_builder("shared_unwind_target", 1117)
+        val defined_call = builder.new_block(Some("defined_call"))
+        val bypass_call = builder.new_block(Some("bypass_call"))
+        val defined_normal = builder.new_block(Some("defined_normal"))
+        val bypass_normal = builder.new_block(Some("bypass_normal"))
+        val unwind = builder.new_block(Some("unwind"))
+        val condition = builder.new_temp(MirType.bool())
+        builder.emit_const(condition, MirConstValue.Bool(true), MirType.bool())
+        builder.terminate_if(
+            mir_operand_copy(condition), defined_call, bypass_call)
+        builder.switch_to_block(defined_call)
+        val context = builder.new_temp(MirType(kind: MirTypeKind.Struct(
+            SymbolId(id: 8010))))
+        val owner = builder.emit_bitcast(
+            mir_operand_copy(context),
+            MirType(kind: MirTypeKind.Opaque("AspectExecutionContext")))
+        val lease = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
+            "__simple_facet_descriptor_lease_abi")))
+        builder.emit_const(lease, MirConstValue.Zero,
+            MirType(kind: MirTypeKind.Opaque("__simple_facet_descriptor_lease_abi")))
+        builder.set_terminator(mir_call_terminator_create(
+            nil, mir_operand_const_int(1), [], defined_normal,
+            MirCallUnwindContract.MayUnwind, Some(unwind)).unwrap())
+        builder.switch_to_block(bypass_call)
+        builder.set_terminator(mir_call_terminator_create(
+            nil, mir_operand_const_int(2), [], bypass_normal,
+            MirCallUnwindContract.MayUnwind, Some(unwind)).unwrap())
+        builder.switch_to_block(unwind)
+        val token = builder.emit_landing_pad()
+        builder.emit_call(cleanup_release_operand(),
+            [mir_operand_copy(owner), mir_operand_copy(lease)], MirType.unit())
+        builder.terminate_resume(mir_operand_move(token))
+        builder.switch_to_block(defined_normal)
+        builder.terminate_return(nil)
+        builder.switch_to_block(bypass_normal)
+        builder.terminate_return(nil)
+        var body = MirBody.from_function(builder.end_function())
+        body.exception_cleanup_contracts = [MirExceptionCleanupContract(
+            unwind_entry: unwind, token: token,
+            entries: [cleanup_manifest_entry(owner, lease, unwind, 1)])]
+        expect(validate_mir_exception_cfg(body).unwrap_err()).to_contain(
+            "local definition does not dominate unwind call")
+
+    it "resolves owner source nominal identity through module types":
+        val body = reverse_cleanup_body("nominal_owner", 1118)
+        val function = cleanup_manifest_function(body)
+        var canonical_types: Dict<SymbolId, MirTypeDef> = {}
+        canonical_types[SymbolId(id: 8001)] = MirTypeDef(
+            symbol: SymbolId(id: 8001), name: "AspectExecutionContext",
+            kind: MirTypeDefKind.Struct([]), is_export_c: false,
+            export_name: "")
+        val canonical = MirModule(
+            name: "canonical_owner", functions: {function.symbol: function},
+            statics: {}, constants: {}, types: canonical_types,
+            facet_binding_plans: [], prepared_advice_slots: [])
+        expect(validate_mir_exception_module(
+            canonical, "at final backend handoff").is_ok()).to_be(true)
+
+        var wrong_types: Dict<SymbolId, MirTypeDef> = {}
+        wrong_types[SymbolId(id: 8001)] = MirTypeDef(
+            symbol: SymbolId(id: 8001), name: "ArbitraryStruct",
+            kind: MirTypeDefKind.Struct([]), is_export_c: false,
+            export_name: "")
+        val wrong = MirModule(
+            name: "wrong_owner", functions: {function.symbol: function},
+            statics: {}, constants: {}, types: wrong_types,
+            facet_binding_plans: [], prepared_advice_slots: [])
+        expect(validate_mir_exception_module(
+            wrong, "at final backend handoff").unwrap_err()).to_contain(
+            "owner source is not canonical AspectExecutionContext")
 
     it "rejects an orphan manifest and rejects stale metadata at the final typed gate":
         var orphan = reverse_cleanup_body("orphan", 1109)

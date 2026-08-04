@@ -220,7 +220,10 @@ true-release/false-bypass joins, and complete ordered consumption before every
 `Resume`. Every current unwind landing pad requires a manifest. Each manifest
 owner, lease, and optional presence local has one definition that dominates
 every targeting `MayUnwind` call; the owner definition is the canonical
-Struct-context to opaque `AspectExecutionContext` bitcast.
+Struct-context to opaque `AspectExecutionContext` bitcast, and the module gate
+resolves that Struct symbol to the nominal `AspectExecutionContext` type rather
+than accepting an arbitrary Struct. A landing pad with no releases remains
+explicitly represented by a legitimate empty manifest.
 
 This closes static local fabrication through missing/repeated/non-dominating
 definitions, but it is not full acquisition provenance. The verifier does not
@@ -228,6 +231,11 @@ yet prove that each lease definition is the exact result of the matching facet
 acquisition call, base object, contract, and generation. The producer records
 those typed locals, while an executable real-HIR acquisition through a
 `MayUnwind` cleanup edge remains pending evidence.
+
+The stricter module gate requires the canonical imported context type to be
+present in `MirModule.types`. If real lowering omits that imported type
+definition, it is a producer completeness failure to repair; the verifier must
+not weaken nominal identity to accept self-attested or absent type metadata.
 
 The manifest is compiler-internal metadata carried by `MirFunction`, `MirBody`,
 compile-pipeline MIR JSON, and identity-preserving pre-backend adapters. It is
