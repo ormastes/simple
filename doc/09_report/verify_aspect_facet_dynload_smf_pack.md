@@ -66,6 +66,13 @@ bookmark is synchronized with GitHub and is rebased onto the current
   representative optimizer preservation, backend/interpreter consumption, and
   live-facet unknown indirect-call `E-AF007` are covered by non-placeholder
   static specs. No compiler or backend was executed for this evidence.
+- **PASS — typed HIR unwind owner and MIR admission (static review):** source
+  `@may_unwind`/`@no_unwind` declarations populate the typed effect row;
+  unannotated declarations default to `NoUnwind`; callable registration,
+  type inference, imports, and method resolution preserve the row. MIR admits
+  `NoUnwind` and rejects `MayUnwind`, missing, or conflicting metadata before
+  call emission when no cleanup successor exists. Live facet scopes retain
+  `E-AF007` precedence. This is static acceptance, not executable evidence.
 - **PASS — automatic registry source path (static review):** real compile inputs
   discover and install the resolver-owned aspect registry; its fingerprint is
   carried into object/closure cache identity. Importer-scoped resolution keys,
@@ -199,8 +206,9 @@ contract are implemented statically. Explicit MIR call-unwind metadata,
 validation, serialization, representative optimizer preservation, and backend
 consumption are also implemented statically; they are not release evidence.
 Blocking gaps are current-source compiler/backend execution and ABI linkage;
-source/HIR effect declarations and propagation; real cleanup successors with
-throw/resume semantics; async cancellation unwinding; LLVM C API `invoke`,
+executable parser/import/method effect propagation; real `MayUnwind` cleanup
+successors with throw/resume semantics; async cancellation and cross-thread
+unwinding; LLVM C API `invoke`,
 landing-pad, and `resume` integration; production
 deployment and startup configuration; lifecycle-wide concurrency, callback-
 error, stale-commit, and lease-drain evidence; imported/indirect unwind and

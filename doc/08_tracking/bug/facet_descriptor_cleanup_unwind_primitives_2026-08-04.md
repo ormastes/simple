@@ -2,10 +2,10 @@
 
 Date: 2026-08-04
 
-Status: partial implementation. The explicit MIR call-terminator contract and
-fail-closed consumers are implemented and statically reviewed; portable source
-effects, cleanup pads/resume, cancellation, and executable verification remain
-open.
+Status: partial implementation. Typed source/HIR effects, the fail-closed
+HIR-to-MIR admission bridge, the explicit MIR call-terminator contract, and its
+consumers are implemented and statically reviewed. Cleanup successors and
+throw/resume pads, cancellation, and executable verification remain open.
 
 ## Problem
 
@@ -30,25 +30,34 @@ No path may silently lower an inconsistent contract/edge pair.
 
 ## Missing primitives
 
-- A typed source/HIR effect owner marking direct, indirect, method, facet
-  witness, and foreign calls as `nounwind` or `may_unwind` before MIR creation.
+- A canonical lowering owner that creates cleanup successors for typed
+  `MayUnwind` calls rather than rejecting them before ordinary call emission.
 - A canonical MIR throw/resume representation carrying the thrown value.
 - Cleanup-pad/landing-pad blocks with defined ordering and exactly-once rules.
 - Backend contracts for cleanup and resume on LLVM, C, Cranelift, interpreter,
   and native x86_64/AArch64/RISC-V targets.
 - Async state-machine ownership hooks for suspension, cancellation, drop, and
   completion of live descriptor leases.
+- Cross-thread unwind/cancellation ownership and executable parser/import/method
+  propagation evidence for the typed HIR effect row.
 - Executable verification proving optimizer CFG rewrites and every admitted
   backend preserve cleanup/unwind behavior. Focused static MIR JSON and
   optimizer-preservation specs now exist but have not executed in this lane.
 
 ## Current fail-closed boundary
 
-MIR lowering emits fatal `E-AF007` when a possibly live leased facet scope
-contains `throw`, `await`, `yield`, an identifiable extern call, or any generic
-indirect call whose unwind behavior is unspecified. Indirect/imported calls do
-not default to `NoUnwind`; they remain fail-closed until the source/HIR effect
-owner supplies an exact contract.
+Every declared function now carries exactly one typed unwind effect. Existing
+source and extern declarations default to `@no_unwind`; `@may_unwind` is
+explicit, and neither extern status nor a string/custom effect infers it.
+Callable registration and module-surface import rows preserve the effect for
+direct, imported, instance/static/trait, and function-typed indirect calls.
+
+MIR lowering admits an ordinary `MirInstKind.Call` only for `NoUnwind`.
+`MayUnwind` fails with `E-MIR-UNWIND001` until a real cleanup successor exists;
+missing, duplicate, or conflicting metadata also fails rather than defaulting.
+Inside a live facet lease, the same cases preserve the stronger lexical cleanup
+diagnostic and fail first with E-AF007. `throw`, `await`, and `yield` remain
+E-AF007 while a lease is live.
 
 ## Completion criteria
 
@@ -67,8 +76,9 @@ surfaces and their authoritative owners are:
 - `src/compiler/50.mir/facet_witness_call.spl:lower_typed_facet_member_call`
   creates the checked descriptor-method call plan.
 - `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:lower_facet_member_call`
-  emits the indirect call, but the call instruction has no `nounwind` or
-  `may_unwind` fact.
+  emits the checked indirect call. The typed callable effect reaches MIR
+  admission; unknown effects fail and `MayUnwind` cannot become an ordinary
+  indirect call without a cleanup successor.
 - `src/compiler/50.mir/mir_instruction_support.spl` owns
   `MirCallUnwindContract`, `validate_mir_call_unwind_contract`, and the canonical
   validated `mir_call_terminator_create`; normal lowering still has no cleanup
@@ -136,22 +146,27 @@ metadata rather than portable groundwork.
 
 Current implementation against the minimum truthful model is:
 
-1. **Implemented for `CallTerminator`:** common `MirCallUnwindContract` with
+1. **Implemented from source through admission:** `EffectKind.NoUnwind` and
+   `EffectKind.MayUnwind` are typed HIR effects. `@no_unwind` is the compatible
+   default, `@may_unwind` is explicit, async remains an independent effect, and
+   duplicate/conflicting unwind annotations are fatal. Callable/import/method
+   and function-type propagation preserves the exact effect. MIR maps it to
+   `MirCallUnwindContract`, admits only `NoUnwind` as an ordinary call, and
+   rejects missing/conflicting metadata or `MayUnwind` without a cleanup edge.
+2. **Implemented for `CallTerminator`:** common `MirCallUnwindContract` with
    only `NoUnwind` and `MayUnwind`; absence is impossible and the validator
    rejects inconsistent edge pairs. JSON/serialization, borrow analysis, SSA,
    DCE, copy propagation, LICM, outlining, loop/collection analysis,
    interpreter, and backend consumers preserve or reject the explicit value.
-   Ordinary `MirInstKind.Call`/`CallIndirect` still lack this source-derived
-   effect because no HIR owner exists.
-2. **Implemented fail-closed consumption:** textual LLVM emits `call` for
+   Ordinary `MirInstKind.Call`/`CallIndirect` admission consumes this
+   source-derived effect; the instruction itself remains the admitted
+   `NoUnwind` form rather than duplicating HIR metadata.
+3. **Implemented fail-closed consumption:** textual LLVM emits `call` for
    `NoUnwind` and `invoke` for `MayUnwind`; the interpreter consumes both; the
    LLVM C API and native/unsupported backends reject unsupported `MayUnwind`.
-3. **Open:** add a HIR/source effect owner. `HirFunction.is_extern` alone is insufficient:
-   extern declarations need an explicit unwind contract, and function-pointer,
-   method, and facet-contract signatures must retain the same fact.
-4. **Open:** lower source-derived `NoUnwind` calls normally. Lower `MayUnwind` only through
-   `CallTerminator` after a cleanup target exists; otherwise emit a typed fatal
-   diagnostic before backend selection.
+4. **Open:** create cleanup successors and lower source-derived `MayUnwind`
+   through `CallTerminator`. The current bridge correctly emits a typed fatal
+   diagnostic before backend selection instead of fabricating an unwind edge.
 5. **Partially implemented:** native and unsupported backends fail closed.
    Textual LLVM can spell `invoke`, but admission remains blocked until the
    function is no longer contradictorily `nounwind` and the unwind block owns a
@@ -177,7 +192,8 @@ Current implementation against the minimum truthful model is:
   explicit contract is rejected inside a leased scope; explicit `NoUnwind` is
   admitted and `MayUnwind` requires the cleanup-edge capability.
 
-Until the remaining source-effect, cleanup-pad/resume, async cancellation,
-LLVM C-API invoke, and executable evidence owners land together, E-AF007 and
+Until the remaining cleanup-successor/pad/resume, async/thread cancellation,
+LLVM C-API invoke, executable parser/import/method checks, and NFR evidence
+owners land together, E-AF007 and
 the native/unsupported `CallTerminator` rejections remain the authoritative
 portable behavior.
