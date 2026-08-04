@@ -1,5 +1,5 @@
 use compiler.mir.mir_instruction_graph.{MirBlock, MirInst}
-use compiler.mir.mir_instruction_support.{BlockId, mir_operand_const_int, mir_operand_copy}
+use compiler.mir.mir_instruction_support.{BlockId, SwitchCase, mir_operand_const_int, mir_operand_copy}
 use compiler.mir.mir_instruction_kinds.{MirInstKind, MirTerminator}
 use compiler.mir.mir_types.{LocalId}
 
@@ -255,3 +255,119 @@ describe "bootstrap MIR-to-LLVM owner mutation":
         expect(codegen).to_contain("[mir-to-llvm] call:arg-before")
         expect(codegen).to_contain("[mir-to-llvm] call:arg-after")
         expect(codegen).to_contain("[mir-to-llvm] call:emit")
+
+    it "projects terminator block and switch targets through their owners":
+        expect(BlockId(id: 73).bootstrap_value()).to_equal(73)
+        val switch_case = SwitchCase(value: 19, target: BlockId(id: 91))
+        expect(switch_case.bootstrap_value()).to_equal(19)
+        expect(switch_case.bootstrap_target_value()).to_equal(91)
+
+    it "routes every terminator through indexed blocks and scalar targets":
+        val codegen = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+        ) ?? ""
+        val support = rt_file_read_text(
+            "src/compiler/50.mir/mir_instruction_support.spl"
+        ) ?? ""
+
+        expect(codegen).to_contain("self.translate_block_at(body.blocks, block_i)")
+        expect(codegen).to_contain("me translate_block_at(blocks: [MirBlock], block_index: i64):")
+        expect(codegen).to_contain("self.translate_terminator_at(blocks, block_index)")
+        expect(codegen).to_contain("me translate_terminator_at(blocks: [MirBlock], block_index: i64):")
+        expect(codegen).to_contain("val term = block.terminator")
+        expect(codegen.contains("self.translate_terminator(block.terminator)")).to_equal(false)
+        expect(codegen).to_contain("val ret_operands: [MirOperand] = [ret_operand]")
+        expect(codegen).to_contain("self.translate_operand_at(ret_operands, 0)")
+        expect(codegen).to_contain("val target_id = target.bootstrap_value()")
+        expect(codegen).to_contain("val then_id = then_.bootstrap_value()")
+        expect(codegen).to_contain("val else_id = else_.bootstrap_value()")
+        expect(codegen).to_contain("switch_case.bootstrap_target_value()")
+        expect(codegen).to_contain("val normal_id = normal.bootstrap_value()")
+        expect(codegen).to_contain("val dest_id = if has_dest: (dest ?? LocalId(id: 0)).id else: 0")
+        expect(support).to_contain("fn bootstrap_value() -> i64:")
+        expect(support).to_contain("fn bootstrap_target_value() -> i64:")
+
+    it "keeps indexed terminator variants and nonsequential ids intact":
+        val ret_nil = MirTerminator.Ret(nil)
+        val ret_const = MirTerminator.Ret(Some(mir_operand_const_int(7)))
+        val ret_copy = MirTerminator.Ret(Some(mir_operand_copy(LocalId(id: 4))))
+        val goto = MirTerminator.Goto(BlockId(id: 41))
+        val if_ = MirTerminator.If(mir_operand_const_int(1), BlockId(id: 53), BlockId(id: 79))
+        val switch = MirTerminator.Switch(
+            mir_operand_const_int(9),
+            [SwitchCase(value: 9, target: BlockId(id: 101))],
+            BlockId(id: 137)
+        )
+        val unreachable = MirTerminator.Unreachable
+        val abort = MirTerminator.Abort("stop")
+        val call_plain = MirTerminator.CallTerminator(
+            nil, mir_operand_const_int(0), [], BlockId(id: 149), nil
+        )
+        val call_invoke = MirTerminator.CallTerminator(
+            Some(LocalId(id: 6)), mir_operand_copy(LocalId(id: 8)),
+            [mir_operand_const_int(3)], BlockId(id: 163), Some(BlockId(id: 181))
+        )
+
+        match ret_nil:
+            case MirTerminator.Ret(value): expect(value == nil).to_equal(true)
+            case _: expect(false).to_equal(true)
+        match ret_const:
+            case MirTerminator.Ret(value): expect(value != nil).to_equal(true)
+            case _: expect(false).to_equal(true)
+        match ret_copy:
+            case MirTerminator.Ret(value):
+                val operand = value ?? mir_operand_const_int(0)
+                match operand.kind:
+                    case Copy(local): expect(local.id).to_equal(4)
+                    case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+        match goto:
+            case MirTerminator.Goto(target): expect(target.bootstrap_value()).to_equal(41)
+            case _: expect(false).to_equal(true)
+        match if_:
+            case MirTerminator.If(_, then_, else_):
+                expect(then_.bootstrap_value()).to_equal(53)
+                expect(else_.bootstrap_value()).to_equal(79)
+            case _: expect(false).to_equal(true)
+        match switch:
+            case MirTerminator.Switch(_, targets, default):
+                expect(targets[0].bootstrap_target_value()).to_equal(101)
+                expect(default.bootstrap_value()).to_equal(137)
+            case _: expect(false).to_equal(true)
+        var saw_unreachable = false
+        match unreachable:
+            case MirTerminator.Unreachable: saw_unreachable = true
+            case _: expect(false).to_equal(true)
+        expect(saw_unreachable).to_equal(true)
+        match abort:
+            case MirTerminator.Abort(message): expect(message).to_equal("stop")
+            case _: expect(false).to_equal(true)
+        match call_plain:
+            case MirTerminator.CallTerminator(dest, _, args, normal, unwind):
+                expect(dest == nil).to_equal(true)
+                expect(args.len()).to_equal(0)
+                expect(normal.bootstrap_value()).to_equal(149)
+                expect(unwind == nil).to_equal(true)
+            case _: expect(false).to_equal(true)
+        match call_invoke:
+            case MirTerminator.CallTerminator(dest, _, args, normal, unwind):
+                expect((dest ?? LocalId(id: 0)).id).to_equal(6)
+                expect(args.len()).to_equal(1)
+                expect(normal.bootstrap_value()).to_equal(163)
+                expect((unwind ?? BlockId(id: 0)).bootstrap_value()).to_equal(181)
+            case _: expect(false).to_equal(true)
+
+    it "keeps indexed terminator progress markers bootstrap-debug gated":
+        val codegen = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+        ) ?? ""
+        expect(codegen).to_contain("[mir-to-llvm] terminator:entry")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:kind")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:ret")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:goto")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:if")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:switch")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:unreachable")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:abort")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:call")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:emit")

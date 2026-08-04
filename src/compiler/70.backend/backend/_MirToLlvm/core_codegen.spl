@@ -515,16 +515,16 @@ impl MirTextCodegen for MirToLlvm:
 
         var block_i = 0
         while block_i < body.blocks.len():
-            val block = body.blocks[block_i]
-            self.translate_block(block)
+            self.translate_block_at(body.blocks, block_i)
             block_i = block_i + 1
 
         self.builder.end_function()
         if bootstrap_debug:
             print "[mir-to-llvm] function:done {name}"
 
-    me translate_block(block: MirBlock):
+    me translate_block_at(blocks: [MirBlock], block_index: i64):
         """Translate a MIR basic block."""
+        val block = blocks[block_index]
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] block:label-before"
@@ -543,7 +543,7 @@ impl MirTextCodegen for MirToLlvm:
             bootstrap_inst_i = bootstrap_inst_i + 1
         if bootstrap_debug:
             print "[mir-to-llvm] block:terminator-before bb{bootstrap_block_id}"
-        self.translate_terminator(block.terminator)
+        self.translate_terminator_at(blocks, block_index)
         if bootstrap_debug:
             print "[mir-to-llvm] block:terminator-after bb{bootstrap_block_id}"
 
@@ -865,16 +865,26 @@ impl MirTextCodegen for MirToLlvm:
             param_tys = param_tys.push(self.valid_llvm_type(self.llvm_type_text(param)))
         self.remember_function_param_types(name, param_tys)
 
-    me translate_terminator(term: MirTerminator):
-        """Translate a block terminator."""
+    me translate_terminator_at(blocks: [MirBlock], block_index: i64):
+        """Translate a block terminator through its indexed MirBlock owner."""
+        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        if bootstrap_debug:
+            print "[mir-to-llvm] terminator:entry index={block_index}"
+        val block = blocks[block_index]
+        val term = block.terminator
+        if bootstrap_debug:
+            print "[mir-to-llvm] terminator:kind index={block_index}"
         match term:
             case Ret(value):
+                if bootstrap_debug:
+                    print "[mir-to-llvm] terminator:ret index={block_index} present={value != nil}"
                 # Decay-safe optional extraction, matching the call-dest path:
                 # compiled cross-module MirOperand? values can arrive flat.
                 if (rt_env_get("SIMPLE_LLVM_RET_TRACE") ?? "") == "1":
                     print "[llvm-ret-top] fn={self.current_function_name} value_nil={value == nil}"
                 if value != nil:
                     val ret_operand: MirOperand = value ?? mir_operand_const_int(0)
+                    val ret_operands: [MirOperand] = [ret_operand]
                     if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                         match ret_operand.kind:
                             case Const(const_value, const_type):
@@ -882,14 +892,18 @@ impl MirTextCodegen for MirToLlvm:
                                     case Int(v):
                                         val const_ret_ty = self.valid_llvm_type(self.current_return_type)
                                         self.builder.emit_ret(const_ret_ty, self.ret_value_for_type(const_ret_ty, "{v}"))
+                                        if bootstrap_debug:
+                                            print "[mir-to-llvm] terminator:emit index={block_index} variant=ret-const"
                                         return
                             case _:
                                 ()
                     match ret_operand.kind:
                         case Copy(local) | Move(local):
-                            val return_local_id = self.local_id_value(local)
+                            val return_local_id = local.id
                             if self.current_function_name == "_start":
                                 self.builder.emit("  unreachable")
+                                if bootstrap_debug:
+                                    print "[mir-to-llvm] terminator:emit index={block_index} variant=ret-start"
                                 return
                             # `not defined_locals.has(...)`: the return operand
                             # references a local that was declared but never
@@ -906,11 +920,13 @@ impl MirTextCodegen for MirToLlvm:
                                 print "[llvm-ret] fn={self.current_function_name} local={return_local_id} is_return_local={self.return_locals.has(return_local_id)} has_type={self.local_types.has(return_local_id)} defined={self.defined_locals.has(return_local_id)}"
                             if self.return_locals.has(return_local_id) or not self.local_types.has(return_local_id) or not self.defined_locals.has(return_local_id):
                                 self.builder.emit_ret(self.current_return_type, self.ret_value_for_type(self.current_return_type, "0"))
+                                if bootstrap_debug:
+                                    print "[mir-to-llvm] terminator:emit index={block_index} variant=ret-fallback"
                                 return
                         case _:
                             ()
-                    val val_str = self.translate_operand(ret_operand)
-                    val src_ret_ty: text = self.get_operand_type(ret_operand)
+                    val val_str = self.translate_operand_at(ret_operands, 0)
+                    val src_ret_ty: text = self.get_operand_type_at(ret_operands, 0)
                     val ret_ty = self.valid_llvm_type(self.current_return_type)
                     val ret_val = self.value_as_type(val_str, src_ret_ty, ret_ty)
                     self.builder.emit_ret(ret_ty, self.ret_value_for_type(ret_ty, ret_val))
@@ -919,62 +935,101 @@ impl MirTextCodegen for MirToLlvm:
                         self.builder.emit_ret_void()
                     else:
                         self.builder.emit_ret(self.current_return_type, self.ret_value_for_type(self.current_return_type, "0"))
+                if bootstrap_debug:
+                    print "[mir-to-llvm] terminator:emit index={block_index} variant=ret"
 
             case Goto(target):
-                self.builder.emit_br("bb{self.block_id_value(target)}")
+                val target_id = target.bootstrap_value()
+                if bootstrap_debug:
+                    print "[mir-to-llvm] terminator:goto index={block_index} target={target_id}"
+                self.builder.emit_br("bb{target_id}")
+                if bootstrap_debug:
+                    print "[mir-to-llvm] terminator:emit index={block_index} variant=goto"
 
             case If(cond, then_, else_):
-                val cond_val = self.translate_operand(cond)
-                val cond_ty = self.valid_llvm_type(self.get_operand_type(cond))
+                val cond_operands: [MirOperand] = [cond]
+                val then_id = then_.bootstrap_value()
+                val else_id = else_.bootstrap_value()
+                if bootstrap_debug:
+                    print "[mir-to-llvm] terminator:if index={block_index} then={then_id} else={else_id}"
+                val cond_val = self.translate_operand_at(cond_operands, 0)
+                val cond_ty = self.valid_llvm_type(self.get_operand_type_at(cond_operands, 0))
                 if cond_ty == "i1":
                     # Already boolean, use directly
-                    self.builder.emit_cond_br(cond_val, "bb{self.block_id_value(then_)}", "bb{self.block_id_value(else_)}")
+                    self.builder.emit_cond_br(cond_val, "bb{then_id}", "bb{else_id}")
                 elif cond_ty == "ptr":
                     val i1_cond = self.builder.fresh_local()
                     self.builder.emit("  {i1_cond} = icmp ne ptr {cond_val}, null")
-                    self.builder.emit_cond_br(i1_cond, "bb{self.block_id_value(then_)}", "bb{self.block_id_value(else_)}")
+                    self.builder.emit_cond_br(i1_cond, "bb{then_id}", "bb{else_id}")
                 else:
                     val i1_cond = self.builder.fresh_local()
                     self.builder.emit("  {i1_cond} = icmp ne {cond_ty} {cond_val}, 0")
-                    self.builder.emit_cond_br(i1_cond, "bb{self.block_id_value(then_)}", "bb{self.block_id_value(else_)}")
+                    self.builder.emit_cond_br(i1_cond, "bb{then_id}", "bb{else_id}")
+                if bootstrap_debug:
+                    print "[mir-to-llvm] terminator:emit index={block_index} variant=if"
 
             case Switch(value, targets, default):
-                val discr_val = self.translate_operand(value)
+                val value_operands: [MirOperand] = [value]
+                val discr_val = self.translate_operand_at(value_operands, 0)
                 val nit = self.native_int()
+                val default_id = default.bootstrap_value()
+                if bootstrap_debug:
+                    print "[mir-to-llvm] terminator:switch index={block_index} default={default_id} cases={targets.len()}"
                 var cases: [(text, text)] = []
-                for switch_case_raw in targets:
-                    val switch_case: SwitchCase = switch_case_raw
-                    val case_value = "{switch_case.value}"
-                    val case_label = "bb{self.block_id_value(switch_case.target)}"
+                var target_i = 0
+                while target_i < targets.len():
+                    val switch_case = targets[target_i]
+                    val case_value = "{switch_case.bootstrap_value()}"
+                    val case_label = "bb{switch_case.bootstrap_target_value()}"
                     cases = cases.push((case_value, case_label))
-                self.builder.emit_switch(discr_val, nit, "bb{self.block_id_value(default)}", cases)
+                    target_i = target_i + 1
+                self.builder.emit_switch(discr_val, nit, "bb{default_id}", cases)
+                if bootstrap_debug:
+                    print "[mir-to-llvm] terminator:emit index={block_index} variant=switch"
 
             case Unreachable:
+                if bootstrap_debug:
+                    print "[mir-to-llvm] terminator:unreachable index={block_index}"
                 self.builder.emit("  unreachable")
+                if bootstrap_debug:
+                    print "[mir-to-llvm] terminator:emit index={block_index} variant=unreachable"
 
             case Abort(message):
+                if bootstrap_debug:
+                    print "[mir-to-llvm] terminator:abort index={block_index}"
                 self.emit_unsupported_panic(message)
+                if bootstrap_debug:
+                    print "[mir-to-llvm] terminator:emit index={block_index} variant=abort"
 
             case CallTerminator(dest, func, args, normal, unwind):
-                var func_val = self.translate_operand(func)
+                val func_operands: [MirOperand] = [func]
+                val normal_id = normal.bootstrap_value()
+                val has_unwind = unwind != nil
+                val unwind_id = if has_unwind: (unwind ?? BlockId(id: 0)).bootstrap_value() else: 0
+                val has_dest = dest != nil
+                val dest_id = if has_dest: (dest ?? LocalId(id: 0)).id else: 0
+                if bootstrap_debug:
+                    print "[mir-to-llvm] terminator:call index={block_index} dest={has_dest} normal={normal_id} unwind={has_unwind}"
+                var func_val = self.translate_operand_at(func_operands, 0)
                 match func.kind:
                     case Copy(local) | Move(local):
-                        func_val = self.value_as_type(func_val, self.get_operand_type(func), "ptr")
+                        func_val = self.value_as_type(func_val, self.get_operand_type_at(func_operands, 0), "ptr")
                     case _:
                         ()
                 val call_func_val = self.normalize_call_callee(func_val)
                 var arg_vals: [text] = []
                 var arg_i = 0
-                for arg in args:
-                    var arg_val = self.translate_operand(arg)
-                    var arg_ty = self.valid_llvm_type(self.get_operand_type(arg))
+                var arg_index = 0
+                while arg_index < args.len():
+                    var arg_val = self.translate_operand_at(args, arg_index)
+                    var arg_ty = self.valid_llvm_type(self.get_operand_type_at(args, arg_index))
                     val param_ty = self.lookup_function_param_type(call_func_val, arg_i)
                     if param_ty != "" and param_ty != nil:
                         # See translate_call: print()'s raw-format runtime
                         # helpers need signedness-aware widening.
                         val is_print_raw_fmt = call_func_val == "@rt_raw_i64_to_string" or call_func_val == "@rt_raw_u64_to_string" or call_func_val == "@rt_raw_bool_to_string"
                         if is_print_raw_fmt:
-                            arg_val = self.value_as_type_signed(arg_val, arg_ty, param_ty, self.get_operand_unsigned(arg))
+                            arg_val = self.value_as_type_signed(arg_val, arg_ty, param_ty, self.get_operand_unsigned_at(args, arg_index))
                         else:
                             arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
                         arg_ty = self.valid_llvm_type(param_ty)
@@ -982,27 +1037,24 @@ impl MirTextCodegen for MirToLlvm:
                         arg_val = self.ret_value_for_type(arg_ty, "0")
                     arg_vals = arg_vals.push("{arg_ty} {arg_val}")
                     arg_i = arg_i + 1
+                    arg_index = arg_index + 1
                 val args_str = arg_vals.join(", ")
-                # Decay-safe optional access on dest/unwind (see translate_call
-                # above): cross-module optional payloads can DECAY to the bare
-                # object, so no `match: Some/nil` on them here.
-                val has_unwind = unwind != nil
-                val uw_id = if has_unwind: self.block_id_value(unwind ?? BlockId(id: 0)) else: 0
-                if dest != nil:
-                    val dest_id = self.local_id_value(dest ?? LocalId(id: 0))
+                if has_dest:
                     val dest_name = self.get_local(dest_id)
                     val ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
                     if has_unwind:
-                        self.builder.emit("  {dest_name} = invoke {ret_ty} {call_func_val}({args_str}) to label %bb{self.block_id_value(normal)} unwind label %bb{uw_id}")
+                        self.builder.emit("  {dest_name} = invoke {ret_ty} {call_func_val}({args_str}) to label %bb{normal_id} unwind label %bb{unwind_id}")
                     else:
                         self.builder.emit("  {dest_name} = call {ret_ty} {call_func_val}({args_str})")
-                        self.builder.emit_br("bb{self.block_id_value(normal)}")
+                        self.builder.emit_br("bb{normal_id}")
                 else:
                     if has_unwind:
-                        self.builder.emit("  invoke void {call_func_val}({args_str}) to label %bb{self.block_id_value(normal)} unwind label %bb{uw_id}")
+                        self.builder.emit("  invoke void {call_func_val}({args_str}) to label %bb{normal_id} unwind label %bb{unwind_id}")
                     else:
                         self.builder.emit("  call void {call_func_val}({args_str})")
-                        self.builder.emit_br("bb{self.block_id_value(normal)}")
+                        self.builder.emit_br("bb{normal_id}")
+                if bootstrap_debug:
+                    print "[mir-to-llvm] terminator:emit index={block_index} variant=call"
 
     # === Required: per-category instruction methods ===
 
