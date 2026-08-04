@@ -927,3 +927,20 @@ on. Existing Stage 2/3 hashes are unchanged from the prior failed focused
 module-global admission, so that identical command was not rerun. No
 `qemu-system-aarch64` process was launched. The next executable action remains
 receipt validation followed by one attested producer invocation.
+
+## 2026-08-04 external producer completion audit
+
+The separately owned Stage 4 process has now ended. Its bounded command used a
+7200-second timeout, the retained output ends at
+`Driver start: inputs=1030 backend=cranelift mode=one-binary`, and
+`stage4out/simple` does not exist. This establishes a failed producer handoff;
+the absence of a terminal timeout line means timeout is an inference from the
+bounded process disappearing at that phase, not a claimed compiler diagnostic.
+
+No compiler receipt appeared anywhere under the owned build roots, GitHub main
+is unchanged at `87ee4312bb`, and no `qemu-system-aarch64` process exists. The
+Stage 2/3 artifacts and hashes are also unchanged, so their identical failed
+admission was not rerun. The ARM64 producer, QMP consumer, and physical-input
+interval therefore remain gated by the same missing receipt-qualified compiler.
+Do not retry the two-hour Stage 4 command from this lane; resume only with a new
+producer artifact or a separately reviewed compiler-production repair.

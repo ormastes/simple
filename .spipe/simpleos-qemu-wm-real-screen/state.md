@@ -42,3 +42,6 @@ dev-done
 ## Log
 - dev: Reconstructed the authoritative refinement from the existing plan with
   seven acceptance criteria; implementation/evidence remains in progress.
+- audit: The separately owned 7200-second Stage 4 producer ended after entering
+  the 1030-file driver and emitted no compiler. No receipt or ARM64 QEMU process
+  appeared; unchanged Stage 2/3 admission failures were not repeated.
