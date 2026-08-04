@@ -520,3 +520,167 @@ describe "css parser gpu tables — cpu parity direct vs indexed lane":
         # miss direction agrees on both lanes
         expect(selector_matches("em.btn", node, nil, 1, 1)).to_be_false()
         expect(br_style_block_rule_for_tag_class(doc, "em", "btn")).to_equal("")
+
+# ---------------------------------------------------------------------------
+# Shorthand declaration expansion (style_block_parse)
+#
+# `expand_shorthand` and its per-property expanders are private to
+# style_block_parse.spl; `parse_declarations` is the only public entry that
+# reaches them, so every case below drives them through that door.
+# ---------------------------------------------------------------------------
+
+fn decl_pairs(src: text) -> text:
+    """Flatten parse_declarations output to a stable `prop=value;` string."""
+    val decls = parse_declarations(src)
+    var out = ""
+    var i = 0
+    while i < decls.len():
+        out = out + decls[i].property + "=" + decls[i].value + ";"
+        i = i + 1
+    out
+
+describe "css parser gpu tables — shorthand declaration expansion":
+
+    it "expands the flex shorthand across every arity form":
+        expect(decl_pairs("flex: none")).to_equal(
+            "flex-grow=0;flex-shrink=0;flex-basis=auto;")
+        expect(decl_pairs("flex: 2")).to_equal(
+            "flex-grow=2;flex-shrink=1;flex-basis=0%;")
+        expect(decl_pairs("flex: 3 4")).to_equal(
+            "flex-grow=3;flex-shrink=4;flex-basis=0%;")
+        expect(decl_pairs("flex: 5 6 120px")).to_equal(
+            "flex-grow=5;flex-shrink=6;flex-basis=120px;")
+
+    it "routes flex-flow through the shorthand dispatcher":
+        expect(decl_pairs("flex-flow: column wrap-reverse")).to_equal(
+            "flex-direction=column;flex-wrap=wrap-reverse;")
+
+    it "expands the border shorthand and normalizes keyword widths":
+        expect(decl_pairs("border: 2px dashed blue")).to_equal(
+            "border-width=2px;border-style=dashed;border-color=blue;")
+        expect(decl_pairs("border: thin solid red")).to_equal(
+            "border-width=1px;border-style=solid;border-color=red;")
+        expect(decl_pairs("border: medium dotted red")).to_equal(
+            "border-width=3px;border-style=dotted;border-color=red;")
+        expect(decl_pairs("border: thick double red")).to_equal(
+            "border-width=5px;border-style=double;border-color=red;")
+        expect(decl_pairs("border: 0.5em none red")).to_equal(
+            "border-width=0.5em;border-style=none;border-color=red;")
+        # a lone color keeps the 1px/solid defaults
+        expect(decl_pairs("border: green")).to_equal(
+            "border-width=1px;border-style=solid;border-color=green;")
+
+    it "lifts a background color out of the background shorthand":
+        expect(decl_pairs("background: red")).to_equal("background-color=red;")
+        expect(decl_pairs("background: black")).to_equal("background-color=black;")
+        expect(decl_pairs("background: #ff0000")).to_equal("background-color=#ff0000;")
+        expect(decl_pairs("background: transparent")).to_equal(
+            "background-color=transparent;")
+        # a functional color token is kept whole across its inner spaces
+        expect(decl_pairs("background: rgba(1, 2, 3, 0.5) fixed")).to_equal(
+            "background-color=rgba(1, 2, 3, 0.5);")
+        # url() and non-color keywords are skipped; the trailing hex wins
+        expect(decl_pairs("background: url(a.png) no-repeat #00ff00")).to_equal(
+            "background-color=#00ff00;")
+
+    it "leaves a background with no usable color as the untouched shorthand":
+        expect(decl_pairs("background: linear-gradient(red, blue)")).to_equal(
+            "background=linear-gradient(red, blue);")
+        expect(decl_pairs("background: no-repeat")).to_equal("background=no-repeat;")
+
+    it "extracts a font-size and font-weight from the font shorthand":
+        expect(decl_pairs("font: bold 12px Arial")).to_equal(
+            "font-weight=bold;font-size=12px;")
+        expect(decl_pairs("font: 1.5rem Georgia")).to_equal("font-size=1.5rem;")
+        expect(decl_pairs("font: italic 120%")).to_equal("font-size=120%;")
+        # nothing recognizable: the shorthand survives as-is
+        expect(decl_pairs("font: serif")).to_equal("font=serif;")
+
+    it "expands margin and padding box shorthands by arity":
+        expect(decl_pairs("margin: 5px")).to_equal("margin=5px;")
+        expect(decl_pairs("margin: 1px 2px")).to_equal(
+            "margin-top=1px;margin-right=2px;margin-bottom=1px;margin-left=2px;")
+        expect(decl_pairs("padding: 1px 2px 3px")).to_equal(
+            "padding-top=1px;padding-right=2px;padding-bottom=3px;padding-left=2px;")
+        expect(decl_pairs("padding: 1px 2px 3px 4px")).to_equal(
+            "padding-top=1px;padding-right=2px;padding-bottom=3px;padding-left=4px;")
+
+# ---------------------------------------------------------------------------
+# Relational and attribute selector matching (style_block_resolve)
+# ---------------------------------------------------------------------------
+
+fn has_fixture_tree() -> BeDomNode:
+    """<div class="card"><h2 class="title"/><ul>#text<li class="hot"/></ul></div>"""
+    val root = make_element("div", "card", "")
+    val header = make_element("h2", "title", "")
+    val list = make_element("ul", "", "")
+    list.add_child(BeDomNode.text("noise"))
+    list.add_child(make_element("li", "hot", ""))
+    root.add_child(header)
+    root.add_child(list)
+    root
+
+describe "css parser gpu tables — :has() relational matching":
+
+    it "matches :has() against direct children and deeper descendants":
+        val root = has_fixture_tree()
+        expect(simple_selector_matches(":has(h2)", root, 1, 1)).to_be_true()
+        expect(simple_selector_matches(":has(li)", root, 1, 1)).to_be_true()
+        expect(simple_selector_matches(":has(.hot)", root, 1, 1)).to_be_true()
+        expect(simple_selector_matches(":has(span)", root, 1, 1)).to_be_false()
+
+    it "honors the child combinator inside :has()":
+        val root = has_fixture_tree()
+        expect(simple_selector_matches(":has(> h2)", root, 1, 1)).to_be_true()
+        expect(simple_selector_matches(":has(> ul)", root, 1, 1)).to_be_true()
+        # li is a grandchild, so the child form must reject it even though
+        # the descendant form above accepts it
+        expect(simple_selector_matches(":has(> li)", root, 1, 1)).to_be_false()
+        # a bare ">" has no selector after it
+        expect(simple_selector_matches(":has(>)", root, 1, 1)).to_be_false()
+
+    it "treats the :has() argument as a forgiving selector list":
+        val root = has_fixture_tree()
+        expect(simple_selector_matches(":has(span, ul)", root, 1, 1)).to_be_true()
+        expect(simple_selector_matches(":has(span, em)", root, 1, 1)).to_be_false()
+        # unterminated argument: no closing paren, no match
+        expect(simple_selector_matches(":has(ul", root, 1, 1)).to_be_false()
+
+    it "combines a compound base selector with :has()":
+        val root = has_fixture_tree()
+        expect(simple_selector_matches("div:has(ul)", root, 1, 1)).to_be_true()
+        expect(simple_selector_matches("p:has(ul)", root, 1, 1)).to_be_false()
+        expect(simple_selector_matches("div:has(span)", root, 1, 1)).to_be_false()
+
+describe "css parser gpu tables — attribute and positional selector edges":
+
+    it "matches the ~= whitespace-token and $= suffix attribute operators":
+        val chip = make_element("span", "", "")
+        chip.set_attr("data-tags", "alpha beta gamma")
+        chip.set_attr("href", "/docs/index.html")
+        expect(simple_selector_matches("span[data-tags~=beta]", chip, 1, 1)).to_be_true()
+        expect(simple_selector_matches("span[data-tags~=alpha]", chip, 1, 1)).to_be_true()
+        expect(simple_selector_matches("span[data-tags~=delta]", chip, 1, 1)).to_be_false()
+        expect(simple_selector_matches("span[href$=\".html\"]", chip, 1, 1)).to_be_true()
+        expect(simple_selector_matches("span[href$=\".css\"]", chip, 1, 1)).to_be_false()
+
+    it "rejects an attribute selector with an empty key":
+        val chip = make_element("span", "", "")
+        chip.set_attr("data-tags", "alpha")
+        expect(simple_selector_matches("span[=alpha]", chip, 1, 1)).to_be_false()
+
+    it "matches :first-child and the -n+3 nth-child formula":
+        val chip = make_element("span", "", "")
+        expect(simple_selector_matches(":first-child", chip, 1, 3)).to_be_true()
+        expect(simple_selector_matches(":first-child", chip, 2, 3)).to_be_false()
+        expect(simple_selector_matches("span:nth-child(-n+3)", chip, 2, 5)).to_be_true()
+        expect(simple_selector_matches("span:nth-child(-n+3)", chip, 4, 5)).to_be_false()
+
+    it "combines a compound base selector with :not() and :is()":
+        val btn = make_element("button", "primary", "")
+        expect(simple_selector_matches("button:not(.ghost)", btn, 1, 1)).to_be_true()
+        expect(simple_selector_matches("button:not(.primary)", btn, 1, 1)).to_be_false()
+        # an empty :not() list matches nothing
+        expect(simple_selector_matches("button:not()", btn, 1, 1)).to_be_false()
+        expect(simple_selector_matches("button:is(.primary, .ghost)", btn, 1, 1)).to_be_true()
+        expect(simple_selector_matches("button:is(.ghost, .muted)", btn, 1, 1)).to_be_false()
