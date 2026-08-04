@@ -33,7 +33,6 @@ Scope (this iteration):
 | Concept | Description |
 |---------|-------------|
 | tool_awk | Entry fn: tool_awk(vfs, cwd, args, terminal) -> i32 |
-| AckProgram | Parsed representation of BEGIN/END + pattern-action rules |
 | Record | One input line; $0 is full text, $1..$NF are whitespace-split fields |
 | NR | Current record (line) number, 1-based |
 | NF | Number of fields in the current record |
@@ -41,7 +40,7 @@ Scope (this iteration):
 """
 
 use std.spipe.*
-use os.tools.shell.awk.awk_tool.{tool_awk, AckProgram}
+use os.tools.shell.awk.awk_tool.{tool_awk}
 use os.apps.terminal.terminal.{Terminal, BufferingTerminal}
 
 
@@ -240,7 +239,10 @@ describe "awk print and printf":
         expect(tcomma).to_equal("foo bar")
 
     it "print with no args prints $0":
-        val out = _run_awk("{ print }", "whole line here")
+        val lb = "{"
+        val rb = "}"
+        val prog_bare = "{lb} print {rb}"
+        val out = _run_awk(prog_bare, "whole line here")
         val tprint = out.trim()
         expect(tprint).to_equal("whole line here")
 
@@ -296,12 +298,87 @@ describe "awk exit codes":
 
     it "returns 0 for a valid program with input":
         val code = _run_awk_exit("{ print $1 }", "hello")
-        code.to_equal(0)
+        expect(code).to_equal(0)
 
     it "returns 0 for a valid program with no input":
         val code = _run_awk_exit("BEGIN { print \"ok\" }", "")
-        code.to_equal(0)
+        expect(code).to_equal(0)
 
     it "returns nonzero for an unparseable program":
         val code = _run_awk_exit("{ INVALID SYNTAX !!! }", "x")
-        code.to_be_greater_than(0)
+        expect(code).to_be_greater_than(0)
+
+
+# ============================================================================
+# Test Group 8: Action state threading (_exec_action arity + tuple return)
+# ============================================================================
+
+describe "awk action state threading":
+    """
+    ## Action State Threading
+
+    `_exec_action` takes the awk variable environment as its 8th parameter and
+    returns `(ctrl, vars)`. Every call site must pass the environment in and
+    bind both halves of the tuple back out:
+
+    - `.0` is the control code — 1 means the action ran `next`, 2 means the
+      action was not a supported statement.
+    - `.1` is the updated environment, which must be fed to the next action so
+      accumulations survive across records and reach END.
+
+    These examples pin that contract. Passing 7 arguments instead of 8 leaves
+    `vars` as the nil sentinel; binding the `(i32, [(text, text)])` return as a
+    bare `i32` makes every `ctrl` comparison compare against a tuple.
+    """
+
+    it "BEGIN block assignment is visible in END":
+        val lb = "{"
+        val rb = "}"
+        val prog = "BEGIN {lb} t = 5 {rb} END {lb} print t {rb}"
+        val out = _run_awk(prog, "")
+        expect(out.trim()).to_equal("5")
+
+    it "variable assigned on one record is visible on the next":
+        val out = _run_awk("{ sum += $1; print sum }", "5\n3\n2")
+        val lines_thread = out.trim().split("\n")
+        expect(lines_thread[0]).to_equal("5")
+        expect(lines_thread[1]).to_equal("8")
+        expect(lines_thread[2]).to_equal("10")
+
+    it "counter accumulated across records reaches END":
+        val lb2 = "{"
+        val rb2 = "}"
+        val prog_n = "{lb2} n++ {rb2} END {lb2} print n {rb2}"
+        val out = _run_awk(prog_n, "x\ny\nz")
+        expect(out.trim()).to_equal("3")
+
+    it "next stops later rules for the same record":
+        val lb3 = "{"
+        val rb3 = "}"
+        val q3 = "\""
+        val prog_next = "/A/ {lb3} next {rb3} /A/ {lb3} print {q3}second-ran{q3} {rb3}"
+        val out = _run_awk(prog_next, "A")
+        expect(out.trim()).to_equal("")
+
+    it "without next both rules run on the same record":
+        val lb4 = "{"
+        val rb4 = "}"
+        val q4 = "\""
+        val prog_ctl = "/A/ {lb4} print {q4}first{q4} {rb4} /A/ {lb4} print {q4}second-ran{q4} {rb4}"
+        val out = _run_awk(prog_ctl, "A")
+        val lines_ctl = out.trim().split("\n")
+        expect(lines_ctl.len()).to_equal(2)
+        expect(lines_ctl[0]).to_equal("first")
+        expect(lines_ctl[1]).to_equal("second-ran")
+
+    it "next on an earlier record does not leak into a later record":
+        val lb5 = "{"
+        val rb5 = "}"
+        val q5 = "\""
+        val prog_leak = "/skip/ {lb5} next {rb5} {lb5} print {q5}saw{q5} {rb5}"
+        val out = _run_awk(prog_leak, "skip\nkeep")
+        expect(out.trim()).to_equal("saw")
+
+    it "an unsupported statement is reported as a nonzero exit":
+        val code = _run_awk_exit("{ TOTALLY BOGUS }", "x")
+        expect(code).to_equal(1)

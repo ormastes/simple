@@ -1,8 +1,9 @@
 # Call-site argument count is never checked before codegen (2026-08-04)
 
 **Status:** OPEN (detection not armed). Seven real in-tree call sites found; the
-two unambiguous ones are fixed here, the remaining five (one function) are
-recorded in §4 as a separate follow-up.
+two unambiguous ones were fixed in `af0fdf192d8`, and the remaining five
+(`awk_tool.spl`) are **now fixed too** — see §7. All seven known call sites are
+therefore repaired; what remains open is only the *detection*, per §5.
 **Class:** silent corruption — wrong value, exit 0, no diagnostic.
 **Related:** `trait_conformance_check_ignores_arity_2026-08-04.md` (`f4a4703f0fb`,
 `34e7d0f303b`) closed the *trait/impl name* half. This doc is the *call site*
@@ -125,7 +126,7 @@ through defaulted parameters, (d) named-argument calls. Those populations are
 much larger and their blast radius is **unmeasured**. That is precisely why
 nothing is armed as an error in this change.
 
-## 4. Not fixed here — `awk_tool.spl` signature drift (follow-up)
+## 4. Not fixed in `af0fdf192d8` — `awk_tool.spl` signature drift (RESOLVED, see §7)
 
 `_exec_action/8` is called with 7 arguments at five sites, so `vars: [(text,text)]`
 is the nil sentinel. It is worse than a pure arity slip: the function returns
@@ -182,3 +183,106 @@ of ~60 commits of breakage.
 Gate after the change:
 `test/01_unit/lib/gc_async_mut/gpu/browser_engine/html_parser_gpu_flat_spec.spl`
 → `Results: 24 total, 24 passed, 0 failed`.
+
+
+## 7. `awk_tool.spl` repaired (follow-up landed)
+
+The five `_exec_action` call sites recorded in §4 are fixed. Establishing intent
+first, as §4 required:
+
+**What the 8th parameter is for.** `vars: [(text, text)]` is the awk *user
+variable environment* — an association list of (name, value) pairs for variables
+the program itself creates (`sum`, `n`, `t`). awk semantics require that
+environment to survive across records and be readable in `END`; it therefore
+cannot be function-local to `_exec_action` and must be passed in and handed back.
+
+**What the tuple return represents.** `(i32, [(text, text)])` is
+`(ctrl, updated_vars)`. `ctrl` is the control signal the action sends back to the
+record loop — `1` means the action executed `next` (stop evaluating later rules
+for this record). `.1` is the environment after the action ran, which the loop
+must store so the following record and the `END` block observe it. Both halves
+are load-bearing; binding the pair as a bare `i32` discarded the environment and
+made `ctrl == 1` compare an `i32` against a tuple.
+
+**What the sentinel was doing at runtime — not inert.** The awk tool is reached
+through `BufferingTerminal`, whose constructor is an unresolved external symbol
+in the JIT, so the whole module is dropped to the interpreter
+(`[jit-fallback] unresolved external symbol 'BufferingTerminal_dot_new'`). The
+interpreter *does* enforce arity at argument-binding time (§2d), so the missing
+`vars` never became sentinel 3 on this path at all — it raised
+`semantic: function expects argument for parameter 'vars', but none was provided`
+and aborted the call. Measured at the origin tip `ab01e7808cd`, the existing
+`test/01_unit/os/shell/awk_spec.spl` therefore reported:
+
+```
+Results: 28 total, 0 passed, 28 failed
+```
+
+Every one of the 28 examples failed with that message. **The awk tool was
+completely non-functional**, and had been silently so: nothing in CI surfaced it.
+The sentinel-3 corruption described in §1 is what this *would* do on any call
+path that stays in the JIT (e.g. a real `Terminal` rather than the test double),
+where `vars` is padded with tagged nil and no diagnostic is emitted at all.
+
+**Three helper functions the file called were defined nowhere.**
+`_resolve_multi_expr`, `_exec_printf` and `_exec_assign` were called from
+`_exec_action` but had no definition in the repository. The arity defect masked
+them: execution never got past the first `_exec_action` call, so the missing
+definitions never had a chance to fail. They are implemented here in the file's
+existing idiom, which is what makes the repaired call paths assertable at all.
+
+### Changed
+
+- `src/os/tools/shell/awk/awk_tool.spl`
+  - `tool_awk` declares `var vars: [(text, text)] = []` and threads it through all
+    five `_exec_action` calls (BEGIN, piped-stdin loop, `-` loop, file loop, END),
+    binding `.1` back into `vars` and testing `.0` for the control code. END's
+    returned environment is deliberately discarded — nothing runs after it.
+  - Implemented `_resolve_multi_expr`, `_exec_printf`, `_exec_assign`, plus the
+    small helpers they need (`_var_get`, `_var_set`, `_split_top_commas`).
+  - `_resolve_expr` gained the `vars` parameter so `print sum` resolves a user
+    variable, and an explicit `$NF` branch (`"NF".to_i32()` was yielding 0).
+  - `_pattern_matches` / `_eval_nr_expr` replace the bare
+    `line.contains(pattern)` test, which could never match the `NR_EXPR:` and
+    `!`-negation patterns `_extract_rules` actually produces. These failures were
+    invisible before because the spec could not run.
+  - `ctrl == 2` now reports an unsupported statement, so an unparseable program
+    exits nonzero instead of silently succeeding. This uses the control channel
+    that the tuple repair restored.
+- `src/os/apps/shell/_ShellApp/run_loop.spl:376` — **a sixth call site of the same
+  family, found while verifying**: `tool_awk(self.vfs, self.cwd, args, self.terminal)`
+  passed 4 arguments to a 5-parameter `tool_awk`, leaving `input: text` unbound;
+  the shell's `awk` command then ran `input.len()` on it. Now passes `""`
+  explicitly (the interactive dispatch has no piped-stdin plumbing to supply).
+- `test/01_unit/os/shell/awk_spec.spl` and `test/unit/os/shell/awk_spec.spl`
+  (kept byte-identical) — added test group 8, "awk action state threading",
+  pinning the `(ctrl, vars)` contract with concrete values. Also repaired three
+  defects in the spec itself: it imported `AckProgram`, a name defined nowhere;
+  `"{ print }"` was parsed by Simple as *interpolation of a variable named
+  `print`*, not as awk source; and three assertions were written
+  `code.to_equal(0)` without `expect(...)`, so they asserted nothing.
+
+### Verification
+
+| state | verdict |
+|---|---|
+| pristine origin tip `ab01e7808cd` | `Results: 28 total, 0 passed, 28 failed` |
+| repaired | `Results: 35 total, 35 passed, 0 failed` |
+| sabotage A — one call site back to 7 args | `Results: 35 total, 4 passed, 31 failed` |
+| sabotage B — tuple bound as bare `i32` again | `Results: 35 total, 26 passed, 9 failed` |
+| restored | `Results: 35 total, 35 passed, 0 failed` |
+
+Sabotage A reproduces the original error verbatim,
+`semantic: function expects argument for parameter 'vars', but none was provided`.
+Sabotage B fails exactly the nine examples that depend on `.0`/`.1` — the three
+accumulation examples, the unsupported-statement exit, and the five state-threading
+examples — and leaves the other 26 green, which is the targeting the group was
+written for.
+
+**`SIMPLE_STRICT_VREG` note.** The codegen arity warning quoted in §2c is emitted
+from the Cranelift lowering, so it can only fire for code that stays in the JIT.
+This module is dropped to the interpreter before codegen, so the warning is not
+the operative signal here; the interpreter's hard arity error is, and it is what
+both the baseline and sabotage A show. Static confirmation that no bad site
+remains: all five `_exec_action` calls now pass 8 arguments and no 7-argument
+call remains in the file.
