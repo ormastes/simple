@@ -21,16 +21,42 @@ fn hir_stmt_kind_disc(k: StmtKind) -> i64:
 # ============================================================================
 
 impl HirLowering:
+    fn facet_wrapper_depth_from_hir_expr(expr: HirExpr) -> i64:
+        match expr.kind:
+            case HirExprKind.FacetAcquire(_, _, _, mode):
+                if mode == "facet": 2 else: 1
+            case HirExprKind.Try(inner) | HirExprKind.Unwrap(inner):
+                val inner_depth = self.facet_wrapper_depth_from_hir_expr(inner)
+                if inner_depth > 0: inner_depth - 1 else: inner_depth
+            case HirExprKind.MethodCall(inner, method, _, _):
+                if method != "unwrap": return -1
+                val inner_depth = self.facet_wrapper_depth_from_hir_expr(inner)
+                if inner_depth > 0: inner_depth - 1 else: inner_depth
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                if self.local_facet_wrapper_depths.has(symbol.id):
+                    return self.local_facet_wrapper_depths[symbol.id]
+                -1
+            case _: -1
+
     fn facet_contract_from_hir_expr(expr: HirExpr) -> HirType?:
         match expr.kind:
             case HirExprKind.FacetAcquire(_, _, contract, _): contract
             case HirExprKind.Try(inner) | HirExprKind.Unwrap(inner):
                 self.facet_contract_from_hir_expr(inner)
+            case HirExprKind.MethodCall(inner, method, _, _):
+                if method == "unwrap": self.facet_contract_from_hir_expr(inner)
+                else: nil
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                if self.local_facet_contracts.has(symbol.id):
+                    return self.local_facet_contracts[symbol.id]
+                nil
             case _: nil
 
     me fn try_register_local_facet_contract(symbol: SymbolId, init: HirExpr):
         if val contract = self.facet_contract_from_hir_expr(init):
             self.local_facet_contracts[symbol.id] = contract
+            self.local_facet_wrapper_depths[symbol.id] =
+                self.facet_wrapper_depth_from_hir_expr(init)
 
     # Nested-field-access support (native --entry path bug -- see
     # struct_field_types_by_name / local_struct_types doc comments in

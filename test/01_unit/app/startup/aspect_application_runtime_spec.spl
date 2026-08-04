@@ -27,6 +27,7 @@ use app.startup.aspect_application_runtime.{
     prepared_advice_dispatch_context_invoke,
     prepared_advice_dispatch_context_invoke_or_panic,
     aspect_execution_context_acquire_facet_descriptor,
+    aspect_execution_context_validate_facet_descriptor_contract,
     aspect_execution_context_facet_method_address,
     aspect_execution_context_release_facet_descriptor,
     aspect_execution_context_release_facet_descriptor_or_panic
@@ -494,6 +495,17 @@ describe "Application aspect runtime policy owner":
         expect(descriptor.witness_descriptor.method_entries.len()).to_equal(1)
         expect(descriptor.witness_descriptor.method_entries[0].method_name).to_equal("audit")
         expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(1)
+        aspect_execution_context_validate_facet_descriptor_contract(
+            runtime, descriptor, "Auditable", "facet-audit-v1", ["audit"]).unwrap()
+        expect(aspect_execution_context_validate_facet_descriptor_contract(
+            runtime, descriptor, "Auditable", "wrong-abi", ["audit"]
+        ).unwrap_err()).to_contain("ABI hash")
+        expect(aspect_execution_context_validate_facet_descriptor_contract(
+            runtime, descriptor, "Auditable", "facet-audit-v1", ["audit", "extra"]
+        ).unwrap_err()).to_contain("method count")
+        expect(aspect_execution_context_validate_facet_descriptor_contract(
+            runtime, descriptor, "Auditable", "facet-audit-v1", ["wrong"]
+        ).unwrap_err()).to_contain("order/name")
         expect(aspect_execution_context_facet_method_address(
             runtime, descriptor, 0, "audit").unwrap()).to_equal(4096)
         expect(aspect_execution_context_facet_method_address(
@@ -528,6 +540,32 @@ describe "Application aspect runtime policy owner":
             runtime, "security.AuditRecord", [], "Auditable").unwrap().unwrap()
         expect(app_release_descriptor_on_error_return(
             runtime, error_descriptor).unwrap_err()).to_equal("fixture business error")
+        expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(0)
+
+        val wrong_context = AspectApplicationRuntime.create(
+            app_aspect_catalog("startup"), app_aspect_session(),
+            LifecycleManager.new_manager(), AspectPackTrustPolicy.ordinary_unsigned(),
+            2, 2, 2).unwrap()
+        val context_bound_descriptor = aspect_execution_context_acquire_facet_descriptor(
+            runtime, "security.AuditRecord", [], "Auditable").unwrap().unwrap()
+        expect(aspect_execution_context_facet_method_address(
+            wrong_context, context_bound_descriptor, 0, "audit"
+        ).unwrap_err()).to_contain("no longer published")
+        expect(aspect_execution_context_release_facet_descriptor(
+            wrong_context, context_bound_descriptor
+        ).unwrap_err()).to_contain("not published")
+        aspect_execution_context_release_facet_descriptor(
+            runtime, context_bound_descriptor).unwrap()
+        expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(0)
+
+        var corrupt_descriptor = aspect_execution_context_acquire_facet_descriptor(
+            runtime, "security.AuditRecord", [], "Auditable").unwrap().unwrap()
+        corrupt_descriptor.witness_descriptor.method_entries[0].resolved_address = 0
+        expect(aspect_execution_context_facet_method_address(
+            runtime, corrupt_descriptor, 0, "audit"
+        ).unwrap_err()).to_contain("unresolved method")
+        aspect_execution_context_release_facet_descriptor(
+            runtime, corrupt_descriptor).unwrap()
         expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(0)
 
         runtime.coordinator.facet_bindings.records[0].witness_descriptor.method_entries[0].resolved_address = 0

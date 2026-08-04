@@ -162,13 +162,16 @@ impl MirLowering:
 
         var absent = self.builder
         absent.switch_to_block(absent_block)
+        self.builder = absent
+        self.emit_facet_cleanup_from(0)
+        absent = self.builder
         val message = absent.emit_const_str(
             if option: "required facet is not published" else: "facet descriptor acquisition failed")
         absent.emit_call(
             self.facet_runtime_function("rt_panic", [], MirType.unit()),
             [mir_operand_copy(message)], MirType.unit())
         absent.emit_const(payload, MirConstValue.Zero, MirType.i64())
-        absent.terminate_goto(merge_block)
+        absent.terminate_abort("facet Result/Option unwrap failed")
         self.builder = absent
 
         var merge = self.builder
@@ -176,29 +179,127 @@ impl MirLowering:
         self.builder = merge
         payload
 
-    me facet_assert_contract_hash(lease: LocalId, expected_hash: text):
+    me facet_enum_wrap_local(
+        enum_name: text, variant: text, payload: LocalId
+    ) -> LocalId:
+        val discriminant = self.enum_variant_discriminant(enum_name, variant)
+        if discriminant < 0:
+            self.error_fatal(
+                "E-AF005 missing builtin {enum_name}.{variant} wrapper",
+                nil)
+            return self.builder.emit_const_int(0)
         var b = self.builder
-        val actual_hash = b.emit_get_field(
-            mir_operand_copy(lease), 3, MirType.i64())
-        val expected = b.emit_const_str(expected_hash)
-        val equal_result = b.emit_call(
+        val enum_id = b.new_temp(MirType(kind: MirTypeKind.I32))
+        b.emit_const(enum_id, MirConstValue.Int(self.enum_runtime_id(enum_name)),
+            MirType(kind: MirTypeKind.I32))
+        val variant_id = b.new_temp(MirType(kind: MirTypeKind.I32))
+        b.emit_const(variant_id, MirConstValue.Int(discriminant),
+            MirType(kind: MirTypeKind.I32))
+        val wrapped_result = b.emit_call(
             self.facet_runtime_function(
-                "rt_text_eq_any", [MirType.i64(), MirType.i64()], MirType.i64()),
-            [mir_operand_copy(actual_hash), mir_operand_copy(expected)], MirType.i64())
-        val equal = equal_result ?? LocalId(id: 0)
+                "rt_enum_new",
+                [MirType(kind: MirTypeKind.I32),
+                 MirType(kind: MirTypeKind.I32), MirType.i64()],
+                MirType.i64()),
+            [mir_operand_copy(enum_id), mir_operand_copy(variant_id),
+             mir_operand_copy(payload)], MirType.i64())
+        self.builder = b
+        val wrapped = wrapped_result ?? LocalId(id: 0)
+        self.mark_runtime_value_local(wrapped.id)
+        if enum_name == "Option":
+            self.option_value_locals[wrapped.id] = true
+        wrapped
+
+    me facet_enum_payload(value: LocalId) -> LocalId:
+        var b = self.builder
+        val payload_result = b.emit_call(
+            self.facet_runtime_function(
+                "rt_enum_payload", [MirType.i64()], MirType.i64()),
+            [mir_operand_copy(value)], MirType.i64())
+        self.builder = b
+        payload_result ?? LocalId(id: 0)
+
+    me facet_enum_discriminant(value: LocalId) -> LocalId:
+        var b = self.builder
+        val discriminant_result = b.emit_call(
+            self.facet_runtime_function(
+                "rt_enum_discriminant", [MirType.i64()], MirType.i64()),
+            [mir_operand_copy(value)], MirType.i64())
+        self.builder = b
+        discriminant_result ?? LocalId(id: 0)
+
+    me facet_validate_contract_or_release_panic(
+        context: LocalId, lease: LocalId,
+        interface_name: text, expected_hash: text,
+        expected_method_names: [text]
+    ):
+        var b = self.builder
+        val zero = b.emit_const_int(0)
+        val names_result = b.emit_call(
+            self.facet_runtime_function(
+                "rt_array_new", [MirType.i64()], MirType.i64()),
+            [mir_operand_copy(zero)], MirType.i64())
+        val names = names_result ?? LocalId(id: 0)
+        self.builder = b
+        for method_name in expected_method_names:
+            var name_builder = self.builder
+            val method_text = name_builder.emit_const_str(method_name)
+            self.builder = name_builder
+            val boxed_method = self.box_runtime_value(method_text)
+            name_builder = self.builder
+            name_builder.emit_call(
+                self.rt_array_push_operand(),
+                [mir_operand_copy(names), mir_operand_copy(boxed_method)],
+                MirType.unit())
+            self.builder = name_builder
+        b = self.builder
+        val interface_id = b.emit_const_str(interface_name)
+        val expected = b.emit_const_str(expected_hash)
+        val validation_result = b.emit_call(
+            self.facet_runtime_function(
+                "aspect_execution_context_validate_facet_descriptor_contract",
+                [self.local_mir_type_of(context) ?? MirType.i64(),
+                 MirType(kind: MirTypeKind.Opaque("PublishedFacetDescriptorLease")),
+                 MirType(kind: MirTypeKind.Opaque("str")),
+                 MirType(kind: MirTypeKind.Opaque("str")), MirType.i64()],
+                MirType.i64()),
+            [mir_operand_copy(context), mir_operand_copy(lease),
+             mir_operand_copy(interface_id), mir_operand_copy(expected),
+             mir_operand_copy(names)], MirType.i64())
+        val validation = validation_result ?? LocalId(id: 0)
+        self.builder = b
+        val validation_disc = self.facet_enum_discriminant(validation)
+        b = self.builder
+        val ok_key = b.emit_const_int(0)
+        val valid_result = b.emit_binop(
+            MirBinOp.Eq, mir_operand_copy(validation_disc),
+            mir_operand_copy(ok_key), MirType.bool())
         val valid_block = b.new_block(Some("facet_contract_valid"))
         val invalid_block = b.new_block(Some("facet_contract_invalid"))
-        b.terminate_if(mir_operand_copy(equal), valid_block, invalid_block)
+        b.terminate_if(
+            mir_operand_copy(valid_result), valid_block, invalid_block)
         self.builder = b
+
         var invalid = self.builder
         invalid.switch_to_block(invalid_block)
-        val message = invalid.emit_const_str(
-            "acquired facet descriptor ABI hash does not match compiled contract")
-        invalid.emit_call(
-            self.facet_runtime_function("rt_panic", [], MirType.unit()),
-            [mir_operand_copy(message)], MirType.unit())
-        invalid.terminate_goto(valid_block)
         self.builder = invalid
+        val validation_error = self.facet_enum_payload(validation)
+        invalid = self.builder
+        invalid.emit_call(
+            self.facet_runtime_function(
+                "aspect_execution_context_release_facet_descriptor_or_panic",
+                [self.local_mir_type_of(context) ?? MirType.i64(),
+                 MirType(kind: MirTypeKind.Opaque("PublishedFacetDescriptorLease"))],
+                MirType.unit()),
+            [mir_operand_copy(context), mir_operand_copy(lease)], MirType.unit())
+        invalid.emit_call(
+            self.facet_runtime_function(
+                "rt_panic", [MirType.i64()], MirType.unit()),
+            [mir_operand_copy(validation_error)], MirType.unit())
+        invalid.terminate_abort(
+            "facet contract validation failed after releasing descriptor lease")
+        self.builder = invalid
+
         var valid = self.builder
         valid.switch_to_block(valid_block)
         self.builder = valid
@@ -255,15 +356,100 @@ impl MirLowering:
             MirType.i64())
         self.builder = b
         val acquired = acquired_result ?? LocalId(id: 0)
-        if mode != "require_facet":
-            # try_facet/facet preserve their Optional/Result wrapper; an
-            # adapter is installed only after a required acquisition owns an
-            # exact descriptor lease in this currently executable lane.
-            return acquired
-        val optional_lease = self.facet_unwrap_or_panic(acquired, "facet_result", false)
-        val lease = self.facet_unwrap_or_panic(optional_lease, "facet_option", true)
+
+        # Runtime ABI: Result<Option<Lease>, text>. Source APIs deliberately
+        # expose three distinct shapes, so inspect both wrappers and rebuild
+        # only the form selected by `mode`. The concrete base stays in the
+        # adapter plan and is never packed into either runtime wrapper.
+        val output = b.new_temp(MirType.i64())
+        val lease = b.new_temp(MirType.i64())
+        b.emit_const(lease, MirConstValue.Zero, MirType.i64())
+        val acquired_present = b.new_temp(MirType.bool())
+        b.emit_const(acquired_present, MirConstValue.Bool(false), MirType.bool())
+        self.builder = b
+
+        val result_discriminant = self.facet_enum_discriminant(acquired)
+        b = self.builder
+        val ok_key = b.emit_const_int(0)
+        val result_is_ok = b.emit_binop(
+            MirBinOp.Eq, mir_operand_copy(result_discriminant),
+            mir_operand_copy(ok_key), MirType.bool())
+        val result_ok_block = b.new_block(Some("facet_acquire_result_ok"))
+        val result_error_block = b.new_block(Some("facet_acquire_result_error"))
+        val merge_block = b.new_block(Some("facet_acquire_merge"))
+        b.terminate_if(
+            mir_operand_copy(result_is_ok), result_ok_block,
+            result_error_block)
+        self.builder = b
+
+        var error_builder = self.builder
+        error_builder.switch_to_block(result_error_block)
+        self.builder = error_builder
+        if mode == "try_facet":
+            # try_facet has no error channel and never requests loading. A
+            # runtime Err therefore denotes contract/runtime corruption, not
+            # ordinary absence; fail stop instead of silently returning None.
+            val runtime_error = self.facet_enum_payload(acquired)
+            error_builder = self.builder
+            error_builder.emit_call(
+                self.facet_runtime_function(
+                    "rt_panic", [MirType.i64()], MirType.unit()),
+                [mir_operand_copy(runtime_error)], MirType.unit())
+            error_builder.terminate_abort(
+                "try_facet runtime acquisition returned Err")
+        else:
+            # facet and require_facet both preserve runtime acquisition errors.
+            error_builder.emit_copy(output, acquired)
+            error_builder.terminate_goto(merge_block)
+        self.builder = error_builder
+
+        var ok_builder = self.builder
+        ok_builder.switch_to_block(result_ok_block)
+        self.builder = ok_builder
+        val optional_lease = self.facet_enum_payload(acquired)
+        val option_discriminant = self.facet_enum_discriminant(optional_lease)
+        ok_builder = self.builder
+        val some_key = ok_builder.emit_const_int(0)
+        val option_is_some = ok_builder.emit_binop(
+            MirBinOp.Eq, mir_operand_copy(option_discriminant),
+            mir_operand_copy(some_key), MirType.bool())
+        val some_block = ok_builder.new_block(Some("facet_acquire_some"))
+        val absent_block = ok_builder.new_block(Some("facet_acquire_absent"))
+        ok_builder.terminate_if(
+            mir_operand_copy(option_is_some), some_block, absent_block)
+        self.builder = ok_builder
+
+        var absent_builder = self.builder
+        absent_builder.switch_to_block(absent_block)
+        self.builder = absent_builder
+        if mode == "try_facet":
+            absent_builder.emit_copy(output, optional_lease)
+        elif mode == "facet":
+            absent_builder.emit_copy(output, acquired)
+        else:
+            val absence_message = absent_builder.emit_const_str(
+                "required facet is not bound")
+            self.builder = absent_builder
+            val required_error = self.facet_enum_wrap_local(
+                "Result", "Err", absence_message)
+            absent_builder = self.builder
+            absent_builder.emit_copy(output, required_error)
+        absent_builder.terminate_goto(merge_block)
+        self.builder = absent_builder
+
+        var some_builder = self.builder
+        some_builder.switch_to_block(some_block)
+        self.builder = some_builder
+        val acquired_lease = self.facet_enum_payload(optional_lease)
+        some_builder = self.builder
+        some_builder.emit_copy(lease, acquired_lease)
+        some_builder.emit_const(
+            acquired_present, MirConstValue.Bool(true), MirType.bool())
+        self.builder = some_builder
         val contract = facet_contract_metadata_from_hir_interface(interface_)
-        self.facet_assert_contract_hash(lease, contract.abi_hash)
+        self.facet_validate_contract_or_release_panic(
+            context_local, lease, interface_.name, contract.abi_hash,
+            contract.method_names)
         val owner = facet_acquisition_context_plan(
             "AspectExecutionContext", mir_operand_copy(context_local),
             "aspect_execution_context_acquire_facet_descriptor",
@@ -271,8 +457,29 @@ impl MirLowering:
         val adapter = plan_typed_dynamic_facet_adapter(
             base_type, mir_operand_copy(base_local), contract,
             mir_operand_copy(lease), owner).unwrap()
-        self.remember_facet_adapter(lease, adapter)
-        lease
+        self.remember_guarded_facet_adapter(
+            lease, adapter, mir_operand_copy(acquired_present))
+        if mode == "try_facet":
+            some_builder = self.builder
+            some_builder.emit_copy(output, optional_lease)
+        elif mode == "facet":
+            some_builder = self.builder
+            some_builder.emit_copy(output, acquired)
+        else:
+            val required_ok = self.facet_enum_wrap_local(
+                "Result", "Ok", lease)
+            some_builder = self.builder
+            some_builder.emit_copy(output, required_ok)
+        self.builder = some_builder
+        self.propagate_facet_adapter(lease, output)
+        some_builder = self.builder
+        some_builder.terminate_goto(merge_block)
+        self.builder = some_builder
+
+        var merge_builder = self.builder
+        merge_builder.switch_to_block(merge_block)
+        self.builder = merge_builder
+        output
 
     me lower_facet_member_call(
         receiver: HirExpr, method: text, args: [HirCallArg]
@@ -1608,10 +1815,14 @@ impl MirLowering:
             br = self.builder
             val ret_op = mir_operand_copy(result)
             val ret_box: MirOperand? = Some(ret_op)
+            self.emit_facet_cleanup_from(0)
+            br = self.builder
             br.terminate_return(ret_box)
             self.builder = br
         else:
             var br_void = self.builder
+            self.emit_facet_cleanup_from(0)
+            br_void = self.builder
             br_void.terminate_return(nil)
             self.builder = br_void
         var br2 = self.builder
@@ -3318,6 +3529,9 @@ impl MirLowering:
             case Break(break_label, break_value):
                 if self.loop_stack.len() > 0:
                     val (loop_continue_block, break_block) = self.loop_stack[self.loop_stack.len() - 1]
+                    if self.loop_cleanup_depths.len() > 0:
+                        self.emit_facet_cleanup_from(
+                            self.loop_cleanup_depths[self.loop_cleanup_depths.len() - 1])
                     var b = self.builder
                     b.terminate_goto(break_block)
                     self.builder = b
@@ -3329,6 +3543,9 @@ impl MirLowering:
             case Continue(cont_label):
                 if self.loop_stack.len() > 0:
                     val (continue_block, loop_break_block) = self.loop_stack[self.loop_stack.len() - 1]
+                    if self.loop_cleanup_depths.len() > 0:
+                        self.emit_facet_cleanup_from(
+                            self.loop_cleanup_depths[self.loop_cleanup_depths.len() - 1])
                     var b = self.builder
                     b.terminate_goto(continue_block)
                     self.builder = b
@@ -3641,6 +3858,8 @@ impl MirLowering:
                 val guard_unsupported_msg = "match guards (case x if cond:) are not supported by native codegen yet (B5b Phase 2)"
                 self.error(guard_unsupported_msg, Some(arm.span))
                 var b_err = self.builder
+                self.emit_facet_cleanup_from(0)
+                b_err = self.builder
                 val panic_msg_local = b_err.emit_const_str(guard_unsupported_msg)
                 val panic_func_operand = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_panic"),

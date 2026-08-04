@@ -53,8 +53,10 @@ architecture:
 
 - **Generated typed adapter:** `FacetRef<T>` is compiler surface sugar over an
   application-local private `(Base, FacetContract)` adapter containing the
-  typed base operand and loader-resolved ordered descriptor; it never erases
-  the base to a raw pointer or changes the base object.
+  typed base operand plus an application-owned opaque descriptor-lease handle.
+  Contract validation and ordinal lookup remain context-first runtime
+  operations; generated code never decodes descriptor layout or erases the
+  base to a raw pointer.
 - **Feature transform:** type selectors compile once to `TypePredicateBytecode`, then evaluate against closed-world or newly registered descriptors.
 - **Provider adapter:** `AspectPackProvider` supplies selected SMF bytes through `ObjectProvider`/`SmfReaderMemory`.
 - **Transactional generation:** mapping, relocation, witnesses, advice, and resources stage privately, then publish once.
@@ -152,10 +154,11 @@ contract-ordered method names/symbols. The wire encoder rejects any populated
 runtime owner or resolved address, so authority cannot be silently erased by
 serialization. After ordinary-SMF mapping, the existing `ModuleLoader` resolves
 every entry to one exact owner and positive address; the loader registry stores
-that resolved state and the application runtime returns a selected method entry
-only together with its exact generation lease. The descriptor identity is
-never called or required as an exported factory. Inherited table flattening and
-generic descriptor shapes remain fail-closed.
+that resolved state and the application runtime returns an opaque whole-contract
+lease handle. A context-first accessor validates the retained generation and
+returns only the compile-time ordinal's checked method address. The descriptor
+identity is never called or required as an exported factory. Inherited table
+flattening and generic descriptor shapes remain fail-closed.
 
 The current intrinsic ABI is intentionally insufficient for that bridge: it
 carries only the stable slot and phase, not a canonical lifecycle handle or

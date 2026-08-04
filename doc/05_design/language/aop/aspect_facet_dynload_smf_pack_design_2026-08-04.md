@@ -553,10 +553,11 @@ aspect.unload(handle: AspectHandle) -> Result<(), AspectUnloadError>
 
 `FacetRef<T>` is compiler surface sugar over a private application-local
 adapter generated for `(Base, FacetContract)`. The adapter retains the typed
-base operand, loader-resolved ordered witness descriptor, exact generation
-lease, and optional sidecar handle. Method selection uses the compile-time
-contract ordinal, validates the name at that descriptor entry, prepends the
-typed base as ABI argument zero, and lowers through ordinary `CallIndirect`.
+base operand and an application-owned opaque descriptor-lease handle; it does
+not decode or embed the runtime descriptor aggregate. Context-first validation
+checks the complete contract, and context-first method selection uses the
+compile-time ordinal and expected name. Generated code then prepends the typed
+base as ABI argument zero and lowers through ordinary `CallIndirect`.
 It is never serialized and never uses the currently incomplete `dyn Trait`
 vtable path or an `Any`/raw-pointer erased base.
 
@@ -2344,10 +2345,11 @@ first admissible surface; other surfaces require separate ABI/link evidence.
 
 Dynamic facet acquisition uses the same lexical context once per retained ref,
 not once per method. The compiler generates a private typed adapter containing
-the concrete base and complete resolved descriptor, selects methods by the
-contract ordinal, and emits the existing base-first `CallIndirect`. Exact
-descriptor version/hash/count/order/name/owner/address checks precede ref
-construction. Lease release is compiler-inserted on every lexical exit.
+the concrete base and an opaque application-owned descriptor lease, selects
+methods through the context-first checked ordinal accessor, and emits the
+existing base-first `CallIndirect`. Exact descriptor version/hash/count/order/
+name/owner/address checks precede ref construction. Lease release is
+compiler-inserted on every modeled lexical exit.
 
 Rejected designs are a global/current context cell, a numeric handle registry,
 copied coordinator/lifecycle state, backend-specific raw callbacks, existing
@@ -2374,5 +2376,11 @@ exposes context-first whole-descriptor acquisition/release with validation and
 failure cleanup. The current continuation wires exact nominal context/contract
 proof, canonical method ordinal/signature resolution, HIR-symbol lambda/async
 capture checks, and typed-base indirect dispatch through an opaque lease and
-context-first checked method accessor. CFG-wide reverse-order release insertion
-and complete `try_facet`/`facet` wrapper lowering remain fail-closed.
+context-first checked method accessor. The compiler now preserves the three
+documented wrapper shapes, installs adapters only for successful acquisition,
+and emits reverse-order release for fallthrough, return, `?`, loop transfer,
+and explicit/generated panic paths. Lazy pack loading is not yet connected:
+`facet` and `require_facet` currently query only published bindings and expose
+`text` errors rather than `FacetLoadError`. Callee/foreign unwind, `throw`,
+async cancellation, and language-sealed opacity for the exported lease class
+remain unproven or unsupported.

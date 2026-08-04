@@ -1480,6 +1480,7 @@ impl MirLowering:
         after the panic still have somewhere to go -- they are unreachable at
         runtime, but they must still lower rather than corrupt the builder.
         """
+        self.emit_facet_cleanup_from(0)
         var panic_temp = LocalId(id: 0)
         if args.len() == 0:
             # No argument: still panic, and still say so. Emitting the literal
@@ -2635,6 +2636,8 @@ impl MirLowering:
                     self.builder = b_none
                     val none_handle = self.ensure_option_handle(nil_result, base_type)
                     var b_none2 = self.builder
+                    self.emit_facet_cleanup_from(0)
+                    b_none2 = self.builder
                     b_none2.terminate_return(Some(mir_operand_copy(none_handle)))
                     self.builder = b_none2
 
@@ -2650,6 +2653,7 @@ impl MirLowering:
                                 self.decode_runtime_value(raw_payload_local, self.lower_type(inner))
                             else:
                                 self.enum_payload_value(raw_payload_local, self.lower_type(inner))
+                    self.propagate_facet_adapter(base_local, payload_local)
                     return payload_local
                 case _: ()
         val res_local = self.lower_expr(base)
@@ -2670,6 +2674,9 @@ impl MirLowering:
         self.builder = b
         var b_err = self.builder
         b_err.switch_to_block(err_block)
+        self.builder = b_err
+        self.emit_facet_cleanup_from(0)
+        b_err = self.builder
         b_err.terminate_return(Some(mir_operand_copy(res_local)))
         self.builder = b_err
         var b_ok = self.builder
@@ -2688,6 +2695,7 @@ impl MirLowering:
                             self.enum_payload_value(pl, self.lower_type(ok_type))
                         case _: pl
                 case _: pl
+            self.propagate_facet_adapter(res_local, payload_local)
             return payload_local
         res_local
 
@@ -3792,6 +3800,8 @@ impl MirLowering:
                 lw.canonical_type_symbols = self.canonical_type_symbols
                 lw.next_canonical_type_symbol = self.next_canonical_type_symbol
                 lw.global_symbol_ids = self.global_symbol_ids
+                lw.static_facets = self.static_facets
+                lw.current_impls = self.current_impls
                 var b = lw.builder
                 b.begin_function(gen_symbol, gen_name, sig, lam.span)
                 lw.builder = b
@@ -3827,7 +3837,10 @@ impl MirLowering:
                         if capture_struct != nil:
                             lw.struct_value_syms[loaded_local.id] = capture_struct ?? ""
                         cap_i = cap_i + 1
+                lw.enter_facet_cleanup_scope()
                 val result = lw.lower_expr(body)
+                val lambda_fallthrough = not lw.builder.current_block_has_explicit_terminator()
+                lw.leave_facet_cleanup_scope(lambda_fallthrough)
                 self.canonical_type_symbols = lw.canonical_type_symbols
                 self.next_canonical_type_symbol = lw.next_canonical_type_symbol
                 var b2 = lw.builder

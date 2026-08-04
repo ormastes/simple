@@ -7,6 +7,7 @@ use std.spec.*
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_definitions.{HirExprKind, HirStmtKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.semantics.safety_checker.{
@@ -45,9 +46,53 @@ fn count_facet_escape_errors(errors: [SafetyError]) -> i64:
     count
 
 describe "typed facet source and HIR ownership":
+    it "assigns the documented wrapper type to each acquisition form":
+        val hir = lower_typed_facet_source(
+            "    val maybe_debug = context.try_facet<Debuggable>(cache)\n" +
+            "    val loaded_debug = context.facet<Debuggable>(cache)\n" +
+            "    val required_debug = context.require_facet<Debuggable>(cache)\n" +
+            "    0\n")
+        var saw_try = false
+        var saw_facet = false
+        var saw_require = false
+        for item in hir.functions:
+            val function = item[1]
+            if function.name != "use_facet": continue
+            for statement in function.body.stmts:
+                match statement.kind:
+                    case Let(_, _, init):
+                        match init.kind:
+                            case FacetAcquire(_, _, _, mode):
+                                if init.type_ == nil:
+                                    fail("facet acquisition must retain its HIR wrapper type")
+                                val acquired_type = init.type_ ?? HirType(
+                                    kind: HirTypeKind.Error, span: init.span)
+                                match (mode, acquired_type.kind):
+                                    case ("try_facet", HirTypeKind.Optional(_)):
+                                        saw_try = true
+                                    case ("facet", HirTypeKind.Result(ok, error)):
+                                        match (ok.kind, error.kind):
+                                            case (HirTypeKind.Optional(_), HirTypeKind.Str):
+                                                saw_facet = true
+                                            case _:
+                                                fail("facet must be Result<Option<FacetRef<T>>, text>")
+                                    case ("require_facet", HirTypeKind.Result(ok, error)):
+                                        match (ok.kind, error.kind):
+                                            case (HirTypeKind.Named(_, _), HirTypeKind.Str):
+                                                saw_require = true
+                                            case _:
+                                                fail("require_facet must be Result<FacetRef<T>, text>")
+                                    case _:
+                                        fail("unexpected facet acquisition wrapper type")
+                            case _: pass
+                    case _: pass
+        if not saw_try: fail("missing typed try_facet HIR")
+        if not saw_facet: fail("missing typed facet HIR")
+        if not saw_require: fail("missing typed require_facet HIR")
+
     it "preserves explicit context, typed base, contract, and member provenance":
         val hir = lower_typed_facet_source(
-            "    val debug = context.require_facet<Debuggable>(cache)\n" +
+            "    val debug = context.require_facet<Debuggable>(cache).unwrap()\n" +
             "    debug.snapshot()\n" +
             "    0\n")
         var saw_acquire = false
@@ -62,6 +107,13 @@ describe "typed facet source and HIR ownership":
                                 case FacetAcquire(_, _, _, mode):
                                     expect(mode).to_equal("require_facet")
                                     saw_acquire = true
+                                case MethodCall(receiver, method, _, _):
+                                    if method == "unwrap":
+                                        match receiver.kind:
+                                            case FacetAcquire(_, _, _, mode):
+                                                expect(mode).to_equal("require_facet")
+                                                saw_acquire = true
+                                            case _: pass
                                 case _: pass
                         case Expr(expr):
                             match expr.kind:
@@ -75,9 +127,36 @@ describe "typed facet source and HIR ownership":
         if not saw_member:
             fail("expected FacetMemberCall provenance")
 
+    it "keeps wrapper methods ordinary until Result and Option are removed":
+        val hir = lower_typed_facet_source(
+            "    val loaded = context.facet<Debuggable>(cache)\n" +
+            "    loaded.is_ok()\n" +
+            "    val debug = loaded.unwrap().unwrap()\n" +
+            "    debug.snapshot()\n" +
+            "    0\n")
+        var saw_wrapper_method = false
+        var saw_unwrapped_member = false
+        for item in hir.functions:
+            val function = item[1]
+            if function.name != "use_facet": continue
+            for statement in function.body.stmts:
+                match statement.kind:
+                    case Expr(expr):
+                        match expr.kind:
+                            case MethodCall(_, method, _, _):
+                                if method == "is_ok": saw_wrapper_method = true
+                            case FacetMemberCall(_, method, _, _):
+                                if method == "snapshot": saw_unwrapped_member = true
+                            case _: pass
+                    case _: pass
+        if not saw_wrapper_method:
+            fail("Result wrapper method must not become facet dispatch")
+        if not saw_unwrapped_member:
+            fail("fully unwrapped FacetRef must retain facet dispatch provenance")
+
     it "rejects copy and return escapes by HIR symbol identity":
         val hir = lower_typed_facet_source(
-            "    val debug = context.require_facet<Debuggable>(cache)\n" +
+            "    val debug = context.require_facet<Debuggable>(cache).unwrap()\n" +
             "    val copied = debug\n" +
             "    return debug\n")
         val checker = SafetyChecker.create()
@@ -86,8 +165,8 @@ describe "typed facet source and HIR ownership":
 
     it "rejects assignment copies and leased facet method arguments":
         val hir = lower_typed_facet_source(
-            "    var first = context.require_facet<Debuggable>(cache)\n" +
-            "    val second = context.require_facet<Debuggable>(cache)\n" +
+            "    var first = context.require_facet<Debuggable>(cache).unwrap()\n" +
+            "    val second = context.require_facet<Debuggable>(cache).unwrap()\n" +
             "    first = second\n" +
             "    first.merge(second)\n" +
             "    0\n")
@@ -97,7 +176,7 @@ describe "typed facet source and HIR ownership":
 
     it "allows local member use without treating it as an escape":
         val hir = lower_typed_facet_source(
-            "    val debug = context.require_facet<Debuggable>(cache)\n" +
+            "    val debug = context.require_facet<Debuggable>(cache).unwrap()\n" +
             "    debug.snapshot()\n" +
             "    0\n")
         val checker = SafetyChecker.create()
@@ -136,7 +215,7 @@ describe "typed facet source and HIR ownership":
 
     it "rejects a member absent from the canonical facet interface":
         val hir = lower_typed_facet_source(
-            "    val debug = context.require_facet<Debuggable>(cache)\n" +
+            "    val debug = context.require_facet<Debuggable>(cache).unwrap()\n" +
             "    debug.missing_member()\n" +
             "    0\n")
         val checker = SafetyChecker.create()
@@ -152,7 +231,7 @@ describe "typed facet source and HIR ownership":
 
     it "rejects lambda capture using HIR symbol identity":
         val hir = lower_typed_facet_source(
-            "    val debug = context.require_facet<Debuggable>(cache)\n" +
+            "    val debug = context.require_facet<Debuggable>(cache).unwrap()\n" +
             "    val closure = \\: debug.snapshot()\n" +
             "    0\n")
         val checker = SafetyChecker.create()
@@ -161,7 +240,7 @@ describe "typed facet source and HIR ownership":
 
     it "rejects capture by a closure passed to an async boundary":
         val hir = lower_typed_facet_source(
-            "    val debug = context.require_facet<Debuggable>(cache)\n" +
+            "    val debug = context.require_facet<Debuggable>(cache).unwrap()\n" +
             "    task_spawn(\\: debug.snapshot())\n" +
             "    0\n")
         val checker = SafetyChecker.create()

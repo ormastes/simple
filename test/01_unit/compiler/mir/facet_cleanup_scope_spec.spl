@@ -1,0 +1,145 @@
+# @req REQ-AF-003 REQ-AF-006
+# @cover src/compiler/50.mir/mir_lowering_types.spl 85%
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.structural_contracts.facet_artifact.{
+    FACET_ARTIFACT_VERSION, FacetContractMetadata
+}
+use compiler.hir.hir_types.{SymbolId, SymbolTable}
+use compiler.mir.{
+    LocalId, MirConstValue, MirInstKind, MirOperandKind,
+    MirSignature, MirType, MirTypeKind, MirLowering,
+    facet_acquisition_context_plan, plan_typed_dynamic_facet_adapter,
+    mir_operand_const_bool, mir_operand_const_int
+}
+
+fn cleanup_contract() -> FacetContractMetadata:
+    FacetContractMetadata(
+        contract_version: FACET_ARTIFACT_VERSION,
+        aspect_id: "cleanup",
+        facet_interface_id: "CleanupFacet",
+        parent_facets: [],
+        method_names: ["run"],
+        method_signatures: ["fn run(self) -> i64"],
+        abi_hash: "cleanup-abi")
+
+fn cleanup_adapter(context_id: i64, base_id: i64, lease_id: i64):
+    val context = facet_acquisition_context_plan(
+        "AspectExecutionContext", mir_operand_const_int(context_id),
+        "aspect_execution_context_acquire_facet_descriptor",
+        "aspect_execution_context_release_facet_descriptor_or_panic").unwrap()
+    plan_typed_dynamic_facet_adapter(
+        MirType(kind: MirTypeKind.Opaque("ConcreteBase")),
+        mir_operand_const_int(base_id), cleanup_contract(),
+        mir_operand_const_int(lease_id), context).unwrap()
+
+fn cleanup_lowering() -> MirLowering:
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    builder.begin_function(
+        SymbolId(id: 901), "cleanup_probe",
+        MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        Span.empty())
+    lowering.builder = builder
+    lowering
+
+fn release_lease_ids(lowering: MirLowering) -> [i64]:
+    var builder = lowering.builder
+    builder.terminate_return(nil)
+    val function = builder.end_function()
+    var ids: [i64] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case Call(_, function_operand, arguments):
+                    var release_call = false
+                    match function_operand.kind:
+                        case Const(MirConstValue.Str(name), _):
+                            release_call = name == "aspect_execution_context_release_facet_descriptor_or_panic"
+                        case _: ()
+                    if release_call and arguments.len() == 2:
+                        match arguments[1].kind:
+                            case Const(MirConstValue.Int(id), _): ids.push(id)
+                            case _: ()
+                case _: ()
+    ids
+
+fn has_guarded_cleanup_branch(lowering: MirLowering) -> bool:
+    var builder = lowering.builder
+    builder.terminate_return(nil)
+    val function = builder.end_function()
+    for block in function.blocks:
+        match block.terminator:
+            case If(_, _, _): return true
+            case _: ()
+    false
+
+describe "facet descriptor lexical cleanup scopes":
+    it "releases leases in reverse acquisition order on scope fallthrough":
+        var lowering = cleanup_lowering()
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(
+            LocalId(id: 11), cleanup_adapter(1, 101, 1001))
+        lowering.remember_facet_adapter(
+            LocalId(id: 12), cleanup_adapter(1, 102, 1002))
+        lowering.leave_facet_cleanup_scope(true)
+        val released = release_lease_ids(lowering)
+        expect(released.len()).to_equal(2)
+        expect(released[0]).to_equal(1002)
+        expect(released[1]).to_equal(1001)
+
+    it "releases an inner scope before its enclosing scope":
+        var lowering = cleanup_lowering()
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(
+            LocalId(id: 21), cleanup_adapter(2, 201, 2001))
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(
+            LocalId(id: 22), cleanup_adapter(2, 202, 2002))
+        lowering.leave_facet_cleanup_scope(true)
+        lowering.leave_facet_cleanup_scope(true)
+        val released = release_lease_ids(lowering)
+        expect(released.len()).to_equal(2)
+        expect(released[0]).to_equal(2002)
+        expect(released[1]).to_equal(2001)
+
+    it "guards optional acquisition cleanup with the runtime presence operand":
+        var lowering = cleanup_lowering()
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_guarded_facet_adapter(
+            LocalId(id: 31), cleanup_adapter(3, 301, 3001),
+            mir_operand_const_bool(true))
+        lowering.leave_facet_cleanup_scope(true)
+        if not has_guarded_cleanup_branch(lowering):
+            fail("expected guarded cleanup to emit a conditional branch")
+        val released = release_lease_ids(lowering)
+        expect(released.len()).to_equal(1)
+        expect(released[0]).to_equal(3001)
+
+    it "does not duplicate cleanup when an exit already terminated the scope":
+        var lowering = cleanup_lowering()
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(
+            LocalId(id: 41), cleanup_adapter(4, 401, 4001))
+        lowering.emit_facet_cleanup_from(0)
+        lowering.leave_facet_cleanup_scope(false)
+        val released = release_lease_ids(lowering)
+        expect(released.len()).to_equal(1)
+        expect(released[0]).to_equal(4001)
+
+    it "releases only scopes deeper than a loop transfer snapshot":
+        var lowering = cleanup_lowering()
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(
+            LocalId(id: 51), cleanup_adapter(5, 501, 5001))
+        val loop_depth = lowering.facet_cleanup_scopes.len()
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(
+            LocalId(id: 52), cleanup_adapter(5, 502, 5002))
+        lowering.emit_facet_cleanup_from(loop_depth)
+        lowering.leave_facet_cleanup_scope(false)
+        lowering.leave_facet_cleanup_scope(false)
+        val released = release_lease_ids(lowering)
+        expect(released.len()).to_equal(1)
+        expect(released[0]).to_equal(5002)

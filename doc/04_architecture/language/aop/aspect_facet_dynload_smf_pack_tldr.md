@@ -39,8 +39,10 @@ flow:
 - D4 is implemented pending executable verification. D5 now has genuine
   source/HIR acquisition, nominal context/contract proof, an opaque descriptor
   lease, checked ordinal method lookup, typed-base indirect-call lowering, and
-  HIR-symbol capture rejection. CFG-wide balanced release and complete wrapper
-  lowering remain open; verification is `STATUS: FAIL`.
+  HIR-symbol capture rejection, wrapper-aware provenance, and reverse-order
+  cleanup on every currently modeled lexical exit. Lazy I/O, typed load errors,
+  unwind/cancellation cleanup, and executable evidence remain open;
+  verification is `STATUS: FAIL`.
 - Resolver startup now crosses `85.mdsoc` through
   `ModuleResolverDiscoveryPort.resolve_inputs`; production composition injects
   the 99-loader adapter, while compatibility/test constructors stay explicitly

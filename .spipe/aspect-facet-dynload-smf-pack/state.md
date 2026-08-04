@@ -266,3 +266,18 @@ verification-failed
 - CFG-wide reverse-order release and complete `try_facet`/`facet` wrapper
   lowering remain open. No compiler/bootstrap command was run; authoritative
   status remains `verification-failed` / `STATUS: FAIL`.
+
+## 2026-08-04 — D5 wrapper and modeled-exit cleanup continuation
+
+- HIR and MIR now preserve the distinct `Option<T>`,
+  `Result<Option<T>, text>`, and `Result<T, text>` acquisition shapes and
+  propagate adapter provenance only through successful unwrap/`?` paths.
+- Whole-contract validation and ordinal lookup are context-first; generated
+  code retains an opaque lease handle and never decodes descriptor fields.
+- Compiler-owned lexical cleanup releases guarded leases in reverse order on
+  fallthrough, explicit/implicit return, `?` propagation, loop transfer, and
+  explicit/generated panic paths.
+- Lazy pack I/O, typed `FacetLoadError`, callee/foreign unwind, `throw`, async
+  cancellation, and language-sealed lease opacity remain open. No compiler or
+  bootstrap command was run; status remains `verification-failed` /
+  `STATUS: FAIL`.

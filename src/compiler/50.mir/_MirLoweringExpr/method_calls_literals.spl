@@ -444,7 +444,12 @@ impl MirLowering:
                 is_text = true
                 supported = true
             case HirTypeKind.Named(symbol, _):
-                if default_expr == nil:
+                if self.facet_interface_for_contract(payload_type).?:
+                    # Compiler-owned FacetRef<T> sugar is carried by its
+                    # canonical interface type but represented by the opaque
+                    # descriptor lease word at MIR level.
+                    supported = true
+                elif default_expr == nil:
                     val type_symbol = self.symbols.get_symbol_raw(symbol.id)
                     if type_symbol != nil:
                         match type_symbol.kind:
@@ -519,6 +524,8 @@ impl MirLowering:
             b_err.emit_copy(result_local, fallback)
         else:
             val panic_text = if unwrap_err: "called `.unwrap_err()` on an Ok Result" else: "called `.unwrap()` on an Err Result"
+            self.emit_facet_cleanup_from(0)
+            b_err = self.builder
             val panic_msg = b_err.emit_const_str(panic_text)
             val panic_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_panic"),
@@ -535,6 +542,7 @@ impl MirLowering:
         if result_struct_name != "":
             self.struct_value_syms[result_local.id] = result_struct_name
             self.remember_local_hir_type(result_local.id, payload_type)
+        self.propagate_facet_adapter(receiver_local, result_local)
         result_local
 
     me try_lower_option_method(receiver: HirExpr, method: text, args: [HirCallArg], result_ok_type: HirType?, result_err_type: HirType?, option_method_receiver: bool, prelowered_method_receiver: LocalId) -> LocalId?:
@@ -638,6 +646,8 @@ impl MirLowering:
             var b_none_uw = self.builder
             b_none_uw.switch_to_block(none_block_uw)
             self.builder = b_none_uw
+            self.emit_facet_cleanup_from(0)
+            b_none_uw = self.builder
             val panic_msg_uw = b_none_uw.emit_const_str("called `.unwrap()` on a nil Option")
             val panic_op_uw = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_panic"),
@@ -667,6 +677,7 @@ impl MirLowering:
             var b_merge_uw = self.builder
             b_merge_uw.switch_to_block(merge_block_uw)
             self.builder = b_merge_uw
+            self.propagate_facet_adapter(receiver_local, result_local_uw)
             return result_local_uw
 
         # `.unwrap_or(default)` accepts canonical and migration Option forms:
@@ -2673,6 +2684,8 @@ impl MirLowering:
                 # produces a use-before-def local (NULL llvm::Value* -> ICmp
                 # SIGSEGV in llvm-lib), so the placeholder still needs a def
                 # even though rt_panic makes it unreachable at runtime.
+                self.emit_facet_cleanup_from(0)
+                b = self.builder
                 val panic_msg = b.emit_const_str("unresolved method call: {method}")
                 val panic_op = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_panic"),
@@ -2876,7 +2889,7 @@ impl MirLowering:
             return "bootstrap_output_from_args"
         if id == 8:
             return "rt_native_build"
-        "" 
+        ""
 
     me symbol_to_operand(symbol: SymbolId) -> MirOperand:
         """Convert a symbol to a function pointer operand."""

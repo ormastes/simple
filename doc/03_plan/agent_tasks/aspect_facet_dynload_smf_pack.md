@@ -61,8 +61,10 @@ Current implementation status:
   release APIs exist. Exact nominal context/contract proof, canonical member
   ordinal/signature resolution, runtime lease-to-adapter lowering, checked
   method-address access, and lambda/async capture rejection now exist.
-  CFG-wide compiler-inserted release on every exit and full optional/fallible
-  acquisition wrapper lowering remain open.
+  Wrapper-aware adapter propagation and reverse-order release now cover every
+  modeled lexical exit. Lazy pack I/O, typed `FacetLoadError`, callee/foreign
+  unwind, `throw`, async cancellation, and language-sealed lease opacity remain
+  open.
 
 These lanes retain the five system-manual phrases already frozen in the system
 test plan. Focused setup/checker helpers are

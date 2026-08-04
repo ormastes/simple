@@ -5,6 +5,7 @@
 # mir_lowering.spl and its split modules (expr, stmts, ml).
 
 use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirOperand, MirOperandKind}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.hir.facet_static.{HirFacetModule}
@@ -15,6 +16,15 @@ use compiler.mir.facet_witness_call.{TypedFacetAdapterPlan}
 # ============================================================================
 # MIR Lowering Types
 # ============================================================================
+
+struct FacetCleanupEntry:
+    adapter: TypedFacetAdapterPlan
+    # nil means acquisition is proven present on every path reaching cleanup.
+    present: MirOperand?
+
+struct FacetCleanupScope:
+    """Lexical owner of exact-generation descriptor leases acquired inside it."""
+    entries: [FacetCleanupEntry]
 
 struct MirLowering:
     """Lowers HIR to MIR."""
@@ -354,6 +364,10 @@ struct MirLowering:
     # exact compile-time contract/context plan without changing base layout.
     facet_adapter_local_ids: [i64]
     facet_adapter_plans: [TypedFacetAdapterPlan]
+    facet_cleanup_scopes: [FacetCleanupScope]
+    # Parallel to loop_stack: number of cleanup scopes retained by a loop
+    # transfer. Break and continue release every deeper lexical scope.
+    loop_cleanup_depths: [i64]
     static_facets: HirFacetModule
     current_impls: [HirImpl]
     target_context: MirTargetContext
@@ -393,6 +407,42 @@ impl MirLowering:
             index = index + 1
         self.facet_adapter_local_ids.push(local.id)
         self.facet_adapter_plans.push(plan)
+        if self.facet_cleanup_scopes.len() > 0:
+            val scope_index = self.facet_cleanup_scopes.len() - 1
+            var scope = self.facet_cleanup_scopes[scope_index]
+            scope.entries.push(FacetCleanupEntry(adapter: plan, present: nil))
+            self.facet_cleanup_scopes[scope_index] = scope
+
+    me remember_guarded_facet_adapter(
+        local: LocalId, plan: TypedFacetAdapterPlan, present: MirOperand
+    ):
+        var index = 0
+        while index < self.facet_adapter_local_ids.len():
+            if self.facet_adapter_local_ids[index] == local.id:
+                self.facet_adapter_plans[index] = plan
+                return
+            index = index + 1
+        self.facet_adapter_local_ids.push(local.id)
+        self.facet_adapter_plans.push(plan)
+        if self.facet_cleanup_scopes.len() > 0:
+            val scope_index = self.facet_cleanup_scopes.len() - 1
+            var scope = self.facet_cleanup_scopes[scope_index]
+            scope.entries.push(FacetCleanupEntry(
+                adapter: plan, present: Some(present)))
+            self.facet_cleanup_scopes[scope_index] = scope
+
+    me propagate_facet_adapter(source: LocalId, destination: LocalId):
+        val plan = self.find_facet_adapter(source)
+        if not plan.?:
+            return
+        var index = 0
+        while index < self.facet_adapter_local_ids.len():
+            if self.facet_adapter_local_ids[index] == destination.id:
+                self.facet_adapter_plans[index] = plan.unwrap()
+                return
+            index = index + 1
+        self.facet_adapter_local_ids.push(destination.id)
+        self.facet_adapter_plans.push(plan.unwrap())
 
     fn find_facet_adapter(local: LocalId) -> TypedFacetAdapterPlan?:
         var index = self.facet_adapter_local_ids.len() - 1
@@ -401,6 +451,58 @@ impl MirLowering:
                 return Some(self.facet_adapter_plans[index])
             index = index - 1
         nil
+
+    me enter_facet_cleanup_scope():
+        self.facet_cleanup_scopes.push(FacetCleanupScope(entries: []))
+
+    me emit_facet_cleanup_from(first_scope: i64):
+        if first_scope < 0 or first_scope >= self.facet_cleanup_scopes.len():
+            return
+        var b = self.builder
+        var scope_index = self.facet_cleanup_scopes.len() - 1
+        while scope_index >= first_scope:
+            val scope = self.facet_cleanup_scopes[scope_index]
+            var entry_index = scope.entries.len() - 1
+            while entry_index >= 0:
+                val entry = scope.entries[entry_index]
+                val adapter = entry.adapter
+                val release = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str(adapter.context.release_symbol),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [
+                            MirType(kind: MirTypeKind.Opaque(
+                                adapter.context.owner_type_id)),
+                            MirType(kind: MirTypeKind.Opaque(
+                                "PublishedFacetDescriptorLease"))],
+                        return_type: MirType.unit(), is_variadic: false)))))
+                match entry.present:
+                    case Some(guard):
+                        val release_block = b.new_block(Some("facet_cleanup_release"))
+                        val continue_block = b.new_block(Some("facet_cleanup_continue"))
+                        b.terminate_if(guard, release_block, continue_block)
+                        b.switch_to_block(release_block)
+                        b.emit_call(
+                            release,
+                            [adapter.context.runtime_owner, adapter.descriptor_lease],
+                            MirType.unit())
+                        b.terminate_goto(continue_block)
+                        b.switch_to_block(continue_block)
+                    case nil:
+                        b.emit_call(
+                            release,
+                            [adapter.context.runtime_owner, adapter.descriptor_lease],
+                            MirType.unit())
+                entry_index = entry_index - 1
+            scope_index = scope_index - 1
+        self.builder = b
+
+    me leave_facet_cleanup_scope(normal_fallthrough: bool):
+        if self.facet_cleanup_scopes.len() == 0:
+            return
+        val scope_index = self.facet_cleanup_scopes.len() - 1
+        if normal_fallthrough:
+            self.emit_facet_cleanup_from(scope_index)
+        self.facet_cleanup_scopes = self.facet_cleanup_scopes[0:scope_index]
 
     me remember_local_hir_type(local_id: i64, type_: HirType):
         var ids = self.local_hir_type_ids

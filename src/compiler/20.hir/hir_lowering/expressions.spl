@@ -142,20 +142,65 @@ fn _hir_named_type_symbol(type_: HirType) -> SymbolId?:
 fn _hir_missing_field_type() -> HirType:
     HirType(kind: HirTypeKind.Error, span: Span.empty())
 
+fn facet_acquisition_hir_type(contract: HirType, mode: text, span: Span) -> HirType:
+    # FacetRef<T> is compiler-owned surface sugar represented by the exact
+    # contract type inside the ordinary Option/Result wrappers. The concrete
+    # base remains a separate FacetAcquire operand and is never erased into T.
+    val optional_contract = HirType(
+        kind: HirTypeKind.Optional(contract), span: span)
+    match mode:
+        case "try_facet": optional_contract
+        case "facet": HirType(
+            kind: HirTypeKind.Result(
+                optional_contract,
+                HirType(kind: HirTypeKind.Str, span: span)),
+            span: span)
+        case "require_facet": HirType(
+            kind: HirTypeKind.Result(
+                contract, HirType(kind: HirTypeKind.Str, span: span)),
+            span: span)
+        case _: HirType(kind: HirTypeKind.Error, span: span)
+
 # Expression Lowering
 # ============================================================================
 
 impl HirLowering:
-    fn facet_contract_for_lowered_receiver(receiver: HirExpr) -> HirType?:
+    fn facet_wrapper_depth_for_lowered_receiver(receiver: HirExpr) -> i64:
+        match receiver.kind:
+            case HirExprKind.FacetAcquire(_, _, _, mode):
+                if mode == "facet": 2 else: 1
+            case HirExprKind.Try(inner) | HirExprKind.Unwrap(inner):
+                val inner_depth = self.facet_wrapper_depth_for_lowered_receiver(inner)
+                if inner_depth > 0: inner_depth - 1 else: inner_depth
+            case HirExprKind.MethodCall(inner, method, _, _):
+                if method != "unwrap": return -1
+                val inner_depth = self.facet_wrapper_depth_for_lowered_receiver(inner)
+                if inner_depth > 0: inner_depth - 1 else: inner_depth
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                if self.local_facet_wrapper_depths.has(symbol.id):
+                    return self.local_facet_wrapper_depths[symbol.id]
+                -1
+            case _: -1
+
+    fn facet_contract_provenance(receiver: HirExpr) -> HirType?:
         match receiver.kind:
             case HirExprKind.FacetAcquire(_, _, contract, _): contract
             case HirExprKind.Try(inner) | HirExprKind.Unwrap(inner):
-                self.facet_contract_for_lowered_receiver(inner)
+                self.facet_contract_provenance(inner)
+            case HirExprKind.MethodCall(inner, method, _, _):
+                if method == "unwrap":
+                    return self.facet_contract_provenance(inner)
+                nil
             case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
                 if self.local_facet_contracts.has(symbol.id):
                     return self.local_facet_contracts[symbol.id]
                 nil
             case _: nil
+
+    fn facet_contract_for_lowered_receiver(receiver: HirExpr) -> HirType?:
+        if self.facet_wrapper_depth_for_lowered_receiver(receiver) != 0:
+            return nil
+        self.facet_contract_provenance(receiver)
 
     me field_module_callable(module_name: text, field_name: text) -> SymbolId?:
         # NOTE: deliberately does NOT filter candidates by `candidate.kind ==
@@ -486,13 +531,15 @@ impl HirLowering:
                     if mode != "try_facet" and mode != "facet" and mode != "require_facet":
                         self.error("E-AF005 unsupported facet acquisition mode", e.span)
                         return HirExpr(kind: HirExprKind.Error, type_: nil, span: e.span)
+                    val lowered_contract = self.lower_type(contract)
                     return HirExpr(
                         kind: HirExprKind.FacetAcquire(
                             self.lower_hir_expr(context),
                             self.lower_hir_expr(base),
-                            self.lower_type(contract),
+                            lowered_contract,
                             mode),
-                        type_: nil,
+                        type_: facet_acquisition_hir_type(
+                            lowered_contract, mode, e.span),
                         span: e.span)
                 case _:
                     pass
