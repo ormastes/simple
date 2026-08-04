@@ -974,3 +974,33 @@ relabeled or checked as a fourth cycle, and the ARM64 producer, QMP consumer,
 and visible Cocoa interval remain unlaunched. Resume in a fresh scoped compiler
 lane only after repairing the post-parameter LLVM translation crash; then run
 the module-global and native compiler admissions once before returning here.
+
+## 2026-08-04 resumed owner-layout repair result
+
+The user authorized a fresh bounded repair lane. Two additional owner-layout
+repairs reached `main`: `22b04a7b46` reads `MirBody.return_ty` through its
+owner, and `6471bf9a57` constructs the flattened bootstrap `MirBody` through
+its owner. The wrapper rebuild exited 1 with an empty transcribed log, so the
+final cycle ran the same strict seed-bootstrap native-build directly to retain
+the actual result. It compiled 725 units with zero failures and emitted:
+
+- version: `simple-bootstrap 1.0.0-beta`
+- SHA-256: `fd5fd23fd4ce3321eedaf9c9d7a0c369ed351371de4f32e60a3a3f6a91e29d0e`
+
+The shared worktree advanced from `22b04a7b46` to `6471bf9a57` while that
+compiler was building, so its source identity is unstable and independently
+inadmissible. Its one canonical strict module-global check also exited 132 at
+the unchanged trace boundary:
+
+```text
+[mir-to-llvm] function:start __simple_main
+[mir-to-llvm] function:locals __simple_main
+[mir-to-llvm] function:params __simple_main
+runtime error: field access on nil receiver
+```
+
+The fresh three-cycle cap is exhausted. No compiler receipt, ARM64 artifact
+producer, QMP consumer, or Cocoa QEMU launch is permitted from this output.
+The next lane must start from a stable `6471bf9a57` or later source snapshot
+and diagnose the remaining post-parameter return-type conversion without
+reusing this source-unstable candidate as evidence.

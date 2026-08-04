@@ -53,3 +53,10 @@ dev-done
   closed with signal 11 after `function:locals` and `function:params`. The
   three-cycle compiler cap is exhausted; no receipt, ARM64 build, or QEMU
   launch is permitted from this candidate.
+- resumed-fix: A fresh bounded lane moved `MirBody.return_ty` reads and
+  flattened-body construction through owner methods (`22b04a7b46`,
+  `6471bf9a57`). A direct strict Phase 2 build emitted a 22 MiB compiler
+  (`fd5fd23fd4ce3321eedaf9c9d7a0c369ed351371de4f32e60a3a3f6a91e29d0e`),
+  but its source changed during the build and canonical module-global
+  admission still exited 132 after `function:params`. The fresh three-cycle
+  cap is exhausted; no receipt or QEMU launch is allowed.
