@@ -36,6 +36,21 @@ failing files carry the idiom; 100 files x 1 + 1 x 2 + 49 x 3 = 249, an exact
 match). `test/03_system/stdlib` — 51 of 63. `test/03_system/compiler` — 50 of
 the `comprehensive/*` failures.
 
+> **WITHDRAWN 2026-08-04 — the "249 of 249" figure is an environment artifact.**
+> A bare `git worktree` has no `bin/simple` (it is a gitignored symlink), so
+> every spec returns `(0 passed, 1 failed)` plus `Error: Process exited with code
+> 127` — 50 of 50 `edge_case` files, and 0 once the symlink is created. That
+> mechanically manufactures an "N of N failing" reading at *file* scale.
+> Corrected facts: the tier holds **229 spec files / 5,573 examples**, not 249
+> failing examples; and the fix can only reach **2 of its 7 subdirectories**
+> (`.?` sites: `edge_case` 199, `error_path` 400, **zero** in `compatibility`,
+> `exploratory`, `regression`, `resilience` — those five pass genuine booleans,
+> which the fix passes through untouched via `Value::Bool => None`). So ~77 files
+> provably cannot change. The true delta for this tier is **UNMEASURED**; the
+> defensible statement is an upper bound of **≤599** closable failures in scope.
+> The `stdlib` (51 of 63) and `compiler` (50) figures above are from the same
+> unpinned environment and are likewise unverified.
+
 Binary under test: `bin/release/x86_64-unknown-linux-gnu/simple` (on this tree
 that is the **Rust seed** — `bin/simple --version` prints the seed banner).
 `bin/simple test` executes specs on the interpreter.
