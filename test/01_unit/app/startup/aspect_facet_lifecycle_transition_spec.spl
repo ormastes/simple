@@ -1,0 +1,81 @@
+use std.spec.*
+use compiler.loader.loader.aspect_catalog.{AspectCatalog}
+use compiler.loader.loader.aspect_activation.{AspectActivationCoordinator}
+use compiler.common.structural_contracts.facet_artifact.{
+    FACET_WITNESS_DESCRIPTOR_VERSION, FacetWitnessDescriptorV1
+}
+use os.smf.dynsmf_session.{DynSmfPolicy, dynsmf_session_new}
+use os.smf.smf_generation.{LifecycleManager}
+use std.aop.facet.{FacetGenerationLease}
+use app.startup.aspect_facet_runtime_contract.{PublishedFacetDescriptorLease}
+use app.startup.aspect_facet_lifecycle_transition.{
+    aspect_generation_acquire, aspect_generation_pin_count,
+    aspect_published_facet_lookup, aspect_published_facet_acquire,
+    aspect_published_facet_descriptor_acquire,
+    aspect_published_facet_handle_validate,
+    aspect_published_facet_contract_validate
+}
+
+fn facet_lifecycle_empty_coordinator() -> AspectActivationCoordinator:
+    AspectActivationCoordinator.create(
+        AspectCatalog(
+            generation: 7,
+            target: "x86_64-unknown-linux-gnu",
+            variant_fingerprint: "variant-a",
+            runtime_abi: "simple-runtime-1",
+            entries: []),
+        dynsmf_session_new(
+            "facet-lifecycle-transition-test",
+            DynSmfPolicy(
+                disabled_all: false, disabled_ids: [], source: "test")),
+        LifecycleManager.new_manager()).unwrap()
+
+fn facet_lifecycle_forged_descriptor() -> PublishedFacetDescriptorLease:
+    PublishedFacetDescriptorLease(
+        aspect_id: "fixture.debug",
+        binding_id: "fixture.debug.binding",
+        facet_interface_id: "Debuggable",
+        facet_contract_abi_hash: "facet-abi-v1",
+        witness_descriptor: FacetWitnessDescriptorV1(
+            descriptor_version: FACET_WITNESS_DESCRIPTOR_VERSION,
+            facet_contract_abi_hash: "facet-abi-v1",
+            descriptor_symbol: "fixture_debug_witness",
+            owner_id: "fixture.debug.owner",
+            method_entries: []),
+        generation_lease: FacetGenerationLease(
+            aspect_id: "other.aspect", generation_id: 7, token_id: 1))
+
+describe "Context-free facet lifecycle transitions":
+    it "preserves empty coordinator state on absent generation failures":
+        val coordinator = facet_lifecycle_empty_coordinator()
+        expect(aspect_generation_acquire(
+            coordinator, "fixture.debug").unwrap_err()).to_contain(
+            "no published generation")
+        expect(aspect_generation_pin_count(
+            coordinator, "fixture.debug").unwrap_err()).to_contain(
+            "no published generation")
+        expect(coordinator.published.keys().len()).to_equal(0)
+
+    it "returns explicit unchanged coordinator outcomes for absent facets":
+        val coordinator = facet_lifecycle_empty_coordinator()
+        expect(aspect_published_facet_lookup(
+            coordinator, "fixture.Cache", [], "Debuggable").unwrap()).to_be_nil()
+        val acquired = aspect_published_facet_acquire(
+            coordinator, "fixture.Cache", [], "Debuggable").unwrap()
+        expect(acquired.acquired).to_be_nil()
+        expect(acquired.coordinator.published.keys().len()).to_equal(0)
+        val descriptor = aspect_published_facet_descriptor_acquire(
+            coordinator, "fixture.Cache", [], "Debuggable")
+        expect(descriptor.error).to_be_nil()
+        expect(descriptor.acquired).to_be_nil()
+        expect(descriptor.coordinator.published.keys().len()).to_equal(0)
+
+    it "runs live handle validation before pure contract validation":
+        val coordinator = facet_lifecycle_empty_coordinator()
+        val forged = facet_lifecycle_forged_descriptor()
+        expect(aspect_published_facet_handle_validate(
+            coordinator, forged).unwrap_err()).to_contain(
+            "lease aspect identity is inconsistent")
+        expect(aspect_published_facet_contract_validate(
+            coordinator, forged, "", "", []).unwrap_err()).to_contain(
+            "lease aspect identity is inconsistent")

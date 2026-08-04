@@ -1,0 +1,297 @@
+# Context-free facet lifecycle transitions.
+#
+# The application runtime owns mutex scopes and installs every returned
+# coordinator. This leaf imports no execution context and accepts no callback.
+
+use compiler.loader.loader.aspect_activation.{AspectActivationCoordinator}
+use compiler.loader.loader.facet_binding_registry.{
+    FacetBindingRecord, facet_lookup, facet_witness_method_entry
+}
+use compiler.loader.loader.advice_binding_registry.{
+    AdviceBindingRecord, advice_lookup_slot
+}
+use compiler.common.structural_contracts.facet_artifact.{FacetWitnessMethodEntry}
+use os.smf.smf_generation.{GenerationToken}
+use std.aop.facet.{FacetGenerationLease}
+use app.startup.aspect_facet_runtime_contract.{
+    PublishedFacetDescriptorLease,
+    aspect_published_facet_descriptor_validate,
+    aspect_published_facet_descriptor_contract_validate,
+    aspect_published_facet_descriptor_method_address
+}
+
+struct AspectCoordinatorTransition:
+    coordinator: AspectActivationCoordinator
+
+struct AspectGenerationAcquireTransition:
+    coordinator: AspectActivationCoordinator
+    token: GenerationToken
+
+struct AspectAdviceLookupTransition:
+    coordinator: AspectActivationCoordinator
+    chain: [AdviceBindingRecord]
+
+struct AspectFacetAcquireTransition:
+    coordinator: AspectActivationCoordinator
+    acquired: (FacetBindingRecord, FacetGenerationLease)?
+
+struct AspectFacetMethodAcquireTransition:
+    coordinator: AspectActivationCoordinator
+    acquired: (FacetWitnessMethodEntry, FacetGenerationLease)?
+    error: text?
+
+struct AspectFacetDescriptorAcquireTransition:
+    coordinator: AspectActivationCoordinator
+    acquired: PublishedFacetDescriptorLease?
+    error: text?
+
+struct AspectFacetDescriptorReleaseTransition:
+    coordinator: AspectActivationCoordinator
+    error: text?
+
+fn aspect_generation_acquire(
+    coordinator: AspectActivationCoordinator, aspect_id: text
+) -> Result<AspectGenerationAcquireTransition, text>:
+    if not coordinator.published.has(aspect_id):
+        return Err("E-AF004 aspect has no published generation: {aspect_id}")
+    if coordinator.published[aspect_id].state != "active":
+        return Err("E-AF004 aspect generation is quiescing: {aspect_id}")
+    val activation = coordinator.published[aspect_id]
+    val acquired = coordinator.lifecycle.acquire_generation_token_for(
+        activation.activation_key, activation.generation)?
+    var updated = coordinator
+    updated.lifecycle = acquired.0
+    Ok(AspectGenerationAcquireTransition(
+        coordinator: updated, token: acquired.1))
+
+fn aspect_generation_release(
+    coordinator: AspectActivationCoordinator, token: GenerationToken
+) -> Result<AspectCoordinatorTransition, text>:
+    var published = false
+    for aspect_id in coordinator.published.keys():
+        val activation = coordinator.published[aspect_id]
+        if (activation.activation_key == token.owner_key and
+            activation.generation == token.generation_id):
+            published = true
+    if not published:
+        return Err(
+            "E-AF004 generation is not published by this application: {token.generation_id}")
+    var updated = coordinator
+    updated.lifecycle = coordinator.lifecycle.release_generation_token(token)?
+    Ok(AspectCoordinatorTransition(coordinator: updated))
+
+fn aspect_generation_pin_count(
+    coordinator: AspectActivationCoordinator, aspect_id: text
+) -> Result<i64, text>:
+    if not coordinator.published.has(aspect_id):
+        return Err("E-AF004 aspect has no published generation: {aspect_id}")
+    val activation = coordinator.published[aspect_id]
+    Ok(coordinator.lifecycle.generation_pin_count_for(
+        activation.activation_key, activation.generation) as i64)
+
+fn aspect_published_facet_lookup(
+    coordinator: AspectActivationCoordinator,
+    concrete_type_id: text,
+    implemented_business_interfaces: [text],
+    facet_interface_id: text
+) -> Result<FacetBindingRecord?, text>:
+    facet_lookup(
+        coordinator.facet_bindings, concrete_type_id,
+        implemented_business_interfaces, facet_interface_id)
+
+fn aspect_published_advice_lookup(
+    coordinator: AspectActivationCoordinator, slot_id: text
+) -> Result<AspectAdviceLookupTransition, text>:
+    val lookup = advice_lookup_slot(coordinator.advice_bindings, slot_id)?
+    var updated = coordinator
+    updated.advice_bindings = lookup.registry
+    Ok(AspectAdviceLookupTransition(
+        coordinator: updated, chain: lookup.chain))
+
+fn aspect_facet_lease_acquire(
+    coordinator: AspectActivationCoordinator, aspect_id: text
+) -> Result<(AspectActivationCoordinator, FacetGenerationLease), text>:
+    val acquired = aspect_generation_acquire(coordinator, aspect_id)?
+    Ok((acquired.coordinator, FacetGenerationLease(
+        aspect_id: aspect_id,
+        generation_id: acquired.token.generation_id,
+        token_id: acquired.token.token_id)))
+
+fn aspect_facet_lease_release(
+    coordinator: AspectActivationCoordinator, lease: FacetGenerationLease
+) -> Result<AspectCoordinatorTransition, text>:
+    if not coordinator.published.has(lease.aspect_id):
+        return Err("E-AF004 facet lease aspect is not published: {lease.aspect_id}")
+    val activation = coordinator.published[lease.aspect_id]
+    if activation.generation != lease.generation_id:
+        return Err("E-AF004 facet lease generation does not match publication")
+    aspect_generation_release(coordinator, GenerationToken(
+        owner_key: activation.activation_key,
+        generation_id: lease.generation_id,
+        token_id: lease.token_id))
+
+fn aspect_published_facet_acquire(
+    coordinator: AspectActivationCoordinator,
+    concrete_type_id: text,
+    implemented_business_interfaces: [text],
+    facet_interface_id: text
+) -> Result<AspectFacetAcquireTransition, text>:
+    val binding = aspect_published_facet_lookup(
+        coordinator, concrete_type_id,
+        implemented_business_interfaces, facet_interface_id)?
+    if binding == nil:
+        return Ok(AspectFacetAcquireTransition(
+            coordinator: coordinator, acquired: nil))
+    val record = binding.unwrap()
+    val leased = aspect_facet_lease_acquire(coordinator, record.aspect_id)?
+    Ok(AspectFacetAcquireTransition(
+        coordinator: leased.0, acquired: Some((record, leased.1))))
+
+fn aspect_published_facet_method_acquire(
+    coordinator: AspectActivationCoordinator,
+    concrete_type_id: text,
+    implemented_business_interfaces: [text],
+    facet_interface_id: text,
+    method_name: text
+) -> AspectFacetMethodAcquireTransition:
+    val transition_result = aspect_published_facet_acquire(
+        coordinator, concrete_type_id,
+        implemented_business_interfaces, facet_interface_id)
+    if transition_result.is_err():
+        return AspectFacetMethodAcquireTransition(
+            coordinator: coordinator, acquired: nil,
+            error: Some(transition_result.unwrap_err()))
+    val transitioned = transition_result.unwrap()
+    if transitioned.acquired == nil:
+        return AspectFacetMethodAcquireTransition(
+            coordinator: transitioned.coordinator, acquired: nil, error: nil)
+    val pair = transitioned.acquired.unwrap()
+    val method = facet_witness_method_entry(pair.0, method_name)
+    if method.is_err():
+        val released = aspect_facet_lease_release(
+            transitioned.coordinator, pair.1)
+        if released.is_err():
+            return AspectFacetMethodAcquireTransition(
+                coordinator: transitioned.coordinator, acquired: nil,
+                error: Some(released.unwrap_err()))
+        # Cleanup precedes the method error exactly as in the runtime owner.
+        return AspectFacetMethodAcquireTransition(
+            coordinator: released.unwrap().coordinator, acquired: nil,
+            error: Some(method.unwrap_err()))
+    AspectFacetMethodAcquireTransition(
+        coordinator: transitioned.coordinator,
+        acquired: Some((method.unwrap(), pair.1)), error: nil)
+
+fn aspect_published_facet_descriptor_acquire(
+    coordinator: AspectActivationCoordinator,
+    concrete_type_id: text,
+    implemented_business_interfaces: [text],
+    facet_interface_id: text
+) -> AspectFacetDescriptorAcquireTransition:
+    val transition_result = aspect_published_facet_acquire(
+        coordinator, concrete_type_id,
+        implemented_business_interfaces, facet_interface_id)
+    if transition_result.is_err():
+        return AspectFacetDescriptorAcquireTransition(
+            coordinator: coordinator, acquired: nil,
+            error: Some(transition_result.unwrap_err()))
+    val transitioned = transition_result.unwrap()
+    if transitioned.acquired == nil:
+        return AspectFacetDescriptorAcquireTransition(
+            coordinator: transitioned.coordinator, acquired: nil, error: nil)
+    val pair = transitioned.acquired.unwrap()
+    val record = pair.0
+    val validation = aspect_published_facet_descriptor_validate(record)
+    if validation.is_err():
+        val released = aspect_facet_lease_release(
+            transitioned.coordinator, pair.1)
+        if released.is_err():
+            return AspectFacetDescriptorAcquireTransition(
+                coordinator: transitioned.coordinator, acquired: nil,
+                error: Some(released.unwrap_err()))
+        return AspectFacetDescriptorAcquireTransition(
+            coordinator: released.unwrap().coordinator, acquired: nil,
+            error: Some(validation.unwrap_err()))
+    AspectFacetDescriptorAcquireTransition(
+        coordinator: transitioned.coordinator,
+        acquired: Some(PublishedFacetDescriptorLease(
+            aspect_id: record.aspect_id,
+            binding_id: record.binding_id,
+            facet_interface_id: record.facet_interface_id,
+            facet_contract_abi_hash: record.facet_contract_abi_hash,
+            witness_descriptor: record.witness_descriptor,
+            generation_lease: pair.1)), error: nil)
+
+fn aspect_published_facet_descriptor_release(
+    coordinator: AspectActivationCoordinator,
+    acquired: PublishedFacetDescriptorLease
+) -> AspectFacetDescriptorReleaseTransition:
+    if acquired.aspect_id != acquired.generation_lease.aspect_id:
+        val released = aspect_facet_lease_release(
+            coordinator, acquired.generation_lease)
+        if released.is_err():
+            return AspectFacetDescriptorReleaseTransition(
+                coordinator: coordinator, error: Some(released.unwrap_err()))
+        return AspectFacetDescriptorReleaseTransition(
+            coordinator: released.unwrap().coordinator,
+            error: Some(
+                "E-AF004 facet descriptor lease aspect identity is inconsistent"))
+    val released = aspect_facet_lease_release(
+        coordinator, acquired.generation_lease)
+    if released.is_err():
+        return AspectFacetDescriptorReleaseTransition(
+            coordinator: coordinator, error: Some(released.unwrap_err()))
+    AspectFacetDescriptorReleaseTransition(
+        coordinator: released.unwrap().coordinator, error: nil)
+
+fn aspect_published_facet_handle_validate(
+    coordinator: AspectActivationCoordinator,
+    acquired: PublishedFacetDescriptorLease
+) -> Result<(), text>:
+    if acquired.aspect_id != acquired.generation_lease.aspect_id:
+        return Err("E-AF004 facet descriptor lease aspect identity is inconsistent")
+    if not coordinator.published.has(acquired.aspect_id):
+        return Err("E-AF004 facet descriptor generation is no longer published")
+    val activation = coordinator.published[acquired.aspect_id]
+    if activation.generation != acquired.generation_lease.generation_id:
+        return Err("E-AF004 facet descriptor generation identity is inconsistent")
+    if not activation.owners.contains(acquired.witness_descriptor.owner_id):
+        return Err("E-AF002 facet descriptor owner is not retained by its generation")
+    Ok(())
+
+fn aspect_published_facet_contract_validate(
+    coordinator: AspectActivationCoordinator,
+    acquired: PublishedFacetDescriptorLease,
+    expected_facet_interface_id: text,
+    expected_abi_hash: text,
+    expected_method_names: [text]
+) -> Result<(), text>:
+    aspect_published_facet_handle_validate(coordinator, acquired)?
+    aspect_published_facet_descriptor_contract_validate(
+        acquired, expected_facet_interface_id,
+        expected_abi_hash, expected_method_names)
+
+fn aspect_published_facet_method_address(
+    coordinator: AspectActivationCoordinator,
+    acquired: PublishedFacetDescriptorLease,
+    ordinal: i64,
+    expected_name: text
+) -> Result<i64, text>:
+    aspect_published_facet_handle_validate(coordinator, acquired)?
+    aspect_published_facet_descriptor_method_address(
+        acquired, ordinal, expected_name)
+
+export AspectCoordinatorTransition, AspectGenerationAcquireTransition
+export AspectAdviceLookupTransition, AspectFacetAcquireTransition
+export AspectFacetMethodAcquireTransition, AspectFacetDescriptorAcquireTransition
+export AspectFacetDescriptorReleaseTransition
+export aspect_generation_acquire, aspect_generation_release
+export aspect_generation_pin_count, aspect_published_facet_lookup
+export aspect_published_advice_lookup, aspect_facet_lease_acquire
+export aspect_facet_lease_release, aspect_published_facet_acquire
+export aspect_published_facet_method_acquire
+export aspect_published_facet_descriptor_acquire
+export aspect_published_facet_descriptor_release
+export aspect_published_facet_handle_validate
+export aspect_published_facet_contract_validate
+export aspect_published_facet_method_address
