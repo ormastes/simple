@@ -70,8 +70,8 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val source = formatter_source()
 
-    expect(source).to_contain("fn break_long_line(line: String, base_indent: i64) -> [String]")
-    expect(source).to_contain("fn is_method_chain(line: String) -> bool")
+expect(source).to_contain("fn break_long_line(line: String, base_indent: i64) -> [String]")
+expect(source).to_contain("fn is_method_chain(line: String) -> bool")
 expect(source).to_contain("fn break_method_chain(line: String, indent_str: String, continuation_str: String) -> [String]")
 expect(source).to_contain("fn break_function_signature(line: String, indent_str: String, continuation_str: String) -> [String]")
 expect(source).to_contain("fn break_function_call(line: String, indent_str: String, continuation_str: String) -> [String]")
