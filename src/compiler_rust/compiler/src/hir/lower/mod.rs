@@ -19,7 +19,6 @@ pub use error::{LowerError, LowerResult};
 pub use memory_warning::{MemoryWarning, MemoryWarningCode, MemoryWarningCollector, WarningSummary};
 pub use lowerer::Lowerer;
 pub use module_lowering::module_with_hoisted_defs;
-pub(crate) use module_lowering::dynamic_module_initializer_name;
 
 use super::lifetime::LifetimeViolation;
 use super::types::HirModule;
@@ -44,6 +43,17 @@ pub struct LoweringOutput {
     /// mapped back to the file and function that emitted it, and so the
     /// population can be counted. See `lenient_global_diag`.
     pub lenient_globals: lenient_global_diag::LenientGlobalCollector,
+    /// Import cycles walked while loading this module's imports, each as the
+    /// closed path `a -> b -> c -> a`.
+    ///
+    /// The loader has always detected these -- re-entering a module that is
+    /// still on the active import path is exactly a cycle -- but absorbed them
+    /// silently, and the dedicated reporter
+    /// (`ModuleResolver::check_circular_dependencies`) is unreachable because
+    /// its graph is only populated by unit tests. Surfaced here so cycles can
+    /// be reported and counted. Recording them does not change whether a module
+    /// compiles: cycles remain tolerated.
+    pub import_cycles: Vec<String>,
 }
 
 impl LoweringOutput {
@@ -55,6 +65,7 @@ impl LoweringOutput {
             lifetime_lean4: None,
             lifetime_violations: Vec::new(),
             lenient_globals: lenient_global_diag::LenientGlobalCollector::new(),
+            import_cycles: Vec::new(),
         }
     }
 
@@ -71,6 +82,7 @@ impl LoweringOutput {
             lifetime_lean4: Some(lifetime_lean4),
             lifetime_violations,
             lenient_globals: lenient_global_diag::LenientGlobalCollector::new(),
+            import_cycles: Vec::new(),
         }
     }
 

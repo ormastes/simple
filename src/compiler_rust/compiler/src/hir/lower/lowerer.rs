@@ -55,8 +55,20 @@ pub struct Lowerer {
     pub(super) module_resolver: Option<ModuleResolver>,
     /// Current file being compiled (for resolving relative imports)
     pub(super) current_file: Option<PathBuf>,
-    /// Track loaded modules to prevent circular dependencies
+    /// Track loaded modules to prevent circular dependencies.
+    ///
+    /// This is the ACTIVE import path, not a visited set: a module is inserted
+    /// before its imports are followed and removed afterwards.
     pub(super) loaded_modules: HashSet<PathBuf>,
+    /// The same active import path in visit order, so a detected cycle can be
+    /// named (`a -> b -> c -> a`) rather than merely suppressed.
+    pub(super) import_stack: Vec<PathBuf>,
+    /// Import cycles observed while loading this module's imports.
+    ///
+    /// Cycles are tolerated, not rejected -- the loader has always absorbed
+    /// them and returning an error here would break every existing build that
+    /// contains one. They are recorded so they can be reported.
+    pub(super) import_cycles: Vec<Vec<PathBuf>>,
     /// Track materialized import targets per module path. A module can be
     /// imported multiple times with different grouped symbols; path-only
     /// de-duplication skips later function imports.
@@ -163,6 +175,8 @@ impl Lowerer {
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
+            import_stack: Vec::new(),
+            import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
             memory_warnings: MemoryWarningCollector::strict(), // STRICT mode for Rust-level safety
             lifetime_context: LifetimeContext::new(),
@@ -211,6 +225,8 @@ impl Lowerer {
             module_resolver: Some(module_resolver),
             current_file: Some(current_file),
             loaded_modules: HashSet::new(),
+            import_stack: Vec::new(),
+            import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
             memory_warnings: MemoryWarningCollector::strict(), // STRICT by default
             lifetime_context: LifetimeContext::new(),
@@ -282,6 +298,8 @@ impl Lowerer {
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
+            import_stack: Vec::new(),
+            import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
             memory_warnings: MemoryWarningCollector::new(), // Lenient mode (warnings only)
             lifetime_context: LifetimeContext::new(),

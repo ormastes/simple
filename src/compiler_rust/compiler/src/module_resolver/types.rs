@@ -6,7 +6,7 @@
 //! - ResolvedModule: Resolved module information
 //! - ModuleResolver: Main resolver struct
 
-use simple_dependency_tracker::{graph::ImportGraph, symbol::ProjectSymbols};
+use simple_dependency_tracker::symbol::ProjectSymbols;
 use simple_parser::ast::{Attribute, AutoImportStmt, Capability, CommonUseStmt, ExportUseStmt, Visibility};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -257,8 +257,6 @@ pub struct ModuleResolver {
     pub(super) features: HashSet<String>,
     /// Profile definitions (name -> (attributes, imports))
     pub(super) profiles: HashMap<String, (Vec<String>, Vec<String>)>,
-    /// Import graph for cycle detection
-    pub(super) import_graph: ImportGraph,
     /// Project-wide symbol tables
     pub(super) project_symbols: ProjectSymbols,
     /// Variant overlay (`variants/`) candidate roots, absolute, in precedence
@@ -284,7 +282,6 @@ impl ModuleResolver {
             manifests: HashMap::new(),
             features: HashSet::new(),
             profiles: HashMap::new(),
-            import_graph: ImportGraph::new(),
             project_symbols: ProjectSymbols::new(),
             var_roots,
         }
@@ -329,7 +326,6 @@ impl ModuleResolver {
             manifests: HashMap::new(),
             features: HashSet::new(),
             profiles: HashMap::new(),
-            import_graph: ImportGraph::new(),
             project_symbols: ProjectSymbols::new(),
             var_roots,
         }
@@ -373,10 +369,6 @@ impl ModuleResolver {
         self.profiles.get(name)
     }
 
-    /// Get the import graph.
-    pub fn import_graph(&self) -> &ImportGraph {
-        &self.import_graph
-    }
 
     /// Get mutable access to project symbols.
     pub fn project_symbols_mut(&mut self) -> &mut ProjectSymbols {

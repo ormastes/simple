@@ -954,29 +954,20 @@ impl ModuleResolver {
         Vec::new()
     }
 
-    /// Record an import in the import graph.
-    pub fn record_import(&mut self, from_module: &str, to_module: &str, kind: ImportKind) {
-        self.import_graph.add_import(from_module, to_module, kind);
-    }
-
-    /// Record an import from HIR representation.
-    /// Automatically determines the ImportKind based on whether the import is type-only.
-    pub fn record_import_from_hir(&mut self, from_module: &str, import: &crate::hir::HirImport) {
-        let to_module = import.from_path.join(".");
-        let kind = if import.is_type_only {
-            ImportKind::TypeUse
-        } else {
-            ImportKind::Use
-        };
-        self.import_graph.add_import(from_module, &to_module, kind);
-    }
-
-    /// Check for circular dependencies in the import graph.
-    pub fn check_circular_dependencies(&self) -> ResolveResult<()> {
-        self.import_graph
-            .check_cycles()
-            .map_err(|e| crate::error::factory::circular_dependency(&e.to_string()))
-    }
+    // `record_import`, `record_import_from_hir` and `check_circular_dependencies`
+    // were removed along with the `import_graph` they operated on.
+    //
+    // They formed a complete, tested cycle detector that could never run: the
+    // graph was only ever populated by the two `record_import*` methods, whose
+    // sole callers were this module's own unit tests. In production the graph
+    // stayed empty, so `check_circular_dependencies` was a guaranteed `Ok(())`
+    // -- and nothing called it either. Keeping it would leave a decoy that reads
+    // like cycle protection while providing none.
+    //
+    // Cycles are now recorded where the import graph is actually walked, in
+    // `hir::lower::Lowerer::load_imported_types`: `loaded_modules` is the active
+    // import path, so re-entering a module still on it is exactly a cycle. See
+    // `Lowerer::record_import_cycle` and `LoweringOutput::import_cycles`.
 
     /// Convert a parser ModulePath to a tracker ModPath.
     pub fn to_tracker_mod_path(path: &ModulePath) -> Option<ModPath> {

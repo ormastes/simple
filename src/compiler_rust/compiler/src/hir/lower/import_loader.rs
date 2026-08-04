@@ -820,13 +820,30 @@ impl Lowerer {
 
         // Prevent circular imports while still allowing the same module to be
         // materialized later for a different target symbol group.
+        //
+        // `loaded_modules` is the ACTIVE import path, not a visited set: entries
+        // are inserted before recursing and removed after. So reaching a module
+        // that is already in it means we have walked an import cycle. That has
+        // always been detected here; it was just absorbed silently. Record it so
+        // the cycle is reportable, then keep the existing tolerate-and-continue
+        // behaviour.
+        //
+        // `ModuleResolver::check_circular_dependencies` was the intended report
+        // path but is unreachable: its `ImportGraph` is only ever fed by
+        // `record_import`, whose sole callers are unit tests, so the production
+        // graph is permanently empty and the check is a guaranteed `Ok(())`.
+        // This is where the real graph is walked, so this is where the cycle is
+        // observable.
         if self.loaded_modules.contains(&resolved.path) {
+            self.record_import_cycle(&resolved.path);
             return Ok(());
         }
         self.loaded_modules.insert(resolved.path.clone());
+        self.import_stack.push(resolved.path.clone());
 
         if resolved.path.extension().is_some_and(|ext| ext == "smf") {
             let result = self.load_types_from_smf(&resolved.path, target);
+            self.import_stack.pop();
             self.loaded_modules.remove(&resolved.path);
             if result.is_ok() {
                 self.loaded_import_targets.insert(import_key);
@@ -862,11 +879,36 @@ impl Lowerer {
         })();
 
         self.current_file = previous_file;
+        self.import_stack.pop();
         self.loaded_modules.remove(&resolved.path);
         if result.is_ok() {
             self.loaded_import_targets.insert(import_key);
         }
         result
+    }
+
+    /// Record the import cycle that closes when `repeated` is re-entered while
+    /// it is still on the active import path.
+    ///
+    /// The recorded cycle is the suffix of the active path starting at the
+    /// earlier visit of `repeated`, closed by `repeated` itself, so it reads as
+    /// `a -> b -> c -> a`. Duplicates are dropped: the same cycle is reached
+    /// once per import target group, and reporting it many times would bury the
+    /// distinct cycles.
+    pub(super) fn record_import_cycle(&mut self, repeated: &Path) {
+        let Some(start) = self.import_stack.iter().position(|p| p == repeated) else {
+            // `repeated` is in `loaded_modules` but not on the ordered stack.
+            // That happens for the sibling-package scan, which marks modules
+            // visited without pushing them; there is no cycle to name.
+            return;
+        };
+
+        let mut cycle: Vec<PathBuf> = self.import_stack[start..].to_vec();
+        cycle.push(repeated.to_path_buf());
+
+        if !self.import_cycles.contains(&cycle) {
+            self.import_cycles.push(cycle);
+        }
     }
 
     fn load_types_from_smf(&mut self, smf_path: &Path, target: &ImportTarget) -> LowerResult<()> {

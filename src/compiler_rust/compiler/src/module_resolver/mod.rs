@@ -727,24 +727,11 @@ auto import router.route
         assert!(!result.iter().any(|s| s.name == "get")); // Not in auto import
     }
 
-    #[test]
-    fn test_circular_dependency_detection() {
-        use simple_dependency_tracker::graph::ImportKind;
-
-        let dir = create_test_project();
-        let src = dir.path().join("src");
-
-        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
-
-        // Create a cycle: a -> b -> c -> a
-        resolver.record_import("crate.a", "crate.b", ImportKind::Use);
-        resolver.record_import("crate.b", "crate.c", ImportKind::Use);
-        resolver.record_import("crate.c", "crate.a", ImportKind::Use);
-
-        let result = resolver.check_circular_dependencies();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Circular dependency"));
-    }
+    // `test_circular_dependency_detection` was removed with the code it
+    // exercised. It hand-fed `record_import` -- the only thing that ever did --
+    // so it proved the detector worked on a graph that production never built.
+    // Real cycle coverage now lives in `tests/import_cycle_detection.rs`, which
+    // walks actual files on disk.
 
     // ========================================================================
     // Capability Inheritance Tests
