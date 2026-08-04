@@ -20,16 +20,30 @@ printf '%s\n' "$help" | grep -F -- '--verify-only' >/dev/null \
 
 grep -F 'TAG="llvmorg-23.1.0-rc2"' "$builder" >/dev/null \
     || fail "builder is not pinned to the researched signed tag"
+grep -F 'TAG_COMMIT="561093d94eb7156dea780c1c71a779824ef90e5b"' "$builder" >/dev/null \
+    || fail "builder does not pin the signed tag's peeled commit"
+grep -F '[ "$tag_commit" = "$TAG_COMMIT" ]' "$builder" >/dev/null \
+    || fail "builder does not reject a retargeted signed tag"
 grep -F 'git -C "$SOURCE_DIR" verify-tag "$TAG"' "$builder" >/dev/null \
     || fail "builder does not verify the tag signature"
 grep -F -- "-DLLVM_ENABLE_PROJECTS='clang;lld'" "$builder" >/dev/null \
     || fail "builder does not limit projects to clang and lld"
-grep -F -- "-DLLVM_DISTRIBUTION_COMPONENTS='clang;lld;llvm-ar;llvm-objcopy;llvm-config'" "$builder" >/dev/null \
-    || fail "builder does not limit the installed provider components"
+grep -F -- "-DLLVM_DISTRIBUTION_COMPONENTS='clang;lld;llvm-ar;llvm-as;opt;llc;llvm-objcopy;llvm-config'" "$builder" >/dev/null \
+    || fail "builder does not install the complete native LLVM provider components"
+for tool in llvm-as opt llc; do
+    grep -F "missing installed $tool:" "$builder" >/dev/null \
+        || fail "builder does not validate $tool"
+done
 grep -F 'TARGETS="X86;AArch64;RISCV;WebAssembly"' "$builder" >/dev/null \
     || fail "builder does not declare the reviewed target set"
 grep -F 'LLVM_23_1_PREFIX=%s' "$builder" >/dev/null \
     || fail "builder does not emit provider handoff metadata"
+grep -F 'LLVM_23_1_PROVIDER_SCHEMA=llvm-23.1-provider-v2' "$builder" >/dev/null \
+    || fail "builder does not emit an attested provider receipt"
+grep -F 'provider tool escapes installed prefix' "$builder" >/dev/null \
+    || fail "builder does not reject provider tool symlinks outside the prefix"
+grep -F 'LLVM_LLC_SHA256=%s' "$builder" >/dev/null \
+    || fail "builder does not bind llc by hash"
 
 if "$builder" --source-dir "$repo_root/build/definitely-missing-llvm-source" \
     --prefix "$repo_root/build/definitely-missing-llvm-prefix" --verify-only \

@@ -36,6 +36,16 @@ fails closed if a required tool is absent or reports a version other than
 23.1; mixing a Clang 23.1 frontend with an older linker or archiver is not an
 admitted workaround.
 
+The canonical FreeBSD QEMU full bootstrap provisions its own guest-native
+provider: it imports the pinned LLVM release signing key, clones and verifies
+the signed `llvmorg-23.1.0-rc2` tag, then builds the complete provider under
+the synced checkout. `FREEBSD_LLVM_23_1_PREFIX` and
+`FREEBSD_LLVM_23_1_SOURCE_DIR` can select absolute guest paths; otherwise safe
+guest-local defaults are used. The smoke mode instead requires a preexisting
+provider. Both modes admit only `clang`, `ld.lld`, `llvm-ar`, `llvm-as`, `opt`,
+`llc`, `llvm-config`, and `llvm-objcopy` from one realpath-resolved prefix,
+record tool hashes, and reject generic FreeBSD `llvm`/`clang` fallback.
+
 The browser guest is built by `scripts/os/build_browser_demo_client.shs`. Its
 ELF is `build/os/apps/browser_demo/browser_demo.elf`, and its retained provider
 record is `build/os/apps/browser_demo/clang-23.1-evidence.txt`. Both must be

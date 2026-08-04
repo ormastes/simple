@@ -6,6 +6,7 @@ set -eu
 # explicit --clone option.
 
 TAG="llvmorg-23.1.0-rc2"
+TAG_COMMIT="561093d94eb7156dea780c1c71a779824ef90e5b"
 REPOSITORY="https://github.com/llvm/llvm-project.git"
 SOURCE_DIR=""
 BUILD_DIR="build/toolchains/llvm-23.1.0-rc2-build"
@@ -39,6 +40,23 @@ EOF
 die() {
     printf 'llvm-23.1-provider: ERROR: %s\n' "$*" >&2
     exit 1
+}
+
+canonical_path() {
+    command -v realpath >/dev/null 2>&1 || die "realpath is required to attest provider paths"
+    realpath "$1" || die "could not resolve path: $1"
+}
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256 >/dev/null 2>&1; then
+        sha256 -q "$1"
+    else
+        die "a SHA-256 utility is required to attest provider tools"
+    fi
 }
 
 while [ "$#" -gt 0 ]; do
@@ -85,6 +103,8 @@ git -C "$SOURCE_DIR" rev-parse -q --verify "refs/tags/$TAG" >/dev/null \
 git -C "$SOURCE_DIR" verify-tag "$TAG" >/dev/null 2>&1 \
     || die "signature verification failed for $TAG; configure Git's trusted LLVM release signing key"
 tag_commit=$(git -C "$SOURCE_DIR" rev-list -n 1 "$TAG")
+[ "$tag_commit" = "$TAG_COMMIT" ] \
+    || die "pinned tag $TAG resolved to $tag_commit, expected $TAG_COMMIT"
 head_commit=$(git -C "$SOURCE_DIR" rev-parse HEAD)
 [ "$head_commit" = "$tag_commit" ] \
     || die "HEAD $head_commit is not pinned tag commit $tag_commit"
@@ -94,16 +114,42 @@ validate_provider() {
     lld_bin="$PREFIX/bin/ld.lld"
     llvm_config_bin="$PREFIX/bin/llvm-config"
     llvm_ar_bin="$PREFIX/bin/llvm-ar"
+    llvm_as_bin="$PREFIX/bin/llvm-as"
+    opt_bin="$PREFIX/bin/opt"
+    llc_bin="$PREFIX/bin/llc"
     llvm_objcopy_bin="$PREFIX/bin/llvm-objcopy"
     [ -x "$clang_bin" ] || die "missing installed clang: $clang_bin"
     [ -x "$lld_bin" ] || die "missing installed ld.lld: $lld_bin"
     [ -x "$llvm_config_bin" ] || die "missing installed llvm-config: $llvm_config_bin"
     [ -x "$llvm_ar_bin" ] || die "missing installed llvm-ar: $llvm_ar_bin"
+    [ -x "$llvm_as_bin" ] || die "missing installed llvm-as: $llvm_as_bin"
+    [ -x "$opt_bin" ] || die "missing installed opt: $opt_bin"
+    [ -x "$llc_bin" ] || die "missing installed llc: $llc_bin"
     [ -x "$llvm_objcopy_bin" ] || die "missing installed llvm-objcopy: $llvm_objcopy_bin"
+    prefix_real=$(canonical_path "$PREFIX")
+    source_real=$(canonical_path "$SOURCE_DIR")
+    clang_bin=$(canonical_path "$clang_bin")
+    lld_bin=$(canonical_path "$lld_bin")
+    llvm_config_bin=$(canonical_path "$llvm_config_bin")
+    llvm_ar_bin=$(canonical_path "$llvm_ar_bin")
+    llvm_as_bin=$(canonical_path "$llvm_as_bin")
+    opt_bin=$(canonical_path "$opt_bin")
+    llc_bin=$(canonical_path "$llc_bin")
+    llvm_objcopy_bin=$(canonical_path "$llvm_objcopy_bin")
+    for provider_bin in "$clang_bin" "$lld_bin" "$llvm_config_bin" "$llvm_ar_bin" \
+        "$llvm_as_bin" "$opt_bin" "$llc_bin" "$llvm_objcopy_bin"; do
+        case "$provider_bin" in
+            "$prefix_real"/bin/*) ;;
+            *) die "provider tool escapes installed prefix: $provider_bin" ;;
+        esac
+    done
     clang_version=$($clang_bin --version | sed -n '1p')
     lld_version=$($lld_bin --version | sed -n '1p')
     llvm_version=$($llvm_config_bin --version)
     llvm_ar_version=$($llvm_ar_bin --version)
+    llvm_as_version=$($llvm_as_bin --version)
+    opt_version=$($opt_bin --version)
+    llc_version=$($llc_bin --version)
     printf '%s\n' "$clang_version" | grep -Eq 'clang version 23\.1\.0([^0-9]|$)' \
         || die "clang is not LLVM 23.1.0: $clang_version"
     printf '%s\n' "$lld_version" | grep -Eq 'LLD 23\.1\.0([^0-9]|$)' \
@@ -112,8 +158,22 @@ validate_provider() {
         || die "llvm-config is not LLVM 23.1.0: $llvm_version"
     printf '%s\n' "$llvm_ar_version" | grep -Eq 'LLVM version 23\.1\.0([^0-9]|$)' \
         || die "llvm-ar is not LLVM 23.1.0: $llvm_ar_version"
-    printf 'LLVM_23_1_PREFIX=%s\nCLANG=%s\nLINKER=%s\nLLVM_AR=%s\nLLVM_OBJCOPY=%s\nLLVM_CONFIG=%s\nLLVM_TAG=%s\nLLVM_TAG_COMMIT=%s\n' \
-        "$PREFIX" "$clang_bin" "$lld_bin" "$llvm_ar_bin" "$llvm_objcopy_bin" "$llvm_config_bin" "$TAG" "$tag_commit"
+    printf '%s\n' "$llvm_as_version" | grep -Eq 'LLVM version 23\.1\.0([^0-9]|$)' \
+        || die "llvm-as is not LLVM 23.1.0: $llvm_as_version"
+    printf '%s\n' "$opt_version" | grep -Eq 'LLVM version 23\.1\.0([^0-9]|$)' \
+        || die "opt is not LLVM 23.1.0: $opt_version"
+    printf '%s\n' "$llc_version" | grep -Eq 'LLVM version 23\.1\.0([^0-9]|$)' \
+        || die "llc is not LLVM 23.1.0: $llc_version"
+    printf 'LLVM_23_1_PROVIDER_SCHEMA=llvm-23.1-provider-v2\nLLVM_23_1_PREFIX=%s\nLLVM_SOURCE_DIR=%s\nLLVM_TARGETS=%s\nCLANG=%s\nCLANG_SHA256=%s\nLINKER=%s\nLINKER_SHA256=%s\nLLVM_AR=%s\nLLVM_AR_SHA256=%s\nLLVM_AS=%s\nLLVM_AS_SHA256=%s\nLLVM_OPT=%s\nLLVM_OPT_SHA256=%s\nLLVM_LLC=%s\nLLVM_LLC_SHA256=%s\nLLVM_OBJCOPY=%s\nLLVM_OBJCOPY_SHA256=%s\nLLVM_CONFIG=%s\nLLVM_CONFIG_SHA256=%s\nLLVM_TAG=%s\nLLVM_TAG_COMMIT=%s\n' \
+        "$prefix_real" "$source_real" "$TARGETS" "$clang_bin" "$(sha256_file "$clang_bin")" \
+        "$lld_bin" "$(sha256_file "$lld_bin")" \
+        "$llvm_ar_bin" "$(sha256_file "$llvm_ar_bin")" \
+        "$llvm_as_bin" "$(sha256_file "$llvm_as_bin")" \
+        "$opt_bin" "$(sha256_file "$opt_bin")" \
+        "$llc_bin" "$(sha256_file "$llc_bin")" \
+        "$llvm_objcopy_bin" "$(sha256_file "$llvm_objcopy_bin")" \
+        "$llvm_config_bin" "$(sha256_file "$llvm_config_bin")" \
+        "$TAG" "$tag_commit"
 }
 
 if [ "$VERIFY_ONLY" -eq 1 ]; then
@@ -128,7 +188,7 @@ cmake -S "$SOURCE_DIR/llvm" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DLLVM_ENABLE_PROJECTS='clang;lld' \
-    -DLLVM_DISTRIBUTION_COMPONENTS='clang;lld;llvm-ar;llvm-objcopy;llvm-config' \
+    -DLLVM_DISTRIBUTION_COMPONENTS='clang;lld;llvm-ar;llvm-as;opt;llc;llvm-objcopy;llvm-config' \
     -DLLVM_TARGETS_TO_BUILD="$TARGETS" \
     -DLLVM_INCLUDE_TESTS=OFF \
     -DLLVM_INCLUDE_EXAMPLES=OFF \

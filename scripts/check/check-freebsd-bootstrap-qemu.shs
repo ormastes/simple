@@ -27,6 +27,20 @@ set -eu
 #   QEMU_SSH_TIMEOUT     Initial SSH wait seconds (default: 1800; pristine images
 #                        may run freebsd-update before nuageinit/sshd)
 #   QEMU_ROOT_SSH_TIMEOUT Root SSH wait seconds after user SSH (default: 120)
+#   FREEBSD_LLVM_23_1_PREFIX
+#                        Absolute guest path to the reviewed complete LLVM 23.1
+#                        provider. Full mode defaults to an authenticated,
+#                        guest-built provider below the synced checkout; smoke
+#                        mode requires an already provisioned provider.
+#   FREEBSD_LLVM_23_1_SOURCE_DIR
+#                        Absolute guest source checkout path. Full mode defaults
+#                        beside the provider prefix.
+#   FREEBSD_LLVM_23_1_JOBS
+#                        Guest LLVM provider build jobs (default: 2).
+#   FREEBSD_LLVM_23_1_TIMEOUT
+#                        Bounded guest LLVM provider build seconds (default:
+#                        10800). The provider is restricted to X86 for this
+#                        x86_64 FreeBSD bootstrap lane.
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -38,6 +52,11 @@ QEMU_MEM="${QEMU_MEM:-8G}"
 QEMU_CPUS="${QEMU_CPUS:-4}"
 QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-1800}"
 QEMU_ROOT_SSH_TIMEOUT="${QEMU_ROOT_SSH_TIMEOUT:-120}"
+FREEBSD_LLVM_23_1_PREFIX="${FREEBSD_LLVM_23_1_PREFIX:-}"
+FREEBSD_LLVM_23_1_SOURCE_DIR="${FREEBSD_LLVM_23_1_SOURCE_DIR:-}"
+FREEBSD_LLVM_23_1_JOBS="${FREEBSD_LLVM_23_1_JOBS:-2}"
+FREEBSD_LLVM_23_1_TIMEOUT="${FREEBSD_LLVM_23_1_TIMEOUT:-10800}"
+FREEBSD_LLVM_23_1_SIGNER_FPR="D574BD5D1D0E98895E3BF90044F2485E45D59042"
 FREEBSD_VERSION="14.4"
 FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
 FREEBSD_IMAGE_URL="https://download.freebsd.org/releases/VM-IMAGES/${FREEBSD_VERSION}-RELEASE/amd64/Latest/${FREEBSD_IMAGE_NAME}.xz"
@@ -68,6 +87,89 @@ done
 pass()  { printf '  ✓ %s\n' "$1"; }
 fail()  { printf '  ✗ %s\n' "$1"; return 1; }
 info()  { printf '  → %s\n' "$1"; }
+
+require_freebsd_llvm_23_1_provider() {
+    case "$FREEBSD_LLVM_23_1_PREFIX" in
+        /*) ;;
+        '') fail "FREEBSD_LLVM_23_1_PREFIX is required (absolute guest path to the reviewed LLVM 23.1 provider)" ;;
+        *) fail "FREEBSD_LLVM_23_1_PREFIX must be an absolute guest path" ;;
+    esac
+    case "$FREEBSD_LLVM_23_1_PREFIX" in
+        *[!A-Za-z0-9_./-]*) fail "FREEBSD_LLVM_23_1_PREFIX contains unsupported characters" ;;
+    esac
+
+    FREEBSD_PROVIDER_OUT=$($VM_SSH "provider_prefix=\$(realpath ${FREEBSD_LLVM_23_1_PREFIX}) || exit 1; for provider_tool in clang ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy; do provider_bin=\$(realpath \$provider_prefix/bin/\$provider_tool) || { echo missing:\$provider_tool; exit 1; }; case \$provider_bin in \$provider_prefix/bin/*) ;; *) echo escaped:\$provider_tool; exit 1;; esac; provider_version=\$(\$provider_bin --version 2>/dev/null | sed -n 's/[^0-9]*\\([0-9][0-9]*\\)\\.\\([0-9][0-9]*\\).*/\\1.\\2/p' | head -n 1); test \"\$provider_version\" = 23.1 || { echo rejected:\$provider_tool:\${provider_version:-unparseable}; exit 1; }; provider_hash=\$(sha256 -q \$provider_bin) || exit 1; printf 'tool_%s_path=%s\\ntool_%s_version=%s\\ntool_%s_sha256=%s\\n' \$provider_tool \$provider_bin \$provider_tool \$provider_version \$provider_tool \$provider_hash; done; printf 'provider_prefix=%s\\nfreebsd_llvm_23_1_provider=true\\n' \$provider_prefix" 2>&1) || {
+        printf '%s\n' "$FREEBSD_PROVIDER_OUT" >&2
+        fail "FreeBSD LLVM provider is incomplete or not version 23.1"
+    }
+    printf '%s\n' "$FREEBSD_PROVIDER_OUT" | grep -qx 'freebsd_llvm_23_1_provider=true' || fail "FreeBSD LLVM provider receipt missing"
+
+    # This is intentionally an assignment fragment for commands executed in the
+    # guest.  The validated prefix is prepended before every compiler-facing
+    # bootstrap and smoke command, so a system llvm/clang cannot win PATH order.
+    FREEBSD_LLVM_23_1_PREFIX=$(printf '%s\n' "$FREEBSD_PROVIDER_OUT" | sed -n 's/^provider_prefix=//p')
+    [ -n "$FREEBSD_LLVM_23_1_PREFIX" ] || fail "FreeBSD LLVM provider canonical prefix receipt missing"
+    FREEBSD_LLVM_23_1_ENV="PATH=${FREEBSD_LLVM_23_1_PREFIX}/bin:\$PATH LLVM_PREFIX=${FREEBSD_LLVM_23_1_PREFIX} LLVM_23_1_PREFIX=${FREEBSD_LLVM_23_1_PREFIX} SIMPLE_LLVM_PREFIX=${FREEBSD_LLVM_23_1_PREFIX} CC=${FREEBSD_LLVM_23_1_PREFIX}/bin/clang AR=${FREEBSD_LLVM_23_1_PREFIX}/bin/llvm-ar"
+}
+
+provision_freebsd_llvm_23_1_provider() {
+    [ -n "$FREEBSD_LLVM_23_1_PREFIX" ] ||
+        FREEBSD_LLVM_23_1_PREFIX="${VM_HOME}/simple/build/toolchains/llvm-23.1.0-rc2"
+    [ -n "$FREEBSD_LLVM_23_1_SOURCE_DIR" ] ||
+        FREEBSD_LLVM_23_1_SOURCE_DIR="${VM_HOME}/simple/build/toolchains/llvm-project-23.1.0-rc2"
+    case "$FREEBSD_LLVM_23_1_JOBS" in
+        ''|*[!0-9]*|0) fail "FREEBSD_LLVM_23_1_JOBS must be a positive integer" ;;
+    esac
+    case "$FREEBSD_LLVM_23_1_TIMEOUT" in
+        ''|*[!0-9]*|0) fail "FREEBSD_LLVM_23_1_TIMEOUT must be a positive integer" ;;
+    esac
+    for guest_path in "$FREEBSD_LLVM_23_1_PREFIX" "$FREEBSD_LLVM_23_1_SOURCE_DIR"; do
+        case "$guest_path" in
+            /*) ;;
+            *) fail "FreeBSD LLVM provider paths must be absolute guest paths" ;;
+        esac
+        case "$guest_path" in
+            *[!A-Za-z0-9_./-]*) fail "FreeBSD LLVM provider paths contain unsupported characters" ;;
+        esac
+    done
+    FREEBSD_LLVM_GNUPGHOME="/tmp/simple-freebsd-llvm23-gpg"
+    FREEBSD_PROVIDER_MANIFEST="${VM_HOME}/simple/build/freebsd/llvm-23.1-provider.env"
+
+    info "Importing the pinned LLVM release signing key in the guest..."
+    $VM_SSH "rm -rf ${FREEBSD_LLVM_GNUPGHOME} && mkdir -m 700 ${FREEBSD_LLVM_GNUPGHOME} && cd ${VM_HOME}/simple && GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} gpg --batch --import scripts/setup/keys/llvm-release-tobias-hieta.asc >/dev/null && GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} gpg --with-colons --list-keys ${FREEBSD_LLVM_23_1_SIGNER_FPR} | grep -q '^fpr:::::::::${FREEBSD_LLVM_23_1_SIGNER_FPR}:$'" ||
+        fail "FreeBSD LLVM release signing key import failed"
+
+    info "Building or verifying authenticated guest LLVM/Clang 23.1 provider..."
+    if ! $VM_SSH "cd ${VM_HOME}/simple && mkdir -p build/freebsd && if test -d ${FREEBSD_LLVM_23_1_SOURCE_DIR}/.git; then gtimeout -k 60 ${FREEBSD_LLVM_23_1_TIMEOUT} env GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} sh scripts/setup/build-llvm-23-1-provider.shs --source-dir ${FREEBSD_LLVM_23_1_SOURCE_DIR} --prefix ${FREEBSD_LLVM_23_1_PREFIX} --targets X86 --jobs ${FREEBSD_LLVM_23_1_JOBS} > build/freebsd/llvm-23.1-provider-build.log 2>&1; else gtimeout -k 60 ${FREEBSD_LLVM_23_1_TIMEOUT} env GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} sh scripts/setup/build-llvm-23-1-provider.shs --clone --source-dir ${FREEBSD_LLVM_23_1_SOURCE_DIR} --prefix ${FREEBSD_LLVM_23_1_PREFIX} --targets X86 --jobs ${FREEBSD_LLVM_23_1_JOBS} > build/freebsd/llvm-23.1-provider-build.log 2>&1; fi"; then
+        $VM_SSH "tail -80 ${VM_HOME}/simple/build/freebsd/llvm-23.1-provider-build.log" >&2 || true
+        copy_guest_bootstrap_logs
+        fail "authenticated guest LLVM 23.1 provider build failed"
+    fi
+    if ! $VM_SSH "cd ${VM_HOME}/simple && GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} sh scripts/setup/build-llvm-23-1-provider.shs --source-dir ${FREEBSD_LLVM_23_1_SOURCE_DIR} --prefix ${FREEBSD_LLVM_23_1_PREFIX} --targets X86 --verify-only > build/freebsd/llvm-23.1-provider-verify.log 2>&1 && cp build/freebsd/llvm-23.1-provider-verify.log ${FREEBSD_PROVIDER_MANIFEST}"; then
+        copy_guest_bootstrap_logs
+        fail "authenticated guest LLVM 23.1 provider verification failed"
+    fi
+    pass "Authenticated guest LLVM/Clang 23.1 provider built and attested"
+}
+
+reverify_freebsd_llvm_23_1_provider() {
+    FREEBSD_PROVIDER_POST_MANIFEST="${VM_HOME}/simple/build/freebsd/llvm-23.1-provider-post.env"
+    if ! $VM_SSH "cd ${VM_HOME}/simple && GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} sh scripts/setup/build-llvm-23-1-provider.shs --source-dir ${FREEBSD_LLVM_23_1_SOURCE_DIR} --prefix ${FREEBSD_LLVM_23_1_PREFIX} --targets X86 --verify-only > build/freebsd/llvm-23.1-provider-post-verify.log 2>&1 && cp build/freebsd/llvm-23.1-provider-post-verify.log ${FREEBSD_PROVIDER_POST_MANIFEST}"; then
+        copy_guest_bootstrap_logs
+        fail "post-bootstrap FreeBSD LLVM 23.1 provider verification failed"
+    fi
+    FREEBSD_PROVIDER_HOST_POST_MANIFEST="${ROOT_DIR}/build/freebsd/llvm-23.1-provider-post.env"
+    scp ${SCP_OPTS} "${VM_USER}@localhost:${FREEBSD_PROVIDER_POST_MANIFEST}" \
+        "$FREEBSD_PROVIDER_HOST_POST_MANIFEST" 2>/dev/null || {
+        copy_guest_bootstrap_logs
+        fail "Failed to retrieve post-bootstrap FreeBSD LLVM provider receipt"
+    }
+    cmp -s "$FREEBSD_PROVIDER_HOST_MANIFEST" "$FREEBSD_PROVIDER_HOST_POST_MANIFEST" || {
+        copy_guest_bootstrap_logs
+        fail "FreeBSD LLVM provider receipt changed during bootstrap/native checks"
+    }
+    pass "FreeBSD LLVM/Clang 23.1 provider receipt unchanged after bootstrap/native checks"
+}
 
 SCRIPT_OK=0
 cleanup() {
@@ -218,8 +320,8 @@ printf '[5/7] QEMU overlay + start\n'
 
 rm -f "$OVERLAY_IMAGE"
 qemu-img create -f qcow2 -b "$QEMU_VM_PATH" -F qcow2 "$OVERLAY_IMAGE" >/dev/null 2>&1
-qemu-img resize "$OVERLAY_IMAGE" 30G >/dev/null 2>&1
-pass "Overlay created (30G): $OVERLAY_IMAGE"
+qemu-img resize "$OVERLAY_IMAGE" 55G >/dev/null 2>&1
+pass "Overlay created (55G): $OVERLAY_IMAGE"
 
 # Detect KVM
 ACCEL="tcg"
@@ -335,6 +437,20 @@ copy_guest_bootstrap_logs() {
     host_log_dir="${ROOT_DIR}/build/freebsd/bootstrap-logs"
     rm -rf "$host_log_dir"
     mkdir -p "$host_log_dir"
+    if $VM_SSH "test -f ${VM_HOME}/simple/build/freebsd/llvm-23.1-provider-build.log" 2>/dev/null; then
+        scp ${SCP_OPTS} "${VM_USER}@localhost:${VM_HOME}/simple/build/freebsd/llvm-23.1-provider-build.log" \
+            "${host_log_dir}/llvm-23.1-provider-build.log" 2>/dev/null || true
+    fi
+    if $VM_SSH "test -f ${VM_HOME}/simple/build/freebsd/llvm-23.1-provider.env" 2>/dev/null; then
+        scp ${SCP_OPTS} "${VM_USER}@localhost:${VM_HOME}/simple/build/freebsd/llvm-23.1-provider.env" \
+            "${host_log_dir}/llvm-23.1-provider.env" 2>/dev/null || true
+    fi
+    for provider_log in llvm-23.1-provider-verify.log llvm-23.1-provider-post-verify.log; do
+        if $VM_SSH "test -f ${VM_HOME}/simple/build/freebsd/${provider_log}" 2>/dev/null; then
+            scp ${SCP_OPTS} "${VM_USER}@localhost:${VM_HOME}/simple/build/freebsd/${provider_log}" \
+                "${host_log_dir}/${provider_log}" 2>/dev/null || true
+        fi
+    done
     if rsync -az -e "ssh ${SSH_OPTS}" \
         "${VM_USER}@localhost:${VM_HOME}/simple/build/bootstrap/logs/" \
         "${host_log_dir}/"; then
@@ -353,24 +469,13 @@ copy_guest_bootstrap_logs() {
 printf '[7/7] Bootstrap (%s)\n' "$MODE"
 
 if [ "$MODE" = "smoke" ]; then
-    # Smoke: verify clang exists and can compile a trivial C program
-    CLANG_CHECK=$($VM_SSH "command -v clang >/dev/null 2>&1 && echo ok || echo missing" 2>/dev/null)
-    if [ "$CLANG_CHECK" = "ok" ]; then
-        pass "clang available in VM"
-    else
-        info "Installing clang..."
-        $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg bootstrap" 2>/dev/null || true
-        $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y llvm" 2>&1 | tail -3
-        CLANG_CHECK=$($VM_SSH "command -v clang >/dev/null 2>&1 && echo ok || echo missing" 2>/dev/null)
-        if [ "$CLANG_CHECK" = "ok" ]; then
-            pass "clang installed"
-        else
-            fail "clang not available"
-        fi
-    fi
+    # Smoke proves the same admitted provider used by full bootstrap.  It must
+    # not install or accept FreeBSD's generic llvm package as a substitute.
+    require_freebsd_llvm_23_1_provider
+    pass "reviewed LLVM/Clang 23.1 provider admitted"
 
     # Test trivial C compilation
-    $VM_SSH "echo 'int main(){return 0;}' > /tmp/test.c && clang -o /tmp/test /tmp/test.c && /tmp/test && echo ok" 2>/dev/null | grep -q ok
+    $VM_SSH "${FREEBSD_LLVM_23_1_ENV} ${FREEBSD_LLVM_23_1_PREFIX}/bin/clang --version >/dev/null && echo 'int main(){return 0;}' > /tmp/test.c && ${FREEBSD_LLVM_23_1_PREFIX}/bin/clang -o /tmp/test /tmp/test.c && /tmp/test && echo ok" 2>/dev/null | grep -q ok
     pass "Trivial C compilation works"
 
     SCRIPT_OK=1
@@ -386,8 +491,8 @@ else
     case "$ROOT_AVAILABLE_KB" in
         ''|*[!0-9]*) fail "Could not determine guest root free space" ;;
     esac
-    [ "$ROOT_AVAILABLE_KB" -ge 10485760 ] || fail "Guest root has less than 10 GiB free after growfs"
-    pass "Guest root has at least 10 GiB free"
+    [ "$ROOT_AVAILABLE_KB" -ge 31457280 ] || fail "Guest root has less than 30 GiB free after growfs"
+    pass "Guest root has at least 30 GiB free"
 
     info "Installing build dependencies in VM (this may take a few minutes)..."
     if ! $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg bootstrap > /tmp/simple-pkg-bootstrap.log 2>&1"; then
@@ -398,7 +503,7 @@ else
         $VM_SSH "tail -20 /tmp/simple-pkg-update.log" >&2 || true
         fail "pkg update failed"
     fi
-    if ! $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y rsync curl rust llvm git gmake pkgconf libffi zstd perl5 > /tmp/simple-pkg-install.log 2>&1"; then
+    if ! $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y rsync curl rust git gmake pkgconf libffi zstd perl5 cmake ninja gnupg coreutils > /tmp/simple-pkg-install.log 2>&1"; then
         $VM_SSH "tail -20 /tmp/simple-pkg-install.log" >&2 || true
         fail "dependency installation failed"
     fi
@@ -433,8 +538,30 @@ else
         "${ROOT_DIR}/" "${VM_USER}@localhost:${VM_HOME}/simple/"
     pass "Project synced"
 
+    provision_freebsd_llvm_23_1_provider
+    info "Admitting authenticated FreeBSD LLVM/Clang 23.1 provider..."
+    require_freebsd_llvm_23_1_provider
+    FULL_PROVIDER_OUT=$($VM_SSH "cd ${VM_HOME}/simple && LLVM_23_1_PREFIX=${FREEBSD_LLVM_23_1_PREFIX} sh -c '. scripts/check/lib/clang-23-1-toolchain.shs; clang_23_1_require_full_provider_prefix \"\$LLVM_23_1_PREFIX\"; echo freebsd_llvm_23_1_provider_helper=true'" 2>&1) || {
+        printf '%s\n' "$FULL_PROVIDER_OUT" >&2
+        fail "FreeBSD LLVM 23.1 provider helper admission failed"
+    }
+    printf '%s\n' "$FULL_PROVIDER_OUT" | grep -qx 'freebsd_llvm_23_1_provider_helper=true' || fail "FreeBSD LLVM 23.1 provider helper receipt missing"
+    FREEBSD_PROVIDER_HOST_MANIFEST="${ROOT_DIR}/build/freebsd/llvm-23.1-provider.env"
+    mkdir -p "$(dirname "$FREEBSD_PROVIDER_HOST_MANIFEST")"
+    scp ${SCP_OPTS} "${VM_USER}@localhost:${FREEBSD_PROVIDER_MANIFEST}" \
+        "$FREEBSD_PROVIDER_HOST_MANIFEST" 2>/dev/null || fail "Failed to retrieve FreeBSD LLVM provider receipt"
+    grep -qx 'LLVM_23_1_PROVIDER_SCHEMA=llvm-23.1-provider-v2' "$FREEBSD_PROVIDER_HOST_MANIFEST" || fail "FreeBSD LLVM provider receipt schema missing"
+    grep -qx 'LLVM_TAG=llvmorg-23.1.0-rc2' "$FREEBSD_PROVIDER_HOST_MANIFEST" || fail "FreeBSD LLVM provider tag receipt missing"
+    grep -qx 'LLVM_TAG_COMMIT=561093d94eb7156dea780c1c71a779824ef90e5b' "$FREEBSD_PROVIDER_HOST_MANIFEST" || fail "FreeBSD LLVM provider peeled-tag receipt missing"
+    grep -qx 'LLVM_TARGETS=X86' "$FREEBSD_PROVIDER_HOST_MANIFEST" || fail "FreeBSD LLVM provider target receipt missing"
+    grep -Eq '^LLVM_LLC_SHA256=[0-9a-f]{64}$' "$FREEBSD_PROVIDER_HOST_MANIFEST" || fail "FreeBSD LLVM provider llc hash receipt missing"
+    for provider_hash in CLANG LINKER LLVM_AR LLVM_AS LLVM_OPT LLVM_LLC LLVM_OBJCOPY LLVM_CONFIG; do
+        grep -Eq "^${provider_hash}_SHA256=[0-9a-f]{64}$" "$FREEBSD_PROVIDER_HOST_MANIFEST" || fail "FreeBSD LLVM provider hash receipt missing: ${provider_hash}"
+    done
+    pass "FreeBSD LLVM/Clang 23.1 provider admitted without generic fallback"
+
     info "Running canonical full bootstrap in VM..."
-    if ! $VM_SSH "cd ${VM_HOME}/simple && env LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --mode=dynload --no-mcp --jobs=2"; then
+    if ! $VM_SSH "cd ${VM_HOME}/simple && env ${FREEBSD_LLVM_23_1_ENV} LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --mode=dynload --no-mcp --jobs=2"; then
         copy_guest_bootstrap_logs
         fail "Canonical FreeBSD bootstrap failed"
     fi
@@ -445,7 +572,7 @@ else
     fi
 
     info "Running FreeBSD typed-enum bytecode execution..."
-    BYTECODE_ENUM_OUT=$($VM_SSH "cd ${VM_HOME}/simple/src/compiler_rust && cargo test -p simple-compiler --lib test_compile_enum_ -- --nocapture 2>&1; echo EXIT:\$?" 2>/dev/null)
+    BYTECODE_ENUM_OUT=$($VM_SSH "cd ${VM_HOME}/simple/src/compiler_rust && ${FREEBSD_LLVM_23_1_ENV} cargo test -p simple-compiler --lib test_compile_enum_ -- --nocapture 2>&1; echo EXIT:\$?" 2>/dev/null)
     BYTECODE_ENUM_EXIT=$(printf '%s' "$BYTECODE_ENUM_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
     printf '%s\n' "$BYTECODE_ENUM_OUT" | grep -v '^EXIT:' | tail -10
     [ "$BYTECODE_ENUM_EXIT" = "0" ] || fail "FreeBSD typed-enum bytecode execution failed (exit $BYTECODE_ENUM_EXIT)"
@@ -454,7 +581,7 @@ else
 
     RUST_SEED_BIN="${VM_HOME}/simple/src/compiler_rust/target/bootstrap/simple"
     info "Running FreeBSD Rust-seed custom enum identity parity..."
-    SEED_ENUM_OUT=$($VM_SSH "cd ${VM_HOME}/simple && test -x ${RUST_SEED_BIN} && SIMPLE_BINARY=${RUST_SEED_BIN} NATIVE_PARITY_CASES=crossmodule_result_u8 NATIVE_PARITY_FAIL_ON_XFAIL=1 PARITY_WORK_DIR=/tmp/simple-freebsd-rust-seed-enum sh scripts/check/check-native-seed-parity.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
+    SEED_ENUM_OUT=$($VM_SSH "cd ${VM_HOME}/simple && test -x ${RUST_SEED_BIN} && ${FREEBSD_LLVM_23_1_ENV} SIMPLE_BINARY=${RUST_SEED_BIN} NATIVE_PARITY_CASES=crossmodule_result_u8 NATIVE_PARITY_FAIL_ON_XFAIL=1 PARITY_WORK_DIR=/tmp/simple-freebsd-rust-seed-enum sh scripts/check/check-native-seed-parity.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
     SEED_ENUM_EXIT=$(printf '%s' "$SEED_ENUM_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
     printf '%s\n' "$SEED_ENUM_OUT" | grep -v '^EXIT:' | tail -10
     [ "$SEED_ENUM_EXIT" = "0" ] || fail "FreeBSD Rust-seed custom enum identity parity failed (exit $SEED_ENUM_EXIT)"
@@ -468,7 +595,7 @@ else
     SMOKE_DIR="/tmp/simple-freebsd-stage3-smoke"
     $VM_SSH "rm -rf ${SMOKE_DIR} && mkdir -p ${SMOKE_DIR} && printf 'fn main():\n    print 6 * 7\n' > ${SMOKE_DIR}/main.spl" \
         2>/dev/null || fail "Failed to create FreeBSD stage3 smoke source"
-    SMOKE_OUT=$($VM_SSH "cd ${VM_HOME}/simple && ${STAGE_BIN} native-build ${SMOKE_DIR}/main.spl --backend cranelift --output ${SMOKE_DIR}/probe 2>&1; echo EXIT:\$?" 2>/dev/null)
+    SMOKE_OUT=$($VM_SSH "cd ${VM_HOME}/simple && ${FREEBSD_LLVM_23_1_ENV} ${STAGE_BIN} native-build ${SMOKE_DIR}/main.spl --backend cranelift --output ${SMOKE_DIR}/probe 2>&1; echo EXIT:\$?" 2>/dev/null)
     SMOKE_EXIT=$(printf '%s' "$SMOKE_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
     printf '%s\n' "$SMOKE_OUT" | grep -v '^EXIT:' | tail -10
     [ "$SMOKE_EXIT" = "0" ] || fail "FreeBSD stage3 native-build smoke failed (exit $SMOKE_EXIT)"
@@ -478,7 +605,7 @@ else
     pass "Canonical Rust + pure-Simple dynload bootstrap and stage3 compiler smoke completed"
 
     info "Running FreeBSD Stage4 dynload provider archive proof..."
-    DYNLOAD_ARCHIVE_OUT=$($VM_SSH "cd ${VM_HOME}/simple && AR=llvm-ar SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BINARY=${STAGE_BIN} sh scripts/check/check-stage4-hosted-dynload-provider-archive.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
+    DYNLOAD_ARCHIVE_OUT=$($VM_SSH "cd ${VM_HOME}/simple && ${FREEBSD_LLVM_23_1_ENV} SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BINARY=${STAGE_BIN} sh scripts/check/check-stage4-hosted-dynload-provider-archive.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
     DYNLOAD_ARCHIVE_EXIT=$(printf '%s' "$DYNLOAD_ARCHIVE_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
     printf '%s\n' "$DYNLOAD_ARCHIVE_OUT" | grep -v '^EXIT:' | tail -10
     [ "$DYNLOAD_ARCHIVE_EXIT" = "0" ] || fail "FreeBSD Stage4 dynload provider archive proof failed (exit $DYNLOAD_ARCHIVE_EXIT)"
@@ -486,7 +613,7 @@ else
     pass "FreeBSD Stage4 dynload provider archive proof completed"
 
     info "Running FreeBSD default-LLVM native smoke matrix..."
-    MATRIX_OUT=$($VM_SSH "cd ${VM_HOME}/simple && SIMPLE_BINARY=${STAGE_BIN} SIMPLE_RUNTIME_PATH=${VM_HOME}/simple/src/compiler_rust/target/bootstrap NATIVE_SMOKE_BACKEND=llvm NATIVE_SMOKE_WORK_DIR=/tmp/simple-freebsd-native-smoke sh scripts/check/native-smoke-matrix.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
+    MATRIX_OUT=$($VM_SSH "cd ${VM_HOME}/simple && ${FREEBSD_LLVM_23_1_ENV} SIMPLE_BINARY=${STAGE_BIN} SIMPLE_RUNTIME_PATH=${VM_HOME}/simple/src/compiler_rust/target/bootstrap NATIVE_SMOKE_BACKEND=llvm NATIVE_SMOKE_WORK_DIR=/tmp/simple-freebsd-native-smoke sh scripts/check/native-smoke-matrix.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
     MATRIX_EXIT=$(printf '%s' "$MATRIX_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
     printf '%s\n' "$MATRIX_OUT" | grep -v '^EXIT:' | tail -20
     [ "$MATRIX_EXIT" = "0" ] || fail "FreeBSD native smoke matrix failed (exit $MATRIX_EXIT)"
@@ -494,7 +621,7 @@ else
     pass "FreeBSD default-LLVM native smoke matrix completed"
 
     info "Running FreeBSD scoped Cranelift smoke..."
-    CRANELIFT_MODULE_INIT_OUT=$($VM_SSH "cd ${VM_HOME}/simple && SIMPLE_BINARY=${STAGE_BIN} SIMPLE_RUNTIME_PATH=${VM_HOME}/simple/src/compiler_rust/target/bootstrap NATIVE_SMOKE_BACKEND=cranelift NATIVE_SMOKE_CASES='dict_struct_value enum_f64_payload_precision tuple_return_across_call hyphenated_module_init parse_f64 scalar_spill_across_loop_calls' NATIVE_SMOKE_WORK_DIR=/tmp/simple-freebsd-native-smoke-cranelift-module-init sh scripts/check/native-smoke-matrix.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
+    CRANELIFT_MODULE_INIT_OUT=$($VM_SSH "cd ${VM_HOME}/simple && ${FREEBSD_LLVM_23_1_ENV} SIMPLE_BINARY=${STAGE_BIN} SIMPLE_RUNTIME_PATH=${VM_HOME}/simple/src/compiler_rust/target/bootstrap NATIVE_SMOKE_BACKEND=cranelift NATIVE_SMOKE_CASES='dict_struct_value enum_f64_payload_precision tuple_return_across_call hyphenated_module_init parse_f64 scalar_spill_across_loop_calls' NATIVE_SMOKE_WORK_DIR=/tmp/simple-freebsd-native-smoke-cranelift-module-init sh scripts/check/native-smoke-matrix.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
     CRANELIFT_MODULE_INIT_EXIT=$(printf '%s' "$CRANELIFT_MODULE_INIT_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
     printf '%s\n' "$CRANELIFT_MODULE_INIT_OUT" | grep -v '^EXIT:' | tail -10
     [ "$CRANELIFT_MODULE_INIT_EXIT" = "0" ] || fail "FreeBSD scoped Cranelift smoke failed (exit $CRANELIFT_MODULE_INIT_EXIT)"
@@ -503,7 +630,7 @@ else
     pass "FreeBSD scoped Cranelift smoke completed"
 
     info "Running FreeBSD cross-module Result<u8> compiler smoke..."
-    CROSSMODULE_OUT=$($VM_SSH "cd ${VM_HOME}/simple && SIMPLE_BINARY=${STAGE_BIN} SIMPLE_RUNTIME_PATH=${VM_HOME}/simple/src/compiler_rust/target/bootstrap WORK_DIR=/tmp/simple-freebsd-result-u8 sh scripts/check/check-native-crossmodule-result-u8.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
+    CROSSMODULE_OUT=$($VM_SSH "cd ${VM_HOME}/simple && ${FREEBSD_LLVM_23_1_ENV} SIMPLE_BINARY=${STAGE_BIN} SIMPLE_RUNTIME_PATH=${VM_HOME}/simple/src/compiler_rust/target/bootstrap WORK_DIR=/tmp/simple-freebsd-result-u8 sh scripts/check/check-native-crossmodule-result-u8.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
     CROSSMODULE_EXIT=$(printf '%s' "$CROSSMODULE_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
     printf '%s\n' "$CROSSMODULE_OUT" | grep -v '^EXIT:' | tail -10
     [ "$CROSSMODULE_EXIT" = "0" ] || fail "FreeBSD cross-module Result<u8> smoke failed (exit $CROSSMODULE_EXIT)"
@@ -511,7 +638,7 @@ else
 
     for PARITY_BACKEND in llvm cranelift; do
         info "Running FreeBSD ${PARITY_BACKEND} Option native-authoritative parity..."
-        PARITY_OUT=$($VM_SSH "cd ${VM_HOME}/simple && SIMPLE_BINARY=${STAGE_BIN} NATIVE_PARITY_BACKEND=${PARITY_BACKEND} NATIVE_PARITY_CASES='option_try_annotated_loud option_try_direct_loud option_try_unresolved_method_loud' NATIVE_PARITY_FAIL_ON_XFAIL=1 PARITY_WORK_DIR=/tmp/simple-freebsd-option-${PARITY_BACKEND} sh scripts/check/check-native-seed-parity.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
+        PARITY_OUT=$($VM_SSH "cd ${VM_HOME}/simple && ${FREEBSD_LLVM_23_1_ENV} SIMPLE_BINARY=${STAGE_BIN} NATIVE_PARITY_BACKEND=${PARITY_BACKEND} NATIVE_PARITY_CASES='option_try_annotated_loud option_try_direct_loud option_try_unresolved_method_loud' NATIVE_PARITY_FAIL_ON_XFAIL=1 PARITY_WORK_DIR=/tmp/simple-freebsd-option-${PARITY_BACKEND} sh scripts/check/check-native-seed-parity.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
         PARITY_EXIT=$(printf '%s' "$PARITY_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
         printf '%s\n' "$PARITY_OUT" | grep -v '^EXIT:' | tail -10
         [ "$PARITY_EXIT" = "0" ] || fail "FreeBSD ${PARITY_BACKEND} Option native-authoritative parity failed (exit $PARITY_EXIT)"
@@ -520,12 +647,14 @@ else
     pass "FreeBSD default-LLVM and explicit-Cranelift Option native-authoritative parity completed"
 
     info "Running FreeBSD strict selected native parity..."
-    SELECTED_OUT=$($VM_SSH "cd ${VM_HOME}/simple && SIMPLE_BINARY=${STAGE_BIN} NATIVE_PARITY_CASES='bare_main class_array_field_mutation class_array_param_field_mutation nested_struct_value_copy exists_struct_payload_field result_unwrap text_ordering text_bracket_index text_for_iteration raw_string_interpolation_contract new_keyword_identifier bool_array_element_interp method_owner_dispatch dynload_tagged_text option_is_none_map array_map_text' NATIVE_PARITY_FAIL_ON_XFAIL=1 PARITY_WORK_DIR=/tmp/simple-freebsd-selected-parity sh scripts/check/check-native-seed-parity.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
+    SELECTED_OUT=$($VM_SSH "cd ${VM_HOME}/simple && ${FREEBSD_LLVM_23_1_ENV} SIMPLE_BINARY=${STAGE_BIN} NATIVE_PARITY_CASES='bare_main class_array_field_mutation class_array_param_field_mutation nested_struct_value_copy exists_struct_payload_field result_unwrap text_ordering text_bracket_index text_for_iteration raw_string_interpolation_contract new_keyword_identifier bool_array_element_interp method_owner_dispatch dynload_tagged_text option_is_none_map array_map_text' NATIVE_PARITY_FAIL_ON_XFAIL=1 PARITY_WORK_DIR=/tmp/simple-freebsd-selected-parity sh scripts/check/check-native-seed-parity.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
     SELECTED_EXIT=$(printf '%s' "$SELECTED_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
     printf '%s\n' "$SELECTED_OUT" | grep -v '^EXIT:' | tail -12
     [ "$SELECTED_EXIT" = "0" ] || fail "FreeBSD selected native parity failed (exit $SELECTED_EXIT)"
     printf '%s\n' "$SELECTED_OUT" | grep -qx 'total=32 pass=32 fail=0 xfail=0' || fail "FreeBSD selected native parity summary was not strict 32/32"
     pass "FreeBSD bare-main/class-copy/text-Option/bool/method/dynload/Option-map selected parity completed under LLVM and Cranelift"
+
+    reverify_freebsd_llvm_23_1_provider
 
     # Retrieve binary
     FREEBSD_BIN_DIR="${ROOT_DIR}/bin/release/freebsd-x86_64"

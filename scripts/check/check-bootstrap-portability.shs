@@ -170,6 +170,8 @@ grep -Fq '"${backend}" "${llvm_features}" "${PATH}" "${PLATFORM}"' scripts/boots
   fail "Rust authority fingerprint recipes do not bind all Cargo targets"
 grep -Fq 'bootstrap_stage3_target_c_compiler "${PLATFORM}"' scripts/bootstrap/bootstrap-from-scratch.sh ||
   fail "Rust authority still assumes a host cc command"
+grep -Fq 'command -v "${CC:-cc}"' scripts/check/lib/bootstrap-stage3/authority.shs ||
+  fail "Rust authority ignores an explicit reviewed C compiler"
 for msvc_env in INCLUDE LIB LIBPATH SystemRoot TEMP; do
   grep -Fq "${msvc_env}=" scripts/bootstrap/bootstrap-from-scratch.sh ||
     fail "Rust authority drops MSVC environment: ${msvc_env}"
@@ -455,12 +457,27 @@ grep -Fq 'FREEBSD_VERSION="14.4"' "${freebsd_qemu}" || fail "FreeBSD QEMU image 
 grep -Fq '#cloud-config' "${freebsd_qemu}" || fail "FreeBSD firstboot seed is not cloud-config"
 grep -Fq '/etc/rc.conf.d/firstboot_freebsd_update' "${freebsd_qemu}" || fail "FreeBSD update is not disabled before LOGIN"
 grep -Fq '/etc/rc.conf.d/firstboot_pkgs' "${freebsd_qemu}" || fail "FreeBSD package bootstrap is not disabled before LOGIN"
-grep -Fq 'pkg install -y rsync curl rust llvm git gmake pkgconf libffi zstd perl5' "${freebsd_qemu}" || fail "FreeBSD full bootstrap dependencies are incomplete"
+grep -Fq 'pkg install -y rsync curl rust git gmake pkgconf libffi zstd perl5 cmake ninja gnupg coreutils' "${freebsd_qemu}" || fail "FreeBSD full bootstrap dependencies are incomplete"
+if grep -F 'pkg install -y' "${freebsd_qemu}" | grep -Eq '[[:space:]]llvm([[:space:]]|$)'; then
+  fail "FreeBSD bootstrap still installs a generic LLVM fallback"
+fi
+grep -Fq 'require_freebsd_llvm_23_1_provider()' "${freebsd_qemu}" || fail "FreeBSD bootstrap lacks the LLVM 23.1 provider gate"
+grep -Fq 'provision_freebsd_llvm_23_1_provider()' "${freebsd_qemu}" || fail "FreeBSD bootstrap lacks authenticated LLVM 23.1 provisioning"
+grep -Fq 'gpg --batch --import scripts/setup/keys/llvm-release-tobias-hieta.asc' "${freebsd_qemu}" || fail "FreeBSD bootstrap does not import the pinned LLVM signing key"
+grep -Fq 'build-llvm-23-1-provider.shs --clone' "${freebsd_qemu}" || fail "FreeBSD bootstrap does not build a guest LLVM 23.1 provider"
+grep -Fq 'gtimeout -k 60 ${FREEBSD_LLVM_23_1_TIMEOUT}' "${freebsd_qemu}" || fail "FreeBSD provider build has no bounded timeout"
+grep -Fq -- '--targets X86' "${freebsd_qemu}" || fail "FreeBSD provider build is not constrained to its X86 target"
+grep -Fq 'llvm-23.1-provider-build.log' "${freebsd_qemu}" || fail "FreeBSD provider failure log is not preserved"
+grep -Fq 'LLVM_23_1_PROVIDER_SCHEMA=llvm-23.1-provider-v2' "${freebsd_qemu}" || fail "FreeBSD bootstrap does not retain LLVM provider provenance"
+grep -Fq 'FREEBSD_LLVM_23_1_PREFIX is required' "${freebsd_qemu}" || fail "FreeBSD bootstrap permits an implicit LLVM provider"
+grep -Fq 'clang ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy' "${freebsd_qemu}" || fail "FreeBSD provider gate does not require the complete LLVM 23.1 tool set"
+grep -Fq 'realpath \$provider_prefix/bin/\$provider_tool' "${freebsd_qemu}" || fail "FreeBSD provider gate does not resolve provider tool paths"
+grep -Fq 'LLVM_TAG_COMMIT=561093d94eb7156dea780c1c71a779824ef90e5b' "${freebsd_qemu}" || fail "FreeBSD provider receipt does not pin the peeled tag commit"
 grep -Fq 'command -v perl' "${freebsd_qemu}" || fail "FreeBSD bootstrap does not verify the provenance helper runtime"
 write_files_line=$(grep -n '^write_files:' "${freebsd_qemu}" | cut -d: -f1)
 runcmd_line=$(grep -n '^runcmd:' "${freebsd_qemu}" | cut -d: -f1)
 [ "${write_files_line}" -lt "${runcmd_line}" ] || fail "FreeBSD firstboot flags are written after runcmd"
-grep -Fq 'if ! $VM_SSH "cd ${VM_HOME}/simple && env LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --mode=dynload --no-mcp --jobs=2"; then' "${freebsd_qemu}" || fail "FreeBSD bootstrap output or library search paths are incorrect"
+grep -Fq 'if ! $VM_SSH "cd ${VM_HOME}/simple && env ${FREEBSD_LLVM_23_1_ENV} LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --mode=dynload --no-mcp --jobs=2"; then' "${freebsd_qemu}" || fail "FreeBSD bootstrap does not bind the admitted LLVM provider"
 grep -Fq 'error: failed to fingerprint Rust seed inputs' scripts/bootstrap/bootstrap-from-scratch.sh || fail "seed fingerprint failure is silent"
 grep -Fq 'STAGE_BIN="${VM_HOME}/simple/build/bootstrap/stage3/x86_64-unknown-freebsd/simple"' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Stage4 dynload proof lacks the fresh Stage3 path"
 freebsd_dynload_archive_body=$(awk '
@@ -469,7 +486,7 @@ inside && /^    info "/ { exit }
 inside { print }
 ' scripts/check/check-freebsd-bootstrap-qemu.shs)
 for required in \
-  'AR=llvm-ar' \
+  'FREEBSD_LLVM_23_1_ENV' \
   'SIMPLE_NO_STUB_FALLBACK=1' \
   'SIMPLE_BINARY=${STAGE_BIN}' \
   'sh scripts/check/check-stage4-hosted-dynload-provider-archive.shs 2>&1; echo EXIT:\$?' \
