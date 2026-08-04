@@ -112,7 +112,8 @@ verification-failed
   multi-symbol SMF validation, and produced overload-safe prepared-advice MIR
   phase calls plus loader-derived dispatch projections. Backend admission now
   fails closed across check/interpreter/JIT/AOT and at the common backend edge.
-- verification: production remains deliberately blocked: the canonical facet
+- verification (historical; superseded by the D1/D2 descriptor/projection work
+  and the later D4/D5 review): production remained deliberately blocked: the canonical facet
   factory/descriptor ABI and generated caller are undefined, prepared-advice
   projection publication/generation pinning/backend trampoline are absent, and
   admitted runtime/NFR evidence could not run under the bounded bootstrap cap.
@@ -159,3 +160,46 @@ verification-failed
 - Final review removed the legacy exported registry-plus-loader native executor
   and its outcome type. Public execution now has no bypass around the required
   projection and canonical lifecycle arguments; registry lookup remains public.
+
+## 2026-08-04 — execution-context prerequisite review
+
+- sync: rebased onto `main@origin` `9c598987bb78` and pushed the isolated WIP
+  bookmark at `231cab73e41a`; the worktree was clean after push.
+- recovery: the earlier Linux `is_alnum` boundary is superseded in current
+  source, and main now includes packed/raw bootstrap return-local repairs.
+  Separate ARM64 recovery reached a newer truncated-104-byte LLVM admission
+  blocker, but this workspace has no current-source admitted Linux Stage 2/3.
+  The safe fresh-session resume command is
+  `SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --jobs=2 --no-mcp --progress=build/bootstrap/recovery-20260804.log`.
+  No capped compiler/bootstrap command was rerun here.
+- architecture: prepared advice and dynamic facet calls share one missing
+  prerequisite: a stable application reference capsule that solely owns the
+  validating `ModuleLoader`, `LifecycleManager`, facet/advice registries, and
+  `AdviceDispatchProjection`. Runtime/coordinator values must reference it,
+  never copy the mutable owner state.
+- frozen successor interface: `AspectExecutionContext`,
+  `simple.prepared_advice_dispatch.v2(context, slot, phase)`, and
+  `prepared_advice_dispatch_context_invoke`. The driver validates the exact
+  typed context Arg and rewrites v2 to an ordinary direct call; residual v1/v2
+  stays E-AF010. Initial admission is hosted CPU AOT entry-closure only.
+- facet contract: dynamic `FacetRef<T>` is compiler sugar over a private typed
+  `(Base, FacetContract)` adapter containing the concrete base and complete
+  resolved descriptor. It selects by canonical method ordinal, emits the
+  existing base-first `CallIndirect`, and is an affine lexical guard released
+  through the same context on every exit.
+- rejected_shortcuts: process-global/current context cells, numeric handle
+  registries, copied lifecycle/coordinator state, backend-private callbacks,
+  current `dyn Trait` (no production vtable ABI), and `Any`/raw-pointer base
+  erasure. `dynamic_facet_ref` remains compatibility-only, not production
+  dynamic acquisition evidence.
+- cooperative review: `activation_runtime` completed backend/context ABI
+  feasibility; `facet_plan_codegen` completed user syntax and typed-adapter
+  review; `aspect_registry_driver` completed current-main recovery/provenance
+  audit. Root Codex accepted and reconciled the findings.
+- doc/wiki refactor: architecture, detail design, agent plan, state, and verify
+  report were refreshed. No matching `doc/07_guide` or overlay wiki entry
+  exists and no workflow/evidence-wrapper command changed, so guide/skill/wiki
+  updates are `N/A` for this architecture-only continuation.
+- phase remains `verification-failed`: D4 canonical state ownership and D5
+  generated adapter/affine lowering are designed but not implemented; AC-11,
+  AC-12, runtime, docgen, maintenance, coverage, and NFR evidence remain open.

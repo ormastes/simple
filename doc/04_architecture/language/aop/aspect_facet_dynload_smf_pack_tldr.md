@@ -4,10 +4,12 @@
 flow:
   build: TypePredicateBytecode -> FacetBindingPlan + prepared advice slots -> AspectCatalog
   package: app.sfm -> aspect/*.sfm -> opaque module.smf
-  load: DynSmfSession -> AspectPackProvider -> ObjectProvider -> staged generation
+  load: DynSmfSession -> AspectExecutionContext -> staged generation
 ```
 
-- Dynamic facets expose `FacetRef<T>` and never change base layout/parents.
+- Dynamic facets expose affine `FacetRef<T>` guards and never change base
+  layout/parents. A compiler-generated private typed adapter retains the base
+  operand, resolved contract-ordered method table, and exact generation lease.
 - V1 uses public contracts or owner-exported capability facades only.
 - Existing compile-time AOP remains authoritative and exactly ordered.
 - Loader advice chains bind only catalog-prepared slots and keep canonical
@@ -26,11 +28,15 @@ flow:
   weave authority and emits automatic entry/return/abort MIR dispatch intrinsics.
 - `PreparedAdviceSlotPlan` is preserved and deterministically serialized; the
   loader derives an immutable exact-generation projection from its one registry.
-- Non-empty native/SMF emission remains fail-closed until projection install and
-  invalidation are atomic with lifecycle transitions and dispatch pins its
-  generation through the backend trampoline.
+- `AspectExecutionContext` solely owns loader/lifecycle/registries/projection.
+  The reviewed v2 intrinsic carries that exact typed context; the driver rewrites
+  it to an ordinary source-owned dispatch call using existing backend ABIs.
+- Residual v1/v2 intrinsics and non-admitted targets remain E-AF010. No backend
+  trampoline, process-global handle, or second lease authority is permitted.
 - Check/interpreter reject the option directly; JIT and every AOT backend reject
   produced slots through the same centralized admission boundary.
+- D4 (execution-context v2 bridge) and D5 (typed facet adapter/acquisition) are
+  not implemented; authoritative verification remains `STATUS: FAIL`.
 - Resolver startup now crosses `85.mdsoc` through
   `ModuleResolverDiscoveryPort.resolve_inputs`; production composition injects
   the 99-loader adapter, while compatibility/test constructors stay explicitly

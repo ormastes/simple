@@ -105,10 +105,14 @@ bookmark is synchronized with GitHub and is rebased onto the current
 - **FAIL — fresh bootstrap gate:** the bootstrap-only Rust authority built, but
   the bounded pure-Simple Stage 2 attempts did not produce a compiler. Fix
   cycles exposed and repaired `extends` as a reserved field plus invalid
-  predicate-parser generated names; the final attempt reached the linker and
-  failed on unsupported `is_alnum`. That call is now rewritten to supported
-  `is_alpha`/`is_digit`, but the mandatory three-cycle cap forbids another run
-  in this session, so the repair is static-only evidence.
+  predicate-parser generated names; the final local attempt reached the linker
+  and failed on unsupported `is_alnum`. Current source has removed that call,
+  and rebased main adds packed/raw bootstrap return-local repairs. Separate
+  retained ARM64 recovery evidence subsequently reached functional admission
+  with a Stage-2 candidate but produced a truncated 104-byte LLVM module; it is
+  not Linux admission evidence. This workspace still has no current-source
+  Linux Stage-2/3 provenance or admitted self-host, and the mandatory local
+  three-cycle cap forbids another run in this session.
 - **FAIL — MCP integration evidence:** the sole final invocation was malformed
   before the runtime started (`timeout` received `SIMPLE_LIB=src` as a command),
   so no passing MCP integration result exists; the no-retry guard was honored.
@@ -130,7 +134,13 @@ bookmark is synchronized with GitHub and is rebased onto the current
   executable factory or parallel private invoke ABI remains. The explicit
   runtime and native probe can invoke this receiver-shaped method path, but
   user-facing type-directed facet-method sugar, inherited table flattening, and
-  generic facet descriptors still fail closed. Dynamic advice has a canonical
+  generic facet descriptors still fail closed. Review also proved the current
+  public `FacetRef<T>` stores only diagnostic text, a caller-supplied view, and
+  lease IDs: it is not the documented dynamic typed adapter. Production needs
+  a compiler-generated private `(Base, FacetContract)` adapter with the typed
+  base, complete resolved descriptor, and an affine lease bound to the exact
+  application execution context. Existing `dyn Trait` has no usable native
+  vtable path and raw/`Any` base erasure is unsafe. Dynamic advice has a canonical
   projection dispatch boundary with exact-generation pin/release and rejects
   runtime `around`; automatic prepared-slot MIR calls still lack a backend-safe
   route to that application-owned boundary, so AC-11 remains unmet.
@@ -148,12 +158,18 @@ bookmark is synchronized with GitHub and is rebased onto the current
   rejects either slot metadata or the intrinsic if a caller bypasses the driver.
   A focused unit gate enumerates every supported backend spelling and also
   constructs an intrinsic-only module, proving both metadata and direct-call
-  paths reject before backend selection/lowering. The missing ABI prerequisite
-  is either a canonical application-runtime dispatch handle threaded into
-  prepared functions/calls, or an owner-approved process-visible handle whose
-  invocation acquires/releases the existing `LifecycleManager` token. The
-  current `(slot, phase)` intrinsic cannot prove that lease, so a native global
-  projection was deliberately not added. AC-11 remains unmet.
+  paths reject before backend selection/lowering. The current `(slot, phase)`
+  intrinsic cannot prove the canonical lease, and the reviewed architecture
+  rejects process-global/current-context handles as a second authority. AC-11
+  remains unmet. The reviewed successor is
+  `simple.prepared_advice_dispatch.v2(context, slot, phase)`, accepted only for
+  a target with one exact typed `AspectExecutionContext` parameter. A driver
+  pass must rewrite validated v2 to the ordinary source-owned
+  `prepared_advice_dispatch_context_invoke` call, and every residual v1/v2 must
+  remain a backend error. Before that can execute, one stable reference capsule
+  must solely own the loader, lifecycle, registries, and projection; copied
+  coordinator state is not safe. Hosted CPU AOT entry-closure is the first
+  proposed admission surface; all others remain fail-closed.
 - **FAIL — missing NFR evidence:** the admitted builder/probe/collector now
   exist, but no retained startup/RSS/page-fault, opened-file, first-use, or
   repeated-lookup baseline has executed. The one-byte disabled-slot value is
@@ -193,9 +209,10 @@ bookmark is synchronized with GitHub and is rebased onto the current
 
 ## Result
 
-**STATUS: FAIL** — the source implementation, automatic registry integration,
-artifact codecs, advice publication, and retained NFR harness are substantially
-complete, but release/merge remains blocked by the self-hosted runtime crash,
+**STATUS: FAIL** — the earlier catalog/artifact and D1/D2 source slices,
+automatic registry integration, advice publication, and retained NFR harness
+are substantially complete, but release/merge remains blocked by the D4/D5
+execution-context and typed facet-adapter implementation, self-hosted runtime crash,
 missing generated-manual/runtime evidence, prepared-advice backend dispatch,
 user-facing facet-call sugar, and absent NFR measurements. The WIP feature bookmark may
 be committed/rebased/pushed for collaboration; no version bump, main push, tag,

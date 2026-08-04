@@ -31,6 +31,9 @@ architecture:
 6. SFM owns catalog, directory, compression, signatures, and pack policy; SMF remains an opaque executable code unit.
 7. One staged transaction validates every dependency/resource before publishing one generation.
 8. Cold catalog entries trigger no pack open, payload read/decompression, mapping, allocation, scan, or config parse.
+9. Dynamic facet acquisition and prepared advice execute only through an
+   explicitly threaded application execution context; there is no implicit
+   process-global/current context.
 
 ## Owner boundaries
 
@@ -44,11 +47,14 @@ architecture:
 | `std.sfm` | Versioned outer manifest, aspect directory, framed payload validation | No SMF symbol/relocation interpretation |
 | `compiler/99.loader` | Object-provider adaptation plus reusable staged-loading, publication, and bounded-cache mechanisms | No application policy, source-root, or variant reevaluation |
 | `os/smf` | dynSMF policy, status/evidence, activation generation, unload/reload | No second module loader |
-| `app/startup` | Owns the process `AspectCatalog`, trust policy, canonical provider-cache instance, activation coordinator, and startup-to-operational seal | No raw `rt_*`, pack codec, module loader, cache implementation, or lifecycle registry |
+| `app/startup` | Owns the process `AspectCatalog`, trust policy, canonical provider-cache instance, stable aspect execution context, and startup-to-operational seal | No raw `rt_*`, pack codec, second module loader/cache, copied lifecycle owner, or process-global context registry |
 
 ## Core patterns
 
-- **Typed witness adapter:** `FacetRef<T>` delegates through a `FacetBindingPlan` witness without changing the base object.
+- **Generated typed adapter:** `FacetRef<T>` is compiler surface sugar over an
+  application-local private `(Base, FacetContract)` adapter containing the
+  typed base operand and loader-resolved ordered descriptor; it never erases
+  the base to a raw pointer or changes the base object.
 - **Feature transform:** type selectors compile once to `TypePredicateBytecode`, then evaluate against closed-world or newly registered descriptors.
 - **Provider adapter:** `AspectPackProvider` supplies selected SMF bytes through `ObjectProvider`/`SmfReaderMemory`.
 - **Transactional generation:** mapping, relocation, witnesses, advice, and resources stage privately, then publish once.
@@ -129,11 +135,14 @@ config producer inserts phase-specific prepared-dispatch intrinsics. Catalog
 slot strings and the loader projection consume the same finite slot identity;
 no runtime pointcut evaluator is introduced.
 
-The remaining implementation owner is the loader/backend bridge that gives a
-generated trampoline access to the canonical application-runtime dispatch
-handle. Projection publication, invalidation, and exact-generation pinning are
-already loader/application-runtime responsibilities. The projection is never
-an independently mutable registry.
+The remaining implementation owner is the explicit application execution
+context bridge. `AspectExecutionContext` is the sole stable owner of the
+loader, lifecycle manager, facet/advice registries, and dispatch projection.
+The driver validates the exact context argument and rewrites v2 to an ordinary
+source-owned dispatch call; no generated backend trampoline or process-global
+handle is admitted. Projection publication, invalidation, and exact-generation
+pinning remain context-owned loader/application-runtime responsibilities. The
+projection is never an independently mutable registry.
 
 ### Facet witness descriptors
 
@@ -153,10 +162,35 @@ carries only the stable slot and phase, not a canonical lifecycle handle or
 generation token. A process-global native projection with its own reference
 count would therefore introduce a second lease authority rather than pinning
 the loader's `LifecycleManager` generation. Until lowering can acquire the
-canonical token (or an equivalent loader-owned opaque dispatch handle), no
-backend-visible table/trampoline is installed and the common backend/driver
+canonical token through the explicit typed execution context, no
+backend-visible table or trampoline is installed and the common backend/driver
 E-AF010 rejection is the required behavior. Raw callback-address invocation
 alone does not close the unload race.
+
+The reviewed successor ABI is
+`simple.prepared_advice_dispatch.v2(context, slot, phase)`. Opt-in targets must
+declare one exact typed context parameter; missing, ambiguous, copied, or
+wrong-typed contexts are compile errors. A driver MIR pass validates the exact
+argument local and rewrites v2 to an ordinary direct call of the
+source-owned `prepared_advice_dispatch_context_invoke` entry, so existing call
+ABIs—not backend-specific callback code—carry the context. Every residual v1
+or v2 intrinsic remains a backend error.
+
+This ABI becomes executable only after a stable application reference capsule
+is the sole owner of `LifecycleManager`, `AdviceBindingRegistry`,
+`AdviceDispatchProjection`, and the validating `ModuleLoader`; coordinator and
+runtime values must reference that capsule rather than copy its mutable state.
+The dispatcher applies returned registry/lifecycle state synchronously and may
+surface failure only after exact-token cleanup. Initial admission is hosted CPU
+AOT entry-closure; interpreter, JIT, SMF-exec, GPU, WASM, VHDL, and unproved
+native paths remain E-AF010. Two-context isolation, held-token unload blocking,
+entry-closure inclusion, and residual-intrinsic rejection are mandatory gates.
+
+The same stable capsule is the lexical acquisition owner for dynamic facets.
+The compiler generates a private typed `(Base, FacetContract)` adapter rather
+than relying on the unimplemented native `dyn Trait` vtable path or erasing the
+base to `Any`/a raw address. Dynamic refs are affine lexical guards whose lease
+is released through that exact capsule on every exit.
 
 ## Cache and invalidation
 

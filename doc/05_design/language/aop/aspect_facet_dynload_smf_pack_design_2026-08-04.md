@@ -524,28 +524,48 @@ The capability is owned and versioned by `LruCache`; the aspect never reaches th
 ## 6.7 Facet acquisition
 
 ```simple
-fn print_cache_debug(cache: Cache):
-    when val debug = cache.facet<Debuggable>():
+fn print_cache_debug(context: AspectExecutionContext, cache: LruCache):
+    when val debug = context.facet<Debuggable>(cache)?:
         print debug.snapshot()
 ```
 
-Required APIs:
+The explicit context is mandatory for dynamic acquisition. It is the stable
+application-owned capsule that reaches the canonical loader, registry, and
+lifecycle state. A future lexical-context feature may permit the shorter
+`cache.facet<Debuggable>()` spelling inside a bound aspect scope, but an
+implicit process-global/current context is forbidden.
+
+Required dynamic APIs:
 
 ```simple
-obj.try_facet<T>() -> Option<FacetRef<T>>
+context.try_facet<T>(obj) -> Option<FacetRef<T>>
 # Never performs I/O. Returns only an already-bound facet.
 
-obj.facet<T>() -> Result<Option<FacetRef<T>>, FacetLoadError>
+context.facet<T>(obj) -> Result<Option<FacetRef<T>>, FacetLoadError>
 # May load an aspect when policy is lazy_facet.
 
-obj.require_facet<T>() -> Result<FacetRef<T>, FacetLoadError>
+context.require_facet<T>(obj) -> Result<FacetRef<T>, FacetLoadError>
 # May load; absence is an error.
 
 aspect.load(name: AspectId) -> Result<AspectHandle, AspectLoadError>
 aspect.unload(handle: AspectHandle) -> Result<(), AspectUnloadError>
 ```
 
-`FacetRef<T>` contains the base object reference, witness/vtable, aspect generation token, and any lazy sidecar-state handle. Holding it pins the loaded generation.
+`FacetRef<T>` is compiler surface sugar over a private application-local
+adapter generated for `(Base, FacetContract)`. The adapter retains the typed
+base operand, loader-resolved ordered witness descriptor, exact generation
+lease, and optional sidecar handle. Method selection uses the compile-time
+contract ordinal, validates the name at that descriptor entry, prepends the
+typed base as ABI argument zero, and lowers through ordinary `CallIndirect`.
+It is never serialized and never uses the currently incomplete `dyn Trait`
+vtable path or an `Any`/raw-pointer erased base.
+
+A leased dynamic `FacetRef<T>` is an affine lexical guard: it cannot be copied,
+stored globally, returned, or moved into async/thread work, and the compiler
+must release its lease through the same context on every scope exit. Static
+refs with no lease remain ordinary values. The current public
+`dynamic_facet_ref` constructor is compatibility-only and is not production
+dynamic acquisition evidence.
 
 ## 6.8 Nominal static mode
 
@@ -1258,7 +1278,7 @@ forms fail closed. `MirModule.prepared_advice_slots` is preserved by every
 current module reconstruction and VHDL aggregation. Deterministic JSON uses
 `serialize_mir_prepared_advice_slots`; the driver collects and validates the
 table and rejects duplicate global slot IDs. Native/SMF emission still refuses
-non-empty tables until a lifecycle-safe backend trampoline exists. The option
+non-empty tables until the reviewed explicit execution-context bridge exists. The option
 participates in compile/cache identity; check/interpreter reject it directly,
 and JIT/all AOT backends reject produced slots centrally before code generation.
 The common backend entry additionally rejects slot metadata or the prepared
@@ -1277,15 +1297,17 @@ The required producer sequence is:
 2. `compiler/50.mir` assigns stable slot IDs and emits prepared-dispatch MIR
    plus module slot metadata;
 3. MIR optimization preserves the operation and exactly-once placement;
-4. `compiler/70.backend` lowers the dormant guard or patchpoint;
-5. `compiler/80.driver` emits the finite slot table;
-6. the loader registry binds an exact generation, and runtime dispatch invokes
-   the preordered chain under its matching generation lease.
+4. `compiler/80.driver` validates the exact typed `AspectExecutionContext`
+   argument and rewrites v2 to the ordinary source-owned
+   `prepared_advice_dispatch_context_invoke` call;
+5. existing backends lower that ordinary call through their normal ABI;
+6. the context-owned loader registry binds an exact generation, and runtime
+   dispatch invokes the preordered chain under its matching generation lease.
 
 Steps 1–3 and the deterministic table contract now exist for execution join
-points. Steps 4–6 remain release-blocking: atomic projection install with
-publication, invalidation before drain, exact-generation pinning across each
-callback, and a backend trampoline must be proven together.
+points. Steps 4–6 remain release-blocking: the stable context capsule, driver
+rewrite, atomic projection install with publication, invalidation before drain,
+and exact-generation pinning across each callback must be proven together.
 
 The backend bridge cannot be implemented as a slot/phase-only native lookup.
 The emitted operation currently has no loader-owned lifecycle handle or
@@ -1293,10 +1315,13 @@ generation token, while safe callback execution requires the canonical
 generation lease to remain pinned through the last callback. A separately
 reference-counted runtime snapshot would create a second unload authority and
 is rejected even if its replacement and invalidation were internally atomic.
-The next bridge design must thread an opaque loader-owned dispatch handle (or
-an equivalent canonical token-acquisition operation) through artifact loading
-and intrinsic lowering. Until that contract exists, all code-generation paths
-retain E-AF010 rather than lowering a partial trampoline.
+The reviewed bridge threads one exact typed `AspectExecutionContext` reference
+through the opt-in target. That stable capsule solely owns `ModuleLoader`,
+`LifecycleManager`, the facet/advice registries, and `AdviceDispatchProjection`.
+The driver rewrites `simple.prepared_advice_dispatch.v2(context, slot, phase)`
+to an ordinary source call; it does not install a backend trampoline or a
+process-global handle. Until that contract is implemented, all code-generation
+paths retain E-AF010.
 
 #### Resolver composition boundary
 
@@ -1379,7 +1404,7 @@ Failures transition to `Failed` with a stable diagnostic. Retry policy is explic
       decompress selected module chunks
       load and relocate through existing ModuleLoader
       validate base/facet ABI hashes
-      stage witness factories
+      resolve every ordered witness descriptor method through ModuleLoader
       publish new binding generation atomically
 6. instantiate or retrieve lazy sidecar state if required
 7. return FacetRef<T>
@@ -1406,7 +1431,9 @@ No heap-object enumeration is required.
 
 ### Stateless
 
-Only a witness/vtable is needed. All objects of a type share it.
+Only one resolved ordered witness descriptor is needed per bound concrete type
+and generation. All objects of that type share it; each retained ref still owns
+its exact lease.
 
 ### Per-type state
 
@@ -1640,7 +1667,8 @@ It does not include decompression of unrelated modules in the same pack.
 
 ## 20.4 Steady state
 
-- A retained `FacetRef<T>` invokes a direct witness/vtable entry.
+- A retained `FacetRef<T>` invokes its compile-time ordinal from the resolved
+  descriptor through ordinary indirect-call lowering while its lease is held.
 - Repeated acquisition uses a type-level inline cache or hash lookup keyed by `(type_id, facet_id, generation)`.
 - Loaded advice chains are preordered; they do not re-evaluate source pointcuts.
 
@@ -2154,10 +2182,11 @@ deploy/
 ### Runtime
 
 ```simple
-val cache: Cache = create_cache()
+val context: AspectExecutionContext = app.aspect_execution_context()
+val cache: LruCache = create_cache()
 cache.put(key, value)          # no debug facet branch in lazy_facet mode
 
-when val debug = cache.facet<Debuggable>()?:
+when val debug = context.facet<Debuggable>(cache)?:
     print debug.snapshot()     # first call loads only debug module closure
 ```
 
@@ -2294,3 +2323,32 @@ computes facet/advice removal, exact projection invalidation, the quiescing
 publication, and exact lifecycle quiesce before assigning the next coordinator
 state; only that fully invalidated state may evaluate drain and unload
 resources.
+
+## 31. Reviewed Execution-Context Bridge (2026-08-04)
+
+`AspectExecutionContext` is the required stable application reference capsule.
+It solely owns the validating `ModuleLoader`, `LifecycleManager`, canonical
+facet/advice registries, and `AdviceDispatchProjection`; `AspectApplicationRuntime`
+and `AspectActivationCoordinator` reference it instead of copying those mutable
+owners. Activation, facet acquisition/release, prepared advice dispatch, and
+unload therefore observe one exact state.
+
+Prepared targets opt in with one typed context parameter. MIR emits
+`simple.prepared_advice_dispatch.v2(Copy(context_arg), slot, phase)` and a
+driver pass rewrites a validated v2 instruction to an ordinary direct call of
+`prepared_advice_dispatch_context_invoke`. The dispatcher synchronously stores
+the returned registry/lifecycle state and reports failure only after token
+cleanup. A target without the exact context, or any backend that receives a
+residual v1/v2 intrinsic, fails E-AF010. Hosted CPU AOT entry-closure is the
+first admissible surface; other surfaces require separate ABI/link evidence.
+
+Dynamic facet acquisition uses the same lexical context once per retained ref,
+not once per method. The compiler generates a private typed adapter containing
+the concrete base and complete resolved descriptor, selects methods by the
+contract ordinal, and emits the existing base-first `CallIndirect`. Exact
+descriptor version/hash/count/order/name/owner/address checks precede ref
+construction. Lease release is compiler-inserted on every lexical exit.
+
+Rejected designs are a global/current context cell, a numeric handle registry,
+copied coordinator/lifecycle state, backend-specific raw callbacks, existing
+`dyn Trait` (no production vtable ABI), and `Any`/raw-pointer base erasure.
