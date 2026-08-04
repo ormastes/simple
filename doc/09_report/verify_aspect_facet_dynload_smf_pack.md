@@ -135,7 +135,10 @@ bookmark is synchronized with GitHub and is rebased onto the current
   `139` for `check src/compiler`, `check src/lib`, `check src/app/mcp`, and
   `check src/app/simple_lsp_mcp`. Focused feature probes likewise previously
   exited `139` or failed the deployed runtime ABI guard. No Rust-seed fallback
-  or retry was used.
+  or retry was used. The later standalone backend-owner crash is tracked in
+  [`codegen_standalone_check_sigsegv_2026-08-04.md`](../08_tracking/bug/codegen_standalone_check_sigsegv_2026-08-04.md);
+  it blocks executable admission of the new `CodegenPipeline` exception-CFG
+  choke point despite passing focused MIR validation specs.
 - **FAIL — fresh bootstrap gate:** the bootstrap-only Rust authority built, but
   the bounded pure-Simple Stage 2 attempts did not produce a compiler. Fix
   cycles exposed and repaired `extends` as a reserved field plus invalid
