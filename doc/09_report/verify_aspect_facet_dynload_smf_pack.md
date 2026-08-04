@@ -59,6 +59,13 @@ bookmark is synchronized with GitHub and is rebased onto the current
   survive normal/bootstrap MIR lowering, optimizer/debug/AOP reconstruction,
   VHDL aggregation, and deterministic versioned JSON serialization. Direct HIR
   ownership edges now drive production `E-AF001` checks.
+- **PASS — explicit MIR call-unwind plumbing (static review):** every scanned
+  `CallTerminator` constructor and pattern now carries the required
+  `MirCallUnwindContract`; contradictory `NoUnwind`/edge and
+  `MayUnwind`/no-edge pairs have canonical rejection tests. Deterministic JSON,
+  representative optimizer preservation, backend/interpreter consumption, and
+  live-facet unknown indirect-call `E-AF007` are covered by non-placeholder
+  static specs. No compiler or backend was executed for this evidence.
 - **PASS — automatic registry source path (static review):** real compile inputs
   discover and install the resolver-owned aspect registry; its fingerprint is
   carried into object/closure cache identity. Importer-scoped resolution keys,
@@ -188,8 +195,13 @@ bookmark is synchronized with GitHub and is rebased onto the current
 **STATUS: FAIL** — catalog/artifact handling, typed facet adapter and ABI,
 prepared v2 rewriting and ABI, the application gate, callback-safe split,
 exact lazy reserve/I/O/commit, facet lifecycle, unload, and the embedding port
-contract are implemented statically. They are not release evidence. Blocking
-gaps are current-source backend/self-host execution and ABI linkage; production
+contract are implemented statically. Explicit MIR call-unwind metadata,
+validation, serialization, representative optimizer preservation, and backend
+consumption are also implemented statically; they are not release evidence.
+Blocking gaps are current-source compiler/backend execution and ABI linkage;
+source/HIR effect declarations and propagation; real cleanup successors with
+throw/resume semantics; async cancellation unwinding; LLVM C API `invoke`,
+landing-pad, and `resume` integration; production
 deployment and startup configuration; lifecycle-wide concurrency, callback-
 error, stale-commit, and lease-drain evidence; imported/indirect unwind and
 leaf-level lease visibility; generated manuals; coverage; and retained NFR

@@ -107,19 +107,23 @@ acceptance.
 
 ## Portable unwind metadata acceptance
 
-No executable spec may claim this contract until the common metadata API exists.
-The authoritative gap and owner matrix is
+The common `MirCallUnwindContract` metadata API now exists. Static unit evidence
+covers its required field, deterministic JSON spelling/order, contradictory
+contract/edge rejection, preservation through representative optimizer and
+backend consumers, and fail-closed indirect calls while a facet lease may be
+live. This is implementation-shape evidence only: no compiler or backend was
+executed in the static-only pass. The authoritative remaining gap and owner matrix is
 `doc/08_tracking/bug/facet_descriptor_cleanup_unwind_primitives_2026-08-04.md`.
 
 ### Deterministic unit specs after the API lands
 
 | Planned spec | Real API exercised | Required oracle |
 |---|---|---|
-| `test/01_unit/compiler/mir/mir_call_unwind_contract_roundtrip_spec.spl` | `MirInstKind.Call`, `MirTerminator.CallTerminator`, MIR JSON/serialization | Direct and indirect `NoUnwind`/`MayUnwind` survive exact deterministic round-trip; missing contract is rejected |
-| `test/01_unit/compiler/mir/mir_call_unwind_optimizer_preservation_spec.spl` | SSA, DCE, copy propagation, LICM, inlining, outlining, auto-vectorization | Contract and normal/unwind successors remain identical after each pass |
+| `test/01_unit/compiler/mir/mir_call_unwind_contract_source_spec.spl`, `mir_call_unwind_json_spec.spl` | `MirTerminator.CallTerminator`, validation, MIR JSON serialization | **Static implemented:** required explicit contract, contradictory pair rejection, deterministic `NoUnwind`/`MayUnwind` JSON; executable round-trip remains pending |
+| `test/01_unit/compiler/mir_opt/mir_call_unwind_optimizer_preservation_spec.spl` plus source consumers | SSA, DCE, copy propagation, LICM, inlining, outlining, auto-vectorization | **Static partially implemented:** consumers accept the field and reconstructing passes preserve it; executable all-pass successor preservation remains pending |
 | `test/01_unit/compiler/mir/facet_member_unwind_contract_spec.spl` | Typed facet witness planning and MIR member-call lowering | Declared facet method effect reaches the emitted indirect call; absent/ambiguous effect is fatal |
 | `test/01_unit/compiler/mir/facet_cleanup_unwind_edge_spec.spl` | Canonical cleanup-target builder | Real unwind successor releases nested leases once in reverse order; normal successor retains leases until its own exits |
-| `test/01_unit/compiler/backend/backend_unwind_contract_spec.spl` | Backend admission | Unsupported native target rejects `MayUnwind` before instruction selection; `NoUnwind` remains ordinary call |
+| backend unwind specs and backend consumer source | Backend admission | **Static implemented:** backend consumers distinguish/preserve the explicit contract and unsupported paths fail closed; executable backend admission evidence remains pending |
 | `test/01_unit/compiler/backend/llvm_unwind_contract_spec.spl` | LLVM lowering | `MayUnwind` produces `invoke`, valid landing pad/resume, and no contradictory function `nounwind` |
 | `test/01_unit/compiler/semantics/foreign_unwind_source_contract_spec.spl` | Source/HIR function effects | Extern with no explicit contract is rejected in a leased scope; explicit `NoUnwind` is admitted; `MayUnwind` requires cleanup capability |
 
