@@ -93,7 +93,7 @@ on the interpreter-backed `bin/simple test` lane; Results lines verbatim):
 | HTML parser GPU (flat projection, CPU-oracle parity) | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/html_parser_gpu_flat_spec.spl` | 24/24 |
 | CSS parser GPU tables (style_block_parse + selector) | `.../css_parser_gpu_tables_spec.spl` | 47/47 |
 | DOM build GPU offload | `.../dom_build_gpu_offload_spec.spl` | 38/38 |
-| CSS apply + transform (decl_apply lane) | `.../css_decl_apply_transform_spec.spl` | 69/69 |
+| CSS apply + transform (decl_apply lane) | `.../css_decl_apply_transform_spec.spl` | 61/61 |
 | GPU script load + animation ticks | `.../browser_script_animation_gpu_spec.spl` | 22/22 |
 | 2D rendering GPU offload parity (device provenance) | `test/02_integration/rendering/web_engine2d_gpu_offload_parity_spec.spl` | 17/17 |
 | Full-GPU-offload web showcase + capture verification | `test/03_system/gui/web_showcase_full_gpu_offload_spec.spl` | 13/13 |
@@ -137,7 +137,7 @@ engine2d/`rt_gpu`/device references in the phase modules).
 |---|---|---|---|
 | tokenize | `html_tokenizer.spl` | CPU-only; GPU-shaped flat projection (24/24 parity) | n/a — no device lane |
 | dom build | `html_tree_builder.spl`, `dom.spl` | CPU-only; offload-shaped build parity (38/38) | n/a — no device lane |
-| style | `style_block_parse.spl`, `style_block_resolve.spl`, `selector_matcher.spl` | CPU-only; GPU table projections (47/47) + decl apply (69/69) | n/a — no device lane |
+| style | `style_block_parse.spl`, `style_block_resolve.spl`, `selector_matcher.spl` | CPU-only; GPU table projections (47/47) + decl apply (61/61) | n/a — no device lane |
 | layout | `simple_web_html_layout_renderer*.spl` | CPU-only; emits `WebGpuPaintFrame` for the paint lane | n/a — no device lane |
 | paint | `simple_web_html_engine2d_presenter.spl` (economics + gpu-first) | GPU rect-fill lane; glyph/gradient/image residual stays CPU ground truth (bit-exact by construction) | yes — backend verdict + engine2d create probe; per-frame decision string marks every decline |
 | tiles | `simple_web_html_layout_renderer_paint_tiles_gpu.spl` | GPU tile lane via Engine2D Vulkan | yes — `Engine2DReadback` source + `vulkan_cpu_fallback_reason` provenance |
