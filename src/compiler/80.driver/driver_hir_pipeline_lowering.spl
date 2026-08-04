@@ -6,6 +6,7 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir.*
+use compiler.hir.facet_static.{HirFacetModule}
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlowering_for_module_with_diagnostics, LoweringError, LoweringErrorKind}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName, module_surface_source_matches, module_surfaces_from_modules}
 use compiler.frontend.frontend.{parse_full_frontend}
@@ -20,7 +21,8 @@ use compiler.driver.driver_orchestration.{driver_streaming_surface_enabled}
 use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_error, log_phase, log_build_progress}
 use compiler.driver.driver_hir_pipeline_passes.{
     run_typecheck_warn_pass,
-    run_safety_warn_pass
+    run_safety_warn_pass,
+    run_static_facet_coherence_pass
 }
 use compiler.semantics.const_fold.{run_const_fold_pass}
 use compiler.semantics.resolve.{resolve_methods}
@@ -95,6 +97,7 @@ impl CompilerDriver:
         var lowered_by_surface: Dict<i64, HirModule> = {}
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
         var phase_entry_hir: HirModule? = self.ctx.bootstrap_entry_hir
+        var phase_entry_name = ""
         var source_index = 0
         var progress_hir_done = 0
         log_build_progress("hir", "modules", 0, surfaces.surfaces.len(),
@@ -113,6 +116,7 @@ impl CompilerDriver:
                 phase_hir_modules[source.module_name] = alias_hir
                 if is_requested_bootstrap_entry:
                     phase_entry_hir = Some(alias_hir)
+                    phase_entry_name = source.module_name
                 source_index = source_index + 1
                 continue
             if surface_index < 0 or surface_index >= surfaces.surfaces.len():
@@ -138,6 +142,7 @@ impl CompilerDriver:
             phase_hir_modules[source.module_name] = hir_module
             if is_requested_bootstrap_entry:
                 phase_entry_hir = Some(hir_module)
+                phase_entry_name = source.module_name
             log_phase("phase3:hir:file:done {source.path} module={source.module_name} funcs={hir_module.functions.len()}")
             # Sixteen modules keeps the append-only progress receipt current
             # even when the next compiler/parser module takes several minutes.
@@ -150,8 +155,15 @@ impl CompilerDriver:
             source_index = source_index + 1
 
         var phase_ctx: CompileContext = self.ctx
-        phase_ctx.hir_modules = phase_hir_modules
         phase_ctx.bootstrap_entry_hir = phase_entry_hir
+        val facet_pass = run_static_facet_coherence_pass(phase_hir_modules, surfaces)
+        phase_hir_modules = facet_pass.modules
+        if phase_entry_name != "" and phase_hir_modules.contains_key(phase_entry_name):
+            phase_entry_hir = Some(phase_hir_modules[phase_entry_name])
+        phase_ctx.bootstrap_entry_hir = phase_entry_hir
+        phase_ctx.hir_modules = phase_hir_modules
+        for facet_error in facet_pass.errors:
+            phase_ctx.add_error(facet_error)
         _driver_validate_value_struct_layouts(phase_ctx)
         if phase_ctx.errors.len() > 0:
             return (phase_ctx, false)
@@ -314,6 +326,9 @@ impl CompilerDriver:
                     di_bindings: [],
                     arch_rules: [],
                     mock_decls: [],
+                    static_facets: HirFacetModule(
+                        interfaces: [], implementations: [], bindings: [], requirements: []),
+                    facet_binding_plans: [],
                     types: []
                 )
             val focused_future_driver_diag = src.path == "src/lib/nogc_async_mut/async/future.spl"
@@ -378,6 +393,9 @@ impl CompilerDriver:
 
         log_debug("HIR lowering complete")
 
+        val facet_pass = run_static_facet_coherence_pass(
+            phase_hir_modules, retained_module_surfaces)
+        phase_hir_modules = facet_pass.modules
         val phase_entry_hir: HirModule? = if phase_entry_source_index >= 0:
             val entry_source = self.ctx.sources[phase_entry_source_index]
             phase_hir_modules[entry_source.module_name]
@@ -386,6 +404,8 @@ impl CompilerDriver:
         var phase_ctx: CompileContext = self.ctx
         phase_ctx.hir_modules = phase_hir_modules
         phase_ctx.bootstrap_entry_hir = phase_entry_hir
+        for facet_error in facet_pass.errors:
+            phase_ctx.add_error(facet_error)
         _driver_validate_value_struct_layouts(phase_ctx)
 
         # Phase 3 (opt-in, warn-only): HM type inference + visibility diagnostics.
@@ -467,4 +487,8 @@ impl CompilerDriver:
             val hir_module: HirModule = lowering.lower_module(module)
             _driver_collect_hir_errors(ctx, name, lowering.errors)
             ctx.hir_modules[name] = hir_module
+        val facet_pass = run_static_facet_coherence_pass(ctx.hir_modules, retained_module_surfaces)
+        ctx.hir_modules = facet_pass.modules
+        for facet_error in facet_pass.errors:
+            ctx.add_error(facet_error)
         (ctx, ctx.errors.len() == 0)

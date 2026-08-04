@@ -1,0 +1,59 @@
+use std.spec.{describe, it, expect}
+use compiler.common.predicate.{
+    Predicate, Selector, compile_type_predicate, evaluate_type_predicate
+}
+use compiler.common.predicate_parser.{compile_type_predicate_text}
+use compiler.common.structural_contracts.aop.{
+    TYPE_PREDICATE_BYTECODE_VERSION, TypePredicateBytecode,
+    TypePredicateInstruction, TypePredicateDescriptor
+}
+
+fn type_predicate_descriptor() -> TypePredicateDescriptor:
+    TypePredicateDescriptor(
+        qualified_name: "storage.cache.LruCache",
+        implemented_types: ["storage.cache.Cache", "DebugName"],
+        supertypes: ["storage.Entity", "Object"]
+    )
+
+describe "type predicate bytecode":
+    it "compiles type, implements, and subtype selectors in postfix order":
+        val predicate = Predicate.And(
+            Predicate.Sel(Selector.Type("storage.cache.**")),
+            Predicate.Or(
+                Predicate.Sel(Selector.Implements("storage.cache.Cache")),
+                Predicate.Sel(Selector.Subtype("storage.archive.ArchiveEntity"))
+            )
+        )
+        val result = compile_type_predicate(predicate)
+        expect(result.is_ok()).to_be(true)
+        val bytecode = result.unwrap()
+        expect(bytecode.contract_version).to_equal(TYPE_PREDICATE_BYTECODE_VERSION)
+        expect(bytecode.instructions.len()).to_equal(5)
+        expect(evaluate_type_predicate(bytecode, type_predicate_descriptor())).to_be(true)
+
+    it "parses the canonical pointcut language into the same bytecode":
+        val result = compile_type_predicate_text(
+            "pc{ implements(storage.cache.Cache) & !subtype(storage.archive.ArchiveEntity) }")
+        expect(result.is_ok()).to_be(true)
+        expect(evaluate_type_predicate(result.unwrap(), type_predicate_descriptor())).to_be(true)
+
+    it "evaluates subtype transitively from the descriptor projection":
+        val result = compile_type_predicate(Predicate.Sel(Selector.Subtype("storage.Entity")))
+        expect(result.is_ok()).to_be(true)
+        expect(evaluate_type_predicate(result.unwrap(), type_predicate_descriptor())).to_be(true)
+
+    it "rejects non-type selectors instead of creating a second evaluator":
+        val result = compile_type_predicate(Predicate.Sel(Selector.Attr("cached")))
+        expect(result.is_err()).to_be(true)
+
+    it "fails closed for malformed or incompatible programs":
+        val malformed = TypePredicateBytecode(
+            contract_version: TYPE_PREDICATE_BYTECODE_VERSION,
+            instructions: [TypePredicateInstruction.And]
+        )
+        val incompatible = TypePredicateBytecode(
+            contract_version: TYPE_PREDICATE_BYTECODE_VERSION + 1,
+            instructions: [TypePredicateInstruction.MatchType("**")]
+        )
+        expect(evaluate_type_predicate(malformed, type_predicate_descriptor())).to_be(false)
+        expect(evaluate_type_predicate(incompatible, type_predicate_descriptor())).to_be(false)

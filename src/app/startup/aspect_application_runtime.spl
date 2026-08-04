@@ -1,0 +1,345 @@
+# Application-owned facade for catalogued aspect-pack activation.
+#
+# The application retains policy and cache state, while executable mapping,
+# relocation, publication, and resource lifetime stay with their established
+# loader/dynSMF owners.  This leaf performs no environment reads, filesystem
+# access, process launch, pack decoding shortcut, or parallel lifecycle work.
+
+use compiler.loader.loader.aspect_catalog.{AspectCatalog}
+use compiler.loader.loader.aspect_pack_provider.{
+    AspectPackProviderKey,
+    AspectPackProvider,
+    AspectPackTrustProfile,
+    AspectPackTrustPolicy,
+    AspectPackProviderCache
+}
+use compiler.loader.loader.aspect_activation.{
+    AspectActivationRequest,
+    AspectActivationCoordinator,
+    AspectActivationResult
+}
+use compiler.loader.loader.module_loader.{ModuleLoader, moduleloader_unload}
+use compiler.loader.loader.facet_binding_registry.{
+    FacetBindingRecord, facet_lookup, facet_unbind_generation
+}
+use os.smf.dynsmf_session.{DynSmfSession}
+use os.smf.smf_generation.{GenerationToken, LifecycleManager}
+use std.aop.facet.{FacetGenerationLease}
+
+enum AspectApplicationPhase:
+    Startup
+    Operational
+
+enum AspectApplicationOperation:
+    LazyIo
+    DynamicAttach
+    Unload
+    Patch
+
+struct AspectApplicationRuntime:
+    catalog: AspectCatalog
+    trust_policy: AspectPackTrustPolicy
+    provider_cache: AspectPackProviderCache
+    coordinator: AspectActivationCoordinator
+    phase: AspectApplicationPhase
+
+fn aspect_application_is_mission(policy: AspectPackTrustPolicy) -> bool:
+    match policy.profile:
+        case AspectPackTrustProfile.MissionRequireSignature: true
+        case _: false
+
+fn aspect_application_is_operational(phase: AspectApplicationPhase) -> bool:
+    match phase:
+        case AspectApplicationPhase.Operational: true
+        case AspectApplicationPhase.Startup: false
+
+fn aspect_application_mission_catalog_valid(catalog: AspectCatalog) -> Result<(), text>:
+    for entry in catalog.entries:
+        if entry.activation_policy != "startup" and entry.activation_policy != "excluded":
+            return Err("E-APACK008 mission profile permits only static, startup, or excluded aspects")
+    Ok(())
+
+fn aspect_application_startup_complete(runtime: AspectApplicationRuntime) -> Result<(), text>:
+    for entry in runtime.catalog.entries:
+        if entry.activation_policy == "startup":
+            if not runtime.coordinator.published.has(entry.aspect_id) or
+                runtime.coordinator.published[entry.aspect_id].state != "active":
+                return Err("E-APACK008 mission operational transition requires active startup aspect: {entry.aspect_id}")
+    Ok(())
+
+impl AspectApplicationRuntime:
+    static fn create(
+        catalog: AspectCatalog,
+        dynsmf_session: DynSmfSession,
+        lifecycle: LifecycleManager,
+        trust_policy: AspectPackTrustPolicy,
+        index_capacity: i64,
+        chunk_capacity: i64,
+        negative_capacity: i64
+    ) -> Result<AspectApplicationRuntime, text>:
+        if aspect_application_is_mission(trust_policy):
+            aspect_application_mission_catalog_valid(catalog)?
+        val cache = AspectPackProviderCache.create(index_capacity, chunk_capacity, negative_capacity)?
+        val coordinator = AspectActivationCoordinator.create(catalog, dynsmf_session, lifecycle)?
+        Ok(AspectApplicationRuntime(
+            catalog: catalog,
+            trust_policy: trust_policy,
+            provider_cache: cache,
+            coordinator: coordinator,
+            phase: AspectApplicationPhase.Startup
+        ))
+
+    fn authorize(operation: AspectApplicationOperation) -> Result<(), text>:
+        if not aspect_application_is_mission(self.trust_policy):
+            return Ok(())
+        match operation:
+            case AspectApplicationOperation.LazyIo:
+                if aspect_application_is_operational(self.phase):
+                    return Err("E-APACK008 mission operational state denies lazy aspect-pack I/O")
+            case AspectApplicationOperation.DynamicAttach:
+                return Err("E-APACK008 mission profile denies dynamic aspect attachment")
+            case AspectApplicationOperation.Unload:
+                return Err("E-APACK008 mission profile denies aspect unload")
+            case AspectApplicationOperation.Patch:
+                return Err("E-APACK008 mission profile denies runtime advice patching")
+        Ok(())
+
+    # The application I/O owner opens exactly this deployed-image-relative
+    # path. No search roots or fallback directories are exposed here.
+    fn pack_path_for(aspect_id: text) -> Result<text, text>:
+        val entry = self.catalog.find(aspect_id)?
+        Ok(entry.pack_path)
+
+    # The embedding application supplies bytes through its canonical I/O
+    # facade.  Admission always executes the retained trust policy, including
+    # ordinary unsigned mode; this API never calls the unsigned constructor.
+    me fn activate_pack_bytes(
+        provider_key: AspectPackProviderKey,
+        pack_bytes: [u8],
+        signature: [u8],
+        request: AspectActivationRequest,
+        loader: ModuleLoader
+    ) -> AspectActivationResult:
+        val entry_result = self.catalog.find(request.aspect_id)
+        if entry_result.is_err():
+            return AspectActivationResult(
+                coordinator: self.coordinator,
+                status: "failed",
+                reason: entry_result.unwrap_err(),
+                generation: self.catalog.generation,
+                staged_count: 0,
+                counters: self.coordinator.counters
+            )
+        if self.coordinator.published.has(request.aspect_id) and
+            self.coordinator.published[request.aspect_id].state != "active":
+            return AspectActivationResult(
+                coordinator: self.coordinator,
+                status: "failed",
+                reason: "E-AF004 aspect generation is quiescing",
+                generation: self.catalog.generation,
+                staged_count: 0,
+                counters: self.coordinator.counters
+            )
+        val authorization = self.authorize(AspectApplicationOperation.LazyIo)
+        if authorization.is_err():
+            return AspectActivationResult(
+                coordinator: self.coordinator,
+                status: "failed",
+                reason: authorization.unwrap_err(),
+                generation: self.catalog.generation,
+                staged_count: 0,
+                counters: self.coordinator.counters
+            )
+        val entry = entry_result.unwrap()
+        if aspect_application_is_mission(self.trust_policy) and entry.activation_policy != "startup":
+            return AspectActivationResult(
+                coordinator: self.coordinator,
+                status: "failed",
+                reason: "E-APACK008 mission profile permits activation only during startup",
+                generation: self.catalog.generation,
+                staged_count: 0,
+                counters: self.coordinator.counters
+            )
+        if provider_key.pack_id != entry.pack_id or
+            provider_key.pack_digest != entry.pack_digest or
+            provider_key.catalog_generation != self.catalog.generation or
+            provider_key.target != entry.target or
+            provider_key.variant_fingerprint != entry.variant_fingerprint or
+            provider_key.runtime_abi != entry.runtime_abi or
+            provider_key.core_public_abi_hash != entry.core_public_abi_hash or
+            provider_key.core_layout_abi_hash != entry.core_layout_abi_hash:
+            return AspectActivationResult(
+                coordinator: self.coordinator,
+                status: "failed",
+                reason: "E-APACK003 provider identity does not match the exact application catalog route",
+                generation: self.catalog.generation,
+                staged_count: 0,
+                counters: self.coordinator.counters
+            )
+        val provider_result = AspectPackProvider.from_trusted_bytes(
+            provider_key,
+            pack_bytes,
+            self.trust_policy,
+            signature
+        )
+        if provider_result.is_err():
+            return AspectActivationResult(
+                coordinator: self.coordinator,
+                status: "failed",
+                reason: provider_result.unwrap_err(),
+                generation: self.catalog.generation,
+                staged_count: 0,
+                counters: self.coordinator.counters
+            )
+        val provider = provider_result.unwrap()
+        val activation = self.coordinator.activate_with_loader(
+            provider, request, loader, self.provider_cache)
+        self.coordinator = activation.coordinator
+        activation
+
+    # Mission publication is explicit and irreversible for this process
+    # state.  Every startup aspect must already be atomically published.
+    me fn enter_operational() -> Result<(), text>:
+        if aspect_application_is_operational(self.phase):
+            return Ok(())
+        if aspect_application_is_mission(self.trust_policy):
+            aspect_application_startup_complete(self)?
+        self.phase = AspectApplicationPhase.Operational
+        Ok(())
+
+    # FacetRef integration pins the exact published generation before it
+    # dereferences a witness. The opaque token rejects replay and forgery.
+    me fn acquire_published_generation(aspect_id: text) -> Result<GenerationToken, text>:
+        if not self.coordinator.published.has(aspect_id):
+            return Err("E-AF004 aspect has no published generation: {aspect_id}")
+        if self.coordinator.published[aspect_id].state != "active":
+            return Err("E-AF004 aspect generation is quiescing: {aspect_id}")
+        val activation = self.coordinator.published[aspect_id]
+        val generation = activation.generation
+        val acquired = self.coordinator.lifecycle.acquire_generation_token_for(
+            activation.activation_key, generation)?
+        self.coordinator.lifecycle = acquired.0
+        Ok(acquired.1)
+
+    # Release accepts only a generation represented by this application's
+    # publication table, preventing arbitrary lifecycle-owner manipulation.
+    me fn release_published_generation(token: GenerationToken) -> Result<(), text>:
+        var published = false
+        for aspect_id in self.coordinator.published.keys():
+            val activation = self.coordinator.published[aspect_id]
+            if activation.activation_key == token.owner_key and activation.generation == token.generation_id:
+                published = true
+        if not published:
+            return Err("E-AF004 generation is not published by this application: {token.generation_id}")
+        val lifecycle = self.coordinator.lifecycle.release_generation_token(token)?
+        self.coordinator.lifecycle = lifecycle
+        Ok(())
+
+    fn published_generation_pin_count(aspect_id: text) -> Result<i64, text>:
+        if not self.coordinator.published.has(aspect_id):
+            return Err("E-AF004 aspect has no published generation: {aspect_id}")
+        val activation = self.coordinator.published[aspect_id]
+        Ok(self.coordinator.lifecycle.generation_pin_count_for(
+            activation.activation_key, activation.generation) as i64)
+
+    # Lookup is pure registry access. The returned record identifies the exact
+    # aspect whose canonical lifecycle lease must be acquired before invoking
+    # its witness symbol.
+    fn lookup_published_facet(
+        concrete_type_id: text,
+        implemented_business_interfaces: [text],
+        facet_interface_id: text
+    ) -> Result<FacetBindingRecord?, text>:
+        facet_lookup(
+            self.coordinator.facet_bindings,
+            concrete_type_id,
+            implemented_business_interfaces,
+            facet_interface_id)
+
+    # First-use boundary: resolve the visible witness and pin that record's
+    # exact published generation as one application-runtime operation.
+    me fn acquire_published_facet(
+        concrete_type_id: text,
+        implemented_business_interfaces: [text],
+        facet_interface_id: text
+    ) -> Result<(FacetBindingRecord, FacetGenerationLease)?, text>:
+        val binding = self.lookup_published_facet(
+            concrete_type_id, implemented_business_interfaces,
+            facet_interface_id)?
+        if binding == nil:
+            return Ok(nil)
+        val record = binding.unwrap()
+        val lease = self.acquire_facet_generation_lease(record.aspect_id)?
+        Ok(Some((record, lease)))
+
+    # Ownership-neutral std.aop lease adapter. The lease carries no app/os
+    # object; this boundary reconstructs the canonical lifecycle token.
+    me fn acquire_facet_generation_lease(aspect_id: text) -> Result<FacetGenerationLease, text>:
+        val token = self.acquire_published_generation(aspect_id)?
+        Ok(FacetGenerationLease(
+            aspect_id: aspect_id,
+            generation_id: token.generation_id,
+            token_id: token.token_id
+        ))
+
+    me fn release_facet_generation_lease(lease: FacetGenerationLease) -> Result<(), text>:
+        if not self.coordinator.published.has(lease.aspect_id):
+            return Err("E-AF004 facet lease aspect is not published: {lease.aspect_id}")
+        val activation = self.coordinator.published[lease.aspect_id]
+        if activation.generation != lease.generation_id:
+            return Err("E-AF004 facet lease generation does not match publication")
+        self.release_published_generation(GenerationToken(
+            owner_key: activation.activation_key,
+            generation_id: lease.generation_id,
+            token_id: lease.token_id
+        ))
+
+    # Ordinary-profile unload is a retryable two-step operation. The first
+    # call quiesces acquisition and removes visible bindings. If tokens remain,
+    # callers release them and retry; no wait loop or forced lease release is
+    # hidden here.
+    me fn unload_published_aspect(aspect_id: text, loader: ModuleLoader) -> Result<text, text>:
+        self.authorize(AspectApplicationOperation.Unload)?
+        if not self.coordinator.published.has(aspect_id):
+            return Err("E-AF004 aspect has no published generation: {aspect_id}")
+        var activation = self.coordinator.published[aspect_id]
+        val generation = activation.generation
+        val quiesced = self.coordinator.lifecycle.quiesce_generation_for(
+            activation.activation_key, generation)?
+        self.coordinator.lifecycle = quiesced
+        self.coordinator.facet_bindings = facet_unbind_generation(
+            self.coordinator.facet_bindings,
+            activation.activation_key,
+            generation)
+        activation.bindings = []
+        activation.state = "quiescing"
+        self.coordinator.published[aspect_id] = activation
+        if not self.coordinator.lifecycle.generation_is_drained_for(
+            activation.activation_key, generation):
+            return Ok("quiescing")
+
+        # Validate every cache pin before changing executable state so the
+        # cleanup sequence cannot discover a missing resource halfway through.
+        for module_key in activation.module_keys:
+            if self.provider_cache.module_ref_count(
+                module_key, loader.lifecycle.smf_cache_mgr) <= 0:
+                return Err("E-APACK003 published aspect module has no cache pin: {module_key.module_id}")
+
+        for owner_id in activation.owners:
+            moduleloader_unload(loader, owner_id)
+        for module_key in activation.module_keys:
+            self.provider_cache.release_module(
+                module_key, loader.lifecycle.smf_cache_mgr)?
+        for module_key in activation.module_keys:
+            _ = self.provider_cache.invalidate_provider(
+                module_key.provider, loader.lifecycle.smf_cache_mgr)
+
+        val completed = self.coordinator.lifecycle.complete_generation_unload_for(
+            activation.activation_key, generation)?
+        self.coordinator.lifecycle = completed
+        self.coordinator.published = self.coordinator.published.remove(aspect_id)
+        Ok("unloaded")
+
+export AspectApplicationPhase
+export AspectApplicationOperation
+export AspectApplicationRuntime

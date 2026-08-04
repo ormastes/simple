@@ -1,11 +1,11 @@
 # Simple Feature Module (SFM) — Design TLDR
 
-`.sfm` codec is symmetric little-endian: 16-byte header (`"SFM1"`, ver u16×2,
-manifest_len u32, smf_len u32) + manifest blob + **opaque SMF blob** (sliced, not
-parsed). Manifest = name/version strings (u32-len UTF-8) + security_level u8 +
-layer_count u32 + layers (name, entry, `LayerKind` byte). DI registers layers
-from the manifest (`Any`-keyed); an AOP Around authz aspect gates Trusted layers.
-`VERSION.md`'s SemVer is stamped into the manifest at build time.
+`SFM1` remains a 16-byte header + manifest + one opaque SMF. `SFM2` kind
+`aspect_pack` is a 28-byte header + canonical manifest + bounded uncompressed
+directory + independently framed opaque SMFs. Directory metadata is validated
+without opening frames; only the selected frame is integrity-checked and
+optionally decompressed before the existing SMF reader receives it. DI/AOP and
+VERSION wiring remain unchanged.
 
 <!-- sdn-diagram:id=simple_feature_module_tldr.design -->
 <details class="sdn-source">

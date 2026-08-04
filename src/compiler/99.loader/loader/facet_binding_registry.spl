@@ -1,0 +1,235 @@
+# Loader-owned dynamic facet binding publication.
+#
+# This registry owns binding visibility only.  Executable mappings, generation
+# pins, drain, and unload remain exclusively owned by ModuleLoader and the
+# existing LifecycleManager.
+
+use compiler.loader.loader.aspect_catalog.{AspectBindingSummary}
+
+struct FacetBindingAdmission:
+    summary: AspectBindingSummary
+    witness_owner_id: text
+
+struct FacetBindingRecord:
+    publication_id: text
+    activation_key: text
+    generation: i64
+    aspect_id: text
+    binding_id: text
+    concrete_type_id: text
+    business_interface_id: text
+    facet_interface_id: text
+    facet_contract_abi_hash: text
+    witness_symbol: text
+    witness_owner_id: text
+    capabilities: [text]
+
+struct FacetBindingCandidate:
+    activation_key: text
+    generation: i64
+    aspect_id: text
+    records: [FacetBindingRecord]
+
+struct FacetBindingRegistry:
+    records: [FacetBindingRecord]
+    # One visible publication per aspect. Older records remain retained until
+    # exact unbind, but are excluded from new lookups after replacement.
+    active_publications: Dict<text, text>
+
+fn facet_publication_id(activation_key: text, generation: i64) -> text:
+    "{activation_key}@{generation}"
+
+fn facet_summary_target_valid(summary: AspectBindingSummary) -> bool:
+    val concrete = summary.concrete_type_id != ""
+    val business = summary.business_interface_id != ""
+    concrete != business
+
+fn facet_binding_record_from(
+    activation_key: text,
+    generation: i64,
+    aspect_id: text,
+    admission: FacetBindingAdmission
+) -> Result<FacetBindingRecord, text>:
+    val summary = admission.summary
+    if activation_key == "" or generation <= 0 or aspect_id == "":
+        return Err("E-AF002 facet binding publication identity is incomplete")
+    if admission.witness_owner_id == "":
+        return Err("E-AF002 facet witness ownership was not validated")
+    if (summary.binding_id == "" or summary.facet_interface_id == "" or
+        summary.facet_contract_abi_hash == "" or summary.witness_symbol == ""):
+        return Err("E-AF002 facet binding summary is incomplete")
+    if not facet_summary_target_valid(summary):
+        return Err("E-AF002 facet binding requires exactly one concrete or business-interface target")
+    Ok(FacetBindingRecord(
+        publication_id: facet_publication_id(activation_key, generation),
+        activation_key: activation_key,
+        generation: generation,
+        aspect_id: aspect_id,
+        binding_id: summary.binding_id,
+        concrete_type_id: summary.concrete_type_id,
+        business_interface_id: summary.business_interface_id,
+        facet_interface_id: summary.facet_interface_id,
+        facet_contract_abi_hash: summary.facet_contract_abi_hash,
+        witness_symbol: summary.witness_symbol,
+        witness_owner_id: admission.witness_owner_id,
+        capabilities: summary.capabilities
+    ))
+
+fn facet_binding_same_static_key(a: FacetBindingRecord, b: FacetBindingRecord) -> bool:
+    if a.facet_interface_id != b.facet_interface_id:
+        return false
+    if a.concrete_type_id != "" and b.concrete_type_id != "":
+        return a.concrete_type_id == b.concrete_type_id
+    if a.business_interface_id != "" and b.business_interface_id != "":
+        return a.business_interface_id == b.business_interface_id
+    false
+
+fn facet_binding_record_is_active(
+    registry: FacetBindingRegistry,
+    record: FacetBindingRecord
+) -> bool:
+    (registry.active_publications.has(record.aspect_id) and
+        registry.active_publications[record.aspect_id] == record.publication_id)
+
+impl FacetBindingRegistry:
+    static fn create() -> FacetBindingRegistry:
+        FacetBindingRegistry(records: [], active_publications: {})
+
+    fn active_count() -> i64:
+        var count: i64 = 0
+        for record in self.records:
+            if facet_binding_record_is_active(self, record):
+                count = count + 1
+        count
+
+fn facet_binding_candidate(
+    activation_key: text,
+    generation: i64,
+    aspect_id: text
+) -> Result<FacetBindingCandidate, text>:
+    if activation_key == "" or generation <= 0 or aspect_id == "":
+        return Err("E-AF002 facet binding candidate identity is incomplete")
+    Ok(FacetBindingCandidate(
+        activation_key: activation_key,
+        generation: generation,
+        aspect_id: aspect_id,
+        records: []
+    ))
+
+# Runtime `facet_bind_type` seam. The admission must be created only after the
+# existing loader has validated witness_symbol -> witness_owner_id ownership.
+fn facet_bind_type(
+    candidate: FacetBindingCandidate,
+    admission: FacetBindingAdmission
+) -> Result<FacetBindingCandidate, text>:
+    val record = facet_binding_record_from(
+        candidate.activation_key, candidate.generation, candidate.aspect_id,
+        admission)?
+    for existing in candidate.records:
+        if existing.binding_id == record.binding_id or
+            facet_binding_same_static_key(existing, record):
+            return Err("E-AF003 ambiguous staged facet binding: {record.binding_id}")
+    var records = candidate.records
+    records.push(record)
+    Ok(FacetBindingCandidate(
+        activation_key: candidate.activation_key,
+        generation: candidate.generation,
+        aspect_id: candidate.aspect_id,
+        records: records
+    ))
+
+fn facet_binding_stage_validated(
+    activation_key: text,
+    generation: i64,
+    aspect_id: text,
+    admissions: [FacetBindingAdmission]
+) -> Result<FacetBindingCandidate, text>:
+    if admissions.len() == 0:
+        return Err("E-AF002 facet binding publication is empty")
+    var candidate = facet_binding_candidate(activation_key, generation, aspect_id)?
+    for admission in admissions:
+        candidate = facet_bind_type(candidate, admission)?
+    Ok(candidate)
+
+# Runtime `aspect_publish_generation` seam. The exact identity parameters make
+# accidental publication of a staged candidate under another lifecycle owner
+# or generation impossible.
+fn aspect_publish_generation(
+    registry: FacetBindingRegistry,
+    candidate: FacetBindingCandidate,
+    activation_key: text,
+    generation: i64
+) -> Result<FacetBindingRegistry, text>:
+    if (candidate.activation_key != activation_key or
+        candidate.generation != generation):
+        return Err("E-AF004 facet publication identity does not match staged generation")
+    val publication_id = facet_publication_id(activation_key, generation)
+    for staged in candidate.records:
+        for existing in registry.records:
+            if not facet_binding_record_is_active(registry, existing):
+                continue
+            # Replacing the visible generation of this same aspect is atomic;
+            # its old records are excluded from conflict checks.
+            if existing.aspect_id == candidate.aspect_id:
+                continue
+            if facet_binding_same_static_key(existing, staged):
+                return Err("E-AF003 ambiguous published facet binding: {staged.binding_id}")
+    var records = registry.records
+    for staged in candidate.records:
+        records.push(staged)
+    var active: Dict<text, text> = {}
+    for aspect_id in registry.active_publications.keys():
+        active[aspect_id] = registry.active_publications[aspect_id]
+    active[candidate.aspect_id] = publication_id
+    Ok(FacetBindingRegistry(records: records, active_publications: active))
+
+# Runtime `facet_lookup` seam. Exact concrete bindings and every matching
+# open-world business-interface rule participate; more than one is ambiguous.
+fn facet_lookup(
+    registry: FacetBindingRegistry,
+    concrete_type_id: text,
+    implemented_business_interfaces: [text],
+    facet_interface_id: text
+) -> Result<FacetBindingRecord?, text>:
+    if concrete_type_id == "" or facet_interface_id == "":
+        return Err("E-AF002 facet lookup identity is incomplete")
+    var found: FacetBindingRecord? = nil
+    for record in registry.records:
+        if not facet_binding_record_is_active(registry, record):
+            continue
+        if record.facet_interface_id != facet_interface_id:
+            continue
+        val exact = record.concrete_type_id == concrete_type_id
+        val open_world = (record.business_interface_id != "" and
+            implemented_business_interfaces.contains(record.business_interface_id))
+        if not exact and not open_world:
+            continue
+        if found != nil:
+            return Err("E-AF003 ambiguous facet lookup for {concrete_type_id} and {facet_interface_id}")
+        found = Some(record)
+    Ok(found)
+
+# Runtime `facet_unbind_generation` seam. It removes visibility and retained
+# registry records for exactly one publication; lifecycle drain/unload remains
+# with the existing owner and occurs after this call.
+fn facet_unbind_generation(
+    registry: FacetBindingRegistry,
+    activation_key: text,
+    generation: i64
+) -> FacetBindingRegistry:
+    val publication_id = facet_publication_id(activation_key, generation)
+    var records: [FacetBindingRecord] = []
+    for record in registry.records:
+        if record.publication_id != publication_id:
+            records.push(record)
+    var active: Dict<text, text> = {}
+    for aspect_id in registry.active_publications.keys():
+        if registry.active_publications[aspect_id] != publication_id:
+            active[aspect_id] = registry.active_publications[aspect_id]
+    FacetBindingRegistry(records: records, active_publications: active)
+
+export FacetBindingAdmission, FacetBindingRecord, FacetBindingCandidate
+export FacetBindingRegistry
+export facet_binding_candidate, facet_binding_stage_validated
+export facet_lookup, facet_bind_type, facet_unbind_generation
+export aspect_publish_generation

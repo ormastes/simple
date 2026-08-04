@@ -8,10 +8,81 @@ export use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type}
 use compiler.mir.mir_json.{serialize_mir_inst_kind, serialize_mir_terminator, serialize_operand}
 use compiler.mir.mir_json.{serialize_const_value, serialize_binop, serialize_unaryop}
 use compiler.mir.mir_json.{escape_json_string}
+use compiler.common.structural_contracts.aop.{
+    COMPILER_AOP_CONTRACT_VERSION,
+    FacetAccess, FacetBindingPlan, FacetMultiplicity, FacetRepresentation,
+    TypePredicateInstruction
+}
+use std.common.crypto.types.{text_to_bytes}
+
+fn mir_facet_metadata_text_lt(a: text, b: text) -> bool:
+    # Native text `<` historically compared addresses.  Metadata ordering is
+    # byte-lexicographic so interpreter/native artifacts remain identical.
+    val a_bytes = text_to_bytes(a)
+    val b_bytes = text_to_bytes(b)
+    var index = 0
+    while index < a_bytes.len() and index < b_bytes.len():
+        if a_bytes[index] != b_bytes[index]:
+            return a_bytes[index] < b_bytes[index]
+        index = index + 1
+    a_bytes.len() < b_bytes.len()
+
+fn serialize_facet_predicate_instruction(instruction: TypePredicateInstruction) -> text:
+    match instruction:
+        case MatchType(value):
+            "{\"op\":\"type\",\"value\":\"{escape_json_string(value)}\"}"
+        case MatchImplements(value):
+            "{\"op\":\"implements\",\"value\":\"{escape_json_string(value)}\"}"
+        case MatchSubtype(value):
+            "{\"op\":\"subtype\",\"value\":\"{escape_json_string(value)}\"}"
+        case Not: "{\"op\":\"not\"}"
+        case And: "{\"op\":\"and\"}"
+        case Or: "{\"op\":\"or\"}"
+
+fn serialize_facet_binding_plan(plan: FacetBindingPlan) -> text:
+    var predicate_parts: [text] = []
+    for instruction in plan.target_predicate.instructions:
+        predicate_parts = predicate_parts.push(
+            serialize_facet_predicate_instruction(instruction))
+    val representation = match plan.representation:
+        case Attached: "attached"
+        case NominalStatic: "nominal_static"
+    val multiplicity = match plan.multiplicity:
+        case Single: "single"
+        case Multi: "multi"
+    val access = match plan.access:
+        case PublicReadonly: "public_readonly"
+    val required = if plan.required: "true" else: "false"
+    val predicate_json = predicate_parts.join(",")
+    ("{\"access\":\"{access}\",\"aspectId\":\"{escape_json_string(plan.aspect_id)}\"," +
+        "\"facetInterfaceId\":\"{escape_json_string(plan.facet_interface_id)}\"," +
+        "\"implementationId\":\"{escape_json_string(plan.implementation_id)}\"," +
+        "\"multiplicity\":\"{multiplicity}\",\"predicate\":{\"contractVersion\":" +
+        "{plan.target_predicate.contract_version},\"instructions\":[{predicate_json}]}," +
+        "\"representation\":\"{representation}\",\"required\":{required}}")
+
+fn serialize_mir_facet_binding_plans(plans: [FacetBindingPlan]) -> text:
+    """Serialize facet plans in a stable order independent of map/pass order."""
+    var rows: [text] = []
+    for plan in plans:
+        rows = rows.push(serialize_facet_binding_plan(plan))
+    var i = 0
+    while i < rows.len():
+        var j = i + 1
+        while j < rows.len():
+            if mir_facet_metadata_text_lt(rows[j], rows[i]):
+                val tmp = rows[i]
+                rows[i] = rows[j]
+                rows[j] = tmp
+            j = j + 1
+        i = i + 1
+    val rows_json = rows.join(",")
+    ("{\"contractVersion\":{COMPILER_AOP_CONTRACT_VERSION}," +
+        "\"plans\":[{rows_json}]}")
 
 
 fn serialize_mir_module(module: MirModule) -> text:
-    """Serialize MIR module to JSON (functions-only compatibility shape)."""
+    """Serialize MIR functions and deterministic compile-time metadata to JSON."""
     var parts: [text] = []
     parts = parts.push("{\"name\":\"")
     parts = parts.push(escape_json_string(module.name))
@@ -24,7 +95,9 @@ fn serialize_mir_module(module: MirModule) -> text:
         parts = parts.push(serialize_mir_function(func))
         first_fn = false
 
-    parts = parts.push("]}")
+    parts = parts.push("],\"facetBindings\":")
+    parts = parts.push(serialize_mir_facet_binding_plans(module.facet_binding_plans))
+    parts = parts.push("}")
     parts.join("")
 
 
@@ -32,4 +105,4 @@ fn serialize_mir_inst(inst: MirInst) -> text:
     """Serialize instruction wrapper with kind payload."""
     "{\"kind\":{serialize_mir_inst_kind(inst.kind)}}"
 
-export serialize_mir_module, serialize_mir_inst
+export serialize_mir_module, serialize_mir_inst, serialize_mir_facet_binding_plans

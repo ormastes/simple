@@ -1,0 +1,177 @@
+# @req REQ-AF-004 REQ-AF-007
+# @cover src/compiler/99.loader/module_resolver/var_resolution.spl 70%
+# codex-system-test
+"""
+# Resolver-Owned Relative Aspect Roots
+
+**Feature IDs:** REQ-AF-004, REQ-AF-007
+**Category:** Compiler / module resolver
+**Status:** Executable
+**Requirements:** `doc/02_requirements/feature/aspect_facet_dynload_smf_pack.md`
+**Design:** `doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md`
+
+This manual proves that explicit aspect roots resolve from their declaring
+manifest into deterministic concrete build-time paths and variant roots. It
+also proves registry-wide fail-closed behavior for traversal, physical/symlink
+escape, and same-rank identity collisions. The symlink scenario invokes the
+resolver's lexical-versus-physical containment oracle directly; it does not
+create or depend on a host symlink.
+"""
+
+use std.spec.*
+use compiler.module_resolver.var_resolution.{
+    AspectRootCandidate, VarGroup, VarManifest, VarSelection,
+    aspect_normalize_path, aspect_path_escape_code, aspect_resolve_roots,
+    aspect_importer_can_search
+}
+use compiler.loader.module_resolver.types.{moduleresolver_new, moduleresolver_with_aspect_roots}
+
+# @inline
+fn aspect_variant_manifest() -> VarManifest:
+    VarManifest(
+        version: 1,
+        global_default: "default",
+        order: ["platform", "hw"],
+        groups: [
+            VarGroup(
+                name: "platform",
+                values: ["default", "linux", "mac"],
+                select_default: "auto"
+            ),
+            VarGroup(
+                name: "hw",
+                values: ["default", "x86_64", "arm64"],
+                select_default: "auto"
+            )
+        ]
+    )
+
+# @inline
+fn aspect_manifest_path() -> text:
+    "test/01_unit/compiler/module_resolver/fixtures/aspects/__init__.spl"
+
+describe "resolver-owned relative aspect roots":
+    describe "REQ-AF-004: manifest-relative deterministic build-time resolution":
+        it "should canonicalize roots from the declaring manifest and order by rank and identity":
+            val candidates = [
+                AspectRootCandidate(
+                    root_id: "company", aspect_id: "trace",
+                    path: "../../shared-aspects/trace", rank: 2, external: true),
+                AspectRootCandidate(
+                    root_id: "app", aspect_id: "security",
+                    path: "./security", rank: 1, external: false),
+                AspectRootCandidate(
+                    root_id: "app", aspect_id: "debug",
+                    path: "./debug/../debug", rank: 1, external: false)
+            ]
+            val resolved = aspect_resolve_roots(
+                ".", aspect_manifest_path(), candidates, aspect_variant_manifest(), [],
+                "var-default-v1")
+            expect(resolved.errors.len()).to_equal(0)
+            expect(resolved.roots.len()).to_equal(3)
+            expect(resolved.roots[0].aspect_id).to_equal("debug")
+            expect(resolved.roots[1].aspect_id).to_equal("security")
+            expect(resolved.roots[2].aspect_id).to_equal("trace")
+            expect(resolved.roots[0].canonical_path).to_end_with("/fixtures/aspects/debug")
+            expect(resolved.roots[0].canonical_path.contains("/../")).to_be(false)
+
+        it "should bind concrete variant roots and the selection fingerprint at build time":
+            val resolved = aspect_resolve_roots(
+                ".", aspect_manifest_path(), [AspectRootCandidate(
+                    root_id: "app", aspect_id: "debug", path: ".",
+                    rank: 0, external: false)],
+                aspect_variant_manifest(), [
+                    VarSelection(group: "platform", value: "linux"),
+                    VarSelection(group: "hw", value: "x86_64")
+                ], "linux-x86_64-v1")
+            expect(resolved.errors.len()).to_equal(0)
+            expect(resolved.selection_fingerprint).to_equal("linux-x86_64-v1")
+            expect(resolved.roots[0].selection_fingerprint).to_equal("linux-x86_64-v1")
+            expect(resolved.roots[0].variant_roots[0]).to_end_with(
+                "/fixtures/aspects/variants/platform/linux")
+            expect(resolved.roots[0].variant_roots[1]).to_end_with(
+                "/fixtures/aspects/variants/hw/x86_64")
+
+        it "should keep logical aspect identity stable across physical root locations":
+            val first = aspect_resolve_roots(
+                ".", aspect_manifest_path(), [AspectRootCandidate(
+                    root_id: "app-a", aspect_id: "debug", path: "./debug-a",
+                    rank: 0, external: false)],
+                aspect_variant_manifest(), [], "var-default-v1")
+            val moved = aspect_resolve_roots(
+                ".", aspect_manifest_path(), [AspectRootCandidate(
+                    root_id: "app-b", aspect_id: "debug", path: "./moved/debug",
+                    rank: 0, external: false)],
+                aspect_variant_manifest(), [], "var-default-v1")
+            expect(first.errors.len()).to_equal(0)
+            expect(moved.errors.len()).to_equal(0)
+            expect(first.roots[0].aspect_id).to_equal("debug")
+            expect(moved.roots[0].aspect_id).to_equal("debug")
+            expect(first.roots[0].canonical_path == moved.roots[0].canonical_path).to_be(false)
+
+        it "should install resolved roots on the live resolver without exposing them to core importers":
+            val roots = ["/workspace/aspects/debug", "/workspace/aspects/base"]
+            val resolver = moduleresolver_with_aspect_roots(
+                moduleresolver_new("/workspace", "/workspace/src"), roots,
+                "aspect-catalog-v1")
+            expect(resolver.aspect_roots).to_equal(roots)
+            expect(resolver.aspect_fingerprint).to_equal("aspect-catalog-v1")
+            expect(aspect_importer_can_search(
+                "/workspace/aspects/debug/src/main.spl", roots)).to_be(true)
+            expect(aspect_importer_can_search(
+                "/workspace/src/business.spl", roots)).to_be(false)
+
+    describe "REQ-AF-004 and REQ-AF-007: fail-closed root validation":
+        it "should reject manifest-relative traversal outside the workspace":
+            expect(aspect_normalize_path(
+                "/workspace/app/aspects/../../../outside")).to_equal("/workspace/outside")
+            val escaped = aspect_resolve_roots(
+                ".", aspect_manifest_path(), [AspectRootCandidate(
+                    root_id: "bad", aspect_id: "debug",
+                    path: "../../../../../../../outside", rank: 0, external: false)],
+                aspect_variant_manifest(), [], "var-default-v1")
+            expect(escaped.errors).to_contain("E-APATH001")
+            expect(escaped.roots.len()).to_equal(0)
+
+        it "should reject a physical symlink escape from a lexically contained path":
+            val code = aspect_path_escape_code(
+                "/workspace", "/workspace",
+                "/workspace/aspects/debug", "/outside/debug", false)
+            expect(code).to_equal("E-APATH002")
+
+        it "should permit an explicitly declared external physical root":
+            val code = aspect_path_escape_code(
+                "/workspace", "/workspace",
+                "/workspace/aspects/debug", "/outside/debug", true)
+            expect(code).to_equal("")
+
+        it "should reject same-rank duplicate aspect identities without publishing roots":
+            val candidates = [
+                AspectRootCandidate(
+                    root_id: "app-a", aspect_id: "debug",
+                    path: "./debug-a", rank: 1, external: false),
+                AspectRootCandidate(
+                    root_id: "app-b", aspect_id: "debug",
+                    path: "./debug-b", rank: 1, external: false)
+            ]
+            val resolved = aspect_resolve_roots(
+                ".", aspect_manifest_path(), candidates,
+                aspect_variant_manifest(), [], "var-default-v1")
+            expect(resolved.errors).to_contain("E-APATH003")
+            expect(resolved.roots.len()).to_equal(0)
+
+        it "should discard valid candidates when any root in the registry is invalid":
+            step("Reject an invalid aspect root registry")
+            val candidates = [
+                AspectRootCandidate(
+                    root_id: "good", aspect_id: "security",
+                    path: "./security", rank: 0, external: false),
+                AspectRootCandidate(
+                    root_id: "bad", aspect_id: "debug",
+                    path: "../../../../../../../outside", rank: 1, external: false)
+            ]
+            val resolved = aspect_resolve_roots(
+                ".", aspect_manifest_path(), candidates,
+                aspect_variant_manifest(), [], "var-default-v1")
+            expect(resolved.errors).to_contain("E-APATH001")
+            expect(resolved.roots.len()).to_equal(0)

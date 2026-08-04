@@ -1,0 +1,239 @@
+# @req REQ-AF-003 REQ-AF-006 REQ-AF-007 REQ-AF-008 NFR-AF-001 NFR-AF-002 NFR-AF-004 NFR-AF-008
+# @cover src/compiler/99.loader/loader/aspect_catalog.spl 80%
+# @cover src/compiler/99.loader/loader/aspect_activation.spl 80%
+# @cover src/compiler/99.loader/loader/facet_binding_registry.spl 80%
+# codex-system-test
+"""
+# Application Aspect Catalog Activation
+
+This executable manual proves deterministic exact-artifact routing, cold
+control-plane counters, dependency-closure selective staging, same-key request
+coalescing, and prior-generation preservation on failure. Counter scope is
+explicit: the activation adapter receives an already-open validated provider
+and does not claim pack opens, executable mappings, sidecar allocations, or
+runtime scans.
+"""
+
+use std.spec.*
+use std.sfm.aspect_pack.{AspectPackCompression, AspectPackPayload, encode_aspect_pack}
+use std.sfm.manifest.{FeatureManifest, SfmSecurityLevel}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.loader.loader.aspect_catalog.{AspectBindingSummary, AspectCatalogEntry, AspectCatalog}
+use compiler.loader.loader.aspect_pack_provider.{AspectPackProviderKey, AspectPackProvider}
+use compiler.loader.loader.aspect_activation.{
+    AspectActivationCounters, AspectActivationRequest, AspectActivationCoordinator,
+    AspectActivationResult
+}
+use compiler.loader.loader.facet_binding_registry.{
+    FacetBindingAdmission, FacetBindingRegistry,
+    facet_binding_stage_validated, facet_lookup, facet_unbind_generation,
+    aspect_publish_generation
+}
+use os.smf.dynsmf_session.{DynSmfPolicy, dynsmf_session_new}
+use os.smf.smf_generation.{LifecycleManager}
+
+# @inline
+fn catalog_minimal_smf() -> [u8]:
+    var out: [u8] = []
+    out.push(83)
+    out.push(77)
+    out.push(70)
+    out.push(0)
+    out.push(1)
+    out.push(1)
+    out.push(1)
+    out.push(0)
+    while out.len() < 20: out.push(0)
+    out.push(128)
+    while out.len() < 28: out.push(0)
+    out.push(128)
+    while out.len() < 128: out.push(0)
+    out
+
+# @inline
+fn build_aspect_pack_fixture() -> [u8]:
+    val smf = catalog_minimal_smf()
+    val manifest = FeatureManifest(
+        name: "diagnostics-pack", version: "2.0.0",
+        security_level: SfmSecurityLevel.Trusted, layers: [])
+    encode_aspect_pack(manifest, [
+        AspectPackPayload(
+            module_id: "debug.base", aspect_id: "base.aspect",
+            compression: AspectPackCompression.None, uncompressed_size: 128,
+            dictionary_id: 0, stored_bytes: smf),
+        AspectPackPayload(
+            module_id: "debug.cache", aspect_id: "debug.aspect",
+            compression: AspectPackCompression.None, uncompressed_size: 128,
+            dictionary_id: 0, stored_bytes: smf)
+    ]).unwrap()
+
+# @inline
+fn catalog_binding(id: text) -> AspectBindingSummary:
+    AspectBindingSummary(
+        binding_id: id,
+        concrete_type_id: "storage.cache.LruCache",
+        business_interface_id: "",
+        facet_interface_id: "Debuggable",
+        facet_contract_abi_hash: "facet-abi-1",
+        witness_symbol: id + "_witness", capabilities: ["facet.read"])
+
+# @inline
+fn catalog_entry(aspect_id: text, module_id: text, digest: text, dependencies: [text], policy: text, target: text) -> AspectCatalogEntry:
+    val pack = build_aspect_pack_fixture()
+    AspectCatalogEntry(
+        aspect_id: aspect_id, pack_id: "diagnostics-pack",
+        pack_path: "packs/diagnostics.sfm", module_id: module_id,
+        pack_digest: sha256_u8_hex(pack), module_digest: digest,
+        core_public_abi_hash: digest, core_layout_abi_hash: digest, target: target,
+        variant_fingerprint: "variant-a", runtime_abi: "simple-runtime-1",
+        dependencies: dependencies, activation_policy: policy,
+        binding_summaries: [catalog_binding(aspect_id + ".binding")],
+        capabilities: ["facet.read"])
+
+# @inline
+fn application_catalog(main_digest: text) -> Result<AspectCatalog, text>:
+    val digest = sha256_u8_hex(catalog_minimal_smf())
+    AspectCatalog.create(
+        7, "x86_64-unknown-linux-gnu", "variant-a", "simple-runtime-1", [
+            catalog_entry("base.aspect", "debug.base", digest, [], "lazy_facet", "x86_64-unknown-linux-gnu"),
+            catalog_entry("debug.aspect", "debug.cache", main_digest, ["base.aspect"], "lazy_facet", "x86_64-unknown-linux-gnu")
+        ])
+
+# @inline
+fn catalog_coordinator(catalog: AspectCatalog, disabled: bool) -> AspectActivationCoordinator:
+    val policy = DynSmfPolicy(disabled_all: disabled, disabled_ids: [], source: "system-spec")
+    AspectActivationCoordinator.create(
+        catalog, dynsmf_session_new("aspect-system", policy),
+        LifecycleManager.new_manager()).unwrap()
+
+# @inline
+fn catalog_provider() -> AspectPackProvider:
+    val pack = build_aspect_pack_fixture()
+    val core_hash = sha256_u8_hex(catalog_minimal_smf())
+    AspectPackProvider.from_bytes(AspectPackProviderKey(
+        pack_id: "diagnostics-pack", pack_digest: sha256_u8_hex(pack),
+        catalog_generation: 7, target: "x86_64-unknown-linux-gnu",
+        variant_fingerprint: "variant-a", runtime_abi: "simple-runtime-1",
+        core_public_abi_hash: core_hash, core_layout_abi_hash: core_hash), pack).unwrap()
+
+# @inline
+fn catalog_request(request_id: text, generation: i64) -> AspectActivationRequest:
+    AspectActivationRequest(
+        aspect_id: "debug.aspect", request_id: request_id,
+        catalog_generation: generation)
+
+# @inline
+fn verify_cold_aspect_counters(counters: AspectActivationCounters):
+    expect(counters.pack_opens).to_equal(0)
+    expect(counters.selected_stored_bytes).to_equal(0)
+    expect(counters.selected_decoded_bytes).to_equal(0)
+    expect(counters.executable_mappings).to_equal(0)
+    expect(counters.sidecar_allocations).to_equal(0)
+    expect(counters.runtime_scans).to_equal(0)
+
+# @inline
+fn verify_atomic_activation(before: AspectActivationCoordinator, result: AspectActivationResult):
+    expect(result.status).to_equal("failed")
+    expect(result.coordinator.lifecycle.active_generation).to_equal(before.lifecycle.active_generation)
+    expect(result.coordinator.dynsmf_session.generation).to_equal(before.dynsmf_session.generation)
+    expect(result.coordinator.published.keys().len()).to_equal(before.published.keys().len())
+    expect(result.coordinator.in_flight.keys().len()).to_equal(before.in_flight.keys().len())
+    expect(result.counters.selected_stored_bytes).to_equal(before.counters.selected_stored_bytes)
+    expect(result.counters.selected_decoded_bytes).to_equal(before.counters.selected_decoded_bytes)
+
+describe "application Aspect Catalog and atomic activation":
+    it "publishes open-world lookup then unbinds only the exact generation":
+        step("Stage loader-validated business-interface witness metadata")
+        var summary = catalog_binding("debug.open")
+        summary.concrete_type_id = ""
+        summary.business_interface_id = "storage.CacheApi"
+        val candidate = facet_binding_stage_validated(
+            "diagnostics-pack:debug.cache:debug.aspect:7", 7,
+            "debug.aspect", [FacetBindingAdmission(
+                summary: summary,
+                witness_owner_id: "diagnostics-pack:debug.cache:7")]
+        ).unwrap()
+        var registry = aspect_publish_generation(
+            FacetBindingRegistry.create(), candidate,
+            "diagnostics-pack:debug.cache:debug.aspect:7", 7).unwrap()
+
+        step("Resolve the open-world rule for a concrete implementing type")
+        val binding = facet_lookup(
+            registry, "storage.RemoteCache", ["storage.CacheApi"],
+            "Debuggable").unwrap()
+        expect(binding != nil).to_equal(true)
+        expect(binding.unwrap().witness_symbol).to_equal("debug.open_witness")
+
+        step("Remove binding visibility before lifecycle drain and unload")
+        registry = facet_unbind_generation(
+            registry, "diagnostics-pack:debug.cache:debug.aspect:7", 7)
+        expect(registry.active_count()).to_equal(0)
+        expect(facet_lookup(
+            registry, "storage.RemoteCache", ["storage.CacheApi"],
+            "Debuggable").unwrap() == nil).to_equal(true)
+
+    it "keeps manual and lazy facets cold after catalog inspection":
+        step("Inspect the application Aspect Catalog")
+        val catalog = application_catalog(sha256_u8_hex(catalog_minimal_smf())).unwrap()
+        val coordinator = catalog_coordinator(catalog, false)
+        expect(coordinator.catalog.find("debug.aspect").unwrap().module_id).to_equal("debug.cache")
+        verify_cold_aspect_counters(coordinator.counters)
+
+    it "loads only the dependency closure and publishes one generation":
+        step("Acquire the optional facet")
+        val catalog = application_catalog(sha256_u8_hex(catalog_minimal_smf())).unwrap()
+        val coordinator = catalog_coordinator(catalog, false)
+        step("Load only the selected SMF module closure")
+        val result = coordinator.activate(catalog_provider(), catalog_request("owner", 7), true, true)
+        step("Publish the facet generation atomically")
+        expect(result.status).to_equal("published")
+        expect(result.staged_count).to_equal(2)
+        expect(result.coordinator.lifecycle.active_generation).to_equal(1)
+        expect(result.counters.selected_stored_bytes).to_equal(256)
+        expect(result.counters.selected_decoded_bytes).to_equal(256)
+        expect(result.counters.executable_mappings).to_equal(0)
+        expect(result.counters.runtime_scans).to_equal(0)
+
+    it "coalesces concurrent requests for the same catalog key":
+        val catalog = application_catalog(sha256_u8_hex(catalog_minimal_smf())).unwrap()
+        val base = catalog_coordinator(catalog, false)
+        val reserved = base.reserve(catalog_request("owner", 7)).unwrap()
+        val follower = reserved.activate(catalog_provider(), catalog_request("follower", 7), true, true)
+        expect(follower.status).to_equal("coalesced_inflight")
+        expect(follower.coordinator.lifecycle.active_generation).to_equal(0)
+        val owner = reserved.activate(catalog_provider(), catalog_request("owner", 7), true, true)
+        expect(owner.status).to_equal("published")
+        val active = owner.coordinator.activate(catalog_provider(), catalog_request("later", 7), true, true)
+        expect(active.status).to_equal("coalesced_active")
+        expect(active.coordinator.lifecycle.active_generation).to_equal(1)
+
+    it "rejects an invalid selected module without changing the prior generation":
+        step("Reject an invalid aspect pack")
+        val wrong = "0000000000000000000000000000000000000000000000000000000000000000"
+        val before = catalog_coordinator(application_catalog(wrong).unwrap(), false)
+        val result = before.activate(catalog_provider(), catalog_request("owner", 7), true, true)
+        expect(result.reason).to_contain("SHA-256 digest mismatch")
+        verify_atomic_activation(before, result)
+
+    it "rejects invalid catalog topology policy and compatibility before publication":
+        val digest = sha256_u8_hex(catalog_minimal_smf())
+        val cycle = AspectCatalog.create(7, "x86_64-unknown-linux-gnu", "variant-a", "simple-runtime-1", [
+            catalog_entry("base.aspect", "debug.base", digest, ["debug.aspect"], "lazy_facet", "x86_64-unknown-linux-gnu"),
+            catalog_entry("debug.aspect", "debug.cache", digest, ["base.aspect"], "lazy_facet", "x86_64-unknown-linux-gnu")])
+        expect(cycle.is_err()).to_be(true)
+        val invalid_policy = AspectCatalog.create(7, "x86_64-unknown-linux-gnu", "variant-a", "simple-runtime-1", [
+            catalog_entry("debug.aspect", "debug.cache", digest, [], "implicit", "x86_64-unknown-linux-gnu")])
+        expect(invalid_policy.is_err()).to_be(true)
+        val wrong_target = AspectCatalog.create(7, "x86_64-unknown-linux-gnu", "variant-a", "simple-runtime-1", [
+            catalog_entry("debug.aspect", "debug.cache", digest, [], "manual", "aarch64-unknown-linux-gnu")])
+        expect(wrong_target.is_err()).to_be(true)
+
+    it "preserves dynSMF disable controls and rejects stale requests atomically":
+        val catalog = application_catalog(sha256_u8_hex(catalog_minimal_smf())).unwrap()
+        val disabled = catalog_coordinator(catalog, true)
+        val denied = disabled.activate(catalog_provider(), catalog_request("owner", 7), true, true)
+        expect(denied.reason).to_contain("dynSMF policy")
+        verify_atomic_activation(disabled, denied)
+        val stale = disabled.activate(catalog_provider(), catalog_request("stale", 6), true, true)
+        expect(stale.reason).to_contain("stale")
+        verify_atomic_activation(disabled, stale)

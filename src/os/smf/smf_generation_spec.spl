@@ -5,7 +5,7 @@
 # All tests use direct struct construction for interpreter compatibility.
 
 use std.spec.*
-use os.smf.smf_generation.{GenerationState, CandidateMapping, SymbolSwap, RetiredMapping, LifecycleManager}
+use os.smf.smf_generation.{GenerationToken, GenerationState, CandidateMapping, SymbolSwap, RetiredMapping, LifecycleManager}
 
 # ============================================================================
 # GenerationState specs
@@ -165,45 +165,133 @@ describe "RetiredMapping - drain tracking":
 
 describe "LifecycleManager - generation orchestration":
     it "new_manager starts at active_generation 0":
-        val lm = LifecycleManager(active_generation: 0, pending_candidate: "", has_candidate: false, retired_count: 0)
+        val lm = LifecycleManager.new_manager()
         expect(lm.active_generation).to_equal(0)
 
     it "new_manager has no candidate":
-        val lm = LifecycleManager(active_generation: 0, pending_candidate: "", has_candidate: false, retired_count: 0)
+        val lm = LifecycleManager.new_manager()
         expect(lm.has_candidate).to_equal(false)
 
     it "new_manager retired_count is 0":
-        val lm = LifecycleManager(active_generation: 0, pending_candidate: "", has_candidate: false, retired_count: 0)
+        val lm = LifecycleManager.new_manager()
         expect(lm.retired_count).to_equal(0)
 
     it "register_candidate sets has_candidate true":
-        val lm = LifecycleManager(active_generation: 0, pending_candidate: "", has_candidate: false, retired_count: 0).register_candidate("mod.smf", 1)
+        val lm = LifecycleManager.new_manager().register_candidate("mod.smf", 1)
         expect(lm.has_candidate).to_equal(true)
 
     it "register_candidate records pending_candidate name":
-        val lm = LifecycleManager(active_generation: 0, pending_candidate: "", has_candidate: false, retired_count: 0).register_candidate("mod.smf", 1)
+        val lm = LifecycleManager.new_manager().register_candidate("mod.smf", 1)
         expect(lm.pending_candidate).to_equal("mod.smf")
 
+    it "does not overwrite an in-flight candidate or an existing generation":
+        val pending = LifecycleManager.new_manager().register_candidate("first", 7)
+        val unchanged = pending.register_candidate("second", 8)
+        expect(unchanged.pending_candidate).to_equal("first")
+        expect(unchanged.pending_generation).to_equal(7)
+        val active = pending.promote_candidate()
+        val duplicate = active.register_candidate("first", 7)
+        expect(duplicate.has_candidate).to_equal(false)
+        expect(duplicate.generation_state_for("first", 7)).to_equal("active")
+
+    it "fails closed when a publisher registers or promotes the wrong transaction":
+        val empty = LifecycleManager.new_manager()
+        val pending = empty.register_candidate_for("aspect-a", 7).unwrap()
+        expect(pending.register_candidate_for("aspect-b", 7).is_err()).to_equal(true)
+        expect(pending.promote_candidate_for("aspect-b", 7).is_err()).to_equal(true)
+        expect(pending.promote_candidate_for("aspect-a", 8).is_err()).to_equal(true)
+        val active = pending.promote_candidate_for("aspect-a", 7).unwrap()
+        expect(active.generation_state_for("aspect-a", 7)).to_equal("active")
+        expect(active.register_candidate_for("aspect-a", 7).is_err()).to_equal(true)
+
     it "promote_candidate increments active_generation":
-        val base = LifecycleManager(active_generation: 0, pending_candidate: "mod.smf", has_candidate: true, retired_count: 0)
+        val base = LifecycleManager.new_manager().register_candidate("mod.smf", 1)
         val lm = base.promote_candidate()
         expect(lm.active_generation).to_equal(1)
 
     it "promote_candidate clears has_candidate":
-        val base = LifecycleManager(active_generation: 0, pending_candidate: "mod.smf", has_candidate: true, retired_count: 0)
+        val base = LifecycleManager.new_manager().register_candidate("mod.smf", 1)
         val lm = base.promote_candidate()
         expect(lm.has_candidate).to_equal(false)
 
     it "retire increments retired_count":
-        val lm = LifecycleManager(active_generation: 0, pending_candidate: "", has_candidate: false, retired_count: 0).retire("mod.smf")
+        val lm = LifecycleManager.new_manager().retire("mod.smf")
         expect(lm.retired_count).to_equal(1)
 
     it "successive retires accumulate count":
-        val base = LifecycleManager(active_generation: 0, pending_candidate: "", has_candidate: false, retired_count: 0)
+        val base = LifecycleManager.new_manager()
         val lm = base.retire("a.smf").retire("b.smf")
         expect(lm.retired_count).to_equal(2)
 
     it "to_text contains active_generation":
-        val base = LifecycleManager(active_generation: 0, pending_candidate: "m", has_candidate: true, retired_count: 0)
+        val base = LifecycleManager.new_manager().register_candidate("m", 1)
         val lm = base.promote_candidate()
         expect(lm.to_text()).to_contain("1")
+
+    it "publishes the exact catalog generation instead of a local counter":
+        val lm = LifecycleManager.new_manager().register_candidate("aspect", 7).promote_candidate()
+        expect(lm.active_generation).to_equal(7)
+        expect(lm.generation_state_for("aspect", 7)).to_equal("active")
+
+    it "pins only the active generation and rejects acquisition after quiesce":
+        val active = LifecycleManager.new_manager().register_candidate("aspect", 7).promote_candidate()
+        val pinned = active.acquire_generation_for("aspect", 7).unwrap()
+        expect(pinned.generation_pin_count_for("aspect", 7)).to_equal(1)
+        val quiescing = pinned.quiesce_generation_for("aspect", 7).unwrap()
+        expect(quiescing.acquire_generation_for("aspect", 7).is_err()).to_equal(true)
+        expect(quiescing.generation_is_drained_for("aspect", 7)).to_equal(false)
+
+    it "blocks unload until release drains the exact generation":
+        val active = LifecycleManager.new_manager().register_candidate("aspect", 7).promote_candidate()
+        val acquired = active.acquire_generation_for("aspect", 7).unwrap()
+        val pinned = acquired.quiesce_generation_for("aspect", 7).unwrap()
+        expect(pinned.complete_generation_unload_for("aspect", 7).is_err()).to_equal(true)
+        val drained = pinned.release_generation_for("aspect", 7).unwrap()
+        expect(drained.generation_is_drained_for("aspect", 7)).to_equal(true)
+        val unloaded = drained.complete_generation_unload_for("aspect", 7).unwrap()
+        expect(unloaded.generation_state_for("aspect", 7)).to_equal("unknown")
+        expect(unloaded.retired_count).to_equal(1)
+
+    it "binds each FacetRef acquisition to a non-replayable generation token":
+        val active = LifecycleManager.new_manager().register_candidate("aspect", 7).promote_candidate()
+        val acquired = active.acquire_generation_token_for("aspect", 7).unwrap()
+        val pinned = acquired.0
+        val token = acquired.1
+        expect(token.owner_key).to_equal("aspect")
+        expect(token.generation_id).to_equal(7)
+        expect(pinned.generation_token_is_active(token)).to_equal(true)
+        expect(pinned.release_generation_for("aspect", 7).is_err()).to_equal(true)
+        val released = pinned.release_generation_token(token).unwrap()
+        expect(released.generation_token_is_active(token)).to_equal(false)
+        expect(released.release_generation_token(token).is_err()).to_equal(true)
+
+    it "quiesces the prior generation atomically when publishing its successor":
+        val first = LifecycleManager.new_manager().register_candidate("aspect", 7).promote_candidate()
+        val second = first.register_candidate("aspect", 8).promote_candidate()
+        expect(second.generation_state_for("aspect", 7)).to_equal("quiescing")
+        expect(second.generation_state_for("aspect", 8)).to_equal("active")
+
+    it "isolates two aspects in the same catalog generation":
+        var lifecycle = LifecycleManager.new_manager().register_candidate("aspect-a", 7).promote_candidate()
+        lifecycle = lifecycle.register_candidate("aspect-b", 7).promote_candidate()
+        val acquired_a = lifecycle.acquire_generation_token_for("aspect-a", 7).unwrap()
+        lifecycle = acquired_a.0
+        val acquired_b = lifecycle.acquire_generation_token_for("aspect-b", 7).unwrap()
+        lifecycle = acquired_b.0
+        lifecycle = lifecycle.quiesce_generation_for("aspect-a", 7).unwrap()
+
+        expect(lifecycle.acquire_generation_token_for("aspect-a", 7).is_err()).to_equal(true)
+        expect(lifecycle.acquire_generation_token_for("aspect-b", 7).is_ok()).to_equal(true)
+        lifecycle = lifecycle.release_generation_token(acquired_a.1).unwrap()
+        lifecycle = lifecycle.complete_generation_unload_for("aspect-a", 7).unwrap()
+        expect(lifecycle.generation_state_for("aspect-a", 7)).to_equal("unknown")
+        expect(lifecycle.generation_state_for("aspect-b", 7)).to_equal("active")
+        expect(lifecycle.generation_token_is_active(acquired_b.1)).to_equal(true)
+
+    it "rejects a token replayed against another aspect in the same generation":
+        var lifecycle = LifecycleManager.new_manager().register_candidate("aspect-a", 7).promote_candidate()
+        lifecycle = lifecycle.register_candidate("aspect-b", 7).promote_candidate()
+        val acquired = lifecycle.acquire_generation_token_for("aspect-a", 7).unwrap()
+        val forged = GenerationToken(owner_key: "aspect-b", generation_id: 7, token_id: acquired.1.token_id)
+        expect(acquired.0.release_generation_token(forged).is_err()).to_equal(true)
+        expect(acquired.0.generation_token_is_active(acquired.1)).to_equal(true)

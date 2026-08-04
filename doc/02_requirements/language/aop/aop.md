@@ -242,13 +242,15 @@ allow pc{ depend(within(api.**), within(core.**)) } "API can depend on core"
 **Example:** validates advice configuration
     Then  expect target() == 42
 
-## Feature: Zero Overhead When Disabled
+## Feature: Byte-Identical Static Omission
 
 ## Performance Guarantee
 
-    Verifies that when AOP is not enabled, there is zero overhead.
+    Verifies that the same build inputs produce byte-identical output when AOP
+    is statically omitted. This claim excludes prepared patchable dynamic
+    advice, whose dormant code/branch footprint must be measured explicitly.
 
-### Scenario: no advice means no overhead
+### Scenario: no advice means byte-identical static output
 
 | # | Example | Status |
 |---|---------|--------|
@@ -260,4 +262,3 @@ allow pc{ depend(within(api.**), within(core.**)) } "API can depend on core"
 
 **Example:** disabled weaving produces no diagnostics
     Then  expect isolated_func() == 100
-

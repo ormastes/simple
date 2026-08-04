@@ -36,13 +36,26 @@ authz_around -> security_level
 </details>
 <!-- sdn-diagram:end -->
 
-## Container codec (`codec.spl`)
-Little-endian, write-then-read symmetric. Header (16 bytes): `"SFM1"` magic,
-`ver_major`/`ver_minor` u16, `manifest_len` u32, `smf_len` u32. Then the manifest
-blob, then the opaque SMF blob (`smf_len` bytes). The decoder validates magic and
-bounds (`SFM_HEADER_BYTES + manifest_len + smf_len <= total`), then slices the SMF
-blob without parsing it. Helpers: `push_u16_le`/`push_u32_le`/`push_str`,
-`read_u16_le`/`read_u32_le`/`read_str`.
+## Container codecs (`codec.spl`, `aspect_pack.spl`)
+
+`SFM1` remains write/read symmetric and unchanged: a 16-byte header, canonical
+manifest blob, then one opaque SMF image.
+
+`SFM2` major 2, minor 0, kind `aspect_pack` has a 28-byte header followed by the
+same canonical `FeatureManifest`, an uncompressed directory, and a payload
+area. Every directory entry contains canonical `module_id` and `aspect_id`,
+compression mode (`None` or `Zstd`), payload-relative offset, stored and decoded
+sizes, dictionary ID, and stored-content hash. Entries and frames are unique,
+ordered, contiguous, and independently decompressible. The decoder validates
+all structural metadata and limits up front, but validates/copies only the
+selected stored frame. The provider then performs bounded decompression and
+requires the exact declared decoded length before giving bytes to the existing
+SMF reader. Dictionary ID zero is the initial supported profile.
+
+Malformed metadata fails closed with `E-APACK001`; integrity failures use
+`E-APACK002`; absent module IDs use `E-APACK003`; configured resource limits use
+`E-APACK004`. The stored-content hash is a corruption guard, not pack
+authentication; catalog signature/trust policy remains a distinct owner.
 
 ## Manifest encoding (`manifest.spl`)
 `name_str | version_str | security_level u8 | layer_count u32 | layers[...]`.

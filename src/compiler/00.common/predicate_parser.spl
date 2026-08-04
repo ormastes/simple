@@ -7,6 +7,7 @@
 
 
 use predicate.*
+use compiler.common.structural_contracts.aop.{TypePredicateBytecode}
 
 # ============================================================================
 # Tokens
@@ -25,7 +26,7 @@ enum Token:
 # Tokenizer
 # ============================================================================
 
-fn tokenize(input: text) -> text:
+fn tokenize(input: text) -> Result<[Token], text>:
     var tokens: [Token] = []
     var i = 0
     val chars = input.chars()
@@ -56,7 +57,7 @@ fn tokenize(input: text) -> text:
         elif c.is_alpha() or c == "_":
             # Parse selector name
             var name = ""
-            while i < len and (chars[i].is_alnum() or chars[i] == "_"):
+            while i < len and (chars[i].is_alpha() or chars[i].is_digit() or chars[i] == "_"):
                 name = name + chars[i]
                 i = i + 1
 
@@ -110,7 +111,7 @@ fn tokenize(input: text) -> text:
 # Parser (recursive descent)
 # ============================================================================
 
-fn parse_predicate(input: text) -> text:
+fn parse_predicate(input: text) -> Result<Predicate, text>:
     """Parse a predicate expression from string."""
     val trimmed = input.trim()
     val inner = if trimmed.starts_with("pc{") and trimmed.ends_with("}"):
@@ -122,13 +123,13 @@ fn parse_predicate(input: text) -> text:
     var pos = 0
     match parse_or(tokens, pos):
         case Ok((pred, new_pos)):
-            if new_pos < tokens_len(tokens):
+            if new_pos < tokens.len():
                 Err("unexpected trailing tokens in predicate")
             else:
                 Ok(pred)
         case Err(e): Err(e)
 
-fn parse_or(tokens: [Token], pos: i64) -> text:
+fn parse_or(tokens: [Token], pos: i64) -> Result<(Predicate, i64), text>:
     var result = parse_and(tokens, pos)?
     val _destruct_0 = result
     var expr = _destruct_0[0]
@@ -143,7 +144,7 @@ fn parse_or(tokens: [Token], pos: i64) -> text:
     val _tup_1 = (expr, p)
     Ok(_tup_1)
 
-fn parse_and(tokens: [Token], pos: i64) -> text:
+fn parse_and(tokens: [Token], pos: i64) -> Result<(Predicate, i64), text>:
     var result = parse_not(tokens, pos)?
     val _destruct_1 = result
     var expr = _destruct_1[0]
@@ -158,7 +159,7 @@ fn parse_and(tokens: [Token], pos: i64) -> text:
     val _tup_2 = (expr, p)
     Ok(_tup_2)
 
-fn parse_not(tokens: [Token], pos: i64) -> text:
+fn parse_not(tokens: [Token], pos: i64) -> Result<(Predicate, i64), text>:
     if pos < tokens.len():
         match tokens[pos]:
             case Not:
@@ -167,7 +168,7 @@ fn parse_not(tokens: [Token], pos: i64) -> text:
             case _: ()
     parse_primary(tokens, pos)
 
-fn parse_primary(tokens: [Token], pos: i64) -> text:
+fn parse_primary(tokens: [Token], pos: i64) -> Result<(Predicate, i64), text>:
     if pos >= tokens.len():
         return Err("unexpected end of predicate expression")
 
@@ -185,7 +186,7 @@ fn parse_primary(tokens: [Token], pos: i64) -> text:
         case _:
             Err("unexpected token in predicate expression")
 
-fn make_selector(name: text, args: [text]) -> text:
+fn make_selector(name: text, args: [text]) -> Result<Selector, text>:
     """Convert a selector name and arguments into a Selector."""
     match name:
         case "execution":
@@ -211,6 +212,12 @@ fn make_selector(name: text, args: [text]) -> text:
         case "type":
             if args.len() < 1: Err("type() requires an argument")
             else: Ok(Selector.Type(args[0]))
+        case "implements":
+            if args.len() < 1: Err("implements() requires an argument")
+            else: Ok(Selector.Implements(args[0]))
+        case "subtype":
+            if args.len() < 1: Err("subtype() requires an argument")
+            else: Ok(Selector.Subtype(args[0]))
         case "init":
             if args.len() < 1: Err("init() requires an argument")
             else: Ok(Selector.Init(args[0]))
@@ -231,6 +238,10 @@ fn make_selector(name: text, args: [text]) -> text:
             else: Ok(Selector.Config(args[0]))
         case _: Err("unknown selector '{name}'")
 
+fn compile_type_predicate_text(input: text) -> Result<TypePredicateBytecode, text>:
+    """Parse and compile the canonical pc{} type-selector language once."""
+    compile_type_predicate(parse_predicate(input)?)
+
 fn parse_signature_pattern(input: text) -> SignaturePattern:
     """Parse a signature pattern like '* User.new(..)' or 'i64 *.calc(i64, i64)'."""
     val parts = input.trim().split(" ")
@@ -243,12 +254,12 @@ fn parse_signature_pattern(input: text) -> SignaturePattern:
 
     # Split name and args
     val paren_idx = rest.index_of("(")
-    if not has_paren_idx:
+    if paren_idx < 0:
         return SignaturePattern(return_type: return_type, qualified_name: rest,
                                 args: ArgPatterns.Any)
 
-    val qualified_name = rest[:paren_idx_value]
-    val args_str = rest[paren_idx_value + 1:]
+    val qualified_name = rest[:paren_idx]
+    val args_str = rest[paren_idx + 1:]
     val args_str = if args_str.ends_with(")"): args_str[:args_str.len() - 1] else: args_str
 
     val args = if args_str.trim() == "..":

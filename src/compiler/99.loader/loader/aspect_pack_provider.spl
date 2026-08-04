@@ -1,0 +1,467 @@
+# Aspect-pack adapter for the existing ObjectProvider byte-backed SMF seam.
+#
+# This module owns no loader or publication registry.  It validates one SFM2
+# image at construction, exposes exactly one selected ordinary SMF image per
+# request, and offers a separately bounded exact-key cache for catalog owners.
+
+use std.sfm.aspect_pack.{
+    AspectPackCompression,
+    AspectPackEntry,
+    AspectPackImage,
+    decode_aspect_pack,
+    aspect_pack_find_entry,
+    aspect_pack_stored_frame
+}
+use std.common.compress.zstd.{zstd_decompress_frame}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.loader.loader.smf_cache_manager.{
+    SmfCacheManager,
+    smfcachemanager_ref_count_inc,
+    smfcachemanager_ref_count_dec,
+    smfcachemanager_get_ref_count
+}
+
+# Exact validated-index identity supplied by the catalog/lifecycle owner.
+# Keeping every invalidation dimension explicit prevents a future cache from
+# accidentally collapsing distinct pack generations or target variants.
+struct AspectPackProviderKey:
+    pack_id: text
+    pack_digest: text
+    catalog_generation: i64
+    target: text
+    variant_fingerprint: text
+    runtime_abi: text
+    core_public_abi_hash: text
+    core_layout_abi_hash: text
+
+# A selected module key extends the pack identity with the module digest.
+struct AspectPackModuleKey:
+    provider: AspectPackProviderKey
+    module_id: text
+    module_digest: text
+
+# Trust roots are supplied by the embedding application.  No key or trust bit
+# from the pack is consulted, so a pack cannot make itself trusted.
+enum AspectPackTrustProfile:
+    OrdinaryAllowUnsigned
+    OrdinaryRequireSignature
+    MissionRequireSignature
+
+struct AspectPackTrustPolicy:
+    profile: AspectPackTrustProfile
+    trusted_public_key: [u8]
+
+impl AspectPackTrustPolicy:
+    static fn ordinary_unsigned() -> AspectPackTrustPolicy:
+        AspectPackTrustPolicy(
+            profile: AspectPackTrustProfile.OrdinaryAllowUnsigned,
+            trusted_public_key: []
+        )
+
+    static fn ordinary_signed(trusted_public_key: [u8]) -> Result<AspectPackTrustPolicy, text>:
+        if trusted_public_key.len() != 32:
+            return Err("E-APACK008 trusted Ed25519 public key must be 32 bytes")
+        Ok(AspectPackTrustPolicy(
+            profile: AspectPackTrustProfile.OrdinaryRequireSignature,
+            trusted_public_key: trusted_public_key
+        ))
+
+    static fn mission(trusted_public_key: [u8]) -> Result<AspectPackTrustPolicy, text>:
+        if trusted_public_key.len() != 32:
+            return Err("E-APACK008 mission trust root must be an external 32-byte Ed25519 public key")
+        Ok(AspectPackTrustPolicy(
+            profile: AspectPackTrustProfile.MissionRequireSignature,
+            trusted_public_key: trusted_public_key
+        ))
+
+struct AspectPackProvider:
+    key: AspectPackProviderKey
+    image: AspectPackImage
+
+struct AspectPackCachedModule:
+    key: AspectPackModuleKey
+    bytes: [u8]
+
+struct AspectPackNegativeModule:
+    key: AspectPackModuleKey
+    reason: text
+
+struct AspectPackProviderCacheStats:
+    index_hits: i64
+    index_misses: i64
+    index_evictions: i64
+    index_invalidations: i64
+    chunk_hits: i64
+    chunk_misses: i64
+    chunk_evictions: i64
+    chunk_invalidations: i64
+    negative_hits: i64
+    negative_misses: i64
+    negative_evictions: i64
+    negative_invalidations: i64
+
+# FIFO bounds are deliberate: they make memory use and eviction deterministic.
+# Every entry retains the full exact key; no digest, target, variant, generation,
+# or ABI dimension is silently collapsed. Resource references are injected
+# from ModuleLoader.lifecycle.smf_cache_mgr on every mutating operation; this
+# cache never creates or stores a parallel pin registry.
+class AspectPackProviderCache:
+    index_capacity: i64
+    chunk_capacity: i64
+    negative_capacity: i64
+    providers: [AspectPackProvider]
+    chunks: [AspectPackCachedModule]
+    negatives: [AspectPackNegativeModule]
+    stats: AspectPackProviderCacheStats
+
+fn aspect_pack_cache_zero_stats() -> AspectPackProviderCacheStats:
+    AspectPackProviderCacheStats(
+        index_hits: 0,
+        index_misses: 0,
+        index_evictions: 0,
+        index_invalidations: 0,
+        chunk_hits: 0,
+        chunk_misses: 0,
+        chunk_evictions: 0,
+        chunk_invalidations: 0,
+        negative_hits: 0,
+        negative_misses: 0,
+        negative_evictions: 0,
+        negative_invalidations: 0
+    )
+
+fn aspect_pack_cache_component(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn aspect_pack_module_resource_id(key: AspectPackModuleKey) -> text:
+    val provider = key.provider
+    "aspect-pack:" +
+        aspect_pack_cache_component(provider.pack_id) + ":" +
+        aspect_pack_cache_component(provider.pack_digest) + ":" +
+        provider.catalog_generation.to_text() + ":" +
+        aspect_pack_cache_component(provider.target) + ":" +
+        aspect_pack_cache_component(provider.variant_fingerprint) + ":" +
+        aspect_pack_cache_component(provider.runtime_abi) + ":" +
+        aspect_pack_cache_component(provider.core_public_abi_hash) + ":" +
+        aspect_pack_cache_component(provider.core_layout_abi_hash) + ":" +
+        aspect_pack_cache_component(key.module_id) + ":" +
+        aspect_pack_cache_component(key.module_digest)
+
+fn aspect_pack_copy_bytes(source: [u8]) -> [u8]:
+    var copy: [u8] = []
+    for byte in source:
+        copy.push(byte)
+    copy
+
+fn aspect_pack_provider_key_valid(key: AspectPackProviderKey) -> Result<(), text>:
+    if key.pack_id == "" or key.pack_digest == "":
+        return Err("E-APACK003 pack identity or digest is empty")
+    if key.catalog_generation < 0:
+        return Err("E-APACK001 catalog generation is invalid")
+    if key.target == "" or key.runtime_abi == "" or key.core_public_abi_hash == "" or key.core_layout_abi_hash == "":
+        return Err("E-APACK002 target, runtime ABI, or core ABI identity is empty")
+    if key.variant_fingerprint == "":
+        return Err("E-APACK005 variant fingerprint is empty")
+    Ok(())
+
+fn aspect_pack_provider_keys_equal(left: AspectPackProviderKey, right: AspectPackProviderKey) -> bool:
+    left.pack_id == right.pack_id and
+        left.pack_digest == right.pack_digest and
+        left.catalog_generation == right.catalog_generation and
+        left.target == right.target and
+        left.variant_fingerprint == right.variant_fingerprint and
+        left.runtime_abi == right.runtime_abi and
+        left.core_public_abi_hash == right.core_public_abi_hash and
+        left.core_layout_abi_hash == right.core_layout_abi_hash
+
+fn aspect_pack_provider_validate_module_key(provider: AspectPackProvider, key: AspectPackModuleKey) -> Result<(), text>:
+    if not aspect_pack_provider_keys_equal(provider.key, key.provider):
+        if provider.key.variant_fingerprint != key.provider.variant_fingerprint:
+            return Err("E-APACK005 variant fingerprint mismatch")
+        if (provider.key.target != key.provider.target or
+            provider.key.runtime_abi != key.provider.runtime_abi or
+            provider.key.core_public_abi_hash != key.provider.core_public_abi_hash or
+            provider.key.core_layout_abi_hash != key.provider.core_layout_abi_hash):
+            return Err("E-APACK002 target, runtime ABI, or core ABI mismatch")
+        return Err("E-APACK003 pack digest or catalog generation mismatch")
+    if key.module_id == "" or key.module_digest == "":
+        return Err("E-APACK003 module identity or digest is empty")
+    Ok(())
+
+fn aspect_pack_module_keys_equal(left: AspectPackModuleKey, right: AspectPackModuleKey) -> bool:
+    aspect_pack_provider_keys_equal(left.provider, right.provider) and
+        left.module_id == right.module_id and
+        left.module_digest == right.module_digest
+
+fn aspect_pack_verify_trust(policy: AspectPackTrustPolicy, pack_bytes: [u8], signature: [u8]) -> Result<(), text>:
+    match policy.profile:
+        case AspectPackTrustProfile.OrdinaryAllowUnsigned:
+            if signature.len() == 0:
+                return Ok(())
+        case AspectPackTrustProfile.OrdinaryRequireSignature:
+            pass
+        case AspectPackTrustProfile.MissionRequireSignature:
+            if signature.len() == 0:
+                return Err("E-APACK008 mission profile rejects unsigned aspect packs")
+    if policy.trusted_public_key.len() != 32 or signature.len() != 64:
+        return Err("E-APACK008 signed aspect pack requires an external Ed25519 trust root and 64-byte signature")
+    if not pure_ed25519_verify(
+        public_key: policy.trusted_public_key,
+        message: pack_bytes,
+        signature: signature
+    ):
+        return Err("E-APACK008 aspect-pack signature verification failed")
+    Ok(())
+
+fn aspect_pack_provider_decode_frame(entry: AspectPackEntry, stored: [u8]) -> Result<[u8], text>:
+    val decoded = match entry.compression:
+        case AspectPackCompression.None:
+            stored
+        case AspectPackCompression.Zstd:
+            if entry.dictionary_id != 0:
+                return Err("E-APACK001 selected Zstd frame requires an unavailable dictionary")
+            val decode_result = zstd_decompress_frame(stored)
+            match decode_result:
+                case Ok(bytes): bytes
+                case Err(reason): return Err("E-APACK001 selected Zstd frame is invalid: {reason.message()}")
+
+    if decoded.len() != (entry.uncompressed_size as i64):
+        return Err("E-APACK004 selected frame decoded size does not match its declared bound")
+    Ok(decoded)
+
+impl AspectPackProvider:
+    static fn from_bytes(key: AspectPackProviderKey, pack_bytes: [u8]) -> Result<AspectPackProvider, text>:
+        aspect_pack_provider_key_valid(key)?
+        val snapshot = aspect_pack_copy_bytes(pack_bytes)
+        if sha256_u8_hex(snapshot) != key.pack_digest:
+            return Err("E-APACK003 pack SHA-256 digest mismatch")
+        val image = decode_aspect_pack(snapshot)?
+        if image.manifest.name != key.pack_id:
+            return Err("E-APACK003 pack manifest identity mismatch")
+        Ok(AspectPackProvider(key: key, image: image))
+
+    static fn from_trusted_bytes(key: AspectPackProviderKey, pack_bytes: [u8], policy: AspectPackTrustPolicy, signature: [u8]) -> Result<AspectPackProvider, text>:
+        val snapshot = aspect_pack_copy_bytes(pack_bytes)
+        aspect_pack_verify_trust(policy, snapshot, signature)?
+        AspectPackProvider.from_bytes(key, snapshot)
+
+    fn get_module_bytes(module_key: AspectPackModuleKey) -> Result<[u8], text>:
+        aspect_pack_provider_validate_module_key(self, module_key)?
+        val entry = aspect_pack_find_entry(self.image.directory, module_key.module_id)?
+        val stored = aspect_pack_stored_frame(self.image, module_key.module_id)?
+        val decoded = aspect_pack_provider_decode_frame(entry, stored)?
+        if sha256_u8_hex(decoded) != module_key.module_digest:
+            return Err("E-APACK003 selected module SHA-256 digest mismatch")
+        Ok(decoded)
+
+    fn get_reader(module_key: AspectPackModuleKey) -> Result<SmfReaderMemory, text>:
+        val smf_bytes = self.get_module_bytes(module_key)?
+        val reader_result = SmfReaderMemory.from_data(smf_bytes)
+        match reader_result:
+            case Ok(reader): Ok(reader)
+            case Err(reason): Err("Invalid SMF bytes for {module_key.module_id}: {reason}")
+
+impl AspectPackProviderCache:
+    static fn create(index_capacity: i64, chunk_capacity: i64, negative_capacity: i64) -> Result<AspectPackProviderCache, text>:
+        if index_capacity <= 0 or chunk_capacity <= 0 or negative_capacity <= 0:
+            return Err("E-APACK004 aspect-pack cache capacities must be positive")
+        Ok(AspectPackProviderCache(
+            index_capacity: index_capacity,
+            chunk_capacity: chunk_capacity,
+            negative_capacity: negative_capacity,
+            providers: [],
+            chunks: [],
+            negatives: [],
+            stats: aspect_pack_cache_zero_stats()
+        ))
+
+    fn module_ref_count(key: AspectPackModuleKey, resource_refs: SmfCacheManager) -> i32:
+        smfcachemanager_get_ref_count(resource_refs, aspect_pack_module_resource_id(key))
+
+    fn provider_has_refs(key: AspectPackProviderKey, resource_refs: SmfCacheManager) -> bool:
+        for cached in self.chunks:
+            if aspect_pack_provider_keys_equal(cached.key.provider, key) and self.module_ref_count(cached.key, resource_refs) > 0:
+                return true
+        false
+
+    me fn evict_provider_at(index: i64):
+        val key = self.providers[index].key
+        self.providers = self.providers.remove_at(index)
+        self.stats.index_evictions = self.stats.index_evictions + 1
+        var chunk_i: i64 = self.chunks.len() - 1
+        while chunk_i >= 0 and self.chunks.len() > 0:
+            if aspect_pack_provider_keys_equal(self.chunks[chunk_i].key.provider, key):
+                self.chunks = self.chunks.remove_at(chunk_i)
+                self.stats.chunk_evictions = self.stats.chunk_evictions + 1
+            chunk_i = chunk_i - 1
+        var negative_i: i64 = self.negatives.len() - 1
+        while negative_i >= 0 and self.negatives.len() > 0:
+            if aspect_pack_provider_keys_equal(self.negatives[negative_i].key.provider, key):
+                self.negatives = self.negatives.remove_at(negative_i)
+                self.stats.negative_evictions = self.stats.negative_evictions + 1
+            negative_i = negative_i - 1
+
+    me fn admit_provider(provider: AspectPackProvider, resource_refs: SmfCacheManager) -> Result<(), text>:
+        var i: i64 = 0
+        while i < self.providers.len():
+            if aspect_pack_provider_keys_equal(self.providers[i].key, provider.key):
+                self.stats.index_hits = self.stats.index_hits + 1
+                self.providers[i] = provider
+                return Ok(())
+            i = i + 1
+        self.stats.index_misses = self.stats.index_misses + 1
+        if self.providers.len() >= self.index_capacity:
+            var eviction_index: i64 = -1
+            i = 0
+            while i < self.providers.len() and eviction_index < 0:
+                if not self.provider_has_refs(self.providers[i].key, resource_refs):
+                    eviction_index = i
+                i = i + 1
+            if eviction_index < 0:
+                return Err("E-APACK004 aspect-pack index capacity is pinned")
+            self.evict_provider_at(eviction_index)
+        self.providers.push(provider)
+        Ok(())
+
+    fn has_provider(key: AspectPackProviderKey) -> bool:
+        for provider in self.providers:
+            if aspect_pack_provider_keys_equal(provider.key, key):
+                return true
+        false
+
+    fn has_module(key: AspectPackModuleKey) -> bool:
+        for cached in self.chunks:
+            if aspect_pack_module_keys_equal(cached.key, key):
+                return true
+        false
+
+    fn index_count() -> i64:
+        self.providers.len()
+
+    fn chunk_count() -> i64:
+        self.chunks.len()
+
+    fn negative_count() -> i64:
+        self.negatives.len()
+
+    fn get_stats() -> AspectPackProviderCacheStats:
+        self.stats
+
+    me fn acquire_module(key: AspectPackModuleKey, resource_refs: SmfCacheManager) -> Result<(), text>:
+        if not self.has_module(key):
+            return Err("E-APACK003 cannot pin an uncached aspect module")
+        smfcachemanager_ref_count_inc(resource_refs, aspect_pack_module_resource_id(key))
+        Ok(())
+
+    me fn release_module(key: AspectPackModuleKey, resource_refs: SmfCacheManager) -> Result<(), text>:
+        if self.module_ref_count(key, resource_refs) <= 0:
+            return Err("E-APACK003 aspect module has no acquired cache pin")
+        smfcachemanager_ref_count_dec(resource_refs, aspect_pack_module_resource_id(key))
+        Ok(())
+
+    me fn get_module_bytes(provider: AspectPackProvider, key: AspectPackModuleKey, resource_refs: SmfCacheManager) -> Result<[u8], text>:
+        self.admit_provider(provider, resource_refs)?
+        for cached in self.chunks:
+            if aspect_pack_module_keys_equal(cached.key, key):
+                self.stats.chunk_hits = self.stats.chunk_hits + 1
+                return Ok(aspect_pack_copy_bytes(cached.bytes))
+        self.stats.chunk_misses = self.stats.chunk_misses + 1
+        for negative in self.negatives:
+            if aspect_pack_module_keys_equal(negative.key, key):
+                self.stats.negative_hits = self.stats.negative_hits + 1
+                return Err(negative.reason)
+        self.stats.negative_misses = self.stats.negative_misses + 1
+
+        val selected = provider.get_module_bytes(key)
+        match selected:
+            case Ok(bytes):
+                if self.chunks.len() >= self.chunk_capacity:
+                    var eviction_index: i64 = -1
+                    var i: i64 = 0
+                    while i < self.chunks.len() and eviction_index < 0:
+                        if self.module_ref_count(self.chunks[i].key, resource_refs) == 0:
+                            eviction_index = i
+                        i = i + 1
+                    if eviction_index < 0:
+                        return Err("E-APACK004 decoded aspect-pack chunk capacity is pinned")
+                    self.chunks = self.chunks.remove_at(eviction_index)
+                    self.stats.chunk_evictions = self.stats.chunk_evictions + 1
+                self.chunks.push(AspectPackCachedModule(key: key, bytes: aspect_pack_copy_bytes(bytes)))
+                Ok(bytes)
+            case Err(reason):
+                if self.negatives.len() >= self.negative_capacity:
+                    self.negatives = self.negatives.remove_at(0)
+                    self.stats.negative_evictions = self.stats.negative_evictions + 1
+                self.negatives.push(AspectPackNegativeModule(key: key, reason: reason))
+                Err(reason)
+
+    me fn invalidate_provider(key: AspectPackProviderKey, resource_refs: SmfCacheManager) -> i64:
+        var invalidated: i64 = 0
+        val provider_pinned = self.provider_has_refs(key, resource_refs)
+        var provider_i: i64 = self.providers.len() - 1
+        while provider_i >= 0 and self.providers.len() > 0:
+            if aspect_pack_provider_keys_equal(self.providers[provider_i].key, key) and not provider_pinned:
+                self.providers = self.providers.remove_at(provider_i)
+                self.stats.index_invalidations = self.stats.index_invalidations + 1
+                invalidated = invalidated + 1
+            provider_i = provider_i - 1
+        var chunk_i: i64 = self.chunks.len() - 1
+        while chunk_i >= 0 and self.chunks.len() > 0:
+            if aspect_pack_provider_keys_equal(self.chunks[chunk_i].key.provider, key) and self.module_ref_count(self.chunks[chunk_i].key, resource_refs) == 0:
+                self.chunks = self.chunks.remove_at(chunk_i)
+                self.stats.chunk_invalidations = self.stats.chunk_invalidations + 1
+                invalidated = invalidated + 1
+            chunk_i = chunk_i - 1
+        var negative_i: i64 = self.negatives.len() - 1
+        while negative_i >= 0 and self.negatives.len() > 0:
+            if aspect_pack_provider_keys_equal(self.negatives[negative_i].key.provider, key):
+                self.negatives = self.negatives.remove_at(negative_i)
+                self.stats.negative_invalidations = self.stats.negative_invalidations + 1
+                invalidated = invalidated + 1
+            negative_i = negative_i - 1
+        invalidated
+
+    me fn invalidate_generation(generation: i64, resource_refs: SmfCacheManager) -> i64:
+        var keys: [AspectPackProviderKey] = []
+        for provider in self.providers:
+            if provider.key.catalog_generation == generation:
+                keys.push(provider.key)
+        var invalidated: i64 = 0
+        for key in keys:
+            invalidated = invalidated + self.invalidate_provider(key, resource_refs)
+        invalidated
+
+    me fn invalidate_semantic_change(current: AspectPackProviderKey, resource_refs: SmfCacheManager) -> i64:
+        """Remove stale identities for one logical pack, respecting live pins.
+
+        Digest, catalog generation, target/variant, runtime ABI, and core
+        public/layout ABI are all exact identity dimensions.
+        """
+        var stale_keys: [AspectPackProviderKey] = []
+        for provider in self.providers:
+            if provider.key.pack_id == current.pack_id and not aspect_pack_provider_keys_equal(provider.key, current):
+                stale_keys.push(provider.key)
+        var invalidated: i64 = 0
+        for key in stale_keys:
+            invalidated = invalidated + self.invalidate_provider(key, resource_refs)
+        invalidated
+
+    me fn clear(resource_refs: SmfCacheManager) -> i64:
+        var keys: [AspectPackProviderKey] = []
+        for provider in self.providers:
+            keys.push(provider.key)
+        var invalidated: i64 = 0
+        for key in keys:
+            invalidated = invalidated + self.invalidate_provider(key, resource_refs)
+        invalidated
+
+export AspectPackProviderKey
+export AspectPackModuleKey
+export AspectPackProvider
+export AspectPackTrustProfile
+export AspectPackTrustPolicy
+export AspectPackProviderCache
+export AspectPackProviderCacheStats
+export aspect_pack_module_resource_id

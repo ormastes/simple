@@ -5,6 +5,10 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Optional aspect facets and SFM packs** — add feature-scoped typed facet
+  acquisition/coherence, manifest-relative aspect roots, an `SFM2` outer pack
+  with independently framed opaque SMFs, exact-digest selective loading, and a
+  deterministic catalog/generation adapter over existing dynSMF owners.
 - **Pinned-corpus GSUB/GPOS shaping** — validate and apply the selected
   Latin, Han, Devanagari, Arabic/Urdu, and Cyrillic OpenType layout plans with
   bounded work, feature-mask provenance, atomic failure, and canonical

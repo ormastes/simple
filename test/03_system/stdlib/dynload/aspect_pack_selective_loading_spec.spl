@@ -1,0 +1,151 @@
+# @req REQ-AF-005 REQ-AF-007 NFR-AF-004 NFR-AF-008
+# @cover src/lib/nogc_sync_mut/sfm/aspect_pack.spl 80%
+"""
+# Selective SFM Aspect-Pack Loading
+
+**Feature IDs:** REQ-AF-005, REQ-AF-007
+**Category:** Dynamic loading
+**Status:** Executable
+**Requirements:** `doc/02_requirements/feature/aspect_facet_dynload_smf_pack.md`
+**Design:** `doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md`
+
+This scenario manual proves that the SFM2 outer pack preserves ordinary SMF
+payloads as opaque independently framed bytes, validates only the selected
+frame on demand, and rejects malformed container identity before exposing a
+module. It does not claim loader relocation or dynSMF activation coverage.
+"""
+
+use std.spec.*
+use std.sfm.aspect_pack.{
+    AspectPackCompression,
+    AspectPackPayload,
+    encode_aspect_pack,
+    decode_aspect_pack,
+    aspect_pack_stored_frame
+}
+use std.sfm.manifest.{FeatureManifest, LayerDescriptor, LayerKind, SfmSecurityLevel}
+
+# @inline
+fn aspect_pack_fixture_bytes(a: i32, b: i32, c: i32, d: i32) -> [u8]:
+    var out: [u8] = []
+    var i: i32 = 0
+    while i < 4:
+        out.append(0 as u8)
+        i = i + 1
+    out[0] = a as u8
+    out[1] = b as u8
+    out[2] = c as u8
+    out[3] = d as u8
+    out
+
+# @inline
+fn aspect_pack_fixture_manifest() -> FeatureManifest:
+    FeatureManifest(
+        name: "diagnostics-pack",
+        version: "2.0.0",
+        security_level: SfmSecurityLevel.Trusted,
+        layers: [LayerDescriptor(
+            role: "diagnostics",
+            kind: LayerKind.BackHw,
+            entry_symbol: "diagnostics_open",
+            privileged: true
+        )]
+    )
+
+# @inline
+fn build_aspect_pack_fixture() -> Result<[u8], text>:
+    val debug_smf = aspect_pack_fixture_bytes(83, 77, 70, 0)
+    val profile_frame = aspect_pack_fixture_bytes(40, 181, 47, 253)
+    encode_aspect_pack(aspect_pack_fixture_manifest(), [
+        AspectPackPayload(
+            module_id: "debug.cache",
+            aspect_id: "debug",
+            compression: AspectPackCompression.None,
+            uncompressed_size: debug_smf.len() as i32,
+            dictionary_id: 0,
+            stored_bytes: debug_smf
+        ),
+        AspectPackPayload(
+            module_id: "profile.memory",
+            aspect_id: "profile",
+            compression: AspectPackCompression.Zstd,
+            uncompressed_size: 64,
+            dictionary_id: 7,
+            stored_bytes: profile_frame
+        )
+    ])
+
+# @inline
+fn aspect_pack_fixture_copy(src: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: i32 = 0
+    while i < (src.len() as i32):
+        out.append(0 as u8)
+        out[i] = src[i]
+        i = i + 1
+    out
+
+describe "SFM aspect-pack selective loading":
+    describe "REQ-AF-005: independently indexed opaque SMF payloads":
+        it "should expose the selected ordinary SMF bytes without decoding another frame":
+            step("Load only the selected SMF module closure")
+            val encoded_result = build_aspect_pack_fixture()
+            expect(encoded_result.is_ok()).to_be(true)
+            val encoded = encoded_result.unwrap()
+
+            # Corrupt only the unselected final frame. Directory decoding and
+            # selecting debug.cache must remain valid; selecting the corrupt
+            # profile frame is checked in the failure scenario below.
+            var corrupt_unselected = aspect_pack_fixture_copy(encoded)
+            corrupt_unselected[corrupt_unselected.len() - 1] = 0 as u8
+            val image_result = decode_aspect_pack(corrupt_unselected)
+            expect(image_result.is_ok()).to_be(true)
+            val selected_result = aspect_pack_stored_frame(image_result.unwrap(), "debug.cache")
+            expect(selected_result.is_ok()).to_be(true)
+            val selected = selected_result.unwrap()
+            expect(selected.len()).to_equal(4)
+            expect(selected[0] as i32).to_equal(83)
+            expect(selected[1] as i32).to_equal(77)
+            expect(selected[2] as i32).to_equal(70)
+            expect(selected[3] as i32).to_equal(0)
+
+        it "should preserve manifest and independent compression metadata":
+            val image_result = decode_aspect_pack(build_aspect_pack_fixture().unwrap())
+            expect(image_result.is_ok()).to_be(true)
+            val image = image_result.unwrap()
+            expect(image.manifest.name).to_equal("diagnostics-pack")
+            expect(image.directory.entries.len()).to_equal(2)
+            expect(image.directory.entries[0].module_id).to_equal("debug.cache")
+            expect(image.directory.entries[1].dictionary_id).to_equal(7)
+            expect(image.directory.entries[1].payload_offset).to_equal(4)
+
+        it "should report an absent module without exposing another payload":
+            val image = decode_aspect_pack(build_aspect_pack_fixture().unwrap()).unwrap()
+            val missing = aspect_pack_stored_frame(image, "debug.absent")
+            expect(missing.is_err()).to_be(true)
+
+    describe "REQ-AF-007: fail-closed outer and selected-frame validation":
+        it "should reject unsupported SFM version and kind before publication":
+            step("Reject an invalid aspect pack")
+            val encoded = build_aspect_pack_fixture().unwrap()
+            var bad_version = aspect_pack_fixture_copy(encoded)
+            bad_version[4] = 3 as u8
+            expect(decode_aspect_pack(bad_version).is_err()).to_be(true)
+
+            var bad_kind = aspect_pack_fixture_copy(encoded)
+            bad_kind[8] = 0 as u8
+            expect(decode_aspect_pack(bad_kind).is_err()).to_be(true)
+
+        it "should reject corruption when the affected frame is selected":
+            val encoded = build_aspect_pack_fixture().unwrap()
+            var corrupt = aspect_pack_fixture_copy(encoded)
+            corrupt[corrupt.len() - 1] = 0 as u8
+            val image_result = decode_aspect_pack(corrupt)
+            expect(image_result.is_ok()).to_be(true)
+            val selected = aspect_pack_stored_frame(image_result.unwrap(), "profile.memory")
+            expect(selected.is_err()).to_be(true)
+
+        it "should reject trailing bytes even when the directory is otherwise valid":
+            var trailing = aspect_pack_fixture_copy(build_aspect_pack_fixture().unwrap())
+            trailing.append(0 as u8)
+            expect(decode_aspect_pack(trailing).is_err()).to_be(true)

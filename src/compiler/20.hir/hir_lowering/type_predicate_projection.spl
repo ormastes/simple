@@ -1,0 +1,91 @@
+"""Project declaration-only module surfaces into shared AOP type descriptors."""
+
+use compiler.common.structural_contracts.aop.{TypePredicateDescriptor}
+use compiler.frontend.parser_types_expr.{parser_type_kind_named_name}
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurface, ModuleSurfaceTrait, ModuleSurfacesByName
+}
+
+fn module_surface_qualified_type_name(surface: ModuleSurface, type_name: text) -> text:
+    if type_name.contains("."): return type_name
+    "{surface.module_name}.{type_name}"
+
+fn module_surface_implemented_types(surface: ModuleSurface, type_name: text) -> [text]:
+    var implemented: [text] = []
+    for impl_ in surface.impls:
+        if not impl_.has_trait_: continue
+        val implementation_type = parser_type_kind_named_name(impl_.type_.kind)
+        if implementation_type != type_name: continue
+        var trait_name = parser_type_kind_named_name(impl_.trait_.kind)
+        if surface.traits.contains_key(trait_name):
+            trait_name = module_surface_qualified_type_name(surface, trait_name)
+        if trait_name != "" and not implemented.contains(trait_name):
+            implemented = implemented.push(trait_name)
+    implemented
+
+fn module_surface_trait_supertypes(surface: ModuleSurface, trait_: ModuleSurfaceTrait) -> [text]:
+    var supertypes: [text] = []
+    for super_type in trait_.super_traits:
+        var super_name = parser_type_kind_named_name(super_type.kind)
+        if surface.traits.contains_key(super_name):
+            super_name = module_surface_qualified_type_name(surface, super_name)
+        if super_name != "" and not supertypes.contains(super_name):
+            supertypes = supertypes.push(super_name)
+    supertypes
+
+fn module_surface_type_name_matches(candidate: text, expected: text) -> bool:
+    candidate == expected or candidate.ends_with(".{expected}")
+
+fn module_surface_expand_type_names(
+    names: [text],
+    descriptors: [TypePredicateDescriptor]
+) -> [text]:
+    # Iterative closure is cycle-safe because each spelling is inserted once.
+    var expanded = names
+    var index = 0
+    while index < expanded.len():
+        val current = expanded[index]
+        for descriptor in descriptors:
+            if module_surface_type_name_matches(descriptor.qualified_name, current):
+                for super_type in descriptor.supertypes:
+                    if not expanded.contains(super_type):
+                        expanded = expanded.push(super_type)
+        index = index + 1
+    expanded
+
+fn module_surface_type_predicate_descriptors(
+    surfaces: ModuleSurfacesByName
+) -> [TypePredicateDescriptor]:
+    """Project declaration-only ModuleSurface data for shared predicate evaluation."""
+    var descriptors: [TypePredicateDescriptor] = []
+    for surface in surfaces.surfaces:
+        for name in surface.composites.keys():
+            descriptors = descriptors.push(TypePredicateDescriptor(
+                qualified_name: module_surface_qualified_type_name(surface, name),
+                implemented_types: module_surface_implemented_types(surface, name),
+                supertypes: []
+            ))
+        for name in surface.enums.keys():
+            descriptors = descriptors.push(TypePredicateDescriptor(
+                qualified_name: module_surface_qualified_type_name(surface, name),
+                implemented_types: module_surface_implemented_types(surface, name),
+                supertypes: []
+            ))
+        for name in surface.traits.keys():
+            descriptors = descriptors.push(TypePredicateDescriptor(
+                qualified_name: module_surface_qualified_type_name(surface, name),
+                implemented_types: [],
+                supertypes: module_surface_trait_supertypes(surface, surface.traits[name])
+            ))
+    var closed_descriptors: [TypePredicateDescriptor] = []
+    for descriptor in descriptors:
+        closed_descriptors = closed_descriptors.push(TypePredicateDescriptor(
+            qualified_name: descriptor.qualified_name,
+            implemented_types: module_surface_expand_type_names(
+                descriptor.implemented_types, descriptors),
+            supertypes: module_surface_expand_type_names(
+                descriptor.supertypes, descriptors)
+        ))
+    closed_descriptors
+
+export module_surface_type_predicate_descriptors

@@ -1,0 +1,79 @@
+# @req REQ-AF-006 REQ-AF-007 NFR-AF-002 NFR-AF-006
+# @cover src/app/startup/aspect_application_runtime.spl 80%
+
+use std.spec.*
+use app.startup.dynsmf_autoload.{dynsmf_startup_session_from_values}
+use app.startup.aspect_application_runtime.{
+    AspectApplicationOperation,
+    AspectApplicationRuntime
+}
+use compiler.loader.loader.aspect_catalog.{AspectBindingSummary, AspectCatalogEntry, AspectCatalog}
+use compiler.loader.loader.aspect_pack_provider.{AspectPackTrustPolicy}
+use os.smf.smf_generation.{LifecycleManager}
+
+fn app_runtime_digest() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn app_runtime_excluded_catalog() -> AspectCatalog:
+    val digest = app_runtime_digest()
+    AspectCatalog.create(
+        12,
+        "x86_64-unknown-linux-gnu",
+        "flight-v1",
+        "simple-runtime-1",
+        [AspectCatalogEntry(
+            aspect_id: "flight.external-diagnostics",
+            pack_id: "flight-diagnostics",
+            pack_path: "aspects/flight-diagnostics.sfm",
+            module_id: "flight.external-diagnostics",
+            pack_digest: digest,
+            module_digest: digest,
+            core_public_abi_hash: digest,
+            core_layout_abi_hash: digest,
+            target: "x86_64-unknown-linux-gnu",
+            variant_fingerprint: "flight-v1",
+            runtime_abi: "simple-runtime-1",
+            dependencies: [],
+            activation_policy: "excluded",
+            binding_summaries: [AspectBindingSummary(
+                binding_id: "flight.external-diagnostics.binding",
+                concrete_type_id: "flight.DiagnosticsRecord",
+                business_interface_id: "",
+                facet_interface_id: "FlightDiagnostics",
+                facet_contract_abi_hash: "flight-diagnostics-v1",
+                witness_symbol: "flight_diagnostics_witness",
+                capabilities: ["flight.read"]
+            )],
+            capabilities: ["flight.read"]
+        )]
+    ).unwrap()
+
+fn app_runtime_mission_trust() -> AspectPackTrustPolicy:
+    var public_key: [u8] = []
+    while public_key.len() < 32:
+        public_key.push(11)
+    AspectPackTrustPolicy.mission(public_key).unwrap()
+
+describe "Application aspect runtime with canonical dynSMF startup":
+    it "preserves startup disable evidence and seals mission operations":
+        val session = dynsmf_startup_session_from_values(
+            ["--no-dynsmf"], "", "", "mission-application")
+        val runtime = AspectApplicationRuntime.create(
+            app_runtime_excluded_catalog(),
+            session,
+            LifecycleManager.new_manager(),
+            app_runtime_mission_trust(),
+            2,
+            2,
+            2
+        ).unwrap()
+
+        expect(runtime.coordinator.dynsmf_session.policy.disabled_all).to_equal(true)
+        expect(runtime.coordinator.dynsmf_session.policy.source).to_equal("arg:--no-dynsmf")
+        expect(runtime.pack_path_for("flight.external-diagnostics").unwrap()).to_equal("aspects/flight-diagnostics.sfm")
+        expect(runtime.provider_cache.index_count()).to_equal(0)
+        expect(runtime.enter_operational().is_ok()).to_equal(true)
+        expect(runtime.authorize(AspectApplicationOperation.LazyIo).is_err()).to_equal(true)
+        expect(runtime.authorize(AspectApplicationOperation.DynamicAttach).is_err()).to_equal(true)
+        expect(runtime.authorize(AspectApplicationOperation.Unload).is_err()).to_equal(true)
+        expect(runtime.authorize(AspectApplicationOperation.Patch).is_err()).to_equal(true)

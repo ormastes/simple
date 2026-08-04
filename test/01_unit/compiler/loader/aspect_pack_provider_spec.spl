@@ -1,0 +1,376 @@
+# @req REQ-AF-005 REQ-AF-006 REQ-AF-007 NFR-AF-004
+# @cover src/compiler/99.loader/loader/aspect_pack_provider.spl 80%
+
+use std.spec.*
+use std.sfm.aspect_pack.{
+    AspectPackCompression,
+    AspectPackPayload,
+    encode_aspect_pack
+}
+use std.sfm.manifest.{FeatureManifest, SfmSecurityLevel}
+use std.common.compress.{CompressionCodec, default_compression_options}
+use std.common.compress.zstd.{zstd_compress_frame}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use compiler.loader.loader.aspect_pack_provider.{
+    AspectPackProviderKey,
+    AspectPackModuleKey,
+    AspectPackProvider,
+    AspectPackTrustPolicy,
+    AspectPackProviderCache
+}
+use compiler.loader.loader.smf_cache_manager.{smfcachemanager_with_new_cache}
+
+fn aspect_pack_provider_key(pack_digest: text, variant: text) -> AspectPackProviderKey:
+    AspectPackProviderKey(
+        pack_id: "diagnostics-pack",
+        pack_digest: pack_digest,
+        catalog_generation: 7,
+        target: "x86_64-unknown-linux-gnu",
+        variant_fingerprint: variant,
+        runtime_abi: "simple-runtime-1",
+        core_public_abi_hash: "core-public-1",
+        core_layout_abi_hash: "core-layout-1"
+    )
+
+fn aspect_pack_provider_key_at(pack_digest: text, variant: text, generation: i64) -> AspectPackProviderKey:
+    AspectPackProviderKey(
+        pack_id: "diagnostics-pack",
+        pack_digest: pack_digest,
+        catalog_generation: generation,
+        target: "x86_64-unknown-linux-gnu",
+        variant_fingerprint: variant,
+        runtime_abi: "simple-runtime-1",
+        core_public_abi_hash: "core-public-1",
+        core_layout_abi_hash: "core-layout-1"
+    )
+
+fn aspect_pack_provider_key_with_semantics(pack_digest: text, generation: i64, public_abi: text, layout_abi: text) -> AspectPackProviderKey:
+    AspectPackProviderKey(
+        pack_id: "diagnostics-pack",
+        pack_digest: pack_digest,
+        catalog_generation: generation,
+        target: "x86_64-unknown-linux-gnu",
+        variant_fingerprint: "variant-a",
+        runtime_abi: "simple-runtime-1",
+        core_public_abi_hash: public_abi,
+        core_layout_abi_hash: layout_abi
+    )
+
+fn aspect_pack_module_key(provider_key: AspectPackProviderKey, module_id: text) -> AspectPackModuleKey:
+    AspectPackModuleKey(
+        provider: provider_key,
+        module_id: module_id,
+        module_digest: sha256_u8_hex(aspect_pack_minimal_smf())
+    )
+
+fn aspect_pack_provider_manifest() -> FeatureManifest:
+    FeatureManifest(
+        name: "diagnostics-pack",
+        version: "2.0.0",
+        security_level: SfmSecurityLevel.Trusted,
+        layers: []
+    )
+
+fn aspect_pack_minimal_smf() -> [u8]:
+    var out: [u8] = []
+    out.push(83)
+    out.push(77)
+    out.push(70)
+    out.push(0)
+    out.push(1)
+    out.push(1)
+    out.push(1)
+    out.push(0)
+    while out.len() < 20:
+        out.push(0)
+    out.push(128)
+    while out.len() < 28:
+        out.push(0)
+    out.push(128)
+    while out.len() < 128:
+        out.push(0)
+    out
+
+fn aspect_pack_provider_fixture(compression: AspectPackCompression, dictionary_id: i32, declared_size: i32) -> [u8]:
+    val smf = aspect_pack_minimal_smf()
+    val stored = match compression:
+        case AspectPackCompression.None: smf
+        case AspectPackCompression.Zstd:
+            zstd_compress_frame(smf, default_compression_options(CompressionCodec.zstd))
+    encode_aspect_pack(aspect_pack_provider_manifest(), [
+        AspectPackPayload(
+            module_id: "debug.cache",
+            aspect_id: "debug",
+            compression: compression,
+            uncompressed_size: declared_size,
+            dictionary_id: dictionary_id,
+            stored_bytes: stored
+        )
+    ]).unwrap()
+
+describe "AspectPackProvider byte-backed loader adapter":
+    it "returns an uncompressed selected ordinary SMF image byte-for-byte":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.None, 0, 128)
+        val provider_key = aspect_pack_provider_key(sha256_u8_hex(pack), "variant-a")
+        val provider = AspectPackProvider.from_bytes(provider_key, pack).unwrap()
+        val module_key = aspect_pack_module_key(provider_key, "debug.cache")
+
+        val selected = provider.get_module_bytes(module_key).unwrap()
+        expect(selected).to_equal(aspect_pack_minimal_smf())
+
+    it "decompresses exactly one independently framed Zstd module":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.Zstd, 0, 128)
+        val provider_key = aspect_pack_provider_key(sha256_u8_hex(pack), "variant-a")
+        val provider = AspectPackProvider.from_bytes(provider_key, pack).unwrap()
+        val module_key = aspect_pack_module_key(provider_key, "debug.cache")
+
+        val selected = provider.get_module_bytes(module_key).unwrap()
+        expect(selected).to_equal(aspect_pack_minimal_smf())
+
+    it "delegates selected bytes to the existing in-memory SMF reader seam":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.None, 0, 128)
+        val provider_key = aspect_pack_provider_key(sha256_u8_hex(pack), "variant-a")
+        val provider = AspectPackProvider.from_bytes(provider_key, pack).unwrap()
+        val module_key = aspect_pack_module_key(provider_key, "debug.cache")
+
+        val reader = provider.get_reader(module_key).unwrap()
+        expect(reader.data_size()).to_equal(128)
+        expect(reader.exported_symbols().len()).to_equal(0)
+
+    it "requires the exact pack target generation and variant key":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.None, 0, 128)
+        val provider_key = aspect_pack_provider_key(sha256_u8_hex(pack), "variant-a")
+        val provider = AspectPackProvider.from_bytes(provider_key, pack).unwrap()
+        val wrong_key = aspect_pack_module_key(aspect_pack_provider_key(sha256_u8_hex(pack), "variant-b"), "debug.cache")
+
+        val selected = provider.get_module_bytes(wrong_key)
+        expect(selected.is_err()).to_equal(true)
+        expect(selected.unwrap_err()).to_contain("E-APACK005")
+
+    it "rejects a selected module under a different core public or layout ABI":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.None, 0, 128)
+        val digest = sha256_u8_hex(pack)
+        val provider_key = aspect_pack_provider_key_with_semantics(digest, 7, "core-public-1", "core-layout-1")
+        val provider = AspectPackProvider.from_bytes(provider_key, pack).unwrap()
+        val public_changed = aspect_pack_module_key(aspect_pack_provider_key_with_semantics(digest, 7, "core-public-2", "core-layout-1"), "debug.cache")
+        val layout_changed = aspect_pack_module_key(aspect_pack_provider_key_with_semantics(digest, 7, "core-public-1", "core-layout-2"), "debug.cache")
+
+        expect(provider.get_module_bytes(public_changed).unwrap_err()).to_contain("E-APACK002")
+        expect(provider.get_module_bytes(layout_changed).unwrap_err()).to_contain("E-APACK002")
+
+    it "rejects decoded output whose size differs from the declared bound":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.Zstd, 0, 129)
+        val provider_key = aspect_pack_provider_key(sha256_u8_hex(pack), "variant-a")
+        val provider = AspectPackProvider.from_bytes(provider_key, pack).unwrap()
+        val module_key = aspect_pack_module_key(provider_key, "debug.cache")
+
+        val selected = provider.get_module_bytes(module_key)
+        expect(selected.is_err()).to_equal(true)
+        expect(selected.unwrap_err()).to_contain("E-APACK004")
+
+    it "fails closed when a selected Zstd frame requires an unavailable dictionary":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.Zstd, 9, 128)
+        val provider_key = aspect_pack_provider_key(sha256_u8_hex(pack), "variant-a")
+        val provider = AspectPackProvider.from_bytes(provider_key, pack).unwrap()
+        val module_key = aspect_pack_module_key(provider_key, "debug.cache")
+
+        val selected = provider.get_module_bytes(module_key)
+        expect(selected.is_err()).to_equal(true)
+        expect(selected.unwrap_err()).to_contain("unavailable dictionary")
+
+    it "rejects a pack whose manifest identity differs from the exact key":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.None, 0, 128)
+        val provider_key = AspectPackProviderKey(
+            pack_id: "other-pack",
+            pack_digest: sha256_u8_hex(pack),
+            catalog_generation: 7,
+            target: "x86_64-unknown-linux-gnu",
+            variant_fingerprint: "variant-a",
+            runtime_abi: "simple-runtime-1",
+            core_public_abi_hash: "core-public-1",
+            core_layout_abi_hash: "core-layout-1"
+        )
+        val provider = AspectPackProvider.from_bytes(provider_key, pack)
+        expect(provider.is_err()).to_equal(true)
+        expect(provider.unwrap_err()).to_contain("manifest identity")
+
+describe "AspectPackProvider external trust policy":
+    it "keeps unsigned admission explicit for the ordinary profile":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.None, 0, 128)
+        val key = aspect_pack_provider_key(sha256_u8_hex(pack), "variant-a")
+        val policy = AspectPackTrustPolicy.ordinary_unsigned()
+
+        val provider = AspectPackProvider.from_trusted_bytes(key, pack, policy, [])
+        expect(provider.is_ok()).to_equal(true)
+
+    it "rejects unsigned packs in the mission profile":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.None, 0, 128)
+        val key = aspect_pack_provider_key(sha256_u8_hex(pack), "variant-a")
+        var public_key: [u8] = []
+        while public_key.len() < 32:
+            public_key.push(7)
+        val policy = AspectPackTrustPolicy.mission(public_key).unwrap()
+
+        val provider = AspectPackProvider.from_trusted_bytes(key, pack, policy, [])
+        expect(provider.is_err()).to_equal(true)
+        expect(provider.unwrap_err()).to_contain("mission profile rejects unsigned")
+
+    it "admits a mission pack only under an externally supplied signing key":
+        val seed: [u8] = [
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+            0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+            0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+            0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
+        ]
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.None, 0, 128)
+        val key = aspect_pack_provider_key(sha256_u8_hex(pack), "variant-a")
+        val pair = pure_ed25519_keypair_from_seed(seed)
+        val signature = pure_ed25519_sign(private_seed: seed, public_key: pair.1, message: pack)
+        val policy = AspectPackTrustPolicy.mission(pair.1).unwrap()
+
+        val provider = AspectPackProvider.from_trusted_bytes(key, pack, policy, signature)
+        expect(provider.is_ok()).to_equal(true)
+
+describe "AspectPackProvider bounded exact-key caches":
+    it "bounds index and decoded-chunk caches with exact generation keys":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.None, 0, 128)
+        val digest = sha256_u8_hex(pack)
+        val key7 = aspect_pack_provider_key_at(digest, "variant-a", 7)
+        val key8 = aspect_pack_provider_key_at(digest, "variant-a", 8)
+        val provider7 = AspectPackProvider.from_bytes(key7, pack).unwrap()
+        val provider8 = AspectPackProvider.from_bytes(key8, pack).unwrap()
+        val module7 = aspect_pack_module_key(key7, "debug.cache")
+        val module8 = aspect_pack_module_key(key8, "debug.cache")
+        val cache = AspectPackProviderCache.create(1, 1, 1).unwrap()
+        val refs = smfcachemanager_with_new_cache()
+
+        cache.admit_provider(provider7, refs).unwrap()
+        cache.get_module_bytes(provider7, module7, refs).unwrap()
+        cache.admit_provider(provider8, refs).unwrap()
+        cache.get_module_bytes(provider8, module8, refs).unwrap()
+
+        expect(cache.index_count()).to_equal(1)
+        expect(cache.chunk_count()).to_equal(1)
+        expect(cache.has_provider(key7)).to_equal(false)
+        expect(cache.has_provider(key8)).to_equal(true)
+        expect(cache.has_module(module7)).to_equal(false)
+        expect(cache.has_module(module8)).to_equal(true)
+
+        cache.invalidate_generation(8, refs)
+        expect(cache.index_count()).to_equal(0)
+        expect(cache.chunk_count()).to_equal(0)
+
+    it "bounds negative entries and invalidates all cache tiers by exact provider":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.None, 0, 128)
+        val key = aspect_pack_provider_key(sha256_u8_hex(pack), "variant-a")
+        val provider = AspectPackProvider.from_bytes(key, pack).unwrap()
+        val valid = aspect_pack_module_key(key, "debug.cache")
+        val absent = aspect_pack_module_key(key, "absent.module")
+        val cache = AspectPackProviderCache.create(2, 2, 1).unwrap()
+        val refs = smfcachemanager_with_new_cache()
+
+        cache.admit_provider(provider, refs).unwrap()
+        cache.get_module_bytes(provider, valid, refs).unwrap()
+        val first = cache.get_module_bytes(provider, absent, refs)
+        val second = cache.get_module_bytes(provider, absent, refs)
+        expect(first.is_err()).to_equal(true)
+        expect(second.is_err()).to_equal(true)
+        expect(cache.negative_count()).to_equal(1)
+
+        cache.invalidate_provider(key, refs)
+        expect(cache.index_count()).to_equal(0)
+        expect(cache.chunk_count()).to_equal(0)
+        expect(cache.negative_count()).to_equal(0)
+
+    it "reports exact per-tier hit miss and eviction counters":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.None, 0, 128)
+        val digest = sha256_u8_hex(pack)
+        val key7 = aspect_pack_provider_key_at(digest, "variant-a", 7)
+        val key8 = aspect_pack_provider_key_at(digest, "variant-a", 8)
+        val provider7 = AspectPackProvider.from_bytes(key7, pack).unwrap()
+        val provider8 = AspectPackProvider.from_bytes(key8, pack).unwrap()
+        val module7 = aspect_pack_module_key(key7, "debug.cache")
+        val module8 = aspect_pack_module_key(key8, "debug.cache")
+        val absent7 = aspect_pack_module_key(key7, "absent.module")
+        val cache = AspectPackProviderCache.create(1, 1, 1).unwrap()
+        val refs = smfcachemanager_with_new_cache()
+
+        cache.get_module_bytes(provider7, module7, refs).unwrap()
+        cache.get_module_bytes(provider7, module7, refs).unwrap()
+        expect(cache.get_module_bytes(provider7, absent7, refs).is_err()).to_equal(true)
+        expect(cache.get_module_bytes(provider7, absent7, refs).is_err()).to_equal(true)
+        cache.get_module_bytes(provider8, module8, refs).unwrap()
+
+        val stats = cache.get_stats()
+        expect(stats.index_hits).to_equal(3)
+        expect(stats.index_misses).to_equal(2)
+        expect(stats.index_evictions).to_equal(1)
+        expect(stats.chunk_hits).to_equal(1)
+        expect(stats.chunk_misses).to_equal(4)
+        expect(stats.chunk_evictions).to_equal(1)
+        expect(stats.negative_hits).to_equal(1)
+        expect(stats.negative_misses).to_equal(3)
+        expect(stats.negative_evictions).to_equal(1)
+
+    it "retains pinned decoded resources until the canonical refcount drains":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.None, 0, 128)
+        val digest = sha256_u8_hex(pack)
+        val key7 = aspect_pack_provider_key_at(digest, "variant-a", 7)
+        val key8 = aspect_pack_provider_key_at(digest, "variant-a", 8)
+        val provider7 = AspectPackProvider.from_bytes(key7, pack).unwrap()
+        val provider8 = AspectPackProvider.from_bytes(key8, pack).unwrap()
+        val module7 = aspect_pack_module_key(key7, "debug.cache")
+        val cache = AspectPackProviderCache.create(1, 1, 1).unwrap()
+        val refs = smfcachemanager_with_new_cache()
+
+        cache.get_module_bytes(provider7, module7, refs).unwrap()
+        cache.acquire_module(module7, refs).unwrap()
+        expect(cache.module_ref_count(module7, refs)).to_equal(1)
+        expect(cache.invalidate_provider(key7, refs)).to_equal(0)
+        expect(cache.has_provider(key7)).to_equal(true)
+        expect(cache.admit_provider(provider8, refs).is_err()).to_equal(true)
+
+        cache.release_module(module7, refs).unwrap()
+        expect(cache.invalidate_provider(key7, refs)).to_be_greater_than(0)
+        expect(cache.has_provider(key7)).to_equal(false)
+
+    it "invalidates stale digest and catalog-generation identities":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.None, 0, 128)
+        val digest = sha256_u8_hex(pack)
+        val old_key = aspect_pack_provider_key_with_semantics(digest, 7, "core-public-1", "core-layout-1")
+        val provider = AspectPackProvider.from_bytes(old_key, pack).unwrap()
+        val cache = AspectPackProviderCache.create(2, 2, 2).unwrap()
+        val refs = smfcachemanager_with_new_cache()
+        cache.get_module_bytes(provider, aspect_pack_module_key(old_key, "debug.cache"), refs).unwrap()
+
+        val changed_digest = aspect_pack_provider_key_with_semantics("new-pack-digest", 7, "core-public-1", "core-layout-1")
+        expect(cache.invalidate_semantic_change(changed_digest, refs)).to_be_greater_than(0)
+        expect(cache.has_provider(old_key)).to_equal(false)
+
+        cache.get_module_bytes(provider, aspect_pack_module_key(old_key, "debug.cache"), refs).unwrap()
+        val changed_generation = aspect_pack_provider_key_with_semantics(digest, 8, "core-public-1", "core-layout-1")
+        expect(cache.invalidate_semantic_change(changed_generation, refs)).to_be_greater_than(0)
+        expect(cache.has_provider(old_key)).to_equal(false)
+        val stats = cache.get_stats()
+        expect(stats.index_invalidations).to_equal(2)
+        expect(stats.chunk_invalidations).to_equal(2)
+
+    it "invalidates stale public and layout ABI identities independently":
+        val pack = aspect_pack_provider_fixture(AspectPackCompression.None, 0, 128)
+        val digest = sha256_u8_hex(pack)
+        val old_key = aspect_pack_provider_key_with_semantics(digest, 7, "core-public-1", "core-layout-1")
+        val provider = AspectPackProvider.from_bytes(old_key, pack).unwrap()
+        val cache = AspectPackProviderCache.create(2, 2, 2).unwrap()
+        val refs = smfcachemanager_with_new_cache()
+        cache.get_module_bytes(provider, aspect_pack_module_key(old_key, "debug.cache"), refs).unwrap()
+
+        val changed_public = aspect_pack_provider_key_with_semantics(digest, 7, "core-public-2", "core-layout-1")
+        expect(cache.invalidate_semantic_change(changed_public, refs)).to_be_greater_than(0)
+        cache.get_module_bytes(provider, aspect_pack_module_key(old_key, "debug.cache"), refs).unwrap()
+        val changed_layout = aspect_pack_provider_key_with_semantics(digest, 7, "core-public-1", "core-layout-2")
+        expect(cache.invalidate_semantic_change(changed_layout, refs)).to_be_greater_than(0)
+        expect(cache.has_provider(old_key)).to_equal(false)
+        val stats = cache.get_stats()
+        expect(stats.index_invalidations).to_equal(2)
+        expect(stats.chunk_invalidations).to_equal(2)

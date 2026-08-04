@@ -9,8 +9,8 @@
 | Selector | Syntax | Status | Backend |
 |----------|--------|--------|---------|
 | `execution` | `execution(* fn_name(..))` | **Supported** | Compile-time |
-| `within` | `within(module.path.*)` | **Supported** | Compile-time |
-| `attr` | `attr(annotation_name)` | **Supported** | Compile-time |
+| `within` | `within(module.path.*)` | Declared; evaluator completion required | Compile-time |
+| `attr` | `attr(annotation_name)` | Declared; evaluator completion required | Compile-time |
 | `get` | `get(field)` | Deferred | — |
 | `set` | `set(field)` | Deferred | — |
 | `init` | `init(Type)` | Deferred | — |
@@ -61,10 +61,16 @@
 
 ### Zero-Overhead Guarantee
 
-When no aspects are defined or AOP is disabled:
+For a statically omitted/no-AOP build, verified against the same inputs:
 - No weaving metadata emitted
 - No runtime probes or proxies inserted
 - Compiled output identical to non-AOP build
+
+This guarantee does not apply to prepared patchable dynamic advice. A dormant
+patchpoint/trampoline/guard has a measurable non-zero code or branch footprint
+and must be reported separately. Facet-only lazy acquisition keeps unrelated
+business methods branch-free because activation begins only at explicit facet
+acquisition.
 
 ## Deterministic Ordering
 
@@ -100,3 +106,7 @@ Conflicting advice (same predicate + form + priority) emits `E1504`.
 - Verified code rejects non-ghost aspects
 - Wildcard restrictions enforced in verified pointcuts
 - Security-AOP uses only supported join points and advice forms
+- `within` and `attr` may be promoted back to **Supported** only after focused
+  evaluator evidence proves positive, negative, boolean-combination, and
+  interpreter/backend parity cases; declaration/parser acceptance alone is not
+  execution support.

@@ -1,0 +1,239 @@
+"""Closed-world coherence checks for the static attached-facet slice."""
+
+use compiler.common.predicate.{evaluate_type_predicate}
+use compiler.common.structural_contracts.aop.{
+    FacetAccess, FacetBindingPlan, FacetMultiplicity, FacetRepresentation,
+    TYPE_PREDICATE_BYTECODE_VERSION, TypePredicateBytecode,
+    TypePredicateDescriptor, TypePredicateInstruction
+}
+use compiler.hir.facet_static.{
+    FacetDeclarationOwner, HirFacetBind, HirFacetDependency, HirFacetImpl,
+    HirFacetInterface, HirFacetModule
+}
+
+struct FacetCoherenceDiagnostic:
+    code: text
+    message: text
+
+struct FacetCoherenceResult:
+    plans: [FacetBindingPlan]
+    diagnostics: [FacetCoherenceDiagnostic]
+
+fn facet_diag(code: text, message: text) -> FacetCoherenceDiagnostic:
+    FacetCoherenceDiagnostic(code: code, message: message)
+
+fn facet_interface_named(module: HirFacetModule, name: text) -> HirFacetInterface?:
+    for interface_ in module.interfaces:
+        if interface_.name == name: return interface_
+    nil
+
+fn facet_impl_named(module: HirFacetModule, name: text) -> HirFacetImpl?:
+    for implementation in module.implementations:
+        if implementation.name == name: return implementation
+    nil
+
+fn facet_impl_has_method(implementation: HirFacetImpl, name: text, signature: text) -> bool:
+    for method in implementation.methods:
+        if method.name == name and method.signature == signature: return true
+    false
+
+fn facet_collect_contract_methods(module: HirFacetModule, root: HirFacetInterface) -> [HirFacetInterface]:
+    var contracts: [HirFacetInterface] = [root]
+    var index = 0
+    while index < contracts.len():
+        for parent_name in contracts[index].parent_facets:
+            if val parent = facet_interface_named(module, parent_name):
+                var already_present = false
+                for known in contracts:
+                    if known.name == parent.name: already_present = true
+                if not already_present: contracts = contracts.push(parent)
+        index = index + 1
+    contracts
+
+fn facet_impl_complete(module: HirFacetModule, interface_: HirFacetInterface, implementation: HirFacetImpl) -> bool:
+    for contract in facet_collect_contract_methods(module, interface_):
+        for method in contract.methods:
+            if not facet_impl_has_method(implementation, method.name, method.signature): return false
+    true
+
+fn facet_binding_required(module: HirFacetModule, binding: HirFacetBind) -> bool:
+    for requirement in module.requirements:
+        if requirement.aspect_id == binding.aspect_id and requirement.facet_interface == binding.facet_interface:
+            return true
+    false
+
+fn facet_binding_targets(binding: FacetBindingPlan, descriptor: TypePredicateDescriptor) -> bool:
+    evaluate_type_predicate(binding.target_predicate, descriptor)
+
+fn facet_type_name_candidates(name: text, descriptors: [TypePredicateDescriptor]) -> [text]:
+    var candidates: [text] = []
+    for descriptor in descriptors:
+        var names = [descriptor.qualified_name]
+        for implemented in descriptor.implemented_types: names = names.push(implemented)
+        for supertype in descriptor.supertypes: names = names.push(supertype)
+        for candidate in names:
+            if (candidate == name or candidate.ends_with(".{name}")) and not candidates.contains(candidate):
+                candidates = candidates.push(candidate)
+    candidates
+
+fn facet_resolve_type_name(name: text, descriptors: [TypePredicateDescriptor]) -> Result<text, text>:
+    # Qualified names and glob patterns are already canonical source forms.
+    if name.contains(".") or name.contains("*"): return Ok(name)
+    val candidates = facet_type_name_candidates(name, descriptors)
+    if candidates.len() == 1: return Ok(candidates[0])
+    if candidates.len() == 0: return Err("unresolved facet selector type '{name}'")
+    Err("ambiguous facet selector type '{name}': {candidates.join(", ")}")
+
+fn facet_resolve_predicate_names(
+    bytecode: TypePredicateBytecode,
+    descriptors: [TypePredicateDescriptor]
+) -> Result<TypePredicateBytecode, text>:
+    if bytecode.contract_version != TYPE_PREDICATE_BYTECODE_VERSION:
+        return Err("unsupported facet predicate bytecode version")
+    var instructions: [TypePredicateInstruction] = []
+    for instruction in bytecode.instructions:
+        match instruction:
+            case MatchType(pattern):
+                instructions = instructions.push(TypePredicateInstruction.MatchType(
+                    facet_resolve_type_name(pattern, descriptors)?
+                ))
+            case MatchImplements(name):
+                instructions = instructions.push(TypePredicateInstruction.MatchImplements(
+                    facet_resolve_type_name(name, descriptors)?
+                ))
+            case MatchSubtype(name):
+                instructions = instructions.push(TypePredicateInstruction.MatchSubtype(
+                    facet_resolve_type_name(name, descriptors)?
+                ))
+            case Not: instructions = instructions.push(TypePredicateInstruction.Not)
+            case And: instructions = instructions.push(TypePredicateInstruction.And)
+            case Or: instructions = instructions.push(TypePredicateInstruction.Or)
+    Ok(TypePredicateBytecode(contract_version: bytecode.contract_version, instructions: instructions))
+
+fn check_static_facet_dependencies(
+    dependencies: [HirFacetDependency]
+) -> [FacetCoherenceDiagnostic]:
+    var diagnostics: [FacetCoherenceDiagnostic] = []
+    for dependency in dependencies:
+        match dependency.source_owner:
+            case Core:
+                match dependency.target_owner:
+                    case OptionalAspect(aspect_id):
+                        diagnostics = diagnostics.push(facet_diag(
+                            "E-AF001",
+                            "core declaration '{dependency.source}' depends on optional aspect '{aspect_id}' declaration '{dependency.target}'"
+                        ))
+                    case Core: ()
+            case OptionalAspect(_): ()
+    diagnostics
+
+fn check_static_facet_coherence(
+    module: HirFacetModule,
+    descriptors: [TypePredicateDescriptor],
+    dependencies: [HirFacetDependency]
+) -> FacetCoherenceResult:
+    var diagnostics = check_static_facet_dependencies(dependencies)
+    var plans: [FacetBindingPlan] = []
+
+    var interface_names: Dict<text, bool> = {}
+    for interface_ in module.interfaces:
+        if interface_names.contains_key(interface_.name):
+            diagnostics = diagnostics.push(facet_diag(
+                "E-AF003", "duplicate facet interface declaration '{interface_.name}'"
+            ))
+        interface_names[interface_.name] = true
+        for parent in interface_.parent_facets:
+            if facet_interface_named(module, parent) == nil:
+                diagnostics = diagnostics.push(facet_diag(
+                    "E-AF002", "facet interface '{interface_.name}' extends missing facet '{parent}'"
+                ))
+
+    var implementation_names: Dict<text, bool> = {}
+    for implementation in module.implementations:
+        if implementation_names.contains_key(implementation.name):
+            diagnostics = diagnostics.push(facet_diag(
+                "E-AF003", "duplicate facet implementation declaration '{implementation.name}'"
+            ))
+        implementation_names[implementation.name] = true
+
+    for binding in module.bindings:
+        match binding.representation:
+            case NominalStatic:
+                diagnostics = diagnostics.push(facet_diag(
+                    "E-AF005",
+                    "static facet slice permits attached witnesses only; nominal introduction would mutate the base type"
+                ))
+                continue
+            case Attached: ()
+
+        val resolved_predicate = facet_resolve_predicate_names(binding.target_predicate, descriptors)
+        if resolved_predicate.is_err():
+            diagnostics = diagnostics.push(facet_diag("E-AF004", resolved_predicate.unwrap_err()))
+            continue
+
+        val interface_ = facet_interface_named(module, binding.facet_interface)
+        val implementation = facet_impl_named(module, binding.implementation)
+        if interface_ == nil or implementation == nil:
+            diagnostics = diagnostics.push(facet_diag(
+                "E-AF002", "facet binding references a missing contract or implementation"
+            ))
+            continue
+        val resolved_interface = interface_ ?? module.interfaces[0]
+        val resolved_impl = implementation ?? module.implementations[0]
+        if not resolved_impl.interfaces.contains(resolved_interface.name):
+            diagnostics = diagnostics.push(facet_diag(
+                "E-AF002", "facet implementation '{resolved_impl.name}' does not implement '{resolved_interface.name}'"
+            ))
+            continue
+        if not facet_impl_complete(module, resolved_interface, resolved_impl):
+            diagnostics = diagnostics.push(facet_diag(
+                "E-AF002", "facet implementation '{resolved_impl.name}' is incomplete for '{resolved_interface.name}'"
+            ))
+            continue
+
+        plans = plans.push(FacetBindingPlan(
+            aspect_id: binding.aspect_id,
+            facet_interface_id: binding.facet_interface,
+            target_predicate: resolved_predicate.unwrap(),
+            implementation_id: binding.implementation,
+            representation: FacetRepresentation.Attached,
+            multiplicity: binding.multiplicity,
+            access: FacetAccess.PublicReadonly,
+            required: facet_binding_required(module, binding)
+        ))
+
+    var single_counts: Dict<text, i64> = {}
+    for descriptor in descriptors:
+        for plan in plans:
+            if not facet_binding_targets(plan, descriptor): continue
+            match plan.multiplicity:
+                case Multi: ()
+                case Single:
+                    val key = "{descriptor.qualified_name}|{plan.facet_interface_id}"
+                    val count = if single_counts.contains_key(key): single_counts[key] else: 0
+                    single_counts[key] = count + 1
+                    if count > 0:
+                        diagnostics = diagnostics.push(facet_diag(
+                            "E-AF003", "ambiguous facet binding for '{descriptor.qualified_name}' and '{plan.facet_interface_id}'"
+                        ))
+
+    for requirement in module.requirements:
+        val resolved_requirement = facet_resolve_predicate_names(requirement.target_predicate, descriptors)
+        if resolved_requirement.is_err():
+            diagnostics = diagnostics.push(facet_diag("E-AF004", resolved_requirement.unwrap_err()))
+            continue
+        for descriptor in descriptors:
+            if not evaluate_type_predicate(resolved_requirement.unwrap(), descriptor): continue
+            var matches = 0
+            for plan in plans:
+                if plan.facet_interface_id == requirement.facet_interface and facet_binding_targets(plan, descriptor):
+                    matches = matches + 1
+            if matches == 0:
+                diagnostics = diagnostics.push(facet_diag(
+                    "E-AF002", "required facet '{requirement.facet_interface}' is missing for '{descriptor.qualified_name}'"
+                ))
+
+    FacetCoherenceResult(plans: plans, diagnostics: diagnostics)
+
+export FacetCoherenceDiagnostic, FacetCoherenceResult
+export check_static_facet_coherence, check_static_facet_dependencies

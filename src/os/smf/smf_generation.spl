@@ -1,6 +1,12 @@
 # SMF generation states, candidate staging, and symbol swap lifecycle.
 # Hosted atomic replacement model for SMF runtime.
 
+struct GenerationToken:
+    """Opaque lease carried by FacetRef/advice calls until release."""
+    owner_key: text
+    generation_id: int
+    token_id: int
+
 class GenerationState:
     """Tracks lifecycle state of an SMF module generation."""
     state: text
@@ -108,52 +114,238 @@ class SymbolSwap:
 # ============================================================================
 
 class LifecycleManager:
-    """Coordinates SMF generation promotion/retirement sequences."""
+    """Canonical per-owner SMF generation lease registry."""
     active_generation: int
     pending_candidate: text
+    pending_generation: int
     has_candidate: bool
     retired_count: int
+    generation_states: Dict<text, text>
+    generation_refs: Dict<text, int>
+    lease_generations: Dict<text, int>
+    next_token_id: int
+    token_leases: Dict<text, text>
 
-    me register_candidate(name: text, g: int) -> LifecycleManager:
-        """Record a new candidate generation awaiting promotion."""
-        return LifecycleManager(
-            active_generation: self.active_generation,
-            pending_candidate: name,
-            has_candidate: true,
-            retired_count: self.retired_count
-        )
+    fn owner_prefix(owner_key: text) -> text:
+        "{owner_key.len()}:{owner_key}@"
+
+    fn generation_key_for(owner_key: text, g: int) -> text:
+        self.owner_prefix(owner_key) + g.to_text()
+
+    fn copy_states() -> Dict<text, text>:
+        var out: Dict<text, text> = {}
+        for key in self.generation_states.keys(): out[key] = self.generation_states[key]
+        out
+
+    fn copy_refs() -> Dict<text, int>:
+        var out: Dict<text, int> = {}
+        for key in self.generation_refs.keys(): out[key] = self.generation_refs[key]
+        out
+
+    fn copy_lease_generations() -> Dict<text, int>:
+        var out: Dict<text, int> = {}
+        for key in self.lease_generations.keys(): out[key] = self.lease_generations[key]
+        out
+
+    fn copy_token_leases() -> Dict<text, text>:
+        var out: Dict<text, text> = {}
+        for key in self.token_leases.keys(): out[key] = self.token_leases[key]
+        out
+
+    fn unique_generation_key(g: int) -> Result<text, text>:
+        var found = ""
+        for key in self.lease_generations.keys():
+            if self.lease_generations[key] == g:
+                if found != "": return Err("generation {g} is ambiguous across owners")
+                found = key
+        if found == "": return Err("generation {g} is unknown")
+        Ok(found)
+
+    fn token_pin_count_for_key(lease_key: text) -> int:
+        var count: int = 0
+        for token_key in self.token_leases.keys():
+            if self.token_leases[token_key] == lease_key: count = count + 1
+        count
+
+    fn with_lease_maps(states: Dict<text, text>, refs: Dict<text, int>, leases: Dict<text, int>, tokens: Dict<text, text>, next_token: int) -> LifecycleManager:
+        LifecycleManager(active_generation: self.active_generation, pending_candidate: self.pending_candidate,
+            pending_generation: self.pending_generation, has_candidate: self.has_candidate,
+            retired_count: self.retired_count, generation_states: states, generation_refs: refs,
+            lease_generations: leases, next_token_id: next_token, token_leases: tokens)
+
+    me register_candidate(owner_key: text, g: int) -> LifecycleManager:
+        val key = self.generation_key_for(owner_key, g)
+        if owner_key == "" or g <= 0 or self.has_candidate or self.generation_states.has(key): return self
+        val states = self.copy_states()
+        val refs = self.copy_refs()
+        val leases = self.copy_lease_generations()
+        states[key] = "candidate"
+        refs[key] = 0
+        leases[key] = g
+        LifecycleManager(active_generation: self.active_generation, pending_candidate: owner_key,
+            pending_generation: g, has_candidate: true, retired_count: self.retired_count,
+            generation_states: states, generation_refs: refs, lease_generations: leases,
+            next_token_id: self.next_token_id, token_leases: self.copy_token_leases())
+
+    me register_candidate_for(owner_key: text, g: int) -> Result<LifecycleManager, text>:
+        """Fail-closed candidate registration for transactional publishers."""
+        if owner_key == "" or g <= 0:
+            return Err("generation candidate identity is invalid")
+        if self.has_candidate:
+            return Err("generation candidate already pending: {self.pending_candidate}@{self.pending_generation}")
+        if self.generation_states.has(self.generation_key_for(owner_key, g)):
+            return Err("generation candidate already exists: {owner_key}@{g}")
+        val next = self.register_candidate(owner_key, g)
+        if not next.has_candidate or next.pending_candidate != owner_key or next.pending_generation != g:
+            return Err("generation candidate registration did not commit exact identity")
+        Ok(next)
 
     me promote_candidate() -> LifecycleManager:
-        """Promote the staged candidate; increment active generation."""
-        val next_gen = self.active_generation + 1
-        return LifecycleManager(
-            active_generation: next_gen,
-            pending_candidate: "",
-            has_candidate: false,
-            retired_count: self.retired_count
-        )
+        if not self.has_candidate: return self
+        val states = self.copy_states()
+        val prefix = self.owner_prefix(self.pending_candidate)
+        for key in states.keys():
+            if key.starts_with(prefix) and states[key] == "active": states[key] = "quiescing"
+        states[self.generation_key_for(self.pending_candidate, self.pending_generation)] = "active"
+        LifecycleManager(active_generation: self.pending_generation, pending_candidate: "",
+            pending_generation: 0, has_candidate: false, retired_count: self.retired_count,
+            generation_states: states, generation_refs: self.copy_refs(),
+            lease_generations: self.copy_lease_generations(), next_token_id: self.next_token_id,
+            token_leases: self.copy_token_leases())
+
+    me promote_candidate_for(owner_key: text, g: int) -> Result<LifecycleManager, text>:
+        """Promote only the exact transaction-owned candidate."""
+        if not self.has_candidate or self.pending_candidate != owner_key or self.pending_generation != g:
+            return Err("generation candidate does not match promotion identity: {owner_key}@{g}")
+        val next = self.promote_candidate()
+        if next.generation_state_for(owner_key, g) != "active":
+            return Err("generation promotion did not activate exact identity: {owner_key}@{g}")
+        Ok(next)
+
+    me acquire_generation_for(owner_key: text, g: int) -> Result<LifecycleManager, text>:
+        val key = self.generation_key_for(owner_key, g)
+        if not self.generation_states.has(key) or self.generation_states[key] != "active": return Err("generation {owner_key}@{g} is not active")
+        val refs = self.copy_refs()
+        refs[key] = refs[key] + 1
+        Ok(self.with_lease_maps(self.copy_states(), refs, self.copy_lease_generations(), self.copy_token_leases(), self.next_token_id))
+
+    me acquire_generation_token_for(owner_key: text, g: int) -> Result<(LifecycleManager, GenerationToken), text>:
+        val key = self.generation_key_for(owner_key, g)
+        if not self.generation_states.has(key) or self.generation_states[key] != "active": return Err("generation {owner_key}@{g} is not active")
+        val refs = self.copy_refs()
+        refs[key] = refs[key] + 1
+        val token = GenerationToken(owner_key: owner_key, generation_id: g, token_id: self.next_token_id)
+        val tokens = self.copy_token_leases()
+        tokens[token.token_id.to_text()] = key
+        Ok((self.with_lease_maps(self.copy_states(), refs, self.copy_lease_generations(), tokens, self.next_token_id + 1), token))
+
+    me release_generation_for(owner_key: text, g: int) -> Result<LifecycleManager, text>:
+        val key = self.generation_key_for(owner_key, g)
+        if not self.generation_refs.has(key) or self.generation_refs[key] <= 0: return Err("generation {owner_key}@{g} has no acquired pin")
+        if self.generation_refs[key] <= self.token_pin_count_for_key(key): return Err("generation {owner_key}@{g} pin requires its exact token")
+        val refs = self.copy_refs()
+        refs[key] = refs[key] - 1
+        Ok(self.with_lease_maps(self.copy_states(), refs, self.copy_lease_generations(), self.copy_token_leases(), self.next_token_id))
+
+    me release_generation_token(token: GenerationToken) -> Result<LifecycleManager, text>:
+        val token_key = token.token_id.to_text()
+        val lease_key = self.generation_key_for(token.owner_key, token.generation_id)
+        if not self.token_leases.has(token_key) or self.token_leases[token_key] != lease_key: return Err("generation token is stale, forged, or unknown")
+        if not self.generation_refs.has(lease_key) or self.generation_refs[lease_key] <= 0: return Err("generation token has no acquired pin")
+        val refs = self.copy_refs()
+        refs[lease_key] = refs[lease_key] - 1
+        var tokens = self.copy_token_leases()
+        tokens = tokens.remove(token_key)
+        Ok(self.with_lease_maps(self.copy_states(), refs, self.copy_lease_generations(), tokens, self.next_token_id))
+
+    fn generation_token_is_active(token: GenerationToken) -> bool:
+        val token_key = token.token_id.to_text()
+        self.token_leases.has(token_key) and self.token_leases[token_key] == self.generation_key_for(token.owner_key, token.generation_id)
+
+    me quiesce_generation_for(owner_key: text, g: int) -> Result<LifecycleManager, text>:
+        val key = self.generation_key_for(owner_key, g)
+        if not self.generation_states.has(key): return Err("generation {owner_key}@{g} is unknown")
+        val state = self.generation_states[key]
+        if state != "active" and state != "quiescing": return Err("generation {owner_key}@{g} cannot quiesce from {state}")
+        val states = self.copy_states()
+        states[key] = "quiescing"
+        Ok(self.with_lease_maps(states, self.copy_refs(), self.copy_lease_generations(), self.copy_token_leases(), self.next_token_id))
+
+    fn generation_pin_count_for(owner_key: text, g: int) -> int:
+        val key = self.generation_key_for(owner_key, g)
+        if self.generation_refs.has(key): return self.generation_refs[key]
+        0
+
+    fn generation_state_for(owner_key: text, g: int) -> text:
+        val key = self.generation_key_for(owner_key, g)
+        if self.generation_states.has(key): return self.generation_states[key]
+        "unknown"
+
+    fn generation_is_drained_for(owner_key: text, g: int) -> bool:
+        self.generation_state_for(owner_key, g) == "quiescing" and self.generation_pin_count_for(owner_key, g) == 0
+
+    me complete_generation_unload_for(owner_key: text, g: int) -> Result<LifecycleManager, text>:
+        if not self.generation_is_drained_for(owner_key, g): return Err("generation {owner_key}@{g} is not quiesced and drained")
+        val key = self.generation_key_for(owner_key, g)
+        var states = self.copy_states()
+        var refs = self.copy_refs()
+        var leases = self.copy_lease_generations()
+        states = states.remove(key)
+        refs = refs.remove(key)
+        leases = leases.remove(key)
+        val next = self.with_lease_maps(states, refs, leases, self.copy_token_leases(), self.next_token_id)
+        next.retired_count = next.retired_count + 1
+        Ok(next)
+
+    # Compatibility wrappers are accepted only when one owner has this numeric generation.
+    me acquire_generation(g: int) -> Result<LifecycleManager, text>:
+        val key = self.unique_generation_key(g)?
+        if self.generation_states[key] != "active": return Err("generation {g} is not active")
+        val refs = self.copy_refs()
+        refs[key] = refs[key] + 1
+        Ok(self.with_lease_maps(self.copy_states(), refs, self.copy_lease_generations(), self.copy_token_leases(), self.next_token_id))
+
+    me release_generation(g: int) -> Result<LifecycleManager, text>:
+        val key = self.unique_generation_key(g)?
+        if self.generation_refs[key] <= 0 or self.generation_refs[key] <= self.token_pin_count_for_key(key): return Err("generation {g} has no unowned pin")
+        val refs = self.copy_refs()
+        refs[key] = refs[key] - 1
+        Ok(self.with_lease_maps(self.copy_states(), refs, self.copy_lease_generations(), self.copy_token_leases(), self.next_token_id))
+
+    me quiesce_generation(g: int) -> Result<LifecycleManager, text>:
+        val key = self.unique_generation_key(g)?
+        val states = self.copy_states()
+        states[key] = "quiescing"
+        Ok(self.with_lease_maps(states, self.copy_refs(), self.copy_lease_generations(), self.copy_token_leases(), self.next_token_id))
+
+    fn generation_pin_count(g: int) -> int:
+        val key_result = self.unique_generation_key(g)
+        if key_result.is_err(): return -1
+        self.generation_refs[key_result.unwrap()]
+
+    fn generation_state(g: int) -> text:
+        val key_result = self.unique_generation_key(g)
+        if key_result.is_err(): return "ambiguous_or_unknown"
+        self.generation_states[key_result.unwrap()]
+
+    fn generation_is_drained(g: int) -> bool:
+        val key_result = self.unique_generation_key(g)
+        if key_result.is_err(): return false
+        val key = key_result.unwrap()
+        self.generation_states[key] == "quiescing" and self.generation_refs[key] == 0
 
     me retire(name: text) -> LifecycleManager:
-        """Record that a generation has been retired."""
-        return LifecycleManager(
-            active_generation: self.active_generation,
-            pending_candidate: self.pending_candidate,
-            has_candidate: self.has_candidate,
-            retired_count: self.retired_count + 1
-        )
+        val next = self.with_lease_maps(self.copy_states(), self.copy_refs(), self.copy_lease_generations(), self.copy_token_leases(), self.next_token_id)
+        next.retired_count = next.retired_count + 1
+        next
 
     me to_text() -> text:
-        """Human-readable description."""
-        return "lifecycle active_gen=" + self.active_generation.to_text() + " retired=" + self.retired_count.to_text()
+        "lifecycle active_gen=" + self.active_generation.to_text() + " retired=" + self.retired_count.to_text()
 
     static fn new_manager() -> LifecycleManager:
-        """Create a fresh LifecycleManager with generation 0."""
-        return LifecycleManager(
-            active_generation: 0,
-            pending_candidate: "",
-            has_candidate: false,
-            retired_count: 0
-        )
+        LifecycleManager(active_generation: 0, pending_candidate: "", pending_generation: 0,
+            has_candidate: false, retired_count: 0, generation_states: {}, generation_refs: {},
+            lease_generations: {}, next_token_id: 1, token_leases: {})
 
 
 class RetiredMapping:
@@ -169,7 +361,7 @@ class RetiredMapping:
 
     me decrement() -> RetiredMapping:
         """Decrement remaining_refs by 1; set can_free if refs reach zero."""
-        val new_refs = self.remaining_refs - 1
+        val new_refs = if self.remaining_refs > 0: self.remaining_refs - 1 else: 0
         val now_free = new_refs == 0
         return RetiredMapping(module_name: self.module_name, generation_id: self.generation_id, remaining_refs: new_refs, can_free: now_free)
 

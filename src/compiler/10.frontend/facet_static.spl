@@ -1,0 +1,281 @@
+"""Proposed, feature-scoped static facet declarations.
+
+This parser deliberately owns only declarations beginning with `facet`,
+`bind facet`, or `require facet`.  Existing `on pc{...} use ...` advice and CE
+`bind` declarations continue through their established parsers unchanged.
+"""
+
+use compiler.common.structural_contracts.aop.{FacetAccess, FacetMultiplicity, FacetRepresentation}
+
+struct FacetMethodDecl:
+    name: text
+    signature: text
+
+struct FacetInterfaceDecl:
+    aspect_id: text
+    name: text
+    parent_facets: [text]
+    methods: [FacetMethodDecl]
+
+struct FacetImplDecl:
+    aspect_id: text
+    name: text
+    base_type: text
+    interfaces: [text]
+    methods: [FacetMethodDecl]
+    access: FacetAccess
+
+struct FacetBindDecl:
+    aspect_id: text
+    facet_interface: text
+    target_pointcut: text
+    implementation: text
+    representation: FacetRepresentation
+    multiplicity: FacetMultiplicity
+
+struct FacetRequireDecl:
+    aspect_id: text
+    facet_interface: text
+    target_pointcut: text
+
+struct FacetAstModule:
+    interfaces: [FacetInterfaceDecl]
+    implementations: [FacetImplDecl]
+    bindings: [FacetBindDecl]
+    requirements: [FacetRequireDecl]
+
+struct FacetSourceProjection:
+    source: text
+    facets: FacetAstModule
+
+fn facet_trim_colon(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed.ends_with(":"): trimmed[:trimmed.len() - 1].trim() else: trimmed
+
+fn facet_line_indent(line: text) -> i64:
+    var count = 0
+    while count < line.len() and line[count] == ' ':
+        count = count + 1
+    count
+
+fn facet_static_decl_starts(line: text) -> bool:
+    val trimmed = line.trim()
+    (trimmed.starts_with("facet interface ") or
+        trimmed.starts_with("facet impl ") or trimmed.starts_with("bind facet ") or
+        trimmed.starts_with("require facet "))
+
+fn facet_method_from_line(line: text) -> Result<FacetMethodDecl, text>:
+    val signature = facet_trim_colon(line)
+    if not signature.starts_with("fn "):
+        return Err("facet implementation members must be methods")
+    val name_parts = signature[3:].split("(")
+    if name_parts.len() < 2 or name_parts[0].trim() == "":
+        return Err("facet method requires a name and parameter list")
+    Ok(FacetMethodDecl(name: name_parts[0].trim(), signature: signature))
+
+fn facet_block_end(lines: [text], start: i64) -> i64:
+    val declaration_indent = facet_line_indent(lines[start])
+    var index = start + 1
+    while index < lines.len():
+        val line = lines[index]
+        if line.trim() != "" and facet_line_indent(line) <= declaration_indent:
+            break
+        index = index + 1
+    index
+
+fn facet_block_header(lines: [text], start: i64, end: i64) -> text:
+    var parts: [text] = []
+    var index = start
+    while index < end:
+        val line = lines[index].trim()
+        if line.starts_with("fn "): break
+        if line != "": parts = parts.push(line)
+        index = index + 1
+    parts.join(" ")
+
+fn facet_block_methods(lines: [text], start: i64, end: i64) -> Result<[FacetMethodDecl], text>:
+    var methods: [FacetMethodDecl] = []
+    var index = start + 1
+    while index < end:
+        val line = lines[index].trim()
+        if line.starts_with("fn "):
+            methods = methods.push(facet_method_from_line(line)?)
+        index = index + 1
+    Ok(methods)
+
+fn parse_facet_interface(lines: [text], start: i64, end: i64, aspect_id: text) -> Result<FacetInterfaceDecl, text>:
+    val header = facet_trim_colon(facet_block_header(lines, start, end))
+    val body = header["facet interface ".len():].trim()
+    val extends_parts = body.split(" extends ")
+    val name = extends_parts[0].trim()
+    if name == "": return Err("facet interface requires a name")
+    var parents: [text] = []
+    if extends_parts.len() > 1:
+        for parent in extends_parts[1].split(","):
+            if parent.trim() != "": parents = parents.push(parent.trim())
+    Ok(FacetInterfaceDecl(
+        aspect_id: aspect_id,
+        name: name,
+        parent_facets: parents,
+        methods: facet_block_methods(lines, start, end)?
+    ))
+
+fn facet_impl_header_name(body: text) -> text:
+    val before_for = body.split(" for ")[0].trim()
+    before_for.split("<")[0].trim()
+
+fn parse_facet_impl(lines: [text], start: i64, end: i64, aspect_id: text) -> Result<FacetImplDecl, text>:
+    val header = facet_trim_colon(facet_block_header(lines, start, end))
+    if not header.contains(" for ") or not header.contains(" implements "):
+        return Err("facet impl requires `for` and `implements`")
+    if not header.contains(" public readonly"):
+        return Err("facet impl V1 access must be `public readonly`")
+    val body = header["facet impl ".len():].trim()
+    val for_parts = body.split(" for ")
+    val after_for = for_parts[1]
+    val implements_parts = after_for.split(" implements ")
+    val base_type = implements_parts[0].trim()
+    val interface_text = implements_parts[1].split(" public readonly")[0].trim()
+    var interfaces: [text] = []
+    for interface_name in interface_text.split(","):
+        if interface_name.trim() != "": interfaces = interfaces.push(interface_name.trim())
+    if base_type == "" or interfaces.len() == 0:
+        return Err("facet impl requires a base type and facet interface")
+    Ok(FacetImplDecl(
+        aspect_id: aspect_id,
+        name: facet_impl_header_name(body),
+        base_type: base_type,
+        interfaces: interfaces,
+        methods: facet_block_methods(lines, start, end)?,
+        access: FacetAccess.PublicReadonly
+    ))
+
+fn parse_facet_binding(lines: [text], start: i64, end: i64, aspect_id: text) -> Result<FacetBindDecl, text>:
+    val header = facet_block_header(lines, start, end)
+    if not header.contains(" to ") or not header.contains(" using "):
+        return Err("bind facet requires `to pc{...} using Implementation`")
+    val body = header["bind facet ".len():].trim()
+    val to_parts = body.split(" to ")
+    val facet_interface = to_parts[0].trim()
+    val using_parts = to_parts[1].split(" using ")
+    val target = using_parts[0].trim()
+    val implementation_and_options = using_parts[1].trim().split(" ")
+    val implementation = implementation_and_options[0].trim()
+    var representation = FacetRepresentation.Attached
+    var multiplicity = FacetMultiplicity.Single
+    if header.contains(" nominal static"):
+        representation = FacetRepresentation.NominalStatic
+    if header.ends_with(" multi") or header.contains(" multi "):
+        multiplicity = FacetMultiplicity.Multi
+    if facet_interface == "" or implementation == "" or not target.starts_with("pc{"):
+        return Err("bind facet has an invalid facet, implementation, or pointcut")
+    Ok(FacetBindDecl(
+        aspect_id: aspect_id,
+        facet_interface: facet_interface,
+        target_pointcut: target,
+        implementation: implementation,
+        representation: representation,
+        multiplicity: multiplicity
+    ))
+
+fn parse_facet_requirement(lines: [text], start: i64, end: i64, aspect_id: text) -> Result<FacetRequireDecl, text>:
+    val header = facet_block_header(lines, start, end)
+    if not header.contains(" on "):
+        return Err("require facet requires `on pc{...}`")
+    val body = header["require facet ".len():].trim()
+    val on_parts = body.split(" on ")
+    val facet_interface = on_parts[0].trim()
+    val target = on_parts[1].trim()
+    if facet_interface == "" or not target.starts_with("pc{"):
+        return Err("require facet has an invalid facet or pointcut")
+    Ok(FacetRequireDecl(
+        aspect_id: aspect_id,
+        facet_interface: facet_interface,
+        target_pointcut: target
+    ))
+
+fn parse_static_facet_declarations(source: text) -> Result<FacetAstModule, text>:
+    """Parse only the proposed static facet declaration family."""
+    val lines = source.split("\n")
+    var aspect_id = ""
+    var interfaces: [FacetInterfaceDecl] = []
+    var implementations: [FacetImplDecl] = []
+    var bindings: [FacetBindDecl] = []
+    var requirements: [FacetRequireDecl] = []
+    var index = 0
+    while index < lines.len():
+        val line = lines[index].trim()
+        if line.starts_with("aspect "):
+            aspect_id = facet_trim_colon(line["aspect ".len():])
+            index = index + 1
+            continue
+        if line.starts_with("facet interface "):
+            val end = facet_block_end(lines, index)
+            interfaces = interfaces.push(parse_facet_interface(lines, index, end, aspect_id)?)
+            index = end
+            continue
+        if line.starts_with("facet impl "):
+            val end = facet_block_end(lines, index)
+            implementations = implementations.push(parse_facet_impl(lines, index, end, aspect_id)?)
+            index = end
+            continue
+        if line.starts_with("bind facet "):
+            val end = facet_block_end(lines, index)
+            bindings = bindings.push(parse_facet_binding(lines, index, end, aspect_id)?)
+            index = end
+            continue
+        if line.starts_with("require facet "):
+            val end = facet_block_end(lines, index)
+            requirements = requirements.push(parse_facet_requirement(lines, index, end, aspect_id)?)
+            index = end
+            continue
+        index = index + 1
+    Ok(FacetAstModule(
+        interfaces: interfaces,
+        implementations: implementations,
+        bindings: bindings,
+        requirements: requirements
+    ))
+
+fn project_static_facet_source(source: text) -> Result<FacetSourceProjection, text>:
+    """Remove only proposed facet declarations before the established parser runs.
+
+    Presence of the proposed declaration family is the feature opt-in. Existing
+    `on pc{...}` advice and ordinary `bind` syntax remain byte-for-byte intact.
+    """
+    if (not source.contains("facet interface ") and
+        not source.contains("facet impl ") and
+        not source.contains("bind facet ") and
+        not source.contains("require facet ")):
+        return Ok(FacetSourceProjection(
+            source: source,
+            facets: FacetAstModule(interfaces: [], implementations: [], bindings: [], requirements: [])
+        ))
+
+    val facets = parse_static_facet_declarations(source)?
+    val lines = source.split("\n")
+    var projected: [text] = []
+    var skip_indent = 0 - 1
+    var index = 0
+    while index < lines.len():
+        val line = lines[index]
+        val trimmed = line.trim()
+        val indent = facet_line_indent(line)
+        if skip_indent >= 0:
+            if trimmed == "" or indent > skip_indent:
+                projected = projected.push("")
+                index = index + 1
+                continue
+            skip_indent = 0 - 1
+        if trimmed.starts_with("aspect "):
+            projected = projected.push("")
+        elif facet_static_decl_starts(line):
+            skip_indent = indent
+            projected = projected.push("")
+        else:
+            projected = projected.push(line)
+        index = index + 1
+    Ok(FacetSourceProjection(source: projected.join("\n"), facets: facets))
+
+export FacetMethodDecl, FacetInterfaceDecl, FacetImplDecl, FacetBindDecl, FacetRequireDecl, FacetAstModule
+export FacetSourceProjection, parse_static_facet_declarations, project_static_facet_source

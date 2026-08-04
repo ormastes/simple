@@ -8,6 +8,10 @@
 #
 # Port of rust/compiler/src/predicate.rs (649 lines)
 
+use compiler.common.structural_contracts.aop.{
+    TYPE_PREDICATE_BYTECODE_VERSION, TypePredicateInstruction,
+    TypePredicateBytecode, TypePredicateDescriptor
+}
 
 # ============================================================================
 # Predicate Context
@@ -16,6 +20,7 @@
 enum PredicateContext:
     Weaving              # AOP weaving: execution, within, attr, effect, test, decision, condition, call
     DependencyInjection  # DI binding: type, within, attr
+    FacetBinding         # Facet binding: type, implements, subtype only
     Mock                 # Mock selection: type, within, attr (test-only)
     Architecture         # Arch rules: import, depend, use, export, config, within, attr
 
@@ -45,6 +50,8 @@ enum Selector:
     Call(SignaturePattern)
     # DI selectors
     Type(text)
+    Implements(text)
+    Subtype(text)
     # AOP runtime selectors
     Init(text)
     # Architecture selectors
@@ -97,13 +104,86 @@ fn matchcontext_empty() -> MatchContext:
 
 fn match_pattern(pattern: text, target: text) -> bool:
     """Glob-style pattern matching: * matches segment, ** matches multiple."""
+    if pattern == "**": return true
     if pattern == "*": return true
     if pattern == target: return true
+    if pattern.ends_with("**"):
+        return target.starts_with(pattern[:pattern.len() - 2])
+    if pattern.starts_with("**"):
+        return target.ends_with(pattern[2:])
     if pattern.ends_with("*"):
         return target.starts_with(pattern[:pattern.len() - 1])
     if pattern.starts_with("*"):
         return target.ends_with(pattern[1:])
     return false
+
+fn type_predicate_named_match(candidate: text, expected: text) -> bool:
+    """Match canonical names after the semantic owner resolves short spellings."""
+    candidate == expected
+
+fn type_predicate_list_contains(names: [text], expected: text) -> bool:
+    for name in names:
+        if type_predicate_named_match(name, expected): return true
+    false
+
+fn compile_type_predicate_into(pred: Predicate, instructions: [TypePredicateInstruction]) -> Result<[TypePredicateInstruction], text>:
+    match pred:
+        case Sel(selector):
+            match selector:
+                case Type(pattern): Ok(instructions.push(TypePredicateInstruction.MatchType(pattern)))
+                case Implements(type_name): Ok(instructions.push(TypePredicateInstruction.MatchImplements(type_name)))
+                case Subtype(type_name): Ok(instructions.push(TypePredicateInstruction.MatchSubtype(type_name)))
+                case _: Err("selector is not valid in a type predicate")
+        case Not(inner):
+            val compiled = compile_type_predicate_into(inner, instructions)?
+            Ok(compiled.push(TypePredicateInstruction.Not))
+        case And(lhs, rhs):
+            val left = compile_type_predicate_into(lhs, instructions)?
+            val right = compile_type_predicate_into(rhs, left)?
+            Ok(right.push(TypePredicateInstruction.And))
+        case Or(lhs, rhs):
+            val left = compile_type_predicate_into(lhs, instructions)?
+            val right = compile_type_predicate_into(rhs, left)?
+            Ok(right.push(TypePredicateInstruction.Or))
+
+fn compile_type_predicate(pred: Predicate) -> Result<TypePredicateBytecode, text>:
+    """Compile supported type selectors to deterministic postfix bytecode."""
+    val instructions = compile_type_predicate_into(pred, [])?
+    Ok(TypePredicateBytecode(
+        contract_version: TYPE_PREDICATE_BYTECODE_VERSION,
+        instructions: instructions
+    ))
+
+fn evaluate_type_predicate(bytecode: TypePredicateBytecode, descriptor: TypePredicateDescriptor) -> bool:
+    """Evaluate one shared predicate program; malformed programs fail closed."""
+    if bytecode.contract_version != TYPE_PREDICATE_BYTECODE_VERSION: return false
+    var stack: [bool] = []
+    for instruction in bytecode.instructions:
+        match instruction:
+            case MatchType(pattern):
+                stack = stack.push(match_pattern(pattern, descriptor.qualified_name))
+            case MatchImplements(type_name):
+                stack = stack.push(type_predicate_list_contains(descriptor.implemented_types, type_name))
+            case MatchSubtype(type_name):
+                val matches_self = type_predicate_named_match(descriptor.qualified_name, type_name)
+                val matches_super = type_predicate_list_contains(descriptor.supertypes, type_name)
+                stack = stack.push(matches_self or matches_super)
+            case Not:
+                if stack.len() < 1: return false
+                stack[stack.len() - 1] = not stack[stack.len() - 1]
+            case And:
+                if stack.len() < 2: return false
+                val rhs = stack[stack.len() - 1]
+                val lhs = stack[stack.len() - 2]
+                stack = stack[:stack.len() - 2]
+                stack = stack.push(lhs and rhs)
+            case Or:
+                if stack.len() < 2: return false
+                val rhs = stack[stack.len() - 1]
+                val lhs = stack[stack.len() - 2]
+                stack = stack[:stack.len() - 2]
+                stack = stack.push(lhs or rhs)
+    stack.len() == 1 and stack[0]
 
 fn match_selector(sel: Selector, ctx: MatchContext) -> bool:
     match sel:
@@ -176,6 +256,8 @@ fn validate_selector(sel: Selector, ctx: PredicateContext) -> text:
         case Weaving:
             match sel:
                 case Type(_): Err("type() selector not valid in weaving context")
+                case Implements(_): Err("implements() selector not valid in weaving context")
+                case Subtype(_): Err("subtype() selector not valid in weaving context")
                 case Import(_, _): Err("import() selector not valid in weaving context")
                 case Depend(_, _): Err("depend() selector not valid in weaving context")
                 case Use(_): Err("use() selector not valid in weaving context")
@@ -188,6 +270,12 @@ fn validate_selector(sel: Selector, ctx: PredicateContext) -> text:
                 case Within(_): Ok(true)
                 case Attr(_): Ok(true)
                 case _: Err("selector not valid in DI context")
+        case FacetBinding:
+            match sel:
+                case Type(_): Ok(true)
+                case Implements(_): Ok(true)
+                case Subtype(_): Ok(true)
+                case _: Err("selector not valid in facet binding context")
         case Mock:
             match sel:
                 case Type(_): Ok(true)

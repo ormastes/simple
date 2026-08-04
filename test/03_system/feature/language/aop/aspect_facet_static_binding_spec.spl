@@ -1,0 +1,358 @@
+# @req REQ-AF-001 REQ-AF-002 REQ-AF-003 REQ-AF-009 REQ-AF-010
+# @cover src/compiler/10.frontend/facet_static.spl 70%
+# @cover src/compiler/20.hir/facet_static.spl 70%
+# @cover src/compiler/35.semantics/facet_coherence.spl 70%
+# @cover src/compiler/50.mir/mir_serialization.spl 70%
+# @cover src/compiler/80.driver/driver_hir_pipeline_passes.spl 70%
+# @cover src/lib/nogc_sync_mut/aop/facet.spl 80%
+# codex-system-test
+"""
+# Static Aspect-Facet Binding
+
+**Feature IDs:** REQ-AF-001, REQ-AF-002, REQ-AF-003, REQ-AF-009, REQ-AF-010
+**Category:** Language / AOP
+**Status:** Executable
+**Requirements:** `doc/02_requirements/feature/aspect_facet_dynload_smf_pack.md`
+**Design:** `doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md`
+
+This manual exercises the implemented static attached-witness slice. It proves
+core dependency rejection, typed no-I/O optional acquisition, shared structural
+selector behavior in both descriptor registration orders, public-readonly
+capability enforcement, and non-interference with the existing AOP/CE grammar.
+It does not claim policy-triggered loading or required runtime acquisition,
+which are later lifecycle surfaces.
+"""
+
+use std.spec.*
+use std.aop.facet.{
+    FacetActivationPolicy, FacetActivationRequest, FacetAcquireErrorKind,
+    FacetGenerationLease, FacetSidecarHandle, StaticFacetWitness,
+    try_facet, facet, require_facet, dynamic_facet_ref
+}
+use compiler.common.predicate.{evaluate_type_predicate}
+use compiler.common.structural_contracts.aop.{
+    FacetAccess, FacetRepresentation, TypePredicateDescriptor
+}
+use compiler.frontend.facet_static.{parse_static_facet_declarations}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.facet_static.{lower_static_facets}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurfacesByName, module_surfaces_from_modules
+}
+use compiler.driver.driver_hir_pipeline_passes.{
+    derive_static_facet_dependencies, run_static_facet_coherence_pass
+}
+use compiler.mir.{MirLowering, serialize_mir_module}
+use compiler.semantics.facet_coherence.{
+    FacetCoherenceDiagnostic, check_static_facet_coherence
+}
+
+# @inline
+fn static_binding_source() -> text:
+    "aspect debug:\n" +
+    "    facet interface Debuggable:\n" +
+    "        fn debug_name(self) -> text\n" +
+    "    facet impl CacheDebug<T: Cache>\n" +
+    "        for T\n" +
+    "        implements Debuggable\n" +
+    "        public readonly:\n" +
+    "        fn debug_name(self) -> text\n" +
+    "    bind facet Debuggable\n" +
+    "        to pc{ implements(Cache) & type(storage.cache.**) }\n" +
+    "        using CacheDebug\n" +
+    "    require facet Debuggable\n" +
+    "        on pc{ implements(Cache) & type(storage.cache.**) }\n" +
+    "on pc{ execution(* storage.cache.get(..)) } use trace before priority 4\n" +
+    "ce:\n" +
+    "    bind value = compute()\n"
+
+# @inline
+fn static_binding_pipeline_source() -> text:
+    ("aspect debug:\n" +
+        "    facet interface Debuggable:\n" +
+        "        fn debug_name(self) -> text\n" +
+        "    facet impl CacheDebug for Cache implements Debuggable public readonly:\n" +
+        "        fn debug_name(self) -> text\n" +
+        "    bind facet Debuggable to pc{ type(Cache) } using CacheDebug\n" +
+        "struct Cache:\n" +
+        "    value: i64\n" +
+        "fn kept() -> i64: 1\n")
+
+# @inline
+fn static_binding_pipeline_surfaces(
+    modules: Dict<text, Module>, sources: [SourceFile]
+) -> ModuleSurfacesByName:
+    match module_surfaces_from_modules(modules, sources):
+        case Ok(value): value
+        case Err(error):
+            expect(error).to_equal("")
+            ModuleSurfacesByName(surfaces: [], index_by_name: {})
+
+# @inline
+fn cache_descriptor() -> TypePredicateDescriptor:
+    TypePredicateDescriptor(
+        qualified_name: "storage.cache.Cache",
+        implemented_types: [],
+        supertypes: []
+    )
+
+# @inline
+fn lru_descriptor() -> TypePredicateDescriptor:
+    TypePredicateDescriptor(
+        qualified_name: "storage.cache.LruCache",
+        implemented_types: ["storage.cache.Cache"],
+        supertypes: ["storage.Entity"]
+    )
+
+# @inline
+fn has_facet_diagnostic(diagnostics: [FacetCoherenceDiagnostic], code: text) -> bool:
+    for diagnostic in diagnostics:
+        if diagnostic.code == code: return true
+    false
+
+# @inline
+fn number_debug_view(value: i64) -> text:
+    "debug:{value}"
+
+# @inline
+fn number_debug_witness() -> StaticFacetWitness<i64, text>:
+    StaticFacetWitness<i64, text>(
+        base_type_id: "example.Number",
+        facet_id: "example.Debuggable",
+        binding_id: "debug:number",
+        adapt: number_debug_view
+    )
+
+# @inline
+fn activate_number_debug(request: FacetActivationRequest) -> Result<[StaticFacetWitness<i64, text>], text>:
+    if request.base_type_id == "example.Number" and request.facet_id == "example.Debuggable":
+        return Ok([number_debug_witness()])
+    Ok([])
+
+# @inline
+fn activate_no_facet(request: FacetActivationRequest) -> Result<[StaticFacetWitness<i64, text>], text>:
+    if request.base_reference == "": return Err("base reference is required")
+    Ok([])
+
+describe "static aspect-facet binding":
+    describe "REQ-AF-001: core independence and layout stability":
+        it "should build only an attached witness plan":
+            val hir = lower_static_facets(
+                parse_static_facet_declarations(static_binding_source()).unwrap()).unwrap()
+            val result = check_static_facet_coherence(
+                hir, [cache_descriptor(), lru_descriptor()], [])
+            expect(result.diagnostics.len()).to_equal(0)
+            expect(result.plans.len()).to_equal(1)
+            expect(result.plans[0].representation).to_equal(FacetRepresentation.Attached)
+
+        it "should reject nominal introduction from the static attached slice":
+            val nominal = static_binding_source().replace(
+                "        using CacheDebug\n", "        using CacheDebug nominal static\n")
+            val hir = lower_static_facets(parse_static_facet_declarations(nominal).unwrap()).unwrap()
+            val result = check_static_facet_coherence(
+                hir, [cache_descriptor(), lru_descriptor()], [])
+            expect(has_facet_diagnostic(result.diagnostics, "E-AF005")).to_be(true)
+            expect(result.plans.len()).to_equal(0)
+
+        it "should reject a core dependency on an optional aspect declaration":
+            val optional_source = static_binding_pipeline_source()
+            val core_source = "use optional.facets.*\nfn core_value() -> i64: 1\n"
+            val optional_parsed = parse_full_frontend(
+                optional_source, "optional/facets.spl", "optional.facets",
+                Logger(level: 0))
+            val core_parsed = parse_full_frontend(
+                core_source, "core/consumer.spl", "core.consumer", Logger(level: 0))
+            var parsed_modules: Dict<text, Module> = {}
+            parsed_modules["optional.facets"] = optional_parsed
+            parsed_modules["core.consumer"] = core_parsed
+            val sources = [
+                SourceFile(path: "optional/facets.spl", content: optional_source,
+                    module_name: "optional.facets"),
+                SourceFile(path: "core/consumer.spl", content: core_source,
+                    module_name: "core.consumer")
+            ]
+            val surfaces = static_binding_pipeline_surfaces(parsed_modules, sources)
+            var optional_lowering = hirlowering_for_module("optional/facets.spl", surfaces)
+            var core_lowering = hirlowering_for_module("core/consumer.spl", surfaces)
+            var hir_modules: Dict<text, HirModule> = {}
+            hir_modules["optional.facets"] = optional_lowering.lower_module(optional_parsed)
+            hir_modules["core.consumer"] = core_lowering.lower_module(core_parsed)
+            expect(optional_lowering.errors.len()).to_equal(0)
+            expect(core_lowering.errors.len()).to_equal(0)
+            expect(derive_static_facet_dependencies(hir_modules).len()).to_equal(1)
+            val result = run_static_facet_coherence_pass(hir_modules, surfaces)
+            var saw_core_optional_error = false
+            for error in result.errors:
+                if error.contains("E-AF001"): saw_core_optional_error = true
+            expect(saw_core_optional_error).to_equal(true)
+
+    describe "REQ-AF-002: typed explicit acquisition":
+        it "should acquire a typed already-linked facet witness":
+            step("Acquire the optional facet")
+            val witness = number_debug_witness()
+            val acquired = try_facet<i64, text>(
+                7, "number:7", "example.Number", "example.Debuggable", [witness])
+            expect(acquired != nil).to_be(true)
+            expect(acquired.unwrap().view).to_equal("debug:7")
+            expect(acquired.unwrap().binding_id).to_equal("debug:number")
+
+        it "should return no facet when the typed identity is absent":
+            val witness = number_debug_witness()
+            val absent = try_facet<i64, text>(
+                7, "number:7", "example.Number", "example.Missing", [witness])
+            expect(absent == nil).to_be(true)
+
+        it "should retain the exact dynamic generation lease and lazy sidecar handle":
+            val acquired = dynamic_facet_ref<text>(
+                "number:7", "debug:7", "example.Debuggable", "debug:number",
+                FacetGenerationLease(
+                    aspect_id: "debug", generation_id: 12, token_id: 41
+                ),
+                Some(FacetSidecarHandle(handle_id: "sidecar:number:7"))
+            )
+            expect(acquired.generation_lease != nil).to_be(true)
+            expect(acquired.generation_lease.unwrap().aspect_id).to_equal("debug")
+            expect(acquired.generation_lease.unwrap().generation_id).to_equal(12)
+            expect(acquired.sidecar_handle != nil).to_be(true)
+
+        it "should activate only when optional acquisition policy permits it":
+            val acquired = facet<i64, text>(
+                7, "number:7", "example.Number", "example.Debuggable", [],
+                FacetActivationPolicy.ActivateOnRequest, activate_number_debug)
+            expect(acquired.is_ok()).to_be(true)
+            expect(acquired.unwrap() != nil).to_be(true)
+            expect(acquired.unwrap().unwrap().view).to_equal("debug:7")
+
+        it "should return typed required-facet absence without implicit activation":
+            val missing = require_facet<i64, text>(
+                7, "number:7", "example.Number", "example.Debuggable", [],
+                FacetActivationPolicy.AlreadyBoundOnly, activate_no_facet)
+            expect(missing.is_err()).to_be(true)
+            expect(missing.unwrap_err().kind == FacetAcquireErrorKind.RequiredFacetAbsent).to_be(true)
+
+        it "should reject a required binding whose implementation is incomplete":
+            val incomplete = static_binding_source().replace(
+                "        fn debug_name(self) -> text\n    bind facet",
+                "    bind facet")
+            val hir = lower_static_facets(
+                parse_static_facet_declarations(incomplete).unwrap()).unwrap()
+            val result = check_static_facet_coherence(
+                hir, [cache_descriptor(), lru_descriptor()], [])
+            expect(has_facet_diagnostic(result.diagnostics, "E-AF002")).to_be(true)
+            expect(result.plans.len()).to_equal(0)
+
+    describe "REQ-AF-003: deterministic structural selection":
+        it "should persist the driver-selected witness plan in MIR artifact metadata":
+            step("Parse facet declarations through the authoritative frontend")
+            val source = static_binding_pipeline_source()
+            val parsed = parse_full_frontend(
+                source, "facet/system_pipeline.spl", "facet.system_pipeline",
+                Logger(level: 0))
+            var parsed_modules: Dict<text, Module> = {}
+            parsed_modules["facet.system_pipeline"] = parsed
+            val sources = [SourceFile(
+                path: "facet/system_pipeline.spl", content: source,
+                module_name: "facet.system_pipeline")]
+            val surfaces = static_binding_pipeline_surfaces(parsed_modules, sources)
+            var hir_lowering = hirlowering_for_module(
+                "facet/system_pipeline.spl", surfaces)
+            val hir = hir_lowering.lower_module(parsed)
+            expect(hir_lowering.errors.len()).to_equal(0)
+
+            step("Run production driver coherence and lower its plan to MIR")
+            var hir_modules: Dict<text, HirModule> = {}
+            hir_modules["facet.system_pipeline"] = hir
+            val facet_pass = run_static_facet_coherence_pass(hir_modules, surfaces)
+            expect(facet_pass.errors.len()).to_equal(0)
+            val planned = facet_pass.modules["facet.system_pipeline"]
+            var mir_lowering = MirLowering.new(planned.symbols)
+            val mir = mir_lowering.lower_module(planned)
+            expect(mir.facet_binding_plans.len()).to_equal(1)
+
+            step("Inspect the canonical downstream metadata artifact")
+            val artifact = serialize_mir_module(mir)
+            expect(artifact).to_contain(
+                "\"facetBindings\":{\"contractVersion\":1,\"plans\":[")
+            expect(artifact).to_contain("\"implementationId\":\"CacheDebug\"")
+
+        it "should select the same implementation when base descriptors register first":
+            val hir = lower_static_facets(
+                parse_static_facet_declarations(static_binding_source()).unwrap()).unwrap()
+            val result = check_static_facet_coherence(
+                hir, [cache_descriptor(), lru_descriptor()], [])
+            expect(result.diagnostics.len()).to_equal(0)
+            expect(result.plans[0].implementation_id).to_equal("CacheDebug")
+            expect(evaluate_type_predicate(
+                result.plans[0].target_predicate, lru_descriptor())).to_be(true)
+
+        it "should select the same implementation when the aspect plan is evaluated before base order":
+            val hir = lower_static_facets(
+                parse_static_facet_declarations(static_binding_source()).unwrap()).unwrap()
+            val result = check_static_facet_coherence(
+                hir, [lru_descriptor(), cache_descriptor()], [])
+            expect(result.diagnostics.len()).to_equal(0)
+            expect(result.plans[0].implementation_id).to_equal("CacheDebug")
+            expect(evaluate_type_predicate(
+                result.plans[0].target_predicate, lru_descriptor())).to_be(true)
+
+        it "should reject ambiguous single-provider bindings":
+            val duplicate = static_binding_source() +
+                "bind facet Debuggable to pc{ implements(Cache) } using CacheDebug\n"
+            val hir = lower_static_facets(
+                parse_static_facet_declarations(duplicate).unwrap()).unwrap()
+            val result = check_static_facet_coherence(
+                hir, [cache_descriptor(), lru_descriptor()], [])
+            expect(has_facet_diagnostic(result.diagnostics, "E-AF003")).to_be(true)
+
+        it "should fail closed for an ambiguous short selector name":
+            val alternate = TypePredicateDescriptor(
+                qualified_name: "alternate.Cache",
+                implemented_types: [],
+                supertypes: []
+            )
+            val hir = lower_static_facets(
+                parse_static_facet_declarations(static_binding_source()).unwrap()).unwrap()
+            val result = check_static_facet_coherence(
+                hir, [cache_descriptor(), lru_descriptor(), alternate], [])
+            expect(has_facet_diagnostic(result.diagnostics, "E-AF004")).to_be(true)
+            expect(result.plans.len()).to_equal(0)
+
+    describe "REQ-AF-009: public capability boundary":
+        it "should publish public-readonly access in every accepted plan":
+            val hir = lower_static_facets(
+                parse_static_facet_declarations(static_binding_source()).unwrap()).unwrap()
+            val result = check_static_facet_coherence(
+                hir, [cache_descriptor(), lru_descriptor()], [])
+            expect(result.diagnostics.len()).to_equal(0)
+            expect(result.plans[0].access).to_equal(FacetAccess.PublicReadonly)
+
+        it "should reject a facet implementation without the V1 public-readonly capability":
+            val private_access = static_binding_source().replace(" public readonly", " private mutable")
+            val parsed = parse_static_facet_declarations(private_access)
+            expect(parsed.is_err()).to_be(true)
+            expect(parsed.unwrap_err()).to_contain("public readonly")
+
+    describe "REQ-AF-010: existing AOP preservation":
+        it "should leave existing advice and CE bind syntax outside facet parsing":
+            val parsed = parse_static_facet_declarations(static_binding_source())
+            expect(parsed.is_ok()).to_be(true)
+            val ast = parsed.unwrap()
+            expect(ast.interfaces.len()).to_equal(1)
+            expect(ast.implementations.len()).to_equal(1)
+            expect(ast.bindings.len()).to_equal(1)
+            expect(ast.requirements.len()).to_equal(1)
+
+        it "should accept a module containing only established AOP and CE forms without inventing facets":
+            val established =
+                "on pc{ execution(* storage.cache.get(..)) } use trace before priority 4\n" +
+                "ce:\n" +
+                "    bind value = compute()\n"
+            val parsed = parse_static_facet_declarations(established)
+            expect(parsed.is_ok()).to_be(true)
+            expect(parsed.unwrap().interfaces.len()).to_equal(0)
+            expect(parsed.unwrap().bindings.len()).to_equal(0)

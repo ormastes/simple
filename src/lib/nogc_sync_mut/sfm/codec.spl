@@ -25,6 +25,7 @@ use std.sfm.manifest.{
     security_level_to_byte,
     security_level_from_byte
 }
+use std.common.encoding.utf8.{char_from_codepoint}
 
 extern fn rt_text_to_bytes(s: text) -> [u8]
 
@@ -140,25 +141,25 @@ fn decode_utf8(buf: [u8], start: i32, n: i32) -> text:
     while i < n:
         val b0: i64 = buf[start + i] as i64
         if b0 < 128:
-            out = out + b0.chr()
+            out = out + char_from_codepoint(b0)
             i = i + 1
         elif b0 >= 194 and b0 < 224 and i + 1 < n and utf8_is_cont(buf[start + i + 1] as i64):
             val b1: i64 = buf[start + i + 1] as i64
-            out = out + (((b0 & 31) << 6) | (b1 & 63)).chr()
+            out = out + char_from_codepoint(((b0 & 31) << 6) | (b1 & 63))
             i = i + 2
         elif b0 >= 224 and b0 < 240 and i + 2 < n and utf8_is_cont(buf[start + i + 1] as i64) and utf8_is_cont(buf[start + i + 2] as i64):
             val b1: i64 = buf[start + i + 1] as i64
             val b2: i64 = buf[start + i + 2] as i64
-            out = out + (((b0 & 15) << 12) | ((b1 & 63) << 6) | (b2 & 63)).chr()
+            out = out + char_from_codepoint(((b0 & 15) << 12) | ((b1 & 63) << 6) | (b2 & 63))
             i = i + 3
         elif b0 >= 240 and b0 < 245 and i + 3 < n and utf8_is_cont(buf[start + i + 1] as i64) and utf8_is_cont(buf[start + i + 2] as i64) and utf8_is_cont(buf[start + i + 3] as i64):
             val b1: i64 = buf[start + i + 1] as i64
             val b2: i64 = buf[start + i + 2] as i64
             val b3: i64 = buf[start + i + 3] as i64
-            out = out + (((b0 & 7) << 18) | ((b1 & 63) << 12) | ((b2 & 63) << 6) | (b3 & 63)).chr()
+            out = out + char_from_codepoint(((b0 & 7) << 18) | ((b1 & 63) << 12) | ((b2 & 63) << 6) | (b3 & 63))
             i = i + 4
         else:
-            out = out + 65533.chr()
+            out = out + char_from_codepoint(65533)
             i = i + 1
     return out
 
@@ -167,6 +168,75 @@ fn decode_str(buf: [u8], at: i32) -> (text, i32):
     val n: i32 = read_u32_le(buf, at)
     val s: text = decode_utf8(buf, at + 4, n)
     return (s, at + 4 + n)
+
+# Strict bounded decoder for callers adding new SFM outer kinds. The original
+# SFM1 decoder below intentionally keeps its established compatibility path;
+# SFM2 owners use this function so malformed nested lengths fail closed before
+# any manifest field is exposed.
+fn decode_manifest_str(blob: [u8], at: i32) -> Result<(text, i32), text>:
+    val limit: i32 = blob.len() as i32
+    if at < 0 or at > limit or limit - at < 4:
+        return Err("sfm: truncated manifest string length")
+    val n: i32 = read_u32_le(blob, at)
+    if n < 0 or n > limit - at - 4:
+        return Err("sfm: invalid manifest string length")
+    return Ok((decode_utf8(blob, at + 4, n), at + 4 + n))
+
+# Decode exactly one canonical FeatureManifest blob produced by
+# `encode_manifest_blob`. Bounds and enum bytes are strict for new SFM kinds.
+fn decode_manifest_blob(blob: [u8]) -> Result<FeatureManifest, text>:
+    val limit: i32 = blob.len() as i32
+    if limit <= 0 or limit > 1048576:
+        return Err("sfm: manifest size limit exceeded")
+    val name_result = decode_manifest_str(blob, 0)?
+    val name: text = name_result[0]
+    val version_result = decode_manifest_str(blob, name_result[1])?
+    val version: text = version_result[0]
+    var off: i32 = version_result[1]
+    if off > limit or limit - off < 5:
+        return Err("sfm: truncated manifest metadata")
+    val security_byte: i32 = blob[off] as i32
+    if security_byte != 0 and security_byte != 1:
+        return Err("sfm: invalid security level")
+    val level: SfmSecurityLevel = security_level_from_byte(security_byte)
+    off = off + 1
+    val layer_count: i32 = read_u32_le(blob, off)
+    off = off + 4
+    if layer_count < 0 or layer_count > 4096:
+        return Err("sfm: manifest layer count limit exceeded")
+
+    var layers: [LayerDescriptor] = []
+    var i: i32 = 0
+    while i < layer_count:
+        if off > limit or limit - off < 2:
+            return Err("sfm: truncated layer metadata")
+        val kind_byte: i32 = blob[off] as i32
+        val privileged_byte: i32 = blob[off + 1] as i32
+        if kind_byte < 0 or kind_byte > 4:
+            return Err("sfm: invalid layer kind")
+        if privileged_byte != 0 and privileged_byte != 1:
+            return Err("sfm: invalid privileged marker")
+        off = off + 2
+        val role_result = decode_manifest_str(blob, off)?
+        val role: text = role_result[0]
+        val entry_result = decode_manifest_str(blob, role_result[1])?
+        val entry_symbol: text = entry_result[0]
+        off = entry_result[1]
+        layers.append(LayerDescriptor(
+            role: role,
+            kind: layer_kind_from_byte(kind_byte),
+            entry_symbol: entry_symbol,
+            privileged: privileged_byte == 1
+        ))
+        i = i + 1
+    if off != limit:
+        return Err("sfm: trailing manifest bytes")
+    return Ok(FeatureManifest(
+        name: name,
+        version: version,
+        security_level: level,
+        layers: layers
+    ))
 
 # AC-1 / AC-2: decode the full container -> (manifest, embedded SMF bytes).
 fn decode_sfm(bytes: [u8]) -> Result<(FeatureManifest, [u8]), text>:

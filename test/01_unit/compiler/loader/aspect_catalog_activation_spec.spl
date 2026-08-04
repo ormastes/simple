@@ -1,0 +1,278 @@
+# @req REQ-AF-003 REQ-AF-006 REQ-AF-007 REQ-AF-008 NFR-AF-004
+# @cover src/compiler/99.loader/loader/aspect_catalog.spl 80%
+# @cover src/compiler/99.loader/loader/aspect_activation.spl 80%
+
+use std.spec.*
+use std.sfm.aspect_pack.{AspectPackCompression, AspectPackPayload, encode_aspect_pack}
+use std.sfm.manifest.{FeatureManifest, SfmSecurityLevel}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.loader.loader.aspect_catalog.{AspectBindingSummary, AspectCatalogEntry, AspectCatalog}
+use compiler.loader.loader.aspect_pack_provider.{AspectPackProviderKey, AspectPackProvider, AspectPackProviderCache}
+use compiler.loader.loader.aspect_activation.{AspectActivationRequest, AspectActivationCounters, AspectActivationCoordinator}
+use compiler.loader.loader.module_loader.{LoadResult, moduleloader_with_defaults, moduleloader_load, moduleloader_unload}
+use os.smf.dynsmf_session.{DynSmfPolicy, dynsmf_session_new}
+use os.smf.smf_generation.{LifecycleManager}
+
+fn activation_minimal_smf(marker: i32) -> [u8]:
+    var out: [u8] = []
+    out.push(83)
+    out.push(77)
+    out.push(70)
+    out.push(0)
+    out.push(1)
+    out.push(1)
+    out.push(1)
+    out.push(marker as u8)
+    while out.len() < 20:
+        out.push(0)
+    out.push(128)
+    while out.len() < 28:
+        out.push(0)
+    out.push(128)
+    while out.len() < 128:
+        out.push(0)
+    out
+
+fn activation_pack() -> [u8]:
+    val manifest = FeatureManifest(name: "diagnostics-pack", version: "2.0.0", security_level: SfmSecurityLevel.Trusted, layers: [])
+    encode_aspect_pack(manifest, [
+        AspectPackPayload(module_id: "debug.base", aspect_id: "base.aspect", compression: AspectPackCompression.None, uncompressed_size: 128, dictionary_id: 0, stored_bytes: activation_minimal_smf(0)),
+        AspectPackPayload(module_id: "debug.cache", aspect_id: "debug.aspect", compression: AspectPackCompression.None, uncompressed_size: 128, dictionary_id: 0, stored_bytes: activation_minimal_smf(0))
+    ]).unwrap()
+
+fn activation_binding(id: text) -> AspectBindingSummary:
+    AspectBindingSummary(
+        binding_id: id,
+        concrete_type_id: "storage.cache.LruCache",
+        business_interface_id: "",
+        facet_interface_id: "Debuggable",
+        facet_contract_abi_hash: "facet-abi-1",
+        witness_symbol: id + "_witness",
+        capabilities: ["facet.read"])
+
+fn activation_entry(aspect_id: text, module_id: text, module_digest: text, dependencies: [text], policy: text, target: text) -> AspectCatalogEntry:
+    AspectCatalogEntry(
+        aspect_id: aspect_id,
+        pack_id: "diagnostics-pack",
+        pack_path: "packs/diagnostics.sfm",
+        module_id: module_id,
+        pack_digest: sha256_u8_hex(activation_pack()),
+        module_digest: module_digest,
+        core_public_abi_hash: module_digest,
+        core_layout_abi_hash: module_digest,
+        target: target,
+        variant_fingerprint: "variant-a",
+        runtime_abi: "simple-runtime-1",
+        dependencies: dependencies,
+        activation_policy: policy,
+        binding_summaries: [activation_binding(aspect_id + ".binding")],
+        capabilities: ["facet.read"]
+    )
+
+fn activation_catalog(main_digest: text) -> Result<AspectCatalog, text>:
+    AspectCatalog.create(7, "x86_64-unknown-linux-gnu", "variant-a", "simple-runtime-1", [
+        activation_entry("base.aspect", "debug.base", sha256_u8_hex(activation_minimal_smf(0)), [], "lazy_facet", "x86_64-unknown-linux-gnu"),
+        activation_entry("debug.aspect", "debug.cache", main_digest, ["base.aspect"], "lazy_facet", "x86_64-unknown-linux-gnu")
+    ])
+
+fn activation_provider() -> AspectPackProvider:
+    val pack = activation_pack()
+    val core_hash = sha256_u8_hex(activation_minimal_smf(0))
+    val key = AspectPackProviderKey(pack_id: "diagnostics-pack", pack_digest: sha256_u8_hex(pack), catalog_generation: 7, target: "x86_64-unknown-linux-gnu", variant_fingerprint: "variant-a", runtime_abi: "simple-runtime-1", core_public_abi_hash: core_hash, core_layout_abi_hash: core_hash)
+    AspectPackProvider.from_bytes(key, pack).unwrap()
+
+fn activation_coordinator(catalog: AspectCatalog, disabled: bool) -> AspectActivationCoordinator:
+    val policy = DynSmfPolicy(disabled_all: disabled, disabled_ids: [], source: "test")
+    AspectActivationCoordinator.create(catalog, dynsmf_session_new("aspect-test", policy), LifecycleManager.new_manager()).unwrap()
+
+fn activation_request(id: text) -> AspectActivationRequest:
+    AspectActivationRequest(aspect_id: "debug.aspect", request_id: id, catalog_generation: 7)
+
+fn expect_activation_counters_equal(actual: AspectActivationCounters, expected: AspectActivationCounters):
+    expect(actual.pack_opens).to_equal(expected.pack_opens)
+    expect(actual.selected_stored_bytes).to_equal(expected.selected_stored_bytes)
+    expect(actual.selected_decoded_bytes).to_equal(expected.selected_decoded_bytes)
+    expect(actual.executable_mappings).to_equal(expected.executable_mappings)
+    expect(actual.sidecar_allocations).to_equal(expected.sidecar_allocations)
+    expect(actual.runtime_scans).to_equal(expected.runtime_scans)
+
+describe "Aspect catalog and atomic facet activation":
+    it "admits registered SMF bytes without a filesystem-backed reader":
+        val loader = moduleloader_with_defaults()
+        expect(loader.provider.register_module_bytes("virtual:no-filesystem:7", activation_minimal_smf(0)).is_ok()).to_equal(true)
+
+        val load_result = moduleloader_load(loader, "virtual:no-filesystem:7")
+
+        match load_result:
+            case LoadResult.Success(module):
+                expect(module.reader).to_be_nil()
+                expect(loader.modules.has("virtual:no-filesystem:7")).to_equal(true)
+            case _:
+                fail("registered memory SMF unexpectedly required a filesystem/getter reader")
+        moduleloader_unload(loader, "virtual:no-filesystem:7")
+
+    it "fails closed when mapped modules do not export catalog witness symbols":
+        val catalog = activation_catalog(sha256_u8_hex(activation_minimal_smf(0))).unwrap()
+        val coordinator = activation_coordinator(catalog, false)
+        val loader = moduleloader_with_defaults()
+
+        val cache = AspectPackProviderCache.create(2, 2, 2).unwrap()
+        val result = coordinator.activate_with_loader(activation_provider(), activation_request("mapped-owner"), loader, cache)
+
+        expect(result.status).to_equal("failed")
+        expect(result.reason).to_contain("witness symbol is missing")
+        expect(result.counters.executable_mappings).to_equal(0)
+        expect(loader.modules.keys().len()).to_equal(0)
+        expect(loader.provider.registered_module_count()).to_equal(0)
+        expect(result.coordinator.published.keys().len()).to_equal(0)
+        expect(cache.chunk_count()).to_equal(2)
+        expect(cache.get_stats().chunk_misses).to_equal(2)
+
+    it "rolls back earlier loader mappings when a later virtual owner collides":
+        val catalog = activation_catalog(sha256_u8_hex(activation_minimal_smf(0))).unwrap()
+        val coordinator = activation_coordinator(catalog, false)
+        val loader = moduleloader_with_defaults()
+        expect(loader.provider.register_module_bytes("diagnostics-pack:debug.cache:7", activation_minimal_smf(0)).is_ok()).to_equal(true)
+
+        val cache = AspectPackProviderCache.create(2, 2, 2).unwrap()
+        val result = coordinator.activate_with_loader(activation_provider(), activation_request("rollback-owner"), loader, cache)
+
+        expect(result.status).to_equal("failed")
+        expect(result.reason).to_contain("already registered")
+        expect(loader.modules.has("diagnostics-pack:debug.base:7")).to_equal(false)
+        expect(loader.provider.has_registered_module("diagnostics-pack:debug.base:7")).to_equal(false)
+        expect(loader.provider.has_registered_module("diagnostics-pack:debug.cache:7")).to_equal(true)
+        expect(result.coordinator.published.keys().len()).to_equal(0)
+
+    it "stages the dependency closure and publishes one existing lifecycle generation":
+        step("Inspect the application Aspect Catalog")
+        val catalog = activation_catalog(sha256_u8_hex(activation_minimal_smf(0))).unwrap()
+        step("Acquire the optional facet")
+        val coordinator = activation_coordinator(catalog, false)
+        expect(coordinator.counters.pack_opens).to_equal(0)
+        expect(coordinator.counters.selected_stored_bytes).to_equal(0)
+        expect(coordinator.counters.selected_decoded_bytes).to_equal(0)
+        expect(coordinator.counters.executable_mappings).to_equal(0)
+        expect(coordinator.counters.sidecar_allocations).to_equal(0)
+        expect(coordinator.counters.runtime_scans).to_equal(0)
+        step("Load only the selected SMF module closure")
+        val result = coordinator.activate(activation_provider(), activation_request("owner"), true, true)
+        step("Publish the facet generation atomically")
+
+        expect(result.status).to_equal("published")
+        expect(result.staged_count).to_equal(2)
+        expect(result.coordinator.lifecycle.active_generation).to_equal(1)
+        expect(result.coordinator.dynsmf_session.generation).to_equal(7)
+        expect(result.coordinator.published["debug.aspect"].owners.len()).to_equal(2)
+        expect(result.counters.pack_opens).to_equal(0)
+        expect(result.counters.selected_stored_bytes).to_equal(256)
+        expect(result.counters.selected_decoded_bytes).to_equal(256)
+        expect(result.counters.executable_mappings).to_equal(0)
+        expect(result.counters.sidecar_allocations).to_equal(0)
+        expect(result.counters.runtime_scans).to_equal(0)
+
+    it "leaves the exact prior generation unpublished when validation fails":
+        val catalog = activation_catalog(sha256_u8_hex(activation_minimal_smf(0))).unwrap()
+        val before = activation_coordinator(catalog, false)
+        val result = before.activate(activation_provider(), activation_request("owner"), true, false)
+
+        expect(result.status).to_equal("failed")
+        expect(result.coordinator.lifecycle.active_generation).to_equal(before.lifecycle.active_generation)
+        expect(result.coordinator.dynsmf_session.generation).to_equal(before.dynsmf_session.generation)
+        expect(result.coordinator.published.keys().len()).to_equal(0)
+        expect(result.coordinator.in_flight.keys().len()).to_equal(0)
+        expect_activation_counters_equal(result.counters, before.counters)
+
+    it "fails closed when another lifecycle candidate owns the publication slot":
+        val catalog = activation_catalog(sha256_u8_hex(activation_minimal_smf(0))).unwrap()
+        val coordinator = activation_coordinator(catalog, false)
+        coordinator.lifecycle = coordinator.lifecycle.register_candidate("other-owner", 99)
+
+        val result = coordinator.activate(
+            activation_provider(), activation_request("owner-collision"), true, true)
+
+        expect(result.status).to_equal("failed")
+        expect(result.reason).to_contain("exact activation lifecycle generation")
+        expect(result.coordinator.published.keys().len()).to_equal(0)
+        expect(result.coordinator.lifecycle.generation_state_for("other-owner", 99)).to_equal("candidate")
+
+    it "coalesces a concurrent same-key follower and a later active request deterministically":
+        val catalog = activation_catalog(sha256_u8_hex(activation_minimal_smf(0))).unwrap()
+        val base = activation_coordinator(catalog, false)
+        val reserved = base.reserve(activation_request("owner")).unwrap()
+        val follower = reserved.activate(activation_provider(), activation_request("follower"), true, true)
+        expect(follower.status).to_equal("coalesced_inflight")
+        expect(follower.coordinator.lifecycle.active_generation).to_equal(0)
+        expect_activation_counters_equal(follower.counters, reserved.counters)
+
+        val owner = reserved.activate(activation_provider(), activation_request("owner"), true, true)
+        expect(owner.status).to_equal("published")
+        val active_follower = owner.coordinator.activate(activation_provider(), activation_request("follower"), true, true)
+        expect(active_follower.status).to_equal("coalesced_active")
+        expect(active_follower.coordinator.lifecycle.active_generation).to_equal(1)
+        expect_activation_counters_equal(active_follower.counters, owner.counters)
+
+    it "rejects duplicate routes cycles mismatches and invalid policies before publication":
+        val digest = sha256_u8_hex(activation_minimal_smf(0))
+        val duplicate = AspectCatalog.create(7, "x86_64-unknown-linux-gnu", "variant-a", "simple-runtime-1", [
+            activation_entry("debug.aspect", "debug.base", digest, [], "lazy_facet", "x86_64-unknown-linux-gnu"),
+            activation_entry("debug.aspect", "debug.cache", digest, [], "lazy_facet", "x86_64-unknown-linux-gnu")
+        ])
+        expect(duplicate.is_err()).to_equal(true)
+
+        val cycle = AspectCatalog.create(7, "x86_64-unknown-linux-gnu", "variant-a", "simple-runtime-1", [
+            activation_entry("base.aspect", "debug.base", digest, ["debug.aspect"], "lazy_facet", "x86_64-unknown-linux-gnu"),
+            activation_entry("debug.aspect", "debug.cache", digest, ["base.aspect"], "lazy_facet", "x86_64-unknown-linux-gnu")
+        ])
+        expect(cycle.is_err()).to_equal(true)
+        expect(AspectCatalog.create(7, "x86_64-unknown-linux-gnu", "variant-a", "simple-runtime-1", [activation_entry("debug.aspect", "debug.cache", digest, [], "invalid", "x86_64-unknown-linux-gnu")]).is_err()).to_equal(true)
+        expect(AspectCatalog.create(7, "x86_64-unknown-linux-gnu", "variant-a", "simple-runtime-1", [activation_entry("debug.aspect", "debug.cache", digest, [], "lazy_facet", "aarch64-unknown-linux-gnu")]).is_err()).to_equal(true)
+
+        var escaping_path = activation_entry("debug.aspect", "debug.cache", digest, [], "lazy_facet", "x86_64-unknown-linux-gnu")
+        escaping_path.pack_path = "../diagnostics.sfm"
+        val invalid_path = AspectCatalog.create(7, "x86_64-unknown-linux-gnu", "variant-a", "simple-runtime-1", [escaping_path])
+        expect(invalid_path.is_err()).to_equal(true)
+        expect(invalid_path.unwrap_err()).to_contain("deployed-image-relative")
+
+        var missing_layout_hash = activation_entry("debug.aspect", "debug.cache", digest, [], "lazy_facet", "x86_64-unknown-linux-gnu")
+        missing_layout_hash.core_layout_abi_hash = ""
+        val invalid_layout_hash = AspectCatalog.create(7, "x86_64-unknown-linux-gnu", "variant-a", "simple-runtime-1", [missing_layout_hash])
+        expect(invalid_layout_hash.is_err()).to_equal(true)
+        expect(invalid_layout_hash.unwrap_err()).to_contain("lowercase SHA-256")
+
+    it "fails closed on a cryptographic module digest mismatch without advancing generation":
+        step("Reject an invalid aspect pack")
+        val wrong_digest = "0000000000000000000000000000000000000000000000000000000000000000"
+        val catalog = activation_catalog(wrong_digest).unwrap()
+        val before = activation_coordinator(catalog, false)
+        val result = before.activate(activation_provider(), activation_request("owner"), true, true)
+
+        expect(result.status).to_equal("failed")
+        expect(result.reason).to_contain("SHA-256 digest mismatch")
+        expect(result.coordinator.lifecycle.active_generation).to_equal(0)
+        expect(result.coordinator.dynsmf_session.generation).to_equal(1)
+        expect(result.coordinator.published.keys().len()).to_equal(0)
+        expect(result.coordinator.in_flight.keys().len()).to_equal(0)
+        expect_activation_counters_equal(result.counters, before.counters)
+
+    it "preserves dynSMF disable policy and rejects stale generations":
+        val catalog = activation_catalog(sha256_u8_hex(activation_minimal_smf(0))).unwrap()
+        val disabled = activation_coordinator(catalog, true)
+        val result = disabled.activate(activation_provider(), activation_request("owner"), true, true)
+        expect(result.status).to_equal("failed")
+        expect(result.reason).to_contain("dynSMF policy")
+        expect(result.coordinator.lifecycle.active_generation).to_equal(0)
+        expect(result.coordinator.dynsmf_session.generation).to_equal(disabled.dynsmf_session.generation)
+        expect(result.coordinator.published.keys().len()).to_equal(0)
+        expect(result.coordinator.in_flight.keys().len()).to_equal(0)
+        expect_activation_counters_equal(result.counters, disabled.counters)
+
+        val stale = AspectActivationRequest(aspect_id: "debug.aspect", request_id: "stale", catalog_generation: 6)
+        val stale_result = disabled.activate(activation_provider(), stale, true, true)
+        expect(stale_result.status).to_equal("failed")
+        expect(stale_result.reason).to_contain("stale")
+        expect(stale_result.coordinator.lifecycle.active_generation).to_equal(disabled.lifecycle.active_generation)
+        expect(stale_result.coordinator.dynsmf_session.generation).to_equal(disabled.dynsmf_session.generation)
+        expect(stale_result.coordinator.published.keys().len()).to_equal(0)
+        expect(stale_result.coordinator.in_flight.keys().len()).to_equal(0)
+        expect_activation_counters_equal(stale_result.counters, disabled.counters)

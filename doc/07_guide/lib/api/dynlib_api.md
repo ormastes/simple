@@ -113,6 +113,29 @@ the stub described in
 `stub_artifact` and is never loaded regardless of how fresh its sidecars are.
 `--dynsmf-status` prints one `id:reason:ready=` line per entry.
 
+## Optional facet aspect packs
+
+Optional facets use SFM outer packaging; ordinary SMF remains unchanged. An
+`SFM2` aspect pack contains the canonical feature manifest, a bounded
+uncompressed directory, and independently framed opaque SMF images. The
+application `AspectCatalog` resolves an aspect ID directly to one exact
+pack/module digest, target, variant fingerprint, runtime ABI, dependencies,
+activation policy, binding summaries, and capabilities. Runtime does not scan
+source roots, `variants/`, directories, or unrelated packs.
+
+`AspectPackProvider` verifies the pack SHA-256, validates the SFM2 directory,
+opens only the selected frame, performs bounded optional Zstd decompression,
+verifies the selected module SHA-256, and delegates parsing to the existing
+`ObjectProvider.reader_from_bytes`/`SmfReaderMemory` seam. `try_facet<T>` is
+no-I/O; `facet<T>` may request activation only under explicit policy;
+`require_facet<T>` returns a typed error when no binding can be published.
+
+Activation staging composes the existing dynSMF policy/evidence and SMF
+generation contracts. A catalog, digest, ABI, dependency, relocation, or
+binding failure leaves the prior published generation unchanged. Catalog
+publication alone is not proof that executable pages were mapped or that
+dynamic advice patchpoints were installed.
+
 ## Current Limitations
 
 - **Libraries must be pre-registered**: `dylib_async_open` calls
@@ -149,4 +172,6 @@ bin/simple test test/01_unit/os/posix/dynlib_spec.spl
 bin/simple test test/01_unit/os/posix/dylib_async_spec.spl
 bin/simple test test/01_unit/os/smf/smf_dynlib_spec.spl
 bin/simple test test/02_integration/app/simple/dynsmf_autoload_policy_spec.spl
+bin/simple test test/03_system/stdlib/dynload/aspect_pack_selective_loading_spec.spl
+bin/simple test test/03_system/app/simple/aspect_catalog_activation_spec.spl
 ```

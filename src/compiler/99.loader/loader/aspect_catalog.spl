@@ -1,0 +1,201 @@
+# Deterministic application aspect catalog.
+#
+# The catalog contains only build-resolved IDs and exact artifact identity.
+# Runtime code performs ID lookups; it never reevaluates source roots, variants,
+# or configuration precedence.
+
+struct AspectBindingSummary:
+    binding_id: text
+    # Exactly one target identity is present. Concrete targets bind one known
+    # type; business-interface targets remain open-world registry rules.
+    concrete_type_id: text
+    business_interface_id: text
+    facet_interface_id: text
+    facet_contract_abi_hash: text
+    witness_symbol: text
+    capabilities: [text]
+
+struct AspectCatalogEntry:
+    aspect_id: text
+    pack_id: text
+    # Canonical deployed-image-relative route. Runtime owners join this exact
+    # path to the application image root; they never search directories.
+    pack_path: text
+    module_id: text
+    pack_digest: text
+    module_digest: text
+    core_public_abi_hash: text
+    core_layout_abi_hash: text
+    target: text
+    variant_fingerprint: text
+    runtime_abi: text
+    dependencies: [text]
+    activation_policy: text
+    binding_summaries: [AspectBindingSummary]
+    capabilities: [text]
+
+struct AspectCatalog:
+    generation: i64
+    target: text
+    variant_fingerprint: text
+    runtime_abi: text
+    entries: [AspectCatalogEntry]
+
+fn aspect_catalog_text_unique(values: [text]) -> bool:
+    var i: i64 = 0
+    while i < values.len():
+        if values[i] == "":
+            return false
+        var j: i64 = 0
+        while j < i:
+            if values[j] == values[i]:
+                return false
+            j = j + 1
+        i = i + 1
+    true
+
+fn aspect_catalog_hex_digest(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var i: i64 = 0
+    while i < value.len():
+        val c = value.char_at(i)
+        val decimal = c >= "0" and c <= "9"
+        val lower_hex = c >= "a" and c <= "f"
+        if not decimal and not lower_hex:
+            return false
+        i = i + 1
+    true
+
+fn aspect_catalog_policy_valid(policy: text) -> bool:
+    policy == "excluded" or policy == "startup" or policy == "lazy_facet" or policy == "manual"
+
+fn aspect_catalog_pack_path_valid(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.starts_with("\\") or path.contains(":") or path.contains("\\"):
+        return false
+    for segment in path.split("/"):
+        if segment == "" or segment == "." or segment == "..":
+            return false
+    true
+
+fn aspect_catalog_contains_entry(entries: [AspectCatalogEntry], aspect_id: text) -> bool:
+    for entry in entries:
+        if entry.aspect_id == aspect_id:
+            return true
+    false
+
+fn aspect_catalog_contains_text(values: [text], wanted: text) -> bool:
+    for value in values:
+        if value == wanted:
+            return true
+    false
+
+fn aspect_catalog_validate_binding(entry: AspectCatalogEntry, summary: AspectBindingSummary) -> Result<(), text>:
+    if summary.binding_id == "" or summary.facet_interface_id == "" or summary.facet_contract_abi_hash == "" or summary.witness_symbol == "":
+        return Err("E-AF002 incomplete facet binding summary for " + entry.aspect_id)
+    val concrete_target = summary.concrete_type_id != ""
+    val business_target = summary.business_interface_id != ""
+    if concrete_target == business_target:
+        return Err("E-AF002 facet binding requires exactly one concrete or business-interface target")
+    if not aspect_catalog_text_unique(summary.capabilities):
+        return Err("E-AF006 duplicate or empty binding capability for " + summary.binding_id)
+    for capability in summary.capabilities:
+        if not aspect_catalog_contains_text(entry.capabilities, capability):
+            return Err("E-AF006 binding capability is not granted by aspect " + entry.aspect_id)
+    Ok(())
+
+fn aspect_catalog_validate_entry(catalog: AspectCatalog, entry: AspectCatalogEntry) -> Result<(), text>:
+    if entry.aspect_id == "" or entry.pack_id == "" or entry.module_id == "":
+        return Err("E-APACK001 catalog route identity is empty")
+    if not aspect_catalog_pack_path_valid(entry.pack_path):
+        return Err("E-APACK001 catalog pack path must be canonical and deployed-image-relative")
+    if not aspect_catalog_hex_digest(entry.pack_digest) or not aspect_catalog_hex_digest(entry.module_digest) or
+        not aspect_catalog_hex_digest(entry.core_public_abi_hash) or not aspect_catalog_hex_digest(entry.core_layout_abi_hash):
+        return Err("E-APACK003 catalog route requires lowercase SHA-256 digests")
+    if entry.target != catalog.target or entry.runtime_abi != catalog.runtime_abi:
+        return Err("E-APACK002 catalog route target or runtime ABI mismatch")
+    if entry.variant_fingerprint != catalog.variant_fingerprint:
+        return Err("E-APACK005 catalog route variant fingerprint mismatch")
+    if not aspect_catalog_policy_valid(entry.activation_policy):
+        return Err("E-APACK001 invalid aspect activation policy")
+    if not aspect_catalog_text_unique(entry.dependencies):
+        return Err("E-APACK006 duplicate or empty aspect dependency")
+    if not aspect_catalog_text_unique(entry.capabilities):
+        return Err("E-AF006 duplicate or empty aspect capability")
+    if entry.binding_summaries.len() == 0:
+        return Err("E-AF002 aspect has no binding summary")
+
+    var binding_ids: [text] = []
+    for summary in entry.binding_summaries:
+        if binding_ids.contains(summary.binding_id):
+            return Err("E-AF003 duplicate facet binding ID")
+        binding_ids.push(summary.binding_id)
+        aspect_catalog_validate_binding(entry, summary)?
+    Ok(())
+
+fn aspect_catalog_validate_unique_routes(entries: [AspectCatalogEntry]) -> Result<(), text>:
+    var i: i64 = 0
+    while i < entries.len():
+        var j: i64 = 0
+        while j < i:
+            if entries[i].aspect_id == entries[j].aspect_id:
+                return Err("E-AF003 duplicate aspect catalog route")
+            if entries[i].pack_id == entries[j].pack_id and entries[i].module_id == entries[j].module_id:
+                return Err("E-APACK001 duplicate pack/module catalog route")
+            j = j + 1
+        i = i + 1
+    Ok(())
+
+fn aspect_catalog_validate_dependencies(entries: [AspectCatalogEntry]) -> Result<(), text>:
+    for entry in entries:
+        for dependency in entry.dependencies:
+            if dependency == entry.aspect_id or not aspect_catalog_contains_entry(entries, dependency):
+                return Err("E-APACK006 missing or self-referential aspect dependency")
+
+    # Deterministic topological elimination.  No source traversal or hash-map
+    # iteration order participates in the result.
+    var resolved: [text] = []
+    while resolved.len() < entries.len():
+        var progressed = false
+        for entry in entries:
+            if resolved.contains(entry.aspect_id):
+                continue
+            var ready = true
+            for dependency in entry.dependencies:
+                if not resolved.contains(dependency):
+                    ready = false
+            if ready:
+                resolved.push(entry.aspect_id)
+                progressed = true
+        if not progressed:
+            return Err("E-APACK007 aspect activation dependency cycle")
+    Ok(())
+
+impl AspectCatalog:
+    static fn create(generation: i64, target: text, variant_fingerprint: text, runtime_abi: text, entries: [AspectCatalogEntry]) -> Result<AspectCatalog, text>:
+        if generation <= 0 or target == "" or variant_fingerprint == "" or runtime_abi == "":
+            return Err("E-APACK001 invalid catalog generation or compatibility identity")
+        if entries.len() == 0:
+            return Err("E-APACK001 aspect catalog is empty")
+        val catalog = AspectCatalog(
+            generation: generation,
+            target: target,
+            variant_fingerprint: variant_fingerprint,
+            runtime_abi: runtime_abi,
+            entries: entries
+        )
+        aspect_catalog_validate_unique_routes(entries)?
+        for entry in entries:
+            aspect_catalog_validate_entry(catalog, entry)?
+        aspect_catalog_validate_dependencies(entries)?
+        Ok(catalog)
+
+    fn find(aspect_id: text) -> Result<AspectCatalogEntry, text>:
+        for entry in self.entries:
+            if entry.aspect_id == aspect_id:
+                return Ok(entry)
+        Err("E-APACK006 aspect is absent from application catalog")
+
+export AspectBindingSummary
+export AspectCatalogEntry
+export AspectCatalog

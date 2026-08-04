@@ -1,0 +1,108 @@
+"""HIR contracts for proposed static facet declarations."""
+
+use compiler.common.predicate_parser.{compile_type_predicate_text}
+use compiler.common.structural_contracts.aop.{FacetAccess, FacetMultiplicity, FacetRepresentation, TypePredicateBytecode}
+use compiler.frontend.facet_static.{FacetAstModule, FacetMethodDecl}
+
+struct HirFacetMethod:
+    name: text
+    signature: text
+
+struct HirFacetInterface:
+    aspect_id: text
+    name: text
+    parent_facets: [text]
+    methods: [HirFacetMethod]
+
+struct HirFacetImpl:
+    aspect_id: text
+    name: text
+    base_type: text
+    interfaces: [text]
+    methods: [HirFacetMethod]
+    access: FacetAccess
+
+struct HirFacetBind:
+    aspect_id: text
+    facet_interface: text
+    target_predicate: TypePredicateBytecode
+    implementation: text
+    representation: FacetRepresentation
+    multiplicity: FacetMultiplicity
+
+struct HirFacetRequire:
+    aspect_id: text
+    facet_interface: text
+    target_predicate: TypePredicateBytecode
+
+struct HirFacetModule:
+    interfaces: [HirFacetInterface]
+    implementations: [HirFacetImpl]
+    bindings: [HirFacetBind]
+    requirements: [HirFacetRequire]
+
+enum FacetDeclarationOwner:
+    Core
+    OptionalAspect(text)
+
+struct HirFacetDependency:
+    source: text
+    source_owner: FacetDeclarationOwner
+    target: text
+    target_owner: FacetDeclarationOwner
+
+fn lower_facet_methods(methods: [FacetMethodDecl]) -> [HirFacetMethod]:
+    var lowered: [HirFacetMethod] = []
+    for method in methods:
+        lowered = lowered.push(HirFacetMethod(name: method.name, signature: method.signature))
+    lowered
+
+fn lower_static_facets(module: FacetAstModule) -> Result<HirFacetModule, text>:
+    var interfaces: [HirFacetInterface] = []
+    for interface_ in module.interfaces:
+        interfaces = interfaces.push(HirFacetInterface(
+            aspect_id: interface_.aspect_id,
+            name: interface_.name,
+            parent_facets: interface_.parent_facets,
+            methods: lower_facet_methods(interface_.methods)
+        ))
+
+    var implementations: [HirFacetImpl] = []
+    for implementation in module.implementations:
+        implementations = implementations.push(HirFacetImpl(
+            aspect_id: implementation.aspect_id,
+            name: implementation.name,
+            base_type: implementation.base_type,
+            interfaces: implementation.interfaces,
+            methods: lower_facet_methods(implementation.methods),
+            access: implementation.access
+        ))
+
+    var bindings: [HirFacetBind] = []
+    for binding in module.bindings:
+        bindings = bindings.push(HirFacetBind(
+            aspect_id: binding.aspect_id,
+            facet_interface: binding.facet_interface,
+            target_predicate: compile_type_predicate_text(binding.target_pointcut)?,
+            implementation: binding.implementation,
+            representation: binding.representation,
+            multiplicity: binding.multiplicity
+        ))
+
+    var requirements: [HirFacetRequire] = []
+    for requirement in module.requirements:
+        requirements = requirements.push(HirFacetRequire(
+            aspect_id: requirement.aspect_id,
+            facet_interface: requirement.facet_interface,
+            target_predicate: compile_type_predicate_text(requirement.target_pointcut)?
+        ))
+
+    Ok(HirFacetModule(
+        interfaces: interfaces,
+        implementations: implementations,
+        bindings: bindings,
+        requirements: requirements
+    ))
+
+export HirFacetMethod, HirFacetInterface, HirFacetImpl, HirFacetBind, HirFacetRequire, HirFacetModule
+export FacetDeclarationOwner, HirFacetDependency, lower_static_facets

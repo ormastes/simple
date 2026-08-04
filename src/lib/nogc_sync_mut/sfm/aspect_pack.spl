@@ -1,0 +1,425 @@
+# Versioned SFM2 aspect-pack directory and opaque payload codec.
+#
+# This is an outer SFM-owned envelope. It deliberately does not interpret or
+# modify ordinary SMF images. The directory is uncompressed; every stored SMF
+# payload is an independent frame selected by module ID.
+#
+# Wire layout (little-endian):
+#   "SFM2" | major u16 | minor u16 | kind u8 | flags u8 | reserved u16
+#          | manifest_size u32 | entry_count u32 | directory_size u32
+#          | payload_size u32
+#   canonical FeatureManifest blob | entries[]
+#   independently framed opaque payload bytes
+#
+# Each variable-size entry is:
+#   module_id str | aspect_id str | compression u8 | flags u8 | reserved u16
+#   payload_offset u32 | stored_size u32 | uncompressed_size u32
+#   dictionary_id u32 | stored_content_hash u32
+#
+# `payload_offset` is relative to the payload area. SFM2 requires frames to be
+# contiguous and ordered exactly as the directory, rejecting overlap, gaps,
+# aliases, and trailing data without opening or decompressing a frame.
+
+use std.sfm.manifest.{FeatureManifest}
+use std.sfm.codec.{encode_manifest_blob, decode_manifest_blob}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+val ASPECT_PACK_FORMAT_MAJOR: i32 = 2
+val ASPECT_PACK_FORMAT_MINOR: i32 = 0
+val ASPECT_PACK_KIND: i32 = 1
+val ASPECT_PACK_HEADER_BYTES: i32 = 28
+val ASPECT_PACK_MAX_ENTRIES: i32 = 1024
+val ASPECT_PACK_MAX_ID_BYTES: i32 = 1024
+val ASPECT_PACK_MAX_DIRECTORY_BYTES: i32 = 1048576
+val ASPECT_PACK_MAX_STORED_BYTES: i32 = 67108864
+val ASPECT_PACK_MAX_UNCOMPRESSED_BYTES: i32 = 268435456
+val ASPECT_PACK_MAX_PAYLOAD_BYTES: i32 = 536870912
+
+enum AspectPackCompression:
+    None
+    Zstd
+
+# Encoder input. `stored_bytes` is either an ordinary SMF image (`None`) or one
+# complete independently decompressible frame (`Zstd`). The codec never applies
+# compression itself.
+struct AspectPackPayload:
+    module_id: text
+    aspect_id: text
+    compression: AspectPackCompression
+    uncompressed_size: i32
+    dictionary_id: i32
+    stored_bytes: [u8]
+
+struct AspectPackEntry:
+    module_id: text
+    aspect_id: text
+    compression: AspectPackCompression
+    payload_offset: i32
+    stored_size: i32
+    uncompressed_size: i32
+    dictionary_id: i32
+    stored_content_hash: i32
+
+struct AspectPackDirectory:
+    version_major: i32
+    version_minor: i32
+    payload_start: i32
+    payload_size: i32
+    entries: [AspectPackEntry]
+
+# The original bytes remain opaque. `aspect_pack_stored_frame` copies and
+# verifies only the selected frame.
+struct AspectPackImage:
+    manifest: FeatureManifest
+    directory: AspectPackDirectory
+    bytes: [u8]
+
+fn aspect_pack_push_u8(buf: [u8], value: i32) -> [u8]:
+    val n: i32 = buf.len() as i32
+    buf.append(0 as u8)
+    buf[n] = (value & 255) as u8
+    return buf
+
+fn aspect_pack_push_u16(buf: [u8], value: i32) -> [u8]:
+    var out = aspect_pack_push_u8(buf, value)
+    out = aspect_pack_push_u8(out, value >> 8)
+    return out
+
+fn aspect_pack_push_u32(buf: [u8], value: i32) -> [u8]:
+    var out = aspect_pack_push_u8(buf, value)
+    out = aspect_pack_push_u8(out, value >> 8)
+    out = aspect_pack_push_u8(out, value >> 16)
+    out = aspect_pack_push_u8(out, value >> 24)
+    return out
+
+fn aspect_pack_push_bytes(buf: [u8], src: [u8]) -> [u8]:
+    var out = buf
+    var i: i32 = 0
+    val n: i32 = src.len() as i32
+    while i < n:
+        out = aspect_pack_push_u8(out, src[i] as i32)
+        i = i + 1
+    return out
+
+fn aspect_pack_push_text(buf: [u8], value: text) -> [u8]:
+    val raw: [u8] = rt_text_to_bytes(value)
+    var out = aspect_pack_push_u32(buf, raw.len() as i32)
+    out = aspect_pack_push_bytes(out, raw)
+    return out
+
+fn aspect_pack_read_u16(buf: [u8], at: i32) -> i32:
+    return ((buf[at] as i32) & 255) | (((buf[at + 1] as i32) & 255) << 8)
+
+fn aspect_pack_read_u32(buf: [u8], at: i32) -> i32:
+    return ((buf[at] as i32) & 255) | (((buf[at + 1] as i32) & 255) << 8) | (((buf[at + 2] as i32) & 255) << 16) | (((buf[at + 3] as i32) & 255) << 24)
+
+fn aspect_pack_ascii_char(code: i32) -> text:
+    val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    return chars[(code - 32) as i64]
+
+fn aspect_pack_decode_ascii(buf: [u8], at: i32, n: i32) -> text:
+    var out: text = ""
+    var i: i32 = 0
+    while i < n:
+        out = out + aspect_pack_ascii_char(buf[at + i] as i32)
+        i = i + 1
+    return out
+
+fn aspect_pack_id_byte_allowed(b: i32) -> bool:
+    if b >= 48 and b <= 57:
+        return true
+    if b >= 65 and b <= 90:
+        return true
+    if b >= 97 and b <= 122:
+        return true
+    return b == 45 or b == 46 or b == 47 or b == 58 or b == 64 or b == 95
+
+# IDs are canonical ASCII identifiers, not filesystem paths or arbitrary text.
+fn aspect_pack_validate_id(value: text, field_name: text) -> Result<(), text>:
+    val raw: [u8] = rt_text_to_bytes(value)
+    val n: i32 = raw.len() as i32
+    if n == 0 or n > ASPECT_PACK_MAX_ID_BYTES:
+        return Err("E-APACK001 " + field_name + " length is invalid")
+    var i: i32 = 0
+    while i < n:
+        if not aspect_pack_id_byte_allowed(raw[i] as i32):
+            return Err("E-APACK001 " + field_name + " is not a canonical identifier")
+        i = i + 1
+    return Ok(())
+
+fn aspect_pack_compression_byte(value: AspectPackCompression) -> i32:
+    match value:
+        case None: return 0
+        case Zstd: return 1
+
+fn aspect_pack_compression_from_byte(value: i32) -> Result<AspectPackCompression, text>:
+    if value == 0:
+        return Ok(AspectPackCompression.None)
+    if value == 1:
+        return Ok(AspectPackCompression.Zstd)
+    return Err("E-APACK001 unsupported compression framing")
+
+# A bounded deterministic integrity checksum over stored frame bytes. This is a
+# corruption guard, not a substitute for the pack signature policy.
+fn aspect_pack_content_hash(bytes: [u8]) -> i32:
+    var hash: i64 = 1
+    var i: i32 = 0
+    val n: i32 = bytes.len() as i32
+    while i < n:
+        hash = (hash * 257 + (bytes[i] as i64) + 1) % 2147483629
+        i = i + 1
+    return hash as i32
+
+fn aspect_pack_payload_valid(value: AspectPackPayload) -> Result<(), text>:
+    aspect_pack_validate_id(value.module_id, "module_id")?
+    aspect_pack_validate_id(value.aspect_id, "aspect_id")?
+    val stored_size: i32 = value.stored_bytes.len() as i32
+    if stored_size <= 0 or stored_size > ASPECT_PACK_MAX_STORED_BYTES:
+        return Err("E-APACK004 stored frame size limit exceeded")
+    if value.uncompressed_size <= 0 or value.uncompressed_size > ASPECT_PACK_MAX_UNCOMPRESSED_BYTES:
+        return Err("E-APACK004 uncompressed frame size limit exceeded")
+    if value.dictionary_id < 0:
+        return Err("E-APACK001 invalid compression dictionary ID")
+    match value.compression:
+        None:
+            if value.dictionary_id != 0 or value.uncompressed_size != stored_size:
+                return Err("E-APACK001 uncompressed frame metadata is inconsistent")
+        Zstd:
+            pass
+    return Ok(())
+
+fn aspect_pack_module_id_unique(payloads: [AspectPackPayload], at: i32) -> bool:
+    var i: i32 = 0
+    while i < at:
+        if payloads[i].module_id == payloads[at].module_id:
+            return false
+        i = i + 1
+    return true
+
+# Encode an SFM2 aspect-pack envelope. Payloads are already independently framed;
+# ordinary SMF bytes are copied verbatim when compression is `None`.
+fn encode_aspect_pack(manifest: FeatureManifest, payloads: [AspectPackPayload]) -> Result<[u8], text>:
+    val count: i32 = payloads.len() as i32
+    if count <= 0 or count > ASPECT_PACK_MAX_ENTRIES:
+        return Err("E-APACK004 aspect-pack entry count limit exceeded")
+    val manifest_blob: [u8] = encode_manifest_blob(manifest)
+    if (manifest_blob.len() as i32) <= 0 or (manifest_blob.len() as i32) > ASPECT_PACK_MAX_DIRECTORY_BYTES:
+        return Err("E-APACK004 SFM manifest size limit exceeded")
+
+    var directory: [u8] = []
+    var payload_bytes: [u8] = []
+    var payload_offset: i32 = 0
+    var i: i32 = 0
+    while i < count:
+        val item = payloads[i]
+        aspect_pack_payload_valid(item)?
+        if not aspect_pack_module_id_unique(payloads, i):
+            return Err("E-APACK001 duplicate module_id")
+        val stored_size: i32 = item.stored_bytes.len() as i32
+        if payload_offset > ASPECT_PACK_MAX_PAYLOAD_BYTES - stored_size:
+            return Err("E-APACK004 total stored payload limit exceeded")
+
+        directory = aspect_pack_push_text(directory, item.module_id)
+        directory = aspect_pack_push_text(directory, item.aspect_id)
+        directory = aspect_pack_push_u8(directory, aspect_pack_compression_byte(item.compression))
+        directory = aspect_pack_push_u8(directory, 0) # flags, reserved in SFM2
+        directory = aspect_pack_push_u16(directory, 0)
+        directory = aspect_pack_push_u32(directory, payload_offset)
+        directory = aspect_pack_push_u32(directory, stored_size)
+        directory = aspect_pack_push_u32(directory, item.uncompressed_size)
+        directory = aspect_pack_push_u32(directory, item.dictionary_id)
+        directory = aspect_pack_push_u32(directory, aspect_pack_content_hash(item.stored_bytes))
+        if (directory.len() as i32) > ASPECT_PACK_MAX_DIRECTORY_BYTES:
+            return Err("E-APACK004 aspect-pack directory size limit exceeded")
+        payload_bytes = aspect_pack_push_bytes(payload_bytes, item.stored_bytes)
+        payload_offset = payload_offset + stored_size
+        i = i + 1
+
+    var out: [u8] = []
+    out = aspect_pack_push_u8(out, 83) # S
+    out = aspect_pack_push_u8(out, 70) # F
+    out = aspect_pack_push_u8(out, 77) # M
+    out = aspect_pack_push_u8(out, 50) # 2
+    out = aspect_pack_push_u16(out, ASPECT_PACK_FORMAT_MAJOR)
+    out = aspect_pack_push_u16(out, ASPECT_PACK_FORMAT_MINOR)
+    out = aspect_pack_push_u8(out, ASPECT_PACK_KIND)
+    out = aspect_pack_push_u8(out, 0)
+    out = aspect_pack_push_u16(out, 0)
+    out = aspect_pack_push_u32(out, manifest_blob.len() as i32)
+    out = aspect_pack_push_u32(out, count)
+    out = aspect_pack_push_u32(out, directory.len() as i32)
+    out = aspect_pack_push_u32(out, payload_bytes.len() as i32)
+    out = aspect_pack_push_bytes(out, manifest_blob)
+    out = aspect_pack_push_bytes(out, directory)
+    out = aspect_pack_push_bytes(out, payload_bytes)
+    return Ok(out)
+
+fn aspect_pack_need(off: i32, amount: i32, limit: i32) -> bool:
+    return off >= 0 and amount >= 0 and off <= limit and amount <= limit - off
+
+fn aspect_pack_decode_id(bytes: [u8], off: i32, directory_end: i32, field_name: text) -> Result<(text, i32), text>:
+    if not aspect_pack_need(off, 4, directory_end):
+        return Err("E-APACK001 truncated " + field_name)
+    val n: i32 = aspect_pack_read_u32(bytes, off)
+    if n <= 0 or n > ASPECT_PACK_MAX_ID_BYTES or not aspect_pack_need(off + 4, n, directory_end):
+        return Err("E-APACK001 invalid " + field_name + " length")
+    var i: i32 = 0
+    while i < n:
+        if not aspect_pack_id_byte_allowed(bytes[off + 4 + i] as i32):
+            return Err("E-APACK001 " + field_name + " is not a canonical identifier")
+        i = i + 1
+    val value: text = aspect_pack_decode_ascii(bytes, off + 4, n)
+    aspect_pack_validate_id(value, field_name)?
+    return Ok((value, off + 4 + n))
+
+fn aspect_pack_entry_id_unique(entries: [AspectPackEntry], module_id: text) -> bool:
+    var i: i32 = 0
+    while i < (entries.len() as i32):
+        if entries[i].module_id == module_id:
+            return false
+        i = i + 1
+    return true
+
+# Decode and validate only the canonical manifest and uncompressed outer directory. Payload integrity
+# remains lazy and is checked by `aspect_pack_stored_frame` for the selected ID.
+fn decode_aspect_pack(bytes: [u8]) -> Result<AspectPackImage, text>:
+    val total: i32 = bytes.len() as i32
+    if total < ASPECT_PACK_HEADER_BYTES:
+        return Err("E-APACK001 aspect-pack header is truncated")
+    if bytes[0] != (83 as u8) or bytes[1] != (70 as u8) or bytes[2] != (77 as u8) or bytes[3] != (50 as u8):
+        return Err("E-APACK001 expected SFM2 aspect-pack container")
+    val major: i32 = aspect_pack_read_u16(bytes, 4)
+    val minor: i32 = aspect_pack_read_u16(bytes, 6)
+    if major != ASPECT_PACK_FORMAT_MAJOR or minor != ASPECT_PACK_FORMAT_MINOR:
+        return Err("E-APACK001 unsupported aspect-pack version")
+    val kind: i32 = bytes[8] as i32
+    val flags: i32 = bytes[9] as i32
+    val reserved: i32 = aspect_pack_read_u16(bytes, 10)
+    if kind != ASPECT_PACK_KIND:
+        return Err("E-APACK001 unsupported SFM2 container kind")
+    if flags != 0 or reserved != 0:
+        return Err("E-APACK001 unsupported SFM2 container flags")
+    val manifest_size: i32 = aspect_pack_read_u32(bytes, 12)
+    val count: i32 = aspect_pack_read_u32(bytes, 16)
+    val directory_size: i32 = aspect_pack_read_u32(bytes, 20)
+    val payload_size: i32 = aspect_pack_read_u32(bytes, 24)
+    if manifest_size <= 0 or manifest_size > ASPECT_PACK_MAX_DIRECTORY_BYTES:
+        return Err("E-APACK004 SFM manifest size limit exceeded")
+    if count <= 0 or count > ASPECT_PACK_MAX_ENTRIES:
+        return Err("E-APACK004 aspect-pack entry count limit exceeded")
+    if directory_size <= 0 or directory_size > ASPECT_PACK_MAX_DIRECTORY_BYTES:
+        return Err("E-APACK004 aspect-pack directory size limit exceeded")
+    if payload_size <= 0 or payload_size > ASPECT_PACK_MAX_PAYLOAD_BYTES:
+        return Err("E-APACK004 total stored payload limit exceeded")
+    if not aspect_pack_need(ASPECT_PACK_HEADER_BYTES, manifest_size, total):
+        return Err("E-APACK001 truncated SFM manifest")
+    val directory_start: i32 = ASPECT_PACK_HEADER_BYTES + manifest_size
+    if not aspect_pack_need(directory_start, directory_size, total):
+        return Err("E-APACK001 truncated aspect-pack directory")
+    val payload_start: i32 = directory_start + directory_size
+    if payload_start > total or payload_size != total - payload_start:
+        return Err("E-APACK001 truncated or trailing aspect-pack payload")
+
+    var manifest_blob: [u8] = []
+    var manifest_i: i32 = 0
+    while manifest_i < manifest_size:
+        val manifest_at: i32 = ASPECT_PACK_HEADER_BYTES + manifest_i
+        manifest_blob = aspect_pack_push_u8(manifest_blob, bytes[manifest_at] as i32)
+        manifest_i = manifest_i + 1
+    val manifest: FeatureManifest = decode_manifest_blob(manifest_blob)?
+
+    var entries: [AspectPackEntry] = []
+    var off: i32 = directory_start
+    val directory_end: i32 = payload_start
+    var expected_payload_offset: i32 = 0
+    var i: i32 = 0
+    while i < count:
+        val module_result = aspect_pack_decode_id(bytes, off, directory_end, "module_id")?
+        val module_id: text = module_result[0]
+        off = module_result[1]
+        val aspect_result = aspect_pack_decode_id(bytes, off, directory_end, "aspect_id")?
+        val aspect_id: text = aspect_result[0]
+        off = aspect_result[1]
+        if not aspect_pack_need(off, 24, directory_end):
+            return Err("E-APACK001 truncated aspect-pack entry")
+        val compression = aspect_pack_compression_from_byte(bytes[off] as i32)?
+        val flags: i32 = bytes[off + 1] as i32
+        val reserved: i32 = aspect_pack_read_u16(bytes, off + 2)
+        val payload_offset: i32 = aspect_pack_read_u32(bytes, off + 4)
+        val stored_size: i32 = aspect_pack_read_u32(bytes, off + 8)
+        val uncompressed_size: i32 = aspect_pack_read_u32(bytes, off + 12)
+        val dictionary_id: i32 = aspect_pack_read_u32(bytes, off + 16)
+        val stored_content_hash: i32 = aspect_pack_read_u32(bytes, off + 20)
+        off = off + 24
+        if flags != 0 or reserved != 0:
+            return Err("E-APACK001 unsupported aspect-pack entry flags")
+        if payload_offset != expected_payload_offset:
+            return Err("E-APACK001 non-canonical or overlapping frame offset")
+        if stored_size <= 0 or stored_size > ASPECT_PACK_MAX_STORED_BYTES:
+            return Err("E-APACK004 stored frame size limit exceeded")
+        if uncompressed_size <= 0 or uncompressed_size > ASPECT_PACK_MAX_UNCOMPRESSED_BYTES:
+            return Err("E-APACK004 uncompressed frame size limit exceeded")
+        if dictionary_id < 0 or stored_content_hash < 0:
+            return Err("E-APACK001 invalid frame metadata")
+        if expected_payload_offset > payload_size - stored_size:
+            return Err("E-APACK001 frame exceeds payload area")
+        match compression:
+            None:
+                if dictionary_id != 0 or uncompressed_size != stored_size:
+                    return Err("E-APACK001 uncompressed frame metadata is inconsistent")
+            Zstd:
+                pass
+        if not aspect_pack_entry_id_unique(entries, module_id):
+            return Err("E-APACK001 duplicate module_id")
+        entries.append(AspectPackEntry(
+            module_id: module_id,
+            aspect_id: aspect_id,
+            compression: compression,
+            payload_offset: payload_offset,
+            stored_size: stored_size,
+            uncompressed_size: uncompressed_size,
+            dictionary_id: dictionary_id,
+            stored_content_hash: stored_content_hash
+        ))
+        expected_payload_offset = expected_payload_offset + stored_size
+        i = i + 1
+    if off != directory_end:
+        return Err("E-APACK001 directory size does not match entries")
+    if expected_payload_offset != payload_size:
+        return Err("E-APACK001 frame sizes do not cover payload area")
+
+    val directory = AspectPackDirectory(
+        version_major: major,
+        version_minor: minor,
+        payload_start: payload_start,
+        payload_size: payload_size,
+        entries: entries
+    )
+    return Ok(AspectPackImage(manifest: manifest, directory: directory, bytes: bytes))
+
+fn aspect_pack_find_entry(directory: AspectPackDirectory, module_id: text) -> Result<AspectPackEntry, text>:
+    var i: i32 = 0
+    while i < (directory.entries.len() as i32):
+        if directory.entries[i].module_id == module_id:
+            return Ok(directory.entries[i])
+        i = i + 1
+    return Err("E-APACK006 module_id is absent from aspect-pack directory")
+
+# Return one independently framed opaque payload. For `None` this is directly
+# consumable ordinary SMF bytes; for `Zstd` the caller decompresses exactly this
+# frame with the declared output bound and optional dictionary.
+fn aspect_pack_stored_frame(image: AspectPackImage, module_id: text) -> Result<[u8], text>:
+    val entry = aspect_pack_find_entry(image.directory, module_id)?
+    val start: i32 = image.directory.payload_start + entry.payload_offset
+    val total: i32 = image.bytes.len() as i32
+    if not aspect_pack_need(start, entry.stored_size, total):
+        return Err("E-APACK001 selected frame exceeds container")
+    var out: [u8] = []
+    var i: i32 = 0
+    while i < entry.stored_size:
+        out = aspect_pack_push_u8(out, image.bytes[start + i] as i32)
+        i = i + 1
+    if aspect_pack_content_hash(out) != entry.stored_content_hash:
+        return Err("E-APACK003 selected frame content hash mismatch")
+    return Ok(out)

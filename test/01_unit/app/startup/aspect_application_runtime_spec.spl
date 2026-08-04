@@ -1,0 +1,323 @@
+# @req REQ-AF-006 REQ-AF-007 REQ-AF-008 NFR-AF-002 NFR-AF-006
+# @cover src/app/startup/aspect_application_runtime.spl 80%
+
+use std.spec.*
+use std.sfm.aspect_pack.{AspectPackCompression, AspectPackPayload, encode_aspect_pack}
+use std.sfm.manifest.{FeatureManifest, SfmSecurityLevel}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.loader.loader.aspect_catalog.{AspectBindingSummary, AspectCatalogEntry, AspectCatalog}
+use compiler.loader.loader.aspect_pack_provider.{AspectPackProviderKey, AspectPackModuleKey, AspectPackProvider, AspectPackTrustPolicy}
+use compiler.loader.loader.aspect_activation.{AspectActivationRequest, AspectPublishedActivation}
+use compiler.loader.loader.module_loader.{moduleloader_with_defaults}
+use compiler.loader.loader.facet_binding_registry.{
+    FacetBindingAdmission, facet_binding_stage_validated,
+    aspect_publish_generation
+}
+use app.startup.aspect_application_runtime.{
+    AspectApplicationPhase,
+    AspectApplicationOperation,
+    AspectApplicationRuntime
+}
+use os.smf.dynsmf_session.{DynSmfSession, DynSmfPolicy, dynsmf_session_new}
+use os.smf.smf_generation.{LifecycleManager}
+
+fn app_aspect_smf() -> [u8]:
+    var out: [u8] = [83, 77, 70, 0, 1, 1, 1, 0]
+    while out.len() < 20:
+        out.push(0)
+    out.push(128)
+    while out.len() < 28:
+        out.push(0)
+    out.push(128)
+    while out.len() < 128:
+        out.push(0)
+    out
+
+fn app_aspect_pack() -> [u8]:
+    encode_aspect_pack(
+        FeatureManifest(
+            name: "mission-pack",
+            version: "1.0.0",
+            security_level: SfmSecurityLevel.Trusted,
+            layers: []
+        ),
+        [AspectPackPayload(
+            module_id: "security.audit",
+            aspect_id: "security.audit",
+            compression: AspectPackCompression.None,
+            uncompressed_size: 128,
+            dictionary_id: 0,
+            stored_bytes: app_aspect_smf()
+        )]
+    ).unwrap()
+
+fn app_aspect_entry(policy: text) -> AspectCatalogEntry:
+    val pack = app_aspect_pack()
+    val module_digest = sha256_u8_hex(app_aspect_smf())
+    AspectCatalogEntry(
+        aspect_id: "security.audit",
+        pack_id: "mission-pack",
+        pack_path: "aspects/mission-pack.sfm",
+        module_id: "security.audit",
+        pack_digest: sha256_u8_hex(pack),
+        module_digest: module_digest,
+        core_public_abi_hash: module_digest,
+        core_layout_abi_hash: module_digest,
+        target: "x86_64-unknown-linux-gnu",
+        variant_fingerprint: "mission-v1",
+        runtime_abi: "simple-runtime-1",
+        dependencies: [],
+        activation_policy: policy,
+        binding_summaries: [AspectBindingSummary(
+            binding_id: "security.audit.binding",
+            concrete_type_id: "security.AuditRecord",
+            business_interface_id: "",
+            facet_interface_id: "Auditable",
+            facet_contract_abi_hash: "facet-audit-v1",
+            witness_symbol: "security_audit_witness",
+            capabilities: ["audit.read"]
+        )],
+        capabilities: ["audit.read"]
+    )
+
+fn app_aspect_catalog(policy: text) -> AspectCatalog:
+    AspectCatalog.create(
+        4,
+        "x86_64-unknown-linux-gnu",
+        "mission-v1",
+        "simple-runtime-1",
+        [app_aspect_entry(policy)]
+    ).unwrap()
+
+fn app_aspect_key() -> AspectPackProviderKey:
+    val digest = sha256_u8_hex(app_aspect_smf())
+    AspectPackProviderKey(
+        pack_id: "mission-pack",
+        pack_digest: sha256_u8_hex(app_aspect_pack()),
+        catalog_generation: 4,
+        target: "x86_64-unknown-linux-gnu",
+        variant_fingerprint: "mission-v1",
+        runtime_abi: "simple-runtime-1",
+        core_public_abi_hash: digest,
+        core_layout_abi_hash: digest
+    )
+
+fn app_aspect_session() -> DynSmfSession:
+    dynsmf_session_new(
+        "application-aspect-test",
+        DynSmfPolicy(disabled_all: false, disabled_ids: [], source: "test")
+    )
+
+fn app_aspect_mission_runtime(policy: text) -> Result<AspectApplicationRuntime, text>:
+    var public_key: [u8] = []
+    while public_key.len() < 32:
+        public_key.push(7)
+    AspectApplicationRuntime.create(
+        app_aspect_catalog(policy),
+        app_aspect_session(),
+        LifecycleManager.new_manager(),
+        AspectPackTrustPolicy.mission(public_key).unwrap(),
+        2,
+        2,
+        2
+    )
+
+fn app_aspect_request(id: text) -> AspectActivationRequest:
+    AspectActivationRequest(
+        aspect_id: "security.audit",
+        request_id: id,
+        catalog_generation: 4
+    )
+
+fn app_aspect_phase_is_operational(phase: AspectApplicationPhase) -> bool:
+    match phase:
+        case AspectApplicationPhase.Operational: true
+        case AspectApplicationPhase.Startup: false
+
+describe "Application aspect runtime policy owner":
+    it "rejects non-startup dynamic routes in the mission profile":
+        val runtime = app_aspect_mission_runtime("lazy_facet")
+        expect(runtime.is_err()).to_equal(true)
+        expect(runtime.unwrap_err()).to_contain("only static, startup, or excluded")
+
+    it "requires every startup aspect before entering operational state":
+        val runtime = app_aspect_mission_runtime("startup").unwrap()
+        val transitioned = runtime.enter_operational()
+        expect(transitioned.is_err()).to_equal(true)
+        expect(transitioned.unwrap_err()).to_contain("requires active startup aspect")
+
+    it "denies lazy IO attach unload and patch after the mission transition":
+        val runtime = app_aspect_mission_runtime("excluded").unwrap()
+        expect(runtime.pack_path_for("security.audit").unwrap()).to_equal("aspects/mission-pack.sfm")
+        expect(runtime.enter_operational().is_ok()).to_equal(true)
+        expect(app_aspect_phase_is_operational(runtime.phase)).to_equal(true)
+        expect(runtime.authorize(AspectApplicationOperation.LazyIo).unwrap_err()).to_contain("denies lazy")
+        expect(runtime.authorize(AspectApplicationOperation.DynamicAttach).unwrap_err()).to_contain("denies dynamic")
+        expect(runtime.authorize(AspectApplicationOperation.Unload).unwrap_err()).to_contain("denies aspect unload")
+        expect(runtime.authorize(AspectApplicationOperation.Patch).unwrap_err()).to_contain("denies runtime advice patching")
+
+        val activation = runtime.activate_pack_bytes(
+            app_aspect_key(), app_aspect_pack(), [],
+            app_aspect_request("operational"), moduleloader_with_defaults())
+        expect(activation.status).to_equal("failed")
+        expect(activation.reason).to_contain("denies lazy")
+        expect(runtime.provider_cache.index_count()).to_equal(0)
+
+    it "retains mission trust and rejects unsigned bytes before cache admission":
+        val runtime = app_aspect_mission_runtime("startup").unwrap()
+        val activation = runtime.activate_pack_bytes(
+            app_aspect_key(), app_aspect_pack(), [],
+            app_aspect_request("unsigned"), moduleloader_with_defaults())
+        expect(activation.status).to_equal("failed")
+        expect(activation.reason).to_contain("mission profile rejects unsigned")
+        expect(runtime.provider_cache.index_count()).to_equal(0)
+
+    it "rejects a provider whose core ABI identity differs from the catalog":
+        val runtime = AspectApplicationRuntime.create(
+            app_aspect_catalog("startup"),
+            app_aspect_session(),
+            LifecycleManager.new_manager(),
+            AspectPackTrustPolicy.ordinary_unsigned(),
+            2,
+            2,
+            2
+        ).unwrap()
+        var wrong_key = app_aspect_key()
+        wrong_key.core_public_abi_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val activation = runtime.activate_pack_bytes(
+            wrong_key, app_aspect_pack(), [],
+            app_aspect_request("wrong-core-abi"), moduleloader_with_defaults())
+        expect(activation.status).to_equal("failed")
+        expect(activation.reason).to_contain("exact application catalog route")
+        expect(runtime.provider_cache.index_count()).to_equal(0)
+
+    it "uses the canonical cache and loader activation path in ordinary mode":
+        val runtime = AspectApplicationRuntime.create(
+            app_aspect_catalog("startup"),
+            app_aspect_session(),
+            LifecycleManager.new_manager(),
+            AspectPackTrustPolicy.ordinary_unsigned(),
+            2,
+            2,
+            2
+        ).unwrap()
+        val loader = moduleloader_with_defaults()
+        val activation = runtime.activate_pack_bytes(
+            app_aspect_key(), app_aspect_pack(), [],
+            app_aspect_request("ordinary"), loader)
+
+        expect(runtime.provider_cache.index_count()).to_equal(1)
+        expect(activation.status).to_equal("failed")
+        expect(activation.reason).to_contain("witness symbol is missing")
+        expect(loader.modules.keys().len()).to_equal(0)
+        expect(loader.provider.registered_module_count()).to_equal(0)
+
+    it "adapts FacetRef leases to the canonical published generation owner":
+        val runtime = AspectApplicationRuntime.create(
+            app_aspect_catalog("startup"),
+            app_aspect_session(),
+            LifecycleManager.new_manager(),
+            AspectPackTrustPolicy.ordinary_unsigned(),
+            2,
+            2,
+            2
+        ).unwrap()
+        val entry = app_aspect_entry("startup")
+        runtime.coordinator.lifecycle = runtime.coordinator.lifecycle.register_candidate(
+            "mission-pack:security.audit:security.audit:4", 4)
+        runtime.coordinator.lifecycle = runtime.coordinator.lifecycle.promote_candidate()
+        runtime.coordinator.published["security.audit"] = AspectPublishedActivation(
+            activation_key: "mission-pack:security.audit:security.audit:4",
+            aspect_id: "security.audit",
+            generation: 4,
+            owners: ["mission-pack:security.audit:4"],
+            module_keys: [AspectPackModuleKey(
+                provider: app_aspect_key(),
+                module_id: "security.audit",
+                module_digest: sha256_u8_hex(app_aspect_smf())
+            )],
+            bindings: entry.binding_summaries,
+            state: "active"
+        )
+        val candidate = facet_binding_stage_validated(
+            "mission-pack:security.audit:security.audit:4", 4, "security.audit",
+            [FacetBindingAdmission(
+                summary: entry.binding_summaries[0],
+                witness_owner_id: "mission-pack:security.audit:4")]
+        ).unwrap()
+        runtime.coordinator.facet_bindings = aspect_publish_generation(
+            runtime.coordinator.facet_bindings, candidate,
+            "mission-pack:security.audit:security.audit:4", 4).unwrap()
+
+        val acquired = runtime.acquire_published_facet(
+            "security.AuditRecord", [], "Auditable").unwrap()
+        expect(acquired != nil).to_equal(true)
+        val pair = acquired.unwrap()
+        val binding = pair.0
+        val lease = pair.1
+        expect(binding.aspect_id).to_equal("security.audit")
+        expect(lease.aspect_id).to_equal("security.audit")
+        expect(lease.generation_id).to_equal(4)
+        expect(lease.token_id).to_be_greater_than(0)
+        expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(1)
+        expect(runtime.release_facet_generation_lease(lease).is_ok()).to_equal(true)
+        expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(0)
+        expect(runtime.release_facet_generation_lease(lease).is_err()).to_equal(true)
+
+    it "quiesces drains releases cache pins and completes ordinary unload":
+        val runtime = AspectApplicationRuntime.create(
+            app_aspect_catalog("startup"),
+            app_aspect_session(),
+            LifecycleManager.new_manager(),
+            AspectPackTrustPolicy.ordinary_unsigned(),
+            2,
+            2,
+            2
+        ).unwrap()
+        val loader = moduleloader_with_defaults()
+        val provider_key = app_aspect_key()
+        val module_key = AspectPackModuleKey(
+            provider: provider_key,
+            module_id: "security.audit",
+            module_digest: sha256_u8_hex(app_aspect_smf())
+        )
+        val provider = AspectPackProvider.from_bytes(provider_key, app_aspect_pack()).unwrap()
+        runtime.provider_cache.get_module_bytes(
+            provider, module_key, loader.lifecycle.smf_cache_mgr).unwrap()
+        runtime.provider_cache.acquire_module(
+            module_key, loader.lifecycle.smf_cache_mgr).unwrap()
+        val activation_key = "mission-pack:security.audit:security.audit:4"
+        runtime.coordinator.lifecycle = runtime.coordinator.lifecycle.register_candidate(
+            activation_key, 4).promote_candidate()
+        runtime.coordinator.published["security.audit"] = AspectPublishedActivation(
+            activation_key: activation_key,
+            aspect_id: "security.audit",
+            generation: 4,
+            owners: ["mission-pack:security.audit:4"],
+            module_keys: [module_key],
+            bindings: app_aspect_entry("startup").binding_summaries,
+            state: "active"
+        )
+        val candidate = facet_binding_stage_validated(
+            activation_key, 4, "security.audit",
+            [FacetBindingAdmission(
+                summary: app_aspect_entry("startup").binding_summaries[0],
+                witness_owner_id: "mission-pack:security.audit:4")]
+        ).unwrap()
+        runtime.coordinator.facet_bindings = aspect_publish_generation(
+            runtime.coordinator.facet_bindings, candidate,
+            activation_key, 4).unwrap()
+        val lease = runtime.acquire_facet_generation_lease("security.audit").unwrap()
+
+        expect(runtime.unload_published_aspect("security.audit", loader).unwrap()).to_equal("quiescing")
+        expect(runtime.coordinator.facet_bindings.active_count()).to_equal(0)
+        expect(runtime.coordinator.published["security.audit"].bindings.len()).to_equal(0)
+        expect(runtime.coordinator.published["security.audit"].state).to_equal("quiescing")
+        expect(runtime.acquire_published_facet(
+            "security.AuditRecord", [], "Auditable").unwrap() == nil).to_equal(true)
+        expect(runtime.acquire_facet_generation_lease("security.audit").is_err()).to_equal(true)
+        expect(runtime.release_facet_generation_lease(lease).is_ok()).to_equal(true)
+        expect(runtime.unload_published_aspect("security.audit", loader).unwrap()).to_equal("unloaded")
+        expect(runtime.coordinator.published.has("security.audit")).to_equal(false)
+        expect(runtime.provider_cache.has_module(module_key)).to_equal(false)
+        expect(runtime.provider_cache.has_provider(provider_key)).to_equal(false)

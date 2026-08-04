@@ -1,10 +1,38 @@
-# Simple Aspect Facets and Demand-Loaded SMF Packs
+# Simple Aspect Facets and Demand-Loaded SFM Packs
 
 **Subtitle:** Typed structural AOP, relative aspect packages, variant-aware deployment, and low-overhead lazy activation  
-**Status:** Proposed final research and design  
+**Status:** Revised design aligned with current Simple architecture  
 **Date:** 2026-08-04  
 **Repository examined:** `ormastes/simple`, `main`  
-**Suggested repository destination:** `doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md`
+**Compatibility filename:** `aspect_facet_dynload_smf_pack_design_2026-08-04.md`; “SMF pack” in the original request now means an SFM aspect pack containing opaque SMF code units.
+
+<!-- codex-design -->
+
+> **Normative alignment correction:** Current Simple architecture assigns optional
+> feature/capsule packaging to SFM and keeps ordinary SMF modules opaque. This
+> revision therefore places `AspectCatalog` and `AspectPackDirectory` in SFM
+> outer metadata, extends the existing object-provider/loader/dynSMF lifecycle,
+> resolves variants entirely at build time, and permits V1 facets to use only
+> public contracts or explicit owner-exported capability facades. Earlier
+> proposals for `SMF_FLAG_ASPECT_PACK`, private-layout inspection, or a parallel
+> activation registry are rejected.
+
+### Implemented first-slice modules
+
+The current pure-Simple slice maps directly to existing owners:
+
+- `compiler/00.common`: versioned structural predicate bytecode;
+- `compiler/10.frontend`, `20.hir`, `35.semantics`: feature-scoped facet
+  declarations, lowering, canonical name resolution, and coherence;
+- `std.aop.facet`: no-I/O, policy-aware optional, and required typed acquisition;
+- `compiler/99.loader/module_resolver`: manifest-relative aspect roots;
+- `std.sfm.aspect_pack`: `SFM2` outer directory and independent opaque SMF frames;
+- `compiler/99.loader/loader`: exact-digest provider, application catalog, and
+  an activation transaction composed over existing dynSMF/generation contracts.
+
+This slice stages and validates the control-plane contracts. Executable mapping,
+relocation, resource pin/drain, and dynamic advice patchpoints remain owned by
+the established loader and must not be inferred merely from catalog publication.
 
 ---
 
@@ -17,7 +45,7 @@ The final model has four distinct concepts:
 1. **Aspect** — a named, optional concern and deployment unit, such as `debug`, `logging`, `profile.memory`, `profile.performance`, or `unit.time`.
 2. **Facet interface** — the statically typed API that the aspect exposes as an optional view of a business object.
 3. **Facet binding** — a structural AOP rule that binds a facet interface and implementation to business types selected by a type pointcut.
-4. **Aspect pack** — one SMF container holding multiple aspect modules, indexed without decompressing module metadata and loaded a module or co-load cluster at a time.
+4. **Aspect pack** — one SFM container holding multiple opaque ordinary SMF modules, indexed without decompressing module metadata and loaded a module or co-load cluster at a time.
 
 The canonical relationship is:
 
@@ -36,8 +64,8 @@ The principal design decisions are:
 - Dynamic facets use an external witness/sidecar representation. They do not change the base object's layout or nominal type hierarchy.
 - Static-only facets may optionally use nominal interface introduction, equivalent in spirit to AspectJ `declare parents`, but such a facet cannot remain independently unloadable.
 - Aspect source can be embedded beside a business package or placed in explicit relative aspect roots. File location never becomes the public aspect identity.
-- At deployment, multiple modules may be grouped into one `kind=aspect_pack` SMF under the application's `aspect/` path.
-- An application SMF contains a small uncompressed **Aspect Catalog**. It routes a facet or dynamic join-point slot directly to its pack and module without scanning directories or opening every pack.
+- At deployment, multiple modules may be grouped into one `kind=aspect_pack` SFM under the application's `aspect/` path.
+- The application SFM contains a small uncompressed **Aspect Catalog**. It routes a facet or dynamic join-point slot directly to its pack and module without scanning directories or opening every pack.
 - Every module payload in an aspect pack is independently compressed. Loading one aspect does not decompress the rest of the pack.
 - Simple's existing `variants/` selection supplies platform, hardware, library, and renderer choices to aspect packages. Aspect selection is a separate axis, but both are compiled into one deterministic deployment catalog.
 - Core compilation cache keys do not include the enabled aspect set unless static weaving or dynamic patchpoint emission actually changes core code.
@@ -53,7 +81,7 @@ Simple's current AOP model is primarily behavioral:
 on pc{ execution(* target_func(..)) } use advice_func before priority 10
 ```
 
-It selects execution join points and weaves `before`, `after_success`, `after_error`, or `around` advice. The current authoritative matrix supports `execution`, `within`, and `attr`; type-introduction selectors and link-time weaving are not yet part of the implemented surface.
+It selects execution join points and weaves `before`, `after_success`, `after_error`, or `around` advice. The declared support matrix names `execution`, `within`, and `attr`, but the current tokenized evaluator reliably matches only its implemented function selector paths; `within`/`attr`, type-introduction selectors, and link-time weaving require focused implementation evidence before they may be claimed. All grammar in this document is proposed and feature-gated.
 
 The proposed facility adds **structural optionality**:
 
@@ -152,11 +180,11 @@ A source package containing one aspect's modules, variants, contract, tests, and
 
 ### 3.7 Aspect pack
 
-A deployment SMF containing multiple independently indexed aspect modules or co-load clusters.
+A deployment SFM capsule containing multiple independently indexed opaque SMF modules or co-load clusters. SFM owns the directory, compression, signature, and catalog metadata; SMF remains the existing executable module format.
 
 ### 3.8 Aspect Catalog
 
-A small uncompressed section in the application SMF. It contains only the data needed to route an aspect request to a pack; it does not contain full aspect module metadata or code.
+A small uncompressed section in the application SFM. It contains only the data needed to route an aspect request to a pack; it does not contain full aspect module metadata or code.
 
 ---
 
@@ -472,22 +500,22 @@ facet impl GenericCacheDebug<T: Cache>
     ...
 ```
 
-A concrete implementation may inspect private representation only with explicit authority:
+A concrete implementation that needs representation-specific data must request it through an explicit owner-exported capability facade:
 
 ```simple
 facet impl LruCacheDebug
     for LruCache
     implements Debuggable
-    inspect readonly:
+    public readonly:
 
     fn snapshot(self) -> DebugSnapshot:
         DebugSnapshot(
-            buckets: self.base._buckets.len(),
-            free_nodes: self.base._free_list.len()
+            buckets: self.base.debug_capability().bucket_count(),
+            free_nodes: self.base.debug_capability().free_node_count()
         )
 ```
 
-The second form is tied to the exact private-layout hash of `LruCache`.
+The capability is owned and versioned by `LruCache`; the aspect never reaches through tree-private state. Arbitrary private-layout inspection/mutation is deferred beyond V1.
 
 ## 6.7 Facet acquisition
 
@@ -874,22 +902,22 @@ A fat installation may carry several catalogs and shared content-addressed chunk
 
 ```text
 deploy/
-  app.smf
+  app.sfm
   aspect/
-    observability.smf
-    diagnostics.smf
-    units.smf
+    observability.sfm
+    diagnostics.sfm
+    units.sfm
 ```
 
 Example grouping:
 
 ```text
-observability.smf
+observability.sfm
   logging.*
   metrics.*
   trace.common.*
 
-diagnostics.smf
+diagnostics.sfm
   debug.*
   profile.memory.*
   profile.performance.*
@@ -911,7 +939,7 @@ It must not imply loading all grouped modules.
 
 ## 11.1 Level 1: application Aspect Catalog
 
-The application SMF contains an uncompressed `AspectCatalog` section.
+The application SFM contains an uncompressed `AspectCatalog` section.
 
 ```text
 AspectCatalogHeader
@@ -967,7 +995,7 @@ It is not sufficient to execute the aspect; detailed symbols and relocations rem
 
 ## 11.2 Level 2: aspect-pack directory
 
-Each aspect-pack SMF contains a small uncompressed `AspectPackDirectory` section.
+Each aspect-pack SFM contains a small uncompressed `AspectPackDirectory` section.
 
 ```text
 AspectPackDirectoryHeader
@@ -1028,13 +1056,13 @@ Only routing and compatibility metadata is duplicated in the uncompressed indexe
 
 ---
 
-## 12. Backward-Compatible Aspect-Pack SMF Implementation
+## 12. Backward-Compatible SFM Aspect-Pack Implementation
 
 The lowest-risk first implementation embeds complete ordinary SMF modules as pack chunks:
 
 ```text
-AspectPack SMF
-  PackDirectory        uncompressed
+AspectPack SFM
+  SFM manifest + PackDirectory  uncompressed
   module A .smf blob   independently compressed
   module B .smf blob   independently compressed
   module C .smf blob   independently compressed
@@ -1052,18 +1080,16 @@ This directly fits the current loader architecture, which already has an object-
 
 Later versions may deduplicate strings, contracts, and relocations across modules. That optimization is not required for the first functional pack format.
 
-## 12.1 SMF header compatibility
+## 12.1 SFM container compatibility
 
-Use the existing trailer/header and section table. Add:
+Extend the pure-Simple SFM manifest/container contract with a versioned
+`kind=aspect_pack` directory. Do not add SMF flags or sections and do not depend
+on planned SMF compression/trailer work. Every embedded payload remains a
+complete current ordinary SMF image consumed through `SmfReaderMemory`.
 
-```text
-SMF_FLAG_ASPECT_PACK
-SectionType::AspectPackDirectory
-SectionType::AspectPackSignature
-SectionType::AspectPackDictionary   # optional
-```
-
-An old loader must reject `SMF_FLAG_ASPECT_PACK` as an ordinary executable module. A new `AspectPackProvider` handles it.
+An older SFM reader rejects the unsupported SFM kind/version before exposing a
+payload. `AspectPackProvider` validates the outer directory and returns only the
+selected opaque SMF bytes through the existing object-provider boundary.
 
 ## 12.2 Compression policy
 
@@ -1111,7 +1137,7 @@ Within hard constraints, group by:
 
 ## 13.3 Independent loading remains mandatory
 
-Even when `debug`, `profile.memory`, and `profile.performance` share `diagnostics.smf`, the directory must allow loading only `debug.cache` and its dependency closure.
+Even when `debug`, `profile.memory`, and `profile.performance` share `diagnostics.sfm`, the directory must allow loading only `debug.cache` and its dependency closure.
 
 ## 13.4 Repacking does not recompile
 
@@ -1122,21 +1148,21 @@ The compiler cache stores ordinary module SMF images or equivalent module chunks
 ## 14. Loader and Runtime Architecture
 
 ```text
-Application SMF
+Application SFM
    |
    +-- AspectCatalogReader
            |
-           +-- AspectActivationManager
+           +-- DynSmfSession activation adapter
                    |
                    +-- AspectPackIndexCache
                    +-- AspectPackProvider
                    +-- FacetBindingRegistry
                    +-- AdviceBindingRegistry
-                   +-- ModuleLoader / existing SMF reader
-                   +-- ResourceLifecycleManager
+                   +-- ObjectProvider / ModuleLoader / existing SMF reader
+                   +-- existing generation and resource lifecycle owners
 ```
 
-## 14.1 New components
+## 14.1 New components and adapters
 
 ### AspectCatalogReader
 
@@ -1144,11 +1170,16 @@ Reads the application catalog once and exposes ID-based routes.
 
 ### AspectPackIndexCache
 
-Caches only pack trailer/directory mappings. It does not imply loading payload chunks.
+Caches only validated SFM manifest/directory mappings. It does not imply loading
+payload chunks. Keys include pack digest, catalog generation, target, resolved
+variant fingerprint, runtime ABI, core public ABI hash, and core layout ABI
+hash. Entries are bounded and invalidated when any exact identity or semantic
+ABI dimension changes; decoded module entries additionally respect canonical
+loader resource pins.
 
 ### AspectPackProvider
 
-Implements module lookup by `(pack_id, module_id)`, decompresses selected chunks, and returns ordinary SMF bytes to the existing loader.
+Implements module lookup by `(pack_id, module_id)`, decompresses selected chunks, and returns ordinary SMF bytes through `ObjectProvider` to the existing loader. It is a provider adapter, not a second module loader.
 
 ### FacetBindingRegistry
 
@@ -1161,13 +1192,57 @@ Maps:
 
 It also stores open-world rules keyed by implemented business interface IDs.
 
+Each binding summary names exactly one target identity: `concrete_type_id` or
+`business_interface_id`. Production activation stages candidates only after
+`ModuleLoader` proves that every witness symbol is owned by the selected module
+owner, and publication requires the candidate's exact
+`activation_key@generation`. One active publication pointer per aspect makes
+replacement atomic while exact-generation unbind remains isolated. Lookup
+combines concrete matches with open-world rules and fails on ambiguity.
+
+This registry owns binding visibility only; the existing lifecycle manager
+owns generation state and leases. `AspectApplicationRuntime` resolves and pins
+the exact binding generation through `acquire_published_facet`, and removes
+visibility before unload drain. Dynamic advice-slot publication remains an
+explicit residual because current binding summaries contain no advice-slot
+metadata; this slice introduces no parallel advice lifecycle registry.
+Native driver/runtime wiring and representative startup, lookup-latency, and
+RSS evidence remain explicit verification residuals; this implementation does
+not convert its focused static/unit/system coverage into performance claims.
+
 ### AdviceBindingRegistry
 
 Maps prepared join-point slots to static, startup, or dynamic advice chains.
 
-### AspectActivationManager
+### DynSmfSession activation adapter
 
-Runs the load/validate/bind/publish state machine and coordinates concurrent first use.
+Extends the existing `DynSmfManifestEntry`/`DynSmfSession` policy and evidence contract to run the load/validate/bind/publish transaction. It preserves manifest-derived status, reason, generation, unload/reload, `--no-dynsmf`, and `SIMPLE_DYNSMF` behavior. It does not introduce a second lifecycle registry.
+
+### Application aspect runtime owner
+
+`app.startup.AspectApplicationRuntime` retains the selected `AspectCatalog`,
+external `AspectPackTrustPolicy`, canonical bounded `AspectPackProviderCache`,
+and `AspectActivationCoordinator` for one process. Catalog routes carry a
+validated deployed-image-relative `pack_path`, exact pack/module digests, and
+core public/layout ABI hashes. The application I/O owner opens only the path
+returned by `pack_path_for`; the facade accepts those bytes without adding a
+filesystem or environment shortcut. Admission always uses
+`AspectPackProvider.from_trusted_bytes`, and executable activation always uses
+`AspectActivationCoordinator.activate_with_loader`.
+
+The runtime activation overload receives that one cache instance. Dependency
+staging selects/decompresses each module through `get_module_bytes` once, maps
+and validates through `ModuleLoader`, then acquires every exact module cache pin
+before atomic publication. A partial pin failure releases only pins acquired by
+that transaction and rolls back mappings. Published metadata retains the exact
+module keys and activation owner key.
+
+The facade exposes `acquire_published_generation` and
+`release_published_generation` as the future `FacetRef` lease boundary. They
+delegate opaque replay-safe `GenerationToken` issuance/release to the existing
+`LifecycleManager`; `std.aop` must not import application or OS owners directly.
+The app boundary converts those tokens to ownership-neutral
+`FacetGenerationLease` values carried by dynamic `FacetRef` instances.
 
 ## 14.2 Runtime state machine
 
@@ -1204,7 +1279,7 @@ Failures transition to `Failed` with a stable diagnostic. Retry policy is explic
 4. consult application FacetRoute
 5. if policy permits lazy loading:
       open exact pack path
-      map trailer and directory only
+      read the SFM manifest and aspect-pack directory only
       verify index hash/signature
       resolve module dependency closure
       decompress selected module chunks
@@ -1281,17 +1356,18 @@ Hot unload is not required for the initial release.
 
 ## 15. Mapping and I/O Policy
 
-The current SMF mmap cache maps the full file and uses sequential access advice. That is appropriate for ordinary modules expected to be consumed as a unit, but not for large cold aspect packs.
+The current SMF mmap cache maps an ordinary executable module as a unit. That remains appropriate for opaque embedded SMF payloads, but the outer SFM aspect pack must not map or decompress unrelated payload chunks.
 
-Aspect packs require a distinct path:
+Aspect packs require an SFM provider path integrated below the current object-provider/cache seam:
 
-- Read the fixed trailer.
-- Map or `pread` only the uncompressed pack directory.
+- Read the bounded SFM header/manifest and uncompressed pack directory.
+- Use canonical file/mmap facades; app and feature leaves add no raw `rt_*` calls.
 - Do not issue whole-file sequential readahead.
 - Map or read only selected compressed chunk ranges.
 - Issue `WILLNEED` only for explicit startup/preload closures.
-- Cache decompressed module bytes by content hash.
-- Evict cold debug chunks independently from the pack index.
+- Cache decompressed module bytes by `(pack digest, module digest, target, resolved variant fingerprint, runtime ABI)`.
+- Bound negative cache entries; invalidate on catalog/generation/digest changes.
+- Evict cold chunks independently while respecting loader generation pins and resource refcounts.
 
 Mapping a whole file may reserve virtual address space without faulting all pages, but the loader should still avoid policies that encourage unnecessary payload read-ahead.
 
@@ -1361,9 +1437,7 @@ Access levels:
 | Level | Domain authority | Default compatibility |
 |---|---|---|
 | `public readonly` | public methods/fields only | public ABI |
-| `inspect readonly` | private representation read | exact layout hash |
-| `mutate` | write domain state | explicit grant + exact ABI |
-| `structural` | alter ownership, dispatch, or layout-sensitive state | unsafe/privileged |
+| owner capability | owner-exported read-only facade | capability ABI |
 
 Default:
 
@@ -1379,15 +1453,15 @@ class FlightController:
     ...
 ```
 
-or grant a named aspect:
+or export a named capability facade:
 
 ```simple
-@allow_facet_access(debug, inspect_readonly)
 class LruCache:
-    ...
+    fn debug_capability(self) -> LruCacheDebugCapability:
+        ...
 ```
 
-The exact attribute spelling may be finalized with the broader capability system; the semantic requirement is mandatory.
+V1 does not grant arbitrary private, mutating, or structural access. Such access requires a future language-wide unsafe capability design and is not implied by a layout hash or pack signature.
 
 ---
 
@@ -1399,7 +1473,7 @@ aspect_policy:
   unload: deny
   lazy_io_after_start: deny
   domain_mutation: deny
-  private_inspect: allow_signed_exact_abi
+  private_inspect: deny
   activation: [static, startup]
   signed_pack: require
   catalog_hash: require
@@ -1415,6 +1489,14 @@ Rules:
 - Domain-mutating facets are rejected.
 - Every configuration has a generated manifest and real system test.
 - A failed aspect load prevents application publication rather than leaving a partially instrumented system.
+- The application calls `enter_operational()` explicitly. In mission mode the
+  transition fails until every `startup` catalog entry is published; afterward
+  `LazyIo`, `DynamicAttach`, `Unload`, and `Patch` authorization fails closed.
+- Ordinary unload quiesces the exact aspect owner, makes its bindings
+  unavailable, and returns a retryable `quiescing` status while generation
+  tokens drain. The drained completion unloads existing `ModuleLoader` owners,
+  releases exact module-cache pins, invalidates the exact provider, completes
+  the canonical lifecycle generation, and only then drops publication metadata.
 
 For operational diagnostics that cannot satisfy these constraints, prefer an external debug process/protocol rather than in-process hot attachment.
 
@@ -1601,9 +1683,25 @@ New outputs:
 
 - facet contract metadata in SHB,
 - binding summary metadata in ordinary aspect-module SMF,
-- aspect-pack directory,
-- application Aspect Catalog,
+- SFM-owned aspect-pack directory,
+- application-SFM Aspect Catalog,
 - per-pack/module content hashes.
+
+## 22.7 MDSOC owner map
+
+| Contract | Authoritative owner | Visibility rule |
+|---|---|---|
+| `AspectId`, `FacetId`, `TypePredicateBytecode` | `src/compiler/00.common/structural_contracts/` when shared by four or more compiler consumers | Common immutable contracts only; no layer implementation leaks. |
+| Facet/aspect syntax | `src/compiler/10.frontend/` | Public only to the next lowering layer through its facade. |
+| Facet type/coherence rules | `src/compiler/20.hir/`, `25.types/`, `30.types/`, `35.semantics/` according to existing responsibility | No sibling-private reach-through; common nodes are extracted rather than imported sideways. |
+| Static binding/weave plan | `src/compiler/50.mir/` and existing `85.mdsoc/` facade | Existing AOP exactly-once ordering remains authoritative. |
+| Packaging/orchestration | `src/compiler/80.driver/` plus `src/lib/nogc_sync_mut/sfm/` codec | Driver coordinates; SFM owns outer format. |
+| Resolution/load | `src/compiler/99.loader/` | Resolver owns source roots; loader owns module publication. |
+| dynSMF policy/lifecycle evidence | `src/os/smf/` | Startup app is a thin facade-using adapter only. |
+
+No aspect may bypass a target owner’s tree-private state. Shared contracts move
+to a common node only when their consumer count justifies it; otherwise they
+stay owner-private and are exposed through the parent/next-layer facade.
 
 ---
 
@@ -1633,13 +1731,17 @@ aspects/debug/
 
 This keeps a debug agent from reading unrelated logging or profiler implementation while preserving layer boundaries inside the aspect.
 
+The directory sketch is logical, not permission to bypass compiler or domain
+owners. Aspect leaves consume only public/next-layer facades and explicit
+owner-exported capabilities.
+
 ### Existing variants
 
-Generalize the current variant-root computation to accept an aspect package-family root and the application's active selection fingerprint.
+Reuse the current variant-root computation while resolving the aspect package at build time. The emitted SFM catalog contains only concrete selected module IDs and the selection fingerprint. Runtime activation never reevaluates `variants/` or traverses variant roots.
 
 ### Existing SMF and loader
 
-Use embedded ordinary SMF blobs in pack v1. Add an `AspectPackProvider` before changing the ordinary SMF reader format.
+Use embedded ordinary opaque SMF blobs in SFM aspect-pack v1. Add `AspectPackProvider` as an `ObjectProvider` adapter and do not change the ordinary SMF reader format.
 
 ### Existing `note.sdn` and JIT
 
@@ -1647,7 +1749,7 @@ Each embedded module retains its own metadata, lazy generic information, and rel
 
 ### Existing hot reload/lifecycle
 
-Use a composite owner ID:
+Extend existing loader/dynSMF generation ownership with a composite owner ID:
 
 ```text
 pack_id : module_id : aspect_generation
@@ -1666,10 +1768,10 @@ This permits module-level ownership even though several modules share one physic
 - Define ABI and diagnostic codes.
 - Define exact performance assertions.
 
-## Phase 1 — Static attached facet binding
+## Phase 1 — Shared type predicates and static attached facet binding
 
+- Add `TypePredicateBytecode` and deterministic `type`, `implements`, and `subtype` evaluation against the compile-time `ModuleSurface` projection.
 - Parse `facet interface`, `facet impl`, `bind facet`, `require facet`.
-- Add `type`, `implements`, and `subtype` selectors.
 - Implement closed-world witness tables.
 - Implement `try_facet<T>()` without dynload.
 - Enforce core dependency and access rules.
@@ -1678,7 +1780,7 @@ This permits module-level ownership even though several modules share one physic
 
 - Publish type descriptors and implemented-interface IDs from modules.
 - Register binding rules in either load order.
-- Add generic public-interface and concrete private-layout implementations.
+- Add generic public-interface and explicit owner-capability implementations.
 - Add binding ambiguity diagnostics.
 
 ## Phase 3 — Relative aspect packages
@@ -1688,18 +1790,19 @@ This permits module-level ownership even though several modules share one physic
 - Reuse variant selection within aspect package roots.
 - Add LSP navigation showing logical aspect ID and physical source.
 
-## Phase 4 — Aspect pack v1
+## Phase 4 — SFM aspect pack v1
 
-- Add `SMF_FLAG_ASPECT_PACK` and uncompressed pack directory.
+- Add versioned `kind=aspect_pack` SFM manifest metadata and an uncompressed pack directory.
 - Embed independently compressed complete ordinary SMF modules.
-- Implement `AspectPackProvider` returning module bytes.
+- Implement `AspectPackProvider` as an `ObjectProvider` adapter returning module bytes.
 - Reuse existing in-memory reader, relocation, JIT, and lifecycle paths.
 
 ## Phase 5 — Application catalog and lazy facet activation
 
-- Emit `AspectCatalog` in app SMF.
+- Emit `AspectCatalog` in the application SFM.
 - Implement exact pack routing and `lazy_facet`.
-- Add index/chunk caches and concurrent activation transaction.
+- Extend `DynSmfSession`, loader generation staging, and resource lifecycle for the concurrent activation transaction; do not add a parallel manager.
+- Add bounded index/chunk caches with exact keys, invalidation, eviction, and negative-cache policy.
 - Ensure no runtime directory search or config parsing.
 
 ## Phase 6 — Startup AOP and static weaving integration
@@ -1742,7 +1845,7 @@ This permits module-level ownership even though several modules share one physic
 - Verify no base object layout change.
 - Verify required binding failures.
 - Verify ambiguity and multi-provider behavior.
-- Verify public-only versus private-layout ABI invalidation.
+- Verify public-contract versus owner-capability ABI invalidation.
 - Verify core-to-aspect dependency errors.
 - Verify helper ownership inference.
 
@@ -1861,16 +1964,16 @@ facet impl CacheDebug<T: Cache>
 facet impl LruPrivateDebug
     for LruCache
     implements Debuggable
-    inspect readonly:
+    public readonly:
 
     fn debug_name(self) -> text:
         "LruCache"
 
     fn snapshot(self) -> DebugSnapshot:
         DebugSnapshot(
-            entries: self.base._entries.len(),
-            buckets: self.base._buckets.len(),
-            free_nodes: self.base._free_list.len()
+            entries: self.base.debug_capability().entry_count(),
+            buckets: self.base.debug_capability().bucket_count(),
+            free_nodes: self.base.debug_capability().free_node_count()
         )
 ```
 
@@ -1915,9 +2018,9 @@ aspect:
 
 ```text
 deploy/
-  app.smf                      # core + AspectCatalog
+  app.sfm                      # application capsule + AspectCatalog + core SMF payload
   aspect/
-    diagnostics.smf            # debug and performance-profile modules
+    diagnostics.sfm            # aspect-pack SFM with opaque SMF modules
 ```
 
 ### Runtime
@@ -1994,10 +2097,10 @@ aspect debug:
 and this deployment model:
 
 ```text
-app.smf
-  uncompressed AspectCatalog
+app.sfm
+  uncompressed AspectCatalog + opaque core SMF payload
 
-aspect/diagnostics.smf
+aspect/diagnostics.sfm
   uncompressed AspectPackDirectory
   independently compressed ordinary SMF module chunks
 ```

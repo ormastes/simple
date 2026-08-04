@@ -39,7 +39,9 @@ use os.smf.smf_generation.{GenerationState, CandidateMapping, SymbolSwap, Lifecy
 struct LoadedModule:
     """A loaded SMF module."""
     path: text
-    reader: SmfReaderImpl
+    # Virtual byte-backed modules are parsed and mapped directly through
+    # SmfReaderMemory and intentionally have no filesystem-backed reader.
+    reader: SmfReaderImpl?
     symbols: Dict<text, LoadedSymbol>
     load_time: i64
     version: i32
@@ -208,15 +210,18 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
         # Register with lifecycle manager for resource tracking.
         lifecycle_on_module_load(self.lifecycle, path, self.jit.exec_mapper.generation, current_time())
 
-        # Prefer shared object provider so we work for .smf and .lsm inputs.
-        var reader_result = self.provider.get_reader(path)
-        if reader_result.is_err():
-            # Fallback to direct file reader (legacy path)
-            reader_result = SmfReaderImpl.open(path)
+        # Explicit virtual modules never probe the filesystem/getter reader.
+        # Their registered bytes have already passed SmfReaderMemory validation.
+        val is_registered_module = self.provider.has_registered_module(path)
+        var reader: SmfReaderImpl? = nil
+        if not is_registered_module:
+            # Preserve the ordinary .smf/.lsm and legacy direct-file paths.
+            var reader_result = self.provider.get_reader(path)
             if reader_result.is_err():
-                return LoadResult.Error(message: reader_result.unwrap_err())
-
-        val reader = reader_result.unwrap()
+                reader_result = SmfReaderImpl.open(path)
+                if reader_result.is_err():
+                    return LoadResult.Error(message: reader_result.unwrap_err())
+            reader = reader_result.unwrap()
 
         # Build loaded module. Prefer the regular reader, but fall back to the
         # pure Simple in-memory reader when the seed-backed reader cannot expose
@@ -246,27 +251,28 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
                     symbols[smf_sym.name] = loaded_sym
                     self.global_symbols[smf_sym.name] = (path, loaded_sym)
                     lifecycle_on_symbol_mapped(self.lifecycle, path, smf_sym.name)
-        val reader_exports = reader.exported_symbols()
-        if symbols.keys().len() == 0 and reader_exports.len() > 0:
-            for smf_sym in reader_exports:
-                val code_result = reader.read_code(smf_sym)
-                if code_result.is_err():
-                    return LoadResult.Error(message: code_result.unwrap_err())
-                val code = code_result.unwrap()
-                val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: smf_sym.name, code: code, allow_replace: false)
-                if exec_addr == 0:
-                    return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
-                val loaded_sym = LoadedSymbol(
-                    name: smf_sym.name,
-                    address: exec_addr,
-                    size: smf_sym.size,
-                    ty: smf_sym.ty,
-                    is_jit: false,
-                    file_offset: smf_sym.offset as i64
-                )
-                symbols[smf_sym.name] = loaded_sym
-                self.global_symbols[smf_sym.name] = (path, loaded_sym)
-                lifecycle_on_symbol_mapped(self.lifecycle, path, smf_sym.name)
+        if symbols.keys().len() == 0:
+            if val file_reader = reader:
+                val reader_exports = file_reader.exported_symbols()
+                for smf_sym in reader_exports:
+                    val code_result = file_reader.read_code(smf_sym)
+                    if code_result.is_err():
+                        return LoadResult.Error(message: code_result.unwrap_err())
+                    val code = code_result.unwrap()
+                    val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: smf_sym.name, code: code, allow_replace: false)
+                    if exec_addr == 0:
+                        return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+                    val loaded_sym = LoadedSymbol(
+                        name: smf_sym.name,
+                        address: exec_addr,
+                        size: smf_sym.size,
+                        ty: smf_sym.ty,
+                        is_jit: false,
+                        file_offset: smf_sym.offset as i64
+                    )
+                    symbols[smf_sym.name] = loaded_sym
+                    self.global_symbols[smf_sym.name] = (path, loaded_sym)
+                    lifecycle_on_symbol_mapped(self.lifecycle, path, smf_sym.name)
         if symbols.keys().len() == 0:
             val load_bytes_result = self.provider.get_module_bytes(path)
             if load_bytes_result.is_err():
@@ -433,18 +439,28 @@ fn moduleloader_replace_live(self: ModuleLoader, path: text) -> LoadResult:
         var gen_lm = LifecycleManager.new_manager().register_candidate(path, next_version)
         var candidate_map = CandidateMapping.create(candidate_prefix)
 
-        var reader_result = self.provider.get_reader(path)
-        if reader_result.is_err():
-            reader_result = SmfReaderImpl.open(path)
+        val is_registered_module = self.provider.has_registered_module(path)
+        var reader: SmfReaderImpl? = nil
+        if not is_registered_module:
+            var reader_result = self.provider.get_reader(path)
             if reader_result.is_err():
-                return LoadResult.Error(message: reader_result.unwrap_err())
-
-        val reader = reader_result.unwrap()
+                reader_result = SmfReaderImpl.open(path)
+                if reader_result.is_err():
+                    return LoadResult.Error(message: reader_result.unwrap_err())
+            reader = reader_result.unwrap()
         var candidate_symbols: Dict<text, LoadedSymbol> = {}
         var internal_symbols: [text] = []
 
-        for smf_sym in reader.exported_symbols():
-            val code_result = reader.read_code(smf_sym)
+        val smf_data_result = self.provider.get_module_bytes(path)
+        if smf_data_result.is_err():
+            return LoadResult.Error(message: smf_data_result.unwrap_err())
+        val memory_reader_result = SmfReaderMemory.from_data(smf_data_result.unwrap())
+        if memory_reader_result.is_err():
+            return LoadResult.Error(message: memory_reader_result.unwrap_err())
+        val memory_reader = memory_reader_result.unwrap()
+
+        for smf_sym in memory_reader.exported_symbols():
+            val code_result = memory_reader.read_code(smf_sym)
             if code_result.is_err():
                 return LoadResult.Error(message: code_result.unwrap_err())
 
@@ -474,12 +490,6 @@ fn moduleloader_replace_live(self: ModuleLoader, path: text) -> LoadResult:
         )
 
         self.modules[path] = candidate
-
-        var smf_data_result = self.provider.get_module_bytes(path)
-        if smf_data_result.is_err():
-            self.modules[path] = old_module
-            moduleloader_unmap_internal_symbols(self, internal_symbols)
-            return LoadResult.Error(message: smf_data_result.unwrap_err())
 
         val reloc_result = moduleloader_apply_relocations(self, path, smf_data_result.unwrap())
         if reloc_result.is_err():
@@ -614,9 +624,12 @@ fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [Type
                 val sym_name = _item_2[0]
                 val symbol = _item_2[1]
                 if sym_name == name:
+                    if module.reader == nil:
+                        return SymbolResult.Error(message: "Generic ObjTaker resolution requires a filesystem-backed SMF reader for {path}")
+                    val module_reader = module.reader.unwrap()
                     # Found template - instantiate with ObjTaker
                     val result = self.obj_taker.take_with_types(
-                        module.reader,
+                        module_reader,
                         name,
                         type_args
                     )
@@ -767,6 +780,15 @@ fn moduleloader_unload(self: ModuleLoader, path: text):
     7. Module cache entry
     """
     if not self.modules.has(path):
+        # A failed provider-backed load can register lifecycle ownership before
+        # the LoadedModule record exists.  Keep rollback idempotent and release
+        # both that partial ownership and any explicit virtual byte source.
+        lifecycle_unload_module(self.lifecycle, self.jit.exec_mapper, path)
+        val partial_symbols = owned_global_symbol_names(self.global_symbols, path)
+        self.global_symbols = global_symbols_without_names(self.global_symbols, partial_symbols)
+        for sym_name in partial_symbols:
+            self.jit.drop_cached_symbol(sym_name)
+        _ = self.provider.remove_registered_module_bytes(path)
         return
 
     # 1. Delegate exec page and SMF cache cleanup to lifecycle manager.
@@ -801,6 +823,7 @@ fn moduleloader_unload(self: ModuleLoader, path: text):
     # 7. Remove module from cache.
     moduleloader_drop_semantic_cache_record(self, path)
     self.modules = self.modules.remove(path)
+    _ = self.provider.remove_registered_module_bytes(path)
 
 fn moduleloader_record_semantic_fingerprint(self: ModuleLoader, path: text, fingerprint: text):
     """Record the semantic/public-ABI/accessor fingerprint for a loaded artifact."""

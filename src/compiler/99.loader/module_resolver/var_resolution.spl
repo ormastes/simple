@@ -15,6 +15,8 @@
 # bootstrap-safe line-based manifest reader and resolver hook are separate
 # increments (H2 / Phase 4).
 
+use std.common.crypto.types.{text_to_bytes}
+
 # A variant group: a selectable axis with a closed value set.
 struct VarGroup:
     name: text            # "platform", "hw", "lib.crypto"
@@ -299,3 +301,183 @@ fn var_validate(manifest: VarManifest, selections: [VarSelection]) -> [text]:
                 errors.push("E-VAR001")
 
     errors
+
+# ----------------------------------------------------------------------------
+# Resolver-owned aspect roots
+#
+# Aspect discovery supplies one candidate per package descriptor. Resolution is
+# deliberately build-time only: variant selections are already concrete, and
+# their fingerprint is copied into every resolved root for catalog/cache use.
+# ----------------------------------------------------------------------------
+
+extern fn rt_path_absolute(path: text) -> text
+
+struct AspectRootCandidate:
+    root_id: text
+    aspect_id: text
+    path: text
+    rank: i64
+    external: bool
+
+struct ResolvedAspectRoot:
+    root_id: text
+    aspect_id: text
+    canonical_path: text
+    rank: i64
+    external: bool
+    variant_roots: [text]
+    selection_fingerprint: text
+
+struct AspectRootResolution:
+    roots: [ResolvedAspectRoot]
+    errors: [text]
+    selection_fingerprint: text
+
+# Lexically collapse separators, `.` and `..`. Absolute paths stay absolute.
+# This runs before realpath so a missing final component cannot preserve an
+# unchecked `..` segment in the runtime fallback.
+fn aspect_normalize_path(path: text) -> text:
+    val normalized = path.replace("\\", "/")
+    val absolute = normalized.starts_with("/")
+    var parts: [text] = []
+    for part in normalized.split("/"):
+        if part.len() == 0 or part == ".":
+            continue
+        if part == "..":
+            if parts.len() > 0 and parts[parts.len() - 1] != "..":
+                parts.pop()
+            elif not absolute:
+                parts.push(part)
+            continue
+        parts.push(part)
+    val joined = parts.join("/")
+    if absolute:
+        return "/{joined}"
+    if joined.len() == 0:
+        return "."
+    joined
+
+fn aspect_path_dirname(path: text) -> text:
+    val normalized = aspect_normalize_path(path)
+    val slash = normalized.last_index_of("/")
+    if slash < 0:
+        return "."
+    if slash == 0:
+        return "/"
+    normalized[0:slash]
+
+fn aspect_path_within(root: text, child: text) -> bool:
+    val canonical_root = aspect_normalize_path(root)
+    val canonical_child = aspect_normalize_path(child)
+    if canonical_root == "/":
+        return canonical_child.starts_with("/")
+    canonical_child == canonical_root or canonical_child.starts_with("{canonical_root}/")
+
+fn aspect_importer_can_search(from_file: text, roots: [text]) -> bool:
+    """Only code already owned by a resolved aspect root may search that registry."""
+    for root in roots:
+        if aspect_path_within(root, from_file):
+            return true
+    false
+
+fn aspect_path_escape_code(
+    workspace_lexical: text,
+    workspace_physical: text,
+    candidate_lexical: text,
+    candidate_physical: text,
+    external: bool
+) -> text:
+    if external:
+        return ""
+    if not aspect_path_within(workspace_lexical, candidate_lexical):
+        return "E-APATH001"
+    if not aspect_path_within(workspace_physical, candidate_physical):
+        return "E-APATH002"
+    ""
+
+fn aspect_root_less(a: ResolvedAspectRoot, b: ResolvedAspectRoot) -> bool:
+    if a.rank != b.rank:
+        return a.rank < b.rank
+    if a.aspect_id != b.aspect_id:
+        return aspect_root_text_less(a.aspect_id, b.aspect_id)
+    if a.root_id != b.root_id:
+        return aspect_root_text_less(a.root_id, b.root_id)
+    aspect_root_text_less(a.canonical_path, b.canonical_path)
+
+fn aspect_root_text_less(a: text, b: text) -> bool:
+    val a_bytes = text_to_bytes(a)
+    val b_bytes = text_to_bytes(b)
+    var index = 0
+    while index < a_bytes.len() and index < b_bytes.len():
+        if a_bytes[index] != b_bytes[index]:
+            return a_bytes[index] < b_bytes[index]
+        index = index + 1
+    a_bytes.len() < b_bytes.len()
+
+fn aspect_sort_roots(roots: [ResolvedAspectRoot]) -> [ResolvedAspectRoot]:
+    var ordered = roots.clone()
+    for i in 1..ordered.len():
+        val item = ordered[i]
+        var j = i
+        while j > 0 and aspect_root_less(item, ordered[j - 1]):
+            ordered[j] = ordered[j - 1]
+            j = j - 1
+        ordered[j] = item
+    ordered
+
+# Resolve discovered aspect packages relative to the declaring manifest.
+#
+# Diagnostics:
+#   E-APATH001 lexical path escapes the workspace without `external: true`
+#   E-APATH002 canonical/real path escapes it through a symlink
+#   E-APATH003 duplicate aspect ID at the same resolution rank
+fn aspect_resolve_roots(
+    workspace_root: text,
+    manifest_path: text,
+    candidates: [AspectRootCandidate],
+    var_manifest: VarManifest,
+    selections: [VarSelection],
+    selection_fingerprint: text
+) -> AspectRootResolution:
+    val workspace_lexical = aspect_normalize_path(rt_path_absolute(workspace_root))
+    val workspace_physical = aspect_normalize_path(rt_path_absolute(workspace_lexical))
+    val manifest_absolute = aspect_normalize_path(rt_path_absolute(manifest_path))
+    val manifest_dir = aspect_path_dirname(manifest_absolute)
+    var roots: [ResolvedAspectRoot] = []
+    var errors: [text] = []
+
+    for i in 0..candidates.len():
+        val candidate = candidates[i]
+
+        for j in 0..i:
+            val prior = candidates[j]
+            if prior.rank == candidate.rank and prior.aspect_id == candidate.aspect_id:
+                errors.push("E-APATH003")
+
+        val lexical = aspect_normalize_path("{manifest_dir}/{candidate.path}")
+        val physical = aspect_normalize_path(rt_path_absolute(lexical))
+        val escape_code = aspect_path_escape_code(
+            workspace_lexical, workspace_physical, lexical, physical, candidate.external)
+        if escape_code.len() > 0:
+            errors.push(escape_code)
+            continue
+
+        roots.push(ResolvedAspectRoot(
+            root_id: candidate.root_id,
+            aspect_id: candidate.aspect_id,
+            canonical_path: physical,
+            rank: candidate.rank,
+            external: candidate.external,
+            variant_roots: var_candidate_roots("{physical}/variants", var_manifest, selections),
+            selection_fingerprint: selection_fingerprint
+        ))
+
+    # Any invalid candidate rejects the registry as a whole. Callers never see
+    # a partially accepted root set and therefore cannot accidentally publish
+    # a catalog from incomplete discovery.
+    val accepted = if errors.len() == 0: aspect_sort_roots(roots) else: []
+    AspectRootResolution(
+        roots: accepted,
+        errors: errors,
+        selection_fingerprint: selection_fingerprint
+    )

@@ -1,14 +1,15 @@
 # Simple Feature Module (SFM) — Architecture TLDR
 
-`.sfm` is a pure-Simple container that **embeds opaque SMF bytes** + a feature
-manifest (no new SMF section → no seed rebuild). The manifest is the MDSOC+
-capsule boundary: exposed **layers** + **SfmSecurityLevel**. **DI** wires layers
-data-driven from the manifest; an **AOP** authz aspect gates Trusted layers. The
-**loader** picks a profile and hands SMF to the existing `SmfGetter`.
+`.sfm` is a pure-Simple outer container over opaque SMF code units (no new SMF
+section). `SFM1` carries one SMF; `SFM2` kind `aspect_pack` carries a bounded,
+uncompressed directory plus independently framed SMFs for selected-module-only
+loading. The manifest remains the MDSOC+ capsule boundary.
 
 ## Core Shape
-- Layout (LE): `"SFM1" | ver(u16,u16) | manifest_len u32 | smf_len u32 | manifest | opaque SMF`.
-- SMF blob is last and never re-encoded; header is 16 bytes.
+- `SFM1`: unchanged 16-byte header + manifest + one opaque SMF.
+- `SFM2 aspect_pack`: 28-byte header + manifest + directory + opaque SMF frames.
+- Metadata is validated up front; only the selected frame is integrity-checked
+  and optionally decompressed before reuse of the existing SMF reader.
 - Profiles: native | loader | script | web | mobile (loader reports which handled it).
 - VERSION → embedded SemVer, retrievable at runtime.
 

@@ -1,0 +1,92 @@
+# @req REQ-AF-004 REQ-AF-006 REQ-AF-007
+# @cover src/compiler/99.loader/module_resolver/aspect_registry.spl 80%
+
+use std.spec.*
+use compiler.loader.module_resolver.aspect_registry.{
+    aspect_registry_find_manifest, aspect_registry_install_for_inputs,
+    aspect_registry_load, aspect_registry_parse_descriptor,
+    aspect_registry_parse_manifest
+}
+use compiler.loader.module_resolver.types.{moduleresolver_new}
+use compiler.loader.module_resolver.var_resolution.{VarManifest}
+
+fn aspect_registry_fixture_entry() -> text:
+    "test/01_unit/compiler/module_resolver/fixtures/aspect_registry/app/main.spl"
+
+describe "resolver-owned aspect registry":
+    it "parses the frozen registry policy and deterministic root order":
+        val parsed = aspect_registry_parse_manifest("""
+aspects:
+  version: 1
+  order: [package_local, app, company]
+  roots:
+    package_local: { path: ../src/storage/cache/aspects }
+    app: { path: . }
+    company: { path: ../../shared-aspects, external: true }
+  policy:
+    same_rank_conflict: error
+    direct_core_import: error
+    path_escape: error
+    symlink_escape: error
+""")
+        expect(parsed.errors.len()).to_equal(0)
+        expect(parsed.roots.len()).to_equal(3)
+        expect(parsed.roots[0].rank).to_equal(0)
+        expect(parsed.roots[2].external).to_be(true)
+
+    it "fails closed for unsupported policy or an unordered root":
+        val parsed = aspect_registry_parse_manifest("""
+aspects:
+  version: 1
+  order: [app]
+  roots:
+    hidden: { path: . }
+  policy:
+    path_escape: allow
+""")
+        expect(parsed.errors).to_contain("E-AREG003")
+        expect(parsed.errors).to_contain("E-AREG004")
+
+    it "parses package identity independently of its physical location":
+        val descriptor = aspect_registry_parse_descriptor("""
+aspect:
+  id: debug
+  version: 1
+  source: src
+  pack: diagnostics
+  activation_default: lazy_facet
+  access_default: public_readonly
+  dependencies: [logging]
+  variants: inherit
+""")
+        expect(descriptor.aspect_id).to_equal("debug")
+        expect(descriptor.version).to_equal(1)
+        expect(descriptor.dependencies).to_equal(["logging"])
+
+    it "discovers and installs concrete roots on an existing live resolver":
+        val entry = aspect_registry_fixture_entry()
+        val manifest = aspect_registry_find_manifest([entry])
+        expect(manifest.?).to_be(true)
+        val resolver = moduleresolver_new(".", "./src")
+        val installed = aspect_registry_install_for_inputs(resolver, [entry])
+        expect(installed.errors.len()).to_equal(0)
+        expect(installed.resolver.aspect_roots.len()).to_equal(1)
+        expect(installed.resolver.aspect_roots[0]).to_end_with("/aspects/debug/src")
+        expect(installed.resolver.aspect_fingerprint.len()).to_equal(64)
+
+    it "rejects a registry root that lexically escapes its workspace":
+        val manifest_path = "test/01_unit/compiler/module_resolver/fixtures/aspect_registry_escape/app/aspects/__init__.spl"
+        val variants = VarManifest(version: 1, global_default: "default", order: [], groups: [])
+        val loaded = aspect_registry_load(
+            "test/01_unit/compiler/module_resolver/fixtures/aspect_registry_escape/app",
+            manifest_path, variants, [], "")
+        expect(loaded.errors).to_contain("E-APATH001")
+        expect(loaded.roots.len()).to_equal(0)
+
+    it "leaves a resolver unchanged when no registry is discoverable":
+        val resolver = moduleresolver_new(".", "./src")
+        val installed = aspect_registry_install_for_inputs(
+            resolver, ["/definitely/missing/aspect-registry-fixture/main.spl"])
+        expect(installed.errors.len()).to_equal(0)
+        expect(installed.manifest_path).to_equal("")
+        expect(installed.resolver.aspect_roots.len()).to_equal(0)

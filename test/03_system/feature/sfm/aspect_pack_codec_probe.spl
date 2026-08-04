@@ -1,0 +1,155 @@
+# Focused executable gate for the SFM2 aspect-pack codec and SFM1 compatibility.
+# Run: bin/simple run test/03_system/feature/sfm/aspect_pack_codec_probe.spl
+
+use std.sfm.aspect_pack.{
+    AspectPackCompression,
+    AspectPackPayload,
+    encode_aspect_pack,
+    decode_aspect_pack,
+    aspect_pack_stored_frame
+}
+use std.sfm.manifest.{FeatureManifest, LayerDescriptor, LayerKind, SfmSecurityLevel}
+use std.sfm.codec.{encode_sfm, decode_sfm}
+
+fn probe_bytes(a: i32, b: i32, c: i32, d: i32) -> [u8]:
+    var out: [u8] = []
+    var i: i32 = 0
+    while i < 4:
+        out.append(0 as u8)
+        i = i + 1
+    out[0] = a as u8
+    out[1] = b as u8
+    out[2] = c as u8
+    out[3] = d as u8
+    return out
+
+fn probe_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i32 = 0
+    while i < (a.len() as i32):
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    return true
+
+fn probe_copy(src: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: i32 = 0
+    while i < (src.len() as i32):
+        out.append(0 as u8)
+        out[i] = src[i]
+        i = i + 1
+    return out
+
+fn probe_fail(detail: text):
+    print("SFM-ASPECT-PACK: FAIL " + detail)
+
+fn probe_manifest() -> FeatureManifest:
+    return FeatureManifest(
+        name: "diagnostics-pack",
+        version: "2.0.0",
+        security_level: SfmSecurityLevel.Trusted,
+        layers: [LayerDescriptor(
+            role: "diagnostics",
+            kind: LayerKind.BackHw,
+            entry_symbol: "diagnostics_open",
+            privileged: true
+        )]
+    )
+
+fn main():
+    val plain = probe_bytes(83, 77, 70, 0)
+    val framed = probe_bytes(40, 181, 47, 253)
+    val manifest = probe_manifest()
+
+    # The existing ordinary SFM1 codec remains byte-compatible and decodable.
+    val ordinary_sfm1: [u8] = encode_sfm(manifest, plain)
+    match decode_sfm(ordinary_sfm1):
+        Err(e):
+            probe_fail("SFM1 compatibility decode: " + e)
+            return
+        Ok((ordinary_manifest, ordinary_payload)):
+            if ordinary_manifest.name != manifest.name or not probe_equal(ordinary_payload, plain):
+                probe_fail("SFM1 compatibility fields")
+                return
+    val inputs = [
+        AspectPackPayload(
+            module_id: "debug.cache",
+            aspect_id: "debug",
+            compression: AspectPackCompression.None,
+            uncompressed_size: 4,
+            dictionary_id: 0,
+            stored_bytes: plain
+        ),
+        AspectPackPayload(
+            module_id: "profile.memory",
+            aspect_id: "profile",
+            compression: AspectPackCompression.Zstd,
+            uncompressed_size: 64,
+            dictionary_id: 7,
+            stored_bytes: framed
+        )
+    ]
+
+    val encoded = match encode_aspect_pack(manifest, inputs):
+        Err(e):
+            probe_fail("encode error: " + e)
+            return
+        Ok(value): value
+    val image = match decode_aspect_pack(encoded):
+        Err(e):
+            probe_fail("decode error: " + e)
+            return
+        Ok(value): value
+    if image.directory.entries.len() != 2:
+        probe_fail("directory entry count")
+        return
+    if image.manifest.name != "diagnostics-pack" or image.manifest.layers.len() != 1:
+        probe_fail("canonical SFM manifest")
+        return
+    if image.directory.entries[1].dictionary_id != 7:
+        probe_fail("independent compression metadata")
+        return
+    val selected = match aspect_pack_stored_frame(image, "debug.cache"):
+        Err(e):
+            probe_fail("select error: " + e)
+            return
+        Ok(value): value
+    if not probe_equal(selected, plain):
+        probe_fail("opaque SMF bytes changed")
+        return
+
+    # Fail closed on an unsupported outer version.
+    var bad_version = probe_copy(encoded)
+    bad_version[4] = 3 as u8
+    match decode_aspect_pack(bad_version):
+        Ok(_):
+            probe_fail("unsupported version accepted")
+            return
+        Err(_): pass
+
+    # SFM2 kinds are explicit; an ordinary/unknown kind is never exposed as a pack.
+    var bad_kind = probe_copy(encoded)
+    bad_kind[8] = 0 as u8
+    match decode_aspect_pack(bad_kind):
+        Ok(_):
+            probe_fail("wrong SFM2 kind accepted")
+            return
+        Err(_): pass
+
+    # Directory parsing remains lazy, but selected-frame integrity must fail.
+    var corrupt = probe_copy(encoded)
+    corrupt[corrupt.len() - 1] = 0 as u8
+    val corrupt_image = match decode_aspect_pack(corrupt):
+        Err(e):
+            probe_fail("directory rejected payload-only corruption: " + e)
+            return
+        Ok(value): value
+    match aspect_pack_stored_frame(corrupt_image, "profile.memory"):
+        Ok(_):
+            probe_fail("corrupt selected frame accepted")
+            return
+        Err(_): pass
+
+    print("SFM-ASPECT-PACK: PASS")

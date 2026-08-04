@@ -12,6 +12,17 @@ use compiler.driver.driver_safety_severity.{
 }
 use compiler.types.type_infer_types.{HmInferContext}
 use compiler.semantics.visibility_integration.{check_module_visibility}
+use compiler.semantics.facet_coherence.{
+    check_static_facet_coherence, check_static_facet_dependencies
+}
+use compiler.hir.facet_static.{
+    FacetDeclarationOwner, HirFacetDependency, HirFacetModule
+}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.type_predicate_projection.{
+    module_surface_type_predicate_descriptors
+}
+use std.common.crypto.types.{text_to_bytes}
 use compiler.semantics.safety_checker.{
     SafetyChecker,
     safetychecker_check_module,
@@ -20,6 +31,88 @@ use compiler.semantics.safety_checker.{
 use compiler.driver.driver_source_loading.{_format_type_infer_error}
 
 extern fn rt_env_get(key: text) -> text
+
+struct StaticFacetCoherencePassResult:
+    modules: Dict<text, HirModule>
+    errors: [text]
+
+export StaticFacetCoherencePassResult
+
+fn static_facet_text_lt(a: text, b: text) -> bool:
+    val a_bytes = text_to_bytes(a)
+    val b_bytes = text_to_bytes(b)
+    var index = 0
+    while index < a_bytes.len() and index < b_bytes.len():
+        if a_bytes[index] != b_bytes[index]:
+            return a_bytes[index] < b_bytes[index]
+        index = index + 1
+    a_bytes.len() < b_bytes.len()
+
+fn static_facet_sorted_text(values: [text]) -> [text]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if static_facet_text_lt(result[j], result[i]):
+                val tmp = result[i]
+                result[i] = result[j]
+                result[j] = tmp
+            j = j + 1
+        i = i + 1
+    result
+
+fn static_facet_module_aspect_id(facets: HirFacetModule) -> text:
+    """Return the stable optional-aspect owner for a facet declaration module."""
+    var aspect_id = ""
+    for interface_ in facets.interfaces:
+        if (interface_.aspect_id != "" and
+            (aspect_id == "" or static_facet_text_lt(interface_.aspect_id, aspect_id))):
+            aspect_id = interface_.aspect_id
+    for implementation in facets.implementations:
+        if (implementation.aspect_id != "" and
+            (aspect_id == "" or static_facet_text_lt(implementation.aspect_id, aspect_id))):
+            aspect_id = implementation.aspect_id
+    for binding in facets.bindings:
+        if (binding.aspect_id != "" and
+            (aspect_id == "" or static_facet_text_lt(binding.aspect_id, aspect_id))):
+            aspect_id = binding.aspect_id
+    for requirement in facets.requirements:
+        if (requirement.aspect_id != "" and
+            (aspect_id == "" or static_facet_text_lt(requirement.aspect_id, aspect_id))):
+            aspect_id = requirement.aspect_id
+    aspect_id
+
+fn static_facet_module_owner(module: HirModule) -> FacetDeclarationOwner:
+    val aspect_id = static_facet_module_aspect_id(module.static_facets)
+    if aspect_id == "": FacetDeclarationOwner.Core
+    else: FacetDeclarationOwner.OptionalAspect(aspect_id)
+
+pub fn derive_static_facet_dependencies(
+    hir_modules: Dict<text, HirModule>
+) -> [HirFacetDependency]:
+    """Project direct HIR imports into the closed-world facet owner graph."""
+    var dependencies: [HirFacetDependency] = []
+    var seen: Dict<text, bool> = {}
+    val source_names = static_facet_sorted_text(hir_modules.keys())
+    for source_name in source_names:
+        val source_module = hir_modules[source_name]
+        val source_owner = static_facet_module_owner(source_module)
+        for import_ in source_module.imports:
+            val target_name = import_.module_path
+            if not hir_modules.contains_key(target_name): continue
+            val target_module = hir_modules[target_name]
+            val target_owner = static_facet_module_owner(target_module)
+            val key = "{source_name}|{target_name}"
+            if seen.contains_key(key): continue
+            seen[key] = true
+            dependencies = dependencies.push(HirFacetDependency(
+                source: source_name,
+                source_owner: source_owner,
+                target: target_name,
+                target_owner: target_owner
+            ))
+    dependencies
 
 impl CompilerDriver:
     fn resolve_methods_impl() -> (CompileContext, bool):
@@ -89,6 +182,42 @@ pub fn run_typecheck_warn_pass(
                 "[visibility {vw.code}] {name}: {vw.message}")
             v_idx = v_idx + 1
     out
+
+pub fn run_static_facet_coherence_pass(
+    hir_modules: Dict<text, HirModule>,
+    surfaces: ModuleSurfacesByName
+) -> StaticFacetCoherencePassResult:
+    """Run fatal coherence only for modules opting into proposed facet syntax."""
+    var out: [text] = []
+    val dependencies = derive_static_facet_dependencies(hir_modules)
+    for diagnostic in check_static_facet_dependencies(dependencies):
+        out = out.push("[facet {diagnostic.code}]: {diagnostic.message}")
+    for name in hir_modules.keys():
+        var module = hir_modules[name]
+        val facets = module.static_facets
+        val declaration_count = (facets.interfaces.len() + facets.implementations.len() +
+            facets.bindings.len() + facets.requirements.len())
+        if declaration_count == 0:
+            continue
+        if not surfaces.index_by_name.contains_key(name):
+            out = out.push("[facet E-AF004] {name}: module surface is unavailable")
+            continue
+        val surface_index = surfaces.index_by_name[name]
+        if surface_index < 0 or surface_index >= surfaces.surfaces.len():
+            out = out.push("[facet E-AF004] {name}: module surface index is invalid")
+            continue
+        val descriptors = module_surface_type_predicate_descriptors(surfaces)
+        # Cross-module owner edges are checked once above.  Module-local
+        # coherence remains scoped to this module's declarations.
+        val result = check_static_facet_coherence(facets, descriptors, [])
+        if result.diagnostics.len() == 0:
+            module.facet_binding_plans = result.plans
+        else:
+            module.facet_binding_plans = []
+        hir_modules[name] = module
+        for diagnostic in result.diagnostics:
+            out = out.push("[facet {diagnostic.code}] {name}: {diagnostic.message}")
+    StaticFacetCoherencePassResult(modules: hir_modules, errors: out)
 
 pub fn run_safety_warn_pass(
     ctx: CompileContext,

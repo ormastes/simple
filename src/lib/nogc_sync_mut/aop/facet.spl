@@ -1,0 +1,146 @@
+"""Static typed facet witnesses with no loader or base-layout mutation."""
+
+struct FacetGenerationLease:
+    """Opaque application-issued generation lease; std.aop never owns lifecycle state."""
+    aspect_id: text
+    generation_id: int
+    token_id: int
+
+struct FacetSidecarHandle:
+    """Opaque handle for lazily allocated facet state outside the base object layout."""
+    handle_id: text
+
+struct FacetRef<T>:
+    base_reference: text
+    view: T
+    facet_id: text
+    binding_id: text
+    generation_lease: FacetGenerationLease?
+    sidecar_handle: FacetSidecarHandle?
+
+enum FacetActivationPolicy:
+    AlreadyBoundOnly
+    ActivateOnRequest
+    DenyActivation
+
+struct FacetActivationRequest:
+    base_reference: text
+    base_type_id: text
+    facet_id: text
+
+enum FacetAcquireErrorKind:
+    ActivationDenied
+    ActivationFailed
+    RequiredFacetAbsent
+
+struct FacetAcquireError:
+    kind: FacetAcquireErrorKind
+    facet_id: text
+    message: text
+
+struct StaticFacetWitness<Base, T>:
+    base_type_id: text
+    facet_id: text
+    binding_id: text
+    adapt: fn(Base) -> T
+
+fn try_facet<Base, T>(
+    base: Base,
+    base_reference: text,
+    base_type_id: text,
+    facet_id: text,
+    witnesses: [StaticFacetWitness<Base, T>]
+) -> Option<FacetRef<T>>:
+    """Return an already-linked typed witness; this function never performs I/O."""
+    for witness in witnesses:
+        if witness.base_type_id == base_type_id and witness.facet_id == facet_id:
+            return Some(FacetRef<T>(
+                base_reference: base_reference,
+                view: witness.adapt(base),
+                facet_id: facet_id,
+                binding_id: witness.binding_id,
+                generation_lease: nil,
+                sidecar_handle: nil
+            ))
+    nil
+
+fn facet<Base, T>(
+    base: Base,
+    base_reference: text,
+    base_type_id: text,
+    facet_id: text,
+    witnesses: [StaticFacetWitness<Base, T>],
+    policy: FacetActivationPolicy,
+    activate: fn(FacetActivationRequest) -> Result<[StaticFacetWitness<Base, T>], text>
+) -> Result<Option<FacetRef<T>>, FacetAcquireError>:
+    """Acquire an optional facet, activating only when policy explicitly permits it."""
+    if val existing = try_facet<Base, T>(base, base_reference, base_type_id, facet_id, witnesses):
+        return Ok(Some(existing))
+    match policy:
+        case AlreadyBoundOnly: Ok(nil)
+        case DenyActivation:
+            Err(FacetAcquireError(
+                kind: FacetAcquireErrorKind.ActivationDenied,
+                facet_id: facet_id,
+                message: "facet activation denied by policy"
+            ))
+        case ActivateOnRequest:
+            val request = FacetActivationRequest(
+                base_reference: base_reference,
+                base_type_id: base_type_id,
+                facet_id: facet_id
+            )
+            val activated = activate(request)
+            if activated.is_err():
+                return Err(FacetAcquireError(
+                    kind: FacetAcquireErrorKind.ActivationFailed,
+                    facet_id: facet_id,
+                    message: activated.unwrap_err()
+                ))
+            Ok(try_facet<Base, T>(
+                base, base_reference, base_type_id, facet_id, activated.unwrap()
+            ))
+
+fn require_facet<Base, T>(
+    base: Base,
+    base_reference: text,
+    base_type_id: text,
+    facet_id: text,
+    witnesses: [StaticFacetWitness<Base, T>],
+    policy: FacetActivationPolicy,
+    activate: fn(FacetActivationRequest) -> Result<[StaticFacetWitness<Base, T>], text>
+) -> Result<FacetRef<T>, FacetAcquireError>:
+    """Acquire a required facet, returning typed absence and activation errors."""
+    val acquired = facet<Base, T>(
+        base, base_reference, base_type_id, facet_id, witnesses, policy, activate
+    )
+    if acquired.is_err(): return Err(acquired.unwrap_err())
+    if val present = acquired.unwrap(): return Ok(present)
+    Err(FacetAcquireError(
+        kind: FacetAcquireErrorKind.RequiredFacetAbsent,
+        facet_id: facet_id,
+        message: "required facet is not bound"
+    ))
+
+fn dynamic_facet_ref<T>(
+    base_reference: text,
+    view: T,
+    facet_id: text,
+    binding_id: text,
+    generation_lease: FacetGenerationLease,
+    sidecar_handle: FacetSidecarHandle?
+) -> FacetRef<T>:
+    """Build a dynamic facet reference from an application-acquired exact-generation lease."""
+    FacetRef<T>(
+        base_reference: base_reference,
+        view: view,
+        facet_id: facet_id,
+        binding_id: binding_id,
+        generation_lease: generation_lease,
+        sidecar_handle: sidecar_handle
+    )
+
+export FacetGenerationLease, FacetSidecarHandle, FacetRef, StaticFacetWitness
+export FacetActivationPolicy, FacetActivationRequest
+export FacetAcquireErrorKind, FacetAcquireError
+export try_facet, facet, require_facet, dynamic_facet_ref

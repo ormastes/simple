@@ -22,6 +22,13 @@ struct ObjectProvider:
     getter: SmfGetter
     verbose: bool
     config: ObjectProviderConfig
+    # Explicit byte registrations are reserved for already-validated virtual
+    # modules (for example, one SMF selected from an aspect pack).  They are
+    # separate from discovery so callers can remove them deterministically.
+    registered_module_bytes: Dict<text, [u8]>
+
+fn objectprovider_registered_module_limit() -> i64:
+    256
 
 fn objectprovider_normalize_backend_name(backend: text) -> text:
     if backend == nil:
@@ -58,6 +65,8 @@ fn objectprovider_extract_backend_kind(bytes: [u8]) -> u8:
     bytes[8]
 
 fn objectprovider_load_source_bytes(self: ObjectProvider, module_name: text) -> Result<[u8], text>:
+    if self.registered_module_bytes.has(module_name):
+        return Ok(self.registered_module_bytes[module_name])
     if file_exists(module_name):
         return Ok(file_read_bytes(module_name))
     val getter_result = self.getter.get(module_name)
@@ -126,8 +135,37 @@ impl ObjectProvider:
         ObjectProvider(
             getter: getter,
             verbose: config.verbose,
-            config: config
+            config: config,
+            registered_module_bytes: {}
         )
+
+    # Register one validated in-memory SMF under a virtual module identity.
+    # The fixed bound prevents dynamic activation from turning this seam into
+    # an unbounded process-lifetime cache.
+    me register_module_bytes(module_identity: text, smf_bytes: [u8]) -> Result<(), text>:
+        if module_identity == "":
+            return Err("ObjectProvider virtual module identity is empty")
+        if self.registered_module_bytes.has(module_identity):
+            return Err("ObjectProvider virtual module is already registered: {module_identity}")
+        if self.registered_module_bytes.keys().len() >= objectprovider_registered_module_limit():
+            return Err("ObjectProvider virtual module registration limit reached")
+        val reader_result = SmfReaderMemory.from_data(smf_bytes)
+        if reader_result.is_err():
+            return Err("Invalid SMF bytes for {module_identity}: {reader_result.unwrap_err()}")
+        self.registered_module_bytes[module_identity] = smf_bytes
+        Ok(())
+
+    me remove_registered_module_bytes(module_identity: text) -> bool:
+        if not self.registered_module_bytes.has(module_identity):
+            return false
+        self.registered_module_bytes = self.registered_module_bytes.remove(module_identity)
+        true
+
+    fn has_registered_module(module_identity: text) -> bool:
+        self.registered_module_bytes.has(module_identity)
+
+    fn registered_module_count() -> i64:
+        self.registered_module_bytes.keys().len()
     # Add a library (.lsm) file to the provider
     me add_library(lib_path: text) -> Result<(), text>:
         var getter = self.getter

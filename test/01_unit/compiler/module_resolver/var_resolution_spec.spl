@@ -1,6 +1,6 @@
 # Unit spec: variant overlay candidate-root ordering + fail-closed validation.
 use std.spec.*
-use compiler.module_resolver.var_resolution.{VarGroup, VarManifest, VarSelection, VarSources, var_group_dir, var_candidate_roots, var_validate, var_parse_manifest, var_resolve_selections, var_module_candidates, var_config_selections}
+use compiler.module_resolver.var_resolution.{VarGroup, VarManifest, VarSelection, VarSources, AspectRootCandidate, var_group_dir, var_candidate_roots, var_validate, var_parse_manifest, var_resolve_selections, var_module_candidates, var_config_selections, aspect_normalize_path, aspect_path_escape_code, aspect_resolve_roots}
 
 # Value selected for a group in a [VarSelection], or "" if absent.
 fn sel_value(sels: [VarSelection], group: text) -> text:
@@ -249,3 +249,56 @@ describe "var manifest reader (bootstrap-safe)":
         expect(errs_empty).to_equal(true)
         val roots = var_candidate_roots("variants", m, [VarSelection(group: "lib.crypto", value: "openssl")])
         expect(roots[0]).to_equal("variants/lib/crypto/openssl")
+
+describe "resolver-owned relative aspect roots":
+    it "canonicalizes from the declaring manifest and orders roots deterministically":
+        val candidates = [
+            AspectRootCandidate(root_id: "company", aspect_id: "trace", path: "../../shared-aspects/trace", rank: 2, external: true),
+            AspectRootCandidate(root_id: "app", aspect_id: "security", path: "./security", rank: 1, external: false),
+            AspectRootCandidate(root_id: "app", aspect_id: "debug", path: "./debug/../debug", rank: 1, external: false)
+        ]
+        val resolved = aspect_resolve_roots(
+            ".", "test/01_unit/compiler/module_resolver/fixtures/aspects/__init__.spl",
+            candidates, sample_manifest(), [VarSelection(group: "platform", value: "linux")], "var-linux-v1")
+        expect(resolved.errors.len()).to_equal(0)
+        expect(resolved.roots[0].aspect_id).to_equal("debug")
+        expect(resolved.roots[1].aspect_id).to_equal("security")
+        expect(resolved.roots[2].aspect_id).to_equal("trace")
+        expect(resolved.roots[0].canonical_path).to_end_with("/fixtures/aspects/debug")
+
+    it "reuses variant precedence and propagates the resolved selection fingerprint":
+        val resolved = aspect_resolve_roots(
+            ".", "test/01_unit/compiler/module_resolver/fixtures/aspects/__init__.spl",
+            [AspectRootCandidate(root_id: "app", aspect_id: "debug", path: ".", rank: 0, external: false)],
+            sample_manifest(), [VarSelection(group: "platform", value: "linux")], "var-linux-v1")
+        expect(resolved.selection_fingerprint).to_equal("var-linux-v1")
+        expect(resolved.roots[0].selection_fingerprint).to_equal("var-linux-v1")
+        expect(resolved.roots[0].variant_roots[0]).to_end_with("/fixtures/aspects/variants/platform/linux")
+        expect(resolved.roots[0].variant_roots[1]).to_end_with("/fixtures/aspects/variants/platform/default")
+
+    it "rejects same-rank duplicate aspect identities":
+        val candidates = [
+            AspectRootCandidate(root_id: "app-a", aspect_id: "debug", path: "./debug-a", rank: 1, external: false),
+            AspectRootCandidate(root_id: "app-b", aspect_id: "debug", path: "./debug-b", rank: 1, external: false)
+        ]
+        val resolved = aspect_resolve_roots(
+            ".", "test/01_unit/compiler/module_resolver/fixtures/aspects/__init__.spl",
+            candidates, sample_manifest(), [], "var-default-v1")
+        expect(resolved.errors).to_contain("E-APATH003")
+
+    it "rejects a manifest-relative workspace escape unless explicitly external":
+        expect(aspect_normalize_path("/workspace/app/aspects/../../../outside")).to_equal("/workspace/outside")
+        val escaped = aspect_resolve_roots(
+            ".", "test/01_unit/compiler/module_resolver/fixtures/aspects/__init__.spl",
+            [AspectRootCandidate(root_id: "bad", aspect_id: "debug", path: "../../../../../../../outside", rank: 0, external: false)],
+            sample_manifest(), [], "var-default-v1")
+        expect(escaped.errors).to_contain("E-APATH001")
+        expect(escaped.roots.len()).to_equal(0)
+
+    it "rejects a symlink-resolved path outside the workspace":
+        step("Lexical path is inside, but realpath resolves outside")
+        val code = aspect_path_escape_code(
+            "/workspace", "/workspace", "/workspace/aspects/debug", "/outside/debug", false)
+        expect(code).to_equal("E-APATH002")
+        expect(aspect_path_escape_code(
+            "/workspace", "/workspace", "/workspace/aspects/debug", "/outside/debug", true)).to_equal("")

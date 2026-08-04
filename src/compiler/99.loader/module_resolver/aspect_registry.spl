@@ -1,0 +1,412 @@
+# Aspect root registry discovery and live resolver installation.
+#
+# `aspects/__init__.spl` and aspect package descriptors are resolver-owned SDN;
+# they are intentionally read before the general Simple parser is available.
+
+use compiler.loader.module_resolver.types.{
+    ModuleResolver, moduleresolver_with_aspect_roots
+}
+use compiler.loader.module_resolver.var_resolution.{
+    AspectRootCandidate, AspectRootResolution, VarManifest, VarSelection,
+    aspect_normalize_path, aspect_path_dirname, aspect_path_escape_code,
+    aspect_path_within, aspect_resolve_roots
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.types.{text_to_bytes}
+
+extern fn rt_path_absolute(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_dir_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+
+struct AspectRegistryRoot:
+    root_id: text
+    path: text
+    external: bool
+    rank: i64
+
+struct AspectRegistryPolicy:
+    same_rank_conflict: text
+    direct_core_import: text
+    path_escape: text
+    symlink_escape: text
+
+struct AspectRegistryManifest:
+    version: i64
+    order: [text]
+    roots: [AspectRegistryRoot]
+    policy: AspectRegistryPolicy
+    errors: [text]
+
+struct AspectPackageDescriptor:
+    aspect_id: text
+    version: i64
+    source: text
+    pack: text
+    activation_default: text
+    access_default: text
+    dependencies: [text]
+    variants: text
+
+struct AspectRegistryInstall:
+    resolver: ModuleResolver
+    manifest_path: text
+    errors: [text]
+
+fn aspect_registry_unquote(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed.len() >= 2:
+        if (trimmed.starts_with("\"") and trimmed.ends_with("\"")) or (trimmed.starts_with("'") and trimmed.ends_with("'")):
+            return trimmed[1:trimmed.len() - 1]
+    trimmed
+
+fn aspect_registry_scalar(line: text) -> text:
+    val parts = line.split(":")
+    if parts.len() < 2:
+        return ""
+    aspect_registry_unquote(parts[1].trim())
+
+fn aspect_registry_field(line: text, key: text) -> text:
+    val parts = line.split("{key}:")
+    if parts.len() < 2:
+        return ""
+    var value = parts[1].trim().split(",")[0].split("}")[0].trim()
+    aspect_registry_unquote(value)
+
+fn aspect_registry_list(line: text) -> [text]:
+    val opened = line.split("[")
+    if opened.len() < 2:
+        return []
+    val inner = opened[1].split("]")[0]
+    var values: [text] = []
+    for raw in inner.split(","):
+        val value = aspect_registry_unquote(raw)
+        if value.len() > 0:
+            values.push(value)
+    values
+
+fn aspect_registry_rank(order: [text], root_id: text) -> i64:
+    for i in 0..order.len():
+        if order[i] == root_id:
+            return i
+    -1
+
+fn aspect_registry_default_policy() -> AspectRegistryPolicy:
+    AspectRegistryPolicy(
+        same_rank_conflict: "error",
+        direct_core_import: "error",
+        path_escape: "error",
+        symlink_escape: "error"
+    )
+
+fn aspect_registry_parse_manifest(source: text) -> AspectRegistryManifest:
+    var version = 0
+    var order: [text] = []
+    var parsed_roots: [AspectRegistryRoot] = []
+    var policy = aspect_registry_default_policy()
+    var section = ""
+    var errors: [text] = []
+
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if line.len() == 0 or line.starts_with("#") or line == "aspects:":
+            continue
+        if line == "roots:":
+            section = "roots"
+            continue
+        if line == "policy:":
+            section = "policy"
+            continue
+        if line.starts_with("version:"):
+            version = aspect_registry_scalar(line).to_i64()
+            continue
+        if line.starts_with("order:"):
+            order = aspect_registry_list(line)
+            continue
+        if section == "roots" and line.contains("{") and line.contains("path:"):
+            val root_id = line.split(":")[0].trim()
+            val path = aspect_registry_field(line, "path")
+            val external = aspect_registry_field(line, "external") == "true"
+            parsed_roots.push(AspectRegistryRoot(root_id: root_id, path: path, external: external, rank: -1))
+            continue
+        if section == "policy":
+            if line.starts_with("same_rank_conflict:"):
+                policy.same_rank_conflict = aspect_registry_scalar(line)
+            elif line.starts_with("direct_core_import:"):
+                policy.direct_core_import = aspect_registry_scalar(line)
+            elif line.starts_with("path_escape:"):
+                policy.path_escape = aspect_registry_scalar(line)
+            elif line.starts_with("symlink_escape:"):
+                policy.symlink_escape = aspect_registry_scalar(line)
+
+    if version != 1:
+        errors.push("E-AREG001")
+    if order.len() == 0:
+        errors.push("E-AREG002")
+    if policy.same_rank_conflict != "error" or policy.direct_core_import != "error" or policy.path_escape != "error" or policy.symlink_escape != "error":
+        errors.push("E-AREG003")
+
+    var roots: [AspectRegistryRoot] = []
+    for parsed in parsed_roots:
+        val rank = aspect_registry_rank(order, parsed.root_id)
+        if rank < 0 or parsed.path.len() == 0:
+            errors.push("E-AREG004")
+            continue
+        roots.push(AspectRegistryRoot(
+            root_id: parsed.root_id,
+            path: parsed.path,
+            external: parsed.external,
+            rank: rank
+        ))
+    for root_id in order:
+        var count = 0
+        for root in roots:
+            if root.root_id == root_id:
+                count = count + 1
+        if count != 1:
+            errors.push("E-AREG005")
+
+    AspectRegistryManifest(version: version, order: order, roots: roots, policy: policy, errors: errors)
+
+fn aspect_registry_parse_descriptor(source: text) -> AspectPackageDescriptor:
+    var descriptor = AspectPackageDescriptor(
+        aspect_id: "", version: 0, source: "", pack: "",
+        activation_default: "", access_default: "", dependencies: [], variants: ""
+    )
+    var in_aspect = false
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if line.len() == 0 or line.starts_with("#"):
+            continue
+        if line == "aspect:":
+            in_aspect = true
+            continue
+        if not in_aspect:
+            continue
+        if line.starts_with("id:"):
+            descriptor.aspect_id = aspect_registry_scalar(line)
+        elif line.starts_with("version:"):
+            descriptor.version = aspect_registry_scalar(line).to_i64()
+        elif line.starts_with("source:"):
+            descriptor.source = aspect_registry_scalar(line)
+        elif line.starts_with("pack:"):
+            descriptor.pack = aspect_registry_scalar(line)
+        elif line.starts_with("activation_default:"):
+            descriptor.activation_default = aspect_registry_scalar(line)
+        elif line.starts_with("access_default:"):
+            descriptor.access_default = aspect_registry_scalar(line)
+        elif line.starts_with("dependencies:"):
+            descriptor.dependencies = aspect_registry_list(line)
+        elif line.starts_with("variants:"):
+            descriptor.variants = aspect_registry_scalar(line)
+    descriptor
+
+fn aspect_registry_descriptor_valid(descriptor: AspectPackageDescriptor) -> bool:
+    descriptor.aspect_id.len() > 0 and descriptor.version > 0 and descriptor.source.len() > 0
+
+fn aspect_registry_sorted_entries(entries: [text]) -> [text]:
+    var ordered = entries.clone()
+    for i in 1..ordered.len():
+        val item = ordered[i]
+        var j = i
+        while j > 0 and aspect_registry_text_less(item, ordered[j - 1]):
+            ordered[j] = ordered[j - 1]
+            j = j - 1
+        ordered[j] = item
+    ordered
+
+fn aspect_registry_text_less(a: text, b: text) -> bool:
+    # Native text `<` is not a portable lexical ordering. Registry fingerprints
+    # compare bytes so interpreter and native discovery remain identical.
+    val a_bytes = text_to_bytes(a)
+    val b_bytes = text_to_bytes(b)
+    var index = 0
+    while index < a_bytes.len() and index < b_bytes.len():
+        if a_bytes[index] != b_bytes[index]:
+            return a_bytes[index] < b_bytes[index]
+        index = index + 1
+    a_bytes.len() < b_bytes.len()
+
+fn aspect_registry_candidate_less(a: AspectRootCandidate, b: AspectRootCandidate) -> bool:
+    if a.rank != b.rank:
+        return a.rank < b.rank
+    if a.aspect_id != b.aspect_id:
+        return aspect_registry_text_less(a.aspect_id, b.aspect_id)
+    if a.root_id != b.root_id:
+        return aspect_registry_text_less(a.root_id, b.root_id)
+    aspect_registry_text_less(a.path, b.path)
+
+fn aspect_registry_sorted_candidates(candidates: [AspectRootCandidate]) -> [AspectRootCandidate]:
+    var ordered = candidates.clone()
+    for i in 1..ordered.len():
+        val item = ordered[i]
+        var j = i
+        while j > 0 and aspect_registry_candidate_less(item, ordered[j - 1]):
+            ordered[j] = ordered[j - 1]
+            j = j - 1
+        ordered[j] = item
+    ordered
+
+fn aspect_registry_candidate(
+    root: AspectRegistryRoot,
+    registry_relative: text,
+    package_relative: text,
+    descriptor: AspectPackageDescriptor
+) -> AspectRootCandidate:
+    var relative = registry_relative
+    if package_relative.len() > 0:
+        relative = "{relative}/{package_relative}"
+    relative = "{relative}/{descriptor.source}"
+    AspectRootCandidate(
+        root_id: root.root_id,
+        aspect_id: descriptor.aspect_id,
+        path: relative,
+        rank: root.rank,
+        external: root.external
+    )
+
+fn aspect_registry_discover_root(
+    workspace_root: text,
+    manifest_path: text,
+    root: AspectRegistryRoot
+) -> ([AspectRootCandidate], [text]):
+    val manifest_dir = aspect_path_dirname(aspect_normalize_path(rt_path_absolute(manifest_path)))
+    val workspace_lexical = aspect_normalize_path(rt_path_absolute(workspace_root))
+    val workspace_physical = aspect_normalize_path(rt_path_absolute(workspace_lexical))
+    val root_lexical = aspect_normalize_path("{manifest_dir}/{root.path}")
+    val root_physical = aspect_normalize_path(rt_path_absolute(root_lexical))
+    val escape = aspect_path_escape_code(
+        workspace_lexical, workspace_physical, root_lexical, root_physical, root.external)
+    if escape.len() > 0:
+        return ([], [escape])
+    if not rt_dir_exists(root_physical):
+        return ([], ["E-AREG006"])
+
+    var candidates: [AspectRootCandidate] = []
+    var errors: [text] = []
+    val own_descriptor_path = "{root_physical}/__init__.spl"
+    if rt_file_exists(own_descriptor_path):
+        val own_source = rt_file_read_text(own_descriptor_path) ?? ""
+        val own_descriptor = aspect_registry_parse_descriptor(own_source)
+        if aspect_registry_descriptor_valid(own_descriptor):
+            val source_lexical = aspect_normalize_path("{root_physical}/{own_descriptor.source}")
+            val source_physical = aspect_normalize_path(rt_path_absolute(source_lexical))
+            if not aspect_path_within(root_physical, source_lexical) or not aspect_path_within(root_physical, source_physical):
+                errors.push("E-APATH004")
+            elif not rt_dir_exists(source_physical):
+                errors.push("E-AREG008")
+            else:
+                candidates.push(aspect_registry_candidate(root, root.path, "", own_descriptor))
+        elif own_source.contains("aspect:"):
+            errors.push("E-AREG007")
+
+    val entries = aspect_registry_sorted_entries(rt_dir_list(root_physical))
+    for entry in entries:
+        val package_path = "{root_physical}/{entry}"
+        val descriptor_path = "{package_path}/__init__.spl"
+        if not rt_dir_exists(package_path) or not rt_file_exists(descriptor_path):
+            continue
+        val descriptor_source = rt_file_read_text(descriptor_path) ?? ""
+        val descriptor = aspect_registry_parse_descriptor(descriptor_source)
+        if not aspect_registry_descriptor_valid(descriptor):
+            errors.push("E-AREG007")
+            continue
+        val source_lexical = aspect_normalize_path("{package_path}/{descriptor.source}")
+        val source_physical = aspect_normalize_path(rt_path_absolute(source_lexical))
+        if not aspect_path_within(package_path, source_lexical) or not aspect_path_within(package_path, source_physical):
+            errors.push("E-APATH004")
+            continue
+        if not rt_dir_exists(source_physical):
+            errors.push("E-AREG008")
+            continue
+        candidates.push(aspect_registry_candidate(root, root.path, entry, descriptor))
+    (candidates, errors)
+
+fn aspect_registry_fingerprint(
+    manifest_path: text,
+    manifest: AspectRegistryManifest,
+    candidates: [AspectRootCandidate]
+) -> text:
+    var rows: [text] = ["aspect-registry-v1", "version={manifest.version}"]
+    for root_id in manifest.order:
+        rows.push("order={root_id}")
+    for root_id in manifest.order:
+        for root in manifest.roots:
+            if root.root_id == root_id:
+                rows.push("root={root.rank}|{root.root_id}|{aspect_normalize_path(root.path)}|{root.external}")
+    val manifest_dir = aspect_path_dirname(aspect_normalize_path(rt_path_absolute(manifest_path)))
+    for candidate in aspect_registry_sorted_candidates(candidates):
+        val source_path = aspect_normalize_path("{manifest_dir}/{candidate.path}")
+        val descriptor_dir = aspect_path_dirname(source_path)
+        val descriptor_path = "{descriptor_dir}/__init__.spl"
+        val descriptor_source = rt_file_read_text(descriptor_path) ?? ""
+        rows.push("aspect={candidate.rank}|{candidate.root_id}|{candidate.aspect_id}|{aspect_normalize_path(candidate.path)}|{sha256_text(descriptor_source)}")
+    sha256_text(rows.join("\n"))
+
+fn aspect_registry_load(
+    workspace_root: text,
+    manifest_path: text,
+    var_manifest: VarManifest,
+    selections: [VarSelection],
+    variant_fingerprint: text
+) -> AspectRootResolution:
+    val source = rt_file_read_text(manifest_path) ?? ""
+    val manifest = aspect_registry_parse_manifest(source)
+    if manifest.errors.len() > 0:
+        return AspectRootResolution(roots: [], errors: manifest.errors, selection_fingerprint: "")
+
+    var candidates: [AspectRootCandidate] = []
+    var errors: [text] = []
+    for root in manifest.roots:
+        val (found, root_errors) = aspect_registry_discover_root(workspace_root, manifest_path, root)
+        for candidate in found:
+            candidates.push(candidate)
+        for error in root_errors:
+            errors.push(error)
+    if errors.len() > 0:
+        return AspectRootResolution(roots: [], errors: errors, selection_fingerprint: "")
+
+    val registry_fingerprint = aspect_registry_fingerprint(manifest_path, manifest, candidates)
+    val combined_fingerprint = sha256_text("{registry_fingerprint}|{variant_fingerprint}")
+    aspect_resolve_roots(
+        workspace_root, manifest_path, candidates, var_manifest, selections, combined_fingerprint)
+
+fn aspect_registry_find_manifest(inputs: [text]) -> text?:
+    for input in inputs:
+        var current = aspect_normalize_path(rt_path_absolute(input))
+        if input.ends_with(".spl") or rt_file_exists(current):
+            current = aspect_path_dirname(current)
+        var depth = 0
+        while depth < 64:
+            val candidate = "{current}/aspects/__init__.spl"
+            if rt_file_exists(candidate):
+                return candidate
+            val parent = aspect_path_dirname(current)
+            if parent == current:
+                break
+            current = parent
+            depth = depth + 1
+    nil
+
+fn aspect_registry_workspace_root(manifest_path: text) -> text:
+    aspect_path_dirname(aspect_path_dirname(aspect_normalize_path(rt_path_absolute(manifest_path))))
+
+fn aspect_registry_install_for_inputs(resolver: ModuleResolver, inputs: [text]) -> AspectRegistryInstall:
+    val manifest_path = aspect_registry_find_manifest(inputs)
+    if not manifest_path.?:
+        return AspectRegistryInstall(resolver: resolver, manifest_path: "", errors: [])
+    val path = manifest_path ?? ""
+    val empty_variants = VarManifest(version: 1, global_default: "default", order: [], groups: [])
+    val loaded = aspect_registry_load(
+        aspect_registry_workspace_root(path), path, empty_variants, [], "")
+    if loaded.errors.len() > 0:
+        return AspectRegistryInstall(resolver: resolver, manifest_path: path, errors: loaded.errors)
+    var roots: [text] = []
+    for root in loaded.roots:
+        roots.push(root.canonical_path)
+    AspectRegistryInstall(
+        resolver: moduleresolver_with_aspect_roots(resolver, roots, loaded.selection_fingerprint),
+        manifest_path: path,
+        errors: []
+    )

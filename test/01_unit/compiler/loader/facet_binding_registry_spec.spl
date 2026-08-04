@@ -1,0 +1,138 @@
+# @req REQ-AF-002 REQ-AF-003 REQ-AF-007 REQ-AF-008
+# @cover src/compiler/99.loader/loader/facet_binding_registry.spl 90%
+
+use std.spec.*
+use compiler.loader.loader.aspect_catalog.{AspectBindingSummary}
+use compiler.loader.loader.facet_binding_registry.{
+    FacetBindingAdmission, FacetBindingCandidate, FacetBindingRegistry,
+    facet_binding_stage_validated, facet_lookup, facet_unbind_generation,
+    aspect_publish_generation
+}
+
+fn registry_summary(
+    id: text,
+    concrete_type_id: text,
+    business_interface_id: text,
+    witness: text
+) -> AspectBindingSummary:
+    AspectBindingSummary(
+        binding_id: id,
+        concrete_type_id: concrete_type_id,
+        business_interface_id: business_interface_id,
+        facet_interface_id: "Debuggable",
+        facet_contract_abi_hash: "debuggable-abi-v1",
+        witness_symbol: witness,
+        capabilities: ["facet.read"]
+    )
+
+fn registry_candidate(
+    key: text,
+    generation: i64,
+    aspect_id: text,
+    summary: AspectBindingSummary,
+    owner: text
+) -> FacetBindingCandidate:
+    facet_binding_stage_validated(
+        key, generation, aspect_id,
+        [FacetBindingAdmission(summary: summary, witness_owner_id: owner)]
+    ).unwrap()
+
+describe "loader facet binding registry":
+    it "publishes and looks up concrete and open-world bindings":
+        val concrete = registry_candidate(
+            "pack:concrete:debug:1", 1, "debug.concrete",
+            registry_summary("concrete", "storage.Cache", "", "cache_debug"),
+            "pack:concrete:1")
+        var registry = aspect_publish_generation(
+            FacetBindingRegistry.create(), concrete,
+            "pack:concrete:debug:1", 1).unwrap()
+        val open_world = registry_candidate(
+            "pack:open:debug:1", 1, "debug.open",
+            registry_summary("open", "", "storage.CacheApi", "api_debug"),
+            "pack:open:1")
+        registry = aspect_publish_generation(
+            registry, open_world, "pack:open:debug:1", 1).unwrap()
+
+        val exact = facet_lookup(registry, "storage.Cache", [], "Debuggable").unwrap()
+        expect(exact != nil).to_equal(true)
+        expect(exact.unwrap().witness_symbol).to_equal("cache_debug")
+        val rule = facet_lookup(
+            registry, "storage.RemoteCache", ["storage.CacheApi"],
+            "Debuggable").unwrap()
+        expect(rule != nil).to_equal(true)
+        expect(rule.unwrap().witness_symbol).to_equal("api_debug")
+
+    it "rejects identity mismatch without publishing staged records":
+        val candidate = registry_candidate(
+            "pack:module:debug:7", 7, "debug.aspect",
+            registry_summary("binding", "storage.Cache", "", "cache_debug"),
+            "pack:module:7")
+        val before = FacetBindingRegistry.create()
+        val result = aspect_publish_generation(
+            before, candidate, "pack:module:debug:8", 8)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("does not match")
+        expect(before.active_count()).to_equal(0)
+        expect(before.records.len()).to_equal(0)
+
+    it "fails duplicate publication and lookup ambiguity":
+        val exact = registry_candidate(
+            "pack:exact:debug:1", 1, "debug.exact",
+            registry_summary("exact", "storage.Cache", "", "exact_debug"),
+            "pack:exact:1")
+        var registry = aspect_publish_generation(
+            FacetBindingRegistry.create(), exact,
+            "pack:exact:debug:1", 1).unwrap()
+        val duplicate = registry_candidate(
+            "pack:duplicate:debug:1", 1, "debug.duplicate",
+            registry_summary("duplicate", "storage.Cache", "", "duplicate_debug"),
+            "pack:duplicate:1")
+        expect(aspect_publish_generation(
+            registry, duplicate, "pack:duplicate:debug:1", 1).is_err()).to_equal(true)
+
+        val rule = registry_candidate(
+            "pack:rule:debug:1", 1, "debug.rule",
+            registry_summary("rule", "", "storage.CacheApi", "rule_debug"),
+            "pack:rule:1")
+        registry = aspect_publish_generation(
+            registry, rule, "pack:rule:debug:1", 1).unwrap()
+        val ambiguous = facet_lookup(
+            registry, "storage.Cache", ["storage.CacheApi"], "Debuggable")
+        expect(ambiguous.is_err()).to_equal(true)
+        expect(ambiguous.unwrap_err()).to_contain("ambiguous")
+
+    it "replaces one aspect generation and unbinds exact generations in isolation":
+        val generation_one = registry_candidate(
+            "pack:module:debug:1", 1, "debug.aspect",
+            registry_summary("binding-v1", "storage.Cache", "", "debug_v1"),
+            "pack:module:1")
+        var registry = aspect_publish_generation(
+            FacetBindingRegistry.create(), generation_one,
+            "pack:module:debug:1", 1).unwrap()
+        val generation_two = registry_candidate(
+            "pack:module:debug:2", 2, "debug.aspect",
+            registry_summary("binding-v2", "storage.Cache", "", "debug_v2"),
+            "pack:module:2")
+        registry = aspect_publish_generation(
+            registry, generation_two, "pack:module:debug:2", 2).unwrap()
+        expect(registry.records.len()).to_equal(2)
+        expect(registry.active_count()).to_equal(1)
+        expect(facet_lookup(
+            registry, "storage.Cache", [], "Debuggable").unwrap().unwrap().witness_symbol
+        ).to_equal("debug_v2")
+
+        registry = facet_unbind_generation(
+            registry, "pack:module:debug:1", 1)
+        expect(registry.records.len()).to_equal(1)
+        expect(registry.active_count()).to_equal(1)
+        expect(facet_lookup(
+            registry, "storage.Cache", [], "Debuggable").unwrap().unwrap().witness_symbol
+        ).to_equal("debug_v2")
+
+        registry = facet_unbind_generation(
+            registry, "pack:module:debug:2", 2)
+        expect(registry.records.len()).to_equal(0)
+        expect(registry.active_count()).to_equal(0)
+        expect(facet_lookup(
+            registry, "storage.Cache", [], "Debuggable").unwrap() == nil
+        ).to_equal(true)

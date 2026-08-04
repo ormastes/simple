@@ -1,0 +1,24 @@
+use std.spec.{describe, it, expect}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.type_predicate_projection.{
+    module_surface_type_predicate_descriptors
+}
+
+describe "module surface type predicate projection":
+    it "projects qualified types and their declared trait implementations":
+        val body = "trait Cache:\n    fn size() -> i64\n\nclass LruCache:\n    fn size() -> i64:\n        1\n\nimpl Cache for LruCache:\n    fn size() -> i64:\n        1\n"
+        val module = parse_and_build_module(body, "storage/cache.spl")
+        val result = module_surfaces_from_modules(
+            {"storage.cache": module},
+            [SourceFile(path: "storage/cache.spl", content: body, module_name: "storage.cache")]
+        )
+        expect(result.is_ok()).to_be(true)
+        val descriptors = module_surface_type_predicate_descriptors(result.unwrap())
+        var found_lru = false
+        for descriptor in descriptors:
+            if descriptor.qualified_name == "storage.cache.LruCache":
+                found_lru = true
+                expect(descriptor.implemented_types.contains("storage.cache.Cache")).to_be(true)
+        expect(found_lru).to_be(true)

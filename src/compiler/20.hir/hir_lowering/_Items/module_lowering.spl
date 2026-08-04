@@ -14,6 +14,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.module_surface.*
 use compiler.hir.hir_lowering.expressions.*
+use compiler.hir.facet_static.{HirFacetModule, lower_static_facets}
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
@@ -317,6 +318,13 @@ fn hir_module_is_bootstrap_entry(module_name: text) -> bool:
     hir_module_logical_name_from_path(entry_path) == hir_module_logical_name_from_path(module_name)
 
 impl HirLowering:
+    me lower_module_static_facets(module: ParserModule) -> HirFacetModule:
+        val lowered = lower_static_facets(module.static_facets)
+        if lowered.is_ok():
+            return lowered.unwrap()
+        self.error("static facet lowering failed: {lowered.unwrap_err()}", Span.empty())
+        HirFacetModule(interfaces: [], implementations: [], bindings: [], requirements: [])
+
     me prescan_composite_field_types(name: text, fields: [ParserField]):
         """Register parser struct/class fields before function lowering."""
         var field_types: Dict<text, HirType> = {}
@@ -1734,6 +1742,7 @@ impl HirLowering:
         # had real cross-module imports to resolve, so this only widens
         # behavior for the closure path.
         val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        val static_facets = self.lower_module_static_facets(module)
         if bootstrap_diag:
             # NOTE: parser ParserModule has no `path` field (parser_types.spl) — a
             # `{module.path}` interpolation here aborted the whole worker under
@@ -2104,6 +2113,8 @@ impl HirLowering:
                 di_bindings: bootstrap_di_bindings,
                 arch_rules: bootstrap_arch_rules,
                 mock_decls: bootstrap_mock_decls,
+                static_facets: static_facets,
+                facet_binding_plans: [],
                 types: bootstrap_types
             )
 
@@ -2232,6 +2243,8 @@ impl HirLowering:
             di_bindings: di_bindings,
             arch_rules: arch_rules,
             mock_decls: mock_decls,
+            static_facets: static_facets,
+            facet_binding_plans: [],
             types: []
         )
 

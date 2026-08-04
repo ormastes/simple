@@ -1,0 +1,615 @@
+# Atomic facet activation transaction over existing dynSMF and SMF-generation
+# owners.  This module stages validated pack modules and publishes binding
+# summaries; it owns no executable loader, artifact cache, or lifecycle table.
+
+use compiler.loader.loader.aspect_catalog.{AspectBindingSummary, AspectCatalogEntry, AspectCatalog}
+use compiler.loader.loader.aspect_pack_provider.{AspectPackProviderKey, AspectPackModuleKey, AspectPackProvider, AspectPackProviderCache}
+use std.sfm.aspect_pack.{aspect_pack_find_entry}
+use os.smf.dynsmf_session.{DynSmfSession, DynSmfEvidenceRow, dynsmf_id_disabled}
+use os.smf.smf_generation.{GenerationState, CandidateMapping, LifecycleManager}
+# Use the provider-backed runtime loader implementation, not the root
+# compatibility loader (which only accepts filesystem paths).
+use compiler.loader.loader.module_loader.{ModuleLoader, LoadResult, moduleloader_load, moduleloader_unload}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.loader.loader.smf_cache_manager.{SmfCacheManager}
+use compiler.loader.loader.facet_binding_registry.{
+    FacetBindingAdmission, FacetBindingCandidate, FacetBindingRegistry,
+    facet_binding_stage_validated, aspect_publish_generation
+}
+
+struct AspectActivationRequest:
+    aspect_id: text
+    request_id: text
+    catalog_generation: i64
+
+struct AspectStagedModule:
+    owner_id: text
+    module_id: text
+    module_digest: text
+    stored_byte_count: i64
+    byte_count: i64
+    smf_bytes: [u8]
+    cache_key: AspectPackModuleKey
+    bindings: [AspectBindingSummary]
+
+struct AspectActivationCounters:
+    # The provider is supplied already open/validated to this adapter.
+    pack_opens: i64
+    selected_stored_bytes: i64
+    selected_decoded_bytes: i64
+    # Mapping is counted only by activate_with_loader; sidecar allocation
+    # remains owned by downstream runtime owners.
+    executable_mappings: i64
+    sidecar_allocations: i64
+    runtime_scans: i64
+
+struct AspectPublishedActivation:
+    activation_key: text
+    aspect_id: text
+    generation: i64
+    owners: [text]
+    module_keys: [AspectPackModuleKey]
+    bindings: [AspectBindingSummary]
+    state: text
+
+struct AspectActivationCoordinator:
+    catalog: AspectCatalog
+    dynsmf_session: DynSmfSession
+    lifecycle: LifecycleManager
+    facet_bindings: FacetBindingRegistry
+    # Facet-binding publication table.  Generation/resource ownership remains
+    # in DynSmfSession and LifecycleManager; this is not a lifecycle registry.
+    published: Dict<text, AspectPublishedActivation>
+    in_flight: Dict<text, text>
+    counters: AspectActivationCounters
+
+struct AspectActivationResult:
+    coordinator: AspectActivationCoordinator
+    status: text
+    reason: text
+    generation: i64
+    staged_count: i64
+    counters: AspectActivationCounters
+
+fn aspect_activation_zero_counters() -> AspectActivationCounters:
+    AspectActivationCounters(
+        pack_opens: 0,
+        selected_stored_bytes: 0,
+        selected_decoded_bytes: 0,
+        executable_mappings: 0,
+        sidecar_allocations: 0,
+        runtime_scans: 0
+    )
+
+fn aspect_activation_key(entry: AspectCatalogEntry, generation: i64) -> text:
+    "{entry.pack_id}:{entry.module_id}:{entry.aspect_id}:{generation}"
+
+fn aspect_activation_owner_id(entry: AspectCatalogEntry, generation: i64) -> text:
+    "{entry.pack_id}:{entry.module_id}:{generation}"
+
+fn aspect_activation_copy_in_flight(source: Dict<text, text>) -> Dict<text, text>:
+    var out: Dict<text, text> = {}
+    for key in source.keys():
+        out[key] = source[key]
+    out
+
+fn aspect_activation_copy_published(source: Dict<text, AspectPublishedActivation>) -> Dict<text, AspectPublishedActivation>:
+    var out: Dict<text, AspectPublishedActivation> = {}
+    for key in source.keys():
+        out[key] = source[key]
+    out
+
+fn aspect_activation_clone_session(source: DynSmfSession, generation: i64, evidence: [DynSmfEvidenceRow]) -> DynSmfSession:
+    DynSmfSession(
+        session_id: source.session_id,
+        generation: generation,
+        next_handle: source.next_handle,
+        policy: source.policy,
+        loaded: source.loaded,
+        evidence: evidence
+    )
+
+fn aspect_activation_without_reservation(coordinator: AspectActivationCoordinator, activation_key: text, request_id: text) -> AspectActivationCoordinator:
+    var in_flight = aspect_activation_copy_in_flight(coordinator.in_flight)
+    if in_flight.has(activation_key) and in_flight[activation_key] == request_id:
+        in_flight = in_flight.remove(activation_key)
+    AspectActivationCoordinator(
+        catalog: coordinator.catalog,
+        dynsmf_session: coordinator.dynsmf_session,
+        lifecycle: coordinator.lifecycle,
+        facet_bindings: coordinator.facet_bindings,
+        published: coordinator.published,
+        in_flight: in_flight,
+        counters: coordinator.counters
+    )
+
+fn aspect_activation_failure(coordinator: AspectActivationCoordinator, activation_key: text, request_id: text, reason: text) -> AspectActivationResult:
+    AspectActivationResult(
+        coordinator: aspect_activation_without_reservation(coordinator, activation_key, request_id),
+        status: "failed",
+        reason: reason,
+        generation: coordinator.catalog.generation,
+        staged_count: 0,
+        counters: coordinator.counters
+    )
+
+fn aspect_activation_dependency_closure(catalog: AspectCatalog, root: AspectCatalogEntry) -> Result<[AspectCatalogEntry], text>:
+    var included: [text] = [root.aspect_id]
+    var cursor: i64 = 0
+    while cursor < included.len():
+        val entry = catalog.find(included[cursor])?
+        for dependency in entry.dependencies:
+            if not included.contains(dependency):
+                included.push(dependency)
+        cursor = cursor + 1
+
+    var ordered: [AspectCatalogEntry] = []
+    var ordered_ids: [text] = []
+    while ordered.len() < included.len():
+        var progressed = false
+        for entry in catalog.entries:
+            if not included.contains(entry.aspect_id) or ordered_ids.contains(entry.aspect_id):
+                continue
+            var ready = true
+            for dependency in entry.dependencies:
+                if included.contains(dependency) and not ordered_ids.contains(dependency):
+                    ready = false
+            if ready:
+                ordered.push(entry)
+                ordered_ids.push(entry.aspect_id)
+                progressed = true
+        if not progressed:
+            return Err("E-APACK007 aspect activation dependency cycle")
+    Ok(ordered)
+
+fn aspect_activation_provider_key(entry: AspectCatalogEntry, generation: i64) -> AspectPackProviderKey:
+    AspectPackProviderKey(
+        pack_id: entry.pack_id,
+        pack_digest: entry.pack_digest,
+        catalog_generation: generation,
+        target: entry.target,
+        variant_fingerprint: entry.variant_fingerprint,
+        runtime_abi: entry.runtime_abi,
+        core_public_abi_hash: entry.core_public_abi_hash,
+        core_layout_abi_hash: entry.core_layout_abi_hash
+    )
+
+fn aspect_activation_stage_modules(provider: AspectPackProvider, catalog: AspectCatalog, root: AspectCatalogEntry) -> Result<[AspectStagedModule], text>:
+    val closure = aspect_activation_dependency_closure(catalog, root)?
+    var staged: [AspectStagedModule] = []
+    for entry in closure:
+        if entry.pack_id != root.pack_id or entry.pack_digest != root.pack_digest:
+            return Err("E-APACK006 dependency closure crosses the selected pack provider")
+        val module_key = AspectPackModuleKey(
+            provider: aspect_activation_provider_key(entry, catalog.generation),
+            module_id: entry.module_id,
+            module_digest: entry.module_digest
+        )
+        val frame_entry = aspect_pack_find_entry(provider.image.directory, entry.module_id)?
+        val smf_bytes_result = provider.get_module_bytes(module_key)
+        if smf_bytes_result.is_err():
+            return Err(smf_bytes_result.unwrap_err())
+        val smf_bytes = smf_bytes_result.unwrap()
+        val reader_result = SmfReaderMemory.from_data(smf_bytes)
+        if reader_result.is_err():
+            return Err(reader_result.unwrap_err())
+        val reader = reader_result.unwrap()
+        staged.push(AspectStagedModule(
+            owner_id: aspect_activation_owner_id(entry, catalog.generation),
+            module_id: entry.module_id,
+            module_digest: entry.module_digest,
+            stored_byte_count: frame_entry.stored_size as i64,
+            byte_count: reader.data_size(),
+            smf_bytes: smf_bytes,
+            cache_key: module_key,
+            bindings: entry.binding_summaries
+        ))
+    Ok(staged)
+
+# Production staging consumes the one application-owned cache. The cache uses
+# ModuleLoader's existing SMF resource manager for eviction/refcount policy.
+fn aspect_activation_stage_modules_cached(
+    provider: AspectPackProvider,
+    catalog: AspectCatalog,
+    root: AspectCatalogEntry,
+    provider_cache: AspectPackProviderCache,
+    resource_refs: SmfCacheManager
+) -> Result<[AspectStagedModule], text>:
+    val closure = aspect_activation_dependency_closure(catalog, root)?
+    var staged: [AspectStagedModule] = []
+    for entry in closure:
+        if entry.pack_id != root.pack_id or entry.pack_digest != root.pack_digest:
+            return Err("E-APACK006 dependency closure crosses the selected pack provider")
+        val module_key = AspectPackModuleKey(
+            provider: aspect_activation_provider_key(entry, catalog.generation),
+            module_id: entry.module_id,
+            module_digest: entry.module_digest
+        )
+        val frame_entry = aspect_pack_find_entry(provider.image.directory, entry.module_id)?
+        val smf_bytes_result = provider_cache.get_module_bytes(provider, module_key, resource_refs)
+        if smf_bytes_result.is_err():
+            return Err(smf_bytes_result.unwrap_err())
+        val smf_bytes = smf_bytes_result.unwrap()
+        val reader_result = SmfReaderMemory.from_data(smf_bytes)
+        if reader_result.is_err():
+            return Err(reader_result.unwrap_err())
+        val reader = reader_result.unwrap()
+        staged.push(AspectStagedModule(
+            owner_id: aspect_activation_owner_id(entry, catalog.generation),
+            module_id: entry.module_id,
+            module_digest: entry.module_digest,
+            stored_byte_count: frame_entry.stored_size as i64,
+            byte_count: reader.data_size(),
+            smf_bytes: smf_bytes,
+            cache_key: module_key,
+            bindings: entry.binding_summaries
+        ))
+    Ok(staged)
+
+fn aspect_activation_rollback_loader(loader: ModuleLoader, registered: [text], loaded: [text]):
+    var loaded_reverse = loaded
+    loaded_reverse.reverse()
+    for owner_id in loaded_reverse:
+        moduleloader_unload(loader, owner_id)
+    var registered_reverse = registered
+    registered_reverse.reverse()
+    for owner_id in registered_reverse:
+        _ = loader.provider.remove_registered_module_bytes(owner_id)
+
+fn aspect_activation_map_staged(loader: ModuleLoader, staged: [AspectStagedModule]) -> Result<i64, text>:
+    var registered: [text] = []
+    var loaded: [text] = []
+    var executable_mapping_count: i64 = 0
+    for module in staged:
+        val registration = loader.provider.register_module_bytes(module.owner_id, module.smf_bytes)
+        if registration.is_err():
+            aspect_activation_rollback_loader(loader, registered, loaded)
+            return Err("E-AF002 failed to stage {module.owner_id}: {registration.unwrap_err()}")
+        registered.push(module.owner_id)
+
+        match moduleloader_load(loader, module.owner_id):
+            case LoadResult.Success(loaded_module):
+                loaded.push(module.owner_id)
+                # Count executable symbol mappings, not merely admitted modules.
+                executable_mapping_count = executable_mapping_count + loaded_module.symbols.keys().len()
+            case LoadResult.AlreadyLoaded(_):
+                aspect_activation_rollback_loader(loader, registered, loaded)
+                return Err("E-AF002 virtual aspect module identity is already loaded: {module.owner_id}")
+            case LoadResult.Error(message):
+                # moduleloader_load owns partial mapping cleanup. Calling its
+                # unload path again is intentional and idempotent.
+                moduleloader_unload(loader, module.owner_id)
+                aspect_activation_rollback_loader(loader, registered, loaded)
+                return Err("E-AF002 module mapping failed for {module.owner_id}: {message}")
+    Ok(executable_mapping_count)
+
+fn aspect_activation_validate_loaded_bindings(loader: ModuleLoader, staged: [AspectStagedModule]) -> Result<(), text>:
+    for module in staged:
+        for binding in module.bindings:
+            if binding.binding_id == "" or binding.facet_interface_id == "" or binding.facet_contract_abi_hash == "" or binding.witness_symbol == "":
+                return Err("E-AF002 incomplete loaded facet binding for {module.owner_id}")
+            if binding.capabilities.len() == 0:
+                return Err("E-AF006 loaded facet binding has no capabilities: {binding.binding_id}")
+            for capability in binding.capabilities:
+                if capability == "":
+                    return Err("E-AF006 loaded facet binding has an empty capability: {binding.binding_id}")
+            if not loader.global_symbols.has(binding.witness_symbol):
+                return Err("E-AF002 loaded witness symbol is missing: {binding.witness_symbol}")
+            val symbol_owner = loader.global_symbols[binding.witness_symbol][0]
+            if symbol_owner != module.owner_id:
+                return Err("E-AF002 loaded witness symbol owner mismatch: {binding.witness_symbol}")
+    Ok(())
+
+fn aspect_activation_stage_binding_candidate(
+    staged: [AspectStagedModule],
+    activation_key: text,
+    generation: i64,
+    aspect_id: text
+) -> Result<FacetBindingCandidate, text>:
+    var admissions: [FacetBindingAdmission] = []
+    for module in staged:
+        for binding in module.bindings:
+            admissions.push(FacetBindingAdmission(
+                summary: binding,
+                witness_owner_id: module.owner_id
+            ))
+    facet_binding_stage_validated(
+        activation_key, generation, aspect_id, admissions)
+
+fn aspect_activation_release_cache_pins(
+    provider_cache: AspectPackProviderCache,
+    resource_refs: SmfCacheManager,
+    module_keys: [AspectPackModuleKey]
+):
+    var reverse = module_keys
+    reverse.reverse()
+    for module_key in reverse:
+        _ = provider_cache.release_module(module_key, resource_refs)
+
+fn aspect_activation_acquire_cache_pins(
+    provider_cache: AspectPackProviderCache,
+    resource_refs: SmfCacheManager,
+    staged: [AspectStagedModule]
+) -> Result<(), text>:
+    var acquired: [AspectPackModuleKey] = []
+    for module in staged:
+        val pin = provider_cache.acquire_module(module.cache_key, resource_refs)
+        if pin.is_err():
+            aspect_activation_release_cache_pins(provider_cache, resource_refs, acquired)
+            return Err("E-APACK004 failed to pin staged aspect module: {pin.unwrap_err()}")
+        acquired.push(module.cache_key)
+    Ok(())
+
+fn aspect_activation_publish_staged(
+    coordinator: AspectActivationCoordinator,
+    entry: AspectCatalogEntry,
+    key: text,
+    request: AspectActivationRequest,
+    staged: [AspectStagedModule],
+    relocation_done: bool,
+    bindings_valid: bool,
+    executable_mapping_count: i64,
+    binding_candidate: FacetBindingCandidate?
+) -> AspectActivationResult:
+    var candidate = CandidateMapping.create(key)
+    if relocation_done:
+        candidate = candidate.complete_relocation()
+    if bindings_valid:
+        candidate = candidate.validate_imports()
+    if not candidate.is_ready():
+        return aspect_activation_failure(coordinator, key, request.request_id, "E-AF002 staged relocation or facet binding validation failed")
+
+    # Compute the complete immutable registry result before lifecycle
+    # promotion. Any ambiguity or identity failure therefore leaves no active
+    # generation, and neither value becomes visible until `next` is built.
+    var facet_bindings = coordinator.facet_bindings
+    var published_bindings: [AspectBindingSummary] = []
+    if val candidate = binding_candidate:
+        val binding_publication = aspect_publish_generation(
+            facet_bindings, candidate, key, coordinator.catalog.generation)
+        if binding_publication.is_err():
+            return aspect_activation_failure(
+                coordinator, key, request.request_id,
+                binding_publication.unwrap_err())
+        facet_bindings = binding_publication.unwrap()
+        published_bindings = entry.binding_summaries
+
+    val generation_candidate = GenerationState.candidate(key, coordinator.catalog.generation)
+    val generation_state = generation_candidate.promote()
+    val registered = coordinator.lifecycle.register_candidate_for(
+        key, coordinator.catalog.generation)
+    if registered.is_err():
+        return aspect_activation_failure(
+            coordinator, key, request.request_id,
+            "E-AF002 exact activation lifecycle candidate failed: {registered.unwrap_err()}")
+    val promoted = registered.unwrap().promote_candidate_for(
+        key, coordinator.catalog.generation)
+    if promoted.is_err():
+        return aspect_activation_failure(
+            coordinator, key, request.request_id,
+            "E-AF002 exact activation lifecycle publication failed: {promoted.unwrap_err()}")
+    val lifecycle = promoted.unwrap()
+
+    var owners: [text] = []
+    var module_keys: [AspectPackModuleKey] = []
+    var selected_stored_bytes: i64 = 0
+    var selected_decoded_bytes: i64 = 0
+    for module in staged:
+        owners.push(module.owner_id)
+        module_keys.push(module.cache_key)
+        selected_stored_bytes = selected_stored_bytes + module.stored_byte_count
+        selected_decoded_bytes = selected_decoded_bytes + module.byte_count
+    val published = aspect_activation_copy_published(coordinator.published)
+    published[entry.aspect_id] = AspectPublishedActivation(
+        activation_key: key,
+        aspect_id: entry.aspect_id,
+        generation: generation_state.generation_id as i64,
+        owners: owners,
+        module_keys: module_keys,
+        bindings: published_bindings,
+        state: "active"
+    )
+
+    var evidence: [DynSmfEvidenceRow] = []
+    for row in coordinator.dynsmf_session.evidence:
+        evidence.push(row)
+    evidence.push(DynSmfEvidenceRow(
+        library_id: entry.aspect_id,
+        action: "aspect_activate",
+        policy_source: coordinator.dynsmf_session.policy.source,
+        status: "active",
+        handle: 0,
+        generation: coordinator.catalog.generation,
+        reason: "aspect_pack_atomic_publish"
+    ))
+    val session = aspect_activation_clone_session(coordinator.dynsmf_session, coordinator.catalog.generation, evidence)
+    var in_flight = aspect_activation_copy_in_flight(coordinator.in_flight)
+    in_flight = in_flight.remove(key)
+    val counters = AspectActivationCounters(
+        pack_opens: coordinator.counters.pack_opens,
+        selected_stored_bytes: coordinator.counters.selected_stored_bytes + selected_stored_bytes,
+        selected_decoded_bytes: coordinator.counters.selected_decoded_bytes + selected_decoded_bytes,
+        executable_mappings: coordinator.counters.executable_mappings + executable_mapping_count,
+        sidecar_allocations: coordinator.counters.sidecar_allocations,
+        runtime_scans: coordinator.counters.runtime_scans
+    )
+    val next = AspectActivationCoordinator(
+        catalog: coordinator.catalog,
+        dynsmf_session: session,
+        lifecycle: lifecycle,
+        facet_bindings: facet_bindings,
+        published: published,
+        in_flight: in_flight,
+        counters: counters
+    )
+    AspectActivationResult(
+        coordinator: next,
+        status: "published",
+        reason: "atomic facet generation published",
+        generation: coordinator.catalog.generation,
+        staged_count: staged.len(),
+        counters: counters
+    )
+
+impl AspectActivationCoordinator:
+    static fn create(catalog: AspectCatalog, dynsmf_session: DynSmfSession, lifecycle: LifecycleManager) -> Result<AspectActivationCoordinator, text>:
+        if catalog.generation < dynsmf_session.generation:
+            return Err("E-APACK001 stale aspect catalog generation")
+        Ok(AspectActivationCoordinator(
+            catalog: catalog,
+            dynsmf_session: dynsmf_session,
+            lifecycle: lifecycle,
+            facet_bindings: FacetBindingRegistry.create(),
+            published: {},
+            in_flight: {},
+            counters: aspect_activation_zero_counters()
+        ))
+
+    fn reserve(request: AspectActivationRequest) -> Result<AspectActivationCoordinator, text>:
+        if request.request_id == "":
+            return Err("E-APACK001 activation request ID is empty")
+        if request.catalog_generation != self.catalog.generation:
+            return Err("E-APACK001 stale activation request generation")
+        val entry = self.catalog.find(request.aspect_id)?
+        val key = aspect_activation_key(entry, self.catalog.generation)
+        if self.in_flight.has(key):
+            return Ok(self)
+        val in_flight = aspect_activation_copy_in_flight(self.in_flight)
+        in_flight[key] = request.request_id
+        Ok(AspectActivationCoordinator(
+            catalog: self.catalog,
+            dynsmf_session: self.dynsmf_session,
+            lifecycle: self.lifecycle,
+            facet_bindings: self.facet_bindings,
+            published: self.published,
+            in_flight: in_flight,
+            counters: self.counters
+        ))
+
+    # Control-plane evidence adapter retained for deterministic catalog tests.
+    # Production activation must use activate_with_loader so relocation and
+    # witness ownership are derived from runtime state rather than booleans.
+    fn activate(provider: AspectPackProvider, request: AspectActivationRequest, relocation_done: bool, bindings_valid: bool) -> AspectActivationResult:
+        if request.request_id == "" or request.catalog_generation != self.catalog.generation:
+            return AspectActivationResult(coordinator: self, status: "failed", reason: "E-APACK001 stale or invalid activation request", generation: self.catalog.generation, staged_count: 0, counters: self.counters)
+        val entry_result = self.catalog.find(request.aspect_id)
+        if entry_result.is_err():
+            return AspectActivationResult(coordinator: self, status: "failed", reason: entry_result.unwrap_err(), generation: self.catalog.generation, staged_count: 0, counters: self.counters)
+        val entry = entry_result.unwrap()
+        val key = aspect_activation_key(entry, self.catalog.generation)
+
+        if self.published.has(entry.aspect_id):
+            val active = self.published[entry.aspect_id]
+            if active.activation_key == key:
+                return AspectActivationResult(coordinator: self, status: "coalesced_active", reason: "already active", generation: active.generation, staged_count: 0, counters: self.counters)
+        if self.in_flight.has(key) and self.in_flight[key] != request.request_id:
+            return AspectActivationResult(coordinator: self, status: "coalesced_inflight", reason: "joined deterministic activation owner", generation: self.catalog.generation, staged_count: 0, counters: self.counters)
+        if entry.activation_policy == "excluded":
+            return aspect_activation_failure(self, key, request.request_id, "E-APACK008 excluded aspect cannot activate")
+        if dynsmf_id_disabled(self.dynsmf_session.policy, entry.aspect_id):
+            return aspect_activation_failure(self, key, request.request_id, "E-APACK008 dynSMF policy disabled aspect activation")
+
+        var reserved = self
+        if not reserved.in_flight.has(key):
+            val reserve_result = reserved.reserve(request)
+            if reserve_result.is_err():
+                return aspect_activation_failure(self, key, request.request_id, reserve_result.unwrap_err())
+            reserved = reserve_result.unwrap()
+
+        val staged_result = aspect_activation_stage_modules(provider, self.catalog, entry)
+        if staged_result.is_err():
+            return aspect_activation_failure(reserved, key, request.request_id, staged_result.unwrap_err())
+        val staged = staged_result.unwrap()
+
+        aspect_activation_publish_staged(
+            reserved, entry, key, request, staged,
+            relocation_done, bindings_valid, 0, nil)
+
+    # Runtime activation path.  Pack selection and validation happen before
+    # any executable mapping; ModuleLoader remains the sole mapping,
+    # relocation, and resource-lifecycle owner.
+    fn activate_with_loader(provider: AspectPackProvider, request: AspectActivationRequest, loader: ModuleLoader, provider_cache: AspectPackProviderCache) -> AspectActivationResult:
+        if request.request_id == "" or request.catalog_generation != self.catalog.generation:
+            return AspectActivationResult(coordinator: self, status: "failed", reason: "E-APACK001 stale or invalid activation request", generation: self.catalog.generation, staged_count: 0, counters: self.counters)
+        val entry_result = self.catalog.find(request.aspect_id)
+        if entry_result.is_err():
+            return AspectActivationResult(coordinator: self, status: "failed", reason: entry_result.unwrap_err(), generation: self.catalog.generation, staged_count: 0, counters: self.counters)
+        val entry = entry_result.unwrap()
+        val key = aspect_activation_key(entry, self.catalog.generation)
+
+        if self.published.has(entry.aspect_id):
+            val active = self.published[entry.aspect_id]
+            if active.activation_key == key:
+                return AspectActivationResult(coordinator: self, status: "coalesced_active", reason: "already active", generation: active.generation, staged_count: 0, counters: self.counters)
+        if self.in_flight.has(key) and self.in_flight[key] != request.request_id:
+            return AspectActivationResult(coordinator: self, status: "coalesced_inflight", reason: "joined deterministic activation owner", generation: self.catalog.generation, staged_count: 0, counters: self.counters)
+        if entry.activation_policy == "excluded":
+            return aspect_activation_failure(self, key, request.request_id, "E-APACK008 excluded aspect cannot activate")
+        if dynsmf_id_disabled(self.dynsmf_session.policy, entry.aspect_id):
+            return aspect_activation_failure(self, key, request.request_id, "E-APACK008 dynSMF policy disabled aspect activation")
+        var reserved = self
+        if not reserved.in_flight.has(key):
+            val reserve_result = reserved.reserve(request)
+            if reserve_result.is_err():
+                return aspect_activation_failure(self, key, request.request_id, reserve_result.unwrap_err())
+            reserved = reserve_result.unwrap()
+
+        val staged_result = aspect_activation_stage_modules_cached(
+            provider, self.catalog, entry, provider_cache,
+            loader.lifecycle.smf_cache_mgr)
+        if staged_result.is_err():
+            return aspect_activation_failure(reserved, key, request.request_id, staged_result.unwrap_err())
+        val staged = staged_result.unwrap()
+        val mapping_result = aspect_activation_map_staged(loader, staged)
+        if mapping_result.is_err():
+            return aspect_activation_failure(reserved, key, request.request_id, mapping_result.unwrap_err())
+
+        val binding_result = aspect_activation_validate_loaded_bindings(loader, staged)
+        if binding_result.is_err():
+            var invalid_owners: [text] = []
+            for module in staged:
+                invalid_owners.push(module.owner_id)
+            aspect_activation_rollback_loader(loader, invalid_owners, invalid_owners)
+            return aspect_activation_failure(reserved, key, request.request_id, binding_result.unwrap_err())
+
+        val binding_candidate = aspect_activation_stage_binding_candidate(
+            staged, key, self.catalog.generation, entry.aspect_id)
+        if binding_candidate.is_err():
+            var invalid_candidate_owners: [text] = []
+            for module in staged:
+                invalid_candidate_owners.push(module.owner_id)
+            aspect_activation_rollback_loader(
+                loader, invalid_candidate_owners, invalid_candidate_owners)
+            return aspect_activation_failure(
+                reserved, key, request.request_id,
+                binding_candidate.unwrap_err())
+
+        val pin_result = aspect_activation_acquire_cache_pins(
+            provider_cache, loader.lifecycle.smf_cache_mgr, staged)
+        if pin_result.is_err():
+            var pin_failure_owners: [text] = []
+            for module in staged:
+                pin_failure_owners.push(module.owner_id)
+            aspect_activation_rollback_loader(loader, pin_failure_owners, pin_failure_owners)
+            return aspect_activation_failure(reserved, key, request.request_id, pin_result.unwrap_err())
+
+        val result = aspect_activation_publish_staged(
+            reserved, entry, key, request, staged, true, true,
+            mapping_result.unwrap(), Some(binding_candidate.unwrap()))
+        if result.status != "published":
+            var cache_keys: [AspectPackModuleKey] = []
+            var owners: [text] = []
+            for module in staged:
+                owners.push(module.owner_id)
+                cache_keys.push(module.cache_key)
+            aspect_activation_release_cache_pins(provider_cache, loader.lifecycle.smf_cache_mgr, cache_keys)
+            aspect_activation_rollback_loader(loader, owners, owners)
+        result
+
+export AspectActivationRequest
+export AspectStagedModule
+export AspectActivationCounters
+export AspectPublishedActivation
+export AspectActivationCoordinator
+export AspectActivationResult
+export aspect_activation_owner_id
