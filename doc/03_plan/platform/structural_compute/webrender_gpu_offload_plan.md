@@ -106,17 +106,50 @@ palette, and honest offload provenance (device identity required for any
 device-readback claim; `host_cache_after_device_present` carries identity per
 the backend_vulkan provenance fix).
 
-**Coverage.** Measured with the now-working `SIMPLE_COVERAGE=1` statement
-path (test_runner epilogue injection; commit `1a6c1e362a5`). Conservative
-floors on target modules: selector_matcher 97%, dom_limits 100%,
-style_block_resolve 77%, style_block_parse 72%, html_tokenizer 64%,
-dom_identity_index 50%, tree_builder 28%. These are FLOORS, not point
-estimates: attribution requires line-hit AND enclosing-function match, and
-`dom.spl` measures 1% despite the 38/38 DOM lane exercising it heavily —
-direct evidence of under-attribution. The spec `@cover` targets declare 90%;
-closing the measured-floor gap is tracked as a coverage-tooling defect
-(`doc/08_tracking/bug/instrumented_statement_coverage_tooling_inert_2026-08-02.md`),
-not by adding vacuous tests.
+**Coverage (2026-08-04).** Measured with `SIMPLE_COVERAGE=1` (test_runner
+epilogue injection; commit `1a6c1e362a5`).
+
+| module | 2026-08-02 | corrected baseline | current | ≥90% |
+|---|---|---|---|---|
+| `selector_matcher.spl` | 97% | 97% | **98%** | yes |
+| `dom_limits.spl` | 100% | — | **100%** | yes |
+| `style_block_resolve.spl` | 77% | 77% | **99%** | yes |
+| `style_block_parse.spl` | 72% | 77% | **96%** | yes |
+| `html_tokenizer.spl` | 64% | 90% | **97%** | yes |
+| `html_tree_builder.spl` | 28% | 72% | 75% | no — capped |
+| `dom_identity_index.spl` | 50% | 51% | 52% | no — capped |
+
+**Most of the original gap was tooling, not untested code.** Three defects
+were found in the coverage tool itself:
+
+- **A (fixed, `9c598987bb7`)** — `_cov_report_for_file` stripped only
+  `static `, so `pub fn` bodies were charged to the *previous* declaration and
+  read as uncovered. This one fix moved `html_tokenizer.spl` 64% → 90% with
+  **zero test changes**, and accounts for 5 of the points on
+  `style_block_parse.spl`.
+- **C (fixed, same commit)** — `elif` heads counted in the denominator but
+  were never recorded even when taken.
+- **B (OPEN)** — instance methods never enter the collector's `functions`
+  section, so a `me` method body scores 0% however well tested.
+  `record_function_call` is reached only from three plain-call paths in
+  `interpreter_call/core/function_exec.rs`. This is what caps
+  `html_tree_builder.spl` (~80%) and `dom_identity_index.spl` (~55%), and it
+  is the correct explanation for `dom.spl` measuring 1% despite the 38/38 DOM
+  lane exercising it heavily — the earlier "under-attribution" framing was
+  directionally right but did not name the mechanism.
+
+Defect B must be closed by making instance-method calls genuinely reach
+`record_function_call`, **not** by relaxing the reporter's gate — a
+reporter-side relaxation would inflate every number in the repo while
+measuring nothing, which is strictly worse than an honest under-report. A
+KNOWN CAP note in `src/app/test_runner_new/test_runner_single.spl` records
+the evidence and warns against exactly that shortcut.
+
+The style and tokenizer lanes wrote tests only for lines that were genuinely
+untested AND measurable; lines unmeasurable under defect B were listed rather
+than tested, since a test against them would raise apparent effort while
+moving nothing. Unreachable-by-construction lines are argued individually in
+the landing commits, never folded silently into a percentage.
 
 Defects found and filed by this campaign (all in `doc/08_tracking/bug/`):
 seed runner 600s child kill (fixed `fd381db82bc`), render-session second-render
@@ -173,11 +206,40 @@ explicit-CPU declines above it. The decline branch executed in every green run
 (decision marker present), so the green is not vacuous. Detail:
 `doc/08_tracking/bug/web_gpu_first_default_publishes_empty_frame_2026-08-04.md`.
 
-Still open: the `gpu-full`/`gpu-partial` prefix derives from
-`economics.residual_pixels` rather than `readback.source`, so it can
-over-claim while `source=` stays honest. Binding it changes decision-string
-vocabulary the gates assert against, so it is not a small obviously-correct
-edit.
+**Closed (`1e461e1985c`):** the `gpu-full`/`gpu-partial` prefix derived from
+`economics.residual_pixels` — a pre-dispatch prediction — rather than
+`readback.source`, so it could over-claim while `source=` stayed honest. The
+prefix *and* the `offloaded=` claim are now both gated on the existing
+`_web_gpu_readback_device_proven` predicate (`source == device_readback` ∧
+`handle > 0` ∧ `identity > 0` ∧ `pixel_count == frame_pixels`); relabelling
+the prefix alone would have left an unearned `offloaded=`. Measured on a real
+`webgpu` frame:
+
+```text
+before: gpu-first:gpu-full:offloaded=rect_fill:2ops/1760px:cpu=none:source=cpu_mirror:handle=0:device_identity=0
+after:  gpu-first:cpu-presented:offloaded=none:cpu=full-frame:reason=readback-not-device-proven:source=cpu_mirror:handle=0:device_identity=0
+```
+
+`vulkan` and `cuda`, which are genuinely device-proven on this host, are
+byte-identical before and after.
+
+Two prior claims about this item were wrong and are corrected. The leak was
+**not** "any CPU source": the decline branch already returned early on
+`source == "cpu_fallback"`; what escaped were the *other* CPU sources, since
+`present_gpu_paint_readback` returns whatever `read_pixels_with_source()`
+reports on its `Ok(engine)` branch, so a backend that constructs successfully
+but presents in software yields `cpu_mirror` and fell through to `gpu-full`.
+And the edit was **not** blocked by gate vocabulary: exactly one spec
+(`web_gpu_first_present_decision_spec.spl`) asserts on these strings — neither
+the parity nor the showcase gate mentions them — so **no existing assertion
+had to change**. One example was *added*, sweeping all six candidate backends
+and asserting both directions, because the pre-existing spec only probes
+`vulkan` on this host and therefore never reached the over-claiming branch;
+without it the fix would have shipped unpinned.
+
+Still open: `_backend_is_cpu()` does not recognise `cpu_mirror` /
+`cpu_fallback`, so the `gpu_backend_used=true` diagnostic over-claims the same
+way for a backend that constructs but presents in software.
 
 **Process note for anyone reading a gate verdict from this tree:** a red
 measured in the shared working copy is not evidence about origin. This
