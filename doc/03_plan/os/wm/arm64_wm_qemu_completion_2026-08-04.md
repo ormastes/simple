@@ -136,6 +136,49 @@ can build the required kernel.
 
 ## Current Resume Gate
 
+### 2026-08-04 per-instance LLVM builder closeout
+
+- `d18bd76cfc` removed the frame-unsafe module-global LLVM text accumulator and
+  made every mode use the per-builder runtime string-builder handle. The direct
+  incidental-builder probe passed. Phase 2 IR grew from the prior 104-byte tail
+  to 2,449 bytes and retained its module header/runtime declarations, proving
+  the truncation defect fixed.
+- `d048f80d8d` then reordered all function starters to emit before mutating
+  `current_function` and recaptured the completed bootstrap module's statics.
+  Its optimized-function direct probe passed, but the source-spec runner timed
+  out without a verdict.
+- The third/final Phase 2 candidate SHA-256
+  `32092b8ac8dcfe6e36163969a6f63df9cbb73e95b5a783b9e56eddfc0a6bf4dc`
+  passed Stage 2 sanity/native smoke. Canonical functional admission ran once
+  and still failed at LLVM line 59: the first retained function content is bare
+  `bb0:` (`expected top-level entity`). Every `define` and physical global
+  declaration is absent, while bodies/closing braces remain and Load/Store
+  still reference `@g_undeclared_3`.
+- Final evidence is retained at
+  `/private/tmp/simple-phase2-final-cycle3-evidence-20260804/`; `failed.ll`
+  SHA-256 is
+  `c611eb94cdd651dbbd4c0543aae3b4a2bb09664fdb1c93868ecff5c1d356be99`.
+  The failed candidate was removed after evidence retention. No admitted Phase
+  3, provenance, ARM64 build, or QEMU run exists. The three-cycle cap is
+  exhausted.
+
+Fresh-session resume:
+
+1. Treat receiver-method opening emission as unproven on compiled Stage 2 even
+   after source reordering. Add a free/helper path that pushes the complete
+   `define ... {` line directly to the builder's `sb` handle, and call it from
+   bootstrap function translation without a mutating receiver-method frame.
+2. Likewise emit/register bootstrap statics through an owner/free helper that
+   first pushes the declaration and then records the module-qualified
+   symbol/type mapping; instrument `bootstrap_mir_static_count()` and require
+   count `1` for the canonical fixture.
+3. Use a native-focused probe, not the deployed JIT-only probe, to retain one
+   header, one physical global, all four `define` lines, all bodies/closers, and
+   no `@g_undeclared_3` before spending the next Phase 2 cycle.
+4. Only after canonical functional admission passes may Phase 2 seed Phase 3,
+   followed by provenance admission, strict ARM64 attestation, and same-run
+   QEMU serial/QMP/RAMFB evidence.
+
 ### 2026-08-04 packed-ID recovery closeout
 
 - Fresh bounded cycles removed both observed packed-ID failures. Indexed

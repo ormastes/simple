@@ -64,3 +64,8 @@ dev-done
 - verify: Final Phase 2 candidate passed Stage 2 sanity/native smoke but failed
   functional admission because LLVM module output was truncated to 104 bytes;
   Phase 3 and ARM64/QEMU remain active.
+- implement: Per-instance LLVM accumulation fixed the 104-byte truncation, but
+  compiled Stage 2 still drops function/global opening emissions.
+- verify: Final bounded candidate `32092b8ac8...` passed sanity/native smoke and
+  failed canonical admission at bare `bb0:`; Phase 3 and ARM64/QEMU remain
+  active.
