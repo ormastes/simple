@@ -108,9 +108,24 @@ enum FreestandingUnresolvedMode {
 }
 
 fn freestanding_unresolved_mode() -> FreestandingUnresolvedMode {
-    if std::env::var("SIMPLE_ALLOW_FREESTANDING_STUBS").as_deref() == Ok("1") {
+    let no_stub_fallback = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
+    let strict_precheck = std::env::var("SIMPLE_STRICT_FREESTANDING_PRECHECK").as_deref() == Ok("1");
+
+    // The strict no-fallback contract is authoritative. Some legacy OS build
+    // profiles still export SIMPLE_ALLOW_FREESTANDING_STUBS=1; allowing that
+    // opt-in to win here silently fabricated weak return-zero definitions even
+    // when the caller explicitly required a stub-free build. Defer by default
+    // so section GC can discard dead references, or preserve the explicitly
+    // requested eager precheck, but never enter EmitStubs.
+    if no_stub_fallback {
+        if strict_precheck {
+            FreestandingUnresolvedMode::StrictPrecheck
+        } else {
+            FreestandingUnresolvedMode::DeferToLinker
+        }
+    } else if std::env::var("SIMPLE_ALLOW_FREESTANDING_STUBS").as_deref() == Ok("1") {
         FreestandingUnresolvedMode::EmitStubs
-    } else if std::env::var("SIMPLE_STRICT_FREESTANDING_PRECHECK").as_deref() == Ok("1") {
+    } else if strict_precheck {
         FreestandingUnresolvedMode::StrictPrecheck
     } else {
         FreestandingUnresolvedMode::DeferToLinker
@@ -1226,7 +1241,103 @@ pub(crate) fn generate_stub_object(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
 
+    fn freestanding_stub_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_freestanding_stub_env<T>(
+        no_fallback: Option<&str>,
+        allow: Option<&str>,
+        strict: Option<&str>,
+        f: impl FnOnce() -> T,
+    ) -> T {
+        let _guard = freestanding_stub_env_lock().lock().unwrap();
+        let names = [
+            "SIMPLE_NO_STUB_FALLBACK",
+            "SIMPLE_ALLOW_FREESTANDING_STUBS",
+            "SIMPLE_STRICT_FREESTANDING_PRECHECK",
+        ];
+        let previous = names.map(|name| std::env::var(name).ok());
+        for (name, value) in names.into_iter().zip([no_fallback, allow, strict]) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        let result = f();
+        for (name, value) in names.into_iter().zip(previous) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn no_stub_fallback_overrides_freestanding_stub_opt_in() {
+        with_freestanding_stub_env(Some("1"), Some("1"), None, || {
+            assert_eq!(
+                freestanding_unresolved_mode(),
+                FreestandingUnresolvedMode::DeferToLinker
+            );
+        });
+        with_freestanding_stub_env(Some("1"), Some("1"), Some("1"), || {
+            assert_eq!(
+                freestanding_unresolved_mode(),
+                FreestandingUnresolvedMode::StrictPrecheck
+            );
+        });
+    }
+
+    #[test]
+    fn no_stub_fallback_prevents_freestanding_stub_artifact_creation() {
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("unresolved.c");
+        let object = dir.path().join("unresolved.o");
+        std::fs::write(
+            &source,
+            "extern long acceptance_missing_symbol(void); long acceptance_probe(void) { return acceptance_missing_symbol(); }\n",
+        )
+        .unwrap();
+        let compile = Command::new("cc")
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .output()
+            .unwrap();
+        assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+
+        let generated = with_freestanding_stub_env(Some("1"), Some("1"), None, || {
+            generate_stub_object_freestanding(
+                dir.path(),
+                std::slice::from_ref(&object),
+                &[],
+                "aarch64-unknown-none",
+                "armv8-a",
+                "lp64",
+                dir.path(),
+                Path::new("acceptance-kernel.elf"),
+            )
+        })
+        .expect("strict no-fallback must defer unresolved symbols to the real linker");
+
+        assert!(generated.is_none(), "no-fallback unexpectedly generated {generated:?}");
+        assert!(
+            !dir.path().join("_stubs_freestanding.c").exists(),
+            "no-fallback must not create a freestanding weak-stub source artifact"
+        );
+        assert!(
+            !dir.path().join("_stubs_freestanding.o").exists(),
+            "no-fallback must not create a freestanding weak-stub object artifact"
+        );
+    }
     #[test]
     fn stale_module_move_is_detected_and_rt_channels_are_untouched() {
         // The live 2026-07-28 instance: `skip_wrap_spaces` moved from the
