@@ -192,7 +192,46 @@ This is worth a second look beyond censuses: `test/unit/compiler/compiler` being
 live symlink to `src/compiler` means a directory-mode test run over `test/` walks
 into production sources.
 
-## Triage
+## The `.spl` arm
+
+With realpath identity and the export/use exclusion both in place, the pure-Simple
+arm passes its ground-truth check. `eval_get_warnings` is rediscovered at
+`src/compiler/10.frontend/core/interpreter/eval.spl:208` with **0 test references**
+and 2 production references that are *both re-export lines*
+(`interpreter/__init__.spl:15` and `eval.spl:953`) — i.e. classified
+`NEVER_REFERENCED`, which is stricter than "test-only" and matches the hand-grep.
+
+Over 13,917 `src/**.spl` files and 30,083 genuine `test/**.spl` files (41,485 walked
+minus 11,392 symlink aliases), against 78,532 distinct `fn` names:
+
+| class | count |
+|---|---|
+| `TEST_ONLY` — referenced only from `test/**` | 2,030 |
+| `NEVER_REFERENCED` — no caller anywhere, including tests | 4,883 |
+
+459 of the 2,030 have production references that are *only* `export`/`use` lines.
+
+`TEST_ONLY` concentration by area:
+
+| area | count |
+|---|---|
+| `src/compiler/70.backend` | 434 |
+| `src/os/kernel` | 299 |
+| `src/os/crypto` | 203 |
+| `src/os/services` | 137 |
+| `src/compiler_rust/lib` | 130 |
+| `src/os/drivers` | 89 |
+| `src/os/compositor` | 74 |
+| `src/compiler/10.frontend` | 66 |
+
+The `src/os/*` concentration (over 850 across kernel, crypto, services, drivers,
+compositor, libc, apps) is the SimpleOS surface and is the obvious next lane —
+`src/os/crypto` in particular, given this repo's history of fabricated KATs and dead
+crypto entry points. These counts carry the same caveats as the Rust arm: the
+one-definition-tree-wide rule suppresses ambiguous names, so 2,030 is a floor, and
+individual triage into (i)/(ii)/(iii) has *not* been done for the `.spl` arm.
+
+## Triage (Rust arm)
 
 | Class | Count | Meaning |
 |---|---|---|
