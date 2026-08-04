@@ -27,6 +27,13 @@ fn exception_operands_have_token(
 
 fn exception_illegal_inst_use(inst: MirInstKind, tokens: Dict<i64, bool>) -> bool:
     match inst:
+        case LandingPad(_): false
+        case Const(dest, _, _) | Alloc(dest, _): tokens.has(dest.id)
+        case Copy(dest, src) | Move(dest, src):
+            tokens.has(dest.id) or tokens.has(src.id)
+        case DebugValue(local, _): tokens.has(local.id)
+        case Ref(dest, _, place): tokens.has(dest.id) or tokens.has(place.local.id)
+        case Nop: false
         case BinOp(_, _, left, right) | CheckedBinOp(_, _, left, right):
             exception_operand_is_token(left, tokens) or exception_operand_is_token(right, tokens)
         case UnaryOp(_, _, operand) | Cast(_, operand, _) | Bitcast(_, operand, _):
@@ -49,7 +56,26 @@ fn exception_illegal_inst_use(inst: MirInstKind, tokens: Dict<i64, bool>) -> boo
             exception_operand_is_token(left, tokens) or exception_operand_is_token(right, tokens)
         case Parallel(_, funcs):
             exception_operands_have_token(funcs, tokens)
-        case _: false
+        # Sound fail-closed default: a newly added opcode must explicitly
+        # prove that none of its fields can consume or redefine a token.
+        case _: true
+
+fn exception_block_by_id(body: MirBody, id: i64) -> MirBlock?:
+    for block in body.blocks:
+        if block.id.id == id:
+            return Some(block)
+    nil
+
+fn exception_successors(term: MirTerminator) -> [i64]:
+    match term:
+        case Goto(target): [target.id]
+        case If(_, then_, else_): [then_.id, else_.id]
+        case Switch(_, targets, default):
+            var result: [i64] = [default.id]
+            for target in targets:
+                result.push(target.target.id)
+            result
+        case _: []
 
 fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
     """Validate unwind-only landing pads and linear exception-token provenance."""
@@ -74,6 +100,7 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
             case _: ()
 
     var token_ids: Dict<i64, bool> = {}
+    var token_definition_counts: Dict<i64, i64> = {}
     for block in body.blocks:
         var pad_count = 0
         var instruction_index = 0
@@ -91,37 +118,28 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
                     if local_kind == nil or local_kind.unwrap() != MirTypeKind.ExceptionToken:
                         return exception_cfg_error("LandingPad destination {dest.id} is not ExceptionToken")
                     token_ids[dest.id] = true
+                    token_definition_counts[dest.id] = (
+                        token_definition_counts.get(dest.id) ?? 0) + 1
                 case _: ()
             instruction_index = instruction_index + 1
         if unwind_targets.has(block.id.id) and pad_count != 1:
             return exception_cfg_error("unwind successor {block.id.id} must contain exactly one LandingPad")
 
-    # Copy/Move are the only legal token-forwarding instructions. Iterate to
-    # discover chains before validating their uses.
-    var changed = true
-    while changed:
-        changed = false
-        for block in body.blocks:
-            for instruction in block.instructions:
-                match instruction.kind:
-                    case Copy(dest, src) | Move(dest, src):
-                        if token_ids.has(src.id) and not token_ids.has(dest.id):
-                            val local_kind = exception_local_type(body, dest.id)
-                            if local_kind == nil or local_kind.unwrap() != MirTypeKind.ExceptionToken:
-                                return exception_cfg_error("exception token forwarded into non-token local {dest.id}")
-                            token_ids[dest.id] = true
-                            changed = true
-                    case _: ()
-
-    var uses: Dict<i64, i64> = {}
+    # No fabricated token locals: every ExceptionToken local has exactly one
+    # LandingPad definition, and tokens are never forwarded or redefined.
+    for local in body.locals:
+        if local.type_.kind == MirTypeKind.ExceptionToken and not token_ids.has(local.id.id):
+            return exception_cfg_error(
+                "ExceptionToken local {local.id.id} has no LandingPad definition")
     for token_id in token_ids.keys():
-        uses[token_id] = 0
+        if token_definition_counts[token_id] != 1:
+            return exception_cfg_error(
+                "ExceptionToken local {token_id} must have exactly one LandingPad definition")
+
     for block in body.blocks:
         for instruction in block.instructions:
             match instruction.kind:
                 case LandingPad(_): ()
-                case Copy(_, src) | Move(_, src):
-                    if token_ids.has(src.id): uses[src.id] = uses[src.id] + 1
                 case Call(_, func, args) | CallIndirect(_, func, args, _):
                     if exception_operand_is_token(func, token_ids):
                         return exception_cfg_error("exception token used as call target")
@@ -136,7 +154,13 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
                 val token_id = exception_operand_local(token)
                 if not token_ids.has(token_id):
                     return exception_cfg_error("Resume operand is not a LandingPad token")
-                uses[token_id] = uses[token_id] + 1
+            case If(cond, _, _) | Switch(cond, _, _):
+                if exception_operand_is_token(cond, token_ids):
+                    return exception_cfg_error("exception token used as branch condition")
+            case CallTerminator(_, func, args, _, _, _):
+                if (exception_operand_is_token(func, token_ids) or
+                    exception_operands_have_token(args, token_ids)):
+                    return exception_cfg_error("exception token used by CallTerminator")
             case Ret(value):
                 if value != nil and token_ids.has(exception_operand_local(value.unwrap())):
                     return exception_cfg_error("exception token returned from function")
@@ -144,9 +168,100 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
                 if token_ids.has(exception_operand_local(value)):
                     return exception_cfg_error("exception token used as source Throw payload")
             case _: ()
-    for token_id in token_ids.keys():
-        if uses[token_id] != 1:
-            return exception_cfg_error("exception token {token_id} must have exactly one linear consumer")
+
+    # Path proof per unwind entry. The region is closed under ordinary CFG
+    # successors; every terminal must Resume the entry token. Fixed-point
+    # completion rejects cycles and paths that cannot reach Resume. External
+    # entries into any region block are rejected, which proves pad dominance.
+    for unwind_id in unwind_targets.keys():
+        val unwind_block = exception_block_by_id(body, unwind_id)
+        if unwind_block == nil:
+            return exception_cfg_error("unwind successor {unwind_id} does not exist")
+        val first_inst = unwind_block.unwrap().instructions[0]
+        val token_id = match first_inst.kind:
+            case LandingPad(dest): dest.id
+            case _: -1
+        var region: Dict<i64, bool> = {}
+        var worklist: [i64] = [unwind_id]
+        while worklist.len() > 0:
+            val current = worklist.pop()
+            if region.has(current):
+                continue
+            region[current] = true
+            val current_block = exception_block_by_id(body, current)
+            if current_block == nil:
+                return exception_cfg_error("cleanup successor {current} does not exist")
+            for instruction in current_block.unwrap().instructions:
+                match instruction.kind:
+                    case LandingPad(_): ()
+                    case Call(_, func, args):
+                        var known_release = false
+                        match func.kind:
+                            case Const(MirConstValue.Str(name), _):
+                                known_release = name == "aspect_execution_context_release_facet_descriptor_or_panic"
+                            case _: ()
+                        if not known_release:
+                            return exception_cfg_error(
+                                "cleanup region call is not the known NoUnwind facet release ABI")
+                    case _:
+                        return exception_cfg_error(
+                            "cleanup region contains a non-cleanup instruction")
+            match current_block.unwrap().terminator:
+                case Resume(token):
+                    if exception_operand_local(token) != token_id:
+                        return exception_cfg_error("cleanup path resumes the wrong ExceptionToken")
+                case Goto(_) | If(_, _, _) | Switch(_, _, _):
+                    for successor in exception_successors(current_block.unwrap().terminator):
+                        worklist.push(successor)
+                case _:
+                    return exception_cfg_error(
+                        "unwind cleanup path must terminate in Resume")
+
+        for block in body.blocks:
+            if region.has(block.id.id):
+                continue
+            for successor in exception_successors(block.terminator):
+                if region.has(successor):
+                    return exception_cfg_error(
+                        "landing-pad region has a non-unwind external predecessor")
+            match block.terminator:
+                case CallTerminator(_, _, _, normal, _, unwind):
+                    if region.has(normal.id):
+                        return exception_cfg_error(
+                            "landing-pad region has a normal call predecessor")
+                    if unwind != nil and region.has(unwind.unwrap().id) and unwind.unwrap().id != unwind_id:
+                        return exception_cfg_error(
+                            "landing-pad region has an external unwind predecessor")
+                case _: ()
+            match block.terminator:
+                case Resume(token):
+                    if exception_operand_local(token) == token_id:
+                        return exception_cfg_error(
+                            "Resume is not dominated by its LandingPad")
+                case _: ()
+
+        var complete: Dict<i64, bool> = {}
+        var progress = true
+        while progress:
+            progress = false
+            for block_id in region.keys():
+                if complete.has(block_id):
+                    continue
+                val region_block = exception_block_by_id(body, block_id).unwrap()
+                var ready = false
+                match region_block.terminator:
+                    case Resume(_): ready = true
+                    case Goto(_) | If(_, _, _) | Switch(_, _, _):
+                        ready = true
+                        for successor in exception_successors(region_block.terminator):
+                            if not complete.has(successor): ready = false
+                    case _: ()
+                if ready:
+                    complete[block_id] = true
+                    progress = true
+        if complete.len() != region.len():
+            return exception_cfg_error(
+                "unwind cleanup region contains a cycle or non-resuming path")
     Ok(())
 
 export validate_mir_exception_cfg
