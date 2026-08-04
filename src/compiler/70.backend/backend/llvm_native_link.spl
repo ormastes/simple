@@ -2548,7 +2548,9 @@ pub fn simpleos_check_no_fabricated_rt_stubs(entry_key: text, user_objects: [tex
     with no fault and no diagnostic.
 
     Fails the link rather than warning: a warning is what the weak stub already
-    is. There is deliberately NO env bypass (the seed has
+    is. `SIMPLE_NO_STUB_FALLBACK=1` also disables the debt baselines: strict
+    builds must contain no non-optional fabricated body, including previously
+    measured debt. There is deliberately NO env bypass (the seed has
     SIMPLE_ALLOW_UNRESOLVED_RT=1); the in-tree escape hatch is
     simpleos_rt_symbol_is_optional_backend, which is greppable and reviewable,
     whereas an env var set once by a lane script is invisible silence again.
@@ -2567,6 +2569,8 @@ pub fn simpleos_check_no_fabricated_rt_stubs(entry_key: text, user_objects: [tex
     (`rt_dma_bytes_to_array` is literally `return 0; /* not called on x86_64
     boot path */` while `rt_memcpy` two lines away is a real loop). Only the
     body separates them."""
+    val strict_no_stub_fallback = (env_get("SIMPLE_NO_STUB_FALLBACK") ?? "") == "1"
+
     # One disassembly pass over `real_objects` serves both channels.
     val trivial_names = simpleos_trivial_body_rt_symbols(real_objects)
     var trivial: {text: bool} = {}
@@ -2639,7 +2643,7 @@ pub fn simpleos_check_no_fabricated_rt_stubs(entry_key: text, user_objects: [tex
             simple_defined[name] = true
         for name in simpleos_defined_symbols_any_binding(real_objects):
             simple_defined[name] = true
-        val simple_baseline = simpleos_simple_symbol_baseline(entry_key)
+        val simple_baseline = if strict_no_stub_fallback: {} else: simpleos_simple_symbol_baseline(entry_key)
         var simple_counted: {text: bool} = {}
         for name in simple_referenced:
             if simple_defined.has(name) or simple_baseline.has(name):
@@ -2652,7 +2656,7 @@ pub fn simpleos_check_no_fabricated_rt_stubs(entry_key: text, user_objects: [tex
         simple_novel.sort()
         return Err("SimpleOS freestanding link refused for entry '{entry_key}': {simple_novel.len()} pure-Simple symbol(s) are newly fabricated -- the closure REFERENCES them but nothing DEFINES them, so the stub generator emits an 8-byte weak nil-returning body and the guest silently takes the false/zero branch at every call site instead of failing here: {simple_novel.join(\", \")}. A pure-Simple function is never optional: find why its body did not reach the link (a stale cached object still referencing a pre-move mangled name is the known cause -- purge the object cache and rebuild) and fix that. This entry's fabricated set must stay a SUBSET of config/simpleos_fabricated_lib_baseline.sdn, which is shrink-only and records pre-existing debt, never new debt.")
 
-    val baseline = simpleos_fabricated_baseline(entry_key)
+    val baseline = if strict_no_stub_fallback: {} else: simpleos_fabricated_baseline(entry_key)
     var novel: [text] = []
     for name in fabricated:
         if not baseline.has(name):

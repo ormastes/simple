@@ -1162,6 +1162,20 @@ impl MirLowering:
                 ))
             case _: nil
         val sym_id = const_.symbol.id
+        # Object-level global identity must not contain SymbolId: it is local
+        # to one HIR lowering and the same imported global can receive a
+        # different id when another closure module is lowered.  Keep that id
+        # for MIR lookup, but give every backend a stable owner-qualified link
+        # name so all per-module aliases bind one storage slot.
+        var global_owner = self.builder.module.name
+        if val symbol_info = self.symbols.get_symbol_raw(sym_id):
+            if val defining_module = symbol_info.defining_module:
+                if defining_module != "":
+                    global_owner = defining_module
+        val owner_dots = global_owner.replace(".", "_")
+        val owner_slashes = owner_dots.replace("/", "_")
+        val owner_safe = owner_slashes.replace("-", "_")
+        val global_link_name = if owner_safe == "": const_.name else: "{owner_safe}__{const_.name}"
         if sym_id >= 0:
             self.global_symbol_ids[sym_id] = true
         var bldr = self.builder
@@ -1169,7 +1183,7 @@ impl MirLowering:
         var statics = module_.statics
         statics[const_.symbol] = MirStatic(
             symbol: const_.symbol,
-            name: const_.name,
+            name: global_link_name,
             type_: static_type,
             init: init_const,
             is_mutable: const_.is_mutable
@@ -1224,9 +1238,18 @@ impl MirLowering:
             var value_builder = self.builder
             var value_module = value_builder.module
             var statics = value_module.statics
+            var runtime_global_owner = module_name_raw
+            if val runtime_symbol_info = self.symbols.get_symbol_raw(const_.symbol.id):
+                if val runtime_defining_module = runtime_symbol_info.defining_module:
+                    if runtime_defining_module != "":
+                        runtime_global_owner = runtime_defining_module
+            val runtime_owner_dots = runtime_global_owner.replace(".", "_")
+            val runtime_owner_slashes = runtime_owner_dots.replace("/", "_")
+            val runtime_owner_safe = runtime_owner_slashes.replace("-", "_")
+            val runtime_global_link_name = if runtime_owner_safe == "": const_.name else: "{runtime_owner_safe}__{const_.name}"
             statics[const_.symbol] = MirStatic(
                 symbol: const_.symbol,
-                name: const_.name,
+                name: runtime_global_link_name,
                 type_: value_type,
                 init: nil,
                 is_mutable: const_.is_mutable

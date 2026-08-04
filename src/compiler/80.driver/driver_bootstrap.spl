@@ -360,6 +360,7 @@ pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> Comp
         translator.remember_function_param_types(emitted_signature_name, signature_param_types)
         signature_idx = signature_idx + 1
     val static_count = bootstrap_mir_static_count()
+    var emitted_static_names: Dict<text, bool> = {}
     var static_idx = 0
     while static_idx < static_count:
         val module_idx = bootstrap_mir_static_module_at(static_idx)
@@ -367,7 +368,10 @@ pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> Comp
         val static_name = bootstrap_mir_static_name_at(static_idx)
         translator.current_bootstrap_module = module_idx
         val g_ty = translator.valid_llvm_type(bootstrap_static_llvm_type_text(bootstrap_mir_static_type_tag_at(static_idx)))
-        val g_name = "@g_{module_idx}_{symbol_id}_{static_name}"
+        # static_name is owner-qualified and stable across independently
+        # lowered closure modules.  Map each module-local SymbolId alias to
+        # that shared slot, but emit the physical global only once.
+        val g_name = "@g_{static_name}"
         val g_key = translator.global_static_key(symbol_id)
         translator.global_static_names[g_key] = g_name
         translator.global_static_types[g_key] = g_ty
@@ -386,7 +390,9 @@ pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> Comp
             # core_codegen.spl's non-flat statics loop).
             if g_ty == "i64":
                 g_init = "ptrtoint (ptr {g_init} to i64)"
-        translator.builder.emit("{g_name} = global {g_ty} {g_init}")
+        if not emitted_static_names.contains(g_name):
+            translator.builder.emit("{g_name} = global {g_ty} {g_init}")
+            emitted_static_names[g_name] = true
         static_idx = static_idx + 1
     var idx = 0
     while idx < count:
