@@ -1,0 +1,121 @@
+use std.spec.*
+use compiler.common.structural_contracts.facet_artifact.{
+    FACET_WITNESS_DESCRIPTOR_VERSION,
+    FacetWitnessMethodEntry, FacetWitnessDescriptorV1
+}
+use std.aop.facet.{FacetGenerationLease}
+use app.startup.aspect_facet_runtime_contract.{
+    PublishedFacetDescriptorLease,
+    aspect_published_facet_descriptor_contract_validate,
+    aspect_published_facet_descriptor_method_address
+}
+
+fn contract_descriptor_lease() -> PublishedFacetDescriptorLease:
+    PublishedFacetDescriptorLease(
+        aspect_id: "security.audit",
+        binding_id: "security.audit.binding",
+        facet_interface_id: "Auditable",
+        facet_contract_abi_hash: "facet-audit-v1",
+        witness_descriptor: FacetWitnessDescriptorV1(
+            descriptor_version: FACET_WITNESS_DESCRIPTOR_VERSION,
+            facet_contract_abi_hash: "facet-audit-v1",
+            descriptor_symbol: "security_audit_witness",
+            owner_id: "security.audit.owner",
+            method_entries: [FacetWitnessMethodEntry(
+                method_name: "audit",
+                method_symbol: "security_audit_witness__audit",
+                resolved_address: 4096)]),
+        generation_lease: FacetGenerationLease(
+            aspect_id: "security.audit", generation_id: 4, token_id: 7))
+
+describe "Pure published facet descriptor contract":
+    it "accepts an exact contract and returns its resolved method address":
+        val acquired = contract_descriptor_lease()
+        aspect_published_facet_descriptor_contract_validate(
+            acquired, "Auditable", "facet-audit-v1", ["audit"]).unwrap()
+        expect(aspect_published_facet_descriptor_method_address(
+            acquired, 0, "audit").unwrap()).to_equal(4096)
+
+    it "preserves contract validation failure order":
+        val incomplete = contract_descriptor_lease()
+        incomplete.witness_descriptor.descriptor_version = 99
+        expect(aspect_published_facet_descriptor_contract_validate(
+            incomplete, "", "facet-audit-v1", ["audit"]
+        ).unwrap_err()).to_contain("identity is incomplete")
+
+        val wrong_interface = contract_descriptor_lease()
+        wrong_interface.witness_descriptor.descriptor_version = 99
+        expect(aspect_published_facet_descriptor_contract_validate(
+            wrong_interface, "Debuggable", "facet-audit-v1", ["audit"]
+        ).unwrap_err()).to_contain("interface does not match")
+
+        val wrong_outer_abi = contract_descriptor_lease()
+        wrong_outer_abi.facet_contract_abi_hash = "wrong-abi"
+        wrong_outer_abi.witness_descriptor.descriptor_version = 99
+        expect(aspect_published_facet_descriptor_contract_validate(
+            wrong_outer_abi, "Auditable", "facet-audit-v1", ["audit"]
+        ).unwrap_err()).to_contain("ABI hash")
+
+        val wrong_descriptor_abi = contract_descriptor_lease()
+        wrong_descriptor_abi.witness_descriptor.facet_contract_abi_hash = "wrong-abi"
+        expect(aspect_published_facet_descriptor_contract_validate(
+            wrong_descriptor_abi, "Auditable", "facet-audit-v1", ["audit"]
+        ).unwrap_err()).to_contain("ABI hash")
+
+        val wrong_version = contract_descriptor_lease()
+        wrong_version.witness_descriptor.descriptor_version = 99
+        expect(aspect_published_facet_descriptor_contract_validate(
+            wrong_version, "Auditable", "facet-audit-v1", ["audit"]
+        ).unwrap_err()).to_contain("version is unsupported")
+
+        val wrong_count = contract_descriptor_lease()
+        wrong_count.witness_descriptor.method_entries[0].resolved_address = 0
+        expect(aspect_published_facet_descriptor_contract_validate(
+            wrong_count, "Auditable", "facet-audit-v1", ["audit", "extra"]
+        ).unwrap_err()).to_contain("method count")
+
+        val wrong_name = contract_descriptor_lease()
+        wrong_name.witness_descriptor.method_entries[0].resolved_address = 0
+        expect(aspect_published_facet_descriptor_contract_validate(
+            wrong_name, "Auditable", "facet-audit-v1", ["wrong"]
+        ).unwrap_err()).to_contain("order/name")
+
+        val unresolved_symbol = contract_descriptor_lease()
+        unresolved_symbol.witness_descriptor.method_entries[0].method_symbol = ""
+        expect(aspect_published_facet_descriptor_contract_validate(
+            unresolved_symbol, "Auditable", "facet-audit-v1", ["audit"]
+        ).unwrap_err()).to_contain("unresolved method: audit")
+
+        val unresolved_address = contract_descriptor_lease()
+        unresolved_address.witness_descriptor.method_entries[0].resolved_address = 0
+        expect(aspect_published_facet_descriptor_contract_validate(
+            unresolved_address, "Auditable", "facet-audit-v1", ["audit"]
+        ).unwrap_err()).to_contain("unresolved method: audit")
+
+    it "preserves method lookup failure order":
+        val empty_name = contract_descriptor_lease()
+        empty_name.witness_descriptor.method_entries[0].resolved_address = 0
+        expect(aspect_published_facet_descriptor_method_address(
+            empty_name, 3, "").unwrap_err()).to_contain("name is empty")
+
+        val bad_ordinal = contract_descriptor_lease()
+        bad_ordinal.witness_descriptor.method_entries[0].resolved_address = 0
+        expect(aspect_published_facet_descriptor_method_address(
+            bad_ordinal, 3, "audit").unwrap_err()).to_contain("ordinal is out of bounds")
+
+        val wrong_name = contract_descriptor_lease()
+        wrong_name.witness_descriptor.method_entries[0].resolved_address = 0
+        expect(aspect_published_facet_descriptor_method_address(
+            wrong_name, 0, "wrong").unwrap_err()).to_contain("order/name")
+
+        val unresolved_symbol = contract_descriptor_lease()
+        unresolved_symbol.witness_descriptor.method_entries[0].method_symbol = ""
+        expect(aspect_published_facet_descriptor_method_address(
+            unresolved_symbol, 0, "audit").unwrap_err()).to_contain(
+            "unresolved method: audit")
+
+        val unresolved_address = contract_descriptor_lease()
+        unresolved_address.witness_descriptor.method_entries[0].resolved_address = -1
+        expect(aspect_published_facet_descriptor_method_address(
+            unresolved_address, 0, "audit").unwrap_err()).to_contain(
+            "unresolved method: audit")

@@ -70,6 +70,50 @@ fn aspect_published_facet_descriptor_validate(
         method_names.push(method.method_name)
     Ok(())
 
+fn aspect_published_facet_descriptor_contract_validate(
+    acquired: PublishedFacetDescriptorLease,
+    expected_facet_interface_id: text,
+    expected_abi_hash: text,
+    expected_method_names: [text]
+) -> Result<(), text>:
+    if expected_facet_interface_id == "" or expected_abi_hash == "":
+        return Err("E-AF002 facet contract identity is incomplete")
+    if acquired.facet_interface_id != expected_facet_interface_id:
+        return Err("E-AF002 facet descriptor interface does not match the contract")
+    if (acquired.facet_contract_abi_hash != expected_abi_hash or
+        acquired.witness_descriptor.facet_contract_abi_hash != expected_abi_hash):
+        return Err("E-AF002 facet descriptor ABI hash does not match the contract")
+    if acquired.witness_descriptor.descriptor_version != FACET_WITNESS_DESCRIPTOR_VERSION:
+        return Err("E-AF002 facet descriptor version is unsupported")
+    if acquired.witness_descriptor.method_entries.len() != expected_method_names.len():
+        return Err("E-AF002 facet descriptor method count does not match the contract")
+    var ordinal = 0
+    while ordinal < expected_method_names.len():
+        val expected_name = expected_method_names[ordinal]
+        val method = acquired.witness_descriptor.method_entries[ordinal]
+        if expected_name == "" or method.method_name != expected_name:
+            return Err("E-AF002 facet descriptor method order/name does not match the contract")
+        if method.method_symbol == "" or method.resolved_address <= 0:
+            return Err("E-AF002 facet descriptor contains an unresolved method: {expected_name}")
+        ordinal = ordinal + 1
+    Ok(())
+
+fn aspect_published_facet_descriptor_method_address(
+    acquired: PublishedFacetDescriptorLease,
+    ordinal: i64,
+    expected_name: text
+) -> Result<i64, text>:
+    if expected_name == "":
+        return Err("E-AF005 facet contract method name is empty")
+    if ordinal < 0 or ordinal >= acquired.witness_descriptor.method_entries.len():
+        return Err("E-AF005 facet contract method ordinal is out of bounds: {ordinal}")
+    val method = acquired.witness_descriptor.method_entries[ordinal]
+    if method.method_name != expected_name:
+        return Err("E-AF002 facet descriptor method order/name does not match the contract")
+    if method.method_symbol == "" or method.resolved_address <= 0:
+        return Err("E-AF002 facet descriptor contains an unresolved method: {expected_name}")
+    Ok(method.resolved_address)
+
 fn aspect_facet_acquire_error_from_runtime_text(
     facet_id: text, message: text
 ) -> FacetAcquireError:
@@ -148,6 +192,8 @@ export PublishedFacetDescriptorLease
 export aspect_application_is_mission, aspect_application_is_operational
 export aspect_application_mission_catalog_valid
 export aspect_published_facet_descriptor_validate
+export aspect_published_facet_descriptor_contract_validate
+export aspect_published_facet_descriptor_method_address
 export aspect_facet_acquire_error_from_runtime_text
 export aspect_facet_acquire_error_required_absent
 export aspect_facet_acquire_error_activation_denied
