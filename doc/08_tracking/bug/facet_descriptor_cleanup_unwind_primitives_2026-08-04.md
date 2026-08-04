@@ -107,3 +107,56 @@ the shortened form lowers to the same explicit `FacetAcquire` context operand,
 use outside a bound context is a fatal diagnostic, and no runtime/global
 current-context lookup is emitted. Until that requirement exists, the explicit
 context spelling is the only supported user-facing contract.
+
+## Portable effect-metadata groundwork
+
+This cannot truthfully be introduced as a facet-only flag. The current ordinary
+call is `MirInstKind.Call(destination, function, arguments)` in
+`src/compiler/50.mir/mir_instruction_support.spl`; adding metadata changes the
+closed instruction shape consumed by MIR JSON/serialization, borrow checking,
+every MIR optimizer, the interpreter, and all code generators. Decorating only
+`TypedFacetAdapterPlan` would lose the fact as soon as
+`lower_typed_facet_member_call` returns a normal `MirInst`, so it would be dead
+metadata rather than portable groundwork.
+
+The minimum truthful model is:
+
+1. Define a common `MirCallUnwindContract` with only `NoUnwind` and
+   `MayUnwind`. Absence is not permitted; legacy producers must choose
+   `NoUnwind` only when their source ABI already guarantees it.
+2. Carry the contract on ordinary direct and indirect `MirInstKind.Call` and on
+   `MirTerminator.CallTerminator`. Preserve it through MIR cloning,
+   serialization, inlining, outlining, SSA, DCE, copy propagation, LICM, and
+   auto-vectorization.
+3. Add a HIR/source effect owner. `HirFunction.is_extern` alone is insufficient:
+   extern declarations need an explicit unwind contract, and function-pointer,
+   method, and facet-contract signatures must retain the same fact.
+4. Lower `NoUnwind` calls normally. Lower `MayUnwind` only through
+   `CallTerminator` after a cleanup target exists; otherwise emit a typed fatal
+   diagnostic before backend selection.
+5. Keep native backends fail closed until they implement the canonical cleanup
+   target. LLVM may emit `invoke` only when the function itself is no longer
+   unconditionally declared `nounwind` and the target block contains the
+   required landing-pad personality/resume contract.
+
+### Required acceptance specs
+
+- `mir_call_unwind_contract_roundtrip_spec.spl`: direct and indirect calls keep
+  the exact contract through MIR JSON and deterministic serialization.
+- `mir_call_unwind_optimizer_preservation_spec.spl`: every optimizer named
+  above preserves the contract and both successors of `CallTerminator`.
+- `facet_member_unwind_contract_spec.spl`: facet method contract metadata
+  reaches the emitted indirect call; missing metadata is fatal, never defaulted.
+- `facet_cleanup_unwind_edge_spec.spl`: nested leases release once in reverse
+  order on an actual unwind successor, while the normal successor releases only
+  at its lexical exits.
+- `backend_unwind_contract_spec.spl`: unsupported native targets reject
+  `MayUnwind` before instruction selection; `NoUnwind` remains an ordinary call.
+- `llvm_unwind_contract_spec.spl`: a `MayUnwind` call emits `invoke`, a valid
+  landing pad and resume edge, and no contradictory function-level `nounwind`.
+- `foreign_unwind_source_contract_spec.spl`: an extern declaration without an
+  explicit contract is rejected inside a leased scope; explicit `NoUnwind` is
+  admitted and `MayUnwind` requires the cleanup-edge capability.
+
+Until these specs and owners land together, E-AF007 and the native
+`CallTerminator` unwind rejections are the authoritative portable behavior.
