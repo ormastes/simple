@@ -6,7 +6,7 @@ use common.io.window_event.{
     WINDOW_EVENT_POINTER_MOVE,
     WINDOW_EVENT_TEXT,
 }
-use common.ui.builder.{build_tree, column, text_field, with_height}
+use common.ui.builder.{build_tree, button, column, text_field, with_height}
 use common.window_protocol.geometry.{Size}
 use nogc_sync_mut.ui.session.{UISession}
 use os.compositor.host_compositor_entry.{HostCompositor}
@@ -119,3 +119,96 @@ describe "host scalar GUI event routing":
             compositor, session
         )).to_equal(false)
         expect(router.client_pointer_captured).to_equal(false)
+
+describe "hosted compositor GUI-session content dispatch":
+    """As a hosted WM user I want pointer, wheel, key, and text input that
+    reaches a GUI-session window's client area to drive the widget session,
+    with the same focus gating, client-area translation, and pointer capture
+    the baremetal compositor provides."""
+    it "gates routing on GUI content kind and captures the pointer":
+        var compositor = HostCompositor.new_headless(Size.wh(320, 180))
+        compositor.apply_bridge_request(
+            1, 10, COMP_CREATE_WINDOW.to_i64(), 0,
+            "Gui", 10, 10, 108, 96, "", 99, "gui-demo"
+        )
+        val window_id = compositor.windows[0].id
+        expect_not(compositor.is_gui_content_window(window_id))
+        expect_not(compositor.dispatch_gui_pointer_event(
+            window_id, 20, 50, "left", "down"
+        ))
+        val tree = build_tree(column("root", [
+            with_height(button("run-action", "Run", "demo.run"), 20)
+        ]))
+        assert_true(compositor.attach_window_gui_tree(window_id, tree))
+        assert_true(compositor.is_gui_content_window(window_id))
+        assert_true(compositor.dispatch_gui_pointer_event(
+            window_id, 20, 50, "left", "down"
+        ))
+        expect(compositor.gui_pointer_capture_window_id).to_equal(window_id)
+        expect(compositor.take_gui_content_action(
+            window_id
+        )).to_equal("demo.run")
+        expect(compositor.take_gui_content_action(window_id)).to_equal("")
+        assert_true(compositor.dispatch_gui_pointer_event(
+            0, 300, 170, "left", "up"
+        ))
+        expect(compositor.gui_pointer_capture_window_id).to_equal(0)
+
+    it "delivers keys and committed text only to the focused GUI window":
+        var compositor = HostCompositor.new_headless(Size.wh(320, 180))
+        compositor.apply_bridge_request(
+            1, 10, COMP_CREATE_WINDOW.to_i64(), 0,
+            "Gui", 10, 10, 108, 96, "", 99, "gui-demo"
+        )
+        val window_id = compositor.windows[0].id
+        val tree = build_tree(column("root", [
+            with_height(text_field("name", "", "Name"), 20)
+        ]))
+        assert_true(compositor.attach_window_gui_tree(window_id, tree))
+        assert_true(compositor.dispatch_gui_pointer_event(
+            window_id, 20, 50, "left", "down"
+        ))
+        assert_true(compositor.dispatch_gui_pointer_event(
+            window_id, 20, 50, "left", "up"
+        ))
+        assert_true(compositor.dispatch_gui_text_event(window_id, "Hi"))
+        assert_true(compositor.dispatch_gui_key_event(
+            window_id, "a", false, false, false, false
+        ))
+        val stored = compositor.gui_content_tree(window_id)
+        assert_true(stored != nil)
+        if stored != nil:
+            expect(stored.find_widget("name").get_prop("value")).to_equal(
+                "Hia"
+            )
+        compositor.apply_bridge_request(
+            2, 10, COMP_CREATE_WINDOW.to_i64(), 0,
+            "Other", 160, 10, 108, 96, "", 100, "other"
+        )
+        val other_id = compositor.windows[1].id
+        compositor.focus_window(other_id)
+        expect_not(compositor.dispatch_gui_key_event(
+            window_id, "b", false, false, false, false
+        ))
+        expect_not(compositor.dispatch_gui_text_event(window_id, "x"))
+
+    it "scrolls inside the client area and releases GUI state on destroy":
+        var compositor = HostCompositor.new_headless(Size.wh(320, 180))
+        compositor.apply_bridge_request(
+            1, 10, COMP_CREATE_WINDOW.to_i64(), 0,
+            "Gui", 10, 10, 108, 96, "", 99, "gui-demo"
+        )
+        val window_id = compositor.windows[0].id
+        val tree = build_tree(column("root", [
+            with_height(text_field("name", "", "Name"), 20)
+        ]))
+        assert_true(compositor.attach_window_gui_tree(window_id, tree))
+        assert_true(compositor.dispatch_gui_scroll_event(
+            window_id, 20, 50, 0, 1000
+        ))
+        expect_not(compositor.dispatch_gui_scroll_event(
+            window_id, 2, 2, 0, 1000
+        ))
+        compositor.destroy_window(window_id)
+        expect(compositor.gui_content_window_ids.len()).to_equal(0)
+        expect_not(compositor.is_gui_content_window(window_id))

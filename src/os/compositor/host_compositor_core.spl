@@ -31,6 +31,8 @@ use common.ui.window_scene_draw_ir.{
     shared_wm_browser_toolbar_control_at
 }
 use common.ui.taskbar_model.{AppRef, WindowRef, TrayItem, TaskbarModel}
+use common.ui.widget.{UIEvent, UITree}
+use nogc_sync_mut.ui.session.{UISession}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.dirty_rect.{DirtyRegion}
@@ -42,7 +44,7 @@ use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, active_wm_theme_render_snapshot, active_wm_theme_id, WmChromeColors}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use common.color.convert.{int_to_hex}
-use os.compositor.wm_action_lifecycle.{HOST_CONTENT_OWNER_LOCAL_WEB, WM_WORK_AREA_TOP, WM_WORK_AREA_BOTTOM, WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, host_content_owner_default, host_content_owner_for_frame, host_content_owner_requires_browser_renderer, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_owner_allows_source, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
+use os.compositor.wm_action_lifecycle.{HOST_CONTENT_OWNER_GUI, HOST_CONTENT_OWNER_LOCAL_WEB, WM_WORK_AREA_TOP, WM_WORK_AREA_BOTTOM, WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, host_content_owner_default, host_content_owner_for_frame, host_content_owner_requires_browser_renderer, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_owner_allows_source, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 use os.services.wm.wm_action.{WmAction}
 use common.window_protocol.compositor_methods.{COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 use common.ui.native_scalar_text.{ui_native_i64_text}
@@ -604,6 +606,16 @@ class HostCompositor:
     external_web_window_ids: [i64]
     external_web_frames: [WmContentFrame]
     external_child_frames: [WmContentFrame]
+    # GUI-session content registry: hosted parity with the baremetal
+    # compositor's dispatch_gui_* lane (os.compositor.compositor). A window
+    # whose content is a widget session attaches its UITree here; input
+    # dispatch reconstructs a UISession per event and stores the mutated
+    # tree + focused widget back, mirroring compositor.spl semantics
+    # (focus gating, client-area translation, pointer capture).
+    gui_content_window_ids: [i64]
+    gui_content_trees: [UITree]
+    gui_content_focused_ids: [text]
+    gui_pointer_capture_window_id: i64
     # Scene background this compositor resolves at render time (color/image/
     # motion, see common.ui.window_scene.BackgroundSpec). Defaults to a plain
     # color matching the historical hardcoded compositor_bg fill so a
@@ -660,6 +672,10 @@ class HostCompositor:
             external_web_window_ids: [],
             external_web_frames: [],
             external_child_frames: [],
+            gui_content_window_ids: [],
+            gui_content_trees: [],
+            gui_content_focused_ids: [],
+            gui_pointer_capture_window_id: 0,
             background: shared_wm_background_color(wm_chrome_theme().compositor_bg),
             render_revision: 0,
             dirty: DirtyRegion.new(),
@@ -712,6 +728,7 @@ class HostCompositor:
         self.scroll_offsets.remove(window_id)
         self.content_caches.remove(window_id)
         self._cancel_window_interaction(window_id)
+        self._release_gui_content(window_id)
         var native_index = 0
         while native_index < self.native_cache_window_ids.len():
             if self.native_cache_window_ids[native_index] == window_id:
@@ -1092,6 +1109,224 @@ class HostCompositor:
                     ))
             i = i + 1
         hit
+
+    fn _gui_content_index(window_id: i64) -> i32:
+        var i = 0
+        while i < self.gui_content_window_ids.len():
+            if self.gui_content_window_ids[i] == window_id:
+                return i
+            i = i + 1
+        -1
+
+    fn is_gui_content_window(window_id: i64) -> bool:
+        val index = self._find_window_index(window_id)
+        index >= 0 and (
+            self.windows[index].content_owner == HOST_CONTENT_OWNER_GUI
+        )
+
+    me attach_window_gui_tree(window_id: i64, tree: UITree) -> bool:
+        val window_index = self._find_window_index(window_id)
+        if window_index < 0:
+            return false
+        val registry_index = self._gui_content_index(window_id)
+        if registry_index >= 0:
+            self.gui_content_trees[registry_index] = tree
+            self.gui_content_focused_ids[registry_index] = ""
+        else:
+            self.gui_content_window_ids.push(window_id)
+            self.gui_content_trees.push(tree)
+            self.gui_content_focused_ids.push("")
+        var window = self.windows[window_index]
+        window.content_owner = HOST_CONTENT_OWNER_GUI
+        self.windows[window_index] = window
+        self.dirty.add_rect(window.x, window.y, window.w, window.h)
+        true
+
+    fn gui_content_tree(window_id: i64) -> UITree?:
+        val registry_index = self._gui_content_index(window_id)
+        if registry_index < 0:
+            return nil
+        Some(self.gui_content_trees[registry_index])
+
+    me _release_gui_content(window_id: i64):
+        val drop_index = self._gui_content_index(window_id)
+        if drop_index >= 0:
+            self.gui_content_window_ids.remove(drop_index)
+            self.gui_content_trees.remove(drop_index)
+            self.gui_content_focused_ids.remove(drop_index)
+        if self.gui_pointer_capture_window_id == window_id:
+            self.gui_pointer_capture_window_id = 0
+
+    me dispatch_gui_pointer_event(
+        window_id: i64,
+        desktop_x: i32,
+        desktop_y: i32,
+        button: text,
+        kind: text
+    ) -> bool:
+        var route_window_id = window_id
+        val captured = (
+            self.gui_pointer_capture_window_id > 0 and kind != "down"
+        )
+        if captured:
+            route_window_id = self.gui_pointer_capture_window_id
+        val window_index = self._find_window_index(route_window_id)
+        if window_index < 0:
+            if kind == "up":
+                self.gui_pointer_capture_window_id = 0
+            return false
+        val window = self.windows[window_index]
+        if not self.is_gui_content_window(route_window_id) or window.minimized:
+            if kind == "up":
+                self.gui_pointer_capture_window_id = 0
+            return false
+        val extra = shared_wm_browser_content_extra_height(window.app_id)
+        val client_x = desktop_x - window.x - 4
+        val client_y = desktop_y - window.y - 32 - extra
+        val client_w = window.w - 8
+        val client_h = window.h - 36 - extra
+        val inside = (
+            client_x >= 0 and client_y >= 0 and
+            client_x < client_w and client_y < client_h
+        )
+        if not inside and not captured:
+            if kind == "up":
+                self.gui_pointer_capture_window_id = 0
+            return false
+        val registry_index = self._gui_content_index(route_window_id)
+        if registry_index < 0:
+            if kind == "up":
+                self.gui_pointer_capture_window_id = 0
+            return false
+        var session = UISession.new(self.gui_content_trees[registry_index])
+        val focused_id = self.gui_content_focused_ids[registry_index]
+        if focused_id != "":
+            session.dispatch(UIEvent.FocusEvent(focused_id, "focus"))
+        session.dispatch(UIEvent.Resize(client_w, client_h))
+        session.dispatch(UIEvent.MouseEvent(
+            client_x.to_f64(), client_y.to_f64(), button, kind
+        ))
+        self.gui_content_trees[registry_index] = session.current_tree()
+        self.gui_content_focused_ids[registry_index] = session.focused_widget()
+        if kind == "down":
+            self.gui_pointer_capture_window_id = route_window_id
+        elif kind == "up":
+            self.gui_pointer_capture_window_id = 0
+        self.dirty.add_rect(window.x, window.y, window.w, window.h)
+        true
+
+    me dispatch_gui_scroll_event(
+        window_id: i64,
+        desktop_x: i32,
+        desktop_y: i32,
+        delta_x_milli: i64,
+        delta_y_milli: i64
+    ) -> bool:
+        val window_index = self._find_window_index(window_id)
+        if window_index < 0:
+            return false
+        val window = self.windows[window_index]
+        if not self.is_gui_content_window(window_id) or window.minimized:
+            return false
+        val extra = shared_wm_browser_content_extra_height(window.app_id)
+        val client_x = desktop_x - window.x - 4
+        val client_y = desktop_y - window.y - 32 - extra
+        val client_w = window.w - 8
+        val client_h = window.h - 36 - extra
+        if (client_x < 0 or client_y < 0 or
+            client_x >= client_w or client_y >= client_h):
+            return false
+        val registry_index = self._gui_content_index(window_id)
+        if registry_index < 0:
+            return false
+        var session = UISession.new(self.gui_content_trees[registry_index])
+        val focused_id = self.gui_content_focused_ids[registry_index]
+        if focused_id != "":
+            session.dispatch(UIEvent.FocusEvent(focused_id, "focus"))
+        session.dispatch(UIEvent.Resize(client_w, client_h))
+        # Same milli-delta normalization as HostGuiEventRouter's wheel lane.
+        session.dispatch(UIEvent.ScrollEvent(
+            client_x.to_f64(), client_y.to_f64(),
+            (0 - delta_x_milli).to_f64() / 100.0,
+            (0 - delta_y_milli).to_f64() / 100.0
+        ))
+        self.gui_content_trees[registry_index] = session.current_tree()
+        self.gui_content_focused_ids[registry_index] = session.focused_widget()
+        self.dirty.add_rect(window.x, window.y, window.w, window.h)
+        true
+
+    me dispatch_gui_key_event(
+        window_id: i64,
+        key: text,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        super_key: bool
+    ) -> bool:
+        if key == "":
+            return false
+        val window_index = self._find_window_index(window_id)
+        if window_index < 0:
+            return false
+        val window = self.windows[window_index]
+        if (not self.is_gui_content_window(window_id) or
+            window.minimized or not window.focused):
+            return false
+        val registry_index = self._gui_content_index(window_id)
+        if registry_index < 0:
+            return false
+        var session = UISession.new(self.gui_content_trees[registry_index])
+        val focused_id = self.gui_content_focused_ids[registry_index]
+        if focused_id != "":
+            session.dispatch(UIEvent.FocusEvent(focused_id, "focus"))
+        if key == "tab":
+            session.dispatch(
+                if shift: UIEvent.FocusPrev else: UIEvent.FocusNext
+            )
+        else:
+            session.dispatch_key_with_modifiers(
+                key, ctrl, shift, alt, super_key
+            )
+        self.gui_content_trees[registry_index] = session.current_tree()
+        self.gui_content_focused_ids[registry_index] = session.focused_widget()
+        self.dirty.add_rect(window.x, window.y, window.w, window.h)
+        true
+
+    me dispatch_gui_text_event(window_id: i64, committed_text: text) -> bool:
+        if committed_text == "":
+            return false
+        val window_index = self._find_window_index(window_id)
+        if window_index < 0:
+            return false
+        val window = self.windows[window_index]
+        if (not self.is_gui_content_window(window_id) or
+            window.minimized or not window.focused):
+            return false
+        val registry_index = self._gui_content_index(window_id)
+        if registry_index < 0:
+            return false
+        var session = UISession.new(self.gui_content_trees[registry_index])
+        val focused_id = self.gui_content_focused_ids[registry_index]
+        if focused_id != "":
+            session.dispatch(UIEvent.FocusEvent(focused_id, "focus"))
+        session.dispatch(UIEvent.CompositionCommit(committed_text))
+        self.gui_content_trees[registry_index] = session.current_tree()
+        self.gui_content_focused_ids[registry_index] = session.focused_widget()
+        self.dirty.add_rect(window.x, window.y, window.w, window.h)
+        true
+
+    me take_gui_content_action(window_id: i64) -> text:
+        val registry_index = self._gui_content_index(window_id)
+        if registry_index < 0:
+            return ""
+        var session = UISession.new(self.gui_content_trees[registry_index])
+        val focused_id = self.gui_content_focused_ids[registry_index]
+        if focused_id != "":
+            session.dispatch(UIEvent.FocusEvent(focused_id, "focus"))
+        val action = session.take_pending_action()
+        self.gui_content_trees[registry_index] = session.current_tree()
+        self.gui_content_focused_ids[registry_index] = session.focused_widget()
+        action
 
     me update_window_content(window_id: i64, body_html: text) -> bool:
         var i = 0

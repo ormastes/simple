@@ -223,6 +223,21 @@ fn _request_host_fullscreen(surface: HostSurfaceState, win: i64, nonce: i64, now
         return fail_or_timeout_display_transition(requested.state, nonce, "native borderless fullscreen request failed", now_micros).state
     requested.state
 
+# winit keycode -> widget-session key name (same shape as
+# host_gui_event_router.host_glfw_key_name, but for the winit lane's
+# ASCII-style codes: 13=enter, 9=tab, 8=backspace, 27=escape).
+fn _host_winit_gui_key_name(keycode: i64) -> text:
+    if keycode >= 65 and keycode <= 90:
+        return ((keycode + 32).to_u8()).to_char()
+    if keycode >= 32 and keycode <= 126:
+        return keycode.to_u8().to_char()
+    match keycode:
+        13: "enter"
+        9: "tab"
+        8: "backspace"
+        27: "escape"
+        _: ""
+
 fn _seed_host_compositor_shared_mdi(comp: HostCompositor) -> HostCompositor:
     var out = comp
     var shared_index = 0
@@ -246,6 +261,7 @@ fn _seed_host_compositor_shared_mdi(comp: HostCompositor) -> HostCompositor:
     out
 
 fn main() -> i64:
+    print "MAIN-FIRST-LINE"
     val args = sys_get_args() ?? []
     if ((args.len() == 5 or args.len() == 6) and
         args[1] == BROWSER_RENDERER_WORKER_ARG):
@@ -1004,6 +1020,23 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 val mx = (rt_winit_event_mouse_x_milli(ev) / 1000).to_i32()
                 val my = (rt_winit_event_mouse_y_milli(ev) / 1000).to_i32()
                 comp.pointer_move(mx, my)
+                # GUI-session content lane: mirror the baremetal
+                # dispatch_gui_pointer_event move semantics (captured target
+                # wins; otherwise the client-area hit under the pointer).
+                if (comp.gui_pointer_capture_window_id > 0 or
+                    comp.gui_content_window_ids.len() > 0):
+                    var gui_move_window_id = comp.gui_pointer_capture_window_id
+                    if gui_move_window_id == 0:
+                        val gui_move_target = comp.content_target(mx, my)
+                        if gui_move_target != nil:
+                            gui_move_window_id = (
+                                gui_move_target.unwrap().window_id
+                            )
+                    if (gui_move_window_id > 0 and
+                        comp.is_gui_content_window(gui_move_window_id)):
+                        val _ = comp.dispatch_gui_pointer_event(
+                            gui_move_window_id, mx, my, "", "move"
+                        )
                 input_receipt = host_wm_input_record_pointer_move(input_receipt, mx, my)
                 mouse_move_events = mouse_move_events + 1
                 if mouse_move_events <= 3:
@@ -1265,7 +1298,28 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                             action_reason, input_received_us
                         )
                     else:
-                        if comp.requires_external_web_frame(target.window_id):
+                        if (comp.gui_pointer_capture_window_id > 0 or
+                            comp.is_gui_content_window(target.window_id)):
+                            # GUI-session content lane (baremetal
+                            # dispatch_gui_pointer_event parity): the
+                            # compositor translates to client-local
+                            # coordinates and owns pointer capture.
+                            val gui_handled = comp.dispatch_gui_pointer_event(
+                                target.window_id, comp.pointer_x,
+                                comp.pointer_y, "left",
+                                if pressed: "down" else: "up"
+                            )
+                            input_receipt = host_wm_input_record_semantic(
+                                input_receipt, semantic_event_id,
+                                target.window_id, "gui:session",
+                                if gui_handled: 1 else: 0,
+                                comp.render_revision,
+                                if gui_handled: "" else: (
+                                    "gui-dispatch-rejected"
+                                ),
+                                input_received_us
+                            )
+                        elif comp.requires_external_web_frame(target.window_id):
                             val dispatch = browser_renderers.dispatch_pointer(
                                 semantic_event_id, target.window_id,
                                 target.local_x, target.local_y, pressed
@@ -1298,6 +1352,14 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                     web_sessions.body_html(target.window_id)
                                 )
                 elif button == 0:
+                    if comp.gui_pointer_capture_window_id > 0:
+                        # Release outside every client area still reaches the
+                        # captured GUI session (window_id 0 routes via the
+                        # compositor's capture id, mirroring baremetal).
+                        val _ = comp.dispatch_gui_pointer_event(
+                            0, comp.pointer_x, comp.pointer_y, "left",
+                            if pressed: "down" else: "up"
+                        )
                     web_sessions.cancel_pointer_state()
                     semantic_event_id = semantic_event_id + 1
                     browser_pressed_control = ""
@@ -1338,6 +1400,23 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                             target.window_id, "browser:page",
                             callback_count, comp.render_revision,
                             reason, input_received_us
+                        )
+                    elif comp.is_gui_content_window(target.window_id):
+                        # GUI-session content lane: scroll goes to the widget
+                        # session, not the WM scroll-offset accumulator.
+                        browser_wheel = true
+                        semantic_event_id = semantic_event_id + 1
+                        val gui_handled = comp.dispatch_gui_scroll_event(
+                            target.window_id, comp.pointer_x, comp.pointer_y,
+                            wheel_x_milli, bounded_wheel_y_milli
+                        )
+                        input_receipt = host_wm_input_record_semantic(
+                            input_receipt, semantic_event_id,
+                            target.window_id, "gui:session",
+                            if gui_handled: 1 else: 0,
+                            comp.render_revision,
+                            if gui_handled: "" else: "gui-dispatch-rejected",
+                            input_received_us
                         )
                     elif comp.requires_external_web_frame(target.window_id):
                         browser_wheel = true
@@ -1441,7 +1520,34 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                     )
                 elif focused > 0:
                     semantic_event_id = semantic_event_id + 1
-                    if comp.requires_external_web_frame(focused):
+                    if comp.is_gui_content_window(focused):
+                        # GUI-session content lane: physical keys become named
+                        # widget keys (baremetal dispatch_gui_key_event
+                        # parity). Escape stays the WM quit key and F11 the
+                        # display toggle, matching the browser lane.
+                        var gui_callback: i64 = 0
+                        var gui_reason = "key-up"
+                        if (pressed_key and keycode != KEY_ESCAPE and
+                            keycode != KEY_F11):
+                            val gui_key = _host_winit_gui_key_name(keycode)
+                            if gui_key == "":
+                                gui_reason = "unmapped-keycode"
+                            elif comp.dispatch_gui_key_event(
+                                focused, gui_key, false, shift_key,
+                                false, false
+                            ):
+                                gui_callback = 1
+                                gui_reason = ""
+                                semantic_consumed = true
+                            else:
+                                gui_reason = "gui-dispatch-rejected"
+                        input_receipt = host_wm_input_record_semantic(
+                            input_receipt, semantic_event_id, focused,
+                            "gui:session", gui_callback,
+                            comp.render_revision, gui_reason,
+                            input_received_us
+                        )
+                    elif comp.requires_external_web_frame(focused):
                         val dispatch = browser_renderers.dispatch_key_with_shift(
                             semantic_event_id, focused, keycode, pressed_key,
                             shift_key
@@ -1588,7 +1694,23 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         )
                     elif focused > 0:
                         semantic_event_id = semantic_event_id + 1
-                        if comp.requires_external_web_frame(focused):
+                        if comp.is_gui_content_window(focused):
+                            # GUI-session content lane: committed text lands
+                            # as a composition commit on the focused widget.
+                            val gui_handled = comp.dispatch_gui_text_event(
+                                focused, committed_text
+                            )
+                            input_receipt = host_wm_input_record_semantic(
+                                input_receipt, semantic_event_id, focused,
+                                "gui:session",
+                                if gui_handled: 1 else: 0,
+                                comp.render_revision,
+                                if gui_handled: "" else: (
+                                    "gui-dispatch-rejected"
+                                ),
+                                input_received_us
+                            )
+                        elif comp.requires_external_web_frame(focused):
                             val dispatch = browser_renderers.dispatch_text(
                                 semantic_event_id, focused, committed_text
                             )
