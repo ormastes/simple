@@ -5,8 +5,16 @@
 # app/io/_CliCommands/handler_commands.spl::cli_handle_run, which would land
 # as our verb) — the "simple mem <verb>" dispatch arm in
 # app/cli/_CliMain/main_and_help.spl is source-only until the next binary
-# deploy, so this spec proves the app entry's own logic rather than the
-# dispatch arm (see doc/05_design/app/mem_cli/m8_simple_mem_cli_design.md).
+# deploy (see doc/05_design/app/mem_cli/m8_simple_mem_cli_design.md).
+#
+# That arm is NO LONGER unexercised: the second describe block below runs the
+# pure-Simple CLI's own entry module as a source program and asserts the
+# routing decision, so a broken `mem` arm now turns this suite red. Renaming
+# the arm's tag was verified to do exactly that. What is still NOT covered
+# here is delivery through the deployed `bin/simple` — that binary is the Rust
+# seed and answers `bin/simple mem help` with "error: file not found: mem".
+# Implementation and routing are proven; end-to-end reachability needs a
+# self-hosted redeploy.
 
 use std.spec.*
 use std.io_runtime.{env_get}
@@ -31,6 +39,47 @@ fn run_mem_timeout(mem_args: [text], timeout_ms: i64) -> (text, text, i32):
     for a in mem_args:
         args.push(a)
     rt_process_run_timeout(simple_binary(), args, timeout_ms)
+
+# The six verbs plan §M8 requires: `simple mem top|snapshot|diff|trace|gpu|gate`.
+# HARDCODED HERE ON PURPOSE. The lane's previous claim — "all help-listed verbs
+# dispatch" — could not fail, because print_help() lists exactly the verbs that
+# were implemented. Anchoring on the plan's list instead makes a missing verb a
+# RED spec rather than a shorter help screen.
+val PLAN_REQUIRED_VERBS = ["top", "snapshot", "diff", "trace", "gpu", "gate"]
+
+# Drives the REAL `simple mem` dispatch arm in
+# src/app/cli/_CliMain/main_and_help.spl, not src/app/mem/main.spl directly.
+#
+# The deployed bin/simple is the Rust seed and carries no `mem` subcommand
+# (`bin/simple mem help` -> "error: file not found: mem"), so end-to-end
+# delivery still needs a self-hosted redeploy. What IS reachable today is the
+# pure-Simple CLI's own entry module run as a source program. Two things are
+# needed for that:
+#   * SIMPLE_MODULE_LIMIT=0 — the CLI's transitive import graph exceeds the
+#     default 800-module cap, which otherwise aborts before dispatch.
+#   * env(1) rather than the parent environment — a persistent test daemon
+#     freezes its env at daemon start, so an inherited assignment would be
+#     stale; `env` sets it live for this invocation.
+# The routing decision is observable because cli_run_file names the file it
+# resolved to before failing on seed SFFI support.
+#
+# NOTE: this cannot use `simple_binary()`'s "/proc/self/exe" fallback. That
+# path is per-process: once `env` is the exec'd program, `/proc/self/exe`
+# resolves to env(1) itself, and the run dies with 127 before reaching any
+# dispatch. A real filesystem path is required, so resolve one explicitly.
+fn dispatch_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != nil and configured != "" and file_exists(configured):
+        return configured
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    "src/compiler_rust/target/debug/simple"
+
+fn run_cli_dispatch(cli_args: [text], timeout_ms: i64) -> (text, text, i32):
+    var args = ["SIMPLE_MODULE_LIMIT=0", dispatch_binary(), "run", "src/app/cli/_CliMain/main_and_help.spl"]
+    for a in cli_args:
+        args.push(a)
+    rt_process_run_timeout("env", args, timeout_ms)
 
 describe "simple mem CLI":
     it "top --profile prints an owner from the fixture snapshot":
@@ -82,3 +131,80 @@ describe "simple mem CLI":
         val (out, _err, code) = run_mem_timeout(["gate"], 120000)
         expect(code).to_equal(0)
         expect(out).to_contain("stage4-memory-gate")
+
+    it "offers every verb the M8 plan requires, not just the ones implemented":
+        # Non-circular by construction: PLAN_REQUIRED_VERBS is the plan's list,
+        # not print_help()'s. Deleting cmd_trace/cmd_gpu makes this RED.
+        val (out, _err, code) = run_mem(["help"])
+        expect(code).to_equal(0)
+        for verb in PLAN_REQUIRED_VERBS:
+            assert_true(out.index_of("simple mem " + verb) >= 0)
+
+    it "trace records an attributed profile that top can then query":
+        # This is plan §M8's own end-to-end exit criterion, finally executable:
+        # `simple mem trace prog.spl` then `simple mem top --profile <file>`
+        # shows the traced program's owners.
+        val trace_path = "build/mem_cli_spec_trace.tsv"
+        val (t_out, _t_err, t_code) = run_mem_timeout(
+            ["trace", "test/fixture/mem_infra/trace_workload.spl", "-o", trace_path], 180000)
+        expect(t_code).to_equal(0)
+        expect(t_out).to_contain("Trace written")
+        assert_true(file_exists(trace_path))
+        val content = file_read_text(trace_path)
+        assert_true(content.starts_with("simple-mem-snapshot\tv1"))
+        # Attribution was ON in the traced child, so the profile carries an
+        # OWNER row. Without SIMPLE_MEM_ATTR=1 there would be none.
+        assert_true(content.index_of("\nOWNER\t") >= 0)
+        val (top_out, _top_err, top_code) = run_mem_timeout(["top", "--profile", trace_path], 120000)
+        expect(top_code).to_equal(0)
+        expect(top_out).to_contain("Top owners by live bytes:")
+        # KIND rows from a live dump carry 4 fields, not 5. The parser used to
+        # require 5 and silently dropped every one of them.
+        expect(top_out).to_contain("Kinds by live bytes:")
+
+    it "trace fails loudly when the traced program emits no snapshot":
+        # A trace that records nothing must not exit 0 and look successful.
+        val (out, _err, code) = run_mem_timeout(
+            ["trace", "test/fixture/mem_infra/attr_enabled_probe.spl",
+             "-o", "build/mem_cli_spec_empty_trace.tsv"], 180000)
+        expect(code).to_equal(1)
+        expect(out).to_contain("no snapshot at")
+        expect(out).to_contain("mem_dump_to")
+
+    it "gpu reports device counters honestly on a host with no tracked device alloc":
+        val (out, _err, code) = run_mem_timeout(["gpu"], 120000)
+        expect(code).to_equal(0)
+        expect(out).to_contain("LIVE_BYTES")
+        expect(out).to_contain("PEAK_BYTES")
+
+    it "gpu --sanitize refuses an unverified backend deterministically":
+        # HIP has no verified sanitizer wrapper; the lane must say so rather
+        # than silently no-op. 127 is the wrapper's documented not-available code.
+        val (out, _err, code) = run_mem_timeout(
+            ["gpu", "--sanitize", "memcheck", "--backend", "hip", "--", "/bin/true"], 120000)
+        expect(code).to_equal(127)
+        expect(out).to_contain("no sanitizer wrapper for backend 'hip'")
+
+    it "gpu --profile reports no DEVICE rows for a host-only snapshot":
+        val (out, _err, code) = run_mem_timeout(["gpu", "--profile", SNAP_A], 120000)
+        expect(code).to_equal(0)
+        expect(out).to_contain("No DEVICE rows in this snapshot")
+
+describe "simple mem dispatch arm (real CLI routing)":
+
+    it "routes `mem` through the CLI dispatch arm to src/app/mem/main.spl":
+        # Drives src/app/cli/_CliMain/main_and_help.spl, the file that owns the
+        # `elif str_eq(first, "mem")` arm — NOT src/app/mem/main.spl directly.
+        # The previous 7/7 suite never touched this file, so it stayed green
+        # while the subcommand was unreachable. Renaming the arm's tag or its
+        # target file turns this RED.
+        val (out, err, _code) = run_cli_dispatch(["mem", "help"], 300000)
+        val combined = out + "\n" + err
+        assert_true(combined.index_of("src/app/mem/main.spl") >= 0)
+
+    it "does not route an unrelated subcommand to the mem entry":
+        # Negative control: proves the assertion above is about the `mem` arm
+        # specifically and not about some path echoed for every invocation.
+        val (out, err, _code) = run_cli_dispatch(["log", "help"], 300000)
+        val combined = out + "\n" + err
+        assert_true(combined.index_of("src/app/mem/main.spl") < 0)

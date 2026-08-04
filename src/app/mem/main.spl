@@ -4,6 +4,8 @@
 #   simple mem top --profile <file> [--n N]   Top-N owners/kinds by live bytes
 #   simple mem diff <a> <b>                    Diff two snapshot files
 #   simple mem snapshot -o <file>              Write an in-process snapshot
+#   simple mem trace <prog.spl> [-o <file>]    Record an attributed profile
+#   simple mem gpu [--profile <f>]             Device rows (M7)
 #   simple mem gate                            Run the stage4 memory gate
 #   simple mem sample <pid> <out_csv> [ms]     Delegate to the memstat sampler
 #   simple mem help                            Show usage
@@ -20,6 +22,7 @@
 
 use std.io_runtime.{get_args, file_read, file_exists, env_get, process_run}
 use std.nogc_sync_mut.mem.dump.{mem_dump_to}
+use std.nogc_sync_mut.gpu_profile.mem_profile.{device_live_bytes, device_peak_bytes, run_under_gpu_sanitizer}
 
 struct MemRow:
     tag: text
@@ -66,26 +69,35 @@ fn parse_dec(s: text) -> i64:
     -1
 
 # Positional args after the interpreter/script prelude. get_args() yields
-# [program, ..., script.spl, user args...]; take everything after the first
-# argument ending in ".spl", falling back to argv[1:] for compiled binaries.
+# [program, ..., script.spl, user args...].
+#
+# A `.spl` argument only counts as OUR entry script when it sits where an
+# entry script can sit: at argv[0]/argv[1], or immediately after a `run`
+# token. The previous rule — "the first argument ending in .spl" — broke the
+# moment a USER argument was itself a .spl path, which is exactly
+# `simple mem trace prog.spl`: `prog.spl` was taken for the entry, every real
+# argument was discarded, and the CLI printed help and exited 1 while looking
+# like an ordinary usage error. Verified across all four argv shapes this
+# entry is invoked with (bare script, `run script`, compiled binary, and the
+# `simple run` child form).
 fn cli_positional_args() -> [text]:
     val all = get_args()
-    var rest: [text] = []
-    var seen_script = false
-    var i = 1
+    var script_idx = -1
+    var i = 0
     while i < all.len():
         val a = all[i]
-        if seen_script:
-            rest = rest.push(a)
-        elif a.ends_with(".spl"):
-            seen_script = true
+        if a.ends_with(".spl") and script_idx < 0:
+            if i <= 1 or str_eq(all[i - 1], "run"):
+                script_idx = i
         i = i + 1
-    if not seen_script:
-        rest = []
-        i = 1
-        while i < all.len():
-            rest = rest.push(all[i])
-            i = i + 1
+    var rest: [text] = []
+    var start = 1
+    if script_idx >= 0:
+        start = script_idx + 1
+    i = start
+    while i < all.len():
+        rest = rest.push(all[i])
+        i = i + 1
     rest
 
 fn print_help():
@@ -95,6 +107,8 @@ fn print_help():
     print "  simple mem top --profile <file> [--n N]   Top-N owners/kinds by live bytes"
     print "  simple mem diff <a> <b>                    Diff two snapshot files"
     print "  simple mem snapshot -o <file>              Write an in-process snapshot"
+    print "  simple mem trace <prog.spl> [-o <file>]    Record an attributed profile"
+    print "  simple mem gpu [--profile <f>|--sanitize <tool> -- cmd]  Device rows (M7)"
     print "  simple mem gate                            Run the stage4 memory gate"
     print "  simple mem sample <pid> <out_csv> [ms]     Delegate to the memstat sampler"
     print "  simple mem help                            Show this help"
@@ -126,6 +140,22 @@ fn parse_snapshot(path: text) -> [MemRow]:
             continue
         val tag = parts[0]
         if str_eq(tag, "OWNER") or str_eq(tag, "KIND"):
+            # OWNER rows carry 5 fields (tag/name/live/peak/allocs). KIND rows
+            # written by mem/dump.spl carry only 4 (tag/kind/live_bytes/
+            # live_count) — the v1 writer and this reader disagreed, so a
+            # `trace`d snapshot's KIND rows were silently dropped by `top`.
+            # Accept 4-field KIND rows: peak is unknown (reported as live),
+            # allocs is the live object count.
+            if parts.len() == 4 and str_eq(tag, "KIND"):
+                val kind_live = parse_dec(parts[2])
+                rows = rows.push(MemRow(
+                    tag: tag,
+                    name: parts[1],
+                    live: kind_live,
+                    peak: kind_live,
+                    allocs: parse_dec(parts[3])
+                ))
+                continue
             if parts.len() < 5:
                 continue
             rows = rows.push(MemRow(
@@ -388,6 +418,167 @@ fn cmd_sample(args: [text]) -> i64:
         print err
     code
 
+# `simple mem trace <prog.spl> [-o <file>] [-- prog args...]`
+#
+# Records an attributed memory profile for another program. The CLI cannot
+# read a foreign process's heap, so `trace` owns the two things it CAN own —
+# the attribution gate and the destination — and the traced program emits the
+# snapshot at its point of interest (call
+# `std.nogc_sync_mut.mem.dump.mem_dump_to(mem_dump_target_path())`, or install
+# the SIGUSR2 hook). Env is exported through `env(1)` rather than the parent's
+# environment so the assignment is live for THIS invocation: a persistent test
+# daemon freezes its own env at daemon start and would otherwise hand the
+# child a stale value.
+#
+# Exits 1 (with an instrumentation hint) when the program produced no
+# snapshot — a trace that silently records nothing is the failure mode this
+# verb exists to make loud.
+fn cmd_trace(args: [text]) -> i64:
+    if args.len() < 1:
+        print "simple mem trace: requires <prog.spl> [-o <file>]"
+        print_help()
+        return 1
+    var program = ""
+    var out_path = ""
+    var prog_args: [text] = []
+    var forwarding = false
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if forwarding:
+            prog_args = prog_args.push(a)
+            i = i + 1
+        elif str_eq(a, "--"):
+            forwarding = true
+            i = i + 1
+        elif str_eq(a, "-o") and i + 1 < args.len():
+            out_path = args[i + 1]
+            i = i + 2
+        elif a.starts_with("-o="):
+            out_path = a.substring(3)
+            i = i + 1
+        elif str_eq(a, "--output") and i + 1 < args.len():
+            out_path = args[i + 1]
+            i = i + 2
+        elif program == "" and not a.starts_with("-"):
+            program = a
+            i = i + 1
+        else:
+            i = i + 1
+    if program == "":
+        print "simple mem trace: requires <prog.spl>"
+        return 1
+    if not file_exists(program):
+        print "simple mem trace: program not found: {program}"
+        return 1
+    if out_path == "":
+        out_path = "build/mem_trace.tsv"
+    var child: [text] = [
+        "SIMPLE_MEM_ATTR=1",
+        "SIMPLE_MEM_DUMP_PATH={out_path}",
+        resolve_simple_binary(),
+        "run",
+        program
+    ]
+    for a in prog_args:
+        child = child.push(a)
+    val (out, err, code) = process_run("env", child)
+    if out.len() > 0:
+        print out
+    if err.len() > 0:
+        print err
+    if not file_exists(out_path):
+        print "simple mem trace: no snapshot at {out_path}"
+        print "  The traced program must emit the snapshot itself. Add:"
+        print "    use std.nogc_sync_mut.mem.dump.{mem_dump_to, mem_dump_target_path}"
+        print "    mem_dump_to(mem_dump_target_path())"
+        print "  (or install_mem_dump_on_usr2() and signal the process)."
+        return 1
+    print "Trace written: {out_path}"
+    print "Query it with: simple mem top --profile {out_path}"
+    code
+
+# `simple mem gpu [--profile <file>] [--sanitize <tool> --backend <b> -- cmd...]`
+#
+# Device rows from the M7 lane. Two modes:
+#   * counters  — this process's device live/peak bytes via the gpu.rs
+#                 note_device_alloc/note_device_free choke points. These are
+#                 zero unless SIMPLE_MEM_ATTR=1 AND a real device allocation
+#                 happened, so on a GPU-less host they honestly read 0 rather
+#                 than pretending.
+#   * --sanitize — exec the given command under compute-sanitizer (CUDA) via
+#                 run_under_gpu_sanitizer. Returns the wrapper's 127 "not
+#                 found" path verbatim on a host without the sanitizer.
+#
+# NOT implemented, and deliberately not faked: per-pool stats
+# (cudaMallocAsync / cuMemPoolGetAttribute) and NVML device truth. Both need
+# GPU hardware to write against; see plan §M7.
+fn cmd_gpu(args: [text]) -> i64:
+    var profile = ""
+    var tool = ""
+    var backend = "cuda"
+    var cmd: [text] = []
+    var forwarding = false
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if forwarding:
+            cmd = cmd.push(a)
+            i = i + 1
+        elif str_eq(a, "--"):
+            forwarding = true
+            i = i + 1
+        elif str_eq(a, "--profile") and i + 1 < args.len():
+            profile = args[i + 1]
+            i = i + 2
+        elif a.starts_with("--profile="):
+            profile = a.substring(10)
+            i = i + 1
+        elif str_eq(a, "--sanitize") and i + 1 < args.len():
+            tool = args[i + 1]
+            i = i + 2
+        elif a.starts_with("--sanitize="):
+            tool = a.substring(11)
+            i = i + 1
+        elif str_eq(a, "--backend") and i + 1 < args.len():
+            backend = args[i + 1]
+            i = i + 2
+        else:
+            i = i + 1
+    if tool != "":
+        if cmd.len() == 0:
+            print "simple mem gpu --sanitize <tool>: requires -- <cmd...>"
+            return 1
+        val (out, err, code) = run_under_gpu_sanitizer(backend, tool, cmd)
+        if out.len() > 0:
+            print out
+        if err.len() > 0:
+            print err
+        return code
+    if profile != "":
+        if not file_exists(profile):
+            print "simple mem gpu: profile not found: {profile}"
+            return 1
+        val rows = sort_rows_desc(filter_tag(parse_snapshot(profile), "DEVICE"))
+        print "Snapshot: {profile}"
+        print ""
+        if rows.len() == 0:
+            print "No DEVICE rows in this snapshot (device attribution off, or no GPU)."
+            return 0
+        print_rows_table("Device memory by owner:", rows, 20)
+        return 0
+    val live = device_live_bytes()
+    val peak = device_peak_bytes()
+    print "Device memory (this process, M7 choke points):"
+    print pad_right("LIVE_BYTES", 16) + pad_left("{live}", 16)
+    print pad_right("PEAK_BYTES", 16) + pad_left("{peak}", 16)
+    if live == 0 and peak == 0:
+        print ""
+        print "Both zero: no tracked device allocation in this process."
+        print "Device counters require SIMPLE_MEM_ATTR=1 and a CUDA allocation."
+        print "For a traced program use: simple mem gpu --profile <trace file>"
+    0
+
 fn main() -> i64:
     val args = cli_positional_args()
     if args.len() == 0:
@@ -401,6 +592,10 @@ fn main() -> i64:
         return cmd_diff(rest)
     elif str_eq(verb, "snapshot"):
         return cmd_snapshot(rest)
+    elif str_eq(verb, "trace"):
+        return cmd_trace(rest)
+    elif str_eq(verb, "gpu"):
+        return cmd_gpu(rest)
     elif str_eq(verb, "gate"):
         return cmd_gate()
     elif str_eq(verb, "sample"):
