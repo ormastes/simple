@@ -240,6 +240,83 @@ fn enforce_assert_ran(
     result
 }
 
+/// Fail a spec file that executed FEWER examples than it unconditionally declares.
+///
+/// A statement that aborts inside a `describe` body at registration time silently
+/// truncates that group and erases every later top-level `describe`. On the
+/// `simple test` path the file then reports only the examples that survived, all
+/// green, and lands in `Results: N total, M passed, K failed` as a pass. Measured
+/// on a five-example fixture whose second `describe` body opens with a bare
+/// `return`: 3 of 5 executed, all green, exit 0.
+///
+/// `declared` comes from `unconditional_example_floor` — a strict lower bound
+/// that counts only examples reachable through module-level statements and
+/// `describe`/`context` bodies. Conditional generation (`if cfg:`, `for`),
+/// runtime expansion (`it_behaves_like`), and skip/pending forms all contribute
+/// zero, so `executed < floor` cannot be produced by any legitimate spec shape.
+/// See `doc/08_tracking/bug/silently_dropped_spec_examples_2026-08-04.md`.
+///
+/// The file is turned into a FAILED file rather than getting a new output line,
+/// so the `Results: N total, M passed, K failed` contract is unchanged: a spec
+/// that dropped examples simply counts as failed, which is what it is.
+fn enforce_no_dropped_examples(mut result: TestFileResult) -> TestFileResult {
+    // Never overwrite an existing failure or error: a real diagnosis outranks
+    // this one, and a file that already failed needs no extra reason.
+    if result.failed > 0 || result.error.is_some() {
+        return result;
+    }
+    let executed = result.individual_results.len();
+    // No examples recorded at all: that is the `--assert-ran` guard's job, and
+    // the many non-BDD execution modes reaching this function legitimately record
+    // nothing. Only a partially-executed file is diagnosable here.
+    if executed == 0 {
+        return result;
+    }
+    let declared = match declared_example_floor(&result.path) {
+        Some(n) => n,
+        // A measurement we could not take is never turned into a drop report.
+        None => return result,
+    };
+    if executed >= declared {
+        return result;
+    }
+
+    let dropped = declared - executed;
+    result.passed = 0;
+    result.failed = 1;
+    result.error = Some(format!(
+        "DROPPED: {} of {} unconditionally-declared example(s) never executed \
+         ({} ran). A describe/it block was skipped — typically a module-load or \
+         registration failure inside a describe body. The examples that did run \
+         are NOT a verdict for this file.",
+        dropped, declared, executed
+    ));
+    result
+}
+
+/// Unconditional example floor for `path`, or `None` if it cannot be measured.
+///
+/// Gated on a cheap substring probe so non-spec files are never re-parsed.
+fn declared_example_floor(path: &Path) -> Option<usize> {
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !matches!(extension, "spl" | "simple" | "sscript" | "") {
+        return None;
+    }
+    let source = std::fs::read_to_string(path).ok()?;
+    if !source.contains("describe")
+        && !source.contains("context")
+        && !source.contains("feature")
+        && !source.contains("scenario")
+        && !source.contains("it ")
+        && !source.contains("it(")
+    {
+        return Some(0);
+    }
+    let mut parser = simple_parser::Parser::new(&source);
+    let ast = parser.parse().ok()?;
+    Some(simple_parser::test_analyzer::unconditional_example_floor(&ast.items))
+}
+
 /// Derive (passed, failed, skipped) counts for in-process compile-mode runs
 /// (SMF, native-in-process). Prefers the authoritative BDD snapshot
 /// (`rt_bdd_snapshot_results`) when present, since `rt_bdd_describe_end` writes
@@ -640,7 +717,9 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
                 error: None,
                 individual_results,
             };
-            enforce_assert_ran(result, options, 0)
+            // Drop check first: a file that silently lost examples must not be
+            // able to satisfy the assert-ran guard with the survivors.
+            enforce_assert_ran(enforce_no_dropped_examples(result), options, 0)
         }
         Err(e) => {
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -2107,6 +2186,141 @@ mod tests {
         let output = "\x1b[32m✓ All tests passed!\x1b[0m";
         let results = parse_individual_results(output);
         assert!(results.is_empty());
+    }
+
+    /// The measured drop shape: five unconditionally-declared examples, a bare
+    /// `return` opening the second `describe` body.
+    const DROPPING_SPEC_SOURCE: &str = "describe \"alpha\":\n    it \"a1\":\n        expect(1).to_equal(1)\n    it \"a2\":\n        expect(2).to_equal(2)\n\ndescribe \"beta\":\n    return\n    it \"b1\":\n        expect(3).to_equal(3)\n    it \"b2\":\n        expect(4).to_equal(4)\n\ndescribe \"gamma\":\n    it \"g1\":\n        expect(5).to_equal(5)\n";
+
+    fn drop_fixture(tag: &str, source: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "simple_testdrop_{}_{}.spl",
+            tag,
+            std::process::id()
+        ));
+        std::fs::write(&path, source).expect("write fixture");
+        path
+    }
+
+    fn executed_results(n: usize, skipped: bool) -> Vec<IndividualTestResult> {
+        (0..n)
+            .map(|i| IndividualTestResult {
+                name: format!("e{}", i),
+                group: "g".to_string(),
+                passed: true,
+                skipped,
+            })
+            .collect()
+    }
+
+    fn green_result(path: PathBuf, individual_results: Vec<IndividualTestResult>) -> TestFileResult {
+        let passed = individual_results.len();
+        TestFileResult {
+            path,
+            passed,
+            failed: 0,
+            skipped: 0,
+            ignored: 0,
+            duration_ms: 0,
+            error: None,
+            individual_results,
+        }
+    }
+
+    /// The case that previously landed in `Results:` as a pass.
+    #[test]
+    fn dropped_examples_fail_the_file_on_the_test_path() {
+        let path = drop_fixture("dropped", DROPPING_SPEC_SOURCE);
+        let result = enforce_no_dropped_examples(green_result(path.clone(), executed_results(3, false)));
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.passed, 0);
+        let msg = result.error.as_deref().unwrap_or("");
+        assert!(msg.contains("DROPPED: 2 of 5"), "unexpected message: {msg}");
+    }
+
+    /// The inverse: a complete run of the same file stays green.
+    #[test]
+    fn a_complete_run_stays_green_on_the_test_path() {
+        let path = drop_fixture("complete", DROPPING_SPEC_SOURCE);
+        let result = enforce_no_dropped_examples(green_result(path.clone(), executed_results(5, false)));
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.passed, 5);
+        assert!(result.error.is_none());
+    }
+
+    /// Skipped examples are recorded, so they are executed, not dropped.
+    #[test]
+    fn skipped_examples_are_not_dropped_on_the_test_path() {
+        let path = drop_fixture("skipped", DROPPING_SPEC_SOURCE);
+        let result = enforce_no_dropped_examples(green_result(path.clone(), executed_results(5, true)));
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(result.failed, 0);
+        assert!(result.error.is_none());
+    }
+
+    /// Runtime-expanded examples can legitimately exceed the floor.
+    #[test]
+    fn executing_more_than_the_floor_stays_green_on_the_test_path() {
+        let path = drop_fixture("expanded", DROPPING_SPEC_SOURCE);
+        let result = enforce_no_dropped_examples(green_result(path.clone(), executed_results(12, false)));
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(result.failed, 0);
+        assert!(result.error.is_none());
+    }
+
+    /// Recording zero examples is the `--assert-ran` guard's job, not this one:
+    /// many non-BDD execution modes legitimately record nothing.
+    #[test]
+    fn zero_recorded_examples_is_left_to_the_assert_ran_guard() {
+        let path = drop_fixture("empty", DROPPING_SPEC_SOURCE);
+        let result = enforce_no_dropped_examples(green_result(path.clone(), vec![]));
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(result.failed, 0);
+        assert!(result.error.is_none());
+    }
+
+    /// An existing failure keeps its own diagnosis.
+    #[test]
+    fn an_existing_failure_is_not_relabelled_as_a_drop() {
+        let path = drop_fixture("prefail", DROPPING_SPEC_SOURCE);
+        let mut result = green_result(path.clone(), executed_results(3, false));
+        result.failed = 1;
+        result.error = Some("original diagnosis".to_string());
+
+        let result = enforce_no_dropped_examples(result);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(result.error.as_deref(), Some("original diagnosis"));
+    }
+
+    /// A non-spec file has a floor of zero and is never touched.
+    #[test]
+    fn a_non_spec_file_is_never_reported_as_dropping() {
+        let path = drop_fixture("plain", "fn main() -> i64:\n    return 0\n");
+        let result = enforce_no_dropped_examples(green_result(path.clone(), executed_results(1, false)));
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(result.failed, 0);
+        assert!(result.error.is_none());
+    }
+
+    /// A file we cannot read yields no measurement, and no invented drop.
+    #[test]
+    fn an_unmeasurable_file_never_invents_a_drop_on_the_test_path() {
+        let missing = std::env::temp_dir().join("simple_testdrop_definitely_absent.spl");
+        let _ = std::fs::remove_file(&missing);
+
+        assert_eq!(declared_example_floor(&missing), None);
+        let result = enforce_no_dropped_examples(green_result(missing, executed_results(1, false)));
+        assert_eq!(result.failed, 0);
+        assert!(result.error.is_none());
     }
 
     #[test]

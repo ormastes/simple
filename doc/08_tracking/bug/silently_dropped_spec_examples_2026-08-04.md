@@ -1,7 +1,7 @@
 # Silently dropped spec examples report green, and `tail -1` misreports the file
 
 **Date:** 2026-08-04
-**Status:** FIXED (both halves) — blast-radius census in progress
+**Status:** FIXED on both the `simple run` and `simple test` paths
 **Severity:** Critical — this is a false-green mechanism, not a cosmetic one
 
 ## Summary
@@ -144,6 +144,51 @@ SPEC FILE VERDICT: fix/ts_full_spec.spl declared>=9 executed=9 passed=9 failed=0
 Sabotage B is the `trait_scanner` shape exactly, and it is now impossible to
 miss: the count is on stdout's last line and the reason is on stderr.
 
+### `driver/src/cli/test_runner/execution.rs` — `enforce_no_dropped_examples`
+
+The same floor applied to the `simple test` path, which is the one the repo's
+tooling actually consumes. A file that executed fewer examples than it declares
+becomes a **failed file** carrying the `DROPPED:` reason, rather than getting a
+new output line — so `Results: N total, M passed, K failed` is unchanged in shape
+and a dropping spec simply counts as failed, which is what it is. It runs before
+`enforce_assert_ran` so a truncated file cannot satisfy the assert-ran guard with
+its survivors.
+
+Verified end to end:
+
+```
+$ simple test fix/d_ret.spl        -> exit 1
+Results: 8 total, 3 passed, 5 failed
+DROPPED: 2 of 5 unconditionally-declared example(s) ... never executed.
+
+$ simple test fix/ok_spec.spl      -> exit 0   Results: 5 total, 5 passed, 0 failed
+$ simple test fix/ts_full_spec.spl -> exit 0   Results: 9 total, 9 passed, 0 failed
+$ simple test fix/sabB_spec.spl    -> exit 1   DROPPED: 3 of 9 ...
+```
+
+## Blast radius
+
+**921 spec files** under `test/01_unit` were run individually with the fixed
+binary and produced a verdict line. **Zero** were dropping examples.
+
+Honest scope, because the raw number invites a fabrication: the census walk
+attempted 5,776 files, but **4,781 of those returned exit 127 — the binary was
+deleted out from under the run by a parallel session's `cargo` invocation**, and
+those files were never measured. Only 993 files actually ran (921 verdicts, 34
+hard errors, 38 timeouts at 45s). Reporting "5,776 files scanned, 0 drops" would
+have been exactly the kind of false green this document exists to close.
+
+So: the drop mechanism is **rare in the committed corpus** — it is not silently
+eating examples across the board today. Its danger is that it is *undetectable*
+when it does happen, and the repo has a documented history of specs shrinking
+without anyone noticing. The guard is cheap insurance, not a mass cleanup.
+
+A separate and much larger finding surfaced while measuring: the committed
+`trait_scanner_spec.spl` is a **stub** — nine real examples commented out,
+replaced by one vacuous `it "skipped"` that asserts a pending-reason string is
+non-empty. That pattern is invisible to the drop guard by construction (a stub
+declares one example and runs one example) and needs its own census.
+
 ## What was deliberately NOT made to fail
 
 A runner that cries wolf gets worked around, leaving us worse off than before.
@@ -181,3 +226,6 @@ None of the following are reported as drops:
   five-example fixture: floor = 5, drop → exit 1, complete run → 0, all-skipped →
   0, over-execution → 0, non-spec status preserved, real error outranks a drop,
   unmeasurable file invents nothing.
+* `driver/src/cli/test_runner/execution.rs` — 8 tests mirroring those on the
+  `simple test` path, plus: zero recorded examples is left to `--assert-ran`, and
+  an existing failure is not relabelled as a drop.
