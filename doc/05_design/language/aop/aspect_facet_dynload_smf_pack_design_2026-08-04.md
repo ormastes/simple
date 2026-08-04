@@ -2390,20 +2390,25 @@ and explicit/generated panic paths. Lazy pack loading is now connected through
 an injected application-owned exact-route I/O port: `try_facet` retains the
 no-I/O published-binding probe, while `facet` and `require_facet` resolve a
 catalogued `lazy_facet` route and return canonical `std.aop.FacetAcquireError`.
-`AspectPackIoPort` is the canonical injection contract, but no production
-embedding/composition adapter owns it yet: default construction remains
-fail-closed. The embedding application still must bind deployed-image and
-detached-signature storage policy; no guessed sidecar convention is permitted.
+`AspectPackIoPort` is the canonical injection contract.
+`aspect_pack_io_port_for_embedding` validates the embedding owner and
+`AspectExecutionContext.create_with_loader_and_pack_io` is the canonical
+composition point; default construction remains fail-closed. The repository
+does not supply a universal deployed-image adapter: each embedding still binds
+its deployed-image and detached-signature storage policy through the exact-route
+callback, and no guessed sidecar convention is permitted.
 Generated MIR carries leases only as the compiler-private opaque
 `__simple_facet_descriptor_lease_abi` type. The startup implementation still
 exports `PublishedFacetDescriptorLease` from its owner leaf, although the
 top-level startup facade no longer re-exports it. Simple supports private and
-`pub(peer)` visibility, so the owner should narrow that class without changing
-the compiler ABI. Lazy-acquire callers now use a Mutex/channel single-flight:
+`pub(peer)` visibility, but narrowing only the class is unsafe while public
+runtime functions expose it in their signatures. Removing the leaf export
+requires a separate opaque-handle runtime facade migration and no compiler ABI
+change. Lazy-acquire callers now use a Mutex/channel single-flight:
 one owner performs I/O/activation and same-route followers receive the shared
 typed completion. Broader lifecycle concurrency across low-level `try_facet`,
 unload, advice, and other state owners remains unproven, as do portable
-callee/foreign unwind, production I/O composition, runtime-source lease export
-tightening, and executable evidence. `throw`, `await`, `yield`,
+callee/foreign unwind, deployment-specific I/O binding, opaque runtime lease
+facade migration, and executable evidence. `throw`, `await`, `yield`,
 and identifiable unspecified-unwind extern calls now fail closed with E-AF007
 while a lease may be live.

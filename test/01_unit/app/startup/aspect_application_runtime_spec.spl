@@ -36,7 +36,8 @@ use app.startup.aspect_application_runtime.{
 }
 use app.startup.aspect_facet_runtime_contract.{PublishedFacetDescriptorLease}
 use app.startup.aspect_pack_io_port.{
-    AspectPackIoRequest, AspectPackIoPayload, AspectPackIoPort
+    AspectPackIoRequest, AspectPackIoPayload, AspectPackIoPort,
+    aspect_pack_io_port_for_embedding
 }
 use os.smf.dynsmf_session.{DynSmfSession, DynSmfPolicy, dynsmf_session_new}
 use os.smf.smf_generation.{LifecycleManager}
@@ -225,9 +226,11 @@ fn app_execution_context_exact_route_load(
         pack_bytes: app_execution_context_pack(), signature: []))
 
 fn app_execution_context_pack_io() -> AspectPackIoPort:
-    AspectPackIoPort(
-        name: "fixture-exact-route-io",
-        load_exact_route_fn: app_execution_context_exact_route_load)
+    val port = aspect_pack_io_port_for_embedding(
+        "fixture-exact-route-io", app_execution_context_exact_route_load)
+    if port.is_err():
+        fail(port.unwrap_err())
+    port.unwrap()
 
 fn app_aspect_key() -> AspectPackProviderKey:
     val digest = sha256_u8_hex(app_aspect_smf())
@@ -300,6 +303,19 @@ fn app_aspect_phase_is_operational(phase: AspectApplicationPhase) -> bool:
         case AspectApplicationPhase.Startup: false
 
 describe "Application aspect runtime policy owner":
+    it "requires an identified embedding owner for exact-route pack I/O":
+        val missing = aspect_pack_io_port_for_embedding(
+            "", app_execution_context_exact_route_load)
+        if missing.is_ok():
+            fail("anonymous embedding pack I/O owner must be rejected")
+        expect(missing.unwrap_err()).to_contain("owner identity is empty")
+
+        val bound = aspect_pack_io_port_for_embedding(
+            "deployed-image-owner", app_execution_context_exact_route_load)
+        if bound.is_err():
+            fail(bound.unwrap_err())
+        expect(bound.unwrap().name).to_equal("deployed-image-owner")
+
     it "rejects non-startup dynamic routes in the mission profile":
         val runtime = app_aspect_mission_runtime("lazy_facet")
         expect(runtime.unwrap_err()).to_contain("only static, startup, or excluded")

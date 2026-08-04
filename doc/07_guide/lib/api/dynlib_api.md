@@ -135,11 +135,14 @@ use these three language forms. The embedding entrypoint supplies the context
 value. Runtime descriptor leases are not a source API; generated MIR carries
 them through a compiler-private opaque ABI type.
 
-`AspectPackIoPort` is currently an injection seam, not a completed production
-composition. Its unavailable default fails closed. An embedding application
-must provide the exact catalog-selected pack bytes and detached signature from
-its own deployment/storage policy; this API defines no `.sig` convention,
-fallback directory, or search root.
+`AspectPackIoPort` is the injection seam.
+`aspect_pack_io_port_for_embedding(owner_id, load_exact_route_fn)` and
+`AspectExecutionContext.create_with_loader_and_pack_io(...)` form the canonical
+embedding composition. The unavailable default fails closed. The callback must
+provide the exact catalog-selected pack bytes and detached signature from the
+embedding's deployment/storage policy; this API defines no `.sig` convention,
+fallback directory, or search root. The repository intentionally supplies no
+universal deployment adapter.
 
 Activation staging composes the existing dynSMF policy/evidence and SMF
 generation contracts. A catalog, digest, ABI, dependency, relocation, or
