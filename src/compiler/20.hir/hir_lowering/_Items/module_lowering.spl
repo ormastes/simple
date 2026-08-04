@@ -6,6 +6,7 @@ use compiler.hir.hir_lowering.items.*
 
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.hir_unwind_effects.{hir_function_effects_from_attributes}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
@@ -26,6 +27,23 @@ extern fn rt_enum_payload(value: StmtKind) -> Expr
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
 use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
+
+fn declared_callable_effects(lowering: HirLowering, attributes: [Attribute], is_async: bool, span: Span) -> [Effect]:
+    val effects = hir_function_effects_from_attributes(attributes, is_async, span)
+    if effects.is_err():
+        lowering.error(effects.unwrap_err(), span)
+        var fallback: [Effect] = []
+        if is_async:
+            fallback = fallback.push(Effect(kind: EffectKind.Async, span: span))
+        return fallback.push(Effect(kind: EffectKind.NoUnwind, span: span))
+    effects.unwrap()
+
+fn declared_surface_callable_effects(lowering: HirLowering, callable: ModuleSurfaceCallable) -> [Effect]:
+    var attributes: [Attribute] = []
+    if callable.unwind_attribute != "":
+        attributes = attributes.push(Attribute(
+            name: callable.unwind_attribute, args: [], span: callable.span))
+    declared_callable_effects(lowering, attributes, callable.is_async, callable.span)
 use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, TYPE_DICT, custom_primitive_bind_symbol, custom_primitive_is_name}
 use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
@@ -498,7 +516,8 @@ impl HirLowering:
         else:
             self.infer_untyped_return_type(fn_decl)
         val callable_type = HirType(
-            kind: HirTypeKind.Function(param_types, return_type, []),
+            kind: HirTypeKind.Function(param_types, return_type,
+                declared_callable_effects(self, fn_decl.attributes, fn_decl.is_async, fn_decl.span)),
             span: fn_decl.span
         )
         Some(callable_type)
@@ -525,7 +544,8 @@ impl HirLowering:
                 return nil
             param_types = param_types.push(self.lower_type(callable.params[param_idx].type_))
             param_idx = param_idx + 1
-        HirType(kind: HirTypeKind.Function(param_types, self.lower_type(callable.return_type), []), span: callable.span)
+        HirType(kind: HirTypeKind.Function(param_types, self.lower_type(callable.return_type),
+            declared_surface_callable_effects(self, callable)), span: callable.span)
 
     me imported_surface_type(type_: Type, imported_mod: ModuleSurface) -> HirType:
         val source_name = parser_type_kind_named_name(type_.kind)
@@ -583,7 +603,7 @@ impl HirLowering:
                     callable.return_type_name,
                     callable.return_array_element_name,
                     imported_mod),
-                []),
+                declared_surface_callable_effects(self, callable)),
             span: callable.span)
     me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
         match e.kind:
