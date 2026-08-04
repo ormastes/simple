@@ -541,14 +541,25 @@ sh scripts/check/check-simpleos-qemu-engine2d-simd-kernels.shs
 Construction:
 
 ```sh
-SIMPLE_BIN=bin/release/aarch64-apple-darwin-macho/simple
+SIMPLE_BIN=/absolute/path/to/admitted/pure-simple/compiler
+COMPILER_RECEIPT=/absolute/path/to/simpleos-arm64-compiler-receipt.env
 mkdir -p build/os/generated/generated build/os
 cp src/generated/simpleos_log_config.spl build/os/generated/generated/simpleos_log_config.spl
 SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on "$SIMPLE_BIN" native-build --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log on --timeout 870 --entry-closure --entry examples/09_embedded/simple_os/arch/x86_64/host_gpu_smoke_entry.spl --target x86_64-unknown-none -o build/os/simpleos_x86_64_host_gpu_probe.elf --linker-script examples/09_embedded/simple_os/arch/x86_64/linker.ld
 env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000 "$SIMPLE_BIN" os build --scenario=x64-desktop-gui
 SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on "$SIMPLE_BIN" native-build --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend cranelift --opt-level=aggressive --log on --timeout 870 --entry-closure --entry examples/09_embedded/simple_os/arch/arm64/host_gpu_file_backed_ram_tail_smoke_entry.spl --target aarch64-unknown-none -o build/os/simpleos_arm64_host_gpu_probe.elf --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld
-sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
+SIMPLEOS_ARM64_ATTESTED_COMPILER="$SIMPLE_BIN" \
+SIMPLEOS_ARM64_COMPILER_RECEIPT="$COMPILER_RECEIPT" \
+    sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
 ```
+
+The compiler receipt uses schema `simpleos-arm64-compiler-receipt-v1` and pins
+the compiler's absolute path, SHA-256 identity, and live `--version` output. It
+must also record `native_smoke_status=pass`, `stub_fallback=forbidden`,
+`fabricated_stub_status=none`, and `measurement_status=measured`. The producer
+runs with `SIMPLE_NO_STUB_FALLBACK=1` and the strict fabricated-stub ratchet,
+captures its build log, and publishes no manifest if the log reports fabricated,
+unmeasured, unbaselined, or weak-zero fallback bodies.
 
 Required handoff:
 
@@ -557,7 +568,8 @@ Required handoff:
 - `simpleos_arm64_host_gpu_probe.elf`,
   `simpleos_arm64_desktop_engine2d.elf`, `fat32-arm64-desktop.img`,
   `make_os_disk`, build manifest, and frozen-source manifest;
-- exact revision, compiler path/version/hash, commands, sizes, and 64-hex
+- exact revision, compiler receipt path/hash, compiler path/version/hash,
+  commands, sizes, and 64-hex
   SHA-256 identities for every compiler, ELF, disk, and font input;
 - focused x86 ELF checks and current-source/manifest identity checks.
 
