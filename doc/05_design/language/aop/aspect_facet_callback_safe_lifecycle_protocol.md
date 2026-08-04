@@ -318,4 +318,12 @@ task/thread identity detector. Different lazy routes are globally serialized
 per context by the current single-flight owner, which is safe but may constrain
 performance. Native callback panic has no recoverable unwind boundary and is
 process fail-stop; only returned `Result` failures receive guaranteed finalize
-cleanup. Portable unwind/cancellation evidence remains open.
+cleanup.
+
+The explicit MIR call-terminator contract is now implemented and preserved by
+JSON, borrow/optimizer paths, interpreter, and backend consumers. Textual LLVM
+can emit `invoke`; native/unsupported targets and the LLVM C-API path reject
+unsupported `MayUnwind`. This does not change the callback rule above: source/HIR
+effect ownership, throw/resume cleanup pads, async cancellation cleanup, LLVM
+C-API invoke binding, and executable verification remain open. Unknown generic
+indirect calls under a live facet lease therefore fail closed with E-AF007.

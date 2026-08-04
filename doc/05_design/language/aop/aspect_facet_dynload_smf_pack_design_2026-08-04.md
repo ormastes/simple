@@ -2464,9 +2464,24 @@ Construction, `enter_operational`, and configuration mutation (including
 loader and pack-I/O installation) remain startup-only operations outside the
 lifecycle gate, and policy/catalog reads assume immutable post-construction
 state. Native callback panic remains process fail-stop, not a recoverable unwind
-path. Broader lifecycle concurrency is therefore implemented but remains
+path.
+
+The compiler now has an explicit required `MirCallUnwindContract` on
+`CallTerminator`, a validator/canonical constructor for the exact
+`NoUnwind`/no-edge and `MayUnwind`/edge pairs, JSON serialization, and exact
+preservation through the owned borrow and MIR optimizer paths. The interpreter
+consumes the contract, textual LLVM emits `invoke` for `MayUnwind`, and native
+or otherwise unsupported backends reject it rather than silently emitting a
+plain call. The LLVM C-API backend remains fail-closed because it has no invoke
+binding. Generic indirect calls with unknown effects under a live facet lease
+now fail with E-AF007.
+
+This groundwork does not provide the missing source/HIR effect owner, MIR
+throw/resume and cleanup pads, async cancellation cleanup, or executable
+verification. Those gaps continue to prevent portable callee/foreign unwind
+claims. Broader lifecycle concurrency is therefore implemented but remains
 unproven until barrier-controlled threaded evidence passes. Portable
 callee/foreign unwind, deployment-specific I/O binding, opaque runtime lease
 facade migration, and executable evidence also remain open. `throw`, `await`, `yield`,
-and identifiable unspecified-unwind extern calls now fail closed with E-AF007
-while a lease may be live.
+identifiable unspecified-unwind extern calls, and unknown generic indirect calls
+fail closed with E-AF007 while a lease may be live.
