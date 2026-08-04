@@ -163,3 +163,59 @@ describe "aliased import static-call / constructor resolution (ALIAS-GAP lane)":
                     assert_true(false)
         else:
             assert_true(false)
+
+    it "keeps duplicate method names bound to each aliased import owner":
+        val log = make_logger()
+
+        val src_object = "class ObjectBuilder:\n    value: i64\n\nimpl ObjectBuilder:\n    me build() -> i64:\n        me.value\n"
+        val module_object = parse_full_frontend(src_object, "object_owner", "object_owner", log)
+
+        val src_array = "class ArrayBuilder:\n    value: i64\n\nimpl ArrayBuilder:\n    me build() -> i64:\n        me.value\n"
+        val module_array = parse_full_frontend(src_array, "array_owner", "array_owner", log)
+
+        val open = "{"
+        val close = "}"
+        val src_consumer = "use object_owner." + open + "ObjectBuilder as BuilderObject" + close + "\n" +
+            "use array_owner." + open + "ArrayBuilder as BuilderArray" + close + "\n" +
+            "fn render() -> i64:\n" +
+            "    val object_value = BuilderObject(value: 7).build()\n" +
+            "    val array_value = BuilderArray(value: 9).build()\n" +
+            "    object_value + array_value\n"
+        val module_consumer = parse_full_frontend(src_consumer, "consumer_owners", "consumer_owners", log)
+
+        var modules_map: Dict<text, any> = {}
+        modules_map["object_owner"] = module_object
+        modules_map["array_owner"] = module_array
+
+        val hir = lower_consumer(modules_map, "consumer_owners", module_consumer)
+        val render_fn = find_fn(hir, "render")
+
+        if val rf = render_fn:
+            expect(rf.body.stmts.len()).to_equal(2)
+            val expected_owners = ["object_owner", "array_owner"]
+            var index = 0
+            while index < 2:
+                match rf.body.stmts[index].kind:
+                    case HirStmtKind.Let(_, _, init):
+                        match init.kind:
+                            case HirExprKind.MethodCall(receiver, method, _, _):
+                                expect(method).to_equal("build")
+                                match receiver.kind:
+                                    case HirExprKind.Call(callee, _, _):
+                                        match callee.kind:
+                                            case HirExprKind.NamedVar(symbol, _):
+                                                if val owner = hir.symbols.get_symbol_raw(symbol.id):
+                                                    expect(owner.defining_module.unwrap()).to_equal(expected_owners[index])
+                                                else:
+                                                    assert_true(false)
+                                            case _:
+                                                assert_true(false)
+                                    case _:
+                                        assert_true(false)
+                            case _:
+                                assert_true(false)
+                    case _:
+                        assert_true(false)
+                index = index + 1
+        else:
+            assert_true(false)
