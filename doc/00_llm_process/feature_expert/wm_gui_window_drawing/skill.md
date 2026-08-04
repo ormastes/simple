@@ -288,6 +288,11 @@ Hard-won lessons for this live lane (each cost hours):
   `build/sffi/libspl_winit.<dylib|so|dll>`; the facade resolution order is
   `$SIMPLE_SPL_WINIT_PATH` override, then that staged path. Drag/click/close
   proven live on macOS with a real interactive window.
+  **AMENDED 2026-08-04:** the cdylib at `src/runtime/spl_winit/src/lib.rs:536+`
+  holds the CANONICAL semantics for the staging-present protocol, which the
+  interpreter's own SFFI shim did not implement for two years' worth of
+  callers — see the 2026-08-04 session update below before touching either
+  side.
 - This removed `RT:src/app/ui.browser/app.spl` from
   `scripts/check/ui_backend_isolation_baseline.txt` (app.spl now goes through
   the facade only, per `doc/04_architecture/ui/rendering/backend_isolation_architecture.md`).
@@ -638,6 +643,89 @@ origin before citing either as shipped.
   truth-in-messaging fix only, not a functional fix. Do not cite
   `cpu_simd` as a perf lever (e.g. for the `SIMPLE_GUI_BACKEND` knob above)
   until that bug is closed.
+
+## Session update 2026-08-04 (winit interpreter SFFI staging-present, functional gui-driver probe, live fullscreen run)
+
+Landed in `177754a3ee`. All of this concerns the LIVE winit lane (the
+`--open` / Metal-demo path), not the headless PPM lanes.
+
+- **The staging-present protocol was missing from the interpreter SFFI.**
+  Launching the Metal demo did not fail gracefully — it ABORTED the whole
+  process with `internal error: entered unreachable code: dispatch_window
+  called with unexpected name: rt_winit_window_staging_ptr`. The pure-Simple
+  present path
+  ([src/lib/nogc_sync_mut/io/window_winit.spl](../../../../src/lib/nogc_sync_mut/io/window_winit.spl):102-114
+  and [src/os/compositor/hosted_backend_winit.spl](../../../../src/os/compositor/hosted_backend_winit.spl):38-55)
+  uses a three-step **staging_ptr → fill → present_staged** protocol; only
+  the cdylib implemented it. Canonical semantics:
+  [src/runtime/spl_winit/src/lib.rs](../../../../src/runtime/spl_winit/src/lib.rs):536+
+  — read that before changing either implementation, and keep them in step.
+  FIX in `src/compiler_rust/compiler/src/interpreter_extern/winit_sffi/`:
+  `present_pixels()` extracted as a helper out of `present_rgba`; implemented
+  `rt_winit_window_staging_ptr` (per-window `Vec<u32>`, reallocated on a
+  `w*h` mismatch), `stage_clear`, `stage_fill_rect`, `present_staged`,
+  `position_x`/`position_y`, and the flat
+  `rt_winit_event_key_*`/`text_*`/`wheel_*`/`mouse_*` externs; staging
+  buffers are freed in `window_free`/`event_loop_free`; routing prefixes
+  added in `mod.rs`.
+  **Residual, flagged not fixed:** `rt_winit_event_mouse_button` has two
+  incompatible callers — the interpreter arm returns a tuple
+  `(button, pressed)` while the flat cdylib API declares `-> i64`.
+- **Five `unreachable!` dispatch fallbacks were aborting the interpreter
+  process.** `_ => unreachable!(...)` at window:384, events:92, input:165,
+  display:39 and buffer:504 meant that ANY unimplemented winit extern killed
+  the process instead of surfacing an error. All five now return
+  `Err(unknown_function(name))` — catchable, diagnosable, and the reason the
+  staging gap presented as a process abort rather than a message. Treat a
+  bare `unreachable!` in an extern dispatch table as a defect class, not an
+  assertion.
+- **Probe gui-drivers FUNCTIONALLY, never by grepping the binary.**
+  `scripts/check/check-macos-wm-fullscreen-metal-evidence.shs` decided
+  whether a build had gui support by grepping the binary for the literal
+  string `rt_winit_window_set_fullscreen`. Release LLVM lowers that
+  extern-name literal into immediate-operand compares, so the string is not
+  in the binary and a perfectly good gui build was reported
+  `gui-driver-missing-or-stale` — a **false stale verdict**. FIX: run a tiny
+  `.spl` that calls the extern; a gui driver validates the arg types, a
+  non-gui driver says "unknown extern". Any future capability probe on a
+  compiled binary should follow this pattern.
+- **Live-verified windowed → fullscreen → restore (computer-use, real
+  on-screen window):** demo ran windowed 320x200 → fullscreen 3420x2146 at
+  `scale_factor 2.0` (`frame native ... pixels=7339320`,
+  `fit_bg_corners=ok bg=14141c`) → `restored_size=320x200
+  is_fullscreen_after=false` → `[wm-fullscreen] done`. That is the window/
+  present/fullscreen chain proven end to end with real pixels.
+- **The Metal harness's downstream gate is still RED, for an unrelated
+  reason:** `web-engine-capture-not-accent-blue-pct=0` — the titlebar CSS
+  accent `0xff2563eb` is absent because the capture fell back to logical
+  dimensions (`web_engine_dims=logical
+  reason=physical-render-exceeded-90s`). So: winit/fullscreen green, web
+  engine capture still failing on a render-time budget. Do not read the
+  fullscreen success as a green gate.
+- **Verification honesty note.** The new/updated specs in this area cannot
+  go green on this host: the deployed
+  `bin/release/aarch64-apple-darwin-macho/simple` (dated Jul 25) has an
+  extern registry lacking `rt_raw_i64_to_string`, so every spec importing
+  `src/lib/common/ui/native_scalar_text.spl` dies with
+  `semantic: unknown extern function: rt_raw_i64_to_string`. Bug doc:
+  `doc/08_tracking/bug/deployed_binary_missing_rt_raw_i64_to_string_extern_2026-08-04.md`.
+  The same binary also predates grammar fix `023a60a05aa`
+  (`doc/08_tracking/bug/stale_seed_binary_blocks_gpu_web_layout_specs_2026-08-01.md`,
+  `doc/08_tracking/bug/parser_trailing_comparison_line_continuation_2026-08-04.md`).
+  Unblock = a real stage4 deploy;
+  `build/bootstrap/stage3/aarch64-apple-darwin/simple` CANNOT substitute
+  (bootstrap-only, `error: unknown command 'run'`). The rebuild was
+  deliberately deferred by the user. This supersedes the 2026-07-03
+  "Stale self-hosted binary" handoff note above (that one was about
+  `rt_u32s_from_raw` on a 2026-06-05 build; the fail-closed +
+  `WM_ALLOW_SEED_DRIVER=1` opt-in design it describes is unchanged and still
+  the right shape).
+- Cross-references for the SimpleOS/QEMU side of the same arc (owned
+  elsewhere — link, don't duplicate):
+  [simpleos_wm_qemu_evidence](../simpleos_wm_qemu_evidence/skill.md) and the
+  [os_compositor](../../layer_expert/os_compositor/skill.md) layer expert.
+  Input routing into GUI-content windows on the hosted winit WM is owned by
+  [interaction_input_routing](../interaction_input_routing/skill.md).
 
 ## Update Rule
 

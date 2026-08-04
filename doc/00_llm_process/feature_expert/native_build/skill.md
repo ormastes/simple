@@ -5,19 +5,10 @@ Compilation of Simple source code to native binaries: the `bin/simple native-bui
 
 ## Source of truth
 - **Observability:** Environment knobs for progress + diagnostics:
-  - `--diagnostics=test` — progress and coarse phase timing, without parser trace
-  - `--diagnostics=debug` (or bare `--diagnostics`) — test mode plus detailed
-    trace, successful LLVM IR retention, and memory snapshots
   - `SIMPLE_COMPILER_TRACE=1` — detailed phase transitions
   - `SIMPLE_COMPILER_PHASE_PROFILE=1` — per-phase timings
-  - `SIMPLE_BOOTSTRAP_DIAGNOSTICS_MODE=debug|test` — environment equivalent
   - `--log off` controls **guest-kernel logging, NOT build verbosity**
   - Per-line flush now landed (see `doc/08_tracking/bug/simpleos_harness_silent_native_build_2026-07-26.md`)
-  - AOP call/assignment logs are not implied; enable them separately only for
-    a scoped weave investigation because they can materially affect runtime.
-  - Isolated diagnostic sweeps use
-    `--diagnostic-child-compiler=/absolute/path/to/simple`; never rely on an
-    ambiguous cwd-relative worker identity.
 
 ## Code map
 | File | Role |
@@ -59,6 +50,35 @@ SIMPLE_RUNTIME_PATH="path/to/seed/target" bin/simple native-build ...
 ```
 Hosted link backfills `rt_*` externs from `libsimple_native_all.a` only if the env var
 points to correct seed target.
+
+## Freestanding linkage: the fabricated-stub gate (2026-08-04)
+On `--target x86_64-unknown-none` the link refuses to invent symbols it cannot find:
+```
+Build failed: freestanding link would FABRICATE 3 symbol(s) not in the baseline
+for entry '<entry>': rt_find, rt_native_cmp, rt_string_partition.
+These get weak bodies that return 0, which silently corrupts every caller.
+```
+Baseline: `config/freestanding_fabricated_stub_baseline.sdn`. The gate runs
+**pre-`--gc-sections`**, over the object set — so a symbol can trip it and still be
+absent from the final ELF once its callers are collected.
+
+**Do not re-baseline to get past it.** `SIMPLE_FABRICATED_STUB_BASELINE_WRITE=1` exists
+but a weak 0-returning body is a silent wrong answer at every call site (a `find` that
+reports "match at index 0", a comparator that says "equal"). Implement the symbol in
+`examples/09_embedded/simple_os/arch/<arch>/boot/baremetal_stubs.c`.
+
+Diagnosing *where* a fabricated name comes from: the names are emitted by the
+pure-Simple codegen's erased-receiver redirect (`rt_<recv>_<method>` / bare
+`rt_<method>`), so they exist in **no** source file — grep will find nothing. Instead
+`nm -u` the kept objects (the failed link leaves them at `native-objects-*/`) to map
+symbol → module, e.g. `rt_string_partition` → `lib__log` → `line.partition(" ")` in
+`src/lib/log.spl`. A symbol referenced by nearly every object (as `rt_native_cmp` was)
+is a codegen-level emission, not one caller's mistake. Binary-grepping the compiler
+itself distinguishes stage3 emission from seed emission.
+
+Host-runtime parity is a real, currently-latent gap: `src/runtime/runtime_native.c` and
+the Rust runtime still lack these three, so the same erased-receiver path would fail to
+link hosted. Precedent for doing it in both: `rt_text_cmp_any`.
 
 ## Update Rule
 After native-build defects, closure-discovery changes, or cache logic shifts, refresh

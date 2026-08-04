@@ -877,6 +877,8 @@ gui_entry.spl (x86_64 Multiboot entry)
 | VGA | std (BGA) | std (BGA) |
 | Resolution | 1024x768x32 | 1024x768x32 |
 
+For the board-runnable x86_64 WM verification lane (OVMF pflash → GRUB standalone EFI → multiboot, serial receipt markers, host prerequisites, and troubleshooting), see [`simpleos_x86_64_wm_qemu.md`](simpleos_x86_64_wm_qemu.md).
+
 ### 8.8 WM Host Mode Policy
 
 The shared WM runtime supports two host classes:

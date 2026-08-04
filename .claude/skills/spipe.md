@@ -89,6 +89,28 @@ stale PASS artifact.
 >    `bin/release/<triple>/simple_seed` until redeploy. See
 >    `doc/08_tracking/bug/cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md`.
 
+> **A stale DEPLOYED binary fails healthy specs, and it looks like your code.**
+> When a spec dies with `semantic: unknown extern function: <rt_*>` or with a
+> parse error inside a library you did not touch, suspect the artifact's AGE
+> before your change: compare the binary's mtime against the commit that
+> introduced that symbol or that grammar. On 2026-08-04 the Jul-25 macOS deploy
+> was stale in two independent ways at once — it predated the
+> trailing-comparison line-continuation grammar fix (`023a60a05aa`, 2026-07-30)
+> so `src/lib/common/web/browser_renderer_protocol.spl` would not parse, and its
+> extern registry lacked `rt_raw_i64_to_string` so every spec transitively
+> importing `src/lib/common/ui/native_scalar_text.spl` died. Five specs
+> "failed" with nothing wrong in them. Isolate with a minimal probe spec that
+> imports ONLY the suspect module; the verdict is *redeploy*, never a fallback
+> to the seed. Bug docs:
+> `doc/08_tracking/bug/deployed_binary_missing_rt_raw_i64_to_string_extern_2026-08-04.md`,
+> `doc/08_tracking/bug/parser_trailing_comparison_line_continuation_2026-08-04.md`.
+>
+> **`build/bootstrap/stage3/<triple>/simple` is NOT a substitute for a deploy.**
+> It is bootstrap-only and has no `run` command (`error: unknown command 'run'`).
+> It builds kernels fine — the SimpleOS WM gate drives it as `SIMPLE_BIN` — but
+> it cannot execute a spec. Do not plan a verification path around it: a redeploy
+> means a real stage4 build.
+
 The SPipe dev entrypoint lives at:
 
 **[.claude/agents/spipe/dev.md](../agents/spipe/dev.md)**
@@ -105,27 +127,6 @@ broad exclusions, or release-blocking verification. The first architecture pass 
 interface names, manual `step("...")` flow helper names, and setup/checker
 helper names; placeholder helpers must fail explicitly (`assert(false)` or
 `fail(...)`).
-
-Kimi K3 is also available as a SPipe sidecar through either Claude Code or the
-native Kimi Code harness. Treat the Kimi Code subscription and Moonshot Open
-Platform as separate providers: subscription keys use
-`api.kimi.com/coding/` + Claude model `k3[1m]` (native model `k3`), while
-`platform.kimi.ai` keys use `api.moonshot.ai/anthropic` +
-`kimi-k3[1m]`. Never diagnose a cross-platform `401` as a model outage. Use
-`kimi --yolo` for ordinary auto-approved tool work and `kimi --auto` only when
-the lane explicitly authorizes fully autonomous decisions.
-
-Before counting a Kimi sidecar as SPipe capacity, run one bounded prompt probe
-and wait for every required MCP server to report `connected`; `connecting` is
-not evidence. Kimi auto-discovers project `.mcp.json`. On startup failure,
-check stale absolute checkout paths first. For the current Simple LSP MCP source
-lane, preserve `bin/mcp_stdio_bridge.js -- bin/simple run
-src/app/simple_lsp_mcp/main.spl`; omitting `run` makes the app parse its source
-path as an option, while forcing the cached native artifact exposes the known
-`tools/call` argument-extraction failure. A tmux `extended-keys` warning affects
-modified Enter combinations, not ordinary Enter; fix the tmux server instead
-of treating it as an MCP/model failure. Full setup and verification commands:
-[Kimi K3 provider setup](../../doc/07_guide/infra/model_providers/kimi.md).
 
 Before accepting done, enumerate every required host/capability row. Each row
 needs fresh native PASS evidence or an explicit linked TODO and plan naming the
@@ -389,6 +390,16 @@ Before touching runtime-adjacent code in an existing lane, read that lane's
 recorded `rejected_shortcuts` first; do not retry a rejected `rt_*`, fixture
 bypass, backend-poke, or generated-code workaround unless new evidence changes
 the decision.
+
+> **An unimplemented dispatch arm returns an error; it never aborts the
+> process.** Five `_ => unreachable!(...)` fallbacks in the interpreter's winit
+> SFFI turned any unimplemented extern into a whole-process abort with a
+> panic-inside-panic, destroying the diagnostics of the very run that found it
+> (`dispatch_window called with unexpected name:
+> rt_winit_window_staging_ptr` killed a demo launch instead of failing one
+> call). They are now `Err(unknown_function(name))`. Any name-dispatch table you
+> add — extern router, capture-kind registry, backend selector — must make its
+> default arm a catchable error so the run still reports what was missing.
 
 Before handoff, run `sh scripts/audit/direct-env-runtime-guard.shs --working`
 for runtime-adjacent lanes and treat any new raw env/process/runtime access
@@ -940,17 +951,6 @@ wrapper, Rust seed, or stale binary is not evidence. This sanity does not
 replace release `--whole` or repository-wide policy checks, and it must not be
 copied into compiler Stages 2 or 3.
 
-For bootstrap/compiler debugging, keep normal SPipe verification on the
-default-off path. Use `--diagnostics=test` for progress and coarse phase
-timing without parser trace; use `--diagnostics=debug` (or bare `--diagnostics`)
-only when detailed phase trace, retained successful LLVM IR, and memory
-snapshots are needed. Both modes imply `--progress`. AOP call/assignment
-tracing is not implied: scope it with `SIMPLE_AOP_DEBUG=<pattern>` and enable
-the specific AOP log flag only when weaving is under investigation. Never use
-debug-mode output alone as Stage 4 admission or release evidence. Bind an
-isolated sweep with `--diagnostic-child-compiler=<absolute admitted CLI>` and
-record both driver and child identities.
-
 A temporarily deployed Stage 2 compiler may unblock native artifact builds,
 but it is not Stage 4 evidence and cannot qualify `run`, `test`, SPipe docgen,
 or release. Record its exact path, hash, supported commands, and rollback path.
@@ -1044,6 +1044,16 @@ Rules:
   spec it was pretending to be (here: discover → lazy activate → real handler
   runs → deactivate disposes everything).
 
+**Grepping a BINARY for a symbol is the same anti-pattern, and it fails
+closed.** A capability gate must exercise the capability. The macOS WM Metal
+harness decided whether a driver had GUI support by grepping the executable for
+the extern name `rt_winit_window_set_fullscreen`; release LLVM lowers that
+dispatch's string match into immediate-operand compares, so the literal is
+absent from rodata in a perfectly good gui build → false
+`gui-driver-missing-or-stale`, and the harness refused to run at all. The fix
+was a 4-line probe spec that CALLS the extern: a capable driver validates the
+argument types, an incapable one reports `unknown extern function`.
+
 ## Running specs on a loaded box (harness truths, 2026-07-29)
 
 Under parallel sessions these look like test failures but are not:
@@ -1061,45 +1071,22 @@ Under parallel sessions these look like test failures but are not:
   a plain `# @step: text` comment.
 - SDN literals containing `{}` inside double-quoted spec strings trigger string
   interpolation ("variable x not found") — use raw `'...'` strings.
+- **Long gates are not hermetic.** Concurrent sessions edit this working copy;
+  the SimpleOS WM gate hashes its sources before and after the build window and
+  fails `wm-simple-web-build-source-changed` when a peer touches `src/os/**`
+  mid-build. Re-run it — do not chase a phantom regression.
 
 If a spec genuinely cannot reach `Results:` after retries, say so with the
 attempt count and land it **flagged as probe-validated, not green** — never
 report an unverified spec as passing.
 
-### Two limits a long-running spec must raise from the right place (2026-08-02)
-
-Both fail **silently** — a plausible wrong result, not an error.
-
-- **Op cap — `# @exec_limit <N>` header directive.** Calling
-  `rt_fault_set_execution_limit` inside a spec is INERT: the driver reads
-  `SIMPLE_EXECUTION_LIMIT` once at startup
-  (`src/compiler_rust/driver/src/cli/init.rs:163`). The sanctioned mechanism is
-  a plain comment line anywhere in the spec, parsed by
-  `spec_exec_limit_directive` (`src/app/test_runner_new/test_runner_single.spl:190`)
-  and forwarded into the child env:
-
-  ```
-  # @exec_limit 2000000000
-  ```
-
-  Raise-only (a higher existing env value wins); default cap is 10M ops.
-  Reference: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/tile_gpu_lane_spec.spl`.
-
-- **Web render budget — arm the floor from the spec.**
-  `WEB_RENDER_BUDGET_MS = 10000`
-  (`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl:81`)
-  trips under interpreter load and then **silently publishes truncated styles**
-  (exit 0, wrong render). Opt in by calling
-  `simple_web_layout_set_render_budget_floor_ms(900000)` (exported at
-  `..._foundation.spl:176`, raise-only) from the spec; restore with
-  `simple_web_layout_restore_render_budget_floor_ms(ms)`. It is a calibration
-  knob, not a bypass — the budget still expires past the floored deadline.
-  **Raising the in-tree default is forbidden.**
-  Reference: `test/03_system/gui/web_showcase_full_gpu_offload_spec.spl`.
-
-Full context and the seven-lane evidence map:
-`doc/00_llm_process/feature_expert/gpu_offload_check/skill.md` and
-`doc/00_llm_process/layer_expert/test_runner/skill.md`.
+**Triage into four verdicts, not two.** `passed` / `failed` /
+**`environment-blocked`** (a prerequisite is absent from this host — GLFW is not
+installed here, so `wm_full_stack_demo`'s lane cannot run at all, and reporting
+that as a test failure would be wrong) / **`could-not-complete-in-time`**
+(interpreter runs here carry ~10s session setup per `bin/simple test`
+invocation, and some specs exceed 240s). Only `failed` is a claim about the code
+under test.
 
 ## Spec-source landmines (the spec fails, the code is fine)
 
@@ -1291,25 +1278,6 @@ fail with the exact symptom in the bug report**, then fix the code and re-run.
 Report both observations (`3 failed → 21/0`, with the failing values quoted);
 "added a spec, suite green" is not evidence the spec covers the defect.
 
-### Pure-Simple-first ownership and adjacent regressions
-
-For every bug, claim the tracking record before editing (`Fix owner: <lane> —
-CLAIMED`) so parallel agents do not fix the same defect concurrently. Resolve
-the tag only when the fix and evidence land.
-
-Fix the pure-Simple owner first: inspect `src/compiler`, `src/lib`, and
-`src/app` before changing `src/compiler_rust` or `src/runtime`. A Rust/runtime
-change is allowed only when the smallest failing reproducer proves the
-pure-Simple layer already delegates correctly and the defect lives below that
-boundary; record that proof in the bug report. Never use a Rust-first patch to
-mask a missing or incorrect pure-Simple implementation.
-
-Regression coverage must include both the exact minimal reproducer observed
-failing before the fix and at least one similar/adjacent situation that could
-share the root cause (for example absent/present option paths, a sibling scalar
-width, a second extern using the same marshaller, or another keyword-binding
-form). If no meaningful adjacent case exists, record why in the bug report.
-
 ## GUI sanity tests (pure-Simple lane)
 
 After any GUI / engine2d / web-render change, sanity-check the **three main GUI
@@ -1493,6 +1461,14 @@ links or mmaps user memory: the OVMF kernel `.bss` band is
 PASS: a durable serial transcript with the full ladder — never a verbal claim
 (the 2e "FULL COMPLETE" mislabel was caught exactly this way). Physical-board
 phases: `doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md`.
+
+Reading that transcript: **anchor every marker with its brackets/prefix** —
+grepping a serial log for `fault` also matches `[rfm] at=default-font`, so search
+`\[fault\]`. Then symbolize a bare `[fault] rip=0x...` line directly with
+`llvm-symbolizer --obj=<kernel.elf> 0x<rip>`; it works on the SimpleOS kernel ELF
+and names the faulting Simple function immediately (2026-08-04:
+`lib__common__encoding__sfnt__parse_fvar_axes`). `llvm-nm | sort | awk`
+address-range hunting is unnecessary.
 
 For SimpleOS QEMU host-GPU external-host evidence, use the postponement and
 resume contract in `doc/07_guide/platform/simpleos/qemu_system_tests.md` and
@@ -1686,31 +1662,13 @@ instead of hand-tracing resolution.
 
 ## Session update 2026-07-18
 
-SimpleOS desktop bring-up knowledge lives in the C1-C8 baremetal codegen
-landmine catalog (doc/08_tracking/bug/). Canonical reference:
-doc/07_guide/os/baremetal_simple_codegen_landmines.md (in progress). Recent
-fixes: seed import-alias (method dispatch), receiver-binding under --entry-closure,
+SimpleOS desktop bring-up knowledge lives in the C1-C8 baremetal codegen 
+landmine catalog (doc/08_tracking/bug/). Canonical reference: 
+doc/07_guide/os/baremetal_simple_codegen_landmines.md (in progress). Recent 
+fixes: seed import-alias (method dispatch), receiver-binding under --entry-closure, 
 NVMe DMA phys=0 guard, interpreter stack overflow, i64 print truncation.
 
 ## Verification tiering (build infra)
-
-## SSpec documentization maintenance tool
-
-`simple sspec-maintain` is the maintenance-level peer of lint and
-duplicate-check. `scan` emits deterministic human, JSON, or SARIF findings and
-seven explainable scores; blockers cap the aggregate at 49, and missing/stale
-mirrors or configured policy failures are incomplete. `improve` is preview-only
-unless the exact patch is confirmed with `--apply`; retain rollback and never
-rewrite semantics, REQ bindings, evidence, or prose mechanically. `scaffold`
-preserves reference hash and REQ IDs in fail-fast modern SSpec. `documentize`
-adds scoring/provenance through SPipe, the complete-manual owner. Baseline or
-suppression records use the reviewed `--suppressions` file format
-`RULE_ID|owner|reason|optional-fingerprint`; blockers cannot be suppressed.
-LLM suggestions are source-evidenced
-previews, excluded from scoring, and never self-apply.
-Full external standards use the shared lossless `spec-to-spipe` architecture
-(`spec-to-sspec` is its compatibility name); the Markdown scaffold is not a
-byte-coverage importer.
 
 Match the verification gate to the size of the change — a small pure-Simple lib
 edit is NOT a full bootstrap. See `.claude/rules/bootstrap.md` § "Verification

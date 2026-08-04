@@ -75,10 +75,21 @@ the unified 2D engine plan.
     [src/os/desktop/shell.spl](../../../../src/os/desktop/shell.spl) are
     the consumer side of the same code contract. Spec:
     `test/01_unit/os/desktop/wm_pointer_decode_spec.spl`.
+- Host WM GUI-content dispatch (`3daf11f4ae`, 2026-08-04) — the production
+  winit lane's input path for GUI-session windows; see the dated section
+  "Host WM event lanes (2026-08-04)" below for the full contract:
+  [src/os/compositor/host_compositor_core.spl](../../../../src/os/compositor/host_compositor_core.spl)
+  (`dispatch_gui_pointer_event` :1160, `dispatch_gui_scroll_event` :1218,
+  `dispatch_gui_key_event` :1258, `dispatch_gui_text_event`,
+  `attach_window_gui_tree` :1127) and
+  [src/os/hosted/hosted_entry.spl](../../../../src/os/hosted/hosted_entry.spl)
+  (EVT_* branches).
 - Related layer experts:
   [browser_engine](../../layer_expert/browser_engine/skill.md),
   [os_compositor](../../layer_expert/os_compositor/skill.md) (neither has
-  adopted this core as its dispatch path yet — see Gotchas).
+  adopted this core as its dispatch path yet — see Gotchas). Host/QEMU WM
+  evidence status:
+  [simpleos_wm_qemu_evidence](../simpleos_wm_qemu_evidence/skill.md).
 
 ## Gotchas
 
@@ -120,6 +131,13 @@ the unified 2D engine plan.
   `0=none/1=down/2=up/3=move`. Left-button-down values are unchanged from
   the pre-existing contract (backward compatible) — only middle/right and
   up/move are new.
+- **Two divergent host WM event lanes exist; only one ships.** Production is
+  winit (`src/os/hosted/hosted_entry.spl`); the demo/spec lane is GLFW
+  (`host_gui_event_router.spl` + `window_event.spl`). Router semantics were
+  historically tested only on the GLFW lane, which is not the shipped one —
+  and GLFW is not even installed on this machine. Before citing any host
+  input behavior as "covered", check WHICH lane the covering spec drives.
+  Full detail in the dated section below.
 - **Browser mouse translate has two coexisting event shapes**: button 0
   (left) keeps `UIEvent.TouchPress`/`TouchRelease` (no button label);
   middle/right route through `UIEvent.MouseEvent(x, y, button, kind)`.
@@ -128,9 +146,31 @@ the unified 2D engine plan.
 
 ## Open Bugs
 
-None filed by this slice (`e9734f41cf2`, `ea2e187c394`, `09a71feb5c7`) — all
-three landed with green specs/probes and no new `doc/08_tracking/bug/`
-entries.
+The original slice (`e9734f41cf2`, `ea2e187c394`, `09a71feb5c7`) filed
+nothing — all three landed with green specs/probes. Open as of 2026-08-04,
+all blocking VERIFICATION of this area rather than its code:
+
+- `doc/08_tracking/bug/deployed_binary_missing_rt_raw_i64_to_string_extern_2026-08-04.md`
+  — the deployed `bin/release/aarch64-apple-darwin-macho/simple` (dated
+  Jul 25) has an extern registry without `rt_raw_i64_to_string` (which does
+  exist in `src/compiler_rust/common/src/runtime_symbols.rs`). Every spec
+  importing `src/lib/common/ui/native_scalar_text.spl` dies with
+  `semantic: unknown extern function: rt_raw_i64_to_string`. That is ALL of
+  `host_gui_event_router_spec` and `compositor_content_registry_spec`, plus
+  1 of 8 in `test/02_integration/ui/event_backend_matrix_spec.spl`.
+- `doc/08_tracking/bug/stale_seed_binary_blocks_gpu_web_layout_specs_2026-08-01.md`
+  + `doc/08_tracking/bug/parser_trailing_comparison_line_continuation_2026-08-04.md`
+  — the same deployed binary predates grammar fix `023a60a05aa`
+  (trailing-comparison line continuation), so it cannot parse
+  `src/lib/common/web/browser_renderer_protocol.spl` and the entire hosted
+  chain was unloadable in the test lane. Worked around by parenthesizing 3
+  sites; the binary is still stale.
+
+Unblock for both: a real stage4 deploy. `build/bootstrap/stage3/...simple`
+CANNOT substitute — it is bootstrap-only and has no `run` command
+(`error: unknown command 'run'`). The rebuild was deliberately deferred by
+the user, so **nothing in the 2026-08-04 GUI-dispatch landing below has a
+green spec run behind it on this host.** Do not claim otherwise.
 
 ## Event-backend integration spec (2026-07-21)
 
@@ -149,6 +189,127 @@ type-code drift pins, and UISession keypress smoke. Notes:
 - No headless winit/SDL2 availability probe exists yet; only constant pins
   are asserted (SDL2 exposes no named event-type constants at all — gap noted
   in the spec header).
+- **Status 2026-08-04: 7 passed / 1 failed**, and the failure is the stale
+  deploy (`rt_raw_i64_to_string`, see Open Bugs), not the code under test.
+
+## Host WM event lanes (2026-08-04)
+
+### The structural finding
+
+There are TWO host WM event lanes, and the one with the router abstraction
+is not the one that ships:
+
+- **Production = winit.** [src/os/hosted/hosted_entry.spl](../../../../src/os/hosted/hosted_entry.spl)
+  — poll loop at `hosted_entry.spl:960` (`rt_winit_event_loop_poll_events`),
+  event-kind constants at `hosted_entry.spl:147-157` (`EVT_KEY=10`,
+  `EVT_TEXT=11`, `EVT_MOUSE_BUTTON=20`, `EVT_MOUSE_MOVE=21`,
+  `EVT_MOUSE_WHEEL=22`). WM state, dispatch, hit-test and focus all live in
+  [src/os/compositor/host_compositor_core.spl](../../../../src/os/compositor/host_compositor_core.spl)
+  (`class HostCompositor` :534, `focus_window` :1605, `handle_mouse_button`
+  :1755, `handle_mouse_wheel` :1764); `host_compositor_entry.spl` is now
+  only a 5-line re-export facade.
+- **Demo/spec = GLFW.** `examples/06_io/ui/wm_full_stack_demo.spl` +
+  [src/os/compositor/host_gui_event_router.spl](../../../../src/os/compositor/host_gui_event_router.spl)
+  (`route_scalar` :118) +
+  [src/lib/common/io/window_event.spl](../../../../src/lib/common/io/window_event.spl)
+  (`WindowEventLoop.poll_scalar` :331).
+
+`HostGuiEventRouter` was reachable ONLY from the GLFW demo and 3 specs, so
+the router's semantics were tested exclusively on the lane that isn't
+shipped. GLFW is additionally environment-blocked on this machine: no
+`/opt/homebrew/lib/libglfw*`, and `rt_glfw_*` exist only in the native C
+runtime (`src/runtime/runtime_glfw.c`).
+
+### P0 fixed: GUI/widget windows were input-dead on the production host WM
+
+`grep -c widget src/os/hosted/hosted_entry.spl` → **0**. A GUI-content
+window rendered but received no input at all; clicks and keys reached WM
+chrome only. The baremetal compositor already had the counterpart
+(`src/os/compositor/compositor.spl` `dispatch_gui_pointer_event` :634,
+`dispatch_gui_key_event` :693, `dispatch_gui_text_event` :739, called from
+`src/os/desktop/shell.spl:1552`) — the hosted lane simply never grew one.
+
+Landed in `3daf11f4ae`:
+
+- `host_compositor_core.spl` (+237): new fields `gui_content_window_ids`,
+  `gui_content_trees`, `gui_content_focused_ids`,
+  `gui_pointer_capture_window_id` (`:615-618`); `is_gui_content_window`
+  :1121, `attach_window_gui_tree` :1127, `_release_gui_content` :1151,
+  `dispatch_gui_pointer_event` :1160 (capture on down / release on up,
+  capture-id rerouting, client-area gate, per-event UISession rebuild with
+  FocusEvent replay + Resize), `dispatch_gui_scroll_event` :1218,
+  `dispatch_gui_key_event` :1258 (focus-gated; tab → FocusPrev/Next),
+  `dispatch_gui_text_event`, `take_gui_content_action`. Cleanup is wired
+  into `_drop_window_render_state` :731. Hosted client geometry mirrors
+  baremetal exactly: `x+4, y+32+extra`, `w-8, h-36-extra`.
+- `hosted_entry.spl` (+127): `_host_winit_gui_key_name` :229; GUI branches
+  on EVT_MOUSE_MOVE `:1023-1039`, EVT_MOUSE_BUTTON `:1300-1320`,
+  capture-release `:1358`, EVT_MOUSE_WHEEL `:1400-1420`, EVT_KEY
+  `:1520-1550` (Escape/F11 stay WM-global, matching the browser lane),
+  EVT_TEXT `:1697-1712`. Every branch emits a
+  `host_wm_input_record_semantic` receipt with target `"gui:session"`.
+  **Ordering matters:** the GUI check runs BEFORE
+  `requires_external_web_frame`, because GUI windows also use the external
+  content-frame registry.
+
+**Content-kind gate.** Routing keys off `HostedWindow.content_owner`.
+`set_external_web_frame` already set `HOST_CONTENT_OWNER_GUI` when a frame
+arrives with `origin_kind == WM_CONTENT_ORIGIN_GUI`; `attach_window_gui_tree`
+now sets it too, so input routes correctly before the first frame ever
+lands.
+
+**Why `HostGuiEventRouter` was NOT reused.** It assumes GLFW single-window
+and a caller-owned session — neither holds under winit's multi-window,
+compositor-owned model. Duplicating it would have re-created the untested
+lane. Instead the hosted dispatch calls the same underlying primitives the
+router does (`UISession.dispatch` / `dispatch_key_with_modifiers`) with the
+compositor owning the session, exactly like baremetal.
+
+Spec added: `test/01_unit/os/compositor/host_gui_event_router_spec.spl`
+(+94), new describe "hosted compositor GUI-session content dispatch"
+(3 `it` blocks). It cannot run on this host — see Open Bugs.
+
+### Per-surface truth table (host WM)
+
+| surface | events reach the compositor? | entry points |
+|---|---|---|
+| web | yes, fully wired (pre-existing) | `hosted_entry.spl` picks a target via `comp.content_target(...)` (:1044/:1320) / `comp.browser_chrome_target(...)` (:1045), dispatching into `hosted_browser_renderer_registry.spl` (`dispatch_pointer` :901, `dispatch_scroll` :937, `dispatch_chrome_pointer` :955, `dispatch_key_with_shift` :1019) and `hosted_web_content_session.spl` |
+| gui | **yes, as of `3daf11f4ae`** | `HostCompositor.dispatch_gui_*` above |
+| 2d | **no — PIXELS ONLY** | `Engine2dCompositorBackend` → `HostCompositor.render_frame_engine2d` |
+
+**The 2D gap is real and is remaining work.** Engine2D reaches the
+compositor as a framebuffer and never as events.
+`src/lib/common/ui/simple2d_gpu_event_boundary.spl` has NO `src/**` importer
+— only its own unit spec. `gpu_web_event_model.spl` / `gpu_event_core.spl`
+are likewise a spec-only lane. Their specs are green, which proves the
+primitives work, not that anything consumes them. Do not cite 2D input as
+wired.
+
+### Known limits of the new GUI lane (recorded, not bugs to re-discover)
+
+- winit exposes only shift (no ctrl/alt/super externs), so GUI key dispatch
+  passes **shift only**.
+- No desktop-clipboard bridging.
+- Keycode 122 is both F11 and `z`; F11 wins. Pre-existing, not introduced
+  here.
+- Releasing a GUI-captured pointer over the browser-profile window's content
+  routes to the browser branch first.
+
+### Where this is verified
+
+Nowhere on this host, honestly. See Open Bugs — the deployed binary's extern
+registry blocks the new spec. The related WM gate
+`scripts/check/check-wm-browser-event-routing-evidence.shs` also fails closed
+at `wm_browser_event_routing_reason=missing-simple-web-font-run-id`
+(wrapper line 170, a fail-closed input precondition), because its producer
+chain — scenario 1 of
+`test/03_system/app/simple_web/feature/web_font_rendering_surface_spec.spl`
+→ `build/test-artifacts/simple-web-font-composition/receipt.env` — cannot
+compile on the stale binary. On the SimpleOS x86_64 side, QMP input
+injection is the branch immediately AFTER readiness, so x86_64 WM input
+delivery has still never been proven either — see
+[simpleos_wm_qemu_evidence](../simpleos_wm_qemu_evidence/skill.md) and
+the [os_compositor](../../layer_expert/os_compositor/skill.md) layer expert.
 
 ## Update Rule
 

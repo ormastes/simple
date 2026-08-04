@@ -124,6 +124,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [platform/packaging.md](platform/packaging.md) | Packages, deployment, GitHub |
 | [platform/simpleos/simpleos_dev_guide.md](platform/simpleos/simpleos_dev_guide.md) | SimpleOS tooling, bootstrap, native build and run workflow |
 | [platform/simpleos/simpleos_arm64_wm_qemu.md](platform/simpleos/simpleos_arm64_wm_qemu.md) | ARM64 SimpleOS WM QEMU ramfb verification |
+| [platform/simpleos/simpleos_x86_64_wm_qemu.md](platform/simpleos/simpleos_x86_64_wm_qemu.md) | x86_64 SimpleOS WM QEMU verification — OVMF/GRUB board-runnable lane |
 | [platform/misc/sosix_process_scheduler.md](platform/misc/sosix_process_scheduler.md) | SOSIX process APIs, immutable sharing, scheduler classes, and current kernel limits |
 | [platform/simpleos/simpleos_web_wm.md](platform/simpleos/simpleos_web_wm.md) | Browser-hosted SimpleOS Web WM runtime |
 

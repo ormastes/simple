@@ -3,6 +3,8 @@
 This lane verifies the canonical Simple ARM64 Engine2D desktop entry under
 `qemu-system-aarch64` with QEMU `ramfb`.
 
+See also [`simpleos_x86_64_wm_qemu.md`](simpleos_x86_64_wm_qemu.md) — the sibling x86_64 lane, which (unlike this one) boots through real firmware and is therefore the board-runnable proxy.
+
 ## Build
 
 Use an LLVM-enabled pure-Simple self-hosted release driver. The Rust driver is
