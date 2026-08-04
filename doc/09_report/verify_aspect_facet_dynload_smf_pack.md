@@ -78,8 +78,12 @@ bookmark is synchronized with GitHub and is rebased onto the current
   deterministic JSON forms. HIR `throw` no longer takes the unsupported-expression
   fatal path; with nested live facet leases it emits reverse-order, exactly-once
   releases before `Throw`. Unsupported backend/interpreter consumers reject the
-  new terminators with typed `E-MIR-UNWIND002`. This does not prove a call
-  unwind successor, landing-pad payload flow, or executable backend semantics.
+  new terminators with typed `E-MIR-UNWIND002`. The static call path now builds
+  a `MayUnwind` cleanup successor with one unwind-only landing pad, nested
+  reverse releases, and one payload-preserving `Resume`; the optimizer release
+  gate validates every function before and after transformation. Visitors and
+  auxiliary type mappers no longer silently drop the token/destination. This
+  does not prove executable behavior or a backend personality implementation.
 - **PASS — automatic registry source path (static review):** real compile inputs
   discover and install the resolver-owned aspect registry; its fingerprint is
   carried into object/closure cache identity. Importer-scoped resolution keys,
@@ -214,9 +218,8 @@ validation, serialization, representative optimizer preservation, backend
 consumption, and payload-carrying Throw/Resume with direct leased-throw cleanup
 are also implemented statically; they are not release evidence.
 Blocking gaps are current-source compiler/backend execution and ABI linkage;
-executable parser/import/method effect propagation; real call-site `MayUnwind`
-cleanup successors; landing-pad exception-payload preservation through
-`Resume`; async cancellation and cross-thread
+executable parser/import/method effect propagation; executable call-site
+`MayUnwind` cleanup/payload preservation through `Resume`; async cancellation and cross-thread
 unwinding; LLVM C API `invoke`,
 landing-pad, and `resume` integration; production
 deployment and startup configuration; lifecycle-wide concurrency, callback-
