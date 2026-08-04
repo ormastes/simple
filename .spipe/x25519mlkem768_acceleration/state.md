@@ -988,8 +988,18 @@ Conventions confirmed for `src/os/crypto/ml_kem_ntt.spl`: representative range
 3. Constant-time / timing behaviour not examined by the oracle.
 4. Everything ran on the Rust **seed** interpreter, never the self-hosted binary
    and never native codegen.
-5. The consolidated driver `mlkem_ntt_oracle.spl` never emitted its own verdict
-   line — run 1 hit `execution limit exceeded: 10000000 operations` at phase 6
-   (phases 0-5 all clean); the rerun was still mid-phase-3 at cutoff. The kernel
-   results above come from the separate `mlkem_ntt_oracle` kernel driver, which
-   did complete.
+5. ~~The consolidated driver never emitted its own verdict line.~~ **Now
+   resolved** — it completed:
+
+       ORACLE_MLKEM verdict=PASS total=956 mismatches=0 scalar_fwd_bad=0
+       scalar_roundtrip_bad=0 scalar_inv_bad=0 linearity_bad=0 conv_bad=0
+       zeta_table_bad=0 range_bad=0 kernel_present=1 kernel_checked=434
+       kernel_bad=0 first_bad=none
+
+   Run 1 had aborted at phase 6, vector 125 of 217, with
+   `execution limit exceeded: 10000000 operations` and **no verdict line** —
+   phases 0-5 had already printed clean counters, so the log read as success.
+   That is a third ceiling, distinct from the 60s CPU guard
+   (`SIMPLE_TIMEOUT_SECONDS`) and the 600s daemon clamp, and neither of those
+   knobs lifts it. Cleared with `rt_fault_set_execution_limit(0)`, proven
+   positionally: run 1 died at 125/217, run 2 passed 150, 175, then finished.
