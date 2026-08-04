@@ -1,0 +1,85 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.{Effect, EffectKind, SymbolId, SymbolTable}
+use compiler.mir.{
+    MirCallUnwindContract, MirLowering, MirSignature, MirType
+}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn unwind_admission_lowering() -> MirLowering:
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    builder.begin_function(
+        SymbolId(id: 951), "unwind_admission_probe",
+        MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        Span.empty())
+    lowering.builder = builder
+    lowering
+
+fn unwind_effect(kind: EffectKind) -> Effect:
+    Effect(kind: kind, span: Span.empty())
+
+fn has_fatal_unwind_error(lowering: MirLowering, fragment: text) -> bool:
+    for error in lowering.errors:
+        if error.fatal and error.message.contains(fragment):
+            return true
+    false
+
+describe "HIR to MIR call unwind admission":
+    it "admits NoUnwind without synthesizing a rejection value":
+        var lowering = unwind_admission_lowering()
+        val contract = lowering.mir_call_unwind_contract_from_effects(
+            [unwind_effect(EffectKind.NoUnwind)]).unwrap()
+        expect(contract == MirCallUnwindContract.NoUnwind).to_be(true)
+        val rejected = lowering.reject_unadmitted_call_effects(
+            Ok([unwind_effect(EffectKind.NoUnwind)]),
+            "safe_call", Span.empty())
+        expect(rejected).to_be_nil()
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "rejects MayUnwind before a call when no cleanup successor exists":
+        var lowering = unwind_admission_lowering()
+        val rejected = lowering.reject_unadmitted_call_effects(
+            Ok([unwind_effect(EffectKind.MayUnwind)]),
+            "throwing_call", Span.empty())
+        expect(rejected != nil).to_be(true)
+        expect(has_fatal_unwind_error(
+            lowering, "E-MIR-UNWIND001 MayUnwind call 'throwing_call'")).to_be(true)
+
+    it "rejects missing and conflicting HIR unwind metadata":
+        var missing = unwind_admission_lowering()
+        val missing_rejected = missing.reject_unadmitted_call_effects(
+            Err("missing typed function effects"), "missing_call", Span.empty())
+        expect(missing_rejected != nil).to_be(true)
+        expect(has_fatal_unwind_error(
+            missing, "E-MIR-UNWIND001 missing or conflicting unwind metadata")).to_be(true)
+
+        var conflicting = unwind_admission_lowering()
+        val conflict_rejected = conflicting.reject_unadmitted_call_effects(
+            Ok([unwind_effect(EffectKind.NoUnwind),
+                unwind_effect(EffectKind.MayUnwind)]),
+            "conflicting_call", Span.empty())
+        expect(conflict_rejected != nil).to_be(true)
+        expect(has_fatal_unwind_error(
+            conflicting, "E-HIR-UNWIND001")).to_be(true)
+
+    it "places direct, indirect, and method admission before call emission":
+        val calls = rt_file_read_text(
+            "src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
+        val methods = rt_file_read_text(
+            "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""
+        val direct_guard = calls.index_of(
+            "self.reject_unadmitted_resolved_call(")
+        val indirect_guard = calls.index_of(
+            "self.reject_unadmitted_call_effects(")
+        val call_emission = calls.index_of("var arg_operands: [MirOperand] = []")
+        expect(direct_guard).to_be_greater_than(-1)
+        expect(indirect_guard).to_be_greater_than(direct_guard)
+        expect(indirect_guard).to_be_less_than(call_emission)
+        val method_guard = methods.index_of(
+            "self.reject_unadmitted_resolved_call(")
+        val method_emission = methods.index_of(
+            "val result = b.emit_call(method_operand, arg_operands, return_type)")
+        expect(method_guard).to_be_greater_than(-1)
+        expect(method_guard).to_be_less_than(method_emission)
