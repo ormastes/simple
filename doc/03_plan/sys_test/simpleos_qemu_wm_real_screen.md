@@ -906,3 +906,24 @@ attempt fails, preserve its cache/log, repair only the first real failure, and
 retry at most twice. After the third failed cycle, stop with the exact remaining
 failure instead of widening runtime bundles, enabling stub fallback, launching
 against stale artifacts, or rerunning an identical command.
+
+## 2026-08-04 post-sync resume audit
+
+GitHub `main` advanced through `e7ef812c11`, including the strict
+module-global/stub-debt repair, ARM64 gate-trace scenarios, and the cross-platform
+`sys_get_args` repair needed by later native probes. The rebase file-count guard
+passed (110118 -> 110130 tracked files), and the two argv commits were pushed.
+
+The newly added ARM64 SSpec was executed once with the user-authorized Rust seed
+as diagnostic source-contract coverage. The seed identified itself correctly;
+it is not compiler admission, SPipe release evidence, or permission to build the
+guest with a seed. No assertion failure was printed before the direct runner
+exited, but no pure-Simple authenticated PASS is claimed.
+
+The filesystem still has no `simpleos-arm64-compiler-receipt-v1` receipt or
+Stage 4 output. The separately owned Stage 4 process remains CPU-active and has
+entered its 1030-file native driver phase; it was neither restarted nor waited
+on. Existing Stage 2/3 hashes are unchanged from the prior failed focused
+module-global admission, so that identical command was not rerun. No
+`qemu-system-aarch64` process was launched. The next executable action remains
+receipt validation followed by one attested producer invocation.
