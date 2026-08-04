@@ -20,14 +20,23 @@ can build the required kernel.
   nil receiver.
 - `clang-20`/browser-demo work is owned by a separate lane and does not block
   ARM64-first progress.
-- A current-main Phase 2 build at `7daa55e42c` reached the final allowed build
-  cycle but stopped at the storage guard: materializing the 2.6 GiB frozen
-  runtime authority reduced free space from 8.1 GiB to 6.8 GiB. The generated
-  copy was removed and 9.4 GiB restored; no new compiler artifact was emitted.
-- The preceding Phase 2 artifact (`033e16e5...7eab830`) passed bootstrap sanity
-  but is inadmissible: it contains Rust provenance and its canonical
-  module-global fixture exits 132 in `MirToLlvm`. The owner-mutation repair for
-  that nil receiver is on `main` at `7daa55e42c`, but still needs a fresh build.
+- The compiler-admission lane completed its three-cycle bound. Every Phase 2
+  compiler passed bootstrap sanity but failed canonical admission and retained
+  703 Rust provenance paths:
+  1. Cycle 1 artifact `c7924818...2db1f6` exited 132 after
+     `function:start`, before local discovery.
+  2. The owner-defined function-state reset fix was pushed in `039cad933a`.
+     Cycle 2 artifact `30e98899...193b37` advanced through `function:params`
+     and then exited 139.
+  3. The owner-defined return-type setter fix was pushed in `9b25558e`.
+     Final Cycle 3 artifact `aa6a764a...ac4899` advanced through
+     `function:params`, then exited 132 before `function:return`.
+- The final artifact is retained at
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-return-owner-cycle3/stage2/aarch64-apple-darwin/simple`.
+  Its full SHA-256 is
+  `aa6a764ac33542593cb87f341efe89a20bdcb03031e766edcac6f55a22ac4899`.
+- Phase 3, the ARM64 attested build, and QEMU evidence were not run because no
+  Phase 2 compiler passed functional or native admission.
 
 ## Current Resume Gate
 
@@ -37,20 +46,25 @@ Owner: compiler-admission lane. Final reviewer: ARM64 integration owner.
    materialized while retaining the 7 GiB safety floor.
 2. Use the clean current-main worktree at
    `.claude/worktrees/agent-aaf2c9946eded166b`.
-3. Resume with one fresh scoped session (the present session exhausted its
-   three-cycle cap):
+3. Start a fresh bounded session; this lane's three-cycle budget is exhausted.
+   Diagnose the access immediately after `function:params`. With the return
+   type assignment already owner-routed, the next failing expression is
+   `self.llvm_type_text(body.return_ty)` in
+   `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`. Treat this as
+   a cross-module `MirBody` field/layout problem; do not repeat the completed
+   owner-setter fixes.
+4. Add a focused pure-Simple regression for owner-safe `MirBody.return_ty`
+   access before building another Phase 2 compiler.
+5. Only after the focused regression passes, run one fresh Phase 2 build and
+   the canonical non-entry module-global/native admission checks once. Phase 3
+   or ARM64 QEMU may start only after both pass.
 
-   ```sh
-   sh scripts/bootstrap/bootstrap-from-scratch.sh \
-     --pure-simple --backend=cranelift \
-     --output=build/phase2-arm64-recovery-20260804 \
-     --jobs=2 --no-mcp \
-     --progress=build/phase2-arm64-recovery-20260804/progress-resume.log
-   ```
+Retained evidence:
 
-4. Stop after Phase 2 sanity; retain the artifact and its runtime authority.
-5. Run the canonical non-entry module-global and native compiler admission
-   checks exactly once. Phase 3 or ARM64 QEMU may start only after both pass.
+- Cycle 2 compact logs and hash report:
+  `/private/tmp/simple-phase2-cycle2-evidence-20260804/`
+- Final Cycle 3 build, progress, and admission logs:
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-return-owner-cycle3/`
 
 ## Parallel Lanes
 
