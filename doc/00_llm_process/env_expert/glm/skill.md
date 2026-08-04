@@ -21,8 +21,10 @@ This is an `env_expert` entry — environment/tooling setup, not a compiler laye
 
 - **Two endpoints, one key.** Claude Code → `https://api.z.ai/api/anthropic`
   (Anthropic-compatible; env vars `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`
-  / `ANTHROPIC_MODEL=glm-5.2` / `ANTHROPIC_SMALL_FAST_MODEL=glm-4.5-air`, then
-  `claude`). opencode → `https://api.z.ai/api/coding/paas/v4` (OpenAI-compatible
+  / `ANTHROPIC_MODEL=glm-5.2`; main tiers and subagents use `glm-5.2`, while
+  Haiku/background calls use `glm-4.5-air`, then `claude`). The canonical
+  credential-free wrapper is `bin/glm`. opencode →
+  `https://api.z.ai/api/coding/paas/v4` (OpenAI-compatible
   provider `zhipuai`, model `zhipuai/glm-5.2`). Do not cross the endpoints.
 - **Key never in a committed file.** Source it from `~/.config/zai/token` (600)
   at launch, or from the tool's own auth store (`opencode auth login`). Same

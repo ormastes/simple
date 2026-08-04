@@ -32,8 +32,9 @@ Claude Code talks to any Anthropic-compatible endpoint via four env vars, then
 runs `claude`. z.ai exposes an Anthropic-shaped endpoint at
 `https://api.z.ai/api/anthropic`.
 
-Add a launcher to `~/.bashrc` (or `~/.zshrc`). This form reads the token from
-the file above at launch, so the secret never lives in the rc file itself:
+The repo ships `bin/glm`, which reads the token at launch so the secret never
+lives in the launcher. Put the repo's `bin/` on `PATH` (the standard repo shell
+setup already does this), then run `glm`. The equivalent shell function is:
 
 ```bash
 # GLM (Zhipu) launcher for Claude Code — plain `claude` still uses your subscription
@@ -41,6 +42,11 @@ glm() {
     ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic" \
     ANTHROPIC_AUTH_TOKEN="$(cat ~/.config/zai/token)" \
     ANTHROPIC_MODEL="glm-5.2" \
+    ANTHROPIC_DEFAULT_OPUS_MODEL="glm-5.2" \
+    ANTHROPIC_DEFAULT_SONNET_MODEL="glm-5.2" \
+    ANTHROPIC_DEFAULT_FABLE_MODEL="glm-5.2" \
+    CLAUDE_CODE_SUBAGENT_MODEL="glm-5.2" \
+    ANTHROPIC_DEFAULT_HAIKU_MODEL="glm-4.5-air" \
     ANTHROPIC_SMALL_FAST_MODEL="glm-4.5-air" \
     claude "$@"
 }
@@ -56,6 +62,9 @@ for cheap background calls (titles, small edits) — kept on the smaller
 | `ANTHROPIC_BASE_URL` | `https://api.z.ai/api/anthropic` |
 | `ANTHROPIC_AUTH_TOKEN` | your z.ai key (from the file) |
 | `ANTHROPIC_MODEL` | `glm-5.2` |
+| Opus / Sonnet / Fable defaults | `glm-5.2` |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | `glm-5.2` |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `glm-4.5-air` |
 | `ANTHROPIC_SMALL_FAST_MODEL` | `glm-4.5-air` |
 
 ## 3. opencode
@@ -78,7 +87,7 @@ as an OpenAI-compatible provider pointing at the z.ai **coding** endpoint
         "glm-5.2": {
           "name": "GLM-5.2",
           "cost": { "input": 0, "output": 0 },
-          "limit": { "context": 200000, "output": 128000 }
+          "limit": { "context": 1000000, "output": 128000 }
         }
       }
     }
@@ -103,7 +112,7 @@ adjust if your plan meters tokens.
 
 | Model | Role |
 |-------|------|
-| `glm-5.2` | Main worker model (200k context / 128k output) |
+| `glm-5.2` | Current flagship/main and subagent model (1M context) |
 | `glm-4.5-air` | Small/fast lane (Claude Code background calls) |
 
 Use the names your z.ai plan actually exposes — these are the ones this
@@ -127,6 +136,6 @@ run `opencode auth login` for the `zhipuai` provider.
 ## Security recap
 
 - Token lives in `~/.config/zai/token` (`600`), never in a committed file.
-- rc-file launcher reads the token at run time; the rc file holds no secret.
+- `bin/glm` reads the token at run time; the launcher holds no secret.
 - Before pushing any config change, grep the outgoing diff for the literal key —
   it must return zero hits.

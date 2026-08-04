@@ -157,6 +157,20 @@ separate claim levels.
   `.spipe/llm-caret-messaging/state.md`.
 - **Development fallback:** direct source/interpreter mode must be explicit and
   is not production evidence.
+
+## GLM and Kimi coding agents
+
+- **GLM through Claude Code:** run `bin/glm`; flagship/main and subagents use
+  `glm-5.2`, while Haiku/background work uses efficient `glm-4.5-air`.
+- **Kimi K3 through Claude Code:** run `bin/k3`; all Claude tiers and subagents
+  map to `kimi-k3[1m]` with a 1M compaction window and max effort.
+- **Kimi native harness:** run `kimi` from `@moonshot-ai/kimi-code`; authenticate
+  with `/login`, select K3 with `/model`, and use its native subagent/MCP flow.
+- **Credentials:** launchers read environment variables or user-private token
+  files. Never put keys in a repo file, shell alias, command history, or wiki.
+- **Guides:** `doc/07_guide/infra/model_providers/glm.md` and
+  `doc/07_guide/infra/model_providers/kimi.md`.
+
 ### Database lookup and execution rule
 
 For database work, search `src/lib/std/database/` first. `PureDatabase` in
