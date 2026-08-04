@@ -44,6 +44,42 @@ the `comprehensive/*` failures.
 > produced this number. A controlled A/B over the whole tier found exactly 249
 > failing examples in the OLD arm. See "MEASURED — `test/03_system/core`" below
 > for the split: **149** are this defect, **100** are a different spec bug.
+> The `stdlib` and `compiler` figures were also measured — see
+> "MEASURED — `test/03_system/stdlib` and `compiler`" below. Both were close:
+> stdlib 51 of 59 (not 63), compiler 100 of 100.
+
+## MEASURED — `test/03_system/stdlib` and `compiler` (2026-08-04, pin `b0f305f1ae6`)
+
+Arms behaviorally backed (OLD reproduces `expected 99 to equal true`; md5
+`e9c32afb…` vs `82450a73…`), `bin/simple` re-pointed per arm and `readlink -f`
+recorded, `code 127` = 0 in every run, totals at example level.
+
+| directory | examples | OLD | NEW | delta |
+|---|---|---|---|---|
+| `compiler/runtime_comprehensive` | 1,350 | 50 | 0 | −50 |
+| `compiler/comprehensive` | 1,350 | 50 | 0 | −50 |
+| `stdlib` | 1,503 | 59 | 8 | −51 |
+| **total** | **4,203** | **159** | **8** | **−151** |
+
+The census predicted 151 (51/50/50 `verify(<expr>.?)` sites, exactly one per
+file) and the measurement landed on 151. Mechanism confirmed rather than
+inferred: each spec defines `fn verify(condition: bool)` **locally**, so the call
+goes through `bind_args` exactly where the fix lives.
+
+**Path correction:** `test/03_system/runtime_comprehensive/` and
+`test/03_system/compiler_comprehensive/` do not exist. The real paths are
+`test/03_system/compiler/{runtime_,}comprehensive/`.
+
+**The 8 survivors are NOT this defect** and must not be counted against it:
+- `stdlib/dynload/dynsmf_session_unload_reload_spec.spl` (4) — `expected 1 to be
+  greater than 1`, `expected 5 to equal 4`, `expected symbol to equal reload`;
+- `stdlib/vector_spec.spl` (2) — identity diagonal / off-diagonal;
+- `stdlib/database/requirement_db_spec.spl` (1) and
+  `stdlib/math/tensor_broadcast_spec.spl` (1) — `no examples executed`, i.e. dead
+  entry points, not assertion failures.
+
+**Unmeasured:** the 88 specs under `test/03_system/compiler/` outside the two
+`comprehensive` subdirectories.
 > The `stdlib` (51 of 63) and `compiler` (50) figures above remain unverified.
 
 ## MEASURED — `test/03_system/core` (2026-08-04, pin `851a0e8d82e`)
