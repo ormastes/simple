@@ -589,6 +589,20 @@ impl MirTextCodegen for MirToLlvm:
             self.mark_instruction_dest_defined_at(instructions, index)
             return
 
+        val store_global_disc = rt_enum_discriminant(MirInstKind.StoreGlobal(SymbolId(id: 0), mir_operand_const_int(0)))
+        if bootstrap_debug:
+            print "[mir-to-llvm] instruction:store-global-discriminant index={index}"
+        if rt_enum_discriminant(inst_kind) == store_global_disc:
+            self.translate_store_global_at(instructions, index)
+            return
+
+        val load_global_disc = rt_enum_discriminant(MirInstKind.LoadGlobal(LocalId(id: 0), SymbolId(id: 0)))
+        if bootstrap_debug:
+            print "[mir-to-llvm] instruction:load-global-discriminant index={index}"
+        if rt_enum_discriminant(inst_kind) == load_global_disc:
+            self.translate_load_global_at(instructions, index)
+            return
+
         match inst_kind:
             case Move(dest, src): self.translate_copy_move(dest, src, true)
             case BinOp(dest, op, left, right): self.translate_binop(dest, op, left, right)
@@ -597,8 +611,8 @@ impl MirTextCodegen for MirToLlvm:
             case Alloc(dest, ty): self.translate_alloc(dest, ty)
             case Load(dest, ptr): self.translate_load(dest, ptr)
             case Store(ptr, value): self.translate_store(ptr, value)
-            case LoadGlobal(dest, symbol): self.translate_load_global(dest, symbol)
-            case StoreGlobal(symbol, value): self.translate_store_global(symbol, value)
+            # Indexed scalar fast paths above own LoadGlobal and StoreGlobal.
+            case LoadGlobal(_, _) | StoreGlobal(_, _): ()
             case GetElementPtr(dest, base, indices): self.translate_gep(dest, base, indices)
             case Aggregate(dest, kind, operands): self.translate_aggregate(dest, kind, operands)
             case GetField(dest, base, field): self.translate_get_field(dest, base, field)
@@ -1954,6 +1968,36 @@ impl MirTextCodegen for MirToLlvm:
             self.mark_ptr_local(dest_id)
         self.builder.emit_load(dest_name, g_ty, g_name)
 
+    me translate_load_global_at(instructions: [MirInst], index: i64):
+        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        if bootstrap_debug:
+            print "[mir-to-llvm] load-global:entry index={index}"
+        val inst = instructions[index]
+        val dest_id = inst.bootstrap_load_global_dest_id()
+        val symbol_id = inst.bootstrap_load_global_symbol_id()
+        if bootstrap_debug:
+            print "[mir-to-llvm] load-global:scalar index={index} dest={dest_id} symbol={symbol_id}"
+        val g_key = self.global_static_key(symbol_id)
+        var g_name = "@g_undeclared_{symbol_id}"
+        if self.global_static_names.has(g_key):
+            val recorded_name = self.global_static_names[g_key]
+            if recorded_name != nil and recorded_name != "":
+                g_name = recorded_name
+        var g_ty = self.native_int_type
+        if self.global_static_types.has(g_key):
+            val recorded_type = self.global_static_types[g_key]
+            if recorded_type != nil and recorded_type != "" and recorded_type != "nil":
+                g_ty = recorded_type
+        val dest_name = "%l{dest_id}"
+        self.local_types[dest_id] = g_ty
+        self.value_types[dest_name] = g_ty
+        self.defined_locals[dest_id] = true
+        if g_ty == "ptr":
+            self.ptr_locals[dest_id] = true
+        self.builder.emit_load(dest_name, g_ty, g_name)
+        if bootstrap_debug:
+            print "[mir-to-llvm] load-global:emit index={index} type={g_ty}"
+
     me translate_store_global(symbol: SymbolId, value: MirOperand):
         val g_key = self.global_static_key(symbol.id)
         val g_name = self.global_static_names.get(g_key) ?? "@g_undeclared_{symbol.id}"
@@ -1961,3 +2005,42 @@ impl MirTextCodegen for MirToLlvm:
         val raw_value_val = self.translate_operand(value)
         val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), g_ty)
         self.builder.emit_store(g_ty, value_val, g_name)
+
+    me translate_store_global_at(instructions: [MirInst], index: i64):
+        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        if bootstrap_debug:
+            print "[mir-to-llvm] store-global:entry index={index}"
+        val inst = instructions[index]
+        val symbol_id = inst.bootstrap_store_global_symbol_id()
+        val value_kind = inst.bootstrap_store_global_value_kind()
+        if bootstrap_debug:
+            print "[mir-to-llvm] store-global:scalar index={index} symbol={symbol_id} kind={value_kind}"
+        val g_key = self.global_static_key(symbol_id)
+        var g_name = "@g_undeclared_{symbol_id}"
+        if self.global_static_names.has(g_key):
+            val recorded_name = self.global_static_names[g_key]
+            if recorded_name != nil and recorded_name != "":
+                g_name = recorded_name
+        var g_ty = self.native_int_type
+        if self.global_static_types.has(g_key):
+            val recorded_type = self.global_static_types[g_key]
+            if recorded_type != nil and recorded_type != "" and recorded_type != "nil":
+                g_ty = recorded_type
+        var value_text = "0"
+        if value_kind == 1 or value_kind == 2:
+            val local_id = inst.bootstrap_store_global_value_local_id()
+            value_text = "%l{local_id}"
+        elif value_kind == 3:
+            val const_kind = inst.bootstrap_store_global_const_kind()
+            val const_text = inst.bootstrap_store_global_const_scalar_text()
+            value_text = const_text
+            if const_kind == 4:
+                val global_name = self.add_string_global(const_text)
+                val str_len = const_text.len() + 1
+                val nit = self.native_int_type
+                value_text = "getelementptr inbounds ([{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0)"
+        if bootstrap_debug:
+            print "[mir-to-llvm] store-global:value index={index} type={g_ty} value={value_text}"
+        self.builder.emit_store(g_ty, value_text, g_name)
+        if bootstrap_debug:
+            print "[mir-to-llvm] store-global:emit index={index} type={g_ty}"

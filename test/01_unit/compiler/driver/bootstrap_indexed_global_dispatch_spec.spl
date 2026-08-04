@@ -1,0 +1,54 @@
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instruction_graph.{MirInst}
+use compiler.mir.mir_instruction_support.{mir_operand_const_int, mir_operand_copy}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_types.{LocalId}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "bootstrap indexed global dispatch":
+    it "projects the exact initializer order and global payloads to scalars":
+        val symbol = SymbolId(id: 41)
+        val call_inst = MirInst(
+            kind: MirInstKind.Call(Some(LocalId(id: 7)), mir_operand_const_int(0), []),
+            span: nil
+        )
+        val store_inst = MirInst(
+            kind: MirInstKind.StoreGlobal(symbol, mir_operand_copy(LocalId(id: 7))),
+            span: nil
+        )
+        val load_inst = MirInst(
+            kind: MirInstKind.LoadGlobal(LocalId(id: 8), symbol),
+            span: nil
+        )
+        val initializer: [MirInst] = [call_inst, store_inst]
+        match initializer[0].kind:
+            case MirInstKind.Call(_, _, _): expect(true).to_equal(true)
+            case _: expect(false).to_equal(true)
+        expect(initializer[1].bootstrap_store_global_symbol_id()).to_equal(41)
+        expect(initializer[1].bootstrap_store_global_value_kind()).to_equal(1)
+        expect(initializer[1].bootstrap_store_global_value_local_id()).to_equal(7)
+        expect(load_inst.bootstrap_load_global_dest_id()).to_equal(8)
+        expect(load_inst.bootstrap_load_global_symbol_id()).to_equal(41)
+
+    it "routes globals through indexed scalar handlers":
+        val codegen = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+        ) ?? ""
+        val owner = rt_file_read_text(
+            "src/compiler/50.mir/mir_instruction_graph.spl"
+        ) ?? ""
+
+        expect(codegen).to_contain("self.translate_store_global_at(instructions, index)")
+        expect(codegen).to_contain("self.translate_load_global_at(instructions, index)")
+        expect(codegen).to_contain("me translate_store_global_at(instructions: [MirInst], index: i64):")
+        expect(codegen).to_contain("me translate_load_global_at(instructions: [MirInst], index: i64):")
+        expect(codegen).to_contain("value_text = \"%l" + "{" + "local_id}\"")
+        expect(codegen).to_contain("self.builder.emit_store(g_ty, value_text, g_name)")
+        expect(codegen).to_contain("self.builder.emit_load(dest_name, g_ty, g_name)")
+        expect(codegen).to_contain("[mir-to-llvm] store-global:scalar")
+        expect(codegen).to_contain("[mir-to-llvm] store-global:emit")
+        expect(codegen).to_contain("[mir-to-llvm] load-global:scalar")
+        expect(codegen).to_contain("[mir-to-llvm] load-global:emit")
+        expect(owner).to_contain("fn bootstrap_store_global_const_scalar_text() -> text:")
+        expect(owner).to_contain("fn bootstrap_load_global_symbol_id() -> i64:")
