@@ -106,6 +106,27 @@ interface names, manual `step("...")` flow helper names, and setup/checker
 helper names; placeholder helpers must fail explicitly (`assert(false)` or
 `fail(...)`).
 
+Kimi K3 is also available as a SPipe sidecar through either Claude Code or the
+native Kimi Code harness. Treat the Kimi Code subscription and Moonshot Open
+Platform as separate providers: subscription keys use
+`api.kimi.com/coding/` + Claude model `k3[1m]` (native model `k3`), while
+`platform.kimi.ai` keys use `api.moonshot.ai/anthropic` +
+`kimi-k3[1m]`. Never diagnose a cross-platform `401` as a model outage. Use
+`kimi --yolo` for ordinary auto-approved tool work and `kimi --auto` only when
+the lane explicitly authorizes fully autonomous decisions.
+
+Before counting a Kimi sidecar as SPipe capacity, run one bounded prompt probe
+and wait for every required MCP server to report `connected`; `connecting` is
+not evidence. Kimi auto-discovers project `.mcp.json`. On startup failure,
+check stale absolute checkout paths first. For the current Simple LSP MCP source
+lane, preserve `bin/mcp_stdio_bridge.js -- bin/simple run
+src/app/simple_lsp_mcp/main.spl`; omitting `run` makes the app parse its source
+path as an option, while forcing the cached native artifact exposes the known
+`tools/call` argument-extraction failure. A tmux `extended-keys` warning affects
+modified Enter combinations, not ordinary Enter; fix the tmux server instead
+of treating it as an MCP/model failure. Full setup and verification commands:
+[Kimi K3 provider setup](../../doc/07_guide/infra/model_providers/kimi.md).
+
 Before accepting done, enumerate every required host/capability row. Each row
 needs fresh native PASS evidence or an explicit linked TODO and plan naming the
 owner, missing prerequisite, exact resume command, and retained artifacts;

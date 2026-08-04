@@ -162,12 +162,29 @@ separate claim levels.
 
 - **GLM through Claude Code:** run `bin/glm`; flagship/main and subagents use
   `glm-5.2`, while Haiku/background work uses efficient `glm-4.5-air`.
-- **Kimi K3 through Claude Code:** run `bin/k3`; all Claude tiers and subagents
-  map to `kimi-k3[1m]` with a 1M compaction window and max effort.
-- **Kimi native harness:** run `kimi` from `@moonshot-ai/kimi-code`; authenticate
-  with `/login`, select K3 with `/model`, and use its native subagent/MCP flow.
+- **Two Kimi credential systems:** Kimi Code subscription keys come from the
+  Kimi Code Console and use `api.kimi.com`; Moonshot Open Platform keys come
+  from `platform.kimi.ai` and use `api.moonshot.ai`. They are not
+  interchangeable. Select by issuing console, not key prefix.
+- **Kimi Code subscription through Claude Code:** use
+  `https://api.kimi.com/coding/`, model `k3[1m]`, and a 1M context window. The
+  bracketed model spelling is for Claude Code environment variables.
+- **Moonshot Open Platform through Claude Code:** run repo `bin/k3`; all Claude
+  tiers and subagents map to `kimi-k3[1m]` on
+  `https://api.moonshot.ai/anthropic` with a 1M window and max effort.
+- **Kimi native harness:** install `@moonshot-ai/kimi-code`; run `kimi`,
+  `kimi --yolo` for auto-approved ordinary tools, or `kimi --auto` for fully
+  autonomous permissions. Native Kimi Code subscription configuration uses
+  `https://api.kimi.com/coding/v1` and model `k3`.
+- **Kimi MCP lookup:** the native harness auto-discovers project `.mcp.json`.
+  Resolve stale absolute checkout paths first. The Simple LSP MCP source command
+  must include `bin/simple run` and the stdio bridge; a merely `connecting`
+  server is not ready.
+- **tmux warning:** `extended-keys` off affects modified Enter combinations,
+  not ordinary Enter. Use `tmux set -g extended-keys on` and persist the option.
 - **Credentials:** launchers read environment variables or user-private token
-  files. Never put keys in a repo file, shell alias, command history, or wiki.
+  files/configs with mode `600`. Never put keys in a repo file, shell alias,
+  command history, or wiki.
 - **Guides:** `doc/07_guide/infra/model_providers/glm.md` and
   `doc/07_guide/infra/model_providers/kimi.md`.
 
