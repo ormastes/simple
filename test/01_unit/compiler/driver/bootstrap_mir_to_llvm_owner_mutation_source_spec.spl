@@ -1,6 +1,6 @@
-use compiler.mir.mir_instruction_graph.{MirBlock}
-use compiler.mir.mir_instruction_support.{BlockId}
-use compiler.mir.mir_instruction_kinds.{MirTerminator}
+use compiler.mir.mir_instruction_graph.{MirBlock, MirInst}
+use compiler.mir.mir_instruction_support.{BlockId, mir_operand_const_int}
+use compiler.mir.mir_instruction_kinds.{MirInstKind, MirTerminator}
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -161,3 +161,41 @@ describe "bootstrap MIR-to-LLVM owner mutation":
         expect(codegen).to_contain("[mir-to-llvm] block:instruction-after")
         expect(codegen).to_contain("[mir-to-llvm] block:terminator-before")
         expect(codegen).to_contain("[mir-to-llvm] block:terminator-after")
+
+    it "dispatches indexed instructions without a MirInst method parameter":
+        val codegen = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+        ) ?? ""
+
+        expect(codegen).to_contain("val bootstrap_instructions = block.instructions")
+        expect(codegen).to_contain("self.translate_instruction_at(bootstrap_instructions, bootstrap_inst_i)")
+        expect(codegen).to_contain("me translate_instruction_at(instructions: [MirInst], index: i64):")
+        expect(codegen).to_contain("val inst: MirInst = instructions[index]")
+        expect(codegen).to_contain("me mark_instruction_dest_defined_at(instructions: [MirInst], index: i64):")
+        expect(codegen.contains("self.translate_instruction(inst)")).to_equal(false)
+        expect(codegen.contains("me translate_instruction(inst: MirInst)")).to_equal(false)
+        expect(codegen.contains("me mark_instruction_dest_defined(inst: MirInst)")).to_equal(false)
+
+    it "keeps indexed kind and Call dispatch observable":
+        val codegen = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+        ) ?? ""
+
+        expect(codegen).to_contain("[mir-to-llvm] instruction:entry")
+        expect(codegen).to_contain("[mir-to-llvm] instruction:kind")
+        expect(codegen).to_contain("[mir-to-llvm] instruction:const-discriminant")
+        expect(codegen).to_contain("[mir-to-llvm] instruction:copy-discriminant")
+        expect(codegen).to_contain("[mir-to-llvm] instruction:call")
+
+        val call_inst = MirInst(
+            kind: MirInstKind.Call(nil, mir_operand_const_int(0), []),
+            span: nil
+        )
+        val instructions: [MirInst] = [call_inst]
+        val fetched: MirInst = instructions[0]
+        match fetched.kind:
+            case MirInstKind.Call(dest, _, args):
+                expect(dest == nil).to_equal(true)
+                expect(args.len()).to_equal(0)
+            case _:
+                expect(false).to_equal(true)

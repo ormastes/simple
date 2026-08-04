@@ -532,11 +532,12 @@ impl MirTextCodegen for MirToLlvm:
         self.builder.emit_label("bb{bootstrap_block_id}")
         if bootstrap_debug:
             print "[mir-to-llvm] block:label-after bb{bootstrap_block_id}"
+        val bootstrap_instructions = block.instructions
         var bootstrap_inst_i = 0
-        for inst in block.instructions:
+        while bootstrap_inst_i < bootstrap_instructions.len():
             if bootstrap_debug:
                 print "[mir-to-llvm] block:instruction-before bb{bootstrap_block_id} index={bootstrap_inst_i}"
-            self.translate_instruction(inst)
+            self.translate_instruction_at(bootstrap_instructions, bootstrap_inst_i)
             if bootstrap_debug:
                 print "[mir-to-llvm] block:instruction-after bb{bootstrap_block_id} index={bootstrap_inst_i}"
             bootstrap_inst_i = bootstrap_inst_i + 1
@@ -546,9 +547,17 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] block:terminator-after bb{bootstrap_block_id}"
 
-    me translate_instruction(inst: MirInst):
+    me translate_instruction_at(instructions: [MirInst], index: i64):
+        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+        if bootstrap_debug:
+            print "[mir-to-llvm] instruction:entry index={index}"
+        val inst: MirInst = instructions[index]
         val inst_kind = inst.kind
+        if bootstrap_debug:
+            print "[mir-to-llvm] instruction:kind index={index}"
         val const_disc = rt_enum_discriminant(MirInstKind.Const(LocalId(id: 0), MirConstValue.Zero, MirType.i64()))
+        if bootstrap_debug:
+            print "[mir-to-llvm] instruction:const-discriminant index={index}"
         if rt_enum_discriminant(inst_kind) == const_disc:
             val payload = rt_enum_payload(inst_kind)
             val dest: LocalId = rt_tuple_get(payload, 0)
@@ -561,10 +570,12 @@ impl MirTextCodegen for MirToLlvm:
             # `defined_locals` and made `translate_terminator` emit `ret <ty> 0`
             # (2026-08-01). Idempotent, so it is safe alongside the callee's own
             # self-marking; keep it so a future fast path cannot re-open the hole.
-            self.mark_instruction_dest_defined(inst)
+            self.mark_instruction_dest_defined_at(instructions, index)
             return
 
         val copy_disc = rt_enum_discriminant(MirInstKind.Copy(LocalId(id: 0), LocalId(id: 0)))
+        if bootstrap_debug:
+            print "[mir-to-llvm] instruction:copy-discriminant index={index}"
         if rt_enum_discriminant(inst_kind) == copy_disc:
             val payload = rt_enum_payload(inst_kind)
             val dest: LocalId = rt_tuple_get(payload, 0)
@@ -572,7 +583,7 @@ impl MirTextCodegen for MirToLlvm:
             self.translate_copy_move(dest, src, false)
             # Same invariant as the Const fast path above: mirror the trailing
             # bookkeeping of the fall-through dispatch before returning.
-            self.mark_instruction_dest_defined(inst)
+            self.mark_instruction_dest_defined_at(instructions, index)
             return
 
         match inst_kind:
@@ -591,7 +602,10 @@ impl MirTextCodegen for MirToLlvm:
             case SetField(base, field, value): self.translate_set_field(base, field, value)
             case Cast(dest, operand, target): self.translate_cast_dispatch(dest, operand, target)
             case Bitcast(dest, operand, target): self.translate_bitcast(dest, operand, target)
-            case Call(dest, func, args): self.translate_call(dest, func, args)
+            case Call(dest, func, args):
+                if bootstrap_debug:
+                    print "[mir-to-llvm] instruction:call index={index}"
+                self.translate_call(dest, func, args)
             case CallIndirect(dest, ptr, args, sig): self.translate_call_indirect(dest, ptr, args, sig)
             case Intrinsic(dest, name, args): self.translate_intrinsic(dest, name, args)
             case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers):
@@ -662,10 +676,14 @@ impl MirTextCodegen for MirToLlvm:
             case SimdHminF32x4(dest, a): self.translate_simd_horizontal(dest, a, "hmin_f32x4")
             case DebugValue(_, _): ()
             case Nop: ()
-            case _: self.translate_unsupported(inst)
-        self.mark_instruction_dest_defined(inst)
+            # MirTextCodegen's default unsupported hook is a no-op. Keep that
+            # behavior in place so a MirInst aggregate never crosses another
+            # method boundary in the bootstrap translator.
+            case _: ()
+        self.mark_instruction_dest_defined_at(instructions, index)
 
-    me mark_instruction_dest_defined(inst: MirInst):
+    me mark_instruction_dest_defined_at(instructions: [MirInst], index: i64):
+        val inst: MirInst = instructions[index]
         match inst.kind:
             case Copy(dest, _) | Move(dest, _) | BinOp(dest, _, _, _) | CheckedBinOp(dest, _, _, _) | UnaryOp(dest, _, _) | Alloc(dest, _) | Load(dest, _) | LoadGlobal(dest, _) | GetElementPtr(dest, _, _) | Aggregate(dest, _, _) | GetField(dest, _, _) | Cast(dest, _, _) | Bitcast(dest, _, _) | PipeForward(dest, _, _) | Compose(dest, _, _, _) | Parallel(dest, _) | LayerConnect(dest, _, _) | Ref(dest, _, _) | CreatePromise(dest, _, _) | Await(dest, _) | Spawn(dest, _, _) | Receive(dest, _) | GpuSharedAlloc(dest, _, _) | GpuAtomicOp(dest, _, _, _) | GpuAtomicCas(dest, _, _, _):
                 self.defined_locals[self.local_id_value(dest)] = true
@@ -1060,9 +1078,9 @@ impl MirTextCodegen for MirToLlvm:
     me translate_copy_move(dest: LocalId, src: LocalId, is_move: bool):
         val dest_id = self.local_id_value(dest)
         val src_id = self.local_id_value(src)
-        # The Copy fast path in translate_instruction (disc-guarded
+        # The Copy fast path in translate_instruction_at (disc-guarded
         # pre-dispatch) `return`s before the trailing
-        # `mark_instruction_dest_defined(inst)` call ever runs, so a Copy
+        # `mark_instruction_dest_defined_at(...)` call ever runs, so a Copy
         # destination was never recorded in `defined_locals`. Returning such a
         # local (`val y = a + 1` then `return y` / bare tail `y`) then tripped
         # translate_terminator's not-defined zero fallback and emitted
