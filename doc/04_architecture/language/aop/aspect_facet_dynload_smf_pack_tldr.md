@@ -40,8 +40,10 @@ flow:
   source/HIR acquisition, nominal context/contract proof, an opaque descriptor
   lease, checked ordinal method lookup, typed-base indirect-call lowering, and
   HIR-symbol capture rejection, wrapper-aware provenance, and reverse-order
-  cleanup on every currently modeled lexical exit. Lazy I/O, typed load errors,
-  unwind/cancellation cleanup, and executable evidence remain open;
+  cleanup on every currently modeled lexical exit, exact-route injected lazy
+  I/O, and canonical typed acquisition errors. Production port binding, true
+  concurrent single-flight completion, portable unwind/cancellation cleanup,
+  and executable evidence remain open;
   verification is `STATUS: FAIL`.
 - Resolver startup now crosses `85.mdsoc` through
   `ModuleResolverDiscoveryPort.resolve_inputs`; production composition injects

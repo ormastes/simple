@@ -21,7 +21,8 @@ use compiler.mir.mir_instructions.{MirPlace}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.mir.facet_witness_call.{
     FacetAcquisitionContextPlan, TypedFacetAdapterPlan,
-    facet_acquisition_context_plan, facet_contract_metadata_from_hir_interface,
+    facet_acquisition_context_plan, facet_acquisition_runtime_symbol,
+    facet_contract_metadata_from_hir_interface,
     plan_typed_dynamic_facet_adapter, resolve_typed_facet_member,
     lower_typed_facet_member_call
 }
@@ -33,6 +34,7 @@ extern fn rt_dict_contains(dict: i64, key: Any) -> bool
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
 extern fn rt_enum_payload(value: Any) -> i64
+
 extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 
 fn mir_expr_env_get(key: text) -> text:
@@ -312,6 +314,7 @@ impl MirLowering:
             self.error_fatal("E-AF005 facet acquisition contract is not a declared facet interface", Some(base.span))
             return self.builder.emit_const_int(0)
         val interface_ = interface_opt.unwrap()
+        val contract = facet_contract_metadata_from_hir_interface(interface_)
         val concrete_type_id = self.facet_concrete_type_id(base)
         if concrete_type_id == "":
             self.error_fatal("E-AF005 facet acquisition base type is not concrete", Some(base.span))
@@ -344,23 +347,43 @@ impl MirLowering:
         b = self.builder
         val concrete = b.emit_const_str(concrete_type_id)
         val facet_id = b.emit_const_str(interface_.name)
-        val acquired_result = b.emit_call(
-            self.facet_runtime_function(
-                "aspect_execution_context_acquire_facet_descriptor",
-                [self.local_mir_type_of(context_local) ?? MirType.i64(),
-                 MirType(kind: MirTypeKind.Opaque("str")), MirType.i64(),
-                 MirType(kind: MirTypeKind.Opaque("str"))],
-                MirType.i64()),
-            [mir_operand_copy(context_local), mir_operand_copy(concrete),
-             mir_operand_copy(interfaces), mir_operand_copy(facet_id)],
-            MirType.i64())
+        var acquired_result: LocalId? = nil
+        if mode == "try_facet":
+            # Strict no-I/O probe: only the already-published registry path is
+            # legal for try_facet.
+            acquired_result = b.emit_call(
+                self.facet_runtime_function(
+                    facet_acquisition_runtime_symbol(mode),
+                    [self.local_mir_type_of(context_local) ?? MirType.i64(),
+                     MirType(kind: MirTypeKind.Opaque("str")), MirType.i64(),
+                     MirType(kind: MirTypeKind.Opaque("str"))],
+                    MirType.i64()),
+                [mir_operand_copy(context_local), mir_operand_copy(concrete),
+                 mir_operand_copy(interfaces), mir_operand_copy(facet_id)],
+                MirType.i64())
+        else:
+            # Loading forms use the typed lazy boundary. It may activate a
+            # pack and already returns FacetAcquireError on failure.
+            val contract_hash = b.emit_const_str(contract.abi_hash)
+            acquired_result = b.emit_call(
+                self.facet_runtime_function(
+                    facet_acquisition_runtime_symbol(mode),
+                    [self.local_mir_type_of(context_local) ?? MirType.i64(),
+                     MirType(kind: MirTypeKind.Opaque("str")), MirType.i64(),
+                     MirType(kind: MirTypeKind.Opaque("str")),
+                     MirType(kind: MirTypeKind.Opaque("str"))],
+                    MirType.i64()),
+                [mir_operand_copy(context_local), mir_operand_copy(concrete),
+                 mir_operand_copy(interfaces), mir_operand_copy(facet_id),
+                 mir_operand_copy(contract_hash)], MirType.i64())
         self.builder = b
         val acquired = acquired_result ?? LocalId(id: 0)
 
-        # Runtime ABI: Result<Option<Lease>, text>. Source APIs deliberately
-        # expose three distinct shapes, so inspect both wrappers and rebuild
-        # only the form selected by `mode`. The concrete base stays in the
-        # adapter plan and is never packed into either runtime wrapper.
+        # try_facet receives Result<Option<Lease>, text> from the strict probe;
+        # loading forms receive Result<Option<Lease>, FacetAcquireError> from
+        # the typed lazy boundary. Inspect both wrappers and rebuild only the
+        # source shape selected by mode. The concrete base stays in the adapter
+        # plan and is never packed into either runtime wrapper.
         val output = b.new_temp(MirType.i64())
         val lease = b.new_temp(MirType.i64())
         b.emit_const(lease, MirConstValue.Zero, MirType.i64())
@@ -398,7 +421,7 @@ impl MirLowering:
             error_builder.terminate_abort(
                 "try_facet runtime acquisition returned Err")
         else:
-            # facet and require_facet both preserve runtime acquisition errors.
+            # The lazy boundary is already typed; preserve the exact Err.
             error_builder.emit_copy(output, acquired)
             error_builder.terminate_goto(merge_block)
         self.builder = error_builder
@@ -427,11 +450,15 @@ impl MirLowering:
         elif mode == "facet":
             absent_builder.emit_copy(output, acquired)
         else:
-            val absence_message = absent_builder.emit_const_str(
-                "required facet is not bound")
+            val absence_error_result = absent_builder.emit_call(
+                self.facet_runtime_function(
+                    "aspect_facet_acquire_error_required_absent",
+                    [MirType(kind: MirTypeKind.Opaque("str"))], MirType.i64()),
+                [mir_operand_copy(facet_id)], MirType.i64())
+            val absence_error = absence_error_result ?? LocalId(id: 0)
             self.builder = absent_builder
             val required_error = self.facet_enum_wrap_local(
-                "Result", "Err", absence_message)
+                "Result", "Err", absence_error)
             absent_builder = self.builder
             absent_builder.emit_copy(output, required_error)
         absent_builder.terminate_goto(merge_block)
@@ -446,7 +473,6 @@ impl MirLowering:
         some_builder.emit_const(
             acquired_present, MirConstValue.Bool(true), MirType.bool())
         self.builder = some_builder
-        val contract = facet_contract_metadata_from_hir_interface(interface_)
         self.facet_validate_contract_or_release_panic(
             context_local, lease, interface_.name, contract.abi_hash,
             contract.method_names)
@@ -1829,6 +1855,17 @@ impl MirLowering:
         val ret_temp = br2.new_temp(MirType.unit())
         self.builder = br2
         ret_temp
+
+    me reject_unsupported_leased_facet_exit(kind: text, span: Span) -> LocalId?:
+        if not self.has_active_facet_cleanup_entries():
+            return nil
+        self.error_fatal(
+            "E-AF007 leased FacetRef scope cannot contain {kind}: MIR has no portable cleanup edge for this nonlocal exit",
+            Some(span))
+        var b = self.builder
+        val rejected = b.new_temp(MirType.unit())
+        self.builder = b
+        Some(rejected)
 
     me lower_index_expr_from_hir(expr_value: HirExpr) -> LocalId:
         val payload = rt_enum_payload(expr_value.kind)
@@ -3526,6 +3563,19 @@ impl MirLowering:
             case Return(value):
                 self.lower_return_expr(value)
 
+            case Throw(_):
+                if val rejected = self.reject_unsupported_leased_facet_exit(
+                    "throw", expr_value.span):
+                    rejected
+                else:
+                    self.error_fatal(
+                        "unsupported MIR expression: throw has no canonical MIR terminator",
+                        Some(expr_value.span))
+                    var throw_builder = self.builder
+                    val throw_temp = throw_builder.new_temp(MirType.unit())
+                    self.builder = throw_builder
+                    throw_temp
+
             case Break(break_label, break_value):
                 if self.loop_stack.len() > 0:
                     val (loop_continue_block, break_block) = self.loop_stack[self.loop_stack.len() - 1]
@@ -3570,10 +3620,18 @@ impl MirLowering:
 
             # Async/Await expressions
             case Await(future_expr):
-                self.lower_await(future_expr)
+                if val rejected = self.reject_unsupported_leased_facet_exit(
+                    "await/async cancellation", expr_value.span):
+                    rejected
+                else:
+                    self.lower_await(future_expr)
 
             case Yield(value):
-                self.lower_yield(value)
+                if val rejected = self.reject_unsupported_leased_facet_exit(
+                    "yield/async cancellation", expr_value.span):
+                    rejected
+                else:
+                    self.lower_yield(value)
 
             # Unsafe block - lower the body, no special handling
             case UnsafeBlock(body):

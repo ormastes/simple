@@ -55,6 +55,8 @@ describe "typed facet source and HIR ownership":
         var saw_try = false
         var saw_facet = false
         var saw_require = false
+        var facet_error_symbol = -1
+        var require_error_symbol = -1
         for item in hir.functions:
             val function = item[1]
             if function.name != "use_facet": continue
@@ -72,16 +74,18 @@ describe "typed facet source and HIR ownership":
                                         saw_try = true
                                     case ("facet", HirTypeKind.Result(ok, error)):
                                         match (ok.kind, error.kind):
-                                            case (HirTypeKind.Optional(_), HirTypeKind.Str):
+                                            case (HirTypeKind.Optional(_), HirTypeKind.Named(symbol, _)):
+                                                facet_error_symbol = symbol.id
                                                 saw_facet = true
                                             case _:
-                                                fail("facet must be Result<Option<FacetRef<T>>, text>")
+                                                fail("facet must be Result<Option<FacetRef<T>>, FacetAcquireError>")
                                     case ("require_facet", HirTypeKind.Result(ok, error)):
                                         match (ok.kind, error.kind):
-                                            case (HirTypeKind.Named(_, _), HirTypeKind.Str):
+                                            case (HirTypeKind.Named(_, _), HirTypeKind.Named(symbol, _)):
+                                                require_error_symbol = symbol.id
                                                 saw_require = true
                                             case _:
-                                                fail("require_facet must be Result<FacetRef<T>, text>")
+                                                fail("require_facet must be Result<FacetRef<T>, FacetAcquireError>")
                                     case _:
                                         fail("unexpected facet acquisition wrapper type")
                             case _: pass
@@ -89,6 +93,15 @@ describe "typed facet source and HIR ownership":
         if not saw_try: fail("missing typed try_facet HIR")
         if not saw_facet: fail("missing typed facet HIR")
         if not saw_require: fail("missing typed require_facet HIR")
+        if facet_error_symbol != require_error_symbol:
+            fail("facet and require_facet must share one canonical error symbol")
+        if val error_type_symbol = hir.symbols.get_symbol_raw(facet_error_symbol):
+            if error_type_symbol.name != "FacetAcquireError":
+                fail("facet acquisition error must be canonical FacetAcquireError")
+            if (error_type_symbol.defining_module ?? "") != "std.nogc_sync_mut.aop.facet":
+                fail("FacetAcquireError must retain its std.aop owner identity")
+        else:
+            fail("canonical FacetAcquireError symbol must exist")
 
     it "preserves explicit context, typed base, contract, and member provenance":
         val hir = lower_typed_facet_source(

@@ -142,22 +142,26 @@ fn _hir_named_type_symbol(type_: HirType) -> SymbolId?:
 fn _hir_missing_field_type() -> HirType:
     HirType(kind: HirTypeKind.Error, span: Span.empty())
 
-fn facet_acquisition_hir_type(contract: HirType, mode: text, span: Span) -> HirType:
+fn facet_acquisition_hir_type(
+    contract: HirType, error_symbol: SymbolId, mode: text, span: Span
+) -> HirType:
     # FacetRef<T> is compiler-owned surface sugar represented by the exact
     # contract type inside the ordinary Option/Result wrappers. The concrete
     # base remains a separate FacetAcquire operand and is never erased into T.
     val optional_contract = HirType(
         kind: HirTypeKind.Optional(contract), span: span)
+    val acquire_error = HirType(
+        kind: HirTypeKind.Named(error_symbol, []), span: span)
     match mode:
         case "try_facet": optional_contract
         case "facet": HirType(
             kind: HirTypeKind.Result(
                 optional_contract,
-                HirType(kind: HirTypeKind.Str, span: span)),
+                acquire_error),
             span: span)
         case "require_facet": HirType(
             kind: HirTypeKind.Result(
-                contract, HirType(kind: HirTypeKind.Str, span: span)),
+                contract, acquire_error),
             span: span)
         case _: HirType(kind: HirTypeKind.Error, span: span)
 
@@ -532,6 +536,13 @@ impl HirLowering:
                         self.error("E-AF005 unsupported facet acquisition mode", e.span)
                         return HirExpr(kind: HirExprKind.Error, type_: nil, span: e.span)
                     val lowered_contract = self.lower_type(contract)
+                    val error_raw = self.symbols.lookup_qualified_type_raw(
+                        "std.nogc_sync_mut.aop.facet", "FacetAcquireError")
+                    if mode != "try_facet" and error_raw < 0:
+                        self.error(
+                            "E-AF005 canonical std.aop FacetAcquireError type is unavailable",
+                            e.span)
+                        return HirExpr(kind: HirExprKind.Error, type_: nil, span: e.span)
                     return HirExpr(
                         kind: HirExprKind.FacetAcquire(
                             self.lower_hir_expr(context),
@@ -539,7 +550,7 @@ impl HirLowering:
                             lowered_contract,
                             mode),
                         type_: facet_acquisition_hir_type(
-                            lowered_contract, mode, e.span),
+                            lowered_contract, SymbolId(id: error_raw), mode, e.span),
                         span: e.span)
                 case _:
                     pass

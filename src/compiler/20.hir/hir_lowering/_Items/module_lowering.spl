@@ -356,6 +356,46 @@ impl HirLowering:
         registered.interfaces = interfaces
         registered
 
+    me register_canonical_facet_acquire_error_symbols(facets: HirFacetModule):
+        # Facet acquisition syntax has a compiler-defined source contract even
+        # when the consumer did not explicitly import std.aop.  Materialize the
+        # existing std.aop identities under qualified keys; an unrelated local
+        # type with the same short name must never become the acquisition error.
+        if facets.interfaces.len() == 0:
+            return
+        val owner = "std.nogc_sync_mut.aop.facet"
+        var kind_raw = self.symbols.lookup_qualified_type_raw(
+            owner, "FacetAcquireErrorKind")
+        if kind_raw < 0:
+            val kind_symbol = self.symbols.define(
+                "__simple_std_aop_facet_acquire_error_kind",
+                SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false,
+                Some(owner))
+            self.symbols.rename_symbol(kind_symbol, "FacetAcquireErrorKind")
+            self.symbols.bind_qualified_type(
+                owner, "FacetAcquireErrorKind", kind_symbol)
+            kind_raw = kind_symbol.id
+
+        var error_raw = self.symbols.lookup_qualified_type_raw(
+            owner, "FacetAcquireError")
+        if error_raw < 0:
+            val error_symbol = self.symbols.define(
+                "__simple_std_aop_facet_acquire_error",
+                SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false,
+                Some(owner))
+            self.symbols.rename_symbol(error_symbol, "FacetAcquireError")
+            self.symbols.bind_qualified_type(owner, "FacetAcquireError", error_symbol)
+            error_raw = error_symbol.id
+
+        var fields: Dict<text, HirType> = {}
+        fields["kind"] = HirType(
+            kind: HirTypeKind.Named(SymbolId(id: kind_raw), []),
+            span: Span.empty())
+        fields["facet_id"] = HirType(kind: HirTypeKind.Str, span: Span.empty())
+        fields["message"] = HirType(kind: HirTypeKind.Str, span: Span.empty())
+        self.struct_field_types_by_name[
+            owner + ".FacetAcquireError"] = fields
+
     me prescan_composite_field_types(name: text, fields: [ParserField]):
         """Register parser struct/class fields before function lowering."""
         var field_types: Dict<text, HirType> = {}
@@ -1845,6 +1885,7 @@ impl HirLowering:
             # coverage to types/consts for the closure path.
             self.declare_module_symbols(module)
             hir_module_phase_probe("phase3:hir:declare:done {module.name}")
+        self.register_canonical_facet_acquire_error_symbols(static_facets)
         static_facets = self.register_static_facet_interface_symbols(static_facets)
         if bootstrap_diag:
             eprint("[hir-lower] declare:done module={module.name}")

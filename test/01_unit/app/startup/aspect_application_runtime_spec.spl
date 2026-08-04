@@ -26,14 +26,21 @@ use app.startup.aspect_application_runtime.{
     AspectApplicationRuntime,
     prepared_advice_dispatch_context_invoke,
     prepared_advice_dispatch_context_invoke_or_panic,
+    aspect_facet_acquire_error_from_runtime_text,
+    aspect_facet_acquire_error_required_absent,
     aspect_execution_context_acquire_facet_descriptor,
+    aspect_execution_context_acquire_or_activate_facet_descriptor,
     aspect_execution_context_validate_facet_descriptor_contract,
     aspect_execution_context_facet_method_address,
     aspect_execution_context_release_facet_descriptor,
     aspect_execution_context_release_facet_descriptor_or_panic
 }
+use app.startup.aspect_pack_io_port.{
+    AspectPackIoRequest, AspectPackIoPayload, AspectPackIoPort
+}
 use os.smf.dynsmf_session.{DynSmfSession, DynSmfPolicy, dynsmf_session_new}
 use os.smf.smf_generation.{LifecycleManager}
+use std.aop.facet.{FacetAcquireErrorKind}
 use test.fixtures.aspect_facet.runtime_fixture.{facet_runtime_fixture_smf}
 
 fn app_resolved_facet_descriptor(
@@ -196,6 +203,31 @@ fn app_execution_context_request(id: text) -> AspectActivationRequest:
     AspectActivationRequest(
         aspect_id: "fixture.debug", request_id: id,
         catalog_generation: 9)
+
+fn app_execution_context_exact_route_load(
+    request: AspectPackIoRequest
+) -> Result<AspectPackIoPayload, text>:
+    if request.aspect_id != "fixture.debug":
+        return Err("fixture received wrong aspect id")
+    if request.pack_path != "aspects/execution-context-pack.sfm":
+        return Err("fixture received non-catalog pack path")
+    val expected = app_execution_context_key()
+    if (request.provider_key.pack_id != expected.pack_id or
+        request.provider_key.pack_digest != expected.pack_digest or
+        request.provider_key.catalog_generation != expected.catalog_generation or
+        request.provider_key.target != expected.target or
+        request.provider_key.variant_fingerprint != expected.variant_fingerprint or
+        request.provider_key.runtime_abi != expected.runtime_abi or
+        request.provider_key.core_public_abi_hash != expected.core_public_abi_hash or
+        request.provider_key.core_layout_abi_hash != expected.core_layout_abi_hash):
+        return Err("fixture received wrong exact provider identity")
+    Ok(AspectPackIoPayload(
+        pack_bytes: app_execution_context_pack(), signature: []))
+
+fn app_execution_context_pack_io() -> AspectPackIoPort:
+    AspectPackIoPort(
+        name: "fixture-exact-route-io",
+        load_exact_route_fn: app_execution_context_exact_route_load)
 
 fn app_aspect_key() -> AspectPackProviderKey:
     val digest = sha256_u8_hex(app_aspect_smf())
@@ -380,6 +412,82 @@ describe "Application aspect runtime policy owner":
 
         val compatible_facade: AspectApplicationRuntime = first
         expect(compatible_facade.advice_binding_counters().dispatch_attempts).to_equal(2)
+
+    it "loads a lazy facet only through its injected exact catalog route":
+        val runtime = AspectApplicationRuntime.create_with_pack_io(
+            app_execution_context_catalog(), app_aspect_session(),
+            LifecycleManager.new_manager(), AspectPackTrustPolicy.ordinary_unsigned(),
+            app_execution_context_pack_io(), 2, 2, 2).unwrap()
+
+        val acquired = aspect_execution_context_acquire_or_activate_facet_descriptor(
+            runtime, "fixture.Cache", [], "Debuggable",
+            "fixture-facet-abi-v1").unwrap().unwrap()
+        if not runtime.coordinator.published.has("fixture.debug"):
+            fail("lazy exact-route activation did not publish fixture.debug")
+        expect(runtime.provider_cache.index_count()).to_equal(1)
+        expect(aspect_execution_context_facet_method_address(
+            runtime, acquired, 0, "summary").unwrap()).to_be_greater_than(0)
+        expect(runtime.published_generation_pin_count("fixture.debug").unwrap()).to_equal(1)
+
+        # Already-active acquisition is resolved before the port and activation
+        # transaction; it only acquires one additional exact generation lease.
+        val repeated = aspect_execution_context_acquire_or_activate_facet_descriptor(
+            runtime, "fixture.Cache", [], "Debuggable",
+            "fixture-facet-abi-v1").unwrap().unwrap()
+        expect(runtime.provider_cache.index_count()).to_equal(1)
+        expect(runtime.published_generation_pin_count("fixture.debug").unwrap()).to_equal(2)
+        aspect_execution_context_release_facet_descriptor(runtime, repeated).unwrap()
+        aspect_execution_context_release_facet_descriptor(runtime, acquired).unwrap()
+        expect(runtime.published_generation_pin_count("fixture.debug").unwrap()).to_equal(0)
+
+    it "fails closed without an IO owner and clears its canonical reservation":
+        val runtime = AspectApplicationRuntime.create(
+            app_execution_context_catalog(), app_aspect_session(),
+            LifecycleManager.new_manager(), AspectPackTrustPolicy.ordinary_unsigned(),
+            2, 2, 2).unwrap()
+        val failed = aspect_execution_context_acquire_or_activate_facet_descriptor(
+            runtime, "fixture.Cache", [], "Debuggable",
+            "fixture-facet-abi-v1")
+        val failure = failed.unwrap_err()
+        if failure.kind != FacetAcquireErrorKind.ActivationFailed:
+            fail("missing I/O owner did not return ActivationFailed")
+        expect(failure.message).to_contain("no application aspect-pack I/O owner")
+        expect(runtime.coordinator.in_flight.keys().len()).to_equal(0)
+        expect(runtime.provider_cache.index_count()).to_equal(0)
+
+    it "coalesces an existing canonical reservation before lazy pack IO":
+        val runtime = AspectApplicationRuntime.create_with_pack_io(
+            app_execution_context_catalog(), app_aspect_session(),
+            LifecycleManager.new_manager(), AspectPackTrustPolicy.ordinary_unsigned(),
+            app_execution_context_pack_io(), 2, 2, 2).unwrap()
+        runtime.coordinator = runtime.coordinator.reserve(
+            app_execution_context_request("existing-owner")).unwrap()
+
+        val follower = aspect_execution_context_acquire_or_activate_facet_descriptor(
+            runtime, "fixture.Cache", [], "Debuggable",
+            "fixture-facet-abi-v1")
+        expect(follower.unwrap_err().message).to_contain("already in flight")
+        expect(runtime.provider_cache.index_count()).to_equal(0)
+        expect(runtime.coordinator.in_flight.keys().len()).to_equal(1)
+
+    it "returns typed absence without IO when no exact lazy route matches":
+        val runtime = AspectApplicationRuntime.create_with_pack_io(
+            app_execution_context_catalog(), app_aspect_session(),
+            LifecycleManager.new_manager(), AspectPackTrustPolicy.ordinary_unsigned(),
+            app_execution_context_pack_io(), 2, 2, 2).unwrap()
+        val absent = aspect_execution_context_acquire_or_activate_facet_descriptor(
+            runtime, "fixture.Cache", [], "Debuggable", "wrong-contract")
+        expect(absent.unwrap()).to_be_nil()
+        expect(runtime.provider_cache.index_count()).to_equal(0)
+        expect(runtime.coordinator.in_flight.keys().len()).to_equal(0)
+
+        val mapped = aspect_facet_acquire_error_from_runtime_text(
+            "Debuggable", "E-APACK003 bad pack")
+        if mapped.kind != FacetAcquireErrorKind.ActivationFailed:
+            fail("runtime text bridge did not return ActivationFailed")
+        val required = aspect_facet_acquire_error_required_absent("Debuggable")
+        if required.kind != FacetAcquireErrorKind.RequiredFacetAbsent:
+            fail("required absence bridge did not return RequiredFacetAbsent")
 
     it "rejects a provider whose core ABI identity differs from the catalog":
         val runtime = AspectApplicationRuntime.create(
@@ -633,6 +741,9 @@ describe "Application aspect runtime policy owner":
             "security.audit").unwrap_err()).to_contain("not published")
         runtime.release_facet_generation_lease(lease).unwrap()
         expect(runtime.unload_published_aspect("security.audit", loader).unwrap()).to_equal("unloaded")
-        expect(runtime.coordinator.published.has("security.audit")).to_be(false)
-        expect(runtime.provider_cache.has_module(module_key)).to_be(false)
-        expect(runtime.provider_cache.has_provider(provider_key)).to_be(false)
+        if runtime.coordinator.published.has("security.audit"):
+            fail("unloaded aspect publication remains visible")
+        if runtime.provider_cache.has_module(module_key):
+            fail("unloaded aspect module cache entry remains visible")
+        if runtime.provider_cache.has_provider(provider_key):
+            fail("unloaded aspect provider cache entry remains visible")

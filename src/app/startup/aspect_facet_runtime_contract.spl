@@ -1,0 +1,154 @@
+# Pure application contracts for dynamic facet routing and typed failures.
+
+use compiler.loader.loader.aspect_catalog.{
+    AspectBindingSummary, AspectCatalogEntry, AspectCatalog
+}
+use compiler.loader.loader.aspect_pack_provider.{
+    AspectPackProviderKey, AspectPackTrustProfile, AspectPackTrustPolicy
+}
+use compiler.loader.loader.facet_binding_registry.{FacetBindingRecord}
+use compiler.common.structural_contracts.facet_artifact.{
+    FACET_WITNESS_DESCRIPTOR_VERSION, FacetWitnessDescriptorV1
+}
+use std.aop.facet.{
+    FacetGenerationLease, FacetAcquireErrorKind, FacetAcquireError
+}
+
+enum AspectApplicationPhase:
+    Startup
+    Operational
+
+enum AspectApplicationOperation:
+    LazyIo
+    DynamicAttach
+    Unload
+    Patch
+
+class PublishedFacetDescriptorLease:
+    aspect_id: text
+    binding_id: text
+    facet_interface_id: text
+    facet_contract_abi_hash: text
+    witness_descriptor: FacetWitnessDescriptorV1
+    generation_lease: FacetGenerationLease
+
+fn aspect_application_is_mission(policy: AspectPackTrustPolicy) -> bool:
+    match policy.profile:
+        case AspectPackTrustProfile.MissionRequireSignature: true
+        case _: false
+
+fn aspect_application_is_operational(phase: AspectApplicationPhase) -> bool:
+    match phase:
+        case AspectApplicationPhase.Operational: true
+        case AspectApplicationPhase.Startup: false
+
+fn aspect_application_mission_catalog_valid(catalog: AspectCatalog) -> Result<(), text>:
+    for entry in catalog.entries:
+        if entry.activation_policy != "startup" and entry.activation_policy != "excluded":
+            return Err("E-APACK008 mission profile permits only static, startup, or excluded aspects")
+    Ok(())
+
+fn aspect_published_facet_descriptor_validate(
+    record: FacetBindingRecord
+) -> Result<(), text>:
+    val descriptor = record.witness_descriptor
+    if descriptor.descriptor_version != FACET_WITNESS_DESCRIPTOR_VERSION:
+        return Err("E-AF002 published facet descriptor version is unsupported")
+    if (descriptor.owner_id != record.witness_owner_id or
+        descriptor.descriptor_symbol != record.witness_symbol or
+        descriptor.facet_contract_abi_hash != record.facet_contract_abi_hash):
+        return Err("E-AF002 published facet descriptor no longer matches its binding")
+    if descriptor.method_entries.len() == 0:
+        return Err("E-AF002 published facet descriptor has no resolved methods")
+    var method_names: [text] = []
+    for method in descriptor.method_entries:
+        if (method.method_name == "" or method.method_symbol == "" or
+            method.resolved_address <= 0):
+            return Err("E-AF002 published facet descriptor contains an unresolved method")
+        if method_names.contains(method.method_name):
+            return Err("E-AF002 published facet descriptor contains a duplicate method")
+        method_names.push(method.method_name)
+    Ok(())
+
+fn aspect_facet_acquire_error_from_runtime_text(
+    facet_id: text, message: text
+) -> FacetAcquireError:
+    FacetAcquireError(
+        kind: FacetAcquireErrorKind.ActivationFailed,
+        facet_id: facet_id,
+        message: message)
+
+fn aspect_facet_acquire_error_required_absent(facet_id: text) -> FacetAcquireError:
+    FacetAcquireError(
+        kind: FacetAcquireErrorKind.RequiredFacetAbsent,
+        facet_id: facet_id,
+        message: "required facet is not bound")
+
+fn aspect_facet_acquire_error_activation_denied(
+    facet_id: text, message: text
+) -> FacetAcquireError:
+    FacetAcquireError(
+        kind: FacetAcquireErrorKind.ActivationDenied,
+        facet_id: facet_id,
+        message: message)
+
+fn aspect_application_provider_key(
+    entry: AspectCatalogEntry, catalog_generation: i64
+) -> AspectPackProviderKey:
+    AspectPackProviderKey(
+        pack_id: entry.pack_id,
+        pack_digest: entry.pack_digest,
+        catalog_generation: catalog_generation,
+        target: entry.target,
+        variant_fingerprint: entry.variant_fingerprint,
+        runtime_abi: entry.runtime_abi,
+        core_public_abi_hash: entry.core_public_abi_hash,
+        core_layout_abi_hash: entry.core_layout_abi_hash)
+
+fn aspect_application_binding_matches_request(
+    summary: AspectBindingSummary,
+    concrete_type_id: text,
+    implemented_business_interfaces: [text],
+    facet_interface_id: text,
+    facet_contract_abi_hash: text
+) -> bool:
+    if (summary.facet_interface_id != facet_interface_id or
+        summary.facet_contract_abi_hash != facet_contract_abi_hash):
+        return false
+    if summary.concrete_type_id != "":
+        return summary.concrete_type_id == concrete_type_id
+    implemented_business_interfaces.contains(summary.business_interface_id)
+
+fn aspect_application_lazy_facet_route(
+    catalog: AspectCatalog,
+    concrete_type_id: text,
+    implemented_business_interfaces: [text],
+    facet_interface_id: text,
+    facet_contract_abi_hash: text
+) -> Result<AspectCatalogEntry?, text>:
+    if concrete_type_id == "" or facet_interface_id == "" or facet_contract_abi_hash == "":
+        return Err("E-AF002 lazy facet route identity is incomplete")
+    var selected: AspectCatalogEntry? = nil
+    var match_count: i64 = 0
+    for entry in catalog.entries:
+        if entry.activation_policy != "lazy_facet":
+            continue
+        for summary in entry.binding_summaries:
+            if aspect_application_binding_matches_request(
+                summary, concrete_type_id, implemented_business_interfaces,
+                facet_interface_id, facet_contract_abi_hash):
+                selected = Some(entry)
+                match_count = match_count + 1
+    if match_count > 1:
+        return Err("E-AF003 ambiguous lazy facet catalog route: {facet_interface_id}")
+    Ok(selected)
+
+export AspectApplicationPhase, AspectApplicationOperation
+export PublishedFacetDescriptorLease
+export aspect_application_is_mission, aspect_application_is_operational
+export aspect_application_mission_catalog_valid
+export aspect_published_facet_descriptor_validate
+export aspect_facet_acquire_error_from_runtime_text
+export aspect_facet_acquire_error_required_absent
+export aspect_facet_acquire_error_activation_denied
+export aspect_application_provider_key, aspect_application_lazy_facet_route

@@ -541,10 +541,10 @@ Required dynamic APIs:
 context.try_facet<T>(obj) -> Option<FacetRef<T>>
 # Never performs I/O. Returns only an already-bound facet.
 
-context.facet<T>(obj) -> Result<Option<FacetRef<T>>, FacetLoadError>
+context.facet<T>(obj) -> Result<Option<FacetRef<T>>, FacetAcquireError>
 # May load an aspect when policy is lazy_facet.
 
-context.require_facet<T>(obj) -> Result<FacetRef<T>, FacetLoadError>
+context.require_facet<T>(obj) -> Result<FacetRef<T>, FacetAcquireError>
 # May load; absence is an error.
 
 aspect.load(name: AspectId) -> Result<AspectHandle, AspectLoadError>
@@ -2379,8 +2379,13 @@ capture checks, and typed-base indirect dispatch through an opaque lease and
 context-first checked method accessor. The compiler now preserves the three
 documented wrapper shapes, installs adapters only for successful acquisition,
 and emits reverse-order release for fallthrough, return, `?`, loop transfer,
-and explicit/generated panic paths. Lazy pack loading is not yet connected:
-`facet` and `require_facet` currently query only published bindings and expose
-`text` errors rather than `FacetLoadError`. Callee/foreign unwind, `throw`,
-async cancellation, and language-sealed opacity for the exported lease class
-remain unproven or unsupported.
+and explicit/generated panic paths. Lazy pack loading is now connected through
+an injected application-owned exact-route I/O port: `try_facet` retains the
+no-I/O published-binding probe, while `facet` and `require_facet` resolve a
+catalogued `lazy_facet` route and return canonical `std.aop.FacetAcquireError`.
+The embedding application still must bind deployed-image and detached-signature
+storage policy; no guessed sidecar convention is permitted. True multithreaded
+single-flight waiting/shared completion, portable callee/foreign unwind,
+language-sealed opacity for the exported lease class, and executable evidence
+remain open. `throw`, `await`, `yield`, and identifiable unspecified-unwind
+extern calls now fail closed with E-AF007 while a lease may be live.

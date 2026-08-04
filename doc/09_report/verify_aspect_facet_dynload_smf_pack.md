@@ -219,9 +219,11 @@ exact nominal context/contract proof, canonical ordinal/signature resolution,
 checked context-first method-address lookup, typed-base indirect-call lowering,
 and HIR-symbol lambda/async capture rejection. Wrapper-aware adapter provenance
 and reverse-order cleanup now cover every currently modeled lexical exit.
-Release/merge remains blocked by lazy pack I/O, typed `FacetLoadError`,
-callee/foreign unwind, `throw`, async cancellation, language-sealed lease
-opacity, the self-hosted runtime crash,
+Exact-route lazy activation and canonical `FacetAcquireError` are now wired;
+unsupported leased nonlocal exits fail closed with E-AF007. Release/merge
+remains blocked by production image/signature port binding, true multithreaded
+single-flight completion, indirect/imported and backend unwind support,
+language-sealed lease opacity, the self-hosted runtime crash,
 missing generated-manual/runtime evidence, prepared-advice backend dispatch,
 user-facing facet-call sugar, and absent NFR measurements. The WIP feature bookmark may
 be committed/rebased/pushed for collaboration; no version bump, main push, tag,

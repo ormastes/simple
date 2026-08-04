@@ -9,7 +9,6 @@ use compiler.loader.loader.aspect_catalog.{AspectCatalog}
 use compiler.loader.loader.aspect_pack_provider.{
     AspectPackProviderKey,
     AspectPackProvider,
-    AspectPackTrustProfile,
     AspectPackTrustPolicy,
     AspectPackProviderCache
 }
@@ -26,8 +25,7 @@ use compiler.loader.loader.facet_binding_registry.{
     facet_witness_method_entry
 }
 use compiler.common.structural_contracts.facet_artifact.{
-    FACET_WITNESS_DESCRIPTOR_VERSION,
-    FacetWitnessMethodEntry, FacetWitnessDescriptorV1
+    FACET_WITNESS_DESCRIPTOR_VERSION, FacetWitnessMethodEntry
 }
 use compiler.loader.loader.advice_binding_registry.{
     AdviceBindingRecord, AdviceBindingCounters, AdviceDisabledPathFootprint,
@@ -35,30 +33,23 @@ use compiler.loader.loader.advice_binding_registry.{
     advice_disabled_path_footprint, advice_dispatch_projection_invalidate,
     advice_dispatch_projection as loader_advice_dispatch_projection
 }
-use os.smf.dynsmf_session.{DynSmfSession}
+use os.smf.dynsmf_session.{DynSmfSession, dynsmf_id_disabled}
 use os.smf.smf_generation.{GenerationToken, LifecycleManager}
-use std.aop.facet.{FacetGenerationLease}
-
-enum AspectApplicationPhase:
-    Startup
-    Operational
-
-enum AspectApplicationOperation:
-    LazyIo
-    DynamicAttach
-    Unload
-    Patch
-
-# Whole-descriptor acquisition returned to compiler-generated private typed
-# adapters. The application owns the lease and descriptor; the compiler keeps
-# the concrete base operand separately and supplies no caller-created view.
-class PublishedFacetDescriptorLease:
-    aspect_id: text
-    binding_id: text
-    facet_interface_id: text
-    facet_contract_abi_hash: text
-    witness_descriptor: FacetWitnessDescriptorV1
-    generation_lease: FacetGenerationLease
+use std.aop.facet.{FacetGenerationLease, FacetAcquireError}
+use app.startup.aspect_pack_io_port.{
+    AspectPackIoRequest, AspectPackIoPort, aspect_pack_io_port_unavailable
+}
+use app.startup.aspect_facet_runtime_contract.{
+    AspectApplicationPhase, AspectApplicationOperation,
+    PublishedFacetDescriptorLease,
+    aspect_application_is_mission, aspect_application_is_operational,
+    aspect_application_mission_catalog_valid,
+    aspect_published_facet_descriptor_validate,
+    aspect_facet_acquire_error_from_runtime_text,
+    aspect_facet_acquire_error_required_absent,
+    aspect_facet_acquire_error_activation_denied,
+    aspect_application_provider_key, aspect_application_lazy_facet_route
+}
 
 # Stable application-owned reference capsule. The coordinator is the canonical
 # aggregate owner of lifecycle and facet/advice publication state; the loader
@@ -70,49 +61,13 @@ class AspectExecutionContext:
     provider_cache: AspectPackProviderCache
     coordinator: AspectActivationCoordinator
     loader: ModuleLoader
+    pack_io: AspectPackIoPort
+    next_lazy_request_id: i64
     phase: AspectApplicationPhase
 
 # Compatibility facade: existing constructors, methods, and public fields keep
 # the AspectApplicationRuntime spelling while sharing the stable context.
 type AspectApplicationRuntime = AspectExecutionContext
-
-fn aspect_application_is_mission(policy: AspectPackTrustPolicy) -> bool:
-    match policy.profile:
-        case AspectPackTrustProfile.MissionRequireSignature: true
-        case _: false
-
-fn aspect_application_is_operational(phase: AspectApplicationPhase) -> bool:
-    match phase:
-        case AspectApplicationPhase.Operational: true
-        case AspectApplicationPhase.Startup: false
-
-fn aspect_application_mission_catalog_valid(catalog: AspectCatalog) -> Result<(), text>:
-    for entry in catalog.entries:
-        if entry.activation_policy != "startup" and entry.activation_policy != "excluded":
-            return Err("E-APACK008 mission profile permits only static, startup, or excluded aspects")
-    Ok(())
-
-fn aspect_published_facet_descriptor_validate(
-    record: FacetBindingRecord
-) -> Result<(), text>:
-    val descriptor = record.witness_descriptor
-    if descriptor.descriptor_version != FACET_WITNESS_DESCRIPTOR_VERSION:
-        return Err("E-AF002 published facet descriptor version is unsupported")
-    if (descriptor.owner_id != record.witness_owner_id or
-        descriptor.descriptor_symbol != record.witness_symbol or
-        descriptor.facet_contract_abi_hash != record.facet_contract_abi_hash):
-        return Err("E-AF002 published facet descriptor no longer matches its binding")
-    if descriptor.method_entries.len() == 0:
-        return Err("E-AF002 published facet descriptor has no resolved methods")
-    var method_names: [text] = []
-    for method in descriptor.method_entries:
-        if (method.method_name == "" or method.method_symbol == "" or
-            method.resolved_address <= 0):
-            return Err("E-AF002 published facet descriptor contains an unresolved method")
-        if method_names.contains(method.method_name):
-            return Err("E-AF002 published facet descriptor contains a duplicate method")
-        method_names.push(method.method_name)
-    Ok(())
 
 fn aspect_application_startup_complete(runtime: AspectApplicationRuntime) -> Result<(), text>:
     for entry in runtime.catalog.entries:
@@ -142,6 +97,8 @@ impl AspectExecutionContext:
             provider_cache: cache,
             coordinator: coordinator,
             loader: moduleloader_with_defaults(),
+            pack_io: aspect_pack_io_port_unavailable(),
+            next_lazy_request_id: 1,
             phase: AspectApplicationPhase.Startup
         ))
 
@@ -157,6 +114,41 @@ impl AspectExecutionContext:
     ) -> Result<AspectExecutionContext, text>:
         val context = AspectExecutionContext.create(
             catalog, dynsmf_session, lifecycle, trust_policy,
+            index_capacity, chunk_capacity, negative_capacity)?
+        context.loader = loader
+        Ok(context)
+
+    static fn create_with_pack_io(
+        catalog: AspectCatalog,
+        dynsmf_session: DynSmfSession,
+        lifecycle: LifecycleManager,
+        trust_policy: AspectPackTrustPolicy,
+        pack_io: AspectPackIoPort,
+        index_capacity: i64,
+        chunk_capacity: i64,
+        negative_capacity: i64
+    ) -> Result<AspectExecutionContext, text>:
+        if pack_io.name == "":
+            return Err("E-APACK008 aspect-pack I/O port identity is empty")
+        val context = AspectExecutionContext.create(
+            catalog, dynsmf_session, lifecycle, trust_policy,
+            index_capacity, chunk_capacity, negative_capacity)?
+        context.pack_io = pack_io
+        Ok(context)
+
+    static fn create_with_loader_and_pack_io(
+        catalog: AspectCatalog,
+        dynsmf_session: DynSmfSession,
+        lifecycle: LifecycleManager,
+        trust_policy: AspectPackTrustPolicy,
+        loader: ModuleLoader,
+        pack_io: AspectPackIoPort,
+        index_capacity: i64,
+        chunk_capacity: i64,
+        negative_capacity: i64
+    ) -> Result<AspectExecutionContext, text>:
+        val context = AspectExecutionContext.create_with_pack_io(
+            catalog, dynsmf_session, lifecycle, trust_policy, pack_io,
             index_capacity, chunk_capacity, negative_capacity)?
         context.loader = loader
         Ok(context)
@@ -279,6 +271,103 @@ impl AspectExecutionContext:
         self.coordinator = activation.coordinator
         self.loader = loader
         activation
+
+    me fn cancel_lazy_activation_request(request_id: text):
+        var in_flight = self.coordinator.in_flight
+        for key in self.coordinator.in_flight.keys():
+            if self.coordinator.in_flight[key] == request_id:
+                in_flight = in_flight.remove(key)
+        self.coordinator.in_flight = in_flight
+
+    # Canonical lazy-facet path. Route identity comes only from AspectCatalog;
+    # the injected application owner supplies bytes/signature for that exact
+    # deployed-image-relative route. The coordinator reservation is claimed
+    # before I/O so a serialized/reentrant follower performs no duplicate read.
+    me fn acquire_or_activate_facet_descriptor(
+        concrete_type_id: text,
+        implemented_business_interfaces: [text],
+        facet_interface_id: text,
+        facet_contract_abi_hash: text
+    ) -> Result<PublishedFacetDescriptorLease?, FacetAcquireError>:
+        val existing = self.acquire_published_facet_descriptor(
+            concrete_type_id, implemented_business_interfaces,
+            facet_interface_id)
+        if existing.is_err():
+            return Err(aspect_facet_acquire_error_from_runtime_text(
+                facet_interface_id, existing.unwrap_err()))
+        if existing.unwrap() != nil:
+            return Ok(existing.unwrap())
+
+        val route = aspect_application_lazy_facet_route(
+            self.catalog, concrete_type_id, implemented_business_interfaces,
+            facet_interface_id, facet_contract_abi_hash)
+        if route.is_err():
+            return Err(aspect_facet_acquire_error_from_runtime_text(
+                facet_interface_id, route.unwrap_err()))
+        if route.unwrap() == nil:
+            return Ok(nil)
+        val entry = route.unwrap().unwrap()
+
+        val authorization = self.authorize(AspectApplicationOperation.LazyIo)
+        if authorization.is_err():
+            return Err(aspect_facet_acquire_error_activation_denied(
+                facet_interface_id, authorization.unwrap_err()))
+        if dynsmf_id_disabled(self.coordinator.dynsmf_session.policy, entry.aspect_id):
+            return Err(aspect_facet_acquire_error_activation_denied(
+                facet_interface_id,
+                "E-APACK008 dynSMF policy disabled aspect activation"))
+
+        val request_id = "lazy-facet:{self.catalog.generation}:{self.next_lazy_request_id}"
+        self.next_lazy_request_id = self.next_lazy_request_id + 1
+        val request = AspectActivationRequest(
+            aspect_id: entry.aspect_id,
+            request_id: request_id,
+            catalog_generation: self.catalog.generation)
+        val reservation = self.coordinator.reserve(request)
+        if reservation.is_err():
+            return Err(aspect_facet_acquire_error_from_runtime_text(
+                facet_interface_id, reservation.unwrap_err()))
+        self.coordinator = reservation.unwrap()
+        var owns_reservation = false
+        for key in self.coordinator.in_flight.keys():
+            if self.coordinator.in_flight[key] == request_id:
+                owns_reservation = true
+        if not owns_reservation:
+            return Err(aspect_facet_acquire_error_from_runtime_text(
+                facet_interface_id,
+                "E-APACK009 lazy facet activation is already in flight; retry after owner completion"))
+
+        val provider_key = aspect_application_provider_key(
+            entry, self.catalog.generation)
+        val payload = self.pack_io.load_exact_route(AspectPackIoRequest(
+            aspect_id: entry.aspect_id,
+            pack_path: entry.pack_path,
+            provider_key: provider_key))
+        if payload.is_err():
+            self.cancel_lazy_activation_request(request_id)
+            return Err(aspect_facet_acquire_error_from_runtime_text(
+                facet_interface_id, payload.unwrap_err()))
+
+        val loaded = payload.unwrap()
+        val activation = self.activate_pack_bytes(
+            provider_key, loaded.pack_bytes, loaded.signature,
+            request, self.loader)
+        if activation.status != "published" and activation.status != "coalesced_active":
+            self.cancel_lazy_activation_request(request_id)
+            return Err(aspect_facet_acquire_error_from_runtime_text(
+                facet_interface_id, activation.reason))
+
+        val acquired = self.acquire_published_facet_descriptor(
+            concrete_type_id, implemented_business_interfaces,
+            facet_interface_id)
+        if acquired.is_err():
+            return Err(aspect_facet_acquire_error_from_runtime_text(
+                facet_interface_id, acquired.unwrap_err()))
+        if acquired.unwrap() == nil:
+            return Err(aspect_facet_acquire_error_from_runtime_text(
+                facet_interface_id,
+                "E-AF002 activated aspect did not publish the requested facet binding"))
+        Ok(acquired.unwrap())
 
     # Mission publication is explicit and irreversible for this process
     # state.  Every startup aspect must already be atomically published.
@@ -637,6 +726,17 @@ fn aspect_execution_context_acquire_facet_descriptor(
         concrete_type_id, implemented_business_interfaces,
         facet_interface_id)
 
+fn aspect_execution_context_acquire_or_activate_facet_descriptor(
+    context: AspectExecutionContext,
+    concrete_type_id: text,
+    implemented_business_interfaces: [text],
+    facet_interface_id: text,
+    facet_contract_abi_hash: text
+) -> Result<PublishedFacetDescriptorLease?, FacetAcquireError>:
+    context.acquire_or_activate_facet_descriptor(
+        concrete_type_id, implemented_business_interfaces,
+        facet_interface_id, facet_contract_abi_hash)
+
 fn aspect_execution_context_release_facet_descriptor(
     context: AspectExecutionContext,
     acquired: PublishedFacetDescriptorLease
@@ -681,9 +781,12 @@ export AspectApplicationOperation
 export PublishedFacetDescriptorLease
 export AspectExecutionContext
 export AspectApplicationRuntime
+export aspect_facet_acquire_error_from_runtime_text
+export aspect_facet_acquire_error_required_absent
 export prepared_advice_dispatch_context_invoke
 export prepared_advice_dispatch_context_invoke_or_panic
 export aspect_execution_context_acquire_facet_descriptor
+export aspect_execution_context_acquire_or_activate_facet_descriptor
 export aspect_execution_context_validate_facet_descriptor_contract
 export aspect_execution_context_facet_method_address
 export aspect_execution_context_release_facet_descriptor

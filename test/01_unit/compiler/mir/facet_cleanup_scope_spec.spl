@@ -7,6 +7,8 @@ use compiler.common.structural_contracts.facet_artifact.{
     FACET_ARTIFACT_VERSION, FacetContractMetadata
 }
 use compiler.hir.hir_types.{SymbolId, SymbolTable}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
 use compiler.mir.{
     LocalId, MirConstValue, MirInstKind, MirOperandKind,
     MirSignature, MirType, MirTypeKind, MirLowering,
@@ -43,6 +45,18 @@ fn cleanup_lowering() -> MirLowering:
         Span.empty())
     lowering.builder = builder
     lowering
+
+fn unit_hir_expr(kind: HirExprKind) -> HirExpr:
+    val span = Span.empty()
+    HirExpr(
+        kind: kind, has_type_: true,
+        type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+
+fn has_fatal_error_containing(lowering: MirLowering, fragment: text) -> bool:
+    for error in lowering.errors:
+        if error.fatal and error.message.contains(fragment):
+            return true
+    false
 
 fn release_lease_ids(lowering: MirLowering) -> [i64]:
     var builder = lowering.builder
@@ -143,3 +157,61 @@ describe "facet descriptor lexical cleanup scopes":
         val released = release_lease_ids(lowering)
         expect(released.len()).to_equal(1)
         expect(released[0]).to_equal(5002)
+
+    it "fails closed when throw appears while a descriptor lease may be live":
+        var lowering = cleanup_lowering()
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(
+            LocalId(id: 61), cleanup_adapter(6, 601, 6001))
+        val thrown = unit_hir_expr(HirExprKind.Throw(
+            unit_hir_expr(HirExprKind.UnitLit)))
+        val _result = lowering.lower_expr(thrown)
+        if not has_fatal_error_containing(lowering, "E-AF007"):
+            fail("expected leased throw to fail with E-AF007")
+        if not has_fatal_error_containing(lowering, "throw"):
+            fail("expected leased throw diagnostic")
+
+    it "fails closed at an await suspension while a descriptor lease may be live":
+        var lowering = cleanup_lowering()
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(
+            LocalId(id: 71), cleanup_adapter(7, 701, 7001))
+        val awaited = unit_hir_expr(HirExprKind.Await(
+            unit_hir_expr(HirExprKind.UnitLit)))
+        val _result = lowering.lower_expr(awaited)
+        if not has_fatal_error_containing(lowering, "E-AF007"):
+            fail("expected leased await to fail with E-AF007")
+        if not has_fatal_error_containing(lowering, "async cancellation"):
+            fail("expected leased await cancellation diagnostic")
+
+    it "fails closed at a yield suspension while a descriptor lease may be live":
+        var lowering = cleanup_lowering()
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(
+            LocalId(id: 72), cleanup_adapter(7, 702, 7002))
+        val yielded = unit_hir_expr(HirExprKind.Yield(Some(
+            unit_hir_expr(HirExprKind.UnitLit))))
+        val _result = lowering.lower_expr(yielded)
+        if not has_fatal_error_containing(lowering, "E-AF007"):
+            fail("expected leased yield to fail with E-AF007")
+        if not has_fatal_error_containing(lowering, "yield"):
+            fail("expected leased yield diagnostic")
+
+    it "fails closed for a statically known extern call while a lease may be live":
+        var lowering = cleanup_lowering()
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(
+            LocalId(id: 81), cleanup_adapter(8, 801, 8001))
+        lowering.extern_function_symbol_ids[82] = true
+        lowering.extern_function_names["foreign_may_unwind"] = true
+        val callee = HirExpr(
+            kind: HirExprKind.NamedVar(SymbolId(id: 82), "foreign_may_unwind"),
+            has_type_: false,
+            type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()),
+            span: Span.empty())
+        val call = unit_hir_expr(HirExprKind.Call(callee, [], []))
+        val _result = lowering.lower_expr(call)
+        if not has_fatal_error_containing(lowering, "E-AF007"):
+            fail("expected leased extern call to fail with E-AF007")
+        if not has_fatal_error_containing(lowering, "extern call"):
+            fail("expected leased extern-call diagnostic")

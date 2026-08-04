@@ -277,7 +277,21 @@ verification-failed
 - Compiler-owned lexical cleanup releases guarded leases in reverse order on
   fallthrough, explicit/implicit return, `?` propagation, loop transfer, and
   explicit/generated panic paths.
-- Lazy pack I/O, typed `FacetLoadError`, callee/foreign unwind, `throw`, async
-  cancellation, and language-sealed lease opacity remain open. No compiler or
+- Lazy pack I/O, typed acquisition errors, and fail-closed nonlocal-exit guards
+  were completed in the following continuation. No compiler or
   bootstrap command was run; status remains `verification-failed` /
   `STATUS: FAIL`.
+
+## 2026-08-04 — D5 exact-route lazy activation continuation
+
+- Added an injected application-owned `AspectPackIoPort`; requests contain
+  only the catalog-derived relative path and complete provider identity.
+- `facet`/`require_facet` now reserve before I/O, reuse the canonical
+  loader/cache/coordinator transaction, and return canonical
+  `std.aop.FacetAcquireError`; `try_facet` remains strictly no-I/O.
+- Leased scopes fail E-AF007 for `throw`, `await`, `yield`, and identifiable
+  extern calls without a portable unwind contract. The required missing MIR,
+  effect, optimizer, and backend primitives are tracked under `doc/08_tracking`.
+- Production image/signature port binding, true multithreaded single-flight
+  completion sharing, imported/indirect unwind metadata, language-sealed lease
+  opacity, and executable evidence remain open. Status remains `STATUS: FAIL`.
