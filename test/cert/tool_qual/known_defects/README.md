@@ -19,7 +19,10 @@ bin/release/x86_64-unknown-linux-gnu/simple run <file>.spl ; echo "exit=$?"
 | Repro | Should happen | Actually happens (deployed binary) | Severity |
 |---|---|---|---|
 | `arity_too_many.spl` | reject: `add/2` called with 3 args | accepted, extra arg dropped, prints `3`, exit 0 | high |
-| `arity_too_few.spl` | reject: `add/2` called with 1 arg | accepted, prints `1`, exit 0 | high |
+| `arity_too_few.spl` | reject: `add/2` called with 1 arg | accepted, prints `4` — the missing `b` reads as the **nil sentinel 3** (`1 + 3`), exit 0 | high |
+| `arity_method_too_few.spl` | reject: `me`-method `m3/3` called with 2 args | accepted, missing param reads as nil sentinel 3, prints `3078` instead of `9078`, exit 0 | high |
+| `arity_method_too_many.spl` | reject: `me`-method `m3/3` called with 4 args | accepted, the extra arg displaces the receiver: `runtime error: field access on nil receiver`, core dump, exit 132 | **critical (crash)** |
+| `arity_static_too_few.spl` | reject: `static fn s3/3` called with 2 args | accepted, missing param reads as nil sentinel 3, prints `3078` instead of `9078`, exit 0 | high |
 | `arg_type_mismatch.spl` | reject: text passed where `i64` expected | accepted, prints GARBAGE (raw text pointer as int, e.g. `6295919127139`), exit 0 | **critical (memory/type-safety hole)** |
 | `undefined_type_annotation.spl` | reject: `val x: Nonexistent` names no type | accepted, prints `5`, exit 0 | medium |
 | `nonexhaustive_match.spl` | reject/trap: `match` has no arm for `E.B` | accepted, `f(E.B)` returns `0`, exit 0 | high |
