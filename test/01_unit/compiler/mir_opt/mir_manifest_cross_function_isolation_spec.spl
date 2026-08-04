@@ -6,7 +6,16 @@ use compiler.mir.{
     MirInstKind, MirOperand, MirOperandKind, MirSignature, MirType,
     MirTypeKind, MirConstValue, mir_operand_copy
 }
-use compiler.mir_opt.mir_opt.mod.{run_pass_on_module}
+use compiler.mir_opt.mir_opt.mod.{
+    OptLevel, PassKind, PassScope, passmanager_new,
+    passmanager_run_on_module, run_pass_on_module
+}
+use compiler.mir_opt.optimizer_plugin.{
+    ApplyMode, optimizer_plugin_mir, optimizer_plugin_run_on_module
+}
+use compiler.mir_opt.mir_opt.predicate_promote.{run_predicate_promote}
+use compiler.mir_opt.mir_opt._AutoVectorize.rewrite.{run_auto_vectorize}
+use compiler.mir_opt.mir_opt.pattern_dispatch.{run_pattern_idiom_pass}
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -79,3 +88,60 @@ describe "manifested MIR cross-function optimizer isolation":
             "src/compiler/60.mir_opt/mir_opt/_Inline/driver.spl") ?? ""
         expect(inline_source).to_contain(
             "if func.exception_cleanup_contracts.len() > 0:")
+
+    it "identity-preserves manifested functions across representative named passes":
+        val sealed = mark_manifested(
+            isolation_function(705, "sealed_named_passes", Some("external")))
+        val ordinary = isolation_function(706, "ordinary_named_passes", nil)
+        for pass_name in [
+            "dead_code_elimination", "copy_propagation", "common_subexpr_elim",
+            "predicate_promote", "auto_vectorize", "pattern_idiom"]:
+            val optimized = run_pass_on_module(
+                pass_name, isolation_module(sealed, ordinary))
+            val preserved = optimized.functions[sealed.symbol]
+            expect(function_call_count(preserved)).to_equal(1)
+            expect(preserved.exception_cleanup_contracts.len()).to_equal(1)
+
+    it "identity-preserves manifested functions through pass manager and plugin adapters":
+        val sealed = mark_manifested(
+            isolation_function(707, "sealed_adapters", Some("external")))
+        val ordinary = isolation_function(708, "ordinary_adapters", nil)
+        val module = isolation_module(sealed, ordinary)
+
+        var manager = passmanager_new()
+        manager.passes = ["dead_code_elimination", "copy_propagation"]
+        val managed = manager.passmanager_run_on_module(module)
+        expect(function_call_count(managed.functions[sealed.symbol])).to_equal(1)
+        expect(managed.functions[sealed.symbol].exception_cleanup_contracts.len()).to_equal(1)
+
+        val plugin = optimizer_plugin_mir(
+            "adversarial_dce", [], PassKind.DeadCodeElimination,
+            PassScope.Function, ApplyMode.Static, OptLevel.Speed, "cheap")
+        val plugged = optimizer_plugin_run_on_module(plugin, module)
+        expect(function_call_count(plugged.functions[sealed.symbol])).to_equal(1)
+        expect(plugged.functions[sealed.symbol].exception_cleanup_contracts.len()).to_equal(1)
+
+    it "identity-preserves manifested functions through raw exported module transforms":
+        val sealed = mark_manifested(
+            isolation_function(709, "sealed_raw_exports", Some("external")))
+        val ordinary = isolation_function(710, "ordinary_raw_exports", nil)
+        val module = isolation_module(sealed, ordinary)
+        for transformed in [
+            run_predicate_promote(module),
+            run_auto_vectorize(module),
+            run_pattern_idiom_pass(module)]:
+            val preserved = transformed.functions[sealed.symbol]
+            expect(function_call_count(preserved)).to_equal(1)
+            expect(preserved.exception_cleanup_contracts.len()).to_equal(1)
+
+    it "routes all module adapters through universal filtering and reinsertion":
+        val mod_source = rt_file_read_text(
+            "src/compiler/60.mir_opt/mir_opt/mod.spl") ?? ""
+        expect(mod_source).to_contain(
+            "var result_module = mir_opt_unmanifested_function_slice(module)")
+        expect(mod_source).to_contain(
+            "mir_opt_reinsert_manifested_functions(original_module, result_module)")
+        val plugin_source = rt_file_read_text(
+            "src/compiler/60.mir_opt/optimizer_plugin.spl") ?? ""
+        expect(plugin_source).to_contain(
+            "run_typed_pass_on_module(kind, module)")
