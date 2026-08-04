@@ -71,42 +71,72 @@ Three implementations of `not` exist. Two are correct:
   `icmp_imm(Equal, val, 0)`. Only literal zero is falsy, so the tagged nil
   sentinel 3 is truthy and `not nil` is **false**. **This is the wrong one.**
 
-## Why it cannot be fixed in `compile_unary_op`
+## FIXED for tagged operands (2026-08-04)
 
-The obvious repair — also compare against the nil sentinel 3 — was implemented,
-built, and **disproved**. Instrumenting the function shows every `not` operand
-in the repro arriving as the same static type:
+`compile_unary_op` now emits the nil-sentinel compare **when the operand's static
+type can carry a tag**, keeping the plain zero-compare for raw scalars:
+
+```rust
+if operand_may_be_nil(ctx.vreg_types.get(&operand).copied()) {
+    let is_nil = builder.ins().icmp_imm(IntCC::Equal, val, 3);
+    builder.ins().bor(is_zero, is_nil)
+} else {
+    is_zero
+}
+```
+
+`operand_may_be_nil` returns false for `BOOL`, the integer widths, the floats,
+`CHAR` and `VOID`, and true for everything else (`Any`, optionals, strings, user
+types, and unrecorded operands).
+
+Verified on a fresh build with no instrumentation (`fresh=YES`, md5
+`7d89856fde41`):
+
+| expression | OLD JIT | NEW JIT | interpreter |
+|---|---|---|---|
+| `not e.?` (`i64? = nil`) | false | **true** | true |
+| `not Some(nil).?` | false | **true** | true |
+| `not Some(42).?` | false | false | false |
+| `not 3` / `not 0` / `not 1` | false / true / false | unchanged | same |
+| `not true` / `not false` | false / true | unchanged | same |
+
+NEW JIT and the interpreter now agree on **every** field, and the scalar results
+are untouched — `not 3` stays false, so the repair did not trade one divergence
+for the opposite one.
+
+## Residual: a bare nil-valued binding is still wrong
+
+`val n = nil; not n` remains `false` under the JIT. Instrumentation showed why:
 
 ```
-compile_unary_op Not reached, operand_ty=Some(TypeId(5))  x4   # I64
-compile_unary_op Not reached, operand_ty=Some(TypeId(1))  x2   # BOOL
+compile_unary_op Not reached, operand_ty=Some(TypeId(5))   # I64 — for `val n = nil`
+compile_unary_op Not reached, operand_ty=Some(TypeId(16))  # for `e.?`
+compile_unary_op Not reached, operand_ty=Some(TypeId(14))  # ANY — for `Some(..).?`
 ```
 
-`TypeId(5)` is `I64`, and it covers **both** `val n = nil` and `val three = 3`.
-At this point in codegen, `not nil` and `not 3` are indistinguishable: same
-static type, and the same 64-bit pattern `3`. Any comparison that makes
-`not nil` true necessarily makes `not 3` true as well — trading one divergence
-for the opposite one. The attempted fix was reverted; it is not in the tree.
+A binding initialised to a bare `nil` infers to `TypeId(5) = I64`, the same
+static type as `val three = 3` and carrying the same 64-bit pattern `3`. Those
+two are genuinely indistinguishable at this point, so the sentinel compare
+cannot be enabled for `I64` without breaking `not 3`.
 
-Gating on the static type does not work either, precisely because a nil-valued
-binding is typed `I64` rather than nil/optional/any.
+**This half is a representation defect**, same family as
+`nil_sentinel_3_forbids_defaulted_int_args`. Two routes:
 
-## Fix direction
+1. **Stop inferring `i64` for a nil-initialised binding** — give it a nil/optional
+   type, after which the existing gate covers it with no codegen change. This is
+   the smaller fix and is where the real bug is.
+2. **Stop reusing `3` as the nil sentinel for integer-typed values**, so the bit
+   patterns no longer collide.
 
-This is a **representation** defect, not a `not`-lowering defect, and it is the
-same family as `nil_sentinel_3_forbids_defaulted_int_args`. Two viable routes:
+The load-bearing idiom (`not <optional>.?`, used throughout the spec corpus) is
+fixed by the change above; the residual affects only bare nil-valued bindings.
 
-1. **Preserve nil-ability in the JIT's static types** so codegen can tell a
-   possibly-tagged operand from a raw integer — then the sentinel compare can be
-   emitted only where it is sound. This is the smaller change if `vreg_types`
-   can carry optional-ness.
-2. **Stop reusing `3` as the nil sentinel for values statically typed as
-   integers**, so the bit patterns no longer collide.
-
-Whichever is chosen, `not` must end up agreeing across all three engines. Decide
-the truthiness rule once — `nil` ⇒ absent ⇒ `not nil` is `true`, which is what
-two of the three engines and the whole spec corpus already assume — rather than
-leaving it engine-dependent.
+**Method note.** An earlier revision of this report concluded the repair was
+impossible here. That was wrong, and it came from probing only `val n = nil` —
+the one case that falls outside the gate — and generalising from it. The idiom
+the corpus actually uses carries a different `TypeId` and was fixed by the same
+patch that had been declared ineffective. Probe the case the code under test
+actually exercises.
 
 Note that a related coercion is already known to be inconsistent: `1 == true`
 holds in the pure-Simple matcher but not under the Rust runner

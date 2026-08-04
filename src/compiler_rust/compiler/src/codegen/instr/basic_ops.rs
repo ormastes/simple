@@ -266,6 +266,33 @@ pub fn compile_cast<M: Module>(
     Ok(())
 }
 
+/// Can a value of this static type carry the tagged nil sentinel?
+///
+/// Plain scalars (bool, the integer widths, the floats, char) never do — their
+/// vreg holds a raw untagged value, so a bit pattern of 3 is the number 3.
+/// Everything else (`Any`, optionals, strings, user types, or an operand whose
+/// type was not recorded) may be tagged, and there nil is the sentinel 3.
+fn operand_may_be_nil(ty: Option<TypeId>) -> bool {
+    match ty {
+        Some(
+            TypeId::BOOL
+            | TypeId::I8
+            | TypeId::I16
+            | TypeId::I32
+            | TypeId::I64
+            | TypeId::U8
+            | TypeId::U16
+            | TypeId::U32
+            | TypeId::U64
+            | TypeId::F32
+            | TypeId::F64
+            | TypeId::CHAR
+            | TypeId::VOID,
+        ) => false,
+        _ => true,
+    }
+}
+
 /// Compile UnaryOp instruction: negation, logical not, bitwise not
 pub fn compile_unary_op<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -309,9 +336,32 @@ pub fn compile_unary_op<M: Module>(
                     .ins()
                     .fcmp(cranelift_codegen::ir::condcodes::FloatCC::Equal, val, zero_f)
             } else {
-                builder
-                    .ins()
-                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 0)
+                let is_zero =
+                    builder
+                        .ins()
+                        .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 0);
+                // A tagged operand can also be nil, which is falsy. Nil is the
+                // tagged sentinel 3 (TAG_SPECIAL=0b011 | SPECIAL_NIL=0), the same
+                // constant `MirLiteral::Nil` lowers to in instr/pattern.rs.
+                // Comparing only against 0 made `not <optional>.?` return false,
+                // diverging from the tree-walk interpreter (which routes `Not`
+                // through is_condition_present) and from the bytecode VM (whose
+                // `as_bool()` is false for nil) — silently inverting the
+                // `not X.?` idiom that the spec corpus relies on.
+                //
+                // Only tagged operands get the extra compare: a raw numeric 3 is
+                // indistinguishable from the nil sentinel at this level, so
+                // widening it unconditionally would break `not 3` the other way.
+                if operand_may_be_nil(ctx.vreg_types.get(&operand).copied()) {
+                    let is_nil = builder.ins().icmp_imm(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal,
+                        val,
+                        3,
+                    );
+                    builder.ins().bor(is_zero, is_nil)
+                } else {
+                    is_zero
+                }
             }
         }
         UnaryOp::BitNot => builder.ins().bnot(val),
