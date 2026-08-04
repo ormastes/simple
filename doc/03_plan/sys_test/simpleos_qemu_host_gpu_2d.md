@@ -43,6 +43,12 @@ Rows are `{linux,macos,windows} × {x86_64,aarch64,riscv64}` and report only
 
 ## Evidence Rules
 
+The Phase-2 bootstrap diagnostic opt-in is a troubleshooting lane, not an
+attestation lane. It is ARM64-only, must use a distinct diagnostic build tree,
+and emits `diagnostic-phase2-non-attested` even when its build and QEMU probes
+succeed. Release or production evidence must continue through the default
+full-CLI `simple_binary_is_valid` admission path.
+
 The wrapper must boot the target guest, capture guest negotiation/submission,
 capture the host daemon device receipt, and correlate IDs and checksums. A row
 cannot pass from QEMU flags, QMP screenshots, VirtIO-GPU scanout, synthetic

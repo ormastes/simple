@@ -13,6 +13,7 @@ REQUIRE_CUDA=${SIMPLEOS_HOST_GPU_REQUIRE_CUDA:-0}
 PROCESSING_SELECTOR=${SIMPLEOS_HOST_GPU_PROCESSING_BACKEND:-auto}
 RSS_SAMPLE_INTERVAL=${SIMPLEOS_HOST_GPU_RSS_SAMPLE_INTERVAL:-0.1}
 DAEMON_READY_ATTEMPTS=${SIMPLEOS_HOST_GPU_DAEMON_READY_ATTEMPTS:-100}
+ALLOW_BOOTSTRAP_DIAGNOSTIC=${SIMPLEOS_HOST_GPU_ALLOW_BOOTSTRAP_COMPILER_DIAGNOSTIC:-0}
 COMPILER_PROBE_TIMEOUT_SECONDS=5
 COMPILER_BUILD_TIMEOUT_SECONDS=60
 COMPILER_EXEC_TIMEOUT_SECONDS=5
@@ -41,6 +42,7 @@ HOST_GPU_WARM_SAMPLE_COUNT=$(sed -n 's/^val HOST_GPU_WARM_SAMPLE_COUNT: i64 = \(
 RENDER_READBACK_P95_MAX_US=16700
 case "$NATIVE_BUILD_TIMEOUT" in ''|0|*[!0-9]*) exit 2 ;; esac
 case "$DAEMON_READY_ATTEMPTS" in ''|0|*[!0-9]*) exit 2 ;; esac
+case "$ALLOW_BOOTSTRAP_DIAGNOSTIC" in 0|1) ;; *) exit 2 ;; esac
 
 case "$(uname -s)" in
     Linux) ACTIVE_HOST=linux ;;
@@ -172,9 +174,60 @@ LINUX_DEFAULT_RUNTIME_PATH=$LINUX_RUNTIME_TARGET/bootstrap
          >"$BUILD_DIR/runtime-build.log" 2>&1 || return 1
      linux_runtime_artifact_is_valid "$RUNTIME_PATH"
  }
+bootstrap_diagnostic_binary_is_valid() (
+    candidate=$1
+    [ "$ALLOW_BOOTSTRAP_DIAGNOSTIC" = 1 ] || return 1
+    [ -n "${SIMPLE_BIN:-}" ] && [ "$candidate" = "$SIMPLE_BIN" ] || return 1
+    [ "$GUEST_ISA_REQUEST" = aarch64 ] || return 1
+    case "$BUILD_DIR" in
+        build/*diag*|build/*diagnostic*) ;;
+        *) return 1 ;;
+    esac
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -x "$candidate" ] || return 1
+    candidate_canonical=$(CDPATH= cd -- "$(dirname -- "$candidate")" && pwd -P)/$(basename -- "$candidate")
+    [ "$candidate" = "$candidate_canonical" ] || return 1
+    timeout_bin=$(candidate_frontend_timeout_bin || true)
+    [ -n "$timeout_bin" ] || return 1
+    version=$(
+        "$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
+            "${COMPILER_PROBE_TIMEOUT_SECONDS}s" "$candidate" --version 2>&1
+    ) || return 1
+    [ "$version" = "simple-bootstrap 1.0.0-beta" ] || return 1
+    diagnostic_frontend_log="$BUILD_DIR/bootstrap-diagnostic-frontend.log"
+    CANDIDATE_FRONTEND_BACKEND=cranelift \
+        candidate_frontend_smoke "$candidate" >"$diagnostic_frontend_log" 2>&1 || return 1
+    ! grep -Eq 'bootstrap seed only|Rust-built|Build complete: [0-9]+ compiled|Linked: .* via clang' \
+        "$diagnostic_frontend_log" || return 1
+)
+
+record_bootstrap_diagnostic_admission() {
+    candidate=$1
+    candidate_sha=$(shasum -a 256 "$candidate" | awk '{print $1}') || return 1
+    {
+        echo schema=simpleos-host-gpu-compiler-admission-v1
+        echo status=pass
+        echo evidence_class=diagnostic-phase2-non-attested
+        echo scope=diagnostic-only
+        echo attestation_status=not-claimed
+        echo compiler_kind=pure-simple-bootstrap
+        echo compiler_path="$candidate"
+        echo compiler_sha256="$candidate_sha"
+        echo version_status=pass
+        echo native_frontend_smoke_status=pass
+        echo full_cli_admission_status=fail
+        echo full_cli_missing_capability=inline-command-c
+    } >"$BUILD_DIR/compiler-admission.env"
+}
+
 find_simple() {
     if [ -n "${SIMPLE_BIN:-}" ]; then
-        simple_binary_is_valid "$SIMPLE_BIN" || return 1
+        if simple_binary_is_valid "$SIMPLE_BIN"; then
+            printf '%s\n' "$SIMPLE_BIN"
+            return 0
+        fi
+        bootstrap_diagnostic_binary_is_valid "$SIMPLE_BIN" || return 1
+        record_bootstrap_diagnostic_admission "$SIMPLE_BIN" || return 1
+        echo "simpleos_qemu_host_gpu_2d: using non-attested bootstrap compiler for diagnostic-only lane" >&2
         printf '%s\n' "$SIMPLE_BIN"
         return 0
     fi
@@ -987,6 +1040,9 @@ emit_row() {
     row_host=$1
     row_isa=$2
     row_status=$3
+    if [ "$ALLOW_BOOTSTRAP_DIAGNOSTIC" = 1 ] && [ "$row_status" = pass ]; then
+        row_status=diagnostic-pass
+    fi
     row_reason=$4
     row_log=$5
     row_processing_backend=${6:-}
@@ -2909,10 +2965,18 @@ for isa in $GUEST_ISAS; do
     fi
 done
 
-echo "simpleos_qemu_host_gpu_2d_status=$overall"
+reported_overall=$overall
+reported_reason=$(if [ "$overall" = pass ]; then echo "all-$host-host-gpu-rows-pass"; else echo "one-or-more-$host-host-gpu-rows-failed"; fi)
+if [ "$ALLOW_BOOTSTRAP_DIAGNOSTIC" = 1 ]; then
+    reported_overall=diagnostic
+    reported_reason="diagnostic-phase2-non-attested-$overall"
+    echo "simpleos_qemu_host_gpu_2d_evidence_class=diagnostic-phase2-non-attested"
+    echo "simpleos_qemu_host_gpu_2d_attestation_status=not-claimed"
+fi
+echo "simpleos_qemu_host_gpu_2d_status=$reported_overall"
 echo "simpleos_qemu_host_gpu_2d_host=$host"
 echo "simpleos_qemu_host_gpu_2d_host_arch=$HOST_ARCH"
-echo "simpleos_qemu_host_gpu_2d_reason=$(if [ "$overall" = pass ]; then echo "all-$host-host-gpu-rows-pass"; else echo "one-or-more-$host-host-gpu-rows-failed"; fi)"
+echo "simpleos_qemu_host_gpu_2d_reason=$reported_reason"
 echo "simpleos_qemu_host_gpu_2d_backend=$BACKEND"
 echo "simpleos_qemu_host_gpu_2d_processing_backend=$PROCESSING_BACKEND"
 echo "simpleos_qemu_host_gpu_2d_processing_selector=$PROCESSING_SELECTOR"

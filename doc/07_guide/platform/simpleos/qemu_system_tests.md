@@ -552,6 +552,16 @@ sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --validate-report build/simpleos_host_gpu_2d/report.env
 ```
 
+For bounded ARM64 diagnosis only, a retained pure-Simple Phase-2 bootstrap
+compiler may be selected with
+`SIMPLEOS_HOST_GPU_ALLOW_BOOTSTRAP_COMPILER_DIAGNOSTIC=1`. This opt-in requires
+an explicit canonical, regular, non-symlink `SIMPLE_BIN`, `aarch64` as the sole
+guest ISA, and a distinct build directory containing `diag` or `diagnostic`.
+It runs the real native frontend smoke and rejects Rust/seed delegation markers.
+Its receipts are always
+`evidence_class=diagnostic-phase2-non-attested`; they cannot become a canonical
+production PASS or satisfy report validation.
+
 Run `--preflight` first. It does not compile or boot SimpleOS. For each ISA it
 records the selected accelerator, default VirtIO-GPU 2D availability,
 `ivshmem-plain`, and accelerated GL/rutabaga device availability. A same-ISA
