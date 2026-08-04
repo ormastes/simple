@@ -2476,12 +2476,21 @@ plain call. The LLVM C-API backend remains fail-closed because it has no invoke
 binding. Generic indirect calls with unknown effects under a live facet lease
 now fail with E-AF007.
 
-This groundwork does not provide the missing source/HIR effect owner, MIR
-throw/resume and cleanup pads, async cancellation cleanup, or executable
-verification. Those gaps continue to prevent portable callee/foreign unwind
-claims. Broader lifecycle concurrency is therefore implemented but remains
+The typed source/HIR effect owner and fail-closed bridge are now implemented.
+Every function has exactly one unwind effect: `@no_unwind` is the default,
+`@may_unwind` is explicit, extern alone does not imply unwind, and `Async` is
+preserved independently. Callable declarations, imports, function types, and
+resolved instance/static/trait/free calls retain the effect. MIR admits an
+ordinary call only for `NoUnwind`; `MayUnwind` without a real cleanup successor
+and missing/conflicting metadata fail with E-MIR-UNWIND001. A live facet lease
+retains E-AF007 precedence for the same unsupported call.
+
+The remaining gap is not effect identity: MIR still lacks the cleanup-successor
+producer, throw/resume cleanup pads, and async cancellation cleanup. LLVM C-API
+invoke binding and executable verification are also open. Those gaps continue
+to prevent portable callee/foreign unwind claims. Broader lifecycle concurrency is therefore implemented but remains
 unproven until barrier-controlled threaded evidence passes. Portable
 callee/foreign unwind, deployment-specific I/O binding, opaque runtime lease
 facade migration, and executable evidence also remain open. `throw`, `await`, `yield`,
-identifiable unspecified-unwind extern calls, and unknown generic indirect calls
-fail closed with E-AF007 while a lease may be live.
+unsupported `MayUnwind`/unknown calls, and `throw`/`await`/`yield` fail closed
+with E-AF007 while a lease may be live.

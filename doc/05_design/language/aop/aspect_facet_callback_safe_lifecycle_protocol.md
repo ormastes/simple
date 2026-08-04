@@ -323,7 +323,13 @@ cleanup.
 The explicit MIR call-terminator contract is now implemented and preserved by
 JSON, borrow/optimizer paths, interpreter, and backend consumers. Textual LLVM
 can emit `invoke`; native/unsupported targets and the LLVM C-API path reject
-unsupported `MayUnwind`. This does not change the callback rule above: source/HIR
-effect ownership, throw/resume cleanup pads, async cancellation cleanup, LLVM
-C-API invoke binding, and executable verification remain open. Unknown generic
-indirect calls under a live facet lease therefore fail closed with E-AF007.
+unsupported `MayUnwind`. Typed HIR ownership is now present: `@no_unwind`
+defaults every function, `@may_unwind` is explicit, async remains orthogonal,
+and callable/import/method/function-type propagation feeds a fail-closed MIR
+bridge. Ordinary MIR calls admit only `NoUnwind`; `MayUnwind` without a cleanup
+successor and invalid metadata fail with E-MIR-UNWIND001, or E-AF007 first when
+a facet lease is live.
+
+This does not change the callback rule above. Cleanup-successor construction,
+throw/resume cleanup pads, async cancellation cleanup, LLVM C-API invoke
+binding, and executable verification remain open.
