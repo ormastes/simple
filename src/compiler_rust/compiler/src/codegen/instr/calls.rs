@@ -154,7 +154,14 @@ fn emit_profiler_call<M: Module>(
 mod tests {
     use cranelift_module::Linkage;
 
-    use super::{linkage_is_defined_local, sffi_alias_target};
+    use super::{boxed_text_arg_indices, linkage_is_defined_local, sffi_alias_target};
+
+    #[test]
+    fn string_builder_push_boxes_only_its_text_argument() {
+        assert_eq!(boxed_text_arg_indices("rt_string_builder_push"), Some(&[1][..]));
+        assert_eq!(boxed_text_arg_indices("rt_string_builder_finish"), None);
+        assert_eq!(boxed_text_arg_indices("rt_print_str"), None);
+    }
 
     #[test]
     fn conversion_aliases_resolve_to_runtime_symbols() {
@@ -2516,6 +2523,15 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     }
 }
 
+/// RuntimeValue-text arguments that must remain one word, but need explicit
+/// boxing because native Simple text can arrive as its raw pointer lane.
+pub fn boxed_text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
+    match func_name {
+        "rt_string_builder_push" => Some(&[1]),
+        _ => None,
+    }
+}
+
 /// Text args that need only a null-terminated C pointer (no length).
 /// These functions accept `*const c_char` and the runtime guarantees null termination.
 pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
@@ -2592,6 +2608,32 @@ fn expand_text_args<M: Module>(
         }
     }
     expanded
+}
+
+fn box_text_args<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    arg_vals: &[Value],
+    text_indices: &[usize],
+) -> Vec<Value> {
+    let string_data_ref = ctx.module.declare_func_in_func(ctx.runtime_funcs["rt_string_data"], builder.func);
+    let string_len_ref = ctx.module.declare_func_in_func(ctx.runtime_funcs["rt_string_len"], builder.func);
+    let string_new_ref = ctx.module.declare_func_in_func(ctx.runtime_funcs["rt_string_new"], builder.func);
+    arg_vals
+        .iter()
+        .enumerate()
+        .map(|(i, &value)| {
+            if !text_indices.contains(&i) {
+                return value;
+            }
+            let ptr_call = adapted_call(builder, string_data_ref, &[value]);
+            let ptr = builder.inst_results(ptr_call)[0];
+            let len_call = adapted_call(builder, string_len_ref, &[value]);
+            let len = builder.inst_results(len_call)[0];
+            let boxed_call = adapted_call(builder, string_new_ref, &[ptr, len]);
+            builder.inst_results(boxed_call)[0]
+        })
+        .collect()
 }
 
 /// Expand text RuntimeValue arguments to just a C-string pointer (no length).
@@ -3142,6 +3184,8 @@ pub fn compile_call<M: Module>(
             expand_file_write_bytes_args(ctx, builder, &arg_vals).unwrap_or(arg_vals)
         } else if let Some((cstr_indices, array_indices)) = process_c_runtime_arg_indices(sffi_name) {
             expand_process_c_runtime_args(ctx, builder, &arg_vals, cstr_indices, array_indices)
+        } else if let Some(text_indices) = boxed_text_arg_indices(sffi_name) {
+            box_text_args(ctx, builder, &arg_vals, text_indices)
         } else if let Some(text_indices) = text_arg_indices(sffi_name) {
             expand_text_args(ctx, builder, &arg_vals, text_indices)
         } else if let Some(cstr_indices) = text_cstr_arg_indices(sffi_name) {

@@ -2749,10 +2749,25 @@ impl LlvmBackend {
                     }
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                     let runtime_name = runtime_spec.map(|spec| spec.name).unwrap_or(&fallback_name);
+                    let boxed_indices = crate::codegen::instr::calls::boxed_text_arg_indices(runtime_name);
                     let text_indices = crate::codegen::instr::calls::process_c_runtime_arg_indices(runtime_name)
                         .map(|(indices, _)| indices)
                         .or_else(|| crate::codegen::instr::calls::text_arg_indices(runtime_name));
-                    if let Some(text_indices) = text_indices {
+                    if let Some(boxed_indices) = boxed_indices {
+                        let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| module.add_function("rt_string_data", i64_type.fn_type(&[i64_type.into()], false), None));
+                        let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| module.add_function("rt_string_len", i64_type.fn_type(&[i64_type.into()], false), None));
+                        let rt_string_new = module.get_function("rt_string_new").unwrap_or_else(|| module.add_function("rt_string_new", i64_type.fn_type(&[i64_type.into(), i64_type.into()], false), None));
+                        for (i, val) in raw_arg_vals.iter().enumerate() {
+                            if boxed_indices.contains(&i) {
+                                let ptr = builder.build_call(rt_string_data, &[(*val).into()], "sffi_boxed_text_ptr").map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?.try_as_basic_value().left().unwrap();
+                                let len = builder.build_call(rt_string_len, &[(*val).into()], "sffi_boxed_text_len").map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?.try_as_basic_value().left().unwrap();
+                                let boxed = builder.build_call(rt_string_new, &[ptr.into(), len.into()], "sffi_boxed_text_value").map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?.try_as_basic_value().left().unwrap();
+                                arg_vals.push(boxed.into());
+                            } else {
+                                arg_vals.push((*val).into());
+                            }
+                        }
+                    } else if let Some(text_indices) = text_indices {
                         let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
                             let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                             module.add_function("rt_string_data", fn_type, None)

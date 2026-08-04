@@ -2498,6 +2498,34 @@ impl LlvmBackend {
                     .left()
                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
                 vec![path_ptr.into(), path_len.into(), data_ptr.into(), data_len.into()]
+            } else if let Some(text_indices) = crate::codegen::instr::calls::boxed_text_arg_indices(sffi_name) {
+                let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
+                    module.add_function("rt_string_data", i64_type.fn_type(&[i64_type.into()], false), None)
+                });
+                let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| {
+                    module.add_function("rt_string_len", i64_type.fn_type(&[i64_type.into()], false), None)
+                });
+                let rt_string_new = module.get_function("rt_string_new").unwrap_or_else(|| {
+                    module.add_function("rt_string_new", i64_type.fn_type(&[i64_type.into(), i64_type.into()], false), None)
+                });
+                let mut boxed = Vec::with_capacity(raw_arg_vals.len());
+                for (i, val) in raw_arg_vals.iter().enumerate() {
+                    if text_indices.contains(&i) {
+                        let ptr = builder.build_call(rt_string_data, &[(*val).into()], "boxed_text_ptr")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?
+                            .try_as_basic_value().left().unwrap().into_int_value();
+                        let len = builder.build_call(rt_string_len, &[(*val).into()], "boxed_text_len")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?
+                            .try_as_basic_value().left().unwrap().into_int_value();
+                        let value = builder.build_call(rt_string_new, &[ptr.into(), len.into()], "boxed_text_value")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?
+                            .try_as_basic_value().left().unwrap();
+                        boxed.push(value.into());
+                    } else {
+                        boxed.push((*val).into());
+                    }
+                }
+                boxed
             } else if let Some(text_indices) = crate::codegen::instr::calls::process_c_runtime_arg_indices(sffi_name)
                 .map(|(indices, _)| indices)
                 .or_else(|| crate::codegen::instr::calls::text_arg_indices(sffi_name))
