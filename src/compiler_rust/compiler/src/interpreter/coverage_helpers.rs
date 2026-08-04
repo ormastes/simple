@@ -46,12 +46,29 @@ pub fn extract_expr_location(_expr: &Expr) -> Option<(String, usize, usize)> {
 
 /// Convert a Span to (file_path, line, column)
 ///
-/// The file path is extracted from the span's source info if available,
-/// otherwise defaults to "<unknown>".
+/// `Span` carries only line/column — no file — so the file has to come from
+/// execution state. `CURRENT_EXEC_MODULE` is the module owning the function
+/// body currently executing; it is saved/restored around `execute_function_body`,
+/// the single choke point every function-execution path funnels through.
+///
+/// This used to return the constant `"<source>"` for EVERY node, which made
+/// `Coverage::record_line` pool every file's hits into one bucket keyed by line
+/// number alone. A line executed in file A then marked the same line number in
+/// file B as covered, inflating reported coverage in the flattering direction
+/// only (a fixture where file B's lines 4..11 never execute reported 100%
+/// instead of 20%). Reporting `total_files: 1` for a multi-file run was the
+/// visible symptom. The debugger's breakpoint file matching
+/// (`DebugState::should_stop`) consumed the same placeholder and was equally
+/// broken by it.
+///
+/// `None` (module top-level statements, lambdas with no known owner) maps to
+/// the `"<entry>"` sentinel already used by `FUNCTION_MODULE_OWNER` for the
+/// root script, rather than to a name that could collide with a real file.
 fn span_to_location(span: &Span) -> (String, usize, usize) {
-    // In Simple's parser, file information is stored elsewhere in the AST
-    // For now, use a placeholder that can be enhanced with better source tracking
-    let file = "<source>".to_string();
+    let file = crate::interpreter::CURRENT_EXEC_MODULE
+        .with(|cell| cell.borrow().clone())
+        .map(|owner| owner.to_string())
+        .unwrap_or_else(|| "<entry>".to_string());
     let line = span.line;
     let column = span.column;
     (file, line, column)

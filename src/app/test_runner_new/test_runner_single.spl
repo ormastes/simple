@@ -357,8 +357,33 @@ fn read_test_result_evidence(path: text) -> (i64, i64, i64):
 #     covered when its line number was hit AND it sits inside a function the
 #     collector recorded as called (or in module top-level code). Targets come
 #     from `# @cover <path>` annotations plus the spec's use-imports.
-# Attribution is heuristic (line numbers are conflated across files), but
-# function-call attribution is exact and bounds the error.
+# Attribution is now exact on both axes: the collector records the owning
+# module per line (CURRENT_EXEC_MODULE, see coverage_helpers.rs) and the
+# reporter keys hits on (file, line).
+#
+# FIXED 2026-08-04 — cross-file line conflation. Hits used to be keyed by line
+# NUMBER alone, because the collector stamped every record with the constant
+# file "<source>". A line executed in file A therefore marked the same line
+# number in file B as covered whenever B's enclosing function had also been
+# called — inflating every percentage in the flattering direction, silently.
+# Fixture (test/01_unit/app/test/coverage_line_key_spec.spl): file B's lines
+# 4..11 never execute and its function IS called; it reported 100% (10/10)
+# against a hand-computed honest 2/10. Measured damage on the browser-engine
+# campaign modules ran to 13 points, and one module reporting 100% was really
+# 96%. Do NOT reintroduce a line-only key.
+#
+# RESIDUAL (open, conservative direction). An imported module's TOP-LEVEL
+# statements are flattened into the entry program before execution, so
+# CURRENT_EXEC_MODULE still reads `<entry>` for them and they are filed under
+# `<entry>` rather than their own module. Those lines therefore report as
+# uncovered even when they ran: fixture covkey_toplevel_d.spl measures 66%
+# (2/3) where the honest answer is 3/3. This UNDER-reports, so a number is a
+# floor, never a flattering estimate. It is bounded: module-level recordable
+# statements are <=2 lines (<=0.9%) in each of the eight browser-engine
+# campaign modules. Fixing it needs the flatten path to carry the owning module
+# through to execution; do NOT "fix" it by accepting `<entry>` hits for a
+# target file, which would re-pool every module's top level into one bucket and
+# reintroduce exactly the conflation above.
 #
 # FIXED 2026-08-04 — instance methods used to always score 0 (was: KNOWN CAP).
 # The collector's `functions` section used to contain only free functions and
@@ -539,10 +564,49 @@ fn _cov_is_recordable(t: text) -> bool:
     # plain assignment statement: `lhs = rhs` (not `==`)
     t.contains(" = ") and not t.contains(" == ")
 
-fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, bool>) -> text:
+fn _cov_norm_path(p: text) -> text:
+    """Normalise a path for cross-form comparison: strip a leading `./` and
+    collapse nothing else. The collector emits `normalize_path_key` output,
+    which may be absolute while `@cover` targets are repo-relative; matching is
+    done by suffix in _cov_hit_key_for_target."""
+    var s = p.trim()
+    while s.starts_with("./"):
+        s = s.substring(2)
+    s
+
+fn _cov_hit_key(file: text, line: text) -> text:
+    """Key a line hit by (file, line) instead of line alone.
+
+    Keying on the line number alone conflated every file in the run: the
+    collector pools all hits into one set, so line 412 executing in file A
+    marked line 412 of file B covered whenever B's enclosing function had also
+    been called. That inflated coverage in the flattering direction only."""
+    _cov_norm_path(file) + "|" + line.trim()
+
+fn _cov_recorded_file_for_target(path: text, files: [text]) -> text:
+    """Pick the recorded module path that denotes `path`. The collector's key
+    comes from `normalize_path_key`, which can be absolute; `@cover` targets are
+    repo-relative. Accept an exact match, or the longest path-suffix match, so
+    `/abs/repo/src/lib/x.spl` matches target `src/lib/x.spl` without letting
+    `other_x.spl` match `x.spl` (the suffix must start at a `/` boundary)."""
+    val want = _cov_norm_path(path)
+    var best = ""
+    for f in files:
+        if f == want:
+            return f
+        if f.ends_with("/" + want) or want.ends_with("/" + f):
+            if f.len() > best.len():
+                best = f
+    best
+
+fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, bool>,
+                        files: [text]) -> text:
     val content = rt_file_read_text(path)
     if content == "":
         return "coverage: {path} 0% (0/0 lines)"
+    # Resolve which recorded module path denotes this target once, up front; a
+    # target the collector never recorded has no hits and reports 0%.
+    val rec_file = _cov_recorded_file_for_target(path, files)
     var current_fn = ""
     var in_doc = false
     var total = 0
@@ -592,7 +656,10 @@ fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, b
         if not _cov_is_recordable(t):
             continue
         total = total + 1
-        if hits.contains_key("{line_no}"):
+        # The line must have been hit IN THIS FILE. The enclosing-function gate
+        # stays exactly as strict as it was (defect B's standing rule): a
+        # genuinely-uncalled body must still read as uncovered.
+        if rec_file != "" and hits.contains_key(_cov_hit_key(rec_file, "{line_no}")):
             if current_fn == "" or called.contains_key(current_fn):
                 hit = hit + 1
     if total == 0:
@@ -603,6 +670,8 @@ fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, b
 fn _cov_print_report(spec_path: text, sdn: text):
     var hits: dict<text, bool> = {}
     var called: dict<text, bool> = {}
+    var seen_files: dict<text, bool> = {}
+    var files: [text] = []
     var section = ""
     for raw in sdn.split("\n"):
         val t = raw.trim()
@@ -618,9 +687,17 @@ fn _cov_print_report(spec_path: text, sdn: text):
         if t == "":
             continue
         if section == "lines":
+            # Row shape: `file, line, hit_count`. The file column used to be the
+            # constant "<source>" for every row, so this kept only the line and
+            # the hit set was pooled across files — see _cov_hit_key. Now the
+            # collector emits the real owning module, so the key is (file, line).
             val parts = t.split(", ")
             if parts.len() >= 3:
-                hits[parts[parts.len() - 2]] = true
+                val f = _cov_norm_path(parts[0])
+                hits[_cov_hit_key(f, parts[parts.len() - 2])] = true
+                if not seen_files.contains_key(f):
+                    seen_files[f] = true
+                    files.push(f)
         elif section == "functions":
             val parts = t.split(", ")
             if parts.len() >= 2:
@@ -633,7 +710,7 @@ fn _cov_print_report(spec_path: text, sdn: text):
         return
     print ""
     for tpath in targets:
-        print _cov_report_for_file(tpath, hits, called)
+        print _cov_report_for_file(tpath, hits, called, files)
 
 fn main() -> i64:
     var run = parse_child_run(clean_args())
