@@ -15,6 +15,17 @@ use compiler.common.diagnostics.span.{Span}
 extern fn rt_enum_payload(value: TypeKind) -> i64
 extern fn rt_enum_discriminant(value: TypeKind) -> i64
 extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
+extern fn rt_println(msg: text)
+extern fn rt_env_get(key: text) -> text
+
+fn parser_types_trace_enabled() -> bool:
+    """Level gate for TypeKind payload-decode tracing (default off).
+
+    Set ``SIMPLE_TRACE_TYPEKIND=1`` to report every payload decode that is
+    asked for an ``Array`` element but handed a different variant.  This is
+    the probe that located the Stage-3 ``field access on nil receiver`` trap.
+    """
+    (rt_env_get("SIMPLE_TRACE_TYPEKIND") ?? "") == "1"
 
 # ============================================================================
 # Type AST
@@ -62,18 +73,52 @@ fn parser_type_kind_named_args(kind: TypeKind) -> [Type]:
     val args: [Type] = rt_tuple_get(payload, 1)
     args
 
+fn parser_type_kind_array_discriminant() -> i64:
+    """Discriminant of `TypeKind.Array`, derived from a sample value.
+
+    Derived from a sample rather than written as a literal so the guard keeps
+    tracking the variant if the enum is ever reordered, matching how the
+    `Named`/`Tuple` decoders above build their own comparison values.
+    """
+    val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
+    rt_enum_discriminant(TypeKind.Array(placeholder, nil))
+
 fn parser_type_kind_array_element(kind: TypeKind, fallback: Type) -> Type:
+    # Decode slot 0 ONLY for a real `Array` payload.  Every other variant
+    # lays out slot 0 differently (`Named` puts `text` there, `Tuple`/`Union`
+    # an array, `Infer`/`Error` nothing at all), so an unguarded decode
+    # reinterprets a foreign value as a `Type`.  Same discriminant guard the
+    # `Named`/`Tuple` decoders above already carry.
+    if rt_enum_discriminant(kind) != parser_type_kind_array_discriminant():
+        return fallback
     val payload = rt_enum_payload(kind)
     if payload == nil:
         return fallback
     val element: Type = rt_tuple_get(payload, 0)
+    if element == nil:
+        return fallback
     element
 
 fn parser_type_kind_array_element_name(kind: TypeKind) -> text:
+    """Name of an `Array` element type, or "" for any non-array kind.
+
+    Callers (`module_surface`) invoke this on EVERY parameter and return
+    type, not just array-typed ones, so a non-`Array` kind is the common
+    case and must return "" rather than decode a foreign payload slot.
+    """
+    val disc = rt_enum_discriminant(kind)
+    if disc != parser_type_kind_array_discriminant():
+        if parser_types_trace_enabled():
+            rt_println("[typekind] array-element-name on non-array disc={disc}")
+        return ""
     val payload = rt_enum_payload(kind)
     if payload == nil:
         return ""
     val element: Type = rt_tuple_get(payload, 0)
+    if element == nil:
+        if parser_types_trace_enabled():
+            rt_println("[typekind] array payload slot0 nil disc={disc}")
+        return ""
     parser_type_kind_named_name(element.kind)
 
 fn parser_type_kind_tuple_elements(kind: TypeKind) -> [Type]:
