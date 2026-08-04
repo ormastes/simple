@@ -161,16 +161,30 @@ fail() {
 }
 
 # -------------------------------------------------------------------------
-# Locate a GUI driver that contains the fullscreen setter symbol.
+# Locate a GUI driver that contains the fullscreen setter extern.
 # The winit real-window runtime only exists in a `--features gui` driver:
 #   (cd src/compiler_rust && CARGO_TARGET_DIR=target/gui \
 #      cargo build -p simple-driver --features gui)
-# -------------------------------------------------------------------------
+# NOTE: probe FUNCTIONALLY, not by grepping the binary for the extern name —
+# release LLVM lowers the dispatch's string match into immediate-operand
+# compares, so the literal may be absent from rodata in a perfectly good
+# gui build (false "stale" on 2026-08-04). A gui driver validates the call's
+# argument types; a non-gui driver reports an unknown extern instead.
+_gui_probe_spl="$BUILD_DIR/gui-driver-probe.spl"
+mkdir -p "$BUILD_DIR"
+cat > "$_gui_probe_spl" <<'SPL'
+extern fn rt_winit_window_set_fullscreen(w: i64, f: i64) -> i64
+fn main():
+    val r = rt_winit_window_set_fullscreen(0, 0)
+    print("probe={r}")
+SPL
 for _c in \
     "src/compiler_rust/target/gui/debug/simple" \
     "src/compiler_rust/target/gui/release/simple"
 do
-    if [ -x "$_c" ] && LC_ALL=C grep -aq "rt_winit_window_set_fullscreen" "$_c"; then
+    if [ -x "$_c" ] && \
+       ! SIMPLE_LIB="$ROOT_DIR/src" "$_c" run "$_gui_probe_spl" 2>&1 | \
+           grep -aq "unknown extern function"; then
         GUI_BIN="$_c"
         break
     fi

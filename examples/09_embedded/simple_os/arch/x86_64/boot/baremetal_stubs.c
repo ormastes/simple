@@ -9993,6 +9993,73 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
     return arr;
 }
 
+/* rt_string_partition: Python-style `text.partition(sep)` ->
+ * [before, sep, after]; when `sep` is absent -> [whole, "", ""].
+ * The freestanding cranelift lane emits this symbol directly for
+ * `.partition(...)` on a text receiver (src/lib/log.spl syslog parsing is the
+ * only caller in the SimpleOS entry closure). There is no `rt_string_partition`
+ * in any runtime, so the freestanding link previously wanted to fabricate a
+ * weak body returning 0 -- every partition result would have been nil and the
+ * syslog parser would have silently produced empty fields.
+ * Returns the TAGGED array handle, same ABI contract as rt_string_split above. */
+RuntimeValue rt_string_partition(RuntimeValue str, RuntimeValue sep)
+{
+    RuntimeString *s = decode_string(str);
+    RuntimeString *d = decode_string(sep);
+    RuntimeValue arr = rt_array_new(ENCODE_INT(3));
+    if (!s) {
+        arr = rt_array_push_handle(arr, rt_string_from_cstr(""));
+        arr = rt_array_push_handle(arr, rt_string_from_cstr(""));
+        arr = rt_array_push_handle(arr, rt_string_from_cstr(""));
+        return arr;
+    }
+    if (d && d->len > 0 && d->len <= s->len) {
+        for (uint32_t i = 0; i + d->len <= s->len; i++) {
+            uint32_t j = 0;
+            while (j < d->len && s->data[i + j] == d->data[j]) j++;
+            if (j == d->len) {
+                /* rt_string_slice takes RAW (untagged) indices. */
+                arr = rt_array_push_handle(arr,
+                    rt_string_slice(str, (RuntimeValue)0, (RuntimeValue)i));
+                arr = rt_array_push_handle(arr, sep);
+                arr = rt_array_push_handle(arr,
+                    rt_string_slice(str, (RuntimeValue)(i + d->len),
+                                    (RuntimeValue)s->len));
+                return arr;
+            }
+        }
+    }
+    /* Separator absent (or empty): whole string, then two empties. */
+    arr = rt_array_push_handle(arr, str);
+    arr = rt_array_push_handle(arr, rt_string_from_cstr(""));
+    arr = rt_array_push_handle(arr, rt_string_from_cstr(""));
+    return arr;
+}
+
+/* rt_find: the bare/erased-receiver form of `.find(needle)`.
+ * The freestanding cranelift lane leaves `.find()` bare when the receiver type
+ * was erased (e.g. `result.substring(pos).find("$")` in env/variables.spl, or
+ * `part.find("=")` on a split element in ui/draw_ir_sdn.spl), so the emitted
+ * symbol is `rt_find` rather than `rt_string_find`. Dispatch on the receiver's
+ * heap type so both text and array receivers get their real semantics; a weak
+ * 0-returning stub would have reported "match at index 0" for every call. */
+RuntimeValue rt_find(RuntimeValue recv, RuntimeValue needle)
+{
+    if (IS_HEAP(recv)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(recv);
+        if (h && h->type == HEAP_ARRAY) {
+            RuntimeArray *a = (RuntimeArray *)h;
+            for (uint64_t i = 0; i < a->len; i++) {
+                if (rt_native_eq(a->items[i], needle)) return (RuntimeValue)i;
+            }
+            return (RuntimeValue)(-1);
+        }
+    }
+    /* Text receiver (and the not-a-collection fallback): byte-offset search,
+     * identical to a statically typed `text.find()` -> rt_string_find. */
+    return rt_string_find(recv, needle);
+}
+
 static int is_whitespace(char c)
 {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
@@ -14173,7 +14240,31 @@ RuntimeValue rt_array_remove(RuntimeValue arr, RuntimeValue idx)
 
 S3(rt_array_insert)
 S1(rt_array_reverse)
-S1(rt_array_sort)
+/* rt_array_sort(arr) — stable in-place insertion sort.
+ *
+ * The freestanding Simple Web layout engine sorts small internal lists while
+ * resolving paint order. Leaving this as an S1 fatal stub turned a normal
+ * desktop compose into a runtime halt. Match simple_core's scalar ordering:
+ * tagged integers retain numeric order and other values use their raw tagged
+ * representation. The renderer does not require a host callback/qsort path.
+ */
+RuntimeValue rt_array_sort(RuntimeValue arr)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY || a->len < 2) return arr;
+    RuntimeValue *items = runtime_array_items(a);
+    for (uint32_t i = 1; i < a->len; i++) {
+        RuntimeValue key = items[i];
+        uint32_t j = i;
+        while (j > 0 && (int64_t)items[j - 1] > (int64_t)key) {
+            items[j] = items[j - 1];
+            j--;
+        }
+        items[j] = key;
+    }
+    return arr;
+}
 S2(rt_array_sort_by)
 S2(rt_array_map)
 S2(rt_array_filter)
@@ -14312,6 +14403,32 @@ RuntimeValue rt_text_cmp_any(RuntimeValue left, RuntimeValue right)
     }
     if (a->len == b->len) return (RuntimeValue)0;
     return (RuntimeValue)(a->len < b->len ? -1 : 1);
+}
+
+/* rt_native_cmp: three-way ordering (-1 / 0 / 1) over erased operands, the
+ * companion of rt_native_eq / rt_native_neq. The freestanding cranelift lane
+ * emits it for `<` / `>` / `<=` / `>=` whenever the operand type was erased
+ * (callers consume the result with `setg` or `shr $63`), which is why nearly
+ * every module in the SimpleOS entry closure references it. A weak body
+ * returning 0 reports "equal" for every comparison, so every erased ordering
+ * test silently became false.
+ *
+ * Numbers arrive here either RAW (an inlined `.len()` read passes the raw
+ * i64 and a literal `0` as a bare zero) or TAGged via ENCODE_INT. A signed
+ * compare of the two words is correct for BOTH: ENCODE_INT is a left shift by
+ * 3, which is order-preserving, so tagged operands compare in the same order
+ * as their decoded values. Strings compare lexicographically, matching
+ * rt_text_cmp_any. */
+RuntimeValue rt_native_cmp(RuntimeValue left, RuntimeValue right)
+{
+    if (left == right) return (RuntimeValue)0;
+    if (IS_HEAP(left) && IS_HEAP(right)) {
+        HeapHeader *hl = (HeapHeader *)DECODE_PTR(left);
+        HeapHeader *hr = (HeapHeader *)DECODE_PTR(right);
+        if (hl && hr && hl->type == HEAP_STRING && hr->type == HEAP_STRING)
+            return rt_text_cmp_any(left, right);
+    }
+    return (RuntimeValue)((int64_t)left < (int64_t)right ? -1 : 1);
 }
 
 /* rt_enum_payload(value) → payload RuntimeValue */

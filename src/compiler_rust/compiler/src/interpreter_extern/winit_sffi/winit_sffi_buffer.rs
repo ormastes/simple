@@ -501,7 +501,7 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
                 }
             }
         }
-        _ => unreachable!("dispatch_buffer called with unexpected name: {name}"),
+        _ => Err(super::unknown_function(name)),
     }
 }
 

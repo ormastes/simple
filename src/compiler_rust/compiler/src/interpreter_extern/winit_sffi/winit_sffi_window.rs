@@ -5,13 +5,66 @@ use crate::value::Value;
 
 use super::{
     get_i64, get_bool, get_string, get_pixels, int_value, bool_value, tuple_value, unsupported_window_mutation,
-    parse_window_config, set_last_error, WindowConfig, NEXT_EVENT_LOOP_ID, EVENT_LOOPS, WINDOW_STATES, WINDOW_OWNERS,
-    RuntimeCommand,
+    parse_window_config, set_last_error, StagingBuffer, WindowConfig, NEXT_EVENT_LOOP_ID, EVENT_LOOPS, STAGING_BUFFERS,
+    WINDOW_STATES, WINDOW_OWNERS, RuntimeCommand,
 };
 use super::winit_sffi_thread::{start_event_loop_thread, event_to_handle};
 
 #[cfg(target_os = "macos")]
 use super::winit_sffi_thread::{macos_pump, MACOS_PUMP};
+
+/// Shared present path: routes an ARGB pixel buffer to the owning event-loop
+/// thread and waits for the presentation result. Used by both
+/// `rt_winit_window_present_rgba` (direct pixels) and
+/// `rt_winit_window_present_staged` (per-window staging buffer).
+fn present_pixels(window_id: i64, width: u32, height: u32, pixels: Vec<u32>) -> Result<bool, CompileError> {
+    let Some(el_id) = WINDOW_OWNERS.lock().get(&window_id).copied() else {
+        set_last_error(format!("invalid window handle: {window_id}"));
+        return Ok(false);
+    };
+    let (response_tx, response_rx) = crossbeam::channel::bounded(1);
+    {
+        if let Some(handle) = EVENT_LOOPS.lock().get(&el_id) {
+            handle
+                .command_tx
+                .send(RuntimeCommand::Present {
+                    window_id,
+                    width,
+                    height,
+                    pixels,
+                    response: response_tx,
+                })
+                .map_err(|err| super::runtime_error(format!("failed to send present request: {err}")))?;
+        }
+    } // Release lock before pumping
+
+    // macOS: pump to process present on main thread
+    #[cfg(target_os = "macos")]
+    for _ in 0..50 {
+        macos_pump(el_id);
+        if let Ok(result) = response_rx.try_recv() {
+            return match result {
+                Ok(()) => Ok(true),
+                Err(err) => {
+                    set_last_error(err);
+                    Ok(false)
+                }
+            };
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    match response_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(Ok(())) => Ok(true),
+        Ok(Err(err)) => {
+            set_last_error(err);
+            Ok(false)
+        }
+        Err(err) => Err(super::runtime_error(format!(
+            "failed to receive present response: {err}"
+        ))),
+    }
+}
 
 pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, CompileError> {
     match name {
@@ -40,7 +93,18 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
             if let Some(handle) = EVENT_LOOPS.lock().remove(&id) {
                 let _ = handle.command_tx.send(RuntimeCommand::Exit);
             }
-            WINDOW_OWNERS.lock().retain(|_, owner| *owner != id);
+            {
+                let mut owners = WINDOW_OWNERS.lock();
+                let mut staging = STAGING_BUFFERS.lock();
+                owners.retain(|window_id, owner| {
+                    if *owner == id {
+                        staging.remove(window_id);
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
             WINDOW_STATES.lock().retain(|_, state| state.event_loop_id != id);
             Ok(bool_value(true))
         }
@@ -173,6 +237,7 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
         }
         "rt_winit_window_free" => {
             let window_id = get_i64(args, 0, name)?;
+            STAGING_BUFFERS.lock().remove(&window_id);
             if let Some(event_loop_id) = WINDOW_OWNERS.lock().get(&window_id).copied() {
                 if let Some(handle) = EVENT_LOOPS.lock().get(&event_loop_id) {
                     let _ = handle.command_tx.send(RuntimeCommand::DestroyWindow { window_id });
@@ -198,53 +263,104 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
             let width = get_i64(args, 1, name)?.max(1) as u32;
             let height = get_i64(args, 2, name)?.max(1) as u32;
             let pixels = get_pixels(args, 3, name)?;
-            let event_loop_id = WINDOW_OWNERS.lock().get(&window_id).copied();
-            if let Some(el_id) = event_loop_id {
-                let (response_tx, response_rx) = crossbeam::channel::bounded(1);
-                {
-                    if let Some(handle) = EVENT_LOOPS.lock().get(&el_id) {
-                        handle
-                            .command_tx
-                            .send(RuntimeCommand::Present {
-                                window_id,
-                                width,
-                                height,
-                                pixels,
-                                response: response_tx,
-                            })
-                            .map_err(|err| super::runtime_error(format!("failed to send present request: {err}")))?;
-                    }
-                } // Release lock before pumping
-
-                // macOS: pump to process present on main thread
-                #[cfg(target_os = "macos")]
-                for _ in 0..50 {
-                    macos_pump(el_id);
-                    if let Ok(result) = response_rx.try_recv() {
-                        return match result {
-                            Ok(()) => Ok(bool_value(true)),
-                            Err(err) => {
-                                set_last_error(err);
-                                Ok(bool_value(false))
-                            }
-                        };
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                }
-
-                return match response_rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                    Ok(Ok(())) => Ok(bool_value(true)),
-                    Ok(Err(err)) => {
-                        set_last_error(err);
-                        Ok(bool_value(false))
-                    }
-                    Err(err) => Err(super::runtime_error(format!(
-                        "failed to receive present response: {err}"
-                    ))),
-                };
+            Ok(bool_value(present_pixels(window_id, width, height, pixels)?))
+        }
+        "rt_winit_window_staging_ptr" => {
+            let window_id = get_i64(args, 0, name)?;
+            let width = get_i64(args, 1, name)?.max(1) as u32;
+            let height = get_i64(args, 2, name)?.max(1) as u32;
+            if !WINDOW_OWNERS.lock().contains_key(&window_id) {
+                set_last_error(format!("invalid window handle: {window_id}"));
+                return Ok(int_value(0));
             }
-            set_last_error(format!("invalid window handle: {window_id}"));
-            Ok(bool_value(false))
+            let mut buffers = STAGING_BUFFERS.lock();
+            let slot = buffers.entry(window_id).or_insert_with(|| StagingBuffer {
+                width: 0,
+                height: 0,
+                pixels: Vec::new(),
+            });
+            let want = width as usize * height as usize;
+            if slot.pixels.len() != want {
+                slot.pixels = vec![0u32; want];
+            }
+            slot.width = width;
+            slot.height = height;
+            Ok(int_value(slot.pixels.as_mut_ptr() as usize as i64))
+        }
+        "rt_winit_window_stage_clear" => {
+            let window_id = get_i64(args, 0, name)?;
+            let width = get_i64(args, 1, name)?.max(1) as u32;
+            let height = get_i64(args, 2, name)?.max(1) as u32;
+            let color = get_i64(args, 3, name)? as u32;
+            if !WINDOW_OWNERS.lock().contains_key(&window_id) {
+                set_last_error(format!("invalid window handle: {window_id}"));
+                return Ok(int_value(0));
+            }
+            let mut buffers = STAGING_BUFFERS.lock();
+            let slot = buffers.entry(window_id).or_insert_with(|| StagingBuffer {
+                width: 0,
+                height: 0,
+                pixels: Vec::new(),
+            });
+            let want = width as usize * height as usize;
+            if slot.pixels.len() != want {
+                slot.pixels = vec![0u32; want];
+            }
+            slot.width = width;
+            slot.height = height;
+            slot.pixels.fill(color);
+            Ok(int_value(1))
+        }
+        "rt_winit_window_stage_fill_rect" => {
+            let window_id = get_i64(args, 0, name)?;
+            let x = get_i64(args, 1, name)?;
+            let y = get_i64(args, 2, name)?;
+            let w = get_i64(args, 3, name)?;
+            let h = get_i64(args, 4, name)?;
+            let color = get_i64(args, 5, name)? as u32;
+            let mut buffers = STAGING_BUFFERS.lock();
+            let Some(slot) = buffers.get_mut(&window_id) else {
+                set_last_error(format!("no staging buffer for window handle: {window_id}"));
+                return Ok(int_value(0));
+            };
+            if slot.pixels.is_empty() || slot.width == 0 || slot.height == 0 {
+                return Ok(int_value(0));
+            }
+            let sw = slot.width as i64;
+            let sh = slot.height as i64;
+            let x0 = x.max(0).min(sw);
+            let y0 = y.max(0).min(sh);
+            let x1 = (x + w).max(0).min(sw);
+            let y1 = (y + h).max(0).min(sh);
+            if x1 <= x0 || y1 <= y0 {
+                return Ok(int_value(1));
+            }
+            for yy in y0 as usize..y1 as usize {
+                let start = yy * slot.width as usize + x0 as usize;
+                let end = yy * slot.width as usize + x1 as usize;
+                slot.pixels[start..end].fill(color);
+            }
+            Ok(int_value(1))
+        }
+        "rt_winit_window_present_staged" => {
+            let window_id = get_i64(args, 0, name)?;
+            let (width, height, pixels) = {
+                let buffers = STAGING_BUFFERS.lock();
+                let Some(slot) = buffers.get(&window_id) else {
+                    set_last_error(format!("no staging buffer for window handle: {window_id}"));
+                    return Ok(int_value(0));
+                };
+                if slot.pixels.is_empty() || slot.width == 0 || slot.height == 0 {
+                    set_last_error(format!("empty staging buffer for window handle: {window_id}"));
+                    return Ok(int_value(0));
+                }
+                (slot.width, slot.height, slot.pixels.clone())
+            }; // Release STAGING_BUFFERS lock before presenting/pumping
+            Ok(int_value(if present_pixels(window_id, width, height, pixels)? {
+                1
+            } else {
+                0
+            }))
         }
         "rt_winit_window_get_size" | "rt_winit_window_get_inner_size" | "rt_winit_window_get_outer_size" => {
             let window_id = get_i64(args, 0, name)?;
@@ -381,6 +497,26 @@ pub(super) fn dispatch_window(name: &str, args: &[Value]) -> Result<Value, Compi
                     .unwrap_or(1.0),
             ))
         }
-        _ => unreachable!("dispatch_window called with unexpected name: {name}"),
+        "rt_winit_window_position_x" => {
+            let window_id = get_i64(args, 0, name)?;
+            Ok(int_value(
+                WINDOW_STATES
+                    .lock()
+                    .get(&window_id)
+                    .map(|window| window.x as i64)
+                    .unwrap_or(0),
+            ))
+        }
+        "rt_winit_window_position_y" => {
+            let window_id = get_i64(args, 0, name)?;
+            Ok(int_value(
+                WINDOW_STATES
+                    .lock()
+                    .get(&window_id)
+                    .map(|window| window.y as i64)
+                    .unwrap_or(0),
+            ))
+        }
+        _ => Err(super::unknown_function(name)),
     }
 }

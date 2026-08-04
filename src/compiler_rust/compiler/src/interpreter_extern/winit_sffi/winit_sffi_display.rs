@@ -36,6 +36,6 @@ pub(super) fn dispatch_display(name: &str, args: &[Value]) -> Result<Value, Comp
             Ok(unsupported_window_mutation(name))
         }
         "rt_winit_get_last_error" => Ok(Value::text(LAST_ERROR.lock().clone())),
-        _ => unreachable!("dispatch_display called with unexpected name: {name}"),
+        _ => Err(super::unknown_function(name)),
     }
 }

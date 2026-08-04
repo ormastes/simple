@@ -75,14 +75,35 @@ class FvarAxis:
     max_value: f64
 
 fn parse_fvar_axes(font: OtFont) -> [FvarAxis]:
-    val maybe_table = find_table(font, 1719034226)
-    val table = match maybe_table:
-        Some(value): value
-        None: return []
-    val base = table.offset as i64
-    val limit = base + table.length as i64
+    # Flat scalar table scan instead of `val table = match find_table(...):
+    # Some(value): value / None: return []`. On the freestanding native lane
+    # (OVMF boot 2026-08-04) that val-assigned Option payload extraction
+    # compiled to discriminant-hash checks with a nil (0x3) fall-through, the
+    # scrutinee matched NEITHER arm at runtime, `table` became nil, and the
+    # first field read `table.offset` died with "field access on nil
+    # receiver" (rip 0x8073034 → this fn). Same Option-marshalling defect
+    # class as the matcher note in sfnt_manifest_names_match below; see
+    # doc/08_tracking/bug/sfnt_fvar_option_match_nil_baremetal_2026-08-04.md.
+    # The statement-form matches in validate_default_glyf_font work; only
+    # this extraction shape faulted, so the lookup is inlined Option-free.
+    var table_found = false
+    var table_offset: i64 = 0
+    var table_length: i64 = 0
+    val tables = font.tables
+    var ti: i64 = 0
+    while ti < tables.len():
+        val entry = tables[ti]
+        val entry_tag: u32 = entry.tag
+        if entry_tag == 1719034226 and not table_found:
+            table_found = true
+            table_offset = entry.offset as i64
+            table_length = entry.length as i64
+        ti = ti + 1
+    if not table_found: return []
+    val base = table_offset
+    val limit = base + table_length
     val blob = font.blob
-    if (table.length < 16 or read_u16_be(blob, base) != 1 or
+    if (table_length < 16 or read_u16_be(blob, base) != 1 or
         read_u16_be(blob, base + 2) != 0 or read_u16_be(blob, base + 6) != 2): return []
     val axes_offset = read_u16_be(blob, base + 4) as i64
     val axis_count = read_u16_be(blob, base + 8) as i64
@@ -105,8 +126,16 @@ fn parse_fvar_axes(font: OtFont) -> [FvarAxis]:
         val default_value = read_fixed_1616(blob, axis_base + 8)
         val max_value = read_fixed_1616(blob, axis_base + 12)
         if tag == 0 or min_value > default_value or default_value > max_value: return []
-        for axis in axes:
-            if axis.tag == tag: return []
+        # Indexed duplicate scan instead of `for axis in axes:` — struct
+        # iteration variables are broken on the freestanding native lane
+        # (value-copy/nil class, see _sfnt_collect_names comment); indexed
+        # element + typed local is the proven-safe form.
+        var ai: i64 = 0
+        while ai < axes.len():
+            val prior = axes[ai]
+            val prior_tag: u32 = prior.tag
+            if prior_tag == tag: return []
+            ai = ai + 1
         axes.push(FvarAxis(tag: tag, min_value: min_value, default_value: default_value, max_value: max_value))
         index = index + 1
     axes
@@ -179,14 +208,27 @@ fn sfnt_manifest_default_axes_match(blob: [u8], manifest: text) -> bool:
     val font = match maybe_font:
         Some(value): value
         None: return false
-    if find_table(font, 1719034226) == None: return manifest == "static"
+    # match instead of `find_table(...) == None`: Option-vs-None `==` is the
+    # documented unhealed marshalling sink on the freestanding native lane
+    # (see validate_default_glyf_font comment above).
+    val has_fvar = match find_table(font, 1719034226):
+        Some(_): true
+        None: false
+    if not has_fvar: return manifest == "static"
     val axes = parse_fvar_axes(font)
     val defaults = manifest.split(",")
     if axes.len() == 0 or defaults.len() != axes.len(): return false
-    for axis in axes:
-        val integer = axis.default_value as i64
-        val value = if integer as f64 == axis.default_value: integer.to_text() else: axis.default_value.to_text()
-        if not _sfnt_names_contain(defaults, _sfnt_tag_text(axis.tag) + "=" + value): return false
+    # Indexed loop + typed locals instead of `for axis in axes:` — struct
+    # iteration variables are broken on the freestanding native lane.
+    var ai: i64 = 0
+    while ai < axes.len():
+        val axis = axes[ai]
+        val axis_tag: u32 = axis.tag
+        val axis_default: f64 = axis.default_value
+        val integer = axis_default as i64
+        val value = if integer as f64 == axis_default: integer.to_text() else: axis_default.to_text()
+        if not _sfnt_names_contain(defaults, _sfnt_tag_text(axis_tag) + "=" + value): return false
+        ai = ai + 1
     true
 
 fn validate_glyf_font_instance(blob: [u8], requested_axes: text) -> SfntValidation:

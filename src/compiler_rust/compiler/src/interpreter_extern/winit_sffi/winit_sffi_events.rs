@@ -82,6 +82,25 @@ pub(super) fn dispatch_events(name: &str, args: &[Value]) -> Result<Value, Compi
                 _ => Ok(Value::Float(1.0)),
             }
         }
+        // Flat accessors used by the window_winit.spl / hosted_entry.spl API
+        // (mirror src/runtime/spl_winit/src/lib.rs rt_winit_event_window_x/_y:
+        // moved-position only, 0 for any other event kind).
+        "rt_winit_event_window_x" => {
+            let event_id = get_i64(args, 0, name)?;
+            let events = EVENTS.lock();
+            match events.get(&event_id) {
+                Some(RuntimeEvent::WindowMoved { x, .. }) => Ok(int_value(*x)),
+                _ => Ok(int_value(0)),
+            }
+        }
+        "rt_winit_event_window_y" => {
+            let event_id = get_i64(args, 0, name)?;
+            let events = EVENTS.lock();
+            match events.get(&event_id) {
+                Some(RuntimeEvent::WindowMoved { y, .. }) => Ok(int_value(*y)),
+                _ => Ok(int_value(0)),
+            }
+        }
         "rt_winit_event_cursor_entered" | "rt_winit_event_cursor_left" => Ok(bool_value(false)),
         "rt_winit_event_touch" => Ok(tuple_value(vec![
             Value::Int(0),
@@ -89,6 +108,6 @@ pub(super) fn dispatch_events(name: &str, args: &[Value]) -> Result<Value, Compi
             Value::Float(0.0),
             Value::Float(0.0),
         ])),
-        _ => unreachable!("dispatch_events called with unexpected name: {name}"),
+        _ => Err(super::unknown_function(name)),
     }
 }

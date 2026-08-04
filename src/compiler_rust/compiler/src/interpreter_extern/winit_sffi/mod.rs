@@ -55,6 +55,19 @@ pub(super) struct PixelBuffer {
     pub(super) pixels: Vec<u32>, // ARGB
 }
 
+/// Per-window CPU staging buffer for the flat staging present protocol
+/// (rt_winit_window_staging_ptr / stage_clear / stage_fill_rect /
+/// present_staged). Mirrors the `staging` fields of the cdylib runtime's
+/// window slot (src/runtime/spl_winit/src/lib.rs).
+pub(super) struct StagingBuffer {
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) pixels: Vec<u32>, // ARGB
+}
+
+pub(super) static STAGING_BUFFERS: LazyLock<Mutex<HashMap<i64, StagingBuffer>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 #[derive(Clone)]
 pub(super) struct EventLoopHandle {
     pub(super) command_tx: crossbeam::channel::Sender<RuntimeCommand>,
@@ -372,7 +385,13 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         {
             winit_sffi_events::dispatch_events(name, args)
         }
-        n if n.starts_with("rt_winit_event_keyboard_") || n.starts_with("rt_winit_event_mouse_") => {
+        n if n.starts_with("rt_winit_event_keyboard_")
+            || n.starts_with("rt_winit_event_mouse_")
+            || n.starts_with("rt_winit_event_key_")
+            || n.starts_with("rt_winit_event_text_")
+            || n.starts_with("rt_winit_event_wheel_")
+            || n == "rt_winit_event_received_character" =>
+        {
             winit_sffi_input::dispatch_input(name, args)
         }
         n if n.starts_with("rt_winit_monitor_")

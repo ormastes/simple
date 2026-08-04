@@ -162,7 +162,77 @@ pub(super) fn dispatch_input(name: &str, args: &[Value]) -> Result<Value, Compil
                 _ => Ok(tuple_value(vec![Value::Float(0.0), Value::Float(0.0)])),
             }
         }
-        _ => unreachable!("dispatch_input called with unexpected name: {name}"),
+        // Flat accessors used by the window_winit.spl / hosted_entry.spl API
+        // (mirror src/runtime/spl_winit/src/lib.rs event accessors: each returns
+        // the matching field for its event kind, 0 otherwise).
+        "rt_winit_event_key_scancode" => {
+            let event_id = get_i64(args, 0, name)?;
+            let events = EVENTS.lock();
+            match events.get(&event_id) {
+                Some(RuntimeEvent::KeyboardInput { scancode, .. }) => Ok(int_value(*scancode)),
+                _ => Ok(int_value(0)),
+            }
+        }
+        "rt_winit_event_key_keycode" => {
+            let event_id = get_i64(args, 0, name)?;
+            let events = EVENTS.lock();
+            match events.get(&event_id) {
+                Some(RuntimeEvent::KeyboardInput { keycode, .. }) => Ok(int_value(*keycode)),
+                _ => Ok(int_value(0)),
+            }
+        }
+        "rt_winit_event_key_pressed" => {
+            let event_id = get_i64(args, 0, name)?;
+            let events = EVENTS.lock();
+            match events.get(&event_id) {
+                Some(RuntimeEvent::KeyboardInput { pressed, .. }) => Ok(int_value(*pressed as i64)),
+                _ => Ok(int_value(0)),
+            }
+        }
+        // The interpreter event stream does not track shift state or IME text
+        // events; report none rather than guessing.
+        "rt_winit_event_key_shifted" | "rt_winit_event_text_len" | "rt_winit_event_text_byte" => Ok(int_value(0)),
+        "rt_winit_event_mouse_pressed" => {
+            let event_id = get_i64(args, 0, name)?;
+            let events = EVENTS.lock();
+            match events.get(&event_id) {
+                Some(RuntimeEvent::MouseButton { pressed, .. }) => Ok(int_value(*pressed as i64)),
+                _ => Ok(int_value(0)),
+            }
+        }
+        "rt_winit_event_mouse_x_milli" => {
+            let event_id = get_i64(args, 0, name)?;
+            let events = EVENTS.lock();
+            match events.get(&event_id) {
+                Some(RuntimeEvent::MouseMoved { x, .. }) => Ok(int_value((*x * 1000.0).round() as i64)),
+                _ => Ok(int_value(0)),
+            }
+        }
+        "rt_winit_event_mouse_y_milli" => {
+            let event_id = get_i64(args, 0, name)?;
+            let events = EVENTS.lock();
+            match events.get(&event_id) {
+                Some(RuntimeEvent::MouseMoved { y, .. }) => Ok(int_value((*y * 1000.0).round() as i64)),
+                _ => Ok(int_value(0)),
+            }
+        }
+        "rt_winit_event_wheel_x_milli" => {
+            let event_id = get_i64(args, 0, name)?;
+            let events = EVENTS.lock();
+            match events.get(&event_id) {
+                Some(RuntimeEvent::MouseWheel { x, .. }) => Ok(int_value((*x * 1000.0).round() as i64)),
+                _ => Ok(int_value(0)),
+            }
+        }
+        "rt_winit_event_wheel_y_milli" => {
+            let event_id = get_i64(args, 0, name)?;
+            let events = EVENTS.lock();
+            match events.get(&event_id) {
+                Some(RuntimeEvent::MouseWheel { y, .. }) => Ok(int_value((*y * 1000.0).round() as i64)),
+                _ => Ok(int_value(0)),
+            }
+        }
+        _ => Err(super::unknown_function(name)),
     }
 }
 
