@@ -296,7 +296,41 @@ fn layered_alias_child_file(current: &Path, segment: &str) -> Option<PathBuf> {
     }
 }
 
+/// `true` when `dir` is the root of the enclosing repository/workspace.
+///
+/// An ancestor climb must stop here. Everything above belongs to a different
+/// project (a sibling checkout, a scratch tree, the user's home directory) and
+/// must never contribute modules to this build. A nested git worktree marks its
+/// root with a `.git` **file**, not a directory, so `exists()` is the right test
+/// — that is what makes `build/worktrees/x` and `.claude/worktrees/y` their own
+/// boundaries rather than a name we have to blacklist.
+fn is_workspace_boundary(dir: &Path) -> bool {
+    dir.join(".git").exists() || dir.join(".jj").is_dir()
+}
+
+/// `true` for imports that name the project's own standard library.
+///
+/// These must resolve from the project's stdlib roots and nowhere else. The
+/// importer-relative and ancestor-climbing strategies join the import verbatim
+/// onto the importing file's directory and onto every ancestor, so `use std.x`
+/// from `test/01_unit/a/b_spec.spl` also tries `test/01_unit/a/std/x.spl`,
+/// `test/01_unit/std/x.spl`, `test/std/x.spl`, … Any `std/` folder along that
+/// chain silently outranks `src/lib/x.spl`, and editing the real file then has
+/// no observable effect at all.
+fn is_project_stdlib_import(parts: &[String]) -> bool {
+    parts
+        .first()
+        .map(|p| matches!(p.as_str(), "std" | "std_lib" | "lib"))
+        .unwrap_or(false)
+}
+
 fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &UseStmt) -> Option<PathBuf> {
+    // Stdlib imports never resolve relative to the importing file — see
+    // is_project_stdlib_import. The caller falls through to the project-rooted
+    // stdlib search.
+    if is_project_stdlib_import(parts) {
+        return None;
+    }
     if let Some(resolved) = resolve_parts_from_root(base, parts, use_stmt) {
         return Some(resolved);
     }
@@ -373,6 +407,11 @@ fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &Use
             parent_mod_resolved.set_extension("spl");
             if parent_mod_resolved.exists() && parent_mod_resolved.is_file() {
                 return Some(parent_mod_resolved);
+            }
+
+            // Never climb out of the enclosing repository.
+            if is_workspace_boundary(&parent_dir) {
+                break;
             }
         } else {
             break;
@@ -2327,6 +2366,10 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
         for _ in 0..10 {
             if let Some(resolved) = resolve_from_stdlib_root(&current, parts, use_stmt) {
                 return Some(resolved);
+            }
+            // Never climb out of the enclosing repository.
+            if is_workspace_boundary(&current) {
+                break;
             }
             let Some(parent) = current.parent() else {
                 break;

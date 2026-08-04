@@ -106,7 +106,16 @@ fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
         if let Some(after_dot) = name_str.find('.') {
             let prefix = &name_str[..after_dot];
             let suffix = &name_str[after_dot + 1..];
-            if suffix == segment && prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) && path.is_dir() {
+            // `!prefix.is_empty()` matters: `all(is_ascii_digit)` is vacuously
+            // true for the empty string, so dotfile directories (`.git`,
+            // `.claude`, `.codex-worktrees`) used to be accepted as numbered
+            // layer directories and pulled into the candidate set.
+            if suffix == segment
+                && !prefix.is_empty()
+                && prefix.len() <= 3
+                && prefix.chars().all(|c| c.is_ascii_digit())
+                && path.is_dir()
+            {
                 return Some(path);
             }
         }
@@ -125,7 +134,13 @@ fn find_segment_in_numbered_dirs(parent: &Path, segment: &str) -> Vec<PathBuf> {
         // Check if this is a numbered directory (NN.name pattern)
         if let Some(after_dot) = name_str.find('.') {
             let prefix = &name_str[..after_dot];
-            if prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) && numbered_path.is_dir() {
+            // See find_numbered_dir: an empty prefix passes `all(is_ascii_digit)`
+            // vacuously, which made every dotfile directory a "numbered" layer.
+            if !prefix.is_empty()
+                && prefix.len() <= 3
+                && prefix.chars().all(|c| c.is_ascii_digit())
+                && numbered_path.is_dir()
+            {
                 let sub = numbered_path.join(segment);
                 if sub.is_dir() {
                     results.push(sub);
@@ -294,6 +309,8 @@ thread_local! {
     static PATH_RESOLUTION_CACHE: RefCell<HashMap<u64, Option<PathBuf>>> = RefCell::new(HashMap::new());
     // Cached project root to avoid re-discovering it per import.
     static PROJECT_ROOT_CACHE: RefCell<HashMap<PathBuf, Option<PathBuf>>> = RefCell::new(HashMap::new());
+    // Cached enclosing repository/workspace root (see find_workspace_boundary).
+    static WORKSPACE_BOUNDARY_CACHE: RefCell<HashMap<PathBuf, Option<PathBuf>>> = RefCell::new(HashMap::new());
 }
 
 /// Find the project root by walking up from `start` looking for `src/` or `Cargo.toml`.
@@ -318,6 +335,55 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
         cache.borrow_mut().insert(start.to_path_buf(), result.clone());
     });
     result
+}
+
+/// Outermost directory a module search is allowed to climb to.
+///
+/// Module resolution used to walk up to ten ancestors unconditionally, so a
+/// build under `/home/u/dev/pub/<repo>` also probed `/home/u/dev/pub`,
+/// `/home/u/dev` and `/home/u` for `src/lib`, `src/std` and `<segment>/`
+/// directories. That let a *sibling* checkout, a stray `std/` folder, or any
+/// scratch tree outside the project contribute modules to a build, silently
+/// shadowing the project's own sources.
+///
+/// The boundary is the enclosing repository/workspace root, detected by a `.git`
+/// entry (a directory in a normal clone, a *file* in a git worktree) or a `.jj`
+/// directory. This excludes stray trees **by construction** rather than by
+/// blacklisting directory names: a nested worktree (`build/worktrees/x`,
+/// `.claude/worktrees/y`) carries its own `.git`, so it is its own boundary and
+/// can never be reached from — nor reach into — the parent project.
+///
+/// Returns `None` for sources that live outside any repository (e.g. a script
+/// under `/tmp`); callers then keep the historical unbounded behaviour.
+fn find_workspace_boundary(start: &Path) -> Option<PathBuf> {
+    let cached = WORKSPACE_BOUNDARY_CACHE.with(|cache| cache.borrow().get(start).cloned());
+    if let Some(result) = cached {
+        return result;
+    }
+
+    let mut dir = start.to_path_buf();
+    let result = loop {
+        if dir.join(".git").exists() || dir.join(".jj").is_dir() {
+            break Some(dir.clone());
+        }
+        if !dir.pop() {
+            break None;
+        }
+    };
+
+    WORKSPACE_BOUNDARY_CACHE.with(|cache| {
+        cache.borrow_mut().insert(start.to_path_buf(), result.clone());
+    });
+    result
+}
+
+/// True when `current` is the last directory an ancestor climb started at
+/// `boundary_start` may examine.
+fn at_search_boundary(current: &Path, boundary: &Option<PathBuf>) -> bool {
+    match boundary {
+        Some(b) => current == b.as_path(),
+        None => false,
+    }
 }
 
 /// Check if parts represent a stdlib-prefixed import.
@@ -557,37 +623,63 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
     // Pre-compute the relative path segments once — reused across all strategies
     let relative: PathBuf = parts.iter().collect();
 
-    // Try resolving from base directory first (sibling files)
-    let mut resolved = base_dir.join(&relative);
-    resolved.set_extension("spl");
-    if resolved.exists() && resolved.is_file() {
-        return Ok(resolved);
-    }
-
-    // Try .shs extension (Simple shell scripts)
-    resolved.set_extension("shs");
-    if resolved.exists() && resolved.is_file() {
-        return Ok(resolved);
-    }
-
-    // Try __init__.spl in directory
-    let mut init_resolved = base_dir.join(&relative);
-    init_resolved.push("__init__.spl");
-    if init_resolved.exists() && init_resolved.is_file() {
-        return Ok(init_resolved);
-    }
-
-    // Try with numbered directory support from base directory
-    if let Some(found) = resolve_with_numbered_dirs(base_dir, parts) {
-        return Ok(found);
-    }
-
     // Determine project root once for early break in parent traversal
     let project_root = find_project_root(base_dir);
+    // Outermost directory any ancestor climb below may examine.
+    let boundary = find_workspace_boundary(base_dir);
+
+    // `std.*` / `lib.*` / `std_lib.*` name the *project's own* stdlib and must
+    // resolve from its stdlib roots (`src/lib`, `src/std`) and nothing else.
+    // They deliberately skip the sibling-file and parent-directory strategies
+    // below: those join the import verbatim onto the importer's directory and
+    // onto every ancestor, so any `std/` folder that happens to sit next to a
+    // source file — a spec fixture directory, a scratch checkout, a nested
+    // worktree — silently outranked the real stdlib. Edits to `src/lib` then had
+    // no observable effect, which is indistinguishable from "the change did not
+    // matter".
+    //
+    // `verification.*` is stdlib-*rooted* for prefix purposes but its tree lives
+    // at `src/verification`, which the `src/` strategy inside the root-anchored
+    // search below handles; it keeps the generic strategies.
+    let is_stdlib = is_stdlib_import(parts);
+    let anchored_stdlib = parts
+        .first()
+        .map(|p| matches!(p.as_str(), "std" | "lib" | "std_lib"))
+        .unwrap_or(false);
+
+    if !anchored_stdlib {
+        // Try resolving from base directory first (sibling files)
+        let mut resolved = base_dir.join(&relative);
+        resolved.set_extension("spl");
+        if resolved.exists() && resolved.is_file() {
+            return Ok(resolved);
+        }
+
+        // Try .shs extension (Simple shell scripts)
+        resolved.set_extension("shs");
+        if resolved.exists() && resolved.is_file() {
+            return Ok(resolved);
+        }
+
+        // Try __init__.spl in directory
+        let mut init_resolved = base_dir.join(&relative);
+        init_resolved.push("__init__.spl");
+        if init_resolved.exists() && init_resolved.is_file() {
+            return Ok(init_resolved);
+        }
+
+        // Try with numbered directory support from base directory
+        if let Some(found) = resolve_with_numbered_dirs(base_dir, parts) {
+            return Ok(found);
+        }
+    }
 
     // Try resolving from parent directories (for project-root-relative imports)
     let mut parent_dir = base_dir.to_path_buf();
     for _ in 0..10 {
+        if anchored_stdlib {
+            break;
+        }
         if let Some(parent) = parent_dir.parent() {
             parent_dir = parent.to_path_buf();
 
@@ -613,7 +705,10 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                 return Ok(found);
             }
 
-            // Early break: stop at project root or filesystem root
+            // Early break: stop at project root, workspace root, or filesystem root
+            if at_search_boundary(&parent_dir, &boundary) {
+                break;
+            }
             if let Some(ref root) = project_root {
                 if parent_dir == *root || parent_dir.parent().is_none() {
                     break;
@@ -648,7 +743,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
 
     // Stdlib search: try canonical paths first, then legacy.
     // Skip stdlib search entirely for non-stdlib imports (parts[0] != std/lib/std_lib).
-    let is_stdlib = is_stdlib_import(parts);
+    // `is_stdlib` is computed near the top of this function.
 
     // `std.*`/`lib.*` drop their synthetic prefix, but `verification.*` is an
     // actual stdlib subtree and must keep its leading segment.
@@ -672,6 +767,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
     }
 
     for search_start in &search_roots {
+        let search_boundary = find_workspace_boundary(search_start);
         let mut current = search_start.to_path_buf();
         for _ in 0..10 {
             // Only search stdlib paths if this looks like a stdlib import
@@ -846,6 +942,11 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                 }
             }
 
+            // Never climb past the enclosing repository/workspace root: anything
+            // above it belongs to a different project (or to no project at all).
+            if at_search_boundary(&current, &search_boundary) {
+                break;
+            }
             if let Some(parent) = current.parent() {
                 current = parent.to_path_buf();
             } else {
@@ -855,6 +956,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
     }
 
     for search_start in &search_roots {
+        let search_boundary = find_workspace_boundary(search_start);
         let mut current = search_start.to_path_buf();
         for _ in 0..10 {
             // Final fallback for non-stdlib imports: search lib subdirectories
@@ -894,6 +996,10 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                 }
             }
 
+            // Never climb past the enclosing repository/workspace root.
+            if at_search_boundary(&current, &search_boundary) {
+                break;
+            }
             if let Some(parent) = current.parent() {
                 current = parent.to_path_buf();
             } else {
@@ -921,7 +1027,10 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_cache_key, normalize_base_dir, resolve_module_path};
+    use super::{
+        compute_cache_key, find_numbered_dir, find_workspace_boundary, normalize_base_dir,
+        resolve_module_path,
+    };
     use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1352,6 +1461,89 @@ mod tests {
         assert_eq!(
             variant,
             project_root.join(format!("src/lib/std/variants/{variant_name}/src/io/__init__.spl"))
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Resolution scope: a module search must stay inside the project that owns
+    // the importing file.
+    // ---------------------------------------------------------------------
+
+    /// `use std.x` must come from the project's own `src/lib`, never from a
+    /// `std/` folder that merely happens to sit next to the importing file.
+    /// Before this was enforced, a spec in a directory with a sibling `std/`
+    /// tree loaded that tree instead, so edits to the real `src/lib` had no
+    /// observable effect at all.
+    #[test]
+    fn stdlib_import_ignores_stray_std_dir_beside_importer() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("src/lib")).unwrap();
+        fs::write(root.join("src/lib/scope_probe.spl"), "fn marker() -> text:\n    \"real\"\n").unwrap();
+
+        let importer_dir = root.join("pkg");
+        fs::create_dir_all(importer_dir.join("std")).unwrap();
+        fs::write(importer_dir.join("std/scope_probe.spl"), "fn marker() -> text:\n    \"stray\"\n").unwrap();
+
+        let parts = vec!["std".to_string(), "scope_probe".to_string()];
+        let resolved = resolve_module_path(&parts, &importer_dir).unwrap();
+        assert_eq!(
+            fs::canonicalize(&resolved).unwrap(),
+            fs::canonicalize(root.join("src/lib/scope_probe.spl")).unwrap(),
+            "resolved {resolved:?}"
+        );
+    }
+
+    /// A module search must not climb out of the enclosing repository. A
+    /// sibling checkout or a scratch tree in the parent directory is a
+    /// different project and must never supply modules to this one.
+    #[test]
+    fn module_search_stops_at_workspace_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let outer = temp.path();
+        // Outside the repository: looks exactly like a valid stdlib root.
+        fs::create_dir_all(outer.join("src/lib")).unwrap();
+        fs::write(outer.join("src/lib/outside_only_probe.spl"), "fn marker():\n    0\n").unwrap();
+
+        // The repository that owns the importing file.
+        let repo = outer.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(repo.join("src")).unwrap();
+
+        let parts = vec!["std".to_string(), "outside_only_probe".to_string()];
+        assert!(
+            resolve_module_path(&parts, &repo.join("src")).is_err(),
+            "a module outside the enclosing repository must not resolve"
+        );
+    }
+
+    /// A nested git worktree marks its root with a `.git` *file*, not a
+    /// directory. Treating only directories as the marker would let the parent
+    /// project's search walk straight through a nested worktree.
+    #[test]
+    fn workspace_boundary_recognises_git_file_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("build/worktrees/agent-1");
+        fs::create_dir_all(nested.join("src/lib")).unwrap();
+        fs::write(nested.join(".git"), "gitdir: /elsewhere/.git/worktrees/agent-1\n").unwrap();
+
+        assert_eq!(find_workspace_boundary(&nested.join("src/lib")), Some(nested));
+    }
+
+    /// `""`.chars().all(is_ascii_digit) is vacuously true, so every dotfile
+    /// directory used to qualify as a numbered layer directory (`NN.name`) and
+    /// was probed for modules.
+    #[test]
+    fn dotfile_directory_is_not_a_numbered_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join(".claude")).unwrap();
+        fs::create_dir_all(temp.path().join("10.frontend")).unwrap();
+
+        assert_eq!(find_numbered_dir(temp.path(), "claude"), None);
+        assert_eq!(
+            find_numbered_dir(temp.path(), "frontend"),
+            Some(temp.path().join("10.frontend"))
         );
     }
 }

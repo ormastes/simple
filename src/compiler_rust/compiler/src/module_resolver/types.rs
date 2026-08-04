@@ -435,6 +435,14 @@ fn detect_stdlib_root(project_root: &Path, file_parent: &Path) -> Option<PathBuf
                 return Some(candidate);
             }
         }
+        // Never climb out of the enclosing repository/workspace: a sibling
+        // checkout or a scratch tree in the parent directory is a different
+        // project and must not supply this one's stdlib. A nested git worktree
+        // marks its root with a `.git` *file*, so `exists()` (not `is_dir()`)
+        // is the right test.
+        if current.join(".git").exists() || current.join(".jj").is_dir() {
+            break;
+        }
         if let Some(parent) = current.parent() {
             current = parent.to_path_buf();
         } else {

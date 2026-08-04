@@ -317,6 +317,13 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
                 return Some(resolved);
             }
         }
+
+        // Never climb out of the enclosing repository/workspace: anything above
+        // it is a different project. A nested git worktree marks its root with a
+        // `.git` *file*, so `exists()` is the right test.
+        if parent_dir.join(".git").exists() || parent_dir.join(".jj").is_dir() {
+            break;
+        }
     }
 
     None

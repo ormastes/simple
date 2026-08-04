@@ -43,7 +43,15 @@ fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
         if let Some(after_dot) = name_str.find('.') {
             let prefix = &name_str[..after_dot];
             let suffix = &name_str[after_dot + 1..];
-            if suffix == segment && prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) {
+            // `!prefix.is_empty()` matters here as it does in the two helpers
+            // below: `all(is_ascii_digit)` is vacuously true for the empty
+            // string, so without it every dotfile directory (`.git`, `.claude`,
+            // `.codex-worktrees`) qualifies as a numbered layer directory.
+            if suffix == segment
+                && !prefix.is_empty()
+                && prefix.len() <= 3
+                && prefix.chars().all(|c| c.is_ascii_digit())
+            {
                 let path = parent.join(&*name_str);
                 if path.is_dir() {
                     return Some(path);
@@ -561,11 +569,33 @@ impl ModuleResolver {
             (parent.to_path_buf(), &segments[..])
         };
 
+        // `std.*` / `std_lib.*` are the project's own stdlib namespace and are
+        // never a package relative to the importing file — the same rule the
+        // `lib.*` branch above already applies. Without it, `use std.x` first
+        // tries `<importer's directory>/std/x.spl`, so any `std/` folder that
+        // happens to sit near a source file (a spec fixture tree, a scratch
+        // checkout, a nested worktree) outranks `src/lib/x.spl`. Editing the
+        // real `src/lib` file then changes nothing, which is indistinguishable
+        // from "the edit did not matter" — measurements taken that way are
+        // silently about a different tree. Skip straight to the project-rooted
+        // stdlib strategy below.
+        let anchored_stdlib = segments[0] == "std" || segments[0] == "std_lib";
+        let base_result = if anchored_stdlib {
+            Err(CompileError::semantic(format!(
+                "stdlib import `{}` resolves from the project stdlib roots only",
+                segments.join(".")
+            )))
+        } else {
+            self.resolve_from_base(&base_dir, remaining, path)
+        };
+
         // Try resolving from the base directory first
-        match self.resolve_from_base(&base_dir, remaining, path) {
+        match base_result {
             Ok(resolved) => Ok(resolved),
             Err(err) => {
-                if let Some(current_dir_name) = layered_dir_alias_name(&base_dir) {
+                // Also importer-relative — excluded for the stdlib namespace
+                // for the reason given above.
+                if let Some(current_dir_name) = layered_dir_alias_name(&base_dir).filter(|_| !anchored_stdlib) {
                     if remaining.len() > 1 && remaining[0] == current_dir_name {
                         if let Ok(resolved) = self.resolve_from_base(&base_dir, &remaining[1..], path) {
                             return Ok(resolved);
