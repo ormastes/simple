@@ -27,6 +27,16 @@ the pure-Simple backend. They must identify the same coherent Clang, LLD,
 feature is a different boundary: current vendored `inkwell`/`llvm-sys`
 bindings stop at LLVM 18. `LLVM_SYS_180_PREFIX` is therefore legacy Rust-only,
 is not a 23.1 migration path, and must not be used as a production fallback.
+The canonical Rust bootstrap is Cranelift-only and rejects `--backend=llvm`
+or `--backend=llvm-lib` before Cargo runs:
+
+```bash
+sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --full-bootstrap --backend=cranelift --mode=dynload
+```
+
+Only the resulting pure-Simple compiler may consume the admitted 23.1
+provider for LLVM native builds.
 
 ## 2. Admit the ad-hoc pure-Simple candidate
 

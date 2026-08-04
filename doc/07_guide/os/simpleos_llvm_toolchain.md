@@ -50,10 +50,10 @@ app-registry execution shortcut.
 ### Rust bootstrap boundary
 
 The vendored Rust bootstrap's `inkwell`/`llvm-sys` integration supports LLVM
-18 only. It cannot be relabeled as a 23.1 backend and must remain an explicit
-bootstrap blocker until upstream bindings support LLVM 23.1 or that binding
-capsule is replaced. Pure-Simple backend and SimpleOS port evidence must not
-fall back to the LLVM-18 Rust feature.
+18 only. The canonical bootstrap therefore uses Cranelift and rejects its
+`llvm` and `llvm-lib` selections before Cargo runs. The legacy source cannot be
+relabeled as a 23.1 backend; pure-Simple backend and SimpleOS port evidence
+must not fall back to it.
 
 ## Historical Clang 20 locations
 

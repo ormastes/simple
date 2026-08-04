@@ -127,8 +127,10 @@ The compiler supports multiple code generation backends:
 | Compiler (`build`, `native-build`) | LLVM | Optimized native binary output |
 | Explicit (`--backend=X`) | User choice | No auto-selection |
 
-Bootstrap defaults to `llvm`. The pure-Simple `llvm` path uses one coherent
-external Clang/LLVM 23.1 provider. Set `LLVM_23_1_PREFIX` for shell build
+Rust bootstrap defaults to `cranelift` and rejects `--backend=llvm` and
+`--backend=llvm-lib` before Cargo runs. After bootstrap, the pure-Simple
+`llvm` path uses one coherent external Clang/LLVM 23.1 provider. Set
+`LLVM_23_1_PREFIX` for shell build
 helpers and `SIMPLE_LLVM_PREFIX` for the pure-Simple compiler; both variables
 normally name the same installation prefix. A missing or non-23.1 provider
 fails with a direct setup error; the wrapper never silently changes the
@@ -149,10 +151,16 @@ sh scripts/setup/build-llvm-23-1-provider.shs \
 The Rust in-process `llvm` Cargo feature is a separate legacy boundary:
 vendored `inkwell`/`llvm-sys` currently exposes LLVM 18 only. It is not the
 migrated provider path and `LLVM_23_1_PREFIX` must not be presented as making
-that feature LLVM 23.1-capable. Stage 1 normally uses hardcoded Cranelift. If
-an operator explicitly rebuilds the Rust driver with `--features llvm`, it
+that feature LLVM 23.1-capable. Stage 1 always uses Cranelift in the canonical
+bootstrap. If an operator manually rebuilds the Rust driver with
+`--features llvm` outside that pipeline, it
 still requires `LLVM_SYS_180_PREFIX` and remains upstream-blocked legacy
 functionality until bindings with LLVM 23 support are available.
+
+```bash
+sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --full-bootstrap --backend=cranelift --mode=dynload
+```
 
 ### Platform Notes
 

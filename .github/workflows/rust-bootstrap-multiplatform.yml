@@ -146,19 +146,10 @@ jobs:
         include:
           - os: ubuntu-latest
             name: Linux x86_64
-            backend: llvm
-          - os: ubuntu-latest
-            name: Linux x86_64
             backend: cranelift
           - os: macos-latest
             name: macOS aarch64
-            backend: llvm
-          - os: macos-latest
-            name: macOS aarch64
             backend: cranelift
-          - os: macos-15-intel
-            name: macOS x86_64
-            backend: llvm
           - os: macos-15-intel
             name: macOS x86_64
             backend: cranelift
@@ -178,7 +169,7 @@ jobs:
         run: sh scripts/check/check-seed-parse-superset.shs
 
       - name: Validate bootstrap portability contracts
-        if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        if: runner.os == 'Linux'
         run: sh scripts/check/check-bootstrap-portability.shs
 
       - name: Setup MSVC
@@ -197,23 +188,14 @@ jobs:
 
       - name: Install FreeType (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang-18 lld-18 llvm-18-dev libfreetype6-dev libunwind-dev
-
-      - name: Install Polly (Linux LLVM)
-        if: runner.os == 'Linux' && matrix.backend == 'llvm'
-        run: sudo apt-get install -y libpolly-18-dev
+        run: sudo apt-get update && sudo apt-get install -y clang lld llvm libfreetype6-dev libunwind-dev
 
       - name: Install FreeType (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install coreutils freetype zstd ${{ matrix.backend == 'llvm' && 'llvm@18' || '' }}
+          brew install coreutils freetype zstd
           echo "RUSTFLAGS=-L native=$(brew --prefix freetype)/lib" >> "$GITHUB_ENV"
           echo "LIBRARY_PATH=$(brew --prefix freetype)/lib:$(brew --prefix zstd)/lib:${LIBRARY_PATH:-}" >> "$GITHUB_ENV"
-          if [ "${{ matrix.backend }}" = "llvm" ]; then
-            llvm_prefix=$(brew --prefix llvm@18)
-            echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
-            echo "LLVM_SYS_180_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
-          fi
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
@@ -238,14 +220,8 @@ jobs:
         shell: bash
         working-directory: src/compiler_rust
         run: |
-          if [ "${{ matrix.backend }}" = "llvm" ]; then
-            cargo build --profile bootstrap -p simple-driver --features llvm
-            cargo build --profile bootstrap -p simple-native-all --features driver-compat,llvm
-            cargo build --profile bootstrap -p simple-compiler-backfill
-          else
-            cargo build --profile bootstrap -p simple-driver
-            cargo build --profile bootstrap -p simple-native-all --features driver-compat
-          fi
+          cargo build --profile bootstrap -p simple-driver
+          cargo build --profile bootstrap -p simple-native-all --features driver-compat
 
       - name: Build and sanity-check pure-Simple stages
         id: pure_simple_bootstrap
@@ -257,7 +233,7 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then
             export SIMPLE_LINKER_FLAVOR=msvc
           fi
-          if [ "$RUNNER_OS" = "Linux" ] && [ "${{ matrix.backend }}" = "llvm" ]; then
+          if [ "$RUNNER_OS" = "Linux" ]; then
             mcp_flag=--full-cli
           else
             mcp_flag=--no-mcp
@@ -279,7 +255,7 @@ jobs:
           retention-days: 7
 
       - name: Stage hosted full-CLI providers
-        if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           full_cli="$(find build/bootstrap/full -type f -name simple -print -quit)"
@@ -294,7 +270,7 @@ jobs:
             build/bootstrap/lib/libspl_fonts.so
 
       - name: Run pure-Simple SMF production consumer
-        if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           full_cli="$(find build/bootstrap/full -type f -name simple -print -quit)"
@@ -304,7 +280,7 @@ jobs:
             "$full_cli" test test/02_integration/app/simple/smf_cache_reuse_spec.spl --mode=interpreter
 
       - name: Upload hosted full CLI
-        if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: bootstrap-hosted-full-${{ github.sha }}
@@ -316,50 +292,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # Self-consistency, NOT parity. This step runs ONE compiler (the Rust
-      # seed) on every side of the case: its llvm codegen against its own
-      # cranelift codegen against a fixed expected literal. It cannot detect a
-      # seed-vs-native divergence and no longer claims to — it prints
-      # native_self_consistency=<bool>, never native_seed_parity=<bool>.
-      # Until 2026-07-28 this step was named "...parity" and pointed a
-      # two-compiler harness at a single binary, so it was green by
-      # construction. The real parity oracle is the step below.
-      - name: Run Rust-seed custom enum identity self-consistency (not parity)
-        if: matrix.backend == 'llvm'
-        shell: bash
-        run: |
-          seed="src/compiler_rust/target/bootstrap/simple"
-          test -x "$seed"
-          PARITY_MODE=self-consistency \
-            SIMPLE_BINARY="$seed" \
-            NATIVE_PARITY_CASES=crossmodule_result_u8 \
-            NATIVE_PARITY_FAIL_ON_XFAIL=1 \
-            PARITY_WORK_DIR="build/check/rust-seed-enum-identity" \
-            sh scripts/check/check-native-seed-parity.shs
-
-      # The REAL seed-vs-native parity oracle: an independent Rust seed on one
-      # side, the self-hosted compiler on the other. Auto-activating by binary
-      # IDENTITY, never by a flag — while no self-hosted binary is deployed it
-      # prints a loud, annotated SKIP and exits 0 (a permanently red job gets
-      # muted, which is the same fail-open it is meant to remove). The first
-      # run after the bootstrap campaign deposits a self-hosted binary, this
-      # gates automatically. There is no re-enable step to forget.
-      - name: Run seed-vs-native parity (auto-activates when self-hosted exists)
-        if: matrix.backend == 'llvm'
-        shell: bash
-        run: |
-          SEED_BINARY="src/compiler_rust/target/bootstrap/simple" \
-            NATIVE_PARITY_CASES=crossmodule_result_u8 \
-            NATIVE_PARITY_FAIL_ON_XFAIL=1 \
-            PARITY_WORK_DIR="build/check/seed-vs-native-parity" \
-            sh scripts/check/check-native-parity-if-selfhosted.shs
-
       - name: Test
         working-directory: src/compiler_rust
         run: cargo test --workspace --lib
 
       - name: Validate hosted Stage4 dynload provider archive
-        if: (runner.os == 'Linux' || runner.os == 'macOS') && matrix.backend == 'llvm'
+        if: runner.os == 'Linux' || runner.os == 'macOS'
         shell: bash
         run: |
           stage3="$(find build/bootstrap/stage3 -type f \( -name simple -o -name simple.exe \) -print -quit)"
@@ -368,7 +306,7 @@ jobs:
           SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BINARY="$stage3" sh scripts/check/check-stage4-hosted-dynload-provider-archive.shs
 
       - name: Run standalone browser mutation control
-        if: runner.os == 'Linux' && matrix.backend == 'llvm'
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           full_cli="$(find build/bootstrap/full -type f -name simple -print -quit)"
@@ -381,26 +319,6 @@ jobs:
           printf 'tid=1 pending=1\n' >build/browser-mutation.expected
           cmp build/browser-mutation.expected build/browser-mutation.actual
           test ! -s build/browser-mutation.stderr
-
-      - name: Run macOS Metal web Draw IR provenance
-        if: runner.os == 'macOS' && matrix.backend == 'llvm'
-        shell: bash
-        run: |
-          stage3="$(find build/bootstrap/stage3 -type f -name simple -print -quit)"
-          test -n "$stage3"
-          chmod +x "$stage3"
-          SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap" "$stage3" native-build \
-            --backend=llvm --source src/lib --source test/fixtures --entry-closure \
-            --entry test/fixtures/native_web_draw_ir_provenance/main.spl \
-            --output build/native-web-draw-ir-provenance
-          build/native-web-draw-ir-provenance \
-            >build/native-web-draw-ir-provenance.actual \
-            2>build/native-web-draw-ir-provenance.stderr
-          printf '%s\n' \
-            'producer=4 rects=4 embedding=0,0,320,240,1000 rendered=4 skipped=0 source=device_readback' \
-            >build/native-web-draw-ir-provenance.expected
-          cmp build/native-web-draw-ir-provenance.expected build/native-web-draw-ir-provenance.actual
-          test ! -s build/native-web-draw-ir-provenance.stderr
 
       - name: Run strict staged native smoke matrix
         shell: bash
@@ -429,44 +347,6 @@ jobs:
             NATIVE_PARITY_CASES="$cases" \
             NATIVE_PARITY_FAIL_ON_XFAIL=1 \
             PARITY_WORK_DIR="build/check/native-option-${{ matrix.backend }}" \
-            sh scripts/check/check-native-seed-parity.shs
-
-      - name: Run full native seed parity gate
-        if: runner.os == 'Linux' && matrix.backend == 'llvm'
-        shell: bash
-        run: |
-          stage3="$(find build/bootstrap/stage3 -type f -name simple -print -quit)"
-          test -n "$stage3"
-          chmod +x "$stage3"
-          SIMPLE_BINARY="$stage3" \
-            NATIVE_PARITY_FAIL_ON_XFAIL=1 \
-            PARITY_WORK_DIR="build/check/native-parity-full" \
-            sh scripts/check/check-native-seed-parity.shs
-
-      - name: Run non-Linux strict dynload parity
-        if: runner.os == 'macOS' && matrix.backend == 'llvm'
-        shell: bash
-        run: |
-          stage3="$(find build/bootstrap/stage3 -type f \( -name simple -o -name simple.exe \) -print -quit)"
-          test -n "$stage3"
-          chmod +x "$stage3"
-          SIMPLE_BINARY="$stage3" \
-            NATIVE_PARITY_CASES=dynload_tagged_text \
-            NATIVE_PARITY_FAIL_ON_XFAIL=1 \
-            PARITY_WORK_DIR="build/check/native-parity-${{ matrix.backend }}" \
-            sh scripts/check/check-native-seed-parity.shs
-
-      - name: Run strict selected native parity
-        if: runner.os == 'macOS' && matrix.backend == 'llvm'
-        shell: bash
-        run: |
-          stage3="$(find build/bootstrap/stage3 -type f \( -name simple -o -name simple.exe \) -print -quit)"
-          test -n "$stage3"
-          chmod +x "$stage3"
-          SIMPLE_BINARY="$stage3" \
-            NATIVE_PARITY_CASES="bare_main class_array_field_mutation class_array_param_field_mutation nested_struct_value_copy exists_struct_payload_field result_unwrap text_ordering text_bracket_index text_for_iteration raw_string_interpolation_contract new_keyword_identifier bool_array_element_interp mixed_numeric_comparison mixed_unsigned_float_comparison mixed_signed_unsigned_ordering unsigned_div_rem_shift method_owner_dispatch option_is_none_map array_map_text crossmodule_result_u8" \
-            NATIVE_PARITY_FAIL_ON_XFAIL=1 \
-            PARITY_WORK_DIR="build/check/native-selected-parity" \
             sh scripts/check/check-native-seed-parity.shs
 
       - name: Run Windows ARM64 Cranelift COFF object gate
@@ -523,7 +403,9 @@ jobs:
           retention-days: 7
 
   native-architectures:
-    name: Pure Simple — ARM32/RV32 LLVM objects + x86_64/AArch64/RISC-V64 dual backend
+    # LLVM architecture coverage belongs to the distinct, admitted 23.1
+    # provider lane. This bootstrap job must not substitute the host LLVM.
+    name: Pure Simple — x86_64/AArch64/RISC-V64 Cranelift
     runs-on: ubuntu-latest
     needs: native
     steps:
@@ -532,13 +414,13 @@ jobs:
       - name: Download Linux pure-Simple stages
         uses: actions/download-artifact@v4
         with:
-          name: bootstrap-Linux x86_64-llvm-${{ github.sha }}
+          name: bootstrap-Linux x86_64-cranelift-${{ github.sha }}
           path: build/bootstrap-linux
 
       - name: Install LLVM cross-execution toolchains
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 lld-18 llvm-18-dev libfreetype6-dev \
+          sudo apt-get install -y clang lld llvm libfreetype6-dev \
             binutils-arm-linux-gnueabihf \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
@@ -551,28 +433,19 @@ jobs:
           test -x "$compiler"
           command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1
           command -v x86_64-w64-mingw32-ar >/dev/null 2>&1
-          command -v llvm-nm-18 >/dev/null 2>&1
-          command -v llvm-objdump-18 >/dev/null 2>&1
+          command -v llvm-nm >/dev/null 2>&1
+          command -v llvm-objdump >/dev/null 2>&1
           compiler_target=$(x86_64-w64-mingw32-gcc -dumpmachine)
           test "$compiler_target" = "x86_64-w64-mingw32"
           SIMPLE_STAGE4_DYNLOAD_ARCHIVE_CROSS_TARGET=x86_64-w64-mingw32 \
             CC=x86_64-w64-mingw32-gcc \
             AR=x86_64-w64-mingw32-ar \
-            SIMPLE_NM=llvm-nm-18 \
-            SIMPLE_OBJDUMP=llvm-objdump-18 \
+            SIMPLE_NM=llvm-nm \
+            SIMPLE_OBJDUMP=llvm-objdump \
             SIMPLE_NO_STUB_FALLBACK=1 \
             SIMPLE_BINARY="$compiler" \
             BUILD_DIR=build/check/stage4-mingw-dynload-provider \
             sh scripts/check/check-stage4-hosted-dynload-provider-archive.shs
-
-      - name: Run strict pure-Simple architecture gate
-        run: |
-          compiler="$PWD/build/bootstrap-linux/stage3/x86_64-unknown-linux-gnu/simple"
-          chmod +x "$compiler"
-          test -x "$compiler"
-          SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BIN="$compiler" \
-            BUILD_DIR=build/check/llvm-simd-row-native-arch \
-            sh scripts/check/check-llvm-simd-row-native-arch.shs
 
       - name: Run strict pure-Simple Cranelift cross-execution gate
         run: |

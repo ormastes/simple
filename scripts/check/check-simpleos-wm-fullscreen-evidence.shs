@@ -20,6 +20,7 @@ KERNEL_BUILD_STATUS=unchecked
 KERNEL_SOURCE_REVISION=""
 NATIVE_BUILD_TIMEOUT_SECONDS="${SIMPLEOS_WM_NATIVE_BUILD_TIMEOUT_SECONDS:-900}"
 NATIVE_BUILD_WORKER_TIMEOUT_SECONDS="${SIMPLEOS_WM_NATIVE_BUILD_WORKER_TIMEOUT_SECONDS:-870}"
+READINESS_WAIT_MILLISECONDS="${SIMPLEOS_WM_READINESS_WAIT_MILLISECONDS:-180000}"
 LAUNCH_OUT="$BUILD_DIR/qemu.out"
 SERIAL_LOG="$BUILD_DIR/serial.log"
 QMP_SOCKET="$BUILD_DIR/qmp.sock"
@@ -286,6 +287,10 @@ browser_demo_disk_payload_status() {
         echo "prefix-temp-failed"
         return
     }
+    # mcopy treats an existing destination as interactive even with -o on
+    # some mtools builds. Keep the securely chosen path, but remove the empty
+    # mktemp inode so unattended evidence collection cannot wait on /dev/tty.
+    rm -f "$extracted"
     if ! mcopy -o -i "$disk_path" ::/SYS/APPS/BROWSMF.SMF "$extracted" >/dev/null 2>&1; then
         rm -f "$extracted" "$prefix"
         echo "browser-smf-missing"
@@ -876,13 +881,10 @@ else
 
     # The guest marker is the only source of scanout metadata. No BGA address,
     # dimensions, pitch, format, or generation defaults are accepted here.
-    # Readiness wait: 60s default; TCG hosts (x86_64 guest on arm64 mac) run
-    # the 4K CPU-fallback desktop layout much slower than KVM/HVF and may need
-    # an explicitly longer window. The knob only extends waiting for the SAME
-    # markers — no gate semantics change.
-    READINESS_TIMEOUT_MS="${SIMPLEOS_WM_READINESS_TIMEOUT_MS:-60000}"
+    # TCG hosts (x86_64 guest on arm64 mac) can require the configured extended
+    # readiness window. The knob only extends waiting for the same markers.
     waited=0
-    while [ "$waited" -le "$READINESS_TIMEOUT_MS" ]; do
+    while [ "$waited" -le "$READINESS_WAIT_MILLISECONDS" ]; do
         serial_bytes="$(wc -c <"$SERIAL_LOG" 2>/dev/null || echo 0)"
         if serial_has_production_fault; then
             reason="guest-render-fault"
