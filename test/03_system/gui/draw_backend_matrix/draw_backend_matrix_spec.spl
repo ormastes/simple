@@ -32,8 +32,9 @@ tautology, MATCH-only comparisons, memorized pixel tables).
 
 | Concept | Description |
 |---------|-------------|
-| Probe | `Engine2D.probe_backend(w, h, key)` — native-only availability (no emulation fallback), so `metal` reports honestly `Unavailable` off macOS even though `directx-on-vulkan`/`metal-on-vulkan` emulation exists elsewhere |
-| Create-success | `Engine2D.create_requested_backend` must resolve to the backend's own honest self-reported name (`directx` → `directx-software-emulation`), catching alias dishonesty |
+| Probe | `Engine2D.probe_backend(w, h, key)` — native-only availability (no emulation fallback), so `metal` reports honestly `Unavailable` off macOS. It runs its own create+init+shutdown and throws it away, so its answer is a PREDICTION: only its SELF-consistency is asserted, never the create outcome |
+| Create-attempt | `Engine2D.create_requested_backend` is a SECOND, INDEPENDENT create and is attempted regardless of the probe. On success it must resolve to the backend's own honest self-reported name (`directx` → `directx-software-emulation`), catching alias dishonesty; a probe/create divergence is disclosed on a `[toctou]` line |
+| Readback provenance | `read_pixels_with_source()` feeds `assert_provenance_invariants` unconditionally on every backend and outcome, and `report_outcome` prints `GPU-PROVEN` or an explicit `GPU BRANCH SKIPPED … proves NOTHING about the GPU path` |
 | Draw-apply | one filled rect + one line drawn on a real framebuffer |
 | Readback-verify | `read_pixels()` download; rect interior == rect color, line pixel == line color, far pixel == background — an absolute pixel oracle, fed through the shared `read_pixels_ppm` (P6) encoder |
 | Vulkan device lane | `bin/simple test` runs specs in the classic interpreter, so real `vkCreateInstance`/`vkCmdDispatch` execute without any extra env var (see `doc/07_guide/ui/gpu_backends/vulkan_backed_rendering.md`) |
@@ -58,7 +59,9 @@ use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.color.{rgba}
 use std.gc_async_mut.gpu.engine2d.backend_directx.{DirectXBackend}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
-use test.helpers.gpu_draw_event_shared.{assert_color_eq, read_pixels_ppm}
+use test.helpers.gpu_draw_event_shared.{
+    assert_color_eq, read_pixels_ppm, assert_provenance_invariants, report_outcome,
+    report_no_frame}
 
 val CANVAS_W: i32 = 32
 val CANVAS_H: i32 = 24
@@ -72,20 +75,65 @@ fn px_at(pixels: [u32], w: i32, x: i32, y: i32) -> u32:
 # ---------------------------------------------------------------------------
 # Shared draw-apply + readback-verify body (steps 3-4), reused by every
 # available backend lane below. Absolute oracle only.
+#
+# The readback goes through read_pixels_with_source() so provenance is checked
+# from the SAME download the pixel oracle reads. Both the provenance invariants
+# and the pixel oracle run UNCONDITIONALLY on whichever backend actually served
+# the frame; only the `proven` extra hangs off the fact a device produced it.
 # ---------------------------------------------------------------------------
-fn draw_apply_and_verify(eng: Engine2D):
+val CANVAS_PX: i64 = (CANVAS_W as i64) * (CANVAS_H as i64)
+
+# Whether the backend publishes a device identity on its readback at all. A
+# deterministic contract claim read off the construction site, NOT a device
+# prediction: backend_vulkan.spl:823/836, backend_metal and backend_cuda call
+# `engine2d_readback_with_identity`; the DirectX DXVK lane
+# (backend_directx.spl:452/454) calls `engine2d_readback_with_handle` and
+# publishes none, so it is honestly device-SOURCED but never device-PROVEN.
+fn backend_attests_device_identity(key: text) -> bool:
+    key == "vulkan" or key == "metal" or key == "cuda"
+
+# A successful vulkan create may NEVER report `cpu_mirror`. Verified in source:
+# backend_vulkan.spl contains no `cpu_mirror` site at all — when the device
+# degrades it sets the sticky `cpu_fallback_used` flag and reports `cpu_fallback`
+# (a disclosed skip). So `cpu_mirror` out of a vulkan lane is a silent CPU
+# reclassification, a bookkeeping defect, and must FAIL rather than disclose.
+# Not applied to directx: its native path legitimately reports `cpu_mirror`
+# (backend_directx.spl:447).
+fn backend_forbids_cpu_mirror(key: text) -> bool:
+    key == "vulkan"
+
+fn draw_apply_and_verify(label: text, eng: Engine2D):
     step("draw-apply: clear + filled rect + line on a real framebuffer")
     eng.clear(BG)
     eng.draw_rect_filled(4, 4, 10, 6, RECT_COLOR)
     eng.draw_line(0, 18, 31, 18, LINE_COLOR, 1)
     eng.present()
 
-    step("readback-verify: read_pixels() absolute oracle (rect/line/background)")
-    val px = eng.read_pixels()
+    step("readback-verify: read_pixels_with_source() — provenance and pixels from one download")
+    val rb = eng.read_pixels_with_source()
+    val px = rb.pixels
+
+    step("provenance invariants — unconditional, every backend, every outcome")
+    assert_provenance_invariants(label, rb.source, rb.backend_handle, rb.device_identity, rb.pixel_count, CANVAS_PX, backend_attests_device_identity(label))
+    val proven = report_outcome(label, rb.source, rb.backend_handle, rb.device_identity, rb.pixel_count, CANVAS_PX)
+
+    if backend_forbids_cpu_mirror(label):
+        step("a successful {label} create may never silently reclassify to cpu_mirror")
+        expect(rb.source == "cpu_mirror").to_equal(false)
+
+    if report_no_frame(label, rb.source):
+        eng.shutdown()
+        return
+
+    step("absolute pixel oracle (rect/line/background) — holds on WHICHEVER backend served this frame")
     expect(px.len()).to_equal(CANVAS_W * CANVAS_H)
     assert_color_eq(px_at(px, CANVAS_W, 8, 6), RECT_COLOR)
     assert_color_eq(px_at(px, CANVAS_W, 15, 18), LINE_COLOR)
     assert_color_eq(px_at(px, CANVAS_W, 1, 1), BG)
+
+    if proven:
+        step("device-proven frame: the download carries the drawn content, not a blank surface")
+        expect(rb.checksum).to_be_greater_than(0)
 
     step("the shared read_pixels_ppm oracle wrapper encodes a valid P6 header")
     val ppm = read_pixels_ppm(CANVAS_W, CANVAS_H, px)
@@ -119,12 +167,14 @@ val EXT_B: u32 = rgba(0, 0, 200, 255)
 val EXT_C: u32 = rgba(0, 200, 0, 255)
 val EXT_D: u32 = rgba(220, 220, 0, 255)
 val EXT_E: u32 = rgba(0, 220, 220, 255)
+val EXT_PX: i64 = (EXT_W as i64) * (EXT_H as i64)
 
 fn assert_directx_extended_ops():
     var b = DirectXBackend.create()
     if not b.init(EXT_W, EXT_H):
         step("host-unavailable(directx): fail-closed checkpoint, not a silent skip")
         expect(b.last_error.len()).to_be_greater_than(0)
+        print "[probe-gpu] directx-extended: GPU BRANCH SKIPPED — init failed ({b.last_error}); this example proves NOTHING about the GPU path"
         return
     b.clear(EXT_BG)
     b.draw_rounded_rect_outline(2, 2, 10, 8, 2, EXT_A, 1)
@@ -134,7 +184,13 @@ fn assert_directx_extended_ops():
     b.draw_image_scaled(10, 14, 4, 4, 2, 2, [EXT_E, EXT_E, EXT_E, EXT_E])
     b.draw_image_transform(20, 14, 2, 2, 256, 0, 0, 256, 0, 0, [EXT_D, EXT_D, EXT_D, EXT_D])
     b.present()
-    val px = b.read_pixels()
+    val rb = b.read_pixels_with_source()
+    val px = rb.pixels
+    assert_provenance_invariants("directx-extended", rb.source, rb.backend_handle, rb.device_identity, rb.pixel_count, EXT_PX, false)
+    report_outcome("directx-extended", rb.source, rb.backend_handle, rb.device_identity, rb.pixel_count, EXT_PX)
+    if report_no_frame("directx-extended", rb.source):
+        b.shutdown()
+        return
     assert_color_eq(px_at(px, EXT_W, 6, 2), EXT_A)            # rounded_rect_outline straight top edge
     assert_color_eq(px_at(px, EXT_W, 7, 6), EXT_BG)           # interior stays background (outline only)
     assert_color_eq(px_at(px, EXT_W, 14, 4), EXT_A)           # gradient_h left column == left_color exactly
@@ -151,6 +207,7 @@ fn assert_vulkan_extended_ops():
     if not b.init(EXT_W, EXT_H):
         step("host-unavailable(vulkan): fail-closed checkpoint, not a silent skip")
         expect(b.last_error.len()).to_be_greater_than(0)
+        print "[probe-gpu] vulkan-extended: GPU BRANCH SKIPPED — init failed ({b.last_error}); this example proves NOTHING about the GPU path"
         return
     b.clear(EXT_BG)
     b.draw_rounded_rect_outline(2, 2, 10, 8, 2, EXT_A, 1)
@@ -160,7 +217,16 @@ fn assert_vulkan_extended_ops():
     b.draw_image_scaled(10, 14, 4, 4, 2, 2, [EXT_E, EXT_E, EXT_E, EXT_E])
     b.draw_image_transform(20, 14, 2, 2, 256, 0, 0, 256, 0, 0, [EXT_D, EXT_D, EXT_D, EXT_D])
     b.present()
-    val px = b.read_pixels()
+    val rb = b.read_pixels_with_source()
+    val px = rb.pixels
+    assert_provenance_invariants("vulkan-extended", rb.source, rb.backend_handle, rb.device_identity, rb.pixel_count, EXT_PX, true)
+    report_outcome("vulkan-extended", rb.source, rb.backend_handle, rb.device_identity, rb.pixel_count, EXT_PX)
+    # A successful VulkanBackend init may never silently reclassify to cpu_mirror
+    # (backend_vulkan.spl has no cpu_mirror site; degradation is cpu_fallback).
+    expect(rb.source == "cpu_mirror").to_equal(false)
+    if report_no_frame("vulkan-extended", rb.source):
+        b.shutdown()
+        return
     assert_color_eq(px_at(px, EXT_W, 6, 2), EXT_A)
     assert_color_eq(px_at(px, EXT_W, 7, 6), EXT_BG)
     assert_color_eq(px_at(px, EXT_W, 14, 4), EXT_A)
@@ -173,25 +239,50 @@ fn assert_vulkan_extended_ops():
     b.shutdown()
 
 # ---------------------------------------------------------------------------
-# Shared per-backend lane: probe -> (host-unavailable checkpoint) or
-# (create-success -> draw-apply -> readback-verify). Never a silent skip().
+# Shared per-backend lane: probe (PREDICTION ONLY) -> create-attempt (always) ->
+# draw-apply -> readback-verify. Never a silent skip().
+#
+# `Engine2D.probe_backend` runs a full create+init+shutdown and throws it away;
+# `create_requested_backend` is a SECOND, INDEPENDENT create with nothing cached
+# between them. Branching the create assertion on the stored probe answer made
+# this lane fail BOTH ways: probe=ok + a create that then lost the device gave a
+# false red (`called unwrap on Err: backend unavailable: vulkan`, 6/6 at
+# `ulimit -n 44`), and probe=unavailable skipped the entire device branch while
+# still printing a clean pass. Nothing below is asserted from the probe; a
+# divergence is DISCLOSED on a [toctou] line instead.
 # ---------------------------------------------------------------------------
+fn is_pure_software_key(key: text) -> bool:
+    key == "software" or key == "cpu"
+
 fn run_backend_lane(key: text, expected_name: text):
-    step("probe {key}")
+    step("probe {key} — a PREDICTION about a create that has not happened yet")
     val probe = Engine2D.probe_backend(CANVAS_W, CANVAS_H, key)
+
+    step("probe SELF-consistency: available/status/reason must agree with each other")
+    expect(probe.available).to_equal(probe.is_ok())
     if not probe.is_ok():
-        step("host-unavailable({key}): fail-closed checkpoint, not a silent skip")
-        assert_false(probe.available)
+        step("host-unavailable({key}): fail-closed classification, not a silent skip")
         expect(probe.reason.len()).to_be_greater_than(0)
-        return
 
-    step("create-success: requested backend resolves to its own honest name")
+    step("create-attempt: the create runs REGARDLESS of what the probe predicted")
     val created = Engine2D.create_requested_backend(CANVAS_W, CANVAS_H, key)
-    assert_true(created.is_ok())
-    var eng = created.unwrap()
-    expect(eng.backend_name()).to_equal(expected_name)
+    if probe.is_ok() != created.is_ok():
+        print "[toctou] {key}: probe predicted ready={probe.is_ok()} but the independent create returned ok={created.is_ok()} — disclosed, never asserted"
 
-    draw_apply_and_verify(eng)
+    if is_pure_software_key(key):
+        step("{key} is pure software and owes no device: its create must ALWAYS succeed")
+        assert_true(created.is_ok())
+
+    match created:
+        Ok(engine):
+            step("create-success: requested backend resolves to its own honest name")
+            var eng = engine
+            expect(eng.backend_name()).to_equal(expected_name)
+            draw_apply_and_verify(key, eng)
+        Err(message):
+            step("create-failed({key}): fail-closed checkpoint carrying a concrete reason")
+            expect(message.len()).to_be_greater_than(0)
+            print "[probe-gpu] {key}: GPU BRANCH SKIPPED — the independent create failed ({message}); this example proves NOTHING about the GPU path"
 
 describe "Draw backend matrix — per-combination system-specific checkpoints":
 
@@ -240,3 +331,13 @@ describe "Draw backend matrix — per-combination system-specific checkpoints":
         expect(Engine2D.detect_best_backend()).to_equal("software")
         step("clear the override so later runs auto-probe again")
         env_set("SIMPLE_2D_BACKEND", "")
+
+        step("RUN VERDICT reading rule")
+        # Deliberately NOT quoting the literal marker tokens: a verdict line that
+        # contains them is counted by `grep -c` and inflates the very number it
+        # is explaining (this turned a true 0 into a reported 1).
+        print "[RUN VERDICT] A green run of this spec does NOT by itself mean a GPU was exercised."
+        print "[RUN VERDICT] Count the per-lane GPU/PROVEN disclosure lines: those, and only those, are"
+        print "[RUN VERDICT] frames a device produced (device_readback + handle > 0 + identity > 0 + full frame)."
+        print "[RUN VERDICT] Every GPU/BRANCH/SKIPPED line proves NOTHING about the GPU path, and a"
+        print "[RUN VERDICT] '[toctou]' line means the probe's prediction did not survive to the create."

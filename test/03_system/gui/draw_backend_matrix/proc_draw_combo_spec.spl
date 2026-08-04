@@ -88,7 +88,8 @@ use common.ui.widget.{WidgetNode, UIEvent, UIState}
 use common.ui.builder.{column, button, build_tree}
 use common.ui.event.{process_event}
 use test.helpers.gpu_draw_event_shared.{
-    assert_color_eq, read_pixels_ppm, assert_payload_gating}
+    assert_color_eq, read_pixels_ppm, assert_payload_gating,
+    assert_provenance_invariants, report_outcome, report_no_frame}
 
 val DRAW_W: i32 = 32
 val DRAW_H: i32 = 24
@@ -138,37 +139,83 @@ fn assert_metal_processing_half():
     assert_payload_gating(ComputeBackend.Metal)
 
 # ---------------------------------------------------------------------------
-# Vulkan drawing half via the Engine2D facade. Returns true if the scene was
-# drawn+verified, false if the host has no Vulkan device (already fail-closed).
+# Vulkan drawing half via the Engine2D facade. Returns true when a DEVICE was
+# proven to have produced the frame — a FACT read off the readback, never the
+# probe's prediction.
+#
+# `Engine2D.probe_backend` runs its own create+init+shutdown and throws it away;
+# `create_requested_backend` is a SECOND, INDEPENDENT create with nothing cached
+# between them, so the probe answer is only a PREDICTION. Branching the create
+# assertion on it broke this lane both ways: at `ulimit -n 96` the probe said
+# ready, the create returned Err and `created.unwrap()` blew up with
+# `semantic: called unwrap on Err: backend unavailable: vulkan` (6/6 runs) — a
+# false red; and a probe that says unavailable skipped the whole device branch
+# while still printing a clean pass. Nothing below is asserted from the probe.
+# Refs doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md
 # ---------------------------------------------------------------------------
+val DRAW_PX: i64 = (DRAW_W as i64) * (DRAW_H as i64)
+
 fn vulkan_draw_scene_or_unavailable(scene: text) -> bool:
-    step("drawing=vulkan: probe via Engine2D facade")
+    step("drawing=vulkan: probe via Engine2D facade — a PREDICTION, not a fact")
     val probe = Engine2D.probe_backend(DRAW_W, DRAW_H, "vulkan")
+
+    step("probe SELF-consistency: available/status/reason must agree with each other")
+    expect(probe.available).to_equal(probe.is_ok())
     if not probe.is_ok():
-        step("host-unavailable(vulkan): fail-closed checkpoint (concrete reason, not a skip)")
-        assert_false(probe.available)
+        step("host-unavailable(vulkan): fail-closed classification (concrete reason, not a skip)")
         expect(probe.reason.len()).to_be_greater_than(0)
-        return false
 
-    step("create-success: requested vulkan resolves to its honest name")
+    step("create-attempt: the create runs REGARDLESS of what the probe predicted")
     val created = Engine2D.create_requested_backend(DRAW_W, DRAW_H, "vulkan")
-    assert_true(created.is_ok())
-    var eng = created.unwrap()
-    expect(eng.backend_name()).to_equal("vulkan")
+    if probe.is_ok() != created.is_ok():
+        print "[toctou] vulkan-{scene}: probe predicted ready={probe.is_ok()} but the independent create returned ok={created.is_ok()} — disclosed, never asserted"
 
-    eng.clear(BG)
+    var eng: Engine2D? = nil
+    match created:
+        Ok(engine):
+            eng = engine
+        Err(message):
+            step("create-failed(vulkan): fail-closed checkpoint carrying a concrete reason")
+            expect(message.len()).to_be_greater_than(0)
+            print "[probe-gpu] vulkan-{scene}: GPU BRANCH SKIPPED — the independent create failed ({message}); this example proves NOTHING about the GPU path"
+            return false
+
+    var e = eng.?
+    step("create-success: requested vulkan resolves to its honest name")
+    expect(e.backend_name()).to_equal("vulkan")
+
+    e.clear(BG)
     if scene == "2d":
         step("draw 2D: filled rect + line on a real framebuffer")
-        eng.draw_rect_filled(4, 4, 10, 6, RECT_COLOR)
-        eng.draw_line(0, 18, 31, 18, LINE_COLOR, 1)
+        e.draw_rect_filled(4, 4, 10, 6, RECT_COLOR)
+        e.draw_line(0, 18, 31, 18, LINE_COLOR, 1)
     else:
         step("draw GUI widget-layer scene: titlebar bar + button rect")
-        eng.draw_rect_filled(0, 0, DRAW_W, 4, LINE_COLOR)   # titlebar bar
-        eng.draw_rect_filled(8, 10, 10, 8, RECT_COLOR)      # button
-    eng.present()
+        e.draw_rect_filled(0, 0, DRAW_W, 4, LINE_COLOR)   # titlebar bar
+        e.draw_rect_filled(8, 10, 10, 8, RECT_COLOR)      # button
+    e.present()
 
-    step("readback: read_pixels() absolute oracle")
-    val px = eng.read_pixels()
+    step("readback: read_pixels_with_source() — provenance and pixels from one download")
+    val rb = e.read_pixels_with_source()
+    val px = rb.pixels
+
+    step("provenance invariants — unconditional, every outcome")
+    val label = "vulkan-{scene}"
+    assert_provenance_invariants(label, rb.source, rb.backend_handle, rb.device_identity, rb.pixel_count, DRAW_PX, true)
+    val proven = report_outcome(label, rb.source, rb.backend_handle, rb.device_identity, rb.pixel_count, DRAW_PX)
+
+    step("a successful vulkan create may never silently reclassify to cpu_mirror")
+    # Verified in source: backend_vulkan.spl has no `cpu_mirror` site at all. A
+    # degrading device sets the sticky `cpu_fallback_used` flag and reports
+    # `cpu_fallback`, which stays a disclosed skip. `cpu_mirror` out of a vulkan
+    # lane is therefore a silent CPU reclassification and must FAIL.
+    expect(rb.source == "cpu_mirror").to_equal(false)
+
+    if report_no_frame(label, rb.source):
+        e.shutdown()
+        return false
+
+    step("absolute pixel oracle — holds on WHICHEVER backend served this frame")
     expect(px.len()).to_equal(DRAW_W * DRAW_H)
     if scene == "2d":
         assert_color_eq(px_at(px, DRAW_W, 8, 6), RECT_COLOR)
@@ -179,13 +226,17 @@ fn vulkan_draw_scene_or_unavailable(scene: text) -> bool:
         assert_color_eq(px_at(px, DRAW_W, 1, 1), LINE_COLOR)     # titlebar
         assert_color_eq(px_at(px, DRAW_W, 25, 20), BG)           # empty area
 
+    if proven:
+        step("device-proven frame: the download carries the drawn content, not a blank surface")
+        expect(rb.checksum).to_be_greater_than(0)
+
     step("P6 PPM wrapper encodes a valid header")
     val ppm = read_pixels_ppm(DRAW_W, DRAW_H, px)
     expect(ppm.len()).to_be_greater_than(DRAW_W * DRAW_H * 3)
     expect(ppm[0]).to_equal(80u8)   # 'P'
     expect(ppm[1]).to_equal(54u8)   # '6'
-    eng.shutdown()
-    return true
+    e.shutdown()
+    return proven
 
 # ---------------------------------------------------------------------------
 # Web surface: styled-box HTML fixture rendered headlessly, vulkan drawing lane.
@@ -211,12 +262,20 @@ fn assert_web_vulkan_render():
 # fallback (always available, same absolute oracle) when no Vulkan device — the
 # event chain, not the GPU device, is what this lane verifies.
 fn open_draw_surface(w: i32, h: i32) -> Engine2D:
+    # The vulkan create is attempted REGARDLESS of the probe: gating it on the
+    # probe's prediction is what let a probe=unavailable run silently take the
+    # software path and still print a clean pass. A divergence is disclosed, and
+    # the software fallback create is kept HARD (pure software, owes no device,
+    # so it must always succeed) rather than being unwrapped on faith.
     val vprobe = Engine2D.probe_backend(w, h, "vulkan")
-    if vprobe.is_ok():
-        val cv = Engine2D.create_requested_backend(w, h, "vulkan")
-        if cv.is_ok():
-            return cv.unwrap()
+    val cv = Engine2D.create_requested_backend(w, h, "vulkan")
+    if vprobe.is_ok() != cv.is_ok():
+        print "[toctou] event-surface: probe predicted ready={vprobe.is_ok()} but the independent create returned ok={cv.is_ok()} — disclosed, never asserted"
+    if cv.is_ok():
+        return cv.unwrap()
+    print "[probe-gpu] event-surface: GPU BRANCH SKIPPED — no vulkan surface, using the software offscreen lane; this example proves NOTHING about the GPU path"
     val cs = Engine2D.create_requested_backend(w, h, "software")
+    assert_true(cs.is_ok())
     return cs.unwrap()
 
 fn render_button(eng: Engine2D, focused: bool):
@@ -236,9 +295,18 @@ fn assert_event_render_chain():
     step("frame 1: render button in NORMAL color (state not focused)")
     val w: i32 = 24
     val h: i32 = 16
+    val event_px: i64 = (w as i64) * (h as i64)
     var s1 = open_draw_surface(w, h)
     render_button(s1, state0.focused_id == "combo_btn")
-    val f1 = s1.read_pixels()
+    val rb1 = s1.read_pixels_with_source()
+    val f1 = rb1.pixels
+    # `attests_identity` is read off the surface that ACTUALLY served the frame,
+    # not off any probe: only the vulkan backend publishes a device identity.
+    assert_provenance_invariants("event-frame1", rb1.source, rb1.backend_handle, rb1.device_identity, rb1.pixel_count, event_px, s1.backend_name() == "vulkan")
+    report_outcome("event-frame1", rb1.source, rb1.backend_handle, rb1.device_identity, rb1.pixel_count, event_px)
+    if s1.backend_name() == "vulkan":
+        expect(rb1.source == "cpu_mirror").to_equal(false)
+    val f1_no_frame = report_no_frame("event-frame1", rb1.source)
     s1.shutdown()
 
     step("dispatch TouchPress inside the button rect — real reducer moves focus")
@@ -248,8 +316,17 @@ fn assert_event_render_chain():
     step("frame 2: re-render; button pixel now FOCUSED color, driven by the new state")
     var s2 = open_draw_surface(w, h)
     render_button(s2, pressed.focused_id == "combo_btn")
-    val f2 = s2.read_pixels()
+    val rb2 = s2.read_pixels_with_source()
+    val f2 = rb2.pixels
+    assert_provenance_invariants("event-frame2", rb2.source, rb2.backend_handle, rb2.device_identity, rb2.pixel_count, event_px, s2.backend_name() == "vulkan")
+    report_outcome("event-frame2", rb2.source, rb2.backend_handle, rb2.device_identity, rb2.pixel_count, event_px)
+    if s2.backend_name() == "vulkan":
+        expect(rb2.source == "cpu_mirror").to_equal(false)
+    val f2_no_frame = report_no_frame("event-frame2", rb2.source)
     s2.shutdown()
+
+    if f1_no_frame or f2_no_frame:
+        return
 
     step("verify: changed pixel flips NORMAL -> FOCUSED (absolute both frames); background unchanged")
     assert_color_eq(px_at(f1, w, 10, 10), BTN_NORMAL)
@@ -307,3 +384,13 @@ describe "Processing × Drawing combination runs — headless offscreen (cuda/vu
     it "metal/vulkan — Event: pointer press moves focus, re-render flips the button pixel":
         assert_metal_processing_half()
         assert_event_render_chain()
+
+        step("RUN VERDICT reading rule")
+        # Deliberately NOT quoting the literal marker tokens: a verdict line that
+        # contains them is counted by `grep -c` and inflates the very number it
+        # is explaining.
+        print "[RUN VERDICT] A green run of this spec does NOT by itself mean a GPU was exercised."
+        print "[RUN VERDICT] Count the per-lane GPU/PROVEN disclosure lines: those, and only those, are"
+        print "[RUN VERDICT] frames a device produced (device_readback + handle > 0 + identity > 0 + full frame)."
+        print "[RUN VERDICT] Every GPU/BRANCH/SKIPPED line proves NOTHING about the GPU path, and a"
+        print "[RUN VERDICT] '[toctou]' line means the probe's prediction did not survive to the create."

@@ -74,6 +74,109 @@ fn probe_backend(backend: text, caps: BackendCaps) -> BackendProbe:
         reason: "host-unavailable(no {backend} device in provided caps)")
 
 # ---------------------------------------------------------------------------
+# Readback provenance: the fact-based replacement for probe predictions.
+# ---------------------------------------------------------------------------
+# A capability probe (`Engine2D.probe_backend`, `probe_cuda_processing`, ...) runs
+# its own create+init+shutdown and throws the result away, so a spec that then
+# calls `Engine2D.create_requested_backend` performs a SECOND, INDEPENDENT create
+# with nothing cached between them. The probe answer is only a PREDICTION and must
+# never be asserted on: a probe that said "ready" and a create that then lost the
+# device is a false RED, and a probe that said "unavailable" skips the whole device
+# branch while still printing a clean pass — a VACUOUS GREEN indistinguishable from
+# a real GPU pass. See doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md
+#
+# These helpers move every device claim onto the FACT the CREATE and the READBACK
+# report. `Engine2DReadback.source` (src/lib/gc_async_mut/gpu/engine2d/backend.spl)
+# is the complete honest vocabulary; anything outside it fails closed.
+fn device_proven(source: text, handle: i64, identity: i64, pixel_count: i64, expected_px: i64) -> bool:
+    source == "device_readback" and handle > 0 and identity > 0 and
+        pixel_count == expected_px
+
+# The vocabulary below was enumerated from the engine2d/browser-engine backends
+# themselves (every `engine2d_readback*(..., "<label>")` construction site), not
+# copied from a doc: device_readback, host_cache_after_device_present,
+# swapchain_present, framebuffer_surface, cpu_mirror, cpu_fallback, software,
+# cache, completion_unknown, readback_failed, not_requested,
+# device_identity_unknown, preflight_rejected, unavailable. Failing closed on a
+# label a real host CAN emit is a false red, not a caught defect.
+fn _source_is_device(source: text) -> bool:
+    source == "device_readback" or source == "host_cache_after_device_present" or
+        source == "swapchain_present" or source == "framebuffer_surface"
+
+# `cache`/`software` are host-side surfaces: never a device attestation.
+fn _source_is_cpu(source: text) -> bool:
+    source == "cpu_mirror" or source == "cpu_fallback" or source == "software" or
+        source == "cache"
+
+# NO-FRAME sources carry an EMPTY pixel array — frame-content assertions must be
+# gated on `source_is_no_frame` or they false-red on a legitimate host condition.
+# `device_identity_unknown` is the device->host copy succeeding while
+# cuda_device_identity() returned <= 0 (backend_cuda.spl); `preflight_rejected`
+# is draw_ir_adv.spl; `unavailable` is the browser-engine lane.
+fn source_is_no_frame(source: text) -> bool:
+    source == "completion_unknown" or source == "readback_failed" or
+        source == "not_requested" or source == "device_identity_unknown" or
+        source == "preflight_rejected" or source == "unavailable"
+
+fn _source_is_known(source: text) -> bool:
+    _source_is_device(source) or _source_is_cpu(source) or source_is_no_frame(source)
+
+# Runs UNCONDITIONALLY on every outcome and every backend — this is where the
+# teeth live. Any device-sourced frame obliges a real handle and a full frame; a
+# CPU source may be neither device-sourced nor device-proven; an unrecognised
+# source fails closed. Deliberately NOT asserting handle == 0 / identity == 0 on
+# CPU sources: the seed surfaces those as nil under fd exhaustion, a false red.
+#
+# `attests_identity` states whether the backend under test publishes a device
+# identity at all. This is a deterministic CONTRACT claim about the backend,
+# verified at its readback construction site — NOT a prediction about device
+# availability. backend_vulkan.spl:823/836, backend_metal and backend_cuda use
+# `engine2d_readback_with_identity` and so must publish identity > 0; the DirectX
+# DXVK lane (backend_directx.spl:452/454) uses `engine2d_readback_with_handle`
+# and publishes NO identity, so demanding one there would be a false red.
+fn assert_provenance_invariants(label: text, source: text, handle: i64, identity: i64, pixel_count: i64, expected_px: i64, attests_identity: bool):
+    if not _source_is_known(source):
+        print "[probe-provenance] {label}: UNKNOWN READBACK SOURCE '{source}' — outside the honest vocabulary, failing closed"
+    expect(_source_is_known(source)).to_equal(true)
+    if _source_is_device(source):
+        expect(handle).to_be_greater_than(0)
+        expect(pixel_count).to_equal(expected_px)
+        if attests_identity:
+            # An identity-attesting backend that hands back 0 here has fabricated
+            # its device provenance — fail, never disclose-and-continue.
+            expect(identity).to_be_greater_than(0)
+    if _source_is_cpu(source):
+        expect(_source_is_device(source)).to_equal(false)
+        expect(device_proven(source, handle, identity, pixel_count, expected_px)).to_equal(false)
+
+# Prints GPU-PROVEN or an explicit "proves NOTHING about the GPU path" skip line,
+# and RETURNS whether a device is proven. Device-only assertions hang off this
+# return value — off a FACT, never off the probe.
+fn report_outcome(label: text, source: text, handle: i64, identity: i64, pixel_count: i64, expected_px: i64) -> bool:
+    if device_proven(source, handle, identity, pixel_count, expected_px):
+        print "[probe-gpu] {label}: GPU-PROVEN — a device produced this frame (source={source} handle={handle} identity={identity} pixels={pixel_count})"
+        return true
+    if _source_is_device(source):
+        print "[probe-gpu] {label}: GPU BRANCH SKIPPED — device-sourced but not device-PROVEN (source={source} handle={handle} identity={identity} pixels={pixel_count}); this example proves NOTHING about the GPU path"
+    else if source == "cpu_fallback":
+        print "[probe-gpu] {label}: GPU BRANCH SKIPPED — the device was unavailable at use time (source=cpu_fallback); the probe's prediction did not survive to the create. This example proves NOTHING about the GPU path"
+    else if source == "cpu_mirror":
+        print "[probe-gpu] {label}: GPU BRANCH SKIPPED — CPU/software lane (source=cpu_mirror); this example proves NOTHING about the GPU path"
+    else:
+        print "[probe-gpu] {label}: GPU BRANCH SKIPPED — no frame produced (source={source}); this example proves NOTHING about the GPU path"
+    false
+
+# Frame-content assertions (pixel oracles, frame length, CPU-oracle parity) must
+# run on EVERY source that actually produced a frame, on whatever backend served
+# it — but a NO-FRAME source hands back an EMPTY pixel array, so asserting on it
+# is a false red. Callers gate on this and print the disclosure below instead.
+fn report_no_frame(label: text, source: text) -> bool:
+    if source_is_no_frame(source):
+        print "[probe-gpu] {label}: FRAME ASSERTIONS SKIPPED — the readback produced no frame (source={source}); this example proves NOTHING about rendering correctness"
+        return true
+    false
+
+# ---------------------------------------------------------------------------
 # read_pixels() -> PPM (P6) oracle wrapper.
 # ---------------------------------------------------------------------------
 # The absolute drawing oracle is a real framebuffer download encoded as a P6
