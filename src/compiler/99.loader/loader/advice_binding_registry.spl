@@ -105,7 +105,7 @@ struct AdviceDispatchPermit:
     entries: [AdviceDispatchProjectionEntry]
     tokens: [GenerationToken]
 
-struct PrepareOutcome:
+struct AdviceDispatchPrepareOutcome:
     lifecycle: LifecycleManager
     permit: AdviceDispatchPermit?
     counter_delta: AdviceBindingCounters
@@ -114,7 +114,7 @@ struct PrepareOutcome:
     tokens_acquired: i64
     tokens_released: i64
 
-struct InvocationReceipt:
+struct AdviceDispatchInvocationReceipt:
     permit_id: text
     status: text
     reason: text
@@ -443,7 +443,7 @@ fn advice_prepare_failed(
     delta: AdviceBindingCounters,
     reason: text,
     around_rejected: bool
-) -> PrepareOutcome:
+) -> AdviceDispatchPrepareOutcome:
     val release = advice_projection_release_tokens(lifecycle, tokens)
     var final_reason = reason
     if release.reason != "":
@@ -452,7 +452,7 @@ fn advice_prepare_failed(
     failed_delta.dispatch_failures = failed_delta.dispatch_failures + 1
     if around_rejected:
         failed_delta.around_rejections = failed_delta.around_rejections + 1
-    PrepareOutcome(
+    AdviceDispatchPrepareOutcome(
         lifecycle: release.lifecycle,
         permit: nil,
         counter_delta: failed_delta,
@@ -491,37 +491,40 @@ fn advice_dispatch_permit_valid(permit: AdviceDispatchPermit) -> bool:
         return false
     var index: i64 = 0
     while index < permit.entries.len():
-        if (permit.tokens[index].owner_key != permit.entries[index].activation_key or
+        if (permit.entries[index].slot_id != permit.slot_id or
+            permit.entries[index].form != permit.form or
+            permit.tokens[index].owner_key != permit.entries[index].activation_key or
             permit.tokens[index].generation_id != permit.entries[index].generation):
             return false
         index = index + 1
     true
 
 fn advice_invocation_receipt_valid(
-    permit: AdviceDispatchPermit, receipt: InvocationReceipt
+    permit: AdviceDispatchPermit, receipt: AdviceDispatchInvocationReceipt
 ) -> bool:
     if receipt.permit_id != permit.permit_id:
         return false
     if receipt.status == "invoked":
-        return (receipt.invoked_count == permit.entries.len() and
+        return (receipt.reason == "" and
+            receipt.invoked_count == permit.entries.len() and
             receipt.return_values.len() == receipt.invoked_count)
     if receipt.status == "failed":
-        return (receipt.invoked_count >= 0 and
-            receipt.invoked_count <= permit.entries.len() and
+        return (receipt.reason != "" and receipt.invoked_count >= 0 and
+            receipt.invoked_count < permit.entries.len() and
             receipt.return_values.len() == 0)
     false
 
 # Prepare validates one immutable invocation plan and pins every exact
 # generation before a callback can run. Callers commit the returned lifecycle
 # and merge counter_delta while holding their canonical state gate.
-fn advice_prepare_dispatch(
+fn advice_dispatch_projection_prepare(
     projection: AdviceDispatchProjection,
     registry: AdviceBindingRegistry,
     lifecycle: LifecycleManager,
     loader: ModuleLoader,
     slot_id: text,
     form: text
-) -> PrepareOutcome:
+) -> AdviceDispatchPrepareOutcome:
     var delta = advice_zero_counters()
     delta.dispatch_attempts = 1
     if form == "around":
@@ -597,7 +600,7 @@ fn advice_prepare_dispatch(
                 "E-AF010 dynamic advice witness is no longer loader-owned: {record.witness_symbol}", false)
         index = index + 1
 
-    PrepareOutcome(
+    AdviceDispatchPrepareOutcome(
         lifecycle: pinned,
         permit: Some(AdviceDispatchPermit(
             schema_id: "simple.advice-dispatch-permit",
@@ -616,12 +619,12 @@ fn advice_prepare_dispatch(
 # Invocation receives no registry, loader, or lifecycle authority. Permits are
 # value-copyable, so the application gate/ledger remains responsible for
 # preventing duplicate invocation of a copied permit.
-fn advice_invoke_dispatch_permit(
+fn advice_dispatch_permit_invoke_with_invoker(
     permit: AdviceDispatchPermit,
     invoke: fn(i64) -> Result<i64, text>
-) -> InvocationReceipt:
+) -> AdviceDispatchInvocationReceipt:
     if not advice_dispatch_permit_valid(permit):
-        return InvocationReceipt(
+        return AdviceDispatchInvocationReceipt(
             permit_id: permit.permit_id,
             status: "failed",
             reason: "E-AF010 dynamic advice dispatch permit schema is invalid",
@@ -632,7 +635,7 @@ fn advice_invoke_dispatch_permit(
     for entry in permit.entries:
         val result = invoke(entry.resolved_witness_address)
         if result.is_err():
-            return InvocationReceipt(
+            return AdviceDispatchInvocationReceipt(
                 permit_id: permit.permit_id,
                 status: "failed",
                 reason: "E-AF010 dynamic advice callback failed: {result.unwrap_err()}",
@@ -640,28 +643,47 @@ fn advice_invoke_dispatch_permit(
                 return_values: [])
         results.push(result.unwrap())
         invoked = invoked + 1
-    InvocationReceipt(
+    AdviceDispatchInvocationReceipt(
         permit_id: permit.permit_id,
         status: "invoked",
         reason: "",
         invoked_count: invoked,
         return_values: results)
 
-# Finalize always starts from caller-supplied current state. Token release and
-# counter deltas therefore preserve unrelated mutations committed during the
-# unlocked callback interval. Replaying finalize against the canonical
-# lifecycle fails through consumed token authority when advice was pinned; this
-# does not claim that a copied permit cannot be invoked twice before an
-# application ledger check.
-fn advice_finalize_dispatch(
+fn advice_dispatch_permit_invoke(
+    permit: AdviceDispatchPermit
+) -> AdviceDispatchInvocationReceipt:
+    advice_dispatch_permit_invoke_with_invoker(permit, advice_native_invoke)
+
+fn advice_dispatch_permit_invoke_native(
+    permit: AdviceDispatchPermit
+) -> AdviceDispatchInvocationReceipt:
+    advice_dispatch_permit_invoke(permit)
+
+# Finalize starts from caller-supplied current state, preserving mutations from
+# the unlocked callback interval. Token authority rejects nonempty finalize
+# replay; copied or empty permits still require an application ledger.
+fn advice_dispatch_projection_finalize(
     permit: AdviceDispatchPermit,
-    receipt: InvocationReceipt,
+    receipt: AdviceDispatchInvocationReceipt,
     registry: AdviceBindingRegistry,
     lifecycle: LifecycleManager
 ) -> AdviceProjectionDispatchOutcome:
+    # A malformed permit has no trustworthy release authority.
+    if not advice_dispatch_permit_valid(permit):
+        var invalid_delta = advice_zero_counters()
+        invalid_delta.dispatch_failures = 1
+        return AdviceProjectionDispatchOutcome(
+            registry: advice_merge_counter_delta(registry, invalid_delta),
+            lifecycle: lifecycle,
+            status: "failed",
+            reason: "E-AF010 dynamic advice dispatch permit structure is invalid",
+            invoked_count: 0,
+            return_values: [],
+            tokens_acquired: 0,
+            tokens_released: 0)
     val release = advice_projection_release_tokens(lifecycle, permit.tokens)
-    val receipt_valid = (advice_dispatch_permit_valid(permit) and
-        advice_invocation_receipt_valid(permit, receipt))
+    val receipt_valid = advice_invocation_receipt_valid(permit, receipt)
     var delta = advice_zero_counters()
     var status = "dispatched"
     var reason = receipt.reason
@@ -669,6 +691,8 @@ fn advice_finalize_dispatch(
     if not receipt_valid or receipt.status != "invoked" or release.reason != "":
         status = "failed"
         delta.dispatch_failures = 1
+        if receipt_valid:
+            delta.dispatch_invocations = receipt.invoked_count
         return_values = []
         if not receipt_valid:
             reason = "E-AF010 dynamic advice invocation receipt does not match its permit"
@@ -684,14 +708,11 @@ fn advice_finalize_dispatch(
         lifecycle: release.lifecycle,
         status: status,
         reason: reason,
-        invoked_count: if status == "dispatched": receipt.invoked_count else: 0,
+        invoked_count: if receipt_valid: receipt.invoked_count else: 0,
         return_values: return_values,
         tokens_acquired: permit.tokens.len(),
         tokens_released: release.released)
 
-# Compatibility composition for sequential callers. New synchronized owners
-# commit PrepareOutcome before invoke and pass their then-current state to
-# finalize instead of using this all-in-one value flow.
 fn advice_dispatch_projection_with_invoker(
     projection: AdviceDispatchProjection,
     registry: AdviceBindingRegistry,
@@ -701,7 +722,7 @@ fn advice_dispatch_projection_with_invoker(
     form: text,
     invoke: fn(i64) -> Result<i64, text>
 ) -> AdviceProjectionDispatchOutcome:
-    val prepared = advice_prepare_dispatch(
+    val prepared = advice_dispatch_projection_prepare(
         projection, registry, lifecycle, loader, slot_id, form)
     val prepared_registry = advice_merge_counter_delta(
         registry, prepared.counter_delta)
@@ -715,11 +736,9 @@ fn advice_dispatch_projection_with_invoker(
             return_values: [],
             tokens_acquired: prepared.tokens_acquired,
             tokens_released: prepared.tokens_released)
-    val permit = prepared.permit ?? AdviceDispatchPermit(
-        schema_id: "", schema_version: 0, permit_id: "", slot_id: "", form: "",
-        entries: [], tokens: [])
-    val receipt = advice_invoke_dispatch_permit(permit, invoke)
-    advice_finalize_dispatch(
+    val permit = prepared.permit.unwrap()
+    val receipt = advice_dispatch_permit_invoke_with_invoker(permit, invoke)
+    advice_dispatch_projection_finalize(
         permit, receipt, prepared_registry, prepared.lifecycle)
 
 fn advice_dispatch_projection(
@@ -766,12 +785,15 @@ export AdviceBindingCounters, AdviceDisabledPathFootprint
 export AdviceBindingRegistry, AdviceLookupResult
 export AdviceDispatchProjectionEntry, AdviceDispatchProjection
 export AdviceProjectionDispatchOutcome
-export AdviceDispatchPermit, PrepareOutcome, InvocationReceipt
+export AdviceDispatchPermit, AdviceDispatchPrepareOutcome
+export AdviceDispatchInvocationReceipt
 export advice_binding_candidate, advice_bind_slot, advice_binding_stage_validated
 export advice_publish_generation, advice_lookup_slot, advice_unbind_generation
 export advice_dispatch_projection_create
 export advice_dispatch_projection_empty, advice_dispatch_projection_invalidate
 export advice_dispatch_projection, advice_dispatch_projection_with_invoker
-export advice_prepare_dispatch, advice_invoke_dispatch_permit
-export advice_finalize_dispatch, advice_merge_counter_delta
+export advice_dispatch_projection_prepare
+export advice_dispatch_permit_invoke, advice_dispatch_permit_invoke_with_invoker
+export advice_dispatch_permit_invoke_native
+export advice_dispatch_projection_finalize, advice_merge_counter_delta
 export advice_disabled_path_footprint
