@@ -62,7 +62,30 @@ sh scripts/bootstrap/bootstrap-from-scratch.sh \
 Only the resulting current-source pure-Simple compiler may consume the
 admitted 23.1 provider for LLVM native builds.
 
-## 2. Admit the current-source Stage 4 full CLI
+## 2. Admit Stage 2, Stage 3, and the current-source Stage 4 full CLI
+
+Each stage is a provider for one narrower handoff:
+
+| Artifact | Required admission | Permitted use |
+|---|---|---|
+| Stage 2 `build/bootstrap/stage2/<triple>/simple` | Built by the current Rust seed, private copy unchanged, bootstrap compiler sanity passes | Produce and sanity-check Stage 3 only |
+| Stage 3 `build/bootstrap/stage3/<triple>/simple` | Built by admitted Stage 2 without Rust native-build delegation; `stage3/<triple>/provenance.env` re-verifies and sanity passes | Produce Stage 4 only |
+| Stage 4 `build/bootstrap/full/<triple>/simple` | Built by admitted Stage 3; source fingerprint, sibling `simple.provenance.env`, redeploy gate, frontend gate, and essential-tools smoke all pass | Launch browser builders and the production QEMU rendering wrapper |
+
+Produce the full chain with stub fallback disabled. The Rust seed remains
+Cranelift-only; the admitted Stage 4 full CLI consumes the external LLVM 23.1
+provider later when the browser and SimpleOS LLVM lanes run:
+
+```bash
+SIMPLE_NO_STUB_FALLBACK=1 \
+sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --full-bootstrap --backend=cranelift --mode=dynload --full-cli --no-mcp
+```
+
+If Stage 3 fails, retain its cache and provenance/log directory and repair that
+failure; do not skip directly from Stage 2 to the QEMU wrapper. If Stage 4
+fails, retain the Stage 2/3 artifacts as producer evidence but do not relabel
+either one as a full CLI.
 
 The qualifying producer is `build/bootstrap/full/<triple>/simple` from the
 current source revision. Retain its absolute path, source revision, version,
@@ -72,9 +95,12 @@ exact binary with stub fallback disabled. The gate must prove its calibrated
 test runner, lint, duplicate-check, and aggregate pass markers before QEMU.
 
 An ad-hoc `build/native_probe/simple` can provide diagnostic native-smoke
-evidence only. Stage 2 and Stage 3 artifacts, the Rust seed, a deployed stale
-wrapper, or a candidate without the current-source provenance and essential
-tools PASS may not substitute for Stage 4. For a diagnostic native smoke:
+evidence only. A passing probe proves that artifact can compile and execute the
+focused native fixtures; it does not prove the full CLI command surface,
+current-source Stage 3 parentage, or the Stage 4 essential-tools gate. Stage 2
+and Stage 3 artifacts, the Rust seed, a deployed stale wrapper, or a candidate
+without current-source provenance and essential-tools PASS may not substitute
+for Stage 4. For a diagnostic native smoke:
 
 ```bash
 SIMPLE_BINARY="$PWD/build/native_probe/simple" \
@@ -159,6 +185,9 @@ rendering result. Static contracts, a browser ELF alone, cached screenshots,
 an unavailable QEMU run, or a Stage 2/3 substitution do not constitute a live
 PASS. Verify each unchanged criterion once. After each failure make at most one
 focused fix, and stop with retained blockers after the third verify/fix cycle.
+Until such a retained bundle reports PASS, describe the lane as pending or
+blocked; a native-probe smoke result must never be summarized as a QEMU render
+success.
 
 ## Related guidance
 

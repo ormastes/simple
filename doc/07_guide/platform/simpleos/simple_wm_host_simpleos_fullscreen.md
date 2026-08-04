@@ -81,18 +81,51 @@ and framebuffer evidence. Source inspection, demo markers, Rust-seed execution,
 fixed QEMU metadata, or unverified screenshots cannot satisfy the scenarios.
 
 For the LLVM 23.1 browser lane, first build and admit the signed current
-provider (`llvmorg-23.1.0-rc2`; stable 23.1.0 is not published as of
-2026-08-04). Then launch the canonical wrapper with explicit coherent tools:
+toolchain provider (`llvmorg-23.1.0-rc2`; stable 23.1.0 is not published as of
+2026-08-04). Bootstrap then admits the compiler providers in order: Stage 2
+may produce Stage 3, the provenance-admitted Stage 3 may produce Stage 4, and
+only the current-source Stage 4 full CLI may launch this production wrapper.
+Stage 2, Stage 3, the Rust seed, and `build/native_probe/simple` are not
+launchable substitutes. The native probe is diagnostic-only even when its
+native smoke passes.
+
+Build the full-stage provider first, preserving the Stage 2/3 caches when a
+bounded retry is needed:
+
+```sh
+SIMPLE_NO_STUB_FALLBACK=1 \
+sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --full-bootstrap --backend=cranelift --mode=dynload --full-cli --no-mcp
+```
+
+The qualifying executable is
+`build/bootstrap/full/<triple>/simple`, accompanied by the verified sibling
+`simple.provenance.env` and the Stage 4 essential-tools smoke receipt. See the
+[bounded Clang 23.1 bootstrap and QEMU workflow](../../app/llm/clang_23_1_bootstrap_browser_qemu_workflow.md)
+for the stage admission rules and recovery cap. Then launch the canonical
+wrapper with the exact admitted Stage 4 path and coherent LLVM tools:
 
 ```sh
 export LLVM_23_1_PREFIX="$PWD/build/toolchains/llvm-23.1.0-rc2"
-SIMPLE_BIN=/Users/ormastes/simple/build/native_probe/simple \
+export SIMPLE_LLVM_PREFIX="$LLVM_23_1_PREFIX"
+SIMPLE_BIN="$PWD/build/bootstrap/full/<triple>/simple" \
+SIMPLE_BIN_SOURCE=full-stage4-provenance \
+SIMPLEOS_WM_NATIVE_BACKEND=llvm \
 CLANG="$LLVM_23_1_PREFIX/bin/clang" \
+SIMPLE_CLANG="$LLVM_23_1_PREFIX/bin/clang" \
 LINKER="$LLVM_23_1_PREFIX/bin/ld.lld" \
+SIMPLE_LINKER="$LLVM_23_1_PREFIX/bin/ld.lld" \
 BUILD_DIR="$PWD/build/evidence/clang-23.1-browser-qemu" \
 REPORT_PATH="$PWD/doc/09_report/clang_23_1_browser_qemu_evidence.md" \
 sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
 ```
+
+Replace `<triple>` with the directory produced by the same bootstrap run; do
+not copy a similarly named binary from another worktree. The wrapper rechecks
+the sibling Stage 4 provenance against the current source tree before it builds
+or boots anything. This guide does not claim a current live QEMU PASS: retain
+the wrapper report and evidence bundle, and report the exact failure when the
+bounded lane has not converged.
 
 The browser builder writes
 `build/os/apps/browser_demo/clang-23.1-evidence.txt`; it records the compiler,

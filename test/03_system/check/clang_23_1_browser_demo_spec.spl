@@ -1,3 +1,16 @@
+# codex-system-test
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008 REQ-009 REQ-010 NFR-001 NFR-002 NFR-003 NFR-004 NFR-005 NFR-006 NFR-007 NFR-008 NFR-009
+# @evidence-display: links
+"""# Clang 23.1 Browser Demo Migration
+
+Documents the source contracts and retained-evidence boundaries for the
+Clang/LLVM 23.1 provider, pure-Simple compiler, browser client, bootstrap, and
+SimpleOS QEMU flow.
+
+Source inspection proves configuration and fail-closed ownership only. It does
+not turn missing Stage4, cross-host, multi-architecture, or live QEMU execution
+into PASS evidence; those rows remain incomplete until their real gates run.
+"""
 use std.spec.*
 use std.io_runtime.{file_read}
 
@@ -48,6 +61,59 @@ describe "Clang 23.1 browser demo migration":
             expect(build).to_contain("llvm_nm_version=")
             expect(build).to_contain("sha256")
 
+    describe "REQ-005: Rust bootstrap LLVM isolation":
+        it "isolates the LLVM-18-only binding from the normal bootstrap graph":
+            step("Inspect the Rust bootstrap backend boundary")
+            val manifest = file_read("src/compiler_rust/compiler/Cargo.toml")
+            val bootstrap = file_read("scripts/bootstrap/bootstrap-from-scratch.sh")
+            expect(manifest).to_contain("default = []")
+            expect(manifest).to_contain("llvm = [\"inkwell\"]")
+            expect(manifest).to_contain("inkwell = { version = \"0.5\", optional = true, features = [\"llvm18-0\"] }")
+            expect(manifest).to_contain("Legacy source compatibility only; excluded from the normal bootstrap graph.")
+            expect(manifest.contains("features = [\"llvm23")).to_equal(false)
+            expect(bootstrap).to_contain("backend=\"cranelift\"")
+            expect(bootstrap).to_contain("Rust bootstrap backend '${backend}' is unavailable")
+            expect(bootstrap).to_contain("pure-Simple LLVM backend with an admitted Clang/LLVM 23.1 provider")
+
+        it "keeps normal multiplatform bootstrap CI on the isolated backend":
+            step("Inspect normal bootstrap CI isolation")
+            val isolation = file_read("scripts/check/check-rust-bootstrap-llvm-isolation.shs")
+            val workflow = file_read(".github/workflows/rust-bootstrap-multiplatform.yml")
+            expect(isolation).to_contain("legacy Rust LLVM backend was accepted")
+            expect(isolation).to_contain("normal Rust bootstrap CI still provisions or enables LLVM 18")
+            expect(isolation).to_contain("rust_bootstrap_llvm_isolation=true")
+            expect(workflow).to_contain("backend: cranelift")
+            expect(workflow.contains("backend: llvm")).to_equal(false)
+            expect(workflow.contains("LLVM_SYS_180_PREFIX")).to_equal(false)
+
+    describe "REQ-006: canonical pure-Simple and SimpleOS ownership":
+        it "routes compiler and interpreter discovery through the canonical prefix":
+            step("Inspect pure-Simple Clang and LLVM discovery")
+            val runtime_compiler = file_read("src/compiler/70.backend/backend/runtime_compiler.spl")
+            val capability = file_read("src/compiler/70.backend/backend/llvm_capability.spl")
+            val interpreter_tools = file_read("src/compiler/95.interp/interpreter/llvm/tools.spl")
+            expect(runtime_compiler).to_contain("SIMPLE_LLVM_PREFIX")
+            expect(runtime_compiler).to_contain("clang-23")
+            expect(capability).to_contain("SIMPLE_LLVM_PREFIX")
+            expect(capability).to_contain("Selected clang is not LLVM 23.1")
+            expect(interpreter_tools).to_contain("SIMPLE_LLVM_PREFIX")
+            expect(interpreter_tools).to_contain("llc-23")
+            expect(interpreter_tools).to_contain("opt-23")
+            expect(interpreter_tools).to_contain("clang-23")
+
+        it "owns canonical guest launch paths and their focused contract test":
+            step("Inspect SimpleOS guest tool manifests and launch aliases")
+            val packages = file_read("src/os/packages/os_packages.spl")
+            val image_builder = file_read("src/os/installer/image_builder.spl")
+            val shell_tools = file_read("src/os/apps/shell/_ShellTools/text_tools.spl")
+            val guest_spec = file_read("test/01_unit/os/port/llvm/clang_23_1_guest_toolchain_contract_spec.spl")
+            expect(packages).to_contain("/usr/bin/clang-23.1")
+            expect(packages.contains("/usr/bin/clang-20")).to_equal(false)
+            expect(image_builder).to_contain("/usr/bin/clang-23.1")
+            expect(shell_tools).to_contain("command == \"clang-23.1\"")
+            expect(guest_spec).to_contain("packages the canonical and versioned guest launch paths")
+            expect(guest_spec).to_contain("pins the port build and static relinker to the 23.1 ABI family")
+
     describe "REQ-009, REQ-010: bootstrap and QEMU evidence":
         it "admits only the full Stage4 CLI and LLVM backend profile":
             step("Run the ad-hoc bootstrap smoke")
@@ -84,3 +150,34 @@ describe "Clang 23.1 browser demo migration":
             expect(gate).to_contain("material=[0-9a-f]{64} theme=$EXPECTED_THEME_ID source=$EXPECTED_THEME_SOURCE_MANIFEST_SHA256$")
             expect(gate).to_contain("content-provenance-rejected|backend=native-safe-fallback")
             step("Validate retained rendering and input evidence")
+
+    describe "AC and NFR traceability boundary":
+        it "keeps every acceptance criterion visible without claiming convergence":
+            step("Read the authoritative SPipe acceptance state")
+            val state = file_read(".spipe/clang_23_1_browser_demo/state.md")
+            expect(state).to_contain("AC-1:")
+            expect(state).to_contain("AC-2:")
+            expect(state).to_contain("AC-3:")
+            expect(state).to_contain("AC-4:")
+            expect(state).to_contain("AC-5:")
+            expect(state).to_contain("AC-6:")
+            expect(state).to_contain("AC-7:")
+            expect(state).to_contain("AC-8:")
+            expect(state).to_contain("AC-9:")
+            expect(state).to_contain("AC-10:")
+            expect(state).to_contain("AC-11:")
+            expect(state).to_contain("verification-blocked")
+            expect(state).to_contain("AC-8, AC-9, and AC-11 remain incomplete")
+
+        it "retains all nonfunctional obligations as explicit final-gate rows":
+            step("Read the authoritative nonfunctional requirements")
+            val nfr = file_read("doc/02_requirements/nfr/clang_23_1_browser_demo.md")
+            expect(nfr).to_contain("NFR-001 Reproducibility")
+            expect(nfr).to_contain("NFR-002 Reliability")
+            expect(nfr).to_contain("NFR-003 Portability")
+            expect(nfr).to_contain("NFR-004 Maintainability")
+            expect(nfr).to_contain("NFR-005 Performance")
+            expect(nfr).to_contain("NFR-006 Security")
+            expect(nfr).to_contain("NFR-007 Compatibility")
+            expect(nfr).to_contain("NFR-008 Evidence")
+            expect(nfr).to_contain("NFR-009 Iteration safety")

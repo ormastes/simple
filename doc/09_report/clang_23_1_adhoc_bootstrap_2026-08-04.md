@@ -93,8 +93,53 @@ because a pure SimpleOS target correctly had no implicit host `stddef.h`.
 Cycle 2 used the sysroot-independent production CRT assembly and converged;
 there was no third cycle.
 
+## Current-source full-CLI bootstrap follow-up
+
+The authorized `native_probe/simple` remains valid only for its admitted
+native-build/execute surface; it is not a Stage 4 full CLI and cannot satisfy
+the essential-tools or QEMU gates.
+
+After the pure-Simple Backend-owner repair, fresh bounded full-bootstrap cycle
+1 admitted Stage 2, parsed all 543 Stage 3 sources, and completed HIR for
+`backend/interpreter.spl` and `backend/env.spl`. This clears the previously
+retained `unresolved type: Backend` failure. The run was later terminated by
+the host with SIGKILL/exit 137 while importing `backend_port.spl`; it emitted
+no replacement compiler diagnostic.
+
+- Cycle 1 log:
+  `build/bootstrap-clang-23-1-stage4-backend-owner-cycle1.out`.
+
+Cycle 2 preserved the bootstrap caches and used `--jobs=2`. It admitted Stage
+2, parsed all 543 Stage 3 sources, and cleared the former unresolved `Backend`
+failure. It then failed normally in phase 4 because `backend/codegen.spl`'s
+broad `use compiler.mir.*` made HIR's `Effect` struct conflict with MIR's
+`Effect` enum.
+
+- Cycle 2 retained log:
+  `build/bootstrap-clang-23-1-stage4-backend-owner-cycle2.out`.
+
+The adjacent repair replaces the broad MIR wildcard with selective imports of
+`mir_types`, `mir_instruction_support`, and `mir_instruction_graph`, and
+removes the unused HIR `SymbolId` import. Final-cap cycle 3 preserved the
+caches and ran with `--jobs=min` (one job). Stage 3 completed HIR for
+`backend/codegen.spl` (38 functions), with neither `Backend` nor `Effect`
+diagnostics recurring, and advanced through `backend/compiler.spl` into
+`backend/sdn.spl`. The host then terminated it with SIGKILL/rc 137:
+
+- Cycle 3 live log:
+  `build/bootstrap-clang-23-1-stage4-backend-owner-cycle3.out`;
+- progress receipt: `build/bootstrap/bootstrap-progress-cycle3.log`.
+
+This follow-up did not produce a current Stage 3 or Stage 4 candidate. The
+three-cycle cap is reached with Stage 3 memory/resource termination even at one
+job. No Stage 4 provenance, essential-tools PASS, or LLVM-default SimpleOS WM
+QEMU rendering PASS exists, and QEMU was not run after the cap. Resume in a
+fresh scoped session from the preserved bootstrap caches and cycle-3 logs.
+
 ## Status
 
-`STATUS: PASS` for both the authorized ad-hoc bootstrap provider lane and the
-Clang 23.1-connected SimpleOS target lane. No source or implementation files
-were edited by this lane.
+`STATUS: PASS` remains limited to the authorized ad-hoc provider smoke and the
+Clang 23.1-connected SimpleOS target smoke described above. The current-source
+full-CLI bootstrap remains incomplete after final-cap cycle 3 ended with host
+SIGKILL/rc 137. Stage 4 essential-tools and the LLVM-default QEMU rendering
+gate remain **NOT VERIFIED**.

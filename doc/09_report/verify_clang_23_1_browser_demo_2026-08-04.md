@@ -77,3 +77,29 @@
 The Clang 23.1 migration and bootstrap lanes are suitable for review. The
 SimpleOS rendering gate remains release-blocking because production draw/font
 materialization does not finish within the canonical readiness window.
+
+## Fresh scoped continuation (2026-08-04, superseding final-gate status)
+
+- The current worktree retained the admitted LLVM 23.1 provider and the
+  passing `build/native_probe/simple` diagnostic smoke.
+- The Stage 3 unresolved `Backend` diagnostic was repaired by removing unread
+  `EvalContext` state and the zero-consumer `HirVisitor` surface. Cycle 1
+  passed that exact site, then the host killed Stage 3 with status 137.
+- Cycle 2 passed the same site and exposed a phase-4 payload-owner conflict in
+  `backend/codegen.spl`: a broad MIR import made HIR's `Effect` struct collide
+  with MIR's `Effect` enum.
+- Codegen now imports the exact MIR owner modules and drops an unused HIR
+  `SymbolId` import. Final-cap cycle 3 parsed 537/537 sources and completed
+  codegen HIR (38 functions), proving both diagnostics absent, but the host
+  again killed Stage 3 with status 137 at one job before a candidate existed.
+- `git diff --check`, the generated-spec layout count (`0`), and the working
+  direct-environment guard pass on the final source/docs input. The installed
+  pure-Simple CLI does not expose `sspec-maintain`; direct source execution did
+  not converge and was stopped without substituting seed evidence.
+
+The three-cycle cap is exhausted. No Stage 3 or Stage 4 candidate, Stage 4
+essential-tools receipt, or fresh LLVM-default SimpleOS/WM QEMU bundle can be
+claimed. Resume in a fresh scoped session from the preserved bootstrap caches
+and logs, first addressing Stage 3 peak-memory/resource termination.
+
+`STATUS: FAIL`
