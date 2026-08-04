@@ -67,6 +67,16 @@ SIMPLEOS_HOST_GPU_BUILD_DIR=build/arm64-host-gpu-phase2-diagnostic-resume \
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
 ```
 
+The next fresh diagnostic cleared `rt_native_cmp`: daemon, ARM64 probe guest,
+and ARM64 production guest all linked, and QEMU 10.2.2 launched with HVF,
+`-cpu host`, 512 MiB file-backed RAM, and the RAM tail shared-memory transport.
+The first runtime failure was the host daemon's unresolved
+`Array.data_ptr` dispatch before negotiation; serial consequently recorded a
+Metal hello timeout and no RAMFB production run occurred. The Metal SFFI owner
+now calls the existing typed `rt_array_data_ptr_u8` runtime facade instead of
+the unsupported array method. Evidence is retained in
+`build/arm64-host-gpu-phase2-diagnostic-runtimecmp-cycle1/`.
+
 The wrapper must boot the target guest, capture guest negotiation/submission,
 capture the host daemon device receipt, and correlate IDs and checksums. A row
 cannot pass from QEMU flags, QMP screenshots, VirtIO-GPU scanout, synthetic
