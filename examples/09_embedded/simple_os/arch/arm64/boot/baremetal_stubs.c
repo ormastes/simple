@@ -937,6 +937,35 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
     return rt_native_eq(a, b) ? 0 : 1;
 }
 
+/* Three-way ordering for erased operands emitted by the pure-Simple
+ * Cranelift lane. Integer tagging is an order-preserving left shift, so a
+ * signed word comparison is correct for raw and tagged integers. Heap strings
+ * require byte-wise lexical ordering, matching the hosted runtime owner. */
+RuntimeValue rt_native_cmp(RuntimeValue left, RuntimeValue right)
+{
+    if (left == right) return (RuntimeValue)0;
+    if (IS_HEAP(left) && IS_HEAP(right)) {
+        HeapHeader *left_header = (HeapHeader *)DECODE_PTR(left);
+        HeapHeader *right_header = (HeapHeader *)DECODE_PTR(right);
+        if (left_header && right_header &&
+            left_header->type == HEAP_STRING && right_header->type == HEAP_STRING) {
+            RuntimeString *left_string = (RuntimeString *)left_header;
+            RuntimeString *right_string = (RuntimeString *)right_header;
+            uint32_t count = left_string->len < right_string->len
+                ? left_string->len : right_string->len;
+            for (uint32_t i = 0; i < count; i++) {
+                unsigned char left_byte = (unsigned char)left_string->data[i];
+                unsigned char right_byte = (unsigned char)right_string->data[i];
+                if (left_byte != right_byte)
+                    return (RuntimeValue)(left_byte < right_byte ? -1 : 1);
+            }
+            if (left_string->len == right_string->len) return (RuntimeValue)0;
+            return (RuntimeValue)(left_string->len < right_string->len ? -1 : 1);
+        }
+    }
+    return (RuntimeValue)((int64_t)left < (int64_t)right ? -1 : 1);
+}
+
 #define ECAM_BASE 0x4010000000ULL
 #define MAX_PCI_CACHED 32
 

@@ -127,6 +127,7 @@ RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b);
 RuntimeValue rt_string_from_cstr(const char *cstr);
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
 RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
+RuntimeValue rt_native_cmp(RuntimeValue left, RuntimeValue right);
 RuntimeValue rt_value_to_string(RuntimeValue val);
 RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr, RuntimeValue fmt_len);
 RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
