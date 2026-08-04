@@ -115,9 +115,11 @@ epilogue injection; commit `1a6c1e362a5`).
 | `dom_limits.spl` | 100% | — | **100%** | yes |
 | `style_block_resolve.spl` | 77% | 77% | **99%** | yes |
 | `style_block_parse.spl` | 72% | 77% | **96%** | yes |
-| `html_tokenizer.spl` | 64% | 90% | **97%** | yes |
-| `html_tree_builder.spl` | 28% | 72% | 75% | no — capped |
-| `dom_identity_index.spl` | 50% | 51% | 52% | no — capped |
+| `html_tokenizer.spl` | 64% | 90% | **98%** | yes |
+| `html_tree_builder.spl` | 28% | 72% | **95%** | yes |
+| `dom_identity_index.spl` | 50% | 51% | **98%** | yes |
+
+**Every target module now clears the 90% `@cover` target.**
 
 **Most of the original gap was tooling, not untested code.** Three defects
 were found in the coverage tool itself:
@@ -129,25 +131,46 @@ were found in the coverage tool itself:
   `style_block_parse.spl`.
 - **C (fixed, same commit)** — `elif` heads counted in the denominator but
   were never recorded even when taken.
-- **B (OPEN)** — instance methods never enter the collector's `functions`
-  section, so a `me` method body scores 0% however well tested.
-  `record_function_call` is reached only from three plain-call paths in
-  `interpreter_call/core/function_exec.rs`. This is what caps
-  `html_tree_builder.spl` (~80%) and `dom_identity_index.spl` (~55%), and it
-  is the correct explanation for `dom.spl` measuring 1% despite the 38/38 DOM
-  lane exercising it heavily — the earlier "under-attribution" framing was
-  directionally right but did not name the mechanism.
+- **B (fixed, `c1b350a2f9d`)** — instance methods never entered the
+  collector's `functions` section, so a `me` method body scored 0% however
+  well tested. `record_function_call` was reached from only three of the
+  interpreter's call paths; **five more never recorded**:
+  `exec_function_with_values_inner`, `exec_function_with_values_and_self`
+  (class/enum method dispatch, 12 call sites),
+  `exec_function_with_captured_env` (closures/lambdas, 8 call sites),
+  `interpreter_control::exec_method_body` (`with` +
+  `call_method_if_exists`), and
+  `special::execution::exec_function_with_self_return` (mutating-self
+  dispatch). A ninth path, `new` bodies via `class_instantiation.rs`,
+  bypasses the shared choke point entirely.
 
-Defect B must be closed by making instance-method calls genuinely reach
-`record_function_call`, **not** by relaxing the reporter's gate — a
-reporter-side relaxation would inflate every number in the repo while
-measuring nothing, which is strictly worse than an honest under-report. A
-KNOWN CAP note in `src/app/test_runner_new/test_runner_single.spl` records
-the evidence and warns against exactly that shortcut.
+  The fix moves the hook down into `execute_function_body` — the single point
+  all eight funnel through — and **deletes the three upstream copies** so
+  counts are preserved rather than doubled, plus one hook for `new` bodies.
+  The reporter gate was not touched. Effect, measured with two seed binaries
+  built from hash-verified-identical `.spl` sources and run serialized:
+  `html_tree_builder.spl` 75% → **95%**, `dom_identity_index.spl` 52% →
+  **98%**, with `html_tokenizer.spl` as a control (97% → 98%) and test
+  outcomes byte-identical across both arms.
 
-The style and tokenizer lanes wrote tests only for lines that were genuinely
-untested AND measurable; lines unmeasurable under defect B were listed rather
-than tested, since a test against them would raise apparent effort while
+  This was also the true mechanism behind `dom.spl` measuring 1% despite the
+  38/38 DOM lane exercising it heavily — the earlier "under-attribution"
+  framing was directionally right but never named the cause.
+
+**The gate is still doing work — do not relax it.** Defect B was closed by
+making instance-method calls genuinely reach `record_function_call`, never by
+loosening the reporter, which would have inflated every number in the repo
+while measuring nothing. Three independent checks pin this: a purpose-built
+negative-control probe with one called and one uncalled method reports
+**41% (5/12), not 100%**, and both uncalled symbols stay absent from the dump;
+free-function counts are unchanged to the digit across arms
+(`_dom_attr` 333215/333215), proving no double-counting; and binary identity
+was established by positive capability probe — the pre-fix binary emits
+ABSENT for every method name, the fixed one emits real counts.
+
+Tests were written only for lines that were genuinely untested AND measurable;
+while defect B was open, lines it made unmeasurable were listed rather than
+tested, since a test against them would have raised apparent effort while
 moving nothing. Unreachable-by-construction lines are argued individually in
 the landing commits, never folded silently into a percentage.
 
