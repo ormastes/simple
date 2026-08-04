@@ -1,9 +1,10 @@
-# Stage 4 access CLI type alias export
+# Stage 4 access CLI alias export and WM text boundary
 
 ## Status
 
-Owner export and real import-topology repair focused PASS. Exact Phase 4
-verification requires a fresh bounded session.
+Owner export and exact WM text-boundary repair PASS in focused and full-closure
+verification. The full closure crossed this module before stopping later in the
+T32 MCP session owner.
 
 ## Symptom
 
@@ -31,13 +32,13 @@ WM adapter or widen type lookup.
 fallback disabled, then exited 30 with empty output. Evidence is retained under
 `build/focused/stage4-access-cli-alias/`.
 
-The final bounded Phase 4 cycle reproduced unresolved `AccessOutputMode` in the
-WM adapter. The initial focused contract imported only the grammar owner and
-therefore missed the real module's simultaneous access-hub import. The repaired
-topology imports semantic aliases through `common.ui.access` and grammar
-constants directly; the strengthened contract mirrors that split. No fourth
-full Phase 4 cycle is permitted in this continuation.
+Two subsequent full-closure cycles proved that neither the access-hub re-export
+nor a direct grammar import makes these text aliases available at the WM leaf's
+Stage 4 type boundary. The accepted containment keeps the aliases inside their
+grammar owner and uses their exact underlying `text` representation in the WM
+adapter. This changes no accepted value or runtime behavior.
 
-The strengthened topology contract compiled and linked, then exited 30 with
-empty output. Evidence: `build/focused/stage4-access-cli-alias/` files ending
-in `-topology`.
+The strengthened contract imports and executes `wm_access_operation`, so the
+real WM module and its hub/grammar topology are compiled. It linked 44 modules
+and exited 30. Full Phase 4 cycle 3 then crossed the WM adapter and stopped
+later in `app.mcp_t32.session_tools`, proving the original blocker is cleared.
