@@ -1,0 +1,81 @@
+use std.spec.*
+use compiler.loader.loader.aspect_catalog.{AspectCatalog}
+use compiler.loader.loader.aspect_activation.{
+    AspectActivationRequest, AspectActivationCoordinator
+}
+use os.smf.dynsmf_session.{DynSmfPolicy, dynsmf_session_new}
+use os.smf.smf_generation.{LifecycleManager}
+use std.aop.facet.{FacetAcquireErrorKind, FacetAcquireError}
+use app.startup.aspect_lazy_singleflight.{AspectLazySingleFlight}
+use app.startup.aspect_lifecycle_capture_contract.{AspectFacetQueryBox}
+use app.startup.aspect_lazy_activation_transition.{
+    aspect_lazy_complete_failure, aspect_lazy_flight_identity,
+    aspect_lazy_reservation_owned, aspect_lazy_cancel_reservation
+}
+
+fn lazy_transition_coordinator() -> AspectActivationCoordinator:
+    val catalog = AspectCatalog(
+        generation: 7,
+        target: "x86_64-unknown-linux-gnu",
+        variant_fingerprint: "variant-a",
+        runtime_abi: "simple-runtime-1",
+        entries: [])
+    val policy = DynSmfPolicy(
+        disabled_all: false, disabled_ids: [], source: "test")
+    AspectActivationCoordinator.create(
+        catalog, dynsmf_session_new("lazy-transition-test", policy),
+        LifecycleManager.new_manager()).unwrap()
+
+describe "Context-free lazy activation transitions":
+    it "builds deterministic identity from sorted business interfaces":
+        val first = aspect_lazy_flight_identity(
+            7, AspectFacetQueryBox(
+                concrete_type_id: "fixture.Cache",
+                implemented_business_interfaces: ["Writable", "Readable"],
+                facet_interface_id: "Debuggable"),
+            "facet-abi-v1")
+        val second = aspect_lazy_flight_identity(
+            7, AspectFacetQueryBox(
+                concrete_type_id: "fixture.Cache",
+                implemented_business_interfaces: ["Readable", "Writable"],
+                facet_interface_id: "Debuggable"),
+            "facet-abi-v1")
+        expect(first.route_key).to_equal(second.route_key)
+        expect(first.route_key).to_contain("8:Readable8:Writable")
+        expect(first.request_prefix).to_equal("lazy-facet:7:Debuggable")
+
+    it "owns and cancels only the exact activation key and request":
+        val coordinator = lazy_transition_coordinator()
+        val request = AspectActivationRequest(
+            aspect_id: "fixture.debug", request_id: "request-1",
+            catalog_generation: 7)
+        coordinator.in_flight["pack:module:fixture.debug:7"] = "request-1"
+        coordinator.in_flight["other:key"] = "request-2"
+
+        expect(aspect_lazy_reservation_owned(
+            coordinator, "pack:module:fixture.debug:7", request)).to_be(true)
+        val wrong_request = AspectActivationRequest(
+            aspect_id: "fixture.debug", request_id: "request-9",
+            catalog_generation: 7)
+        val unchanged = aspect_lazy_cancel_reservation(
+            coordinator, "pack:module:fixture.debug:7", wrong_request)
+        expect(unchanged.in_flight.keys().len()).to_equal(2)
+
+        val cancelled = aspect_lazy_cancel_reservation(
+            unchanged, "pack:module:fixture.debug:7", request)
+        expect(cancelled.in_flight.has(
+            "pack:module:fixture.debug:7")).to_be(false)
+        expect(cancelled.in_flight["other:key"]).to_equal("request-2")
+
+    it "completes the owned flight and preserves its typed failure":
+        val singleflight = AspectLazySingleFlight.create()
+        val ticket = singleflight.begin("route-a", "lazy-a").unwrap()
+        val failure = FacetAcquireError(
+            kind: FacetAcquireErrorKind.ActivationFailed,
+            facet_id: "Debuggable", message: "fixture I/O failed")
+        val returned = aspect_lazy_complete_failure(
+            singleflight, ticket, failure)
+        if returned.kind != FacetAcquireErrorKind.ActivationFailed:
+            fail("lazy completion changed the typed failure kind")
+        expect(returned.facet_id).to_equal("Debuggable")
+        expect(returned.message).to_equal("fixture I/O failed")

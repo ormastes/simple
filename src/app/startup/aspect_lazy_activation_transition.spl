@@ -1,0 +1,223 @@
+# Context-free lazy facet activation values and state transitions.
+#
+# This leaf never imports AspectExecutionContext. Callers enter their lifecycle
+# gate, pass explicit state, and install the returned coordinator before unlock.
+
+use compiler.loader.loader.aspect_catalog.{AspectCatalog}
+use compiler.loader.loader.aspect_pack_provider.{AspectPackProviderKey}
+use compiler.loader.loader.aspect_activation.{
+    AspectActivationRequest, AspectActivationCoordinator
+}
+use app.startup.aspect_pack_io_port.{
+    AspectPackIoRequest, AspectPackIoPayload, AspectPackIoPort
+}
+use app.startup.aspect_lazy_singleflight.{
+    AspectLazyFlightTicket, AspectLazySingleFlight
+}
+use app.startup.aspect_lifecycle_capture_contract.{AspectFacetQueryBox}
+use app.startup.aspect_facet_runtime_contract.{
+    PublishedFacetDescriptorLease,
+    aspect_application_provider_key, aspect_application_lazy_facet_route,
+    aspect_facet_acquire_error_from_runtime_text,
+    aspect_facet_acquire_error_activation_denied
+}
+use std.aop.facet.{FacetAcquireError}
+use std.common.algorithm_utils.{sorted}
+
+class AspectLazyActivationCapsule:
+    query: AspectFacetQueryBox
+    facet_contract_abi_hash: text
+    activation_key: text
+    request: AspectActivationRequest
+    provider_key: AspectPackProviderKey
+    io_request: AspectPackIoRequest
+    pack_io: AspectPackIoPort
+
+class AspectLazyPreflightOutcome:
+    kind: text
+    coordinator: AspectActivationCoordinator
+    existing: PublishedFacetDescriptorLease?
+    capsule: AspectLazyActivationCapsule?
+
+class AspectLazyCommitBox:
+    capsule: AspectLazyActivationCapsule
+    payload: AspectPackIoPayload
+
+class AspectLazyFlightIdentity:
+    route_key: text
+    request_prefix: text
+
+class AspectLazyCommitValidation:
+    accepted: bool
+    coordinator: AspectActivationCoordinator
+    error: FacetAcquireError?
+
+fn aspect_lazy_complete_failure(
+    singleflight: AspectLazySingleFlight,
+    ticket: AspectLazyFlightTicket,
+    failure: FacetAcquireError
+) -> FacetAcquireError:
+    val completed = singleflight.complete_failure(ticket, failure)
+    if completed.is_err():
+        return FacetAcquireError(
+            kind: failure.kind,
+            facet_id: failure.facet_id,
+            message: "{failure.message}; {completed.unwrap_err()}")
+    failure
+
+fn aspect_lazy_flight_identity(
+    catalog_generation: i64,
+    query: AspectFacetQueryBox,
+    facet_contract_abi_hash: text
+) -> AspectLazyFlightIdentity:
+    var interface_key = ""
+    for interface_id in sorted(query.implemented_business_interfaces):
+        interface_key = "{interface_key}{interface_id.len()}:{interface_id}"
+    AspectLazyFlightIdentity(
+        route_key: "{catalog_generation}:{query.concrete_type_id.len()}:" +
+            "{query.concrete_type_id}:{query.facet_interface_id.len()}:" +
+            "{query.facet_interface_id}:{facet_contract_abi_hash.len()}:" +
+            "{facet_contract_abi_hash}:{interface_key}",
+        request_prefix:
+            "lazy-facet:{catalog_generation}:{query.facet_interface_id}")
+
+fn aspect_lazy_reservation_owned(
+    coordinator: AspectActivationCoordinator,
+    activation_key: text,
+    request: AspectActivationRequest
+) -> bool:
+    coordinator.in_flight.has(activation_key) and
+        coordinator.in_flight[activation_key] == request.request_id
+
+fn aspect_lazy_cancel_reservation(
+    coordinator: AspectActivationCoordinator,
+    activation_key: text,
+    request: AspectActivationRequest
+) -> AspectActivationCoordinator:
+    var updated = coordinator
+    if aspect_lazy_reservation_owned(updated, activation_key, request):
+        updated.in_flight = updated.in_flight.remove(activation_key)
+    updated
+
+fn aspect_lazy_reservation_prepare(
+    catalog: AspectCatalog,
+    coordinator: AspectActivationCoordinator,
+    query: AspectFacetQueryBox,
+    facet_contract_abi_hash: text,
+    request_id: text,
+    pack_io: AspectPackIoPort,
+    authorization: Result<(), text>,
+    activation_disabled: bool
+) -> Result<AspectLazyPreflightOutcome, FacetAcquireError>:
+    val route = aspect_application_lazy_facet_route(
+        catalog, query.concrete_type_id,
+        query.implemented_business_interfaces, query.facet_interface_id,
+        facet_contract_abi_hash)
+    if route.is_err():
+        return Err(aspect_facet_acquire_error_from_runtime_text(
+            query.facet_interface_id, route.unwrap_err()))
+    if route.unwrap() == nil:
+        return Ok(AspectLazyPreflightOutcome(
+            kind: "absent", coordinator: coordinator,
+            existing: nil, capsule: nil))
+    val entry = route.unwrap().unwrap()
+    if authorization.is_err():
+        return Err(aspect_facet_acquire_error_activation_denied(
+            query.facet_interface_id, authorization.unwrap_err()))
+    if activation_disabled:
+        return Err(aspect_facet_acquire_error_activation_denied(
+            query.facet_interface_id,
+            "E-APACK008 dynSMF policy disabled aspect activation"))
+    val request = AspectActivationRequest(
+        aspect_id: entry.aspect_id, request_id: request_id,
+        catalog_generation: catalog.generation)
+    val activation_key = "{entry.pack_id}:{entry.module_id}:" +
+        "{entry.aspect_id}:{catalog.generation}"
+    val reservation = coordinator.reserve(request)
+    if reservation.is_err():
+        return Err(aspect_facet_acquire_error_from_runtime_text(
+            query.facet_interface_id, reservation.unwrap_err()))
+    val updated = reservation.unwrap()
+    if not aspect_lazy_reservation_owned(updated, activation_key, request):
+        return Err(aspect_facet_acquire_error_from_runtime_text(
+            query.facet_interface_id,
+            "E-APACK009 activation reservation is owned outside the application single-flight gate"))
+    val provider_key = aspect_application_provider_key(entry, catalog.generation)
+    Ok(AspectLazyPreflightOutcome(
+        kind: "reserved", coordinator: updated, existing: nil,
+        capsule: Some(AspectLazyActivationCapsule(
+            query: query,
+            facet_contract_abi_hash: facet_contract_abi_hash,
+            activation_key: activation_key,
+            request: request,
+            provider_key: provider_key,
+            io_request: AspectPackIoRequest(
+                aspect_id: entry.aspect_id, pack_path: entry.pack_path,
+                provider_key: provider_key),
+            pack_io: pack_io))))
+
+fn aspect_lazy_route_still_exact(
+    catalog: AspectCatalog,
+    coordinator: AspectActivationCoordinator,
+    capsule: AspectLazyActivationCapsule
+) -> bool:
+    if (catalog.generation != capsule.request.catalog_generation or
+        coordinator.catalog.generation != capsule.request.catalog_generation):
+        return false
+    val route = aspect_application_lazy_facet_route(
+        catalog, capsule.query.concrete_type_id,
+        capsule.query.implemented_business_interfaces,
+        capsule.query.facet_interface_id, capsule.facet_contract_abi_hash)
+    if route.is_err() or route.unwrap() == nil:
+        return false
+    val entry = route.unwrap().unwrap()
+    val current_key = aspect_application_provider_key(entry, catalog.generation)
+    (current_key.pack_id == capsule.provider_key.pack_id and
+        current_key.pack_digest == capsule.provider_key.pack_digest and
+        current_key.catalog_generation == capsule.provider_key.catalog_generation and
+        current_key.target == capsule.provider_key.target and
+        current_key.variant_fingerprint == capsule.provider_key.variant_fingerprint and
+        current_key.runtime_abi == capsule.provider_key.runtime_abi and
+        current_key.core_public_abi_hash == capsule.provider_key.core_public_abi_hash and
+        current_key.core_layout_abi_hash == capsule.provider_key.core_layout_abi_hash and
+        entry.aspect_id == capsule.io_request.aspect_id and
+        entry.pack_path == capsule.io_request.pack_path)
+
+fn aspect_lazy_commit_validate(
+    catalog: AspectCatalog,
+    coordinator: AspectActivationCoordinator,
+    capsule: AspectLazyActivationCapsule,
+    authorization: Result<(), text>,
+    activation_disabled: bool
+) -> AspectLazyCommitValidation:
+    if (not aspect_lazy_route_still_exact(catalog, coordinator, capsule) or
+        not aspect_lazy_reservation_owned(
+            coordinator, capsule.activation_key, capsule.request)):
+        val updated = aspect_lazy_cancel_reservation(
+            coordinator, capsule.activation_key, capsule.request)
+        return AspectLazyCommitValidation(
+            accepted: false, coordinator: updated,
+            error: Some(aspect_facet_acquire_error_from_runtime_text(
+                capsule.query.facet_interface_id,
+                "E-APACK001 stale lazy activation commit or lost reservation")))
+    if authorization.is_err() or activation_disabled:
+        val updated = aspect_lazy_cancel_reservation(
+            coordinator, capsule.activation_key, capsule.request)
+        val reason = if authorization.is_err():
+            authorization.unwrap_err()
+        else:
+            "E-APACK008 dynSMF policy disabled aspect activation"
+        return AspectLazyCommitValidation(
+            accepted: false, coordinator: updated,
+            error: Some(aspect_facet_acquire_error_activation_denied(
+                capsule.query.facet_interface_id, reason)))
+    AspectLazyCommitValidation(
+        accepted: true, coordinator: coordinator, error: nil)
+
+export AspectLazyActivationCapsule, AspectLazyPreflightOutcome
+export AspectLazyCommitBox, AspectLazyFlightIdentity
+export AspectLazyCommitValidation
+export aspect_lazy_complete_failure, aspect_lazy_flight_identity
+export aspect_lazy_reservation_owned, aspect_lazy_cancel_reservation
+export aspect_lazy_reservation_prepare, aspect_lazy_route_still_exact
+export aspect_lazy_commit_validate
