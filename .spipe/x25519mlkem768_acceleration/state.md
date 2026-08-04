@@ -795,3 +795,41 @@ implementation-active
   (`src/app/test/x25519mlkem768_gpu_paired_measurement.spl`), which returns a
   blocked *value* rather than `Err` and is gated on a different root cause
   (no trusted live-executor lifecycle snapshots).
+
+## 2026-08-04 — x86 native CPU-SIMD lane built and PASSING on this host (backend=1)
+
+- Built the previously-empty x86 half of the native lane by running the
+  repo's own producer, `scripts/check/check-x25519mlkem768-cpu-simd.shs`
+  (exit 0). This closes the gap noted in the entry above: the `x86/` directory
+  is no longer empty, and `backend=1` is now reachable on this machine.
+- Receipt, measured this run (not asserted from the seed):
+  - `mlkem_ntt_simd_backend=1` — AVX2, matching the C ground truth
+    (`C_simd_detect_avx2=1`) and contradicting the seed's designed 0.
+  - `mlkem_ntt_avx2_reduction_mismatches=0`
+  - `mlkem_ntt_simd_forward_hits=240`, `mlkem_ntt_simd_total_hits=480` — real
+    native SIMD execution, not a scalar fallback.
+  - `mlkem_ntt_simd_thread_local_receipt=pass`, `MLKEM_NTT_SIMD_C_TEST: PASS`
+  - `mlkem_cpu_simd_execution_class=native`, `mlkem_cpu_simd_status=pass`
+  - `mlkem_cpu_simd_curve25519_smalllimb_dependency=absent`
+  - Pinned digests: checker
+    `2b63ff26e6b44d462db9c0dfaca462ee42ba85f31187c4de38bac5b3366c1662`,
+    runtime source
+    `98a1b781b01c26a30a6100fb08d9c8f06ce6eda8030df244088cdb5c6768f053`,
+    binary
+    `837d6bded0aa64ab8d3913cbce913d9234d737eb4064bcb3ee6edbe810aa1133`.
+- **Scope of what this does and does not prove.** The lane itself reports
+  `mlkem_cpu_simd_evidence_scope=correctness-only`,
+  `mlkem_cpu_simd_performance_status=not-run`, and
+  `mlkem_cpu_simd_promotion_status=not-proven`. So this is a genuine native
+  AVX2 **correctness** receipt on x86, and nothing more — it is **not** a
+  paired timing measurement and **not** a performance PASS. No speedup or
+  threshold claim is made.
+- What it changes for the campaign: the "no reachable SIMD backend" obstacle is
+  now specific rather than absolute. Native x86 AVX2 execution is demonstrably
+  available through the C-runtime lane, while `bin/simple` still reports 0 by
+  design. The paired collector still cannot be verified through `bin/simple`;
+  it needs to run in this native execution class.
+- Unchanged next step, now better grounded: land the same-owner paired
+  differential-oracle entry point and the `:503` removal, and verify the ABBA
+  span ordering in the **native** lane above rather than on the seed. Still no
+  physical SIMD or GPU performance PASS is claimed.
