@@ -40,15 +40,19 @@
 - Pure-Simple runtime execution of the version parser remains unproven because
   the full integration spec timed out and the runner's documented filter was
   rejected.
-- The continuation's fullscreen QEMU gate exhausted its three-cycle cap:
-  1. the repaired sort provider reached active web rendering, but the fixed
-     60-second readiness window stopped the still-progressing 4K frame;
-  2. the extended window exposed and precisely symbolized the software
-     offscreen trait-dispatch `ud2` in `Engine2D.clear`;
-  3. concrete dispatch removed that trap and rendered Browser, Hello, and the
-     launchable Clang surface, then the compositor rejected each window's
-     content provenance (`status=engine2d_rendered backend=software material=`)
-     and marked them degraded before readiness/capture.
+- The fresh continuation's fullscreen QEMU gate exhausted its three-cycle cap.
+  Every cycle used the explicit `build/native_probe/simple` provider, the
+  admitted signed Clang/LLD 23.1 prefix, and a current-source kernel. All three
+  reached active Browser/Hello/Clang rendering, but the material producer
+  rejected the Aetheric browser entry with the same receipt:
+  `backdrop=blur() saturate(170%) backdrop_len=21 backdrop_admitted=0`.
+- The receipt proves that `var(--blur-surface)` finds its property name but
+  receives an empty value instead of `30px`; `var(--app-surface)` is likewise
+  absent from the background shorthand. A single-entry state representation
+  and a join-based serialization experiment both reproduced the same guest
+  receipt and were reverted rather than committed as unproven fixes. The
+  retained rejection diagnostic now prints the actual backdrop and admission
+  result.
 - Therefore framebuffer/font/input/browser-content rendering evidence is not
   complete, and compiler/core/MCP aggregate checks were not all green.
 - The focused renderer regression spec could not reach assertions because the
@@ -57,15 +61,16 @@
 - The focused QEMU wrapper contract reached 5 passing cases before existing
   string-interpolation semantic errors (`font_guest_path`, `handled_text`)
   prevented a complete verdict.
-- The producer and checker repairs have not received a fourth QEMU run because
-  the mandated three-cycle cap is already exhausted; the live evidence remains
-  the concrete release blocker.
+- A fourth QEMU run was not attempted because the mandatory three-cycle cap is
+  exhausted. The next bounded session must trace the value loss upstream of
+  `_css_resolve_vars` (collector text, state construction, or freestanding text
+  lifetime) and obtain `blur(30px) saturate(170%)` with an admitted material
+  receipt before the framebuffer/input/browser-content criteria can run.
 
 ## Result
 
 `STATUS: FAIL`
 
-The migration and bootstrap lanes are suitable for review, and the exact
-producer/checker defects exposed by the third QEMU cycle are repaired. The
-rendering gate remains release-blocking until a fresh bounded session can run
-the unchanged final inputs once and retain the required evidence bundle.
+The Clang 23.1 migration and bootstrap lanes are suitable for review. The
+SimpleOS rendering gate remains release-blocking because custom-property values
+are empty in the freestanding browser renderer even though their names resolve.
