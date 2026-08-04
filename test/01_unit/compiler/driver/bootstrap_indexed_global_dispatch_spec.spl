@@ -28,8 +28,11 @@ describe "bootstrap indexed global dispatch":
         expect(initializer[1].bootstrap_store_global_symbol_id()).to_equal(41)
         expect(initializer[1].bootstrap_store_global_value_kind()).to_equal(1)
         expect(initializer[1].bootstrap_store_global_value_local_id()).to_equal(7)
-        expect(load_inst.bootstrap_load_global_dest_id()).to_equal(8)
-        expect(load_inst.bootstrap_load_global_symbol_id()).to_equal(41)
+        match load_inst.kind:
+            case MirInstKind.LoadGlobal(dest, found_symbol):
+                expect(dest.id).to_equal(8)
+                expect(found_symbol.id).to_equal(41)
+            case _: expect(false).to_equal(true)
 
     it "routes globals through indexed scalar handlers":
         val codegen = rt_file_read_text(
@@ -38,11 +41,19 @@ describe "bootstrap indexed global dispatch":
         val owner = rt_file_read_text(
             "src/compiler/50.mir/mir_instruction_graph.spl"
         ) ?? ""
+        val lowering = rt_file_read_text(
+            "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl"
+        ) ?? ""
 
         expect(codegen).to_contain("self.translate_store_global_at(instructions, index)")
-        expect(codegen).to_contain("self.translate_load_global_at(instructions, index)")
+        expect(codegen).to_contain("val load_payload = rt_enum_payload(inst_kind)")
+        expect(codegen).to_contain("val load_dest: LocalId = rt_tuple_get(load_payload, 0)")
+        expect(codegen).to_contain("val load_dest_id = load_dest.id")
+        expect(codegen).to_contain("val load_symbol: SymbolId = rt_tuple_get(load_payload, 1)")
+        expect(codegen).to_contain("val load_symbol_id = load_symbol.id")
+        expect(codegen).to_contain("self.translate_load_global_ids(load_dest_id, load_symbol_id)")
         expect(codegen).to_contain("me translate_store_global_at(instructions: [MirInst], index: i64):")
-        expect(codegen).to_contain("me translate_load_global_at(instructions: [MirInst], index: i64):")
+        expect(codegen).to_contain("me translate_load_global_ids(dest_id: i64, symbol_id: i64):")
         expect(codegen).to_contain("value_text = \"%l" + "{" + "local_id}\"")
         expect(codegen).to_contain("self.builder.emit_store(g_ty, value_text, g_name)")
         expect(codegen).to_contain("self.builder.emit_load(dest_name, g_ty, g_name)")
@@ -50,5 +61,15 @@ describe "bootstrap indexed global dispatch":
         expect(codegen).to_contain("[mir-to-llvm] store-global:emit")
         expect(codegen).to_contain("[mir-to-llvm] load-global:scalar")
         expect(codegen).to_contain("[mir-to-llvm] load-global:emit")
+        expect(codegen).to_contain("[mir-to-llvm] load-global:payload")
+        expect(codegen).to_contain("[mir-to-llvm] load-global:dest-slot")
+        expect(codegen).to_contain("[mir-to-llvm] load-global:dest-id")
+        expect(codegen).to_contain("[mir-to-llvm] load-global:symbol-slot")
+        expect(codegen).to_contain("[mir-to-llvm] load-global:symbol-id")
+        expect(codegen.contains("bootstrap_load_global_dest_id" )).to_equal(false)
+        expect(codegen.contains("bootstrap_load_global_symbol_id" )).to_equal(false)
+        expect(owner.contains("bootstrap_load_global_dest_id" )).to_equal(false)
+        expect(owner.contains("bootstrap_load_global_symbol_id" )).to_equal(false)
+        expect(lowering).to_contain("val dest = b_glob.new_temp(static_.type_)")
+        expect(lowering).to_contain("MirInstKind.LoadGlobal(dest, static_.symbol)")
         expect(owner).to_contain("fn bootstrap_store_global_const_scalar_text() -> text:")
-        expect(owner).to_contain("fn bootstrap_load_global_symbol_id() -> i64:")
