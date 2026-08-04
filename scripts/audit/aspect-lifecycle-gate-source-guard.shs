@@ -1,14 +1,83 @@
 #!/bin/sh
 set -eu
 
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+LOCKED_METHOD_RE='^[[:space:]]+((pub|me|static)[[:space:]]+)*fn[[:space:]]+[a-zA-Z0-9_]+_locked[[:space:]]*\('
+LOCKED_EXPORT_RE='^export([[:space:]]+.*)?_locked|^[[:space:]]+aspect_execution_context_.*_locked[[:space:]]*,'
+DISCARDED_RELEASE_RE='^[[:space:]]*((val[[:space:]]+_.*|_)[[:space:]]*=[[:space:]]*)?self\.release_published_facet_descriptor[[:space:]]*\('
+
+has_locked_method() {
+    rg -n "$LOCKED_METHOD_RE" "$1"
+}
+
+has_locked_export() {
+    rg -n "$LOCKED_EXPORT_RE" "$1"
+}
+
+has_discarded_release() {
+    rg -n "$DISCARDED_RELEASE_RE" "$1"
+}
+
+self_test() {
+    tmp_dir="${TMPDIR:-/tmp}/aspect-lifecycle-gate-source-guard.$$"
+    mkdir -p "$tmp_dir"
+    trap 'rm -rf "$tmp_dir"' EXIT
+    method_index=0
+    for line in \
+        '    fn plain_locked():' \
+        '    me fn member_locked ():' \
+        '    pub fn public_locked():' \
+        '    me static fn mixed_locked():'
+    do
+        method_index=$((method_index + 1))
+        printf '%s\n' "$line" >"$tmp_dir/method-${method_index}.spl"
+        has_locked_method "$tmp_dir/method-${method_index}.spl" >/dev/null || {
+            echo "STATUS: FAIL lifecycle gate guard missed locked method variant ${method_index}" >&2
+            exit 1
+        }
+    done
+    release_index=0
+    for line in \
+        '_ = self.release_published_facet_descriptor(value)' \
+        'val _ = self.release_published_facet_descriptor(value)' \
+        'self.release_published_facet_descriptor(value)'
+    do
+        release_index=$((release_index + 1))
+        printf '%s\n' "$line" >"$tmp_dir/release-${release_index}.spl"
+        has_discarded_release "$tmp_dir/release-${release_index}.spl" >/dev/null || {
+            echo "STATUS: FAIL lifecycle gate guard missed discarded release variant ${release_index}" >&2
+            exit 1
+        }
+    done
+    printf '%s\n' \
+        'val released = self.release_published_facet_descriptor(value)' \
+        'return self.release_published_facet_descriptor(value)' >"$tmp_dir/safe.spl"
+    if has_discarded_release "$tmp_dir/safe.spl" >/dev/null; then
+        echo "STATUS: FAIL lifecycle gate guard rejected handled release" >&2
+        exit 1
+    fi
+    echo "STATUS: PASS aspect-lifecycle-gate-source-guard self-test"
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    self_test
+    exit 0
+fi
+if [ "$#" -ne 0 ]; then
+    echo "Usage: sh scripts/audit/aspect-lifecycle-gate-source-guard.shs [--self-test]" >&2
+    exit 2
+fi
+
 runtime_source="src/app/startup/aspect_application_runtime.spl"
 
-if rg -n '^[[:space:]]+(me )?fn [a-zA-Z0-9_]+_locked\(' "$runtime_source"; then
+if has_locked_method "$runtime_source"; then
     echo "FAIL: lifecycle locked helper remains on the exported context method surface" >&2
     exit 1
 fi
 
-if rg -n '^export .*_locked|^[[:space:]]+aspect_execution_context_.*_locked,' "$runtime_source"; then
+if has_locked_export "$runtime_source"; then
     echo "FAIL: lifecycle locked helper is exported" >&2
     exit 1
 fi
@@ -25,9 +94,13 @@ do
         echo "FAIL: missing lifecycle mutex capture box: ${box_name}" >&2
         exit 1
     fi
+    if ! rg -q "${box_name}[[:space:]]*\(" "$runtime_source"; then
+        echo "FAIL: lifecycle mutex capture box is declared but unused: ${box_name}" >&2
+        exit 1
+    fi
 done
 
-if rg -n '_ = self\.release_published_facet_descriptor\(' "$runtime_source"; then
+if has_discarded_release "$runtime_source"; then
     echo "FAIL: lazy completion discards descriptor release failure" >&2
     exit 1
 fi
