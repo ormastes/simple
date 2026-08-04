@@ -58,7 +58,10 @@ class CssVarResolutionState:
             val nl = find_from(props, "\n", pos)
             val line_end = if nl < 0: props.len() else: nl
             val line = props.substring(pos, line_end).trim()
-            val colon = line.index_of(":")
+            # Dynamic-text `.index_of()` is unreliable in the x86_64
+            # freestanding runtime. `find_from` is the production byte-search
+            # primitive already used by the collector that produced `props`.
+            val colon = find_from(line, ":", 0)
             if colon > 0:
                 names[prop_count] = line.substring(0, colon).trim()
                 values[prop_count] = line.substring(
@@ -199,7 +202,13 @@ fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
                 val_end = body_len
             val prop_val = body.substring(colon + 1, val_end).trim()
             if name.len() > 2:
-                val entry = name + ":" + prop_val + "\n"
+                # Keep each concatenation statically typed as text. A chained
+                # expression erases the intermediate type in native code and
+                # lowers its middle operation through numeric rt_any_add.
+                var entry: text = name
+                entry = entry + ":"
+                entry = entry + prop_val
+                entry = entry + "\n"
                 if between.len() == 0 and base_entry_i < base_entries.len():
                     base_entries[base_entry_i] = entry
                     base_entry_i = base_entry_i + 1
@@ -3090,3 +3099,44 @@ pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) ->
                 return st.backdrop_filter_raw
         i = i + 1
     ""
+
+pub fn simple_web_layout_debug_collect_custom_props(
+    css: text, root_attrs: text
+) -> text:
+    """Expose the production :root collector for focused native probes."""
+    _css_collect_custom_props(css, root_attrs)
+
+pub fn simple_web_layout_debug_resolve_custom_props(
+    css: text, props: text
+) -> text:
+    """Expose production var() substitution without the HTML/layout stages."""
+    val state = CssVarResolutionState.new(props)
+    val resolution = _css_resolve_vars(css, state, 0, 0, false)
+    match resolution:
+        CssVarResolution.Resolved(resolved_css): resolved_css
+        CssVarResolution.Invalid: "<invalid>"
+        CssVarResolution.Cycle: "<cycle>"
+        CssVarResolution.DepthExceeded: "<depth-exceeded>"
+        CssVarResolution.BudgetExceeded: "<budget-exceeded>"
+
+pub fn simple_web_layout_debug_custom_prop_state(
+    props: text, index: i32, field: text
+) -> text:
+    """Inspect one parsed state slot without exposing the private state type."""
+    val state = CssVarResolutionState.new(props)
+    if index < 0 or index >= state.prop_count:
+        return "<missing>"
+    if field == "name":
+        return state.prop_names[index]
+    if field == "value":
+        return state.prop_values[index]
+    if field == "count":
+        return state.prop_count.to_string()
+    "<unknown-field>"
+
+pub fn simple_web_layout_debug_backdrop_admission(backdrop: text) -> text:
+    """Expose the production admission result for a focused native probe."""
+    val admission = simple_web_backdrop_admission(backdrop)
+    if not admission.admitted:
+        return "false"
+    "true:{admission.realized_blur_px}:{admission.realized_saturation_milli}"

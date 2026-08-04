@@ -27,34 +27,87 @@ struct SimpleWebBackdropAdmission:
     realized_blur_px: i64
     realized_saturation_milli: i64
 
+fn _simple_web_backdrop_decimal(
+    value: text, start: i32, end: i32, maximum: i64
+) -> i64:
+    # Keep this admission parser independent of text-to-integer runtime helpers:
+    # the freestanding x86 implementation of rt_string_to_int is deliberately
+    # unavailable. The caller identifies the exact digit span first.
+    if start >= end:
+        return -1
+    if end - start > 1 and value.byte_at(start) == 48:
+        return -1
+    var parsed: i64 = 0
+    var i = start
+    while i < end:
+        val digit = value.byte_at(i) - 48
+        if digit < 0 or digit > 9:
+            return -1
+        if parsed > (maximum - digit) / 10:
+            return -1
+        parsed = parsed * 10 + digit
+        i = i + 1
+    parsed
+
 fn simple_web_backdrop_admission(backdrop: text) -> SimpleWebBackdropAdmission:
-    val terms = backdrop.split(" ")
-    if terms.len() != 2:
+    # Exact accepted grammar: blur(<decimal>px) saturate(<decimal>%). Parse by
+    # byte because the grammar is ASCII and byte_at is the proven freestanding
+    # primitive; split/starts_with/to_i64 have incomplete x86 lowering.
+    val n = backdrop.len()
+    if n < 24:
         return SimpleWebBackdropAdmission(
             admitted: false, realized_blur_px: 0,
             realized_saturation_milli: 0)
-    val blur_term = terms[0]
-    val saturation_term = terms[1]
-    if not blur_term.starts_with("blur(") or not blur_term.ends_with("px)"):
+    if (backdrop.byte_at(0) != 98 or backdrop.byte_at(1) != 108 or
+        backdrop.byte_at(2) != 117 or backdrop.byte_at(3) != 114 or
+        backdrop.byte_at(4) != 40):
         return SimpleWebBackdropAdmission(
             admitted: false, realized_blur_px: 0,
             realized_saturation_milli: 0)
-    if (not saturation_term.starts_with("saturate(") or
-        not saturation_term.ends_with("%)")):
+
+    var blur_end = 5
+    while blur_end < n:
+        val code = backdrop.byte_at(blur_end)
+        if code < 48 or code > 57:
+            break
+        blur_end = blur_end + 1
+    val saturation_prefix = blur_end + 4
+    if (blur_end == 5 or saturation_prefix + 9 >= n or
+        backdrop.byte_at(blur_end) != 112 or
+        backdrop.byte_at(blur_end + 1) != 120 or
+        backdrop.byte_at(blur_end + 2) != 41 or
+        backdrop.byte_at(blur_end + 3) != 32 or
+        backdrop.byte_at(saturation_prefix) != 115 or
+        backdrop.byte_at(saturation_prefix + 1) != 97 or
+        backdrop.byte_at(saturation_prefix + 2) != 116 or
+        backdrop.byte_at(saturation_prefix + 3) != 117 or
+        backdrop.byte_at(saturation_prefix + 4) != 114 or
+        backdrop.byte_at(saturation_prefix + 5) != 97 or
+        backdrop.byte_at(saturation_prefix + 6) != 116 or
+        backdrop.byte_at(saturation_prefix + 7) != 101 or
+        backdrop.byte_at(saturation_prefix + 8) != 40):
         return SimpleWebBackdropAdmission(
             admitted: false, realized_blur_px: 0,
             realized_saturation_milli: 0)
-    val blur_text = blur_term.slice(5, blur_term.len() - 3)
-    val saturation_text = saturation_term.slice(9, saturation_term.len() - 2)
-    val blur = blur_text.to_i64()
-    val saturation_percent = saturation_text.to_i64()
-    if (blur == nil or saturation_percent == nil or blur < 0 or
-        blur > 1000000 or saturation_percent < 0 or
-        saturation_percent > 300):
+
+    val saturation_start = saturation_prefix + 9
+    var saturation_end = saturation_start
+    while saturation_end < n:
+        val code = backdrop.byte_at(saturation_end)
+        if code < 48 or code > 57:
+            break
+        saturation_end = saturation_end + 1
+    if (saturation_end == saturation_start or saturation_end + 2 != n or
+        backdrop.byte_at(saturation_end) != 37 or
+        backdrop.byte_at(saturation_end + 1) != 41):
         return SimpleWebBackdropAdmission(
             admitted: false, realized_blur_px: 0,
             realized_saturation_milli: 0)
-    if backdrop != "blur({blur}px) saturate({saturation_percent}%)":
+
+    val blur = _simple_web_backdrop_decimal(backdrop, 5, blur_end, 1000000)
+    val saturation_percent = _simple_web_backdrop_decimal(
+        backdrop, saturation_start, saturation_end, 300)
+    if blur < 0 or saturation_percent < 0:
         return SimpleWebBackdropAdmission(
             admitted: false, realized_blur_px: 0,
             realized_saturation_milli: 0)
