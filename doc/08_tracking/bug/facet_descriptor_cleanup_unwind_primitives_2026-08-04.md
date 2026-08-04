@@ -217,7 +217,17 @@ entries, cycles, unknown opcodes, ordinary token uses, and non-resuming paths.
 Facet cleanup landing pads additionally require one typed cleanup manifest;
 validation checks exact sites, symbol/signature/typed argument order, guarded
 true-release/false-bypass joins, and complete ordered consumption before every
-`Resume`.
+`Resume`. Every current unwind landing pad requires a manifest. Each manifest
+owner, lease, and optional presence local has one definition that dominates
+every targeting `MayUnwind` call; the owner definition is the canonical
+Struct-context to opaque `AspectExecutionContext` bitcast.
+
+This closes static local fabrication through missing/repeated/non-dominating
+definitions, but it is not full acquisition provenance. The verifier does not
+yet prove that each lease definition is the exact result of the matching facet
+acquisition call, base object, contract, and generation. The producer records
+those typed locals, while an executable real-HIR acquisition through a
+`MayUnwind` cleanup edge remains pending evidence.
 
 The manifest is compiler-internal metadata carried by `MirFunction`, `MirBody`,
 compile-pipeline MIR JSON, and identity-preserving pre-backend adapters. It is

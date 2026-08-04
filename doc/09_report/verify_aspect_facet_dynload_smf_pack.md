@@ -97,9 +97,15 @@ bookmark is synchronized with GitHub and is rebased onto the current
   `(block, entry-index)` dataflow rejects
   missing, duplicate, extra, reordered, stale, wrong-argument, and inconsistent
   join manifests and requires every Resume path to consume the declared entries.
+  Every current unwind landing pad requires one manifest; owner, lease, and
+  optional presence locals require one dominating definition, with the owner
+  produced by the canonical context bitcast. All optimizer entrypoints now
+  identity-preserve manifested functions.
   Exact static release count and reverse registration order are therefore
-  closed. This does not prove executable behavior, source exception-packet
-  identity, async cancellation, or a backend personality implementation.
+  closed. The verifier still does not prove that a lease definition came from
+  the matching real acquisition call/base/contract/generation. That provenance,
+  executable real-HIR acquisition-to-`MayUnwind` lowering, source exception-packet
+  identity, async cancellation, and a backend personality remain unproved.
 - **PASS — automatic registry source path (static review):** real compile inputs
   discover and install the resolver-owned aspect registry; its fingerprint is
   carried into object/closure cache identity. Importer-scoped resolution keys,
