@@ -86,7 +86,8 @@ fn _test_arg_has_empty_equals_value(arg: text) -> bool:
         arg == "--batch-size=" or arg == "--batch-manifest=" or
         arg == "--batch-result=" or arg == "--session-kind=" or
         arg == "--max-sessions=" or arg == "--session-reset=" or
-        arg == "--sdoctest-env=" or arg == "--mode="
+        arg == "--sdoctest-env=" or arg == "--mode=" or
+        arg == "--timeout=" or arg == "--seed=" or arg == "--format="
     )
 
 fn test_args_validation_error(args: [text]) -> text:
@@ -127,6 +128,13 @@ fn test_args_validation_error(args: [text]) -> text:
             i = i + 1
             continue
 
+        if arg.starts_with("--format=") and arg != "--format=":
+            val fmt_value = arg.substring(9)
+            if fmt_value != "text" and fmt_value != "json" and fmt_value != "doc":
+                return "invalid value for --format: {fmt_value}"
+            i = i + 1
+            continue
+
         val known = (
             arg == "--unit" or arg == "--integration" or arg == "--system" or
             arg == "--fail-fast" or arg == "--list" or arg == "--list-ignored" or
@@ -163,7 +171,8 @@ fn test_args_validation_error(args: [text]) -> text:
             arg.starts_with("--batch-manifest=") or arg.starts_with("--batch-result=") or
             arg.starts_with("--session-kind=") or arg.starts_with("--max-sessions=") or
             arg.starts_with("--session-reset=") or arg.starts_with("--sdoctest-env=") or
-            arg.starts_with("--mode=")
+            arg.starts_with("--mode=") or arg.starts_with("--timeout=") or
+            arg.starts_with("--seed=") or arg.starts_with("--format=")
         )
         if not known and arg.starts_with("-"):
             return "unknown option: {arg}"
@@ -509,6 +518,10 @@ fn parse_test_args(args: [text]) -> TestOptions:
             if i < args.len():
                 if args[i] == "text" or args[i] == "json" or args[i] == "doc":
                     format = args[i]
+        elif arg.starts_with("--format="):
+            val fmt = arg.substring(9)
+            if fmt == "text" or fmt == "json" or fmt == "doc":
+                format = fmt
         elif arg == "--compile":
             mode = TestExecutionMode.Compile
         elif arg == "--mode":
@@ -522,11 +535,25 @@ fn parse_test_args(args: [text]) -> TestOptions:
             i = i + 1
             if i < args.len():
                 timeout = args[i].to_int() ?? 0
+        elif arg.starts_with("--timeout="):
+            # `--timeout=N` was accepted by the single-file runner
+            # (test_runner_single.spl) but rejected here as "unknown option",
+            # so `simple test --timeout=800 <dir>` aborted with exit 2 while the
+            # same flag worked on a single spec. Both spellings now parse.
+            # The intermediate `val` is load-bearing: `arg.substring(10).to_int()`
+            # chained directly returns a raw pointer under the JIT (see
+            # doc/08_tracking/bug/jit_substring_chained_to_int_returns_pointer_2026-08-04.md).
+            val timeout_value: text = arg.substring(10)
+            timeout = timeout_value.to_int() ?? 0
         elif arg == "--seed":
             i = i + 1
             if i < args.len():
                 seed = args[i].to_int() ?? 0
                 seed_set = true
+        elif arg.starts_with("--seed="):
+            val seed_value: text = arg.substring(7)
+            seed = seed_value.to_int() ?? 0
+            seed_set = true
         elif arg == "--profile":
             i = i + 1
             if i < args.len():

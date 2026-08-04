@@ -1,8 +1,19 @@
 extern fn rt_file_read_text(path: text) -> text
 
+# Regression guard for STOMP `content-length` parsing.
+#
+# History: this spec used to require `return value.to_int() ?? nil`. That
+# pattern is DEAD -- `.to_int()` is typed `i64?` but its runtime cannot produce
+# nil, so the `??` arm never fired and `content-length:abc` read as 0.
+# `subscribe.spl` now returns `try_parse_int(value)`, which really can report
+# failure, and a non-numeric header is treated as the protocol error it is.
 describe "nogc sync stomp content length numeric guard":
-    it "defaults malformed content length parsing":
+    it "parses content-length through a parser that can actually fail":
         val source = rt_file_read_text("src/lib/nogc_sync_mut/stomp/subscribe.spl") ?? ""
 
-        expect(source).to_contain("return value.to_int() ?? nil")
-        expect(source.contains("return value.to_int()\n")).to_equal(false)
+        expect(source).to_contain("return try_parse_int(value)")
+
+    it "never reintroduces the coercing to_int spelling":
+        val source = rt_file_read_text("src/lib/nogc_sync_mut/stomp/subscribe.spl") ?? ""
+
+        expect(source.contains("return value.to_int()")).to_equal(false)

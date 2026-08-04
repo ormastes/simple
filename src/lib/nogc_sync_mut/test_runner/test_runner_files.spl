@@ -9,7 +9,7 @@ use std.io.{file_read, file_exists}
 use std.io_runtime.{dir_walk}
 use std.test_runner.test_manifest.{
     TestManifest, TestManifestEntry,
-    MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh
+    MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh, manifest_covers
 }
 use std.test_runner.test_manifest_scanner.{manifest_full_scan, manifest_incremental_update}
 use std.test_runner.test_level_detect.{
@@ -208,8 +208,11 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
 
     # Try loading manifest
     val manifest = manifest_load(MANIFEST_PATH)
-    if not manifest_is_fresh(manifest):
-        # Manifest missing or stale — fall back to full scan, then save
+    if not manifest_is_fresh(manifest) or not manifest_covers(manifest, base_path):
+        # Manifest missing, stale, or built from a walk that never visited
+        # `base_path` — fall back to a full scan, then save. Filtering an index
+        # that never indexed this subtree yields zero files and reads as
+        # "No test files found" even when the directory is full of specs.
         val result = discover_test_files_slow(base_path, options)
         # Build manifest in background for next run
         save_manifest_from_discovery(base_path)
@@ -287,6 +290,17 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
 
     val elapsed = rt_time_now_unix_micros() - start
     val elapsed_ms = elapsed / 1000
+
+    # Fail-closed: an empty fast-path result is never authoritative. The
+    # manifest may be truncated, or simply not cover `base_path` at all, and
+    # both look identical to "this directory has no tests". Prove it with a
+    # real filesystem walk before reporting zero tests, and re-index so the
+    # next run is fast again.
+    if test_files.len() == 0:
+        val verified = discover_test_files_slow(base_path, options)
+        save_manifest_from_discovery(base_path)
+        return verified
+
     print "  Discovery: {elapsed_ms}ms (from manifest, {manifest.entries.len()} indexed)"
 
     test_files

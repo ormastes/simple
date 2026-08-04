@@ -41,6 +41,12 @@ struct SdoctestManifestEntry:
 struct TestManifest:
     version: i64
     scan_timestamp: i64
+    # Directory roots this index actually WALKED. A manifest is only
+    # authoritative for a path inside one of these roots; without them a scoped
+    # scan (e.g. `simple test test/01_unit/lib/.../io`) produced a small but
+    # FRESH index that every other path then matched zero entries against,
+    # printing "No test files found" — a silent false green.
+    roots: [text]
     entries: [TestManifestEntry]
     sdoctest_entries: [SdoctestManifestEntry]
 
@@ -61,6 +67,7 @@ fn manifest_new() -> TestManifest:
     TestManifest(
         version: MANIFEST_VERSION,
         scan_timestamp: 0,
+        roots: [],
         entries: [],
         sdoctest_entries: []
     )
@@ -84,6 +91,59 @@ fn manifest_is_fresh_with_ttl(manifest: TestManifest, ttl_micros: i64) -> bool:
     age < ttl_micros
 
 # ============================================================================
+# Coverage Check
+# ============================================================================
+
+# Strip trailing slashes and normalize separators so root/path comparison is
+# textual but separator-safe.
+fn manifest_normalize_root(raw: text) -> text:
+    var d = raw.replace("\\", "/")
+    while d.ends_with("/") and d.len() > 1:
+        d = d[0:d.len() - 1]
+    d
+
+# Does this manifest's WALK actually include `base_path`? Freshness alone is not
+# enough: a fresh index built from a narrower root has no entries for anything
+# outside it, and an empty filter result would otherwise read as "no tests".
+fn manifest_covers(manifest: TestManifest, base_path: text) -> bool:
+    val target = manifest_normalize_root(base_path)
+    for raw_root in manifest.roots:
+        val root = manifest_normalize_root(raw_root)
+        if root == "":
+            continue
+        if target == root:
+            return true
+        if target.starts_with(root + "/"):
+            return true
+    false
+
+# Union of existing roots with newly walked dirs, dropping any root that a
+# broader new root already subsumes.
+fn manifest_merge_roots(old_roots: [text], new_dirs: [text]) -> [text]:
+    var merged: [text] = []
+    for raw_dir in new_dirs:
+        val d = manifest_normalize_root(raw_dir)
+        if d == "":
+            continue
+        var already = false
+        for m in merged:
+            if m == d:
+                already = true
+        if not already:
+            merged.push(d)
+    for raw_old in old_roots:
+        val o = manifest_normalize_root(raw_old)
+        if o == "":
+            continue
+        var covered = false
+        for m in merged:
+            if o == m or o.starts_with(m + "/"):
+                covered = true
+        if not covered:
+            merged.push(o)
+    merged
+
+# ============================================================================
 # Serialization — Save
 # ============================================================================
 
@@ -96,7 +156,9 @@ fn manifest_save(manifest: TestManifest, path: text) -> bool:
 
     var lines: [text] = []
     lines.push("# test-manifest v{manifest.version}")
+    val roots_line = manifest.roots.join(",")
     lines.push("scan_timestamp={manifest.scan_timestamp}")
+    lines.push("roots={roots_line}")
     lines.push("entry_count={manifest.entries.len()}")
     lines.push("sdoctest_count={manifest.sdoctest_entries.len()}")
     lines.push("")
@@ -160,6 +222,17 @@ fn manifest_load(path: text) -> TestManifest:
         # Parse header fields
         if line.starts_with("scan_timestamp="):
             manifest.scan_timestamp = line[15:].to_int() ?? 0
+            continue
+        if line.starts_with("roots="):
+            # Absent in pre-coverage manifests: those parse to an EMPTY root
+            # list, which manifest_covers() rejects, so they force a rescan
+            # instead of silently reporting zero tests.
+            val roots_raw = line[6:]
+            if roots_raw != "":
+                for r in roots_raw.split(","):
+                    val rn = r.trim()
+                    if rn != "":
+                        manifest.roots.push(rn)
             continue
         if line.starts_with("entry_count=") or line.starts_with("sdoctest_count="):
             continue
@@ -245,6 +318,7 @@ fn manifest_find_sdoctest(manifest: TestManifest, path: text) -> SdoctestManifes
 export TestManifestEntry, SdoctestManifestEntry, TestManifest
 export MANIFEST_VERSION, MANIFEST_PATH, MANIFEST_TTL_MICROS
 export manifest_new, manifest_is_fresh, manifest_is_fresh_with_ttl
+export manifest_covers, manifest_merge_roots, manifest_normalize_root
 export manifest_save, manifest_load
 export parse_manifest_entry, parse_sdoctest_entry
 export manifest_find_entry, manifest_find_sdoctest

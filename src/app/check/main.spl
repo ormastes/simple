@@ -46,8 +46,14 @@ fn print_help():
     print "Parse and validate Simple source files."
     print ""
     print "Options:"
-    print "  --human | --llm | --json     Select log rendering mode"
+    # Keep this list in step with check_option_error() in check_options.spl —
+    # every option accepted there has to be discoverable here.
+    print "  --log-mode <human|llm|json>  Select log rendering mode"
+    print "  --human | --llm | --json     Shorthand log modes"
+    print "  --surface=<stdout|tui>       Select output surface"
     print "  --progress <summary|count|dot|none>"
+    print "  --dots | --count | --no-progress"
+    print "  --quiet | --verbose"
     print "  --phase-profile              Emit coarse phase timings (suppressed by --json)"
     print "  -h, --help                   Show this help"
 
@@ -192,7 +198,15 @@ fn checker_end_file_scope() -> bool:
     ast_reset()
     ended
 
-fn check_one(path: text, as_json: bool, phase_profile: bool, done: i64, total: i64) -> i64:
+fn check_one(path: text, as_json: bool) -> i64:
+    """Check a single file. Published two-argument entry point.
+
+    Phase profiling needs the progress counters, so it lives on
+    `check_one_profiled`; callers that only want the verdict use this.
+    """
+    check_one_profiled(path, as_json, false, 0, 0)
+
+fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, done: i64, total: i64) -> i64:
     var file_started_us: i64 = 0
     var phase_started_us: i64 = 0
     if phase_profile:
@@ -261,7 +275,9 @@ fn main() -> i64:
     val option_error = check_option_error(args)
     if option_error != "":
         print "ERROR: {option_error}"
-        return 2
+        # Option rejection is exit 1 across every command that shares the
+        # log-mode/progress option surface (brief, bug-gen, cache, cli, mcp).
+        return 1
     if args.contains("-h") or args.contains("--help"):
         print_help()
         return 0
@@ -283,7 +299,7 @@ fn main() -> i64:
             print "ERROR: {directory}: no Simple source files found"
     for file in files:
         checked = checked + 1
-        val failed = check_one(file, as_json, phase_profile, checked, files.len())
+        val failed = check_one_profiled(file, as_json, phase_profile, checked, files.len())
         if failed != 0:
             errors = errors + failed
             files_with_errors = files_with_errors + 1

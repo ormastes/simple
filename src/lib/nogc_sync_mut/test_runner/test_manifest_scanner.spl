@@ -5,7 +5,7 @@
 
 use std.test_runner.test_manifest.{
     TestManifest, TestManifestEntry, SdoctestManifestEntry,
-    MANIFEST_VERSION, manifest_new, manifest_find_entry
+    MANIFEST_VERSION, manifest_new, manifest_find_entry, manifest_merge_roots
 }
 use std.test_runner.doctest_runner.{extract_doctests}
 use std.test_runner.sdoctest.extractor.{extract_blocks_from_content}
@@ -25,6 +25,7 @@ extern fn rt_time_now_unix_micros() -> i64
 fn manifest_full_scan(dirs: [text]) -> TestManifest:
     var manifest = manifest_new()
     manifest.scan_timestamp = rt_time_now_unix_micros()
+    manifest.roots = manifest_merge_roots([], dirs)
 
     for dir in dirs:
         val all_files = dir_walk_native(dir)
@@ -48,6 +49,9 @@ fn manifest_full_scan(dirs: [text]) -> TestManifest:
 fn manifest_incremental_update(old: TestManifest, dirs: [text]) -> TestManifest:
     var manifest = manifest_new()
     manifest.scan_timestamp = rt_time_now_unix_micros()
+    # A scoped scan WIDENS coverage; it never narrows it, because entries
+    # outside `dirs` are carried over below.
+    manifest.roots = manifest_merge_roots(old.roots, dirs)
 
     # Build lookup set of old entries by path for quick access
     var old_paths: {text: bool} = {}
@@ -97,8 +101,35 @@ fn manifest_incremental_update(old: TestManifest, dirs: [text]) -> TestManifest:
                     if sd.block_count > 0:
                         manifest.sdoctest_entries.push(sd)
 
-    # Deleted files are automatically excluded — they won't be in seen_paths
+    # Deleted files are automatically excluded — they won't be in seen_paths.
+    #
+    # Entries OUTSIDE the scanned dirs must be preserved: a scoped scan narrows
+    # the WALK, not the INDEX. Dropping them shrank the manifest to whichever
+    # subtree was tested last while leaving scan_timestamp fresh, so the next
+    # run for any other path matched zero entries and reported
+    # "No test files found" with exit 0 — a silent false green.
+    for entry in old.entries:
+        if not path_under_any(entry.path, dirs):
+            manifest.entries.push(entry)
+    for sd in old.sdoctest_entries:
+        if not path_under_any(sd.path, dirs):
+            manifest.sdoctest_entries.push(sd)
+
     manifest
+
+# Is `path` inside (or equal to) any of `dirs`?
+fn path_under_any(path: text, dirs: [text]) -> bool:
+    for raw_dir in dirs:
+        var d = raw_dir.replace("\\", "/")
+        if d == "":
+            continue
+        if path == d:
+            return true
+        if not d.ends_with("/"):
+            d = d + "/"
+        if path.starts_with(d):
+            return true
+    false
 
 # ============================================================================
 # File Classification
