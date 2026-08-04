@@ -7,6 +7,7 @@
 #             backend_vulkan_glsl.spl (shader sources, accessed via main init)
 
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.io.mod_stub.{env_get as vulkan_order_env_get}
 use std.gpu.engine2d.glyph.{render_text_to_buffer}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_create_descriptor_set, vulkan_sffi_bind_buffer,
@@ -35,6 +36,28 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
 
 val VK_PUSH_CONSTANT_SIZE: i64 = 64
 val VK_DISPATCH_COMPLETED_INELIGIBLE: i64 = 2
+
+# ============================================================================
+# Submission-order probe (level-gated, default OFF)
+# ============================================================================
+
+fn vulkan_order_trace_enabled() -> bool:
+    """True when SIMPLE_VK_ORDER_TRACE=1 arms the `[vk-order]` probe."""
+    (vulkan_order_env_get("SIMPLE_VK_ORDER_TRACE") ?? "") == "1"
+
+fn vulkan_order_trace(message: text):
+    """Emit one `[vk-order]` line when the probe is armed, else do nothing.
+
+    This probe exists to answer a specific, recurring question: in what ORDER
+    do framebuffer mutations actually reach the device relative to the font
+    route's snapshot/restore? The run-lane truncation bug
+    (`doc/08_tracking/bug/run_lane_render_truncation_divergence_2026-08-02.md`)
+    was mis-diagnosed twice because that ordering was invisible. Default OFF so
+    it costs one `env_get` per dispatch and nothing else; arm with
+    `SIMPLE_VK_ORDER_TRACE=1`.
+    """
+    if vulkan_order_trace_enabled():
+        print("[vk-order] " + message)
 val VK_IMAGE_COMPOSITE_COPY: i32 = 0
 val VK_IMAGE_COMPOSITE_SRC_OVER: i32 = 1
 
@@ -153,6 +176,11 @@ impl VulkanBackend:
 
     me _flush_pending_compute() -> i64:
         """Submit one Engine-managed primitive batch and release dependencies."""
+        val flush_rc = self._flush_pending_compute_impl()
+        vulkan_order_trace("flush rc={flush_rc} dirty={self.dirty} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown}")
+        flush_rc
+
+    me _flush_pending_compute_impl() -> i64:
         val cmd = self.pending_compute_command
         if cmd <= 0:
             return 1
@@ -269,6 +297,13 @@ impl VulkanBackend:
         else:
             vulkan_dispatch_framebuffer_compute_checked(
                 self.d_framebuffer, pipe, push_data, gx, gy, gz)
+        # clip_* is on this line deliberately: `_pack_rect_pc` folds the clip
+        # into the rect push constants, so a clip left armed from an earlier
+        # Draw-IR command makes the GPU discard a primitive while the dispatch
+        # still reports rc=1 and dirty=true. That is indistinguishable from a
+        # healthy frame in every other receipt -- see the run-lane truncation
+        # bug's "What is still open".
+        vulkan_order_trace("dispatch pipe={pipe} batched={self.frame_batching_enabled} rc={dispatched} fb={self.d_framebuffer} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count} clip_on={self.clip_enabled} clip={self.clip_x},{self.clip_y},{self.clip_w},{self.clip_h}")
         if dispatched > 0:
             self.dirty = true
         else:
