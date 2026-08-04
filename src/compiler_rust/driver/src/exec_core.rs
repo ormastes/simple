@@ -658,6 +658,44 @@ impl ExecCore {
         self.execute_and_gc(&module)
     }
 
+    /// Attach the module's declared sandbox policy to a WASI config.
+    ///
+    /// The compiler already renders every `sandbox` policy into
+    /// `sandbox_manifest.sdn`, and `WasiCapabilityTable` already knows how to
+    /// parse it, but nothing connected the two: the runtime's capability table
+    /// was only ever populated from tests, so `validate_capabilities` returned
+    /// `Ok(())` unconditionally in production. This is that connection.
+    ///
+    /// A module that declares no sandbox gets no table — there is no policy to
+    /// enforce, and inventing an empty (deny-everything) one would reject every
+    /// unsandboxed module. A module that declares exactly one sandbox gets that
+    /// sandbox's grants. Declaring more than one is rejected rather than guessed
+    /// at, because picking arbitrarily would silently enforce the wrong policy.
+    #[cfg(feature = "wasm")]
+    fn apply_wasm_sandbox_policy(
+        &self,
+        source: &str,
+        config: simple_wasm_runtime::WasiConfig,
+    ) -> Result<simple_wasm_runtime::WasiConfig, String> {
+        let Some(manifest) = simple_compiler::sandbox_manifest_for_source("<wasm-source>", source) else {
+            return Ok(config);
+        };
+        let names = simple_wasm_runtime::declared_sandbox_names(&manifest);
+
+        match names.as_slice() {
+            [] => Ok(config),
+            [name] => config
+                .with_sandbox_policy(name, &manifest)
+                .map_err(|e| format!("wasm sandbox policy: {e}")),
+            _ => Err(format!(
+                "wasm sandbox policy: module declares {} sandboxes ({}); \
+                 WASI enforcement needs exactly one",
+                names.len(),
+                names.join(", ")
+            )),
+        }
+    }
+
     /// Compile to WebAssembly and run with Wasmer runtime (WASI environment)
     #[cfg(feature = "wasm")]
     pub fn run_source_wasm(&self, source: &str) -> Result<i32, String> {
@@ -673,8 +711,11 @@ impl ExecCore {
         let wasm_path = tmp.path().join("module.wasm");
         fs::write(&wasm_path, wasm_bytes).map_err(|e| format!("write wasm: {e}"))?;
 
-        // Create WasmRunner with WASI configuration
-        let config = WasiConfig::new();
+        // Create WasmRunner with WASI configuration, carrying the module's own
+        // sandbox policy so `validate_capabilities` has something to enforce.
+        // Without this the capability table stays `None` and every grant check
+        // short-circuits to "allow".
+        let config = self.apply_wasm_sandbox_policy(source, WasiConfig::new())?;
         let mut runner = WasmRunner::with_config(config).map_err(|e| format!("create wasm runner: {e}"))?;
 
         // Run the main function

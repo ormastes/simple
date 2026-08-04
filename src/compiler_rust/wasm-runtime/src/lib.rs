@@ -51,7 +51,11 @@ pub mod error;
 #[cfg(feature = "wasm")]
 pub mod runner;
 
-#[cfg(feature = "wasm")]
+// Not gated on `wasm`: everything in this module that needs wasmer (the
+// `initialize` bootstrap and `CapturingPipes`) carries its own `cfg`. The
+// capability table, the policy parser and `validate_capabilities` are plain
+// data logic, and gating them behind `wasm` meant the security enforcement
+// could not be built or tested without the full wasmer stack.
 pub mod wasi_env;
 
 #[cfg(feature = "wasm")]
@@ -68,8 +72,10 @@ pub use error::{WasmError, WasmResult};
 #[cfg(feature = "wasm")]
 pub use runner::WasmRunner;
 
+pub use wasi_env::{declared_sandbox_names, WasiCapabilityTable, WasiConfig};
+
 #[cfg(feature = "wasm")]
-pub use wasi_env::{CapturingPipes, WasiConfig};
+pub use wasi_env::CapturingPipes;
 
 #[cfg(feature = "wasm")]
 pub use bridge::{from_wasm_value, to_wasm_value};

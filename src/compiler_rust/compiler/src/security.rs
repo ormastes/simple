@@ -2611,3 +2611,63 @@ fn builtin_capability_handles() -> &'static [&'static str] {
         "ProcessSpawner",
     ]
 }
+
+/// Render the sandbox manifest for one source file, or `None` when the source
+/// declares no `sandbox` policy at all.
+///
+/// This is the compiler half of the bridge that lets a runtime enforce a
+/// module's declared sandbox: the runtime parses the returned document into a
+/// capability table. It returns `None` rather than an empty manifest so a
+/// caller can tell "no policy to enforce" apart from "a policy that grants
+/// nothing" — conflating those is how a capability check ends up either
+/// vacuous or rejecting every unsandboxed module.
+///
+/// Parse and lowering failures also yield `None`: this runs alongside a real
+/// compile that reports its own diagnostics, and duplicating them here would
+/// only obscure the original error.
+pub fn sandbox_manifest_for_source(path: &str, source: &str) -> Option<String> {
+    let mut parser = simple_parser::Parser::new(source);
+    let ast = parser.parse().ok()?;
+    let module = crate::hir::lower(&ast).ok()?;
+    if module.sandbox_policies.is_empty() {
+        return None;
+    }
+
+    let source_file = SecuritySourceFile {
+        path: path.to_string(),
+        source: source.to_string(),
+    };
+    Some(build_security_inventory_for_source(&source_file, &module).sandbox_manifest_sdn)
+}
+
+#[cfg(test)]
+mod sandbox_manifest_bridge_tests {
+    use super::*;
+
+    #[test]
+    fn source_without_sandbox_policy_has_no_manifest() {
+        assert_eq!(sandbox_manifest_for_source("<t>", "fn main():\n    return 0\n"), None);
+    }
+
+    #[test]
+    fn source_with_sandbox_policy_renders_its_grants() {
+        let source = r#"security gate UserAdminGate:
+    from feature user
+    to feature admin
+    policy CanRequestAdminAction
+    audit all
+    sandbox admin_sandbox
+    grant:
+        ReadDir["/reports"]
+        AuditLog
+
+sandbox admin_sandbox:
+    backend auto
+    net deny all
+"#;
+
+        let manifest = sandbox_manifest_for_source("<t>", source).expect("sandbox policy must render");
+        assert!(manifest.contains("admin_sandbox:"), "manifest was: {manifest}");
+        assert!(manifest.contains("ReadDir[\"/reports\"]"), "manifest was: {manifest}");
+    }
+}

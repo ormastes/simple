@@ -77,10 +77,23 @@ impl WasiCapabilityTable {
         self
     }
 
-    /// Parse the lowered sandbox manifest subset used by WASI backends.
+    /// Parse the sandbox capability grants for one sandbox out of a rendered
+    /// security document.
+    ///
+    /// Accepts both documents the compiler emits: `sandbox_manifest.sdn`, which
+    /// lists grants under `capabilities:`, and `sandbox_lowering.sdn`, which
+    /// lists the same grants under `capability_handles:`.
+    ///
+    /// Sandbox names are recognised by indentation rather than by an allow-list
+    /// of structural keys: the first indented `name:` header establishes the
+    /// sandbox-name column, and every deeper `key:` header is structural. The
+    /// previous allow-list (`capabilities` / `deny` / `allow`) silently treated
+    /// `enforcement:` and `capability_handles:` as sandbox names, so parsing a
+    /// real `sandbox_lowering.sdn` always yielded an empty table.
     pub fn from_sandbox_lowering_sdn(sandbox_name: &str, text: &str) -> WasmResult<Self> {
         let mut table = Self::new();
         let mut in_target_sandbox = sandbox_name.is_empty();
+        let mut sandbox_column: Option<usize> = None;
 
         for raw_line in text.lines() {
             let line = raw_line.trim();
@@ -88,10 +101,16 @@ impl WasiCapabilityTable {
                 continue;
             }
 
-            if line.ends_with(':') {
+            if line.ends_with(':') && !line.contains(' ') {
+                let indent = raw_line.len() - raw_line.trim_start().len();
                 let label = line.trim_end_matches(':').trim();
-                if !label.is_empty() && !matches!(label, "capabilities" | "deny" | "allow") {
-                    in_target_sandbox = label == sandbox_name;
+                // Indent 0 is the document root (`sandbox_manifest:` /
+                // `sandbox_lowering:`), never a sandbox name.
+                if indent > 0 && !label.is_empty() {
+                    let column = *sandbox_column.get_or_insert(indent);
+                    if indent == column {
+                        in_target_sandbox = label == sandbox_name;
+                    }
                 }
             }
 
@@ -129,8 +148,17 @@ impl WasiCapabilityTable {
         self.allow_all_env || self.env_keys.contains(key)
     }
 
-    fn allows_preopen(&self, host_path: &str, guest_path: &str) -> bool {
-        self.path_allowed(host_path) || self.path_allowed(guest_path)
+    /// A preopen is allowed when the path the *module* can name — the guest
+    /// path — is granted.
+    ///
+    /// This deliberately ignores the host path. The previous `host || guest`
+    /// form was a bypass: a grant of `/reports` also admitted host `/reports`
+    /// mapped as guest `/etc`, which hands the module a directory the policy
+    /// never granted under a name the policy never mentioned. The host side of
+    /// the mapping is the deployer's choice and constrains nothing the module
+    /// can reach.
+    fn allows_preopen(&self, guest_path: &str) -> bool {
+        self.path_allowed(guest_path)
     }
 
     fn path_allowed(&self, path: &str) -> bool {
@@ -226,6 +254,29 @@ impl WasiConfig {
         self
     }
 
+    /// Attach the capability table declared by a compiled module's sandbox
+    /// policy.
+    ///
+    /// This is the bridge between the compiler, which renders the policy into
+    /// `sandbox_manifest.sdn` / `sandbox_lowering.sdn`, and the runtime, which
+    /// enforces it in `validate_capabilities`. Without it the table stays
+    /// `None` and every grant check short-circuits to "allow".
+    ///
+    /// `policy_sdn` is either rendered document; `sandbox_name` selects which
+    /// declared sandbox applies. Returns an error when the named sandbox is not
+    /// present in the document, so a typo'd or renamed policy fails closed
+    /// rather than silently disabling enforcement.
+    pub fn with_sandbox_policy(self, sandbox_name: &str, policy_sdn: &str) -> WasmResult<Self> {
+        if !sandbox_name.is_empty() && !sandbox_policy_declares(sandbox_name, policy_sdn) {
+            return Err(WasmError::WasiError(format!(
+                "WASI sandbox policy '{}' is not declared in the module's security manifest",
+                sandbox_name
+            )));
+        }
+        let table = WasiCapabilityTable::from_sandbox_lowering_sdn(sandbox_name, policy_sdn)?;
+        Ok(self.with_capability_table(table))
+    }
+
     /// Set stdin data
     pub fn with_stdin(self, data: &[u8]) -> Self {
         *self.stdin.lock().unwrap() = data.to_vec();
@@ -264,7 +315,19 @@ impl WasiConfig {
         self.stderr.lock().unwrap().clear();
     }
 
-    /// Validate env and preopen grants against the optional capability table.
+    /// Validate env, stdin and preopen grants against the optional capability
+    /// table.
+    ///
+    /// A `None` table means the module declared no sandbox policy, so there is
+    /// nothing to enforce. Whenever a policy *does* exist the table must be
+    /// attached — see `WasiConfig::with_sandbox_policy`.
+    ///
+    /// Note on stdout/stderr: `WasiCapabilityTable` also carries `allow_stdout`
+    /// / `allow_stderr` grants, and they are intentionally not enforced here.
+    /// `initialize` wires stdout and stderr to in-process capture buffers, not
+    /// to the host's stdio, so connecting them grants the module no reach
+    /// outside the sandbox. Stdin is different: it carries host-supplied bytes
+    /// *into* the module, so it is enforced.
     pub fn validate_capabilities(&self) -> WasmResult<()> {
         let Some(table) = &self.capability_table else {
             return Ok(());
@@ -279,8 +342,14 @@ impl WasiConfig {
             }
         }
 
+        if !self.stdin.lock().unwrap().is_empty() && !table.allow_stdin {
+            return Err(WasmError::WasiError(
+                "WASI capability denied stdin: policy does not grant Stdin".to_string(),
+            ));
+        }
+
         for (host_path, guest_path) in &self.preopened_dirs {
-            if !table.allows_preopen(host_path, guest_path) {
+            if !table.allows_preopen(guest_path) {
                 return Err(WasmError::WasiError(format!(
                     "WASI capability denied preopen host '{}' as '{}'",
                     host_path, guest_path
@@ -290,6 +359,44 @@ impl WasiConfig {
 
         Ok(())
     }
+}
+
+/// List the sandbox policies declared in a rendered `sandbox_manifest.sdn` or
+/// `sandbox_lowering.sdn` document, in declaration order.
+///
+/// Sandbox names are the headers at the first indented column; deeper headers
+/// (`capabilities:`, `capability_handles:`, `enforcement:`, `policy_rules:`,
+/// ...) are structural keys, not sandboxes.
+pub fn declared_sandbox_names(policy_sdn: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut sandbox_column: Option<usize> = None;
+
+    for raw_line in policy_sdn.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || !line.ends_with(':') || line.contains(' ') {
+            continue;
+        }
+        let indent = raw_line.len() - raw_line.trim_start().len();
+        if indent == 0 {
+            continue;
+        }
+        let label = line.trim_end_matches(':').trim();
+        if label.is_empty() {
+            continue;
+        }
+        let column = *sandbox_column.get_or_insert(indent);
+        if indent == column && !names.iter().any(|existing| existing == label) {
+            names.push(label.to_string());
+        }
+    }
+
+    names
+}
+
+fn sandbox_policy_declares(sandbox_name: &str, policy_sdn: &str) -> bool {
+    declared_sandbox_names(policy_sdn)
+        .iter()
+        .any(|name| name == sandbox_name)
 }
 
 fn normalize_capability_path(path: &str) -> String {
@@ -518,5 +625,117 @@ sandbox_manifest:
         assert!(table.env_keys.contains("SIMPLE_ENV"));
         assert!(!table.env_keys.contains("SECRET"));
         assert!(table.allow_stdout);
+    }
+
+    /// The compiler's `sandbox_lowering.sdn` nests grants under
+    /// `capability_handles:`, behind an `enforcement:` block. The old
+    /// allow-list parser treated both of those as sandbox-name headers, so it
+    /// silently produced an empty table for the very document it is named
+    /// after.
+    #[test]
+    fn test_capability_table_parses_real_sandbox_lowering_document() {
+        let lowering = r#"sandbox_lowering:
+  PluginSandbox:
+    source_backend: wasi
+    lowered_backend: wasi_capabilities
+    enforcement:
+      - preopened_dirs
+      - wasi_capability_table
+    capability_handles:
+      - ReadDir["/reports"]
+      - Env["SIMPLE_ENV"]
+    policy_rules:
+      net: deny
+  OtherSandbox:
+    source_backend: wasi
+    lowered_backend: wasi_capabilities
+    capability_handles:
+      - ReadDir["/secrets"]
+"#;
+
+        let table = WasiCapabilityTable::from_sandbox_lowering_sdn("PluginSandbox", lowering).unwrap();
+
+        assert!(table.read_dirs.contains("/reports"), "grants must survive the enforcement block");
+        assert!(table.env_keys.contains("SIMPLE_ENV"));
+        // Grants belonging to a different sandbox must not leak in.
+        assert!(!table.read_dirs.contains("/secrets"));
+
+        assert_eq!(
+            declared_sandbox_names(lowering),
+            vec!["PluginSandbox".to_string(), "OtherSandbox".to_string()]
+        );
+    }
+
+    /// A grant names a directory in the *guest* namespace. Matching the host
+    /// side too let an ungranted guest path through whenever the host path
+    /// happened to match a grant.
+    #[test]
+    fn test_capability_table_denies_granted_host_mapped_to_ungranted_guest() {
+        let table = WasiCapabilityTable::new().grant_read_dir("/reports");
+        let config = WasiConfig::new()
+            .with_capability_table(table)
+            .with_preopen_dir("/reports", "/etc");
+
+        let err = config.validate_capabilities().unwrap_err().to_string();
+        assert!(
+            err.contains("denied preopen host '/reports' as '/etc'"),
+            "unexpected diagnostic: {err}"
+        );
+    }
+
+    #[test]
+    fn test_capability_table_denies_ungranted_stdin() {
+        let table = WasiCapabilityTable::new().grant_read_dir("/reports");
+        let config = WasiConfig::new()
+            .with_capability_table(table)
+            .with_stdin(b"host supplied bytes");
+
+        let err = config.validate_capabilities().unwrap_err().to_string();
+        assert!(err.contains("denied stdin"), "unexpected diagnostic: {err}");
+    }
+
+    #[test]
+    fn test_capability_table_allows_granted_stdin() {
+        let table = WasiCapabilityTable::new().grant_stdin();
+        let config = WasiConfig::new()
+            .with_capability_table(table)
+            .with_stdin(b"host supplied bytes");
+
+        assert!(config.validate_capabilities().is_ok());
+    }
+
+    /// Enforcement must not be disabled by naming a sandbox the module never
+    /// declared — that would be a fail-open the caller cannot see.
+    #[test]
+    fn test_with_sandbox_policy_rejects_undeclared_sandbox() {
+        let manifest = "sandbox_manifest:\n  PluginSandbox:\n    capabilities:\n      - ReadDir[\"/reports\"]\n";
+
+        let err = WasiConfig::new()
+            .with_sandbox_policy("TypoSandbox", manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is not declared in the module's security manifest"), "unexpected: {err}");
+    }
+
+    /// End-to-end through the production bridge: policy grants `/reports`, the
+    /// config preopens `/etc`, so the run is refused.
+    #[test]
+    fn test_sandbox_policy_bridge_denies_ungranted_preopen() {
+        let manifest = "sandbox_manifest:\n  PluginSandbox:\n    capabilities:\n      - ReadDir[\"/reports\"]\n";
+
+        let config = WasiConfig::new()
+            .with_sandbox_policy("PluginSandbox", manifest)
+            .unwrap()
+            .with_preopen_dir("/etc", "/etc");
+
+        let err = config.validate_capabilities().unwrap_err().to_string();
+        assert!(err.contains("denied preopen host '/etc' as '/etc'"), "unexpected: {err}");
+
+        // ...and the honest direction: a granted preopen still runs.
+        let ok = WasiConfig::new()
+            .with_sandbox_policy("PluginSandbox", manifest)
+            .unwrap()
+            .with_preopen_dir("/srv/reports", "/reports");
+        assert!(ok.validate_capabilities().is_ok());
     }
 }
