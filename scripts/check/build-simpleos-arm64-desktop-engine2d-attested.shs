@@ -10,6 +10,7 @@ cd "$ROOT_DIR"
 
 . scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs
 . scripts/check/lib/qemu-frozen-source-admission.shs
+. scripts/check/lib/clang-23-1-toolchain.shs
 
 COMPILER=""
 COMPILER_REJECTION_REASON=""
@@ -21,8 +22,12 @@ FROZEN_BUILD_MANIFEST="${BUILD_MANIFEST}.frozen-source-admission.env"
 BUILD_STAMP="${KERNEL}.build_stamp"
 GENERATED_LOG_CONFIG="build/os/generated/generated/simpleos_log_config.spl"
 BUILD_COMMAND=""
-BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000"
+BUILD_ENVIRONMENT=""
 ENTRY="examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
+LLVM_23_1_EXPECTED_TAG="llvmorg-23.1.0-rc2"
+LLVM_23_1_EXPECTED_TAG_COMMIT="561093d94eb7156dea780c1c71a779824ef90e5b"
+LLVM_23_1_SOURCE_DIR="${LLVM_23_1_SOURCE_DIR:-}"
+LLVM_23_1_PROVIDER_BUILDER="scripts/setup/build-llvm-23-1-provider.shs"
 MANIFEST_TMP="${BUILD_MANIFEST}.tmp.$$"
 SELF_TEST_DIR=""
 
@@ -51,6 +56,197 @@ sha256_file() {
     esac
     [ "${#sha256_value}" -eq 64 ] || return 1
     printf '%s\n' "$sha256_value"
+}
+
+canonical_provider_tool() {
+    provider_tool_path="$1"
+    provider_tool_name="$2"
+    [ -x "$provider_tool_path" ] && [ -f "$provider_tool_path" ] &&
+        [ ! -L "$provider_tool_path" ] || return 1
+    provider_tool_dir="$(CDPATH= cd -- "$(dirname -- "$provider_tool_path")" 2>/dev/null && pwd -P)" ||
+        return 1
+    PROVIDER_TOOL_CANONICAL_PATH="$provider_tool_dir/$(basename -- "$provider_tool_path")"
+    [ "$PROVIDER_TOOL_CANONICAL_PATH" = "$LLVM_PROVIDER_PREFIX/bin/$provider_tool_name" ] ||
+        return 1
+}
+
+provider_receipt_field() {
+    provider_receipt_key="$2"
+    printf '%s\n' "$1" | awk -F= -v key="$provider_receipt_key" '
+        $1 == key { if (++seen != 1) exit 1; print substr($0, length(key) + 2) }
+        END { if (seen != 1) exit 1 }
+    '
+}
+
+attest_authenticated_llvm_23_1_builder() {
+    [ -n "$LLVM_23_1_SOURCE_DIR" ] ||
+        fail_build "llvm-23-1-source-dir-required"
+    [ -f "$LLVM_23_1_PROVIDER_BUILDER" ] && [ ! -L "$LLVM_23_1_PROVIDER_BUILDER" ] ||
+        fail_build "llvm-23-1-provider-builder-unavailable"
+    LLVM_PROVIDER_SOURCE_DIR="$(CDPATH= cd -- "$LLVM_23_1_SOURCE_DIR" 2>/dev/null && pwd -P)" ||
+        fail_build "llvm-23-1-source-dir-invalid"
+    case "$LLVM_PROVIDER_SOURCE_DIR" in
+        *[!A-Za-z0-9_./-]*) fail_build "llvm-23-1-source-dir-unsafe" ;;
+    esac
+    LLVM_PROVIDER_BUILDER_RECEIPT="$(
+        sh "$LLVM_23_1_PROVIDER_BUILDER" --source-dir "$LLVM_PROVIDER_SOURCE_DIR" \
+            --prefix "$LLVM_PROVIDER_PREFIX" --verify-only
+    )" || fail_build "llvm-23-1-signed-builder-rejected"
+    LLVM_PROVIDER_TAG="$(provider_receipt_field "$LLVM_PROVIDER_BUILDER_RECEIPT" LLVM_TAG)" ||
+        fail_build "llvm-23-1-builder-tag-receipt-invalid"
+    LLVM_PROVIDER_TAG_COMMIT="$(provider_receipt_field "$LLVM_PROVIDER_BUILDER_RECEIPT" LLVM_TAG_COMMIT)" ||
+        fail_build "llvm-23-1-builder-tag-commit-receipt-invalid"
+    [ "$LLVM_PROVIDER_TAG" = "$LLVM_23_1_EXPECTED_TAG" ] ||
+        fail_build "llvm-23-1-builder-tag-mismatch"
+    [ "$LLVM_PROVIDER_TAG_COMMIT" = "$LLVM_23_1_EXPECTED_TAG_COMMIT" ] ||
+        fail_build "llvm-23-1-builder-tag-commit-mismatch"
+}
+
+# This producer invokes the pure-Simple LLVM backend.  The backend consumes
+# SIMPLE_LLVM_PREFIX while the host tool contract is rooted at
+# LLVM_23_1_PREFIX.  Treating either as advisory would let an older LLVM
+# provider compile an artifact whose manifest merely says "llvm".
+attest_llvm_23_1_provider() {
+    [ -n "${LLVM_23_1_PREFIX:-}" ] ||
+        fail_build "llvm-23-1-prefix-required"
+    [ -n "${SIMPLE_LLVM_PREFIX:-}" ] ||
+        fail_build "simple-llvm-prefix-required"
+    case "${CLANG:-}${LINKER:-}${LLVM_AR:-}" in
+        "") ;;
+        *) fail_build "llvm-provider-tool-override-forbidden" ;;
+    esac
+    LLVM_PROVIDER_PREFIX="$(CDPATH= cd -- "$LLVM_23_1_PREFIX" 2>/dev/null && pwd -P)" ||
+        fail_build "llvm-23-1-prefix-invalid"
+    SIMPLE_LLVM_PROVIDER_PREFIX="$(CDPATH= cd -- "$SIMPLE_LLVM_PREFIX" 2>/dev/null && pwd -P)" ||
+        fail_build "simple-llvm-prefix-invalid"
+    [ "$LLVM_PROVIDER_PREFIX" = "$SIMPLE_LLVM_PROVIDER_PREFIX" ] ||
+        fail_build "llvm-provider-prefix-mismatch"
+    case "$LLVM_PROVIDER_PREFIX" in
+        *[!A-Za-z0-9_./-]*) fail_build "llvm-provider-prefix-unsafe" ;;
+    esac
+    LLVM_23_1_PREFIX="$LLVM_PROVIDER_PREFIX"
+    SIMPLE_LLVM_PREFIX="$LLVM_PROVIDER_PREFIX"
+    export LLVM_23_1_PREFIX SIMPLE_LLVM_PREFIX
+    attest_authenticated_llvm_23_1_builder
+    validate_clang_23_1_toolchain ||
+        fail_build "llvm-23-1-provider-rejected"
+    LLVM_OPT_23_1="$LLVM_PROVIDER_PREFIX/bin/opt"
+    LLVM_LLC_23_1="$LLVM_PROVIDER_PREFIX/bin/llc"
+    LLVM_CONFIG_23_1="$LLVM_PROVIDER_PREFIX/bin/llvm-config"
+    LLVM_OBJCOPY_23_1="$LLVM_PROVIDER_PREFIX/bin/llvm-objcopy"
+    clang_23_1_require "$LLVM_OPT_23_1" opt ||
+        fail_build "llvm-23-1-opt-rejected"
+    clang_23_1_require "$LLVM_LLC_23_1" llc ||
+        fail_build "llvm-23-1-llc-rejected"
+    clang_23_1_require "$LLVM_CONFIG_23_1" llvm-config ||
+        fail_build "llvm-23-1-llvm-config-rejected"
+    clang_23_1_require "$LLVM_OBJCOPY_23_1" llvm-objcopy ||
+        fail_build "llvm-23-1-llvm-objcopy-rejected"
+    for provider_binding in \
+        "clang:$CLANG_23_1" \
+        "ld.lld:$LLD_23_1" \
+        "llvm-ar:$LLVM_AR_23_1" \
+        "opt:$LLVM_OPT_23_1" \
+        "llc:$LLVM_LLC_23_1" \
+        "llvm-config:$LLVM_CONFIG_23_1" \
+        "llvm-objcopy:$LLVM_OBJCOPY_23_1"
+    do
+        provider_name=${provider_binding%%:*}
+        provider_tool=${provider_binding#*:}
+        canonical_provider_tool "$provider_tool" "$provider_name" ||
+            fail_build "llvm-provider-tool-not-canonical"
+        case "$provider_name" in
+            clang) CLANG_23_1=$PROVIDER_TOOL_CANONICAL_PATH ;;
+            ld.lld) LLD_23_1=$PROVIDER_TOOL_CANONICAL_PATH ;;
+            llvm-ar) LLVM_AR_23_1=$PROVIDER_TOOL_CANONICAL_PATH ;;
+            opt) LLVM_OPT_23_1=$PROVIDER_TOOL_CANONICAL_PATH ;;
+            llc) LLVM_LLC_23_1=$PROVIDER_TOOL_CANONICAL_PATH ;;
+            llvm-config) LLVM_CONFIG_23_1=$PROVIDER_TOOL_CANONICAL_PATH ;;
+            llvm-objcopy) LLVM_OBJCOPY_23_1=$PROVIDER_TOOL_CANONICAL_PATH ;;
+        esac
+    done
+    LLVM_CLANG_SHA256="$(sha256_file "$CLANG_23_1")" ||
+        fail_build "llvm-23-1-clang-sha256-failed"
+    LLVM_LLD_SHA256="$(sha256_file "$LLD_23_1")" ||
+        fail_build "llvm-23-1-lld-sha256-failed"
+    LLVM_AR_SHA256="$(sha256_file "$LLVM_AR_23_1")" ||
+        fail_build "llvm-23-1-llvm-ar-sha256-failed"
+    LLVM_OPT_SHA256="$(sha256_file "$LLVM_OPT_23_1")" ||
+        fail_build "llvm-23-1-opt-sha256-failed"
+    LLVM_LLC_SHA256="$(sha256_file "$LLVM_LLC_23_1")" ||
+        fail_build "llvm-23-1-llc-sha256-failed"
+    LLVM_CONFIG_SHA256="$(sha256_file "$LLVM_CONFIG_23_1")" ||
+        fail_build "llvm-23-1-llvm-config-sha256-failed"
+    LLVM_OBJCOPY_SHA256="$(sha256_file "$LLVM_OBJCOPY_23_1")" ||
+        fail_build "llvm-23-1-llvm-objcopy-sha256-failed"
+    LLVM_CLANG_VERSION="$(clang_23_1_version "$CLANG_23_1")" ||
+        fail_build "llvm-23-1-clang-version-unavailable"
+    LLVM_LLD_VERSION="$(clang_23_1_version "$LLD_23_1")" ||
+        fail_build "llvm-23-1-lld-version-unavailable"
+    LLVM_AR_VERSION="$(clang_23_1_version "$LLVM_AR_23_1")" ||
+        fail_build "llvm-23-1-llvm-ar-version-unavailable"
+    LLVM_OPT_VERSION="$(clang_23_1_version "$LLVM_OPT_23_1")" ||
+        fail_build "llvm-23-1-opt-version-unavailable"
+    LLVM_LLC_VERSION="$(clang_23_1_version "$LLVM_LLC_23_1")" ||
+        fail_build "llvm-23-1-llc-version-unavailable"
+    LLVM_CONFIG_VERSION="$(clang_23_1_version "$LLVM_CONFIG_23_1")" ||
+        fail_build "llvm-23-1-llvm-config-version-unavailable"
+    LLVM_OBJCOPY_VERSION="$(clang_23_1_version "$LLVM_OBJCOPY_23_1")" ||
+        fail_build "llvm-23-1-llvm-objcopy-version-unavailable"
+    [ "$LLVM_CLANG_VERSION" = "23.1" ] &&
+        [ "$LLVM_LLD_VERSION" = "23.1" ] &&
+        [ "$LLVM_AR_VERSION" = "23.1" ] &&
+        [ "$LLVM_OPT_VERSION" = "23.1" ] &&
+        [ "$LLVM_LLC_VERSION" = "23.1" ] &&
+        [ "$LLVM_CONFIG_VERSION" = "23.1" ] &&
+        [ "$LLVM_OBJCOPY_VERSION" = "23.1" ] ||
+        fail_build "llvm-23-1-provider-version-drift"
+}
+
+verify_llvm_23_1_provider_unchanged() {
+    [ "$(sha256_file "$CLANG_23_1")" = "$LLVM_CLANG_SHA256" ] &&
+        [ "$(sha256_file "$LLD_23_1")" = "$LLVM_LLD_SHA256" ] &&
+        [ "$(sha256_file "$LLVM_AR_23_1")" = "$LLVM_AR_SHA256" ] &&
+        [ "$(sha256_file "$LLVM_OPT_23_1")" = "$LLVM_OPT_SHA256" ] &&
+        [ "$(sha256_file "$LLVM_LLC_23_1")" = "$LLVM_LLC_SHA256" ] &&
+        [ "$(sha256_file "$LLVM_CONFIG_23_1")" = "$LLVM_CONFIG_SHA256" ] &&
+        [ "$(sha256_file "$LLVM_OBJCOPY_23_1")" = "$LLVM_OBJCOPY_SHA256" ] ||
+        fail_build "llvm-23-1-provider-changed-during-build"
+}
+
+run_llvm_provider_contract_self_test() {
+    SELF_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/simple-arm64-llvm-provider.XXXXXX")" ||
+        fail_build "llvm-provider-self-test-tempdir-failed"
+    mkdir -p "$SELF_TEST_DIR/provider/bin" "$SELF_TEST_DIR/external"
+    LLVM_PROVIDER_PREFIX="$SELF_TEST_DIR/provider"
+    for self_tool in clang ld.lld llvm-ar opt llc llvm-config llvm-objcopy; do
+        printf '#!/bin/sh\nprintf "LLVM version 23.1.0\\n"\n' >"$LLVM_PROVIDER_PREFIX/bin/$self_tool"
+        chmod +x "$LLVM_PROVIDER_PREFIX/bin/$self_tool"
+    done
+    canonical_provider_tool "$LLVM_PROVIDER_PREFIX/bin/llc" llc ||
+        fail_build "llvm-provider-self-test-canonical-rejected"
+    ln -s "$SELF_TEST_DIR/external/llc" "$LLVM_PROVIDER_PREFIX/bin/escape"
+    if canonical_provider_tool "$LLVM_PROVIDER_PREFIX/bin/escape" escape; then
+        fail_build "llvm-provider-self-test-symlink-accepted"
+    fi
+    printf '#!/bin/sh\nprintf "LLVM version 18.1.0\\n"\n' >"$LLVM_PROVIDER_PREFIX/bin/llc"
+    chmod +x "$LLVM_PROVIDER_PREFIX/bin/llc"
+    if clang_23_1_require "$LLVM_PROVIDER_PREFIX/bin/llc" llc >/dev/null 2>&1; then
+        fail_build "llvm-provider-self-test-old-llc-accepted"
+    fi
+    good_receipt="LLVM_TAG=${LLVM_23_1_EXPECTED_TAG}
+LLVM_TAG_COMMIT=${LLVM_23_1_EXPECTED_TAG_COMMIT}"
+    [ "$(provider_receipt_field "$good_receipt" LLVM_TAG_COMMIT)" = "$LLVM_23_1_EXPECTED_TAG_COMMIT" ] ||
+        fail_build "llvm-provider-self-test-receipt-rejected"
+    bad_receipt="LLVM_TAG=${LLVM_23_1_EXPECTED_TAG}
+LLVM_TAG_COMMIT=deadbeef"
+    if [ "$(provider_receipt_field "$bad_receipt" LLVM_TAG_COMMIT)" = "$LLVM_23_1_EXPECTED_TAG_COMMIT" ]; then
+        fail_build "llvm-provider-self-test-retargeted-tag-accepted"
+    fi
+    echo "arm64_llvm_provider_canonical_rejection_status=pass"
+    echo "arm64_llvm_provider_version_rejection_status=pass"
+    echo "arm64_llvm_provider_tag_commit_rejection_status=pass"
+    echo "arm64_llvm_provider_contract_self_test_status=pass"
 }
 
 write_self_test_native_header() {
@@ -116,6 +312,10 @@ if [ "${1:-}" = "--self-test" ]; then
     run_compiler_admission_self_test
     exit 0
 fi
+if [ "${1:-}" = "--llvm-provider-self-test" ]; then
+    run_llvm_provider_contract_self_test
+    exit 0
+fi
 
 resolve_compiler() {
     compiler_os="$(uname -s)" || return 1
@@ -147,13 +347,15 @@ resolve_compiler() {
     COMPILER="$compiler_candidate"
     COMPILER_FORMAT="$ARM64_GUEST_COMPILER_FORMAT"
     COMPILER_ARCH="$ARM64_GUEST_COMPILER_ARCH"
-    BUILD_COMMAND="env $BUILD_ENVIRONMENT $COMPILER os build --scenario=arm64-desktop-engine2d"
 }
 
 resolve_compiler ||
     fail_build "${COMPILER_REJECTION_REASON:-canonical-pure-simple-compiler-unavailable}"
 [ -x "$COMPILER" ] || fail_build "canonical-compiler-missing"
 [ ! -L "$COMPILER" ] || fail_build "canonical-compiler-symlink-rejected"
+attest_llvm_23_1_provider
+BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER PATH=$LLVM_PROVIDER_PREFIX/bin:\$PATH SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000 LLVM_23_1_PREFIX=$LLVM_PROVIDER_PREFIX SIMPLE_LLVM_PREFIX=$SIMPLE_LLVM_PROVIDER_PREFIX CLANG=$CLANG_23_1 LINKER=$LLD_23_1 LLVM_AR=$LLVM_AR_23_1 LLVM_OPT=$LLVM_OPT_23_1 LLVM_LLC=$LLVM_LLC_23_1 LLVM_CONFIG=$LLVM_CONFIG_23_1 LLVM_OBJCOPY=$LLVM_OBJCOPY_23_1"
+BUILD_COMMAND="env $BUILD_ENVIRONMENT $COMPILER os build --scenario=arm64-desktop-engine2d"
 # The runner owns this transient source and recreates/removes it around every
 # build. Normalize stale crash residue before taking the pre-build snapshot.
 mkdir -p build/os/generated/generated
@@ -193,7 +395,9 @@ qemu_admission_begin arm64 \
     scripts/os/simpleos_font_bundle_companion.sha256 assets/fonts \
     scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs \
     scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs \
-    scripts/check/lib/qemu-frozen-source-admission.shs ||
+    scripts/check/lib/qemu-frozen-source-admission.shs \
+    scripts/check/lib/clang-23-1-toolchain.shs \
+    scripts/setup/build-llvm-23-1-provider.shs ||
     fail_build "frozen-source-admission-rejected"
 
 # Remove a previously valid receipt before starting: a failed or interrupted
@@ -207,13 +411,20 @@ rm -f "$KERNEL" "$BUILD_STAMP" "$DISK" "$DISK_PRODUCER" ||
 
 set +e
 env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE \
-    -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_OS_BUILD_BACKEND=llvm \
-    SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000 \
+    -u SIMPLE_BOOTSTRAP_DRIVER PATH="$LLVM_PROVIDER_PREFIX/bin:$PATH" \
+    SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off \
+    SIMPLE_OS_BUILD_TIMEOUT_MS=900000 \
+    LLVM_23_1_PREFIX="$LLVM_PROVIDER_PREFIX" \
+    SIMPLE_LLVM_PREFIX="$SIMPLE_LLVM_PROVIDER_PREFIX" \
+    CLANG="$CLANG_23_1" LINKER="$LLD_23_1" LLVM_AR="$LLVM_AR_23_1" \
+    LLVM_OPT="$LLVM_OPT_23_1" LLVM_LLC="$LLVM_LLC_23_1" \
+    LLVM_CONFIG="$LLVM_CONFIG_23_1" LLVM_OBJCOPY="$LLVM_OBJCOPY_23_1" \
     "$COMPILER" os build --scenario=arm64-desktop-engine2d
 BUILD_CODE=$?
 set -e
 [ "$BUILD_CODE" -eq 0 ] ||
     fail_build "canonical-scenario-build-failed"
+verify_llvm_23_1_provider_unchanged
 # The runner creates this source before native-build but does not remove it on
 # its success path. Restore the same normalized state used by the pre-snapshot.
 rm -f "$GENERATED_LOG_CONFIG" ||
@@ -289,6 +500,34 @@ umask 077
     echo "compiler_version=$PRE_COMPILER_VERSION"
     echo "compiler_format=$COMPILER_FORMAT"
     echo "compiler_arch=$COMPILER_ARCH"
+    echo "llvm_provider_attestation=llvm-clang-23.1-host-native-build-v1"
+    echo "llvm_provider_builder_attestation=llvm-23.1-signed-builder-v1"
+    echo "llvm_provider_source_dir=$LLVM_PROVIDER_SOURCE_DIR"
+    echo "llvm_provider_tag=$LLVM_PROVIDER_TAG"
+    echo "llvm_provider_tag_commit=$LLVM_PROVIDER_TAG_COMMIT"
+    echo "llvm_23_1_prefix=$LLVM_PROVIDER_PREFIX"
+    echo "simple_llvm_prefix=$SIMPLE_LLVM_PROVIDER_PREFIX"
+    echo "llvm_clang_path=$CLANG_23_1"
+    echo "llvm_clang_version=$LLVM_CLANG_VERSION"
+    echo "llvm_clang_sha256=$LLVM_CLANG_SHA256"
+    echo "llvm_lld_path=$LLD_23_1"
+    echo "llvm_lld_version=$LLVM_LLD_VERSION"
+    echo "llvm_lld_sha256=$LLVM_LLD_SHA256"
+    echo "llvm_ar_path=$LLVM_AR_23_1"
+    echo "llvm_ar_version=$LLVM_AR_VERSION"
+    echo "llvm_ar_sha256=$LLVM_AR_SHA256"
+    echo "llvm_opt_path=$LLVM_OPT_23_1"
+    echo "llvm_opt_version=$LLVM_OPT_VERSION"
+    echo "llvm_opt_sha256=$LLVM_OPT_SHA256"
+    echo "llvm_llc_path=$LLVM_LLC_23_1"
+    echo "llvm_llc_version=$LLVM_LLC_VERSION"
+    echo "llvm_llc_sha256=$LLVM_LLC_SHA256"
+    echo "llvm_config_path=$LLVM_CONFIG_23_1"
+    echo "llvm_config_version=$LLVM_CONFIG_VERSION"
+    echo "llvm_config_sha256=$LLVM_CONFIG_SHA256"
+    echo "llvm_objcopy_path=$LLVM_OBJCOPY_23_1"
+    echo "llvm_objcopy_version=$LLVM_OBJCOPY_VERSION"
+    echo "llvm_objcopy_sha256=$LLVM_OBJCOPY_SHA256"
     echo "build_command=$BUILD_COMMAND"
     echo "build_environment=$BUILD_ENVIRONMENT"
 } >"$MANIFEST_TMP"
@@ -299,7 +538,9 @@ qemu_admission_publish "$KERNEL" "$FROZEN_BUILD_MANIFEST" \
     scripts/os/simpleos_font_bundle_companion.sha256 assets/fonts \
     scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs \
     scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs \
-    scripts/check/lib/qemu-frozen-source-admission.shs || {
+    scripts/check/lib/qemu-frozen-source-admission.shs \
+    scripts/check/lib/clang-23-1-toolchain.shs \
+    scripts/setup/build-llvm-23-1-provider.shs || {
     rm -f "$BUILD_MANIFEST" "$FROZEN_BUILD_MANIFEST"
     fail_build "frozen-source-admission-rejected"
 }
