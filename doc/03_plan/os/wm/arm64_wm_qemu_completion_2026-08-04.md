@@ -102,6 +102,37 @@ can build the required kernel.
 - Phase 3, ARM64 attestation/build, and QEMU were not run in this session because
   functional admission never passed. No fourth rebuild/admission cycle is
   permitted in the exhausted session.
+- A fourth fresh bounded session exhausted another three-cycle cap while moving
+  Ret translation state out of imported class-field reads. Phase 2 Cranelift
+  sanity passed in all three cycles, but canonical functional admission failed
+  once per cycle:
+  1. `e97904af77` added `MirToLlvm` owner getters for return decisions and
+     scalar text. Its focused source contract ended 19/20 after the bounded
+     attempts and was committed after review without a PASS claim. Candidate
+     SHA-256
+     `23accc810dd10a09a7f23999b015246ea940a58e894fff621434fbb07136382d`
+     regressed to exit 132 after `terminator:kind index=0`, before the first Ret
+     marker; the implicit return-type getter was the new pre-marker boundary.
+  2. `d907815427` removed those getters and threaded effective return type,
+     `_start` status, and return-slot ID as primitives. Its focused source
+     contract remained 19/20 after three bounded runs and was committed after
+     review without a PASS claim. Candidate SHA-256
+     `9895d925101ea283aca1361ada3c7711918dc5c7af10183b5b7fd3389ec29aea`
+     exited 134 after `ret-threaded-fallback index=0 required=false`, before
+     local value/type selection.
+  3. `5b6089d22d` formed the return value text directly as `%l0` and inlined
+     source-type selection. Its final focused evidence was 18/19 before the
+     reviewed mechanical contract restoration; it was committed without a PASS
+     claim or rerun. Candidate SHA-256
+     `8bba8a40460ff688702eb846cfc896a4e54ea0edc2289308ef52a3cab44f8a1c`
+     exited 139 after `ret-threaded-value index=0 value=%l0`, before
+     `ret-threaded-source-type` or Ret emission.
+- The final retained compiler is
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-inline-return-cycle3/stage2/aarch64-apple-darwin/simple`.
+  The exact exit-139 admission log is
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-inline-return-cycle3/admission/bootstrap_nonentry_module_global/native-build.log`.
+- Phase 3, ARM64 attestation/build, and QEMU were not run. Functional admission
+  never passed, and the session's three-cycle cap is exhausted.
 
 ## Current Resume Gate
 
@@ -113,17 +144,17 @@ Owner: compiler-admission lane. Final reviewer: ARM64 integration owner.
    older retained worktree is still current.
 3. Start a fresh bounded session. The completed session exhausted its three
    rebuild/admission cycles, so no fourth cycle may be appended to it.
-4. Continue at the exact `terminator:ret-scalar-local index=0 local=0`
-   boundary. The next statements read mutable translator state directly in
-   `core_codegen`: `_start` selection through `current_function_name`, fallback
-   selection through `return_locals`/`local_types`/`defined_locals`, and result
-   ABI through `current_return_type`.
-5. Move those decisions behind `MirToLlvm` owner scalar getters: one boolean for
-   whether the current function is `_start`, one boolean for whether local ID 0
-   requires the zero fallback, and one text getter for the current return type.
-   Keep the local ID scalar. Avoid direct consumer-side reads of those fields in
-   the Ret branch, preserve Copy and Move semantics, and add gated markers after
-   each owner decision before any new rebuild.
+4. Continue at the exact `terminator:ret-threaded-value index=0 value=%l0`
+   boundary. `requires_fallback=false` proves local ID 0 has both a declared
+   type and a completed definition; the next unobserved operation initializes
+   source type with `self.native_int()` before reading ptr/bool/local type maps.
+5. Remove that initial `self.native_int()` call. Initialize source type from
+   the proven `self.local_types[return_local_id]` scalar text (or thread the
+   already-known local type), validate it, then apply ptr and bool scalar
+   overrides. Add a marker before each individual access and after final source
+   type selection. Preserve the `%l0` value, threaded return type/status, and
+   existing fallback decision; do not add another owner getter or aggregate
+   return.
 6. Only after the focused regression passes, run one fresh Phase 2 build and
    the canonical non-entry module-global/native admission checks once. Phase 3
    or ARM64 QEMU may start only after both pass.
@@ -157,6 +188,13 @@ Retained evidence:
 - Final scalar-Ret Cycle 3 build, sanity evidence, and exact scalar-local
   admission log:
   `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-ret-scalar-cycle3/`
+- Return-owner API Cycle 1 build and regressed pre-Ret admission log:
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-return-owner-api-cycle1/`
+- Primitive-threaded Cycle 2 build and fallback-boundary admission log:
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-threaded-return-cycle2/`
+- Final inline-Ret Cycle 3 build, sanity evidence, and exact `%l0` admission
+  log:
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-inline-return-cycle3/`
 
 ## Parallel Lanes
 
