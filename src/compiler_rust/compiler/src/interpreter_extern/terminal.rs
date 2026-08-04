@@ -157,6 +157,11 @@ pub fn rt_terminal_is_tty(_args: &[Value]) -> Result<Value, CompileError> {
     native_io::native_is_tty(&[Value::Int(0)])
 }
 
+/// `rt_terminal_stdout_is_tty` — query stdout (handle 1), independently of stdin.
+pub fn rt_terminal_stdout_is_tty(_args: &[Value]) -> Result<Value, CompileError> {
+    native_io::native_is_tty(&[Value::Int(1)])
+}
+
 /// `rt_terminal_get_size` — bridges to `native_get_term_size` on stdout
 /// (handle 1, matching `fill_terminal_size`'s `STDOUT_FILENO` in
 /// env_process.rs). `native_get_term_size` returns `[rows, cols]`; the `rt_`

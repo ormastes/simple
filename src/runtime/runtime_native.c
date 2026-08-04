@@ -3465,6 +3465,47 @@ int64_t rt_string_split(int64_t value, int64_t delimiter) {
     return (int64_t)(uintptr_t)parts;
 }
 
+int64_t rt_string_split_limit(int64_t value, int64_t delimiter, int64_t limit) {
+    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* d = rt_core_as_string(delimiter);
+    if (!s || !d) return rt_core_nil();
+    if (limit <= 0) return rt_string_split(value, delimiter);
+    if (limit == 1) {
+        SplArray* one = rt_array_new(1);
+        if (!one) return rt_core_nil();
+        rt_array_push(one, value);
+        return (int64_t)(uintptr_t)one;
+    }
+    if (d->len == 0) {
+        SplArray* parts = rt_array_new(limit);
+        if (!parts) return rt_core_nil();
+        uint64_t start = 0;
+        while (start < s->len && parts->len < limit - 1) {
+            rt_array_push(parts, rt_string_new((const uint8_t*)s->data + start, 1));
+            start++;
+        }
+        rt_array_push(parts, rt_string_new((const uint8_t*)s->data + start, s->len - start));
+        return (int64_t)(uintptr_t)parts;
+    }
+    SplArray* parts = rt_array_new(limit);
+    if (!parts) return rt_core_nil();
+    uint64_t start = 0;
+    uint64_t i = 0;
+    int64_t count = 1;
+    while (i + d->len <= s->len && count < limit) {
+        if (memcmp(s->data + i, d->data, (size_t)d->len) == 0) {
+            rt_array_push(parts, rt_string_new((const uint8_t*)s->data + start, i - start));
+            i += d->len;
+            start = i;
+            count++;
+        } else {
+            i++;
+        }
+    }
+    rt_array_push(parts, rt_string_new((const uint8_t*)s->data + start, s->len - start));
+    return (int64_t)(uintptr_t)parts;
+}
+
 int64_t rt_string_join(int64_t array_value, int64_t separator) {
     RtCoreArray* array = rt_core_as_array(array_value);
     RtCoreString* sep = rt_core_as_string(separator);

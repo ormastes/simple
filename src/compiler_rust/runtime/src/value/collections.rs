@@ -3308,6 +3308,58 @@ pub extern "C" fn rt_string_split(string: RuntimeValue, delimiter: RuntimeValue)
     }
 }
 
+/// Split a string at most `limit - 1` times, preserving the remainder.
+#[no_mangle]
+pub extern "C" fn rt_string_split_limit(
+    string: RuntimeValue,
+    delimiter: RuntimeValue,
+    limit: i64,
+) -> RuntimeValue {
+    if limit <= 0 {
+        return rt_string_split(string, delimiter);
+    }
+    let str_len = rt_string_len(string);
+    let del_len = rt_string_len(delimiter);
+    if str_len < 0 || del_len < 0 {
+        return rt_array_new(0);
+    }
+    let str_data = rt_string_data(string);
+    let del_data = rt_string_data(delimiter);
+    if str_data.is_null() || (del_len > 0 && del_data.is_null()) {
+        return rt_array_new(0);
+    }
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len as usize));
+        let d = std::str::from_utf8_unchecked(std::slice::from_raw_parts(del_data, del_len as usize));
+        let result = rt_array_new(limit.max(1) as u64);
+        if limit == 1 {
+            rt_array_push(result, string);
+            return result;
+        }
+        if d.is_empty() {
+            let mut start = 0usize;
+            while start < s.len() && (start as i64) < limit - 1 {
+                let end = start + 1;
+                rt_array_push(result, rt_string_new(s[start..end].as_ptr(), 1));
+                start = end;
+            }
+            rt_array_push(result, rt_string_new(s[start..].as_ptr(), (s.len() - start) as u64));
+            return result;
+        }
+        let mut start = 0usize;
+        let mut count = 1i64;
+        while count < limit {
+            let Some(relative) = s[start..].find(d) else { break };
+            let end = start + relative;
+            rt_array_push(result, rt_string_new(s[start..end].as_ptr(), (end - start) as u64));
+            start = end + d.len();
+            count += 1;
+        }
+        rt_array_push(result, rt_string_new(s[start..].as_ptr(), (s.len() - start) as u64));
+        result
+    }
+}
+
 /// Return the UTF-8 bytes of a string as an array of ints (one per byte).
 /// Mirrors the interpreter's `text.bytes()` (`interpreter_method/string.rs`)
 /// so JIT/native code can call `.bytes()` instead of only the interpreter.

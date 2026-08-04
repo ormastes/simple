@@ -443,6 +443,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Byte-indexed (not char-indexed) raw byte read; see rt_string_char_code_at.
     RuntimeFuncSpec::new("rt_string_byte_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_split", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_split_limit", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_bytes", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_chars", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_lines", &[I64], &[I64]),
@@ -1769,6 +1770,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_terminal_enable_raw_mode", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_terminal_disable_raw_mode", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_terminal_is_tty", &[], &[I64]), // () -> RuntimeValue (bool)
+    RuntimeFuncSpec::new("rt_terminal_stdout_is_tty", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_stdin_read_byte", &[], &[I64]), // () -> byte or -1
     RuntimeFuncSpec::new("stdin_read_char", &[], &[I64]), // legacy source-level char read -> RuntimeValue(text)
     RuntimeFuncSpec::new("rt_ssh_userauth_password_only_failure_payload", &[], &[I64]),

@@ -235,7 +235,27 @@ if let Value::Str(ref s) = recv_val {
         }
         "split" => {
             let sep = eval_arg(args, 0, Value::text(" "), env, functions, classes, enums, impl_methods)?.to_key_string();
-            let parts: Vec<Value> = s.split(&sep).map(|p| Value::text(p.to_string())).collect();
+            let limit = if args.len() > 1 {
+                eval_arg(args, 1, Value::Int(0), env, functions, classes, enums, impl_methods)?.as_int().unwrap_or(0)
+            } else {
+                0
+            };
+            let raw_parts: Vec<String> = if limit > 0 && sep.is_empty() {
+                let chars: Vec<char> = s.chars().collect();
+                if limit == 1 {
+                    vec![s.to_string()]
+                } else {
+                    let head = ((limit - 1) as usize).min(chars.len());
+                    let mut bounded: Vec<String> = chars[..head].iter().map(char::to_string).collect();
+                    bounded.push(chars[head..].iter().collect());
+                    bounded
+                }
+            } else if limit > 0 {
+                s.splitn(limit as usize, &sep).map(str::to_string).collect()
+            } else {
+                s.split(&sep).map(str::to_string).collect()
+            };
+            let parts: Vec<Value> = raw_parts.into_iter().map(Value::text).collect();
             return Ok(Value::array(parts));
         }
         "split_lines" | "lines" => {

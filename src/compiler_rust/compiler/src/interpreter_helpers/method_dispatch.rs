@@ -90,9 +90,26 @@ pub(crate) fn call_method_on_value(
                     .first()
                     .map(Value::to_key_string)
                     .unwrap_or_else(|| " ".to_string());
-                return Ok(Value::array(
-                    s.split(&sep).map(|part| Value::text(part.to_string())).collect(),
-                ));
+                let limit = match _args.get(1) {
+                    Some(value) => value.as_int().unwrap_or(0),
+                    None => 0,
+                };
+                let raw_parts: Vec<String> = if limit > 0 && sep.is_empty() {
+                    let chars: Vec<char> = s.chars().collect();
+                    if limit == 1 {
+                        vec![s.to_string()]
+                    } else {
+                        let head = ((limit - 1) as usize).min(chars.len());
+                        let mut bounded: Vec<String> = chars[..head].iter().map(char::to_string).collect();
+                        bounded.push(chars[head..].iter().collect());
+                        bounded
+                    }
+                } else if limit > 0 {
+                    s.splitn(limit as usize, &sep).map(str::to_string).collect()
+                } else {
+                    s.split(&sep).map(str::to_string).collect()
+                };
+                return Ok(Value::array(raw_parts.into_iter().map(Value::text).collect()));
             }
             "index_of" => {
                 // Byte-indexed, with optional two-arg `index_of(needle,

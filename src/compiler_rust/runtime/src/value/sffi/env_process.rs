@@ -1459,6 +1459,19 @@ pub extern "C" fn rt_terminal_get_size() -> RuntimeValue {
 static SAVED_TERMIOS: std::sync::OnceLock<std::sync::Mutex<Option<nix::sys::termios::Termios>>> =
     std::sync::OnceLock::new();
 
+#[cfg(unix)]
+extern "C" fn restore_terminal_at_exit() {
+    use nix::sys::termios::{tcsetattr, SetArg};
+    use std::os::fd::BorrowedFd;
+    let fd = unsafe { BorrowedFd::borrow_raw(0) };
+    let slot = SAVED_TERMIOS.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = slot.lock() {
+        if let Some(orig) = guard.take() {
+            let _ = tcsetattr(fd, SetArg::TCSANOW, &orig);
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_terminal_enable_raw_mode() -> RuntimeValue {
     #[cfg(unix)]
@@ -1479,12 +1492,28 @@ pub extern "C" fn rt_terminal_enable_raw_mode() -> RuntimeValue {
         if let Ok(mut guard) = slot.lock() {
             *guard = Some(orig);
         }
+        static INSTALL_EXIT_RESTORE: std::sync::Once = std::sync::Once::new();
+        INSTALL_EXIT_RESTORE.call_once(|| unsafe {
+            libc::atexit(restore_terminal_at_exit);
+        });
         RuntimeValue::from_bool(true)
     }
     #[cfg(not(unix))]
     {
         RuntimeValue::from_bool(true)
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_terminal_is_tty() -> RuntimeValue {
+    use std::io::IsTerminal;
+    RuntimeValue::from_bool(std::io::stdin().is_terminal())
+}
+
+#[no_mangle]
+pub extern "C" fn rt_terminal_stdout_is_tty() -> RuntimeValue {
+    use std::io::IsTerminal;
+    RuntimeValue::from_bool(std::io::stdout().is_terminal())
 }
 
 #[no_mangle]
