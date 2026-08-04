@@ -40,21 +40,25 @@
 - Pure-Simple runtime execution of the version parser remains unproven because
   the full integration spec timed out and the runner's documented filter was
   rejected.
-- The fresh continuation's fullscreen QEMU gate exhausted its three-cycle cap.
-  Every cycle used the explicit `build/native_probe/simple` provider, the
-  admitted signed Clang/LLD 23.1 prefix, and a current-source kernel. All three
-  reached active Browser/Hello/Clang rendering, but the material producer
-  rejected the Aetheric browser entry with the same receipt:
-  `backdrop=blur() saturate(170%) backdrop_len=21 backdrop_admitted=0`.
-- The receipt proves that `var(--blur-surface)` finds its property name but
-  receives an empty value instead of `30px`; `var(--app-surface)` is likewise
-  absent from the background shorthand. A single-entry state representation
-  and a join-based serialization experiment both reproduced the same guest
-  receipt and were reverted rather than committed as unproven fixes. The
-  retained rejection diagnostic now prints the actual backdrop and admission
-  result.
+- A fresh scoped continuation proved and repaired custom-property transport:
+  the collector now keeps chained concatenation statically `text`, state
+  parsing uses `find_from`, and exact backdrop admission uses bounded ASCII
+  byte parsing instead of incomplete freestanding text/integer helpers.
+- The retained focused Clang 23.1 guest proves both custom properties, resolved
+  Aetheric CSS, exact background/gradient colors, memo color, and
+  `backdrop-admission value=true:4:1700`, with no fault.
+- Canonical QEMU cycle 1 isolated the admission defect. Cycle 2 cleared it but
+  exposed a page fault in the provisional global `rt_any_add` widening; that
+  change was reverted. Cycle 3 used the typed producer fix, built 6 modules
+  with 725 cached, and reached CPU-entry/font rendering without rejection or
+  fault.
+- Cycle 3 still failed the 180-second readiness oracle. Serial evidence shows
+  repeated 1,048,576-element draw/font arrays (about 8 MiB each) before the
+  guest stalls; no desktop/browser-ready, framebuffer, input, or content-delta
+  receipts are emitted. This is now the concrete release blocker.
 - Therefore framebuffer/font/input/browser-content rendering evidence is not
-  complete, and compiler/core/MCP aggregate checks were not all green.
+  complete, and compiler/core/MCP aggregate checks were not run against a
+  passing final QEMU input.
 - The focused renderer regression spec could not reach assertions because the
   current pure-Simple runner fails parsing the existing multiline import in
   `src/lib/common/web/browser_renderer_protocol.spl`. No seed fallback was used.
@@ -62,15 +66,14 @@
   string-interpolation semantic errors (`font_guest_path`, `handled_text`)
   prevented a complete verdict.
 - A fourth QEMU run was not attempted because the mandatory three-cycle cap is
-  exhausted. The next bounded session must trace the value loss upstream of
-  `_css_resolve_vars` (collector text, state construction, or freestanding text
-  lifetime) and obtain `blur(30px) saturate(170%)` with an admitted material
-  receipt before the framebuffer/input/browser-content criteria can run.
+  exhausted. The next bounded session must reduce or bound the repeated
+  million-element draw/font allocation path and then obtain the canonical
+  readiness, framebuffer, input, and browser-content receipts.
 
 ## Result
 
 `STATUS: FAIL`
 
 The Clang 23.1 migration and bootstrap lanes are suitable for review. The
-SimpleOS rendering gate remains release-blocking because custom-property values
-are empty in the freestanding browser renderer even though their names resolve.
+SimpleOS rendering gate remains release-blocking because production draw/font
+materialization does not finish within the canonical readiness window.

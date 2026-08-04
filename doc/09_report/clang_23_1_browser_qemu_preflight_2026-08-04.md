@@ -69,3 +69,11 @@ sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
 
 That remaining operation must prove the browser ELF build and byte-identical
 guest staging before the retained rendering/input evidence can converge.
+
+## Superseded status
+
+The provider and staging blockers above were subsequently resolved. The signed
+`llvmorg-23.1.0-rc2` provider built and staged the browser ELF successfully;
+the current terminal blocker is the production guest missing the 180-second
+desktop/browser readiness oracle during repeated million-element draw/font
+materialization. See `verify_clang_23_1_browser_demo_2026-08-04.md`.

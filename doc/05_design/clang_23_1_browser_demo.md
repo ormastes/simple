@@ -51,3 +51,14 @@ Every rejection includes the observed path/version and expected `23.1.x`.
 Provider/bootstrap/browser/QEMU logs are retained under the isolated build tree.
 The QEMU report must prove font, baseline, fullscreen, restored and browser
 frames plus correlated keyboard, pointer/click and browser provenance events.
+
+## Focused pre-QEMU renderer probe
+
+The x86_64 freestanding probe imports only public debug seams around the
+production custom-property collector, resolution state, substitution, style
+lookup, and backdrop admission. It must prove exact Aetheric values before a
+full QEMU cycle: two serialized properties, resolved `rgba(31,31,33,0.80)` and
+`blur(30px)`, gradient colors, memo color, and admission `true:4:1700`.
+Concatenation intermediates remain statically `text`; exact admission uses
+bounded ASCII byte parsing so the probe does not depend on incomplete
+freestanding dynamic dispatch or string-to-integer helpers.

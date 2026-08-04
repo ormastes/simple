@@ -14,6 +14,13 @@ Run each unchanged criterion once.  A failing criterion permits at most three
 fix/verify cycles.  Environmental absence is not a pass: retain the exact
 blocker and command evidence.
 
+Before each changed full-QEMU input, run the focused freestanding renderer
+probe for REQ-004 and REQ-010. Require exact custom-property serialization,
+resolution, colors, backdrop admission `true:4:1700`, the terminal
+`CSS_VAR_TRANSPORT_PROBE_DONE` marker, and no fault marker. This probe narrows
+producer/admission defects but does not replace framebuffer, input, font, or
+browser-content evidence from the canonical wrapper.
+
 ## Manual flow
 
 1. Inspect the installed Clang 23.1 toolchain.
