@@ -201,6 +201,14 @@ fn _simple_web_layout_execute_draw_ir_composition(
 ) -> SimpleWebLayoutEngine2DExecutionResult:
     val render = _simple_web_layout_render_draw_ir_composition(
         composition, width, height, backend_name, image_resources)
+    # A caller that asked for an accelerated backend and got its pixels back
+    # from a CPU fallback surface received a DEMOTED frame. Before 2026-08-02
+    # that demotion was invisible here (`render_degraded` stayed false), which
+    # is how a Vulkan lane poisoned mid-frame by a font-route failure could
+    # publish a partial frame as a complete one. Latch it.
+    val lane_demoted = (
+        backend_name != "software" and backend_name != "cpu" and
+        render.readback_source == "cpu_fallback")
     val material_fallback = simple_web_layout_material_provenance_after_backend_execution(
         material_witness,
         render.skipped_command_count,
@@ -218,7 +226,7 @@ fn _simple_web_layout_execute_draw_ir_composition(
         # Captured AFTER the layout/style pass has run, so it reflects any
         # budget break in that pass; the vector_font_* fields below are only
         # trustworthy when this is false.
-        render_degraded: simple_web_layout_last_render_degraded(),
+        render_degraded: simple_web_layout_last_render_degraded() or lane_demoted,
         vector_font_identity: render.font_identity,
         vector_font_pixel_size:
             _simple_web_draw_ir_last_text_font_pixel_size(

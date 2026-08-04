@@ -333,6 +333,33 @@ class Engine2D with DrawIrRenderTarget:
         self.selected_backend_name = "vulkan-poisoned-software"
         self.vulkan_font_state_unknown = true
 
+    me vulkan_font_poisoned() -> bool:
+        """True once a font-route failure demoted this Vulkan lane to the CPU."""
+        self.vulkan_font_state_unknown
+
+    me _vulkan_primitive_target() -> VulkanBackend?:
+        """Vulkan handle for PRIMITIVE routing -- nil once the lane is poisoned.
+
+        RUN-LANE TRUNCATION (2026-08-02): `_poison_vulkan_font_surface` above
+        installs a CPU fallback surface but deliberately keeps
+        `self.vulkan_backend` non-nil, because `shutdown()` still needs that
+        handle to release device resources (nulling it leaks the Vulkan
+        session). Every primitive router, however, tested
+        `elif val Some(vk) = self.vulkan_backend:` BEFORE the
+        `else: self.backend` arm, so after a poison they all kept dispatching
+        into the dead backend -- whose methods each begin
+        `if self.completion_unknown: return` (backend_vulkan.spl) and are
+        therefore silent no-ops. The installed fallback surface was never
+        drawn into, and a full-length `device_readback` frame missing
+        everything after the first text draw was published with
+        `render_degraded=false`. Routers now resolve their Vulkan handle
+        through here, so a poisoned lane falls through to `self.backend`,
+        i.e. the fallback surface that actually paints.
+        """
+        if self.vulkan_font_state_unknown:
+            return nil
+        self.vulkan_backend
+
     # ========================================================================
     # Constructors
     # ========================================================================
@@ -1087,7 +1114,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.clear(color)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             vulkan.clear(color)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
@@ -1105,7 +1132,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.draw_rect(x, y, w, h, color)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             vulkan.draw_rect(x, y, w, h, color)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
@@ -1123,7 +1150,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.draw_rect_filled(x, y, w, h, color)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             vulkan.draw_rect_filled(x, y, w, h, color)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
@@ -1141,7 +1168,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.draw_line(x1, y1, x2, y2, color, thickness)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             vulkan.draw_line(x1, y1, x2, y2, color, thickness)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
@@ -1159,7 +1186,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.draw_circle(cx, cy, r, color)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             vulkan.draw_circle(cx, cy, r, color)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
@@ -1177,7 +1204,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.draw_circle_filled(cx, cy, r, color)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             vulkan.draw_circle_filled(cx, cy, r, color)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
@@ -1195,7 +1222,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.draw_rounded_rect(x, y, w, h, radius, color)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             vulkan.draw_rounded_rect(x, y, w, h, radius, color)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
@@ -1213,7 +1240,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             vulkan.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
@@ -1231,7 +1258,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             vulkan.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
@@ -1521,8 +1548,12 @@ class Engine2D with DrawIrRenderTarget:
                 _vec_entry_probe_count = _vec_entry_probe_count + 1
                 print("[vec-text-probe] returned-from-draw_text_configured ok={configured_ok}")
             return
-        if self.vulkan_font_state_unknown:
-            return
+        # NOTE(2026-08-02): a poisoned lane used to `return` here, silently
+        # DROPPING the bitmap text draw. It only existed because the router
+        # chain below would otherwise dispatch into the dead Vulkan backend;
+        # `_vulkan_primitive_target()` now excludes that arm, so the chain
+        # falls through to `self.backend` -- the CPU fallback surface the
+        # poison installed -- and the text is painted instead of dropped.
         if val Some(vg) = self.virtio_gpu_backend:
             vg.draw_text(x, y, text_val, color, font_size)
         elif val Some(bm) = self.baremetal_backend:
@@ -1532,7 +1563,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.draw_text(x, y, text_val, color, font_size)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_text(x, y, text_val, color, font_size)
             self.vulkan_backend = Some(vulkan_typed)
@@ -2015,7 +2046,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.draw_text_bg(x, y, text_val, fg, bg, font_size)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             # Keep the canonical software-AA payload byte-for-byte; only the
             # final copy is routed through the canonical typed Vulkan state.
             val text_buf = text_aa_blit_buffer(text_val, fg, bg, font_size)
@@ -2040,7 +2071,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.draw_image(x, y, w, h, pixels)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             vulkan.draw_image(x, y, w, h, pixels)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
@@ -2174,7 +2205,7 @@ class Engine2D with DrawIrRenderTarget:
             emu_draw_gradient_rect_h(cuda, x, y, w, h, left_color, right_color)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_gradient_rect_h(
                 x, y, w, h, left_color, right_color)
@@ -2232,7 +2263,7 @@ class Engine2D with DrawIrRenderTarget:
             emu_draw_rect_blend(cuda, x, y, w, h, color)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_rect_blend(x, y, w, h, color)
             self.vulkan_backend = Some(vulkan_typed)
@@ -2256,7 +2287,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.draw_image_blend(x, y, w, h, pixels)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_image_blend(x, y, w, h, pixels)
             self.vulkan_backend = Some(vulkan_typed)
@@ -2398,7 +2429,7 @@ class Engine2D with DrawIrRenderTarget:
             emu_draw_image_scaled(cuda, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             # Typed receiver: the if-val binding is type-erased and the AOT
             # codegen's ambiguous-method guard refuses a bare
             # draw_image_scaled with 26 candidates (blocked `bin/simple
@@ -2423,7 +2454,7 @@ class Engine2D with DrawIrRenderTarget:
             emu_draw_image_scaled_blend(cuda, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_image_scaled_blend(
                 dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
@@ -2455,7 +2486,7 @@ class Engine2D with DrawIrRenderTarget:
             emu_draw_blur_rect(cuda, x, y, w, h, radius)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_blur_rect(x, y, w, h, radius)
             self.vulkan_backend = Some(vulkan_typed)
@@ -2473,7 +2504,7 @@ class Engine2D with DrawIrRenderTarget:
             emu_draw_shadow_rect(cuda, x, y, w, h, offset_x, offset_y, blur_r, color)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_shadow_rect(
                 x, y, w, h, offset_x, offset_y, blur_r, color)
@@ -2492,7 +2523,7 @@ class Engine2D with DrawIrRenderTarget:
             emu_draw_image_transform(cuda, dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_image_transform(
                 dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
@@ -2511,7 +2542,7 @@ class Engine2D with DrawIrRenderTarget:
             emu_draw_rect_blend_mode(cuda, x, y, w, h, color, mode)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_rect_blend_mode(x, y, w, h, color, mode)
             self.vulkan_backend = Some(vulkan_typed)
@@ -2529,7 +2560,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.set_mask(mask_pixels, w, h)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.set_mask(mask_pixels, w, h)
             self.vulkan_backend = Some(vulkan_typed)
@@ -2547,7 +2578,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.clear_mask()
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.clear_mask()
             self.vulkan_backend = Some(vulkan_typed)
@@ -2566,7 +2597,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.set_clip(x, y, w, h)
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.set_clip(x, y, w, h)
             self.vulkan_backend = Some(vulkan_typed)
@@ -2585,7 +2616,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.clear_clip()
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.clear_clip()
             self.vulkan_backend = Some(vulkan_typed)
@@ -2604,7 +2635,7 @@ class Engine2D with DrawIrRenderTarget:
             cuda.present()
             self.cuda_backend = cuda
             self.backend = cuda
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             vulkan.present()
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
@@ -2625,7 +2656,7 @@ class Engine2D with DrawIrRenderTarget:
             self.cuda_backend = cuda
             self.backend = cuda
             return ok
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             val ok = vulkan.submit_batch()
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
@@ -2649,7 +2680,7 @@ class Engine2D with DrawIrRenderTarget:
             self.cuda_backend = cuda
             self.backend = cuda
             return pixels
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             val pending_status = vulkan._flush_pending_compute()
             if pending_status < 0:
                 vulkan.mark_completion_unknown()
@@ -2664,6 +2695,13 @@ class Engine2D with DrawIrRenderTarget:
 
     me read_pixels_with_source() -> Engine2DReadback:
         """Read the framebuffer contents as a flat u32 array."""
+        if self.vulkan_font_state_unknown:
+            # The lane was demoted to the CPU fallback surface by
+            # `_poison_vulkan_font_surface`; the device framebuffer holds only
+            # whatever landed before the poison. Report the surface that was
+            # actually painted, with honest provenance -- never
+            # `device_readback` (run-lane truncation, 2026-08-02).
+            return engine2d_readback(self.backend.read_pixels(), "cpu_fallback")
         if val Some(vg) = self.virtio_gpu_backend:
             vg.read_pixels_with_source()
         elif val Some(bm) = self.baremetal_backend:
@@ -2674,7 +2712,7 @@ class Engine2D with DrawIrRenderTarget:
             self.cuda_backend = cuda
             self.backend = cuda
             readback
-        elif val Some(vulkan) = self.vulkan_backend:
+        elif val Some(vulkan) = self._vulkan_primitive_target():
             val pending_status = vulkan._flush_pending_compute()
             if pending_status < 0:
                 vulkan.mark_completion_unknown()

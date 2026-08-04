@@ -1,7 +1,7 @@
 # Vulkan engine2d lane publishes a TRUNCATED frame as a proven device frame when the font route fails
 
 **Date:** 2026-08-02 (mechanism re-pinned 2026-08-04)
-**Status:** OPEN — mechanism pinned by reading + A/B probes; fix not applied
+**Status:** FIXED 2026-08-04 — see "Fix (2026-08-04)" at the end of this file.
 **Severity:** High (silent wrong frame, exit 0, `render_degraded=false`,
 `readback.source=device_readback`)
 **Lane:** engine2d backend `"vulkan"` under
@@ -245,3 +245,73 @@ complete must fall back and say so, never publish a truncated frame.
 - `probe_sw96.log` / `probe_vk96.log` — 96x72 with-text software vs vulkan
 - `vk96_readback.log` — provenance receipt for the truncated with-text frame
 - `probe_releaseseed_run.log` — 320x240 with phase traces
+
+## Fix (2026-08-04)
+
+Applied exactly where the mechanism section pins it: at the router gate. The
+`(A)` framebuffer roll-back in `backend_vulkan_font.spl` is left alone — it is a
+legitimate "undo my partial writes"; the defect was `(B)`, that the roll-back
+was then published as a complete frame.
+
+### `src/lib/gc_async_mut/gpu/engine2d/engine.spl`
+
+1. New `me _vulkan_primitive_target() -> VulkanBackend?` returns `nil` while
+   `vulkan_font_state_unknown` is set, and `self.vulkan_backend` otherwise.
+   Every primitive router now resolves its handle through it —
+   `elif val Some(vulkan) = self._vulkan_primitive_target():`, **29 sites** on
+   this revision (the "37" in the mechanism section above counted routers, not
+   the distinct `elif` dispatch lines). A poisoned lane therefore falls through
+   to `else: self.backend`, which is the CPU fallback surface
+   `_poison_vulkan_font_surface` installs — so that surface stops being dead
+   code and is actually drawn into.
+
+   **Gate, do not null.** `self.vulkan_backend` itself is untouched, because
+   `shutdown()` still needs the handle to release the device session; nulling it
+   would leak.
+
+2. `read_pixels_with_source()` returns
+   `engine2d_readback(self.backend.read_pixels(), "cpu_fallback")` while the
+   lane is poisoned. `device_readback` can no longer be reported for a frame the
+   device did not produce — this is the receipt that was lying in
+   `vk96_readback.log`.
+
+3. `draw_text()`'s `if self.vulkan_font_state_unknown: return` is **removed**.
+   It existed only to keep the router chain below it off the dead backend, which
+   the gate now does; with it gone the chain falls through to the software
+   surface and the bitmap text is painted rather than silently dropped.
+
+4. `me vulkan_font_poisoned() -> bool` exposes the state to callers.
+
+### `src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl`
+
+5. `_simple_web_layout_execute_draw_ir_composition` latches `lane_demoted` — an
+   accelerated `backend_name` whose readback came back `cpu_fallback` — into
+   `render_degraded`. A demoted frame is no longer published as a clean one.
+
+### On `skipped_command_count`
+
+After (1)+(3) the poisoned lane drops nothing: primitives and the CPU font
+plan's glyph blits all land on the fallback surface. The count is therefore
+honest at 0 *by construction* rather than by omission, and no counter was added
+— a counter that is always 0 would be new dead code.
+
+One unaccounted text drop remains, orthogonal and pre-existing:
+`draw_text_configured()` returns `false` (empty plan / unsupported selection)
+without drawing and without incrementing anything, and `draw_ir_adv.spl:1722`
+ignores that return. Separate follow-up, not part of this fix.
+
+### Verification
+
+- **Control — the healthy path must not move.** `textfree_ab_probe.spl`, 96x72,
+  no text nodes: software vs vulkan stay bit-identical after the fix
+  (`sw/vk_blue=504 green=504 amber=504 red=336 purple=336 body=4728`,
+  `textfree_v2.log`). The source was re-grepped immediately before AND after the
+  run (31 gate sites both times) so the result provably describes the fixed
+  tree.
+- **With-text A/B** — `vulkan_drop_probe.spl` (64x48, both arms in one process,
+  the probe whose pre-fix numbers are quoted above) and `withtext_ab_probe.spl`
+  (96x72, through the readback-result entry, prints one authoritative
+  `Results:` line). PASS requires the vulkan arm to either match software or
+  report `render_degraded=true` with a non-`device_readback` source; a partial
+  frame claiming `device_readback` is a FAIL by construction.
+- **Regression gate** — `test/03_system/gui/web_showcase_full_gpu_offload_spec.spl`.
