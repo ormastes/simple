@@ -88,10 +88,15 @@ bookmark is synchronized with GitHub and is rebased onto the current
   forwarding, unknown cleanup opcodes, swapped release arguments, and
   wrong-typed owner/lease locals. Typed gates now cover the public
   `CompilerBackend`, shared post-transform adapter handoff, `CodegenPipeline`,
-  and prepared/final VHDL boundaries. The MIR body still has no cleanup-entry
-  manifest, so exact release count and reverse registration order remain open.
-  This does not prove executable behavior, source exception-packet identity,
-  or a backend personality implementation.
+  and prepared/final VHDL boundaries. `MirExceptionCleanupContract` now records
+  exact owner/lease/guard locals, release instruction sites, and execution
+  order on `MirFunction`/`MirBody`; JSON serialization and optimizer retention
+  preserve it. The verifier's guarded `(block, entry-index)` dataflow rejects
+  missing, duplicate, extra, reordered, stale, wrong-argument, and inconsistent
+  join manifests and requires every Resume path to consume the declared entries.
+  Exact static release count and reverse registration order are therefore
+  closed. This does not prove executable behavior, source exception-packet
+  identity, async cancellation, or a backend personality implementation.
 - **PASS — automatic registry source path (static review):** real compile inputs
   discover and install the resolver-owned aspect registry; its fingerprint is
   carried into object/closure cache identity. Importer-scoped resolution keys,

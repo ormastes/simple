@@ -2543,16 +2543,13 @@ unsupported consumers retain E-MIR-UNWIND002, while lowering retains
 E-MIR-UNWIND001 only when no cleanup successor owner is available.
 
 <!-- codex-design -->
-#### Future exact facet-cleanup manifest
+#### Exact facet-cleanup manifest
 
-The CFG verifier can authenticate the release ABI today, but a MIR body does
-not retain which leases were live at each unwind edge. It therefore cannot
-prove release count or reverse-acquisition order. The future representation
-must attach typed metadata to `MirFunction` and expose the same metadata through
-`MirBody`; block labels are diagnostic text and must never participate in this
-proof.
+The CFG verifier authenticates both the release ABI and the leases live at each
+unwind edge. Typed metadata is attached to `MirFunction` and exposed through
+`MirBody`; block labels are diagnostic text and never participate in the proof.
 
-The minimal metadata API is:
+The implemented metadata API is:
 
 ```simple
 struct MirInstructionSite:
@@ -2620,11 +2617,12 @@ Verifier semantics for each contract are:
    arguments, or a guard on any other local fails closed with
    E-MIR-UNWIND003.
 
-Focused verifier tests must cover: two unconditional leases in reverse order;
+Focused verifier tests cover: two unconditional leases in reverse order;
 nested scopes; guarded true and false paths; two independently guarded entries;
 missing, duplicate, extra, and reordered release sites; swapped owner/lease;
 wrong owner/lease/guard types; wrong guard block or continuation; a join with
 different manifest cursors; stale block/local/instruction identities after an
 optimizer rewrite; and JSON/SMF round-trip preservation. The production test
-must mutate MIR after optimization and prove the final backend gate rejects a
-stale manifest.
+mutates MIR after optimization and proves the final backend gate rejects a stale
+manifest. These are static structural proofs until the executable compiler and
+an admitted unwind backend pass their release gates.

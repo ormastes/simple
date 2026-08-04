@@ -7,7 +7,10 @@ HIR-to-MIR admission bridge, the explicit MIR call-terminator contract, and its
 consumers are implemented and statically reviewed. Cleanup successors,
 payload-carrying Throw/Resume, typed landing pads, and the production verifier
 gate are also implemented statically. Backend personality/runtime exception
-support, cancellation, and executable verification remain open.
+gate are also implemented statically. Typed cleanup manifests prove exact
+release identity, guarded count, and reverse order at final MIR gates. Backend
+personality/runtime exception support, cancellation, and executable verification
+remain open.
 
 ## Problem
 
@@ -165,8 +168,11 @@ Current implementation against the minimum truthful model is:
    LLVM C API and native/unsupported backends reject unsupported `MayUnwind`.
 4. **Implemented statically:** source-derived `MayUnwind` with live facet
    cleanup lowers through `CallTerminator` to an unwind-only landing pad,
-   reverse releases, and `Resume`. The production optimizer gate validates the
-   exception CFG before and after transformations.
+   reverse releases, and `Resume`. `MirExceptionCleanupContract` records exact
+   owner/lease/guard locals and release sites; guarded cursor dataflow proves
+   release count/order and rejects stale or inconsistent manifests. Production
+   optimizer and backend gates validate the exception CFG before and after
+   transformations.
 5. **Partially implemented:** native and unsupported backends fail closed.
    Textual LLVM can spell `invoke`, but admission remains blocked until the
    function is no longer contradictorily `nounwind` and the unwind block owns a
@@ -208,6 +214,10 @@ terminate in `Resume` of that original token; mutually exclusive terminal
 resumes are permitted, but forwarding is not. MIR validation rejects landing
 pads reached by normal edges, unwind targets without a landing pad, external
 entries, cycles, unknown opcodes, ordinary token uses, and non-resuming paths.
+Facet cleanup landing pads additionally require one typed cleanup manifest;
+validation checks exact sites, symbol/signature/typed argument order, guarded
+true-release/false-bypass joins, and complete ordered consumption before every
+`Resume`.
 
 For one `MayUnwind` call with live facet scopes, lowering must build this CFG:
 
