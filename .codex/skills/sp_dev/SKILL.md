@@ -67,16 +67,37 @@ the applicable full lint and duplication gates. If duplicate caching changed,
 the same gate must prove token/cosine create/reuse parity, changed/deleted-file
 invalidation, `--no-cache`, exit parity, and JSON stdout purity.
 
-For LLVM 23.1 migration/bootstrap lanes, build the coherent provider with
+For LLVM/bootstrap work, default `--backend=llvm` and every related native,
+SimpleOS, QEMU, linker, and code-generation lane to the repository-managed
+Clang/LLVM 23.1 provider. Build or validate that coherent provider only through
 `scripts/setup/build-llvm-23-1-provider.shs` from the signed current
 `llvmorg-23.1.0-rc2` tag (stable 23.1.0 is not published as of 2026-08-04).
 Export its installed prefix as both `LLVM_23_1_PREFIX` for shell consumers and
-`SIMPLE_LLVM_PREFIX` for the pure-Simple backend; never mix a 23.1 frontend with
-an older linker, archiver, optimizer, or code generator. A user-authorized
-fresh artifact such as `build/native_probe/simple` may provide ad-hoc bootstrap
-evidence only after its path, version, and SHA-256 are recorded and its native
-smoke passes with stub fallback disabled. It is not Stage 4 unless the bounded
-essential-tools smoke above also passes against that exact artifact.
+`SIMPLE_LLVM_PREFIX` for the pure-Simple backend. Never mix a 23.1 frontend
+with an older linker, archiver, optimizer, object tool, or code generator.
+
+Before accepting a provider-backed result, retain the `--verify-only` output
+and record the exact `LLVM_23_1_PREFIX`, `LLVM_TAG`, `LLVM_TAG_COMMIT`,
+`CLANG`, `LINKER`, `LLVM_AR`, `LLVM_OBJCOPY`, and `LLVM_CONFIG` identities,
+their 23.1.0 version output, and SHA-256 values for every executable actually
+used. The selected lane must pass those paths explicitly to its command or
+environment. `PATH` discovery, an unversioned system tool, or a matching major
+version alone is not provider evidence.
+
+Do not silently fall back to LLVM 18, `LLVM_SYS_180_PREFIX`, an LLVM-18-only
+Rust `inkwell`/`llvm-sys` capsule, or a host-default clang when the 23.1
+provider is absent or rejected: fail the 23.1 lane and retain its first
+blocker. An explicit rollback is permitted only as separately labeled rollback
+evidence: name the previous provider/version and exact binary hashes, the
+failed 23.1 provider identity and reason, the rollback command, and the
+re-entry command for 23.1. Rollback evidence cannot satisfy a 23.1 migration,
+Stage 4, release, or SimpleOS admission criterion.
+
+A user-authorized fresh artifact such as `build/native_probe/simple` may
+provide ad-hoc bootstrap evidence only after its path, version, and SHA-256 are
+recorded and its native smoke passes with stub fallback disabled. It is not
+Stage 4 unless the bounded essential-tools smoke above also passes against that
+exact artifact.
 
 After the backend and SimpleOS port admit the same provider, build the browser
 guest with `scripts/os/build_browser_demo_client.shs`, retain
