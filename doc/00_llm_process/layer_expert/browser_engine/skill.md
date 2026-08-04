@@ -217,4 +217,37 @@ phase-by-phase GPU-reality audit:
   `simple_web_render_session` (interpreter arm-binding leak; see
   `doc/08_tracking/bug/render_session_second_render_match_arm_shadowing_bx_2026-08-02.md`).
 
+## Render budget is a silent-truncation hazard (2026-08-02)
+
+This layer owns `simple_web_html_layout_renderer_foundation.spl`, which defines
+the wall-clock render budget. Contract for anyone writing a spec against this
+layer:
+
+- `WEB_RENDER_BUDGET_MS = 10000` (`..._foundation.spl:81`) **trips under
+  interpreter load and then silently publishes truncated styles** — no error,
+  exit 0, a plausible-but-wrong render. Any parity/showcase spec that renders a
+  non-trivial page on the interpreter is exposed.
+- Sanctioned opt-in, called from the SPEC:
+  `simple_web_layout_set_render_budget_floor_ms(900000)` — exported at
+  `..._foundation.spl:176`, **raise-only** (`ms > 0`).
+  Companions: `simple_web_layout_render_budget_floor_ms()` (read) and
+  `simple_web_layout_restore_render_budget_floor_ms(ms)` (scoped restore,
+  accepts `>= 0` so a bounded degraded-retry caller can lower back to
+  "no floor"). Production precedent for the raise/restore pair:
+  `simple_web_layout_engine2d_fast.spl:306`.
+- A floor is a **calibration knob, not a bypass** — the budget still expires
+  past the floored deadline.
+- **Raising the in-tree default `WEB_RENDER_BUDGET_MS` is forbidden.** Arm the
+  floor per-spec instead.
+- Env override, read at `..._foundation.spl:127`: `SIMPLE_WEB_RENDER_BUDGET_MS`
+  (unset/non-numeric falls back to the default).
+
+Consumer using this today: `test/03_system/gui/web_showcase_full_gpu_offload_spec.spl`.
+
+Seven GPU-offload lanes over this layer are green; the evidence map and the
+companion `# @exec_limit` trap live in the
+[gpu_offload_check feature expert](../../feature_expert/gpu_offload_check/skill.md),
+with the authoritative counts in
+[doc/03_plan/platform/structural_compute/webrender_gpu_offload_plan.md](../../../03_plan/platform/structural_compute/webrender_gpu_offload_plan.md).
+
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

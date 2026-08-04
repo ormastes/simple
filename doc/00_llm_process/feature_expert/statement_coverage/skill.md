@@ -24,6 +24,16 @@ verification evidence required for any attribution change.
   NEVER appear in the dump's called set.
 - Bug doc:
   [instrumented_statement_coverage_tooling_inert_2026-08-02.md](../../../08_tracking/bug/instrumented_statement_coverage_tooling_inert_2026-08-02.md)
+- Landing commits: `1a6c1e362a5` (working `SIMPLE_COVERAGE=1` statement
+  coverage, pure-`.spl` wiring) then `d905ebdb7aa` (instance-method
+  attribution fix, below).
+- Owning layer: [test_runner layer expert](../../layer_expert/test_runner/skill.md)
+  — child-env setup, spec-header directives, coverage report entry points
+  (`_cov_report_for_file:494`, `_cov_print_report:537`).
+- Attribution caveat seen in the GPU-offload campaign: `dom.spl` measures ~1%
+  despite a green 38/38 DOM lane exercising it heavily. Treat low coverage on a
+  green lane as an attribution question before calling the lane vacuous. See
+  [gpu_offload_check](../gpu_offload_check/skill.md).
 
 ## Attribution model (2026-08-02, `d905ebdb7aa`)
 

@@ -147,6 +147,99 @@ inventory doubles as the burn-down list for making phases 1-5 honest.
   construct" per rejection) applies to Option A, not this scanner.
 - SPipe skill for agents: `.claude/skills/gpu-offload-check.md`.
 
+## Campaign evidence map — seven green GPU-offload lanes (2026-08-02)
+
+Authoritative record (counts transcribed from it, do not re-derive):
+[doc/03_plan/platform/structural_compute/webrender_gpu_offload_plan.md](../../../03_plan/platform/structural_compute/webrender_gpu_offload_plan.md)
+§ evidence table (lines ~93-102). All spec paths below were confirmed to exist.
+
+| Lane | Spec | Result |
+|------|------|--------|
+| HTML parser GPU (flat projection, CPU-oracle parity) | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/html_parser_gpu_flat_spec.spl` | 24/24 |
+| CSS parser GPU tables (style_block_parse + selector) | `.../css_parser_gpu_tables_spec.spl` | 47/47 |
+| DOM build GPU offload | `.../dom_build_gpu_offload_spec.spl` | 38/38 |
+| CSS apply + transform (decl_apply lane) | `.../css_decl_apply_transform_spec.spl` | 69/69 |
+| GPU script load + animation ticks | `.../browser_script_animation_gpu_spec.spl` | 22/22 |
+| 2D rendering GPU offload parity (device provenance) | `test/02_integration/rendering/web_engine2d_gpu_offload_parity_spec.spl` | 17/17 |
+| Full-GPU-offload web showcase + capture verification | `test/03_system/gui/web_showcase_full_gpu_offload_spec.spl` | 13/13 |
+
+Supporting gates: engine2d renderer unit spec 23/23, backend resolver spec 6/6
+(viable-probe auto-resolution, `b0ef8e6aee5`), plus
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/tile_gpu_lane_spec.spl`
+(tile grid + paint).
+
+Read this table together with the **phase-audit reality** section above: a green
+lane proves the *parity oracle* holds, NOT that the phase reaches a device.
+Phases 1-2 and 4 are still naming-only per that audit.
+
+## Two measurement traps in these lanes (READ BEFORE running or editing)
+
+Both are silent — they produce a plausible wrong answer, not an error. They are
+the single most expensive things to rediscover in this campaign.
+
+### 1. `# @exec_limit <N>` — the ONLY way to raise a spec's op cap
+
+`rt_fault_set_execution_limit` called from inside a spec is **INERT**: the
+driver reads `SIMPLE_EXECUTION_LIMIT` once at startup
+(`src/compiler_rust/driver/src/cli/init.rs:163`), so a spec cannot raise its own
+cap in-process. The sanctioned mechanism is the spec-header directive, parsed by
+`spec_exec_limit_directive` (`src/app/test_runner_new/test_runner_single.spl:190`)
+and forwarded into the child env by the env setup in `main()` (same file,
+~line 599):
+
+```
+# @exec_limit 2000000000
+```
+
+- Plain comment line, anywhere in the file; parser does a raw `find_raw` for the
+  literal `"# @exec_limit "` then reads consecutive ASCII digits.
+- Non-numeric / absent ⇒ 0 ⇒ no directive.
+- **Raise-only**: an already-higher `SIMPLE_EXECUTION_LIMIT` in the environment
+  wins; the directive never lowers the cap.
+- Live example (and the doc-comment explaining why): `tile_gpu_lane_spec.spl`,
+  whose two 600x400 readback + per-tile checksum passes exceed the default
+  10M-operation cap.
+
+### 2. Render-budget floor — a tripped budget silently publishes truncated styles
+
+`WEB_RENDER_BUDGET_MS = 10000`
+(`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl:81`)
+trips under interpreter load and then **silently publishes truncated styles** —
+the spec sees a plausible, wrong render, exit 0.
+
+- Sanctioned opt-in: the spec calls
+  `simple_web_layout_set_render_budget_floor_ms(900000)`
+  (exported at `..._foundation.spl:176`). The setter is **raise-only** (`ms > 0`).
+  Scoped-restore counterpart for bounded degraded-retry callers:
+  `simple_web_layout_restore_render_budget_floor_ms(ms)` (accepts `>= 0`, so it
+  can lower back to "no floor"); read the current floor with
+  `simple_web_layout_render_budget_floor_ms()`.
+- This is a **calibration knob, not a budget bypass** — the budget still expires
+  past the floored deadline.
+- **Raising the in-tree default `WEB_RENDER_BUDGET_MS` is forbidden.** Arm the
+  floor from the spec instead.
+- Live example: `web_showcase_full_gpu_offload_spec.spl` (arms it, 2 call sites).
+  In-tree production precedent for the scoped raise/restore pattern:
+  `simple_web_layout_engine2d_fast.spl:306`.
+- There is also a `SIMPLE_WEB_RENDER_BUDGET_MS` env override read at
+  `..._foundation.spl:127`; unset or non-numeric falls back to the default.
+
+## Coverage tooling status
+
+Working `SIMPLE_COVERAGE=1` statement coverage landed as `1a6c1e362a5`
+(pure-`.spl` wiring), with the instance-method attribution fix in `d905ebdb7aa`.
+Details and the attribution model:
+[statement_coverage feature expert](../statement_coverage/skill.md).
+Caveat carried by the plan doc: `dom.spl` still measures 1% despite the 38/38
+DOM lane exercising it heavily — treat low coverage on a green lane as an
+attribution question first.
+
+## Adjacent tooling landed with this campaign
+
+- `src/app/clean/main.spl` — `simple clean`, manual + auto temp/cache cleanup.
+  Auto mode is **opt-in via `SIMPLE_AUTO_CLEAN=1`** (runs at `simple build`
+  start; `SIMPLE_CACHE_MAX_GB` default 20).
+
 ## Update Rule
 
 When the project process creates or changes research, requirements,

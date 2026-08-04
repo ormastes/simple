@@ -1045,6 +1045,41 @@ If a spec genuinely cannot reach `Results:` after retries, say so with the
 attempt count and land it **flagged as probe-validated, not green** — never
 report an unverified spec as passing.
 
+### Two limits a long-running spec must raise from the right place (2026-08-02)
+
+Both fail **silently** — a plausible wrong result, not an error.
+
+- **Op cap — `# @exec_limit <N>` header directive.** Calling
+  `rt_fault_set_execution_limit` inside a spec is INERT: the driver reads
+  `SIMPLE_EXECUTION_LIMIT` once at startup
+  (`src/compiler_rust/driver/src/cli/init.rs:163`). The sanctioned mechanism is
+  a plain comment line anywhere in the spec, parsed by
+  `spec_exec_limit_directive` (`src/app/test_runner_new/test_runner_single.spl:190`)
+  and forwarded into the child env:
+
+  ```
+  # @exec_limit 2000000000
+  ```
+
+  Raise-only (a higher existing env value wins); default cap is 10M ops.
+  Reference: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/tile_gpu_lane_spec.spl`.
+
+- **Web render budget — arm the floor from the spec.**
+  `WEB_RENDER_BUDGET_MS = 10000`
+  (`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl:81`)
+  trips under interpreter load and then **silently publishes truncated styles**
+  (exit 0, wrong render). Opt in by calling
+  `simple_web_layout_set_render_budget_floor_ms(900000)` (exported at
+  `..._foundation.spl:176`, raise-only) from the spec; restore with
+  `simple_web_layout_restore_render_budget_floor_ms(ms)`. It is a calibration
+  knob, not a bypass — the budget still expires past the floored deadline.
+  **Raising the in-tree default is forbidden.**
+  Reference: `test/03_system/gui/web_showcase_full_gpu_offload_spec.spl`.
+
+Full context and the seven-lane evidence map:
+`doc/00_llm_process/feature_expert/gpu_offload_check/skill.md` and
+`doc/00_llm_process/layer_expert/test_runner/skill.md`.
+
 ## Spec-source landmines (the spec fails, the code is fine)
 
 Some spec failures come from how the **spec source itself** is lexed, not from the
