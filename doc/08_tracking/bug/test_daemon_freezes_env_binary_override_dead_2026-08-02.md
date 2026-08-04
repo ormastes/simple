@@ -147,6 +147,34 @@ Regression coverage extended:
 example that deliberately names **no** variable from the original five, so it
 can only pass while the sibling names remain listed.
 
+### The regression coverage for the 2026-08-02 fix had itself never passed
+
+Running the existing passthrough spec before changing anything returned
+`2 examples, 2 failures`. The cause is not the daemon at all — it is the same
+Simple-interpolation trap this file's own "Fix" section relies on. The fixture
+wrote:
+
+```
+process_run("/bin/sh", ["-c", "echo shell=[${SIMPLE_TEST_BINARY:-}]"])
+```
+
+`{` opens an interpolation inside a Simple text literal, so `${SIMPLE_TEST_BINARY:-}`
+is parsed Simple-side and the example dies with ``semantic: variable
+`SIMPLE_TEST_BINARY` not found`` **before the shell ever runs**. The
+`OVERRIDE_TARGET shell=[…]` line was therefore never printed, `observed_shell()`
+was always false, and both examples failed on their `assert_true`. The braces
+must be doubled — exactly the escaping that
+`guard_backend_parity_spec.spl:99` already documents.
+
+So the spec cited above as "regression coverage" for the 2026-08-02 fix was red
+from the moment it landed and could not have been protecting anything. Measured
+after doubling the braces: `direct=[OVERRIDE_ALPHA]`, `shell=[OVERRIDE_ALPHA]`,
+`1 example, 0 failures`, exit 0.
+
+This is worth separating from the daemon defect: the daemon bug made specs pass
+for the wrong reason, whereas this one made the guard fail for the wrong reason.
+A red guard that nobody re-ran is the same blind spot in the other direction.
+
 ## Still open
 
 The protocol-level fix. `light_request_encode`/`light_request_parse` should
