@@ -85,6 +85,35 @@ describe "gpu-first present decision honesty":
             step("A decline must state a concrete reason — never a silent CPU fallback")
             expect(decision).to_contain("reason=")
 
+    it "never labels a frame gpu-* unless the readback proves a device produced it":
+        simple_web_layout_set_render_budget_floor_ms(900000)
+
+        step("Sweep every gpu-paint-candidate backend, present and unavailable alike")
+        # The offload label used to be derived from `economics.residual_pixels` —
+        # a prediction made BEFORE dispatch — so a backend that returned Ok but
+        # presented on the CPU was still labelled `gpu-full` while its own
+        # `source=` field said `cpu_mirror`. The label and the readback are one
+        # claim and must agree.
+        val names = ["vulkan", "metal", "cuda", "opencl", "webgpu", "rocm"]
+        var i = 0
+        while i < names.len():
+            val name = names[i]
+            val decision = simple_web_layout_render_html_gpu_first_decision(
+                FILL_HTML, SURFACE_W, SURFACE_H, name)
+            val claims_gpu = (decision.contains("gpu-first:gpu-full")
+                or decision.contains("gpu-first:gpu-partial"))
+
+            step("Any gpu-* label must carry device readback provenance")
+            if claims_gpu:
+                expect(decision).to_contain("source=device_readback")
+                expect(decision).to_contain(":offloaded=rect_fill:")
+
+            step("A CPU-sourced readback must never be labelled gpu-* nor claim an offload")
+            if decision.contains("source=cpu_mirror") or decision.contains("source=cpu_fallback"):
+                expect(claims_gpu).to_be(false)
+                expect(decision).to_contain(":offloaded=none")
+            i = i + 1
+
     it "maps the SIMPLE_WEB_GPU_PAINT routing env to exactly one of the three modes":
         val mode = web_gpu_paint_mode()
         expect(mode == "off" or mode == "measured" or mode == "gpu-first").to_be(true)

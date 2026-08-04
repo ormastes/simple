@@ -777,6 +777,23 @@ fn _present_gpu_first(html: text, width: i32, height: i32, backend_name: text) -
         val decision = "gpu-first:cpu-fallback:offloaded=none:cpu=full-frame:reason=engine2d-create-failed"
         print "[web-gpu-paint-decision] backend={normalized_backend} {decision}"
         return _WebGpuFirstPresent(readback: readback, decision: decision)
+    # The offload label must be backed by the readback that actually produced
+    # this frame, never by the pre-dispatch prediction in `economics`. An
+    # Engine2D backend can return Ok while presenting on the CPU (software
+    # fallback inside the requested backend), in which case the readback
+    # carries no device evidence — claiming `gpu-full` there fabricates
+    # provenance (see the referenced provenance bug). Fail closed: no device
+    # proof, no GPU claim and no `offloaded=` claim.
+    if not _web_gpu_readback_device_proven(readback, economics.frame_pixels):
+        val decision = (
+            "gpu-first:cpu-presented:offloaded=none:cpu=full-frame" +
+            ":reason=readback-not-device-proven" +
+            ":source=" + readback.source +
+            ":handle=" + readback.backend_handle.to_text() +
+            ":device_identity=" + readback.device_identity.to_text()
+        )
+        print "[web-gpu-paint-decision] backend={normalized_backend} {decision}"
+        return _WebGpuFirstPresent(readback: readback, decision: decision)
     val offload_kind = if economics.residual_pixels > 0: "gpu-partial" else: "gpu-full"
     val cpu_side = if economics.residual_pixels > 0:
         "glyph-gradient-residual:" + economics.residual_pixels.to_text() + "px-cpu-rastered-ground-truth"
