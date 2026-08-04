@@ -85,21 +85,6 @@ class LlvmIRBuilder:
 
     static fn create(name: text, target: LlvmTargetTriple) -> LlvmIRBuilder:
         val st = if target.is_32bit(): "i32" else: "i64"
-        # Reset the SIMPLE_BOOTSTRAP accumulation buffer: it is the global
-        # mirror of the per-instance `sb` string builder (see emit()), so it
-        # MUST be cleared exactly where a fresh `sb` is allocated -- one
-        # builder is one module (MirToLlvm.create/create_baremetal are the
-        # only construction sites, one per module). Without this reset the
-        # buffer accumulates across modules and every module after the first
-        # is emitted as <all previous modules> ++ <this module>, giving
-        # duplicate `source_filename`/`target datalayout`/`target triple`
-        # lines mid-file. llc rejects that at the SECOND header line with
-        # "expected top-level entity", which reads as a corrupt target
-        # triple. Bare-metal attrs are queued per-instance in
-        # pending_baremetal_attrs (emit_baremetal_attributes runs after
-        # create()), so clearing here cannot drop them.
-        # See doc/08_tracking/bug/llvm_bootstrap_ir_buffer_not_reset_2026-08-01.md
-        _llvm_bootstrap_ir_text = ""
         LlvmIRBuilder(
             module_name: name,
             sb: rt_string_builder_new(),
@@ -127,6 +112,11 @@ class LlvmIRBuilder:
 
     me emit_module_header():
         """Emit module header."""
+        # The bootstrap accumulator is module-scoped, not builder-scoped.
+        # Incidental builders may be constructed while another module is
+        # being emitted; construction alone must not erase that module's IR.
+        # An actual header is the ownership boundary that starts a new module.
+        _llvm_bootstrap_ir_text = ""
         # Do not retain or snapshot the incoming LlvmTargetTriple across the
         # builder class boundary. On the compiled pure-Simple lane its optional
         # env payload can already be corrupt at create(), while reconstructing

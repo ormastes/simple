@@ -72,7 +72,8 @@ describe "LLVM IR Builder bootstrap buffer isolation":
         # Under SIMPLE_BOOTSTRAP=1, emit() accumulates into the module-level
         # global _llvm_bootstrap_ir_text instead of the per-instance string
         # builder. That global is the mirror of `sb`, so LlvmIRBuilder.create()
-        # must clear it. Before the fix, module B built as A ++ B, producing a
+        # must clear it when B emits its module header. Before the fix, module
+        # B built as A ++ B, producing a
         # second `source_filename`/`target triple` mid-file, which llc rejects
         # with "expected top-level entity".
         rt_env_set("SIMPLE_BOOTSTRAP", "1")
@@ -105,3 +106,28 @@ describe "LLVM IR Builder bootstrap buffer isolation":
         # Exactly one module header in B (split on N occurrences -> N+1 parts).
         expect(ir_b.split("target triple").len()).to_equal(2)
         expect(ir_b.split("source_filename").len()).to_equal(2)
+
+    it "does not let an incidental builder erase an active module":
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+
+        val triple = LlvmTargetTriple.from_target(CodegenTarget.X86_64)
+        val top = LlvmIRBuilder.create("top", triple)
+        top.emit_module_header()
+        top.start_function("body", [], "i64")
+        top.emit_ret("i64", "42")
+        top.end_function()
+
+        # Construction without a module header has no ownership of the
+        # module-scoped bootstrap accumulator and therefore cannot reset it.
+        val incidental = LlvmIRBuilder.create("incidental", triple)
+        val _ = incidental.local_counter
+
+        top.emit("; retained tail")
+        val ir = llvm_ir_builder_build(top)
+
+        rt_env_set("SIMPLE_BOOTSTRAP", "")
+
+        expect(ir.split("ModuleID = 'top'").len()).to_equal(2)
+        expect(ir.split("define i64 @body()").len()).to_equal(2)
+        expect(ir.split("; retained tail").len()).to_equal(2)
+        expect(ir.contains("incidental")).to_equal(false)
