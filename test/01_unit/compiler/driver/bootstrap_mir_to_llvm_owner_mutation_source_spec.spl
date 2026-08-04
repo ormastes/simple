@@ -270,10 +270,10 @@ describe "bootstrap MIR-to-LLVM owner mutation":
             "src/compiler/50.mir/mir_instruction_support.spl"
         ) ?? ""
 
-        expect(codegen).to_contain("self.translate_block_at(body.blocks, block_i)")
-        expect(codegen).to_contain("me translate_block_at(blocks: [MirBlock], block_index: i64):")
-        expect(codegen).to_contain("self.translate_terminator_at(blocks, block_index)")
-        expect(codegen).to_contain("me translate_terminator_at(blocks: [MirBlock], block_index: i64):")
+        expect(codegen).to_contain("self.translate_block_at(body.blocks, block_i, effective_ret_ty, is_start, return_slot_id)")
+        expect(codegen).to_contain("me translate_block_at(blocks: [MirBlock], block_index: i64,")
+        expect(codegen).to_contain("self.translate_terminator_at(blocks, block_index, return_type_text, is_start, return_slot_id)")
+        expect(codegen).to_contain("me translate_terminator_at(blocks: [MirBlock], block_index: i64,")
         expect(codegen).to_contain("val term = block.terminator")
         expect(codegen.contains("self.translate_terminator(block.terminator)")).to_equal(false)
         expect(codegen).to_contain("blocks[block_index].bootstrap_ret_kind()")
@@ -412,7 +412,7 @@ describe "bootstrap MIR-to-LLVM owner mutation":
         expect(codegen).to_contain("[mir-to-llvm] terminator:call")
         expect(codegen).to_contain("[mir-to-llvm] terminator:emit")
 
-    it "reads return decisions and local ABI text through the translator owner":
+    it "threads primitive return state into indexed terminators":
         val codegen = rt_file_read_text(
             "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
         ) ?? ""
@@ -420,27 +420,26 @@ describe "bootstrap MIR-to-LLVM owner mutation":
             "src/compiler/70.backend/backend/_MirToLlvm/class_def.spl"
         ) ?? ""
 
-        expect(codegen).to_contain("self.bootstrap_return_decision(return_local_id)")
-        expect(codegen).to_contain("self.bootstrap_return_type_text()")
-        expect(codegen).to_contain("self.bootstrap_return_local_value_text(return_local_id)")
-        expect(codegen).to_contain("self.bootstrap_return_local_type_text(return_local_id)")
-        expect(translator).to_contain("fn bootstrap_return_decision(local_id: i64) -> i64:")
-        expect(translator).to_contain("if self.current_function_name == \"_start\":\n            return 1")
-        expect(translator).to_contain("if self.return_locals.has(local_id) or not self.local_types.has(local_id) or not self.defined_locals.has(local_id):\n            return 2")
-        expect(translator).to_contain("fn bootstrap_return_type_text() -> text:")
-        expect(translator).to_contain("fn bootstrap_return_local_value_text(local_id: i64) -> text:")
-        expect(translator).to_contain("return \"%l")
-        expect(translator).to_contain("\"undef\"")
-        expect(translator).to_contain("fn bootstrap_return_local_type_text(local_id: i64) -> text:")
-        expect(translator).to_contain("if self.ptr_locals.contains_key(local_id):\n            return \"ptr\"")
-        expect(translator).to_contain("if self.bool_locals.contains_key(local_id):\n            return \"i1\"")
-        expect(translator).to_contain("val type_text = self.local_types[local_id]")
-        expect(translator).to_contain("self.native_int_type")
+        expect(codegen).to_contain("var return_slot_id = -1")
+        expect(codegen).to_contain("return_slot_id = local_id")
+        expect(codegen).to_contain("val is_start = name == \"_start\"")
+        expect(codegen).to_contain("effective_ret_ty, is_start, return_slot_id")
+        expect(codegen).to_contain("return_local_id == return_slot_id")
+        expect(codegen).to_contain("not self.local_types.has(return_local_id)")
+        expect(codegen).to_contain("not self.defined_locals.has(return_local_id)")
+        expect(codegen).to_contain("self.local_value_text(return_local_id)")
+        expect(codegen).to_contain("self.get_local_type(return_local_id)")
+        expect(codegen).to_contain("self.valid_llvm_type(return_type_text)")
+        expect(translator.contains("fn bootstrap_return_decision(local_id: i64) -> i64:")).to_equal(false)
+        expect(translator.contains("fn bootstrap_return_type_text() -> text:")).to_equal(false)
+        expect(translator.contains("fn bootstrap_return_local_value_text(local_id: i64) -> text:")).to_equal(false)
+        expect(translator.contains("fn bootstrap_return_local_type_text(local_id: i64) -> text:")).to_equal(false)
 
-    it "keeps owner return decision and type progress observable":
+    it "keeps threaded return decisions observable":
         val codegen = rt_file_read_text(
             "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
         ) ?? ""
-        expect(codegen).to_contain("[mir-to-llvm] terminator:ret-owner-type")
-        expect(codegen).to_contain("[mir-to-llvm] terminator:ret-owner-decision")
-        expect(codegen).to_contain("[mir-to-llvm] terminator:ret-owner-local")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:ret-threaded-type")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:ret-threaded-status")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:ret-threaded-fallback")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:ret-threaded-local")

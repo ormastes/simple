@@ -371,6 +371,7 @@ impl MirTextCodegen for MirToLlvm:
         # otherwise a u8 local id N in one function could leak its unsigned
         # flag onto an unrelated i32 local id N in the next function.
         var local_i = 0
+        var return_slot_id = -1
         while local_i < body.locals.len():
             val local: MirLocal = body.locals[local_i]
             val llvm_ty: text = self.llvm_type_text(local.type_)
@@ -396,6 +397,7 @@ impl MirTextCodegen for MirToLlvm:
             match local.kind:
                 case Return:
                     self.return_locals[local_id] = true
+                    return_slot_id = local_id
                 case _:
                     ()
             local_i = local_i + 1
@@ -513,16 +515,17 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] function:started {name}"
 
+        val is_start = name == "_start"
         var block_i = 0
         while block_i < body.blocks.len():
-            self.translate_block_at(body.blocks, block_i)
+            self.translate_block_at(body.blocks, block_i, effective_ret_ty, is_start, return_slot_id)
             block_i = block_i + 1
 
         self.builder.end_function()
         if bootstrap_debug:
             print "[mir-to-llvm] function:done {name}"
 
-    me translate_block_at(blocks: [MirBlock], block_index: i64):
+    me translate_block_at(blocks: [MirBlock], block_index: i64, return_type_text: text, is_start: bool, return_slot_id: i64):
         """Translate a MIR basic block."""
         val block = blocks[block_index]
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
@@ -543,7 +546,7 @@ impl MirTextCodegen for MirToLlvm:
             bootstrap_inst_i = bootstrap_inst_i + 1
         if bootstrap_debug:
             print "[mir-to-llvm] block:terminator-before bb{bootstrap_block_id}"
-        self.translate_terminator_at(blocks, block_index)
+        self.translate_terminator_at(blocks, block_index, return_type_text, is_start, return_slot_id)
         if bootstrap_debug:
             print "[mir-to-llvm] block:terminator-after bb{bootstrap_block_id}"
 
@@ -865,7 +868,7 @@ impl MirTextCodegen for MirToLlvm:
             param_tys = param_tys.push(self.valid_llvm_type(self.llvm_type_text(param)))
         self.remember_function_param_types(name, param_tys)
 
-    me translate_terminator_at(blocks: [MirBlock], block_index: i64):
+    me translate_terminator_at(blocks: [MirBlock], block_index: i64, return_type_text: text, is_start: bool, return_slot_id: i64):
         """Translate a block terminator through its indexed MirBlock owner."""
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
@@ -877,38 +880,38 @@ impl MirTextCodegen for MirToLlvm:
         match term:
             case Ret(_):
                 val ret_kind = blocks[block_index].bootstrap_ret_kind()
-                val owner_return_type = self.bootstrap_return_type_text()
                 if bootstrap_debug:
                     print "[mir-to-llvm] terminator:ret-scalar-kind index={block_index} kind={ret_kind}"
-                    print "[mir-to-llvm] terminator:ret-owner-type index={block_index} type={owner_return_type}"
+                    print "[mir-to-llvm] terminator:ret-threaded-type index={block_index} type={return_type_text}"
+                    print "[mir-to-llvm] terminator:ret-threaded-status index={block_index} start={is_start} return_slot={return_slot_id}"
                 if ret_kind == 0:
-                    if owner_return_type == "void":
+                    if return_type_text == "void":
                         self.builder.emit_ret_void()
                     else:
-                        self.builder.emit_ret(owner_return_type, self.ret_value_for_type(owner_return_type, "0"))
+                        self.builder.emit_ret(return_type_text, self.ret_value_for_type(return_type_text, "0"))
                     if bootstrap_debug:
                         print "[mir-to-llvm] terminator:emit index={block_index} variant=ret-nil"
                 elif ret_kind == 1 or ret_kind == 2:
                     val return_local_id = blocks[block_index].bootstrap_ret_local_id()
                     if bootstrap_debug:
                         print "[mir-to-llvm] terminator:ret-scalar-local index={block_index} local={return_local_id}"
-                    val return_decision = self.bootstrap_return_decision(return_local_id)
+                    val requires_fallback = return_local_id == return_slot_id or not self.local_types.has(return_local_id) or not self.defined_locals.has(return_local_id)
                     if bootstrap_debug:
-                        print "[mir-to-llvm] terminator:ret-owner-decision index={block_index} decision={return_decision}"
-                    if return_decision == 1:
+                        print "[mir-to-llvm] terminator:ret-threaded-fallback index={block_index} required={requires_fallback}"
+                    if is_start:
                         self.builder.emit("  unreachable")
                         if bootstrap_debug:
                             print "[mir-to-llvm] terminator:emit index={block_index} variant=ret-start"
-                    elif return_decision == 2:
-                        self.builder.emit_ret(owner_return_type, self.ret_value_for_type(owner_return_type, "0"))
+                    elif requires_fallback:
+                        self.builder.emit_ret(return_type_text, self.ret_value_for_type(return_type_text, "0"))
                         if bootstrap_debug:
                             print "[mir-to-llvm] terminator:emit index={block_index} variant=ret-fallback"
                     else:
-                        val val_str = self.bootstrap_return_local_value_text(return_local_id)
-                        val src_ret_ty = self.bootstrap_return_local_type_text(return_local_id)
+                        val val_str = self.local_value_text(return_local_id)
+                        val src_ret_ty = self.get_local_type(return_local_id)
                         if bootstrap_debug:
-                            print "[mir-to-llvm] terminator:ret-owner-local index={block_index} value={val_str} type={src_ret_ty}"
-                        val ret_ty = self.valid_llvm_type(owner_return_type)
+                            print "[mir-to-llvm] terminator:ret-threaded-local index={block_index} value={val_str} type={src_ret_ty}"
+                        val ret_ty = self.valid_llvm_type(return_type_text)
                         val ret_val = self.value_as_type(val_str, src_ret_ty, ret_ty)
                         self.builder.emit_ret(ret_ty, self.ret_value_for_type(ret_ty, ret_val))
                         if bootstrap_debug:
@@ -924,7 +927,7 @@ impl MirTextCodegen for MirToLlvm:
                         val str_len = const_text.len() + 1
                         val nit = self.native_int()
                         const_value_text = "getelementptr inbounds ([{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0)"
-                    val ret_ty = self.valid_llvm_type(owner_return_type)
+                    val ret_ty = self.valid_llvm_type(return_type_text)
                     self.builder.emit_ret(ret_ty, self.ret_value_for_type(ret_ty, const_value_text))
                     if bootstrap_debug:
                         print "[mir-to-llvm] terminator:emit index={block_index} variant=ret-const"
