@@ -76,6 +76,16 @@ workers consume the resulting artifact read-only.
 
 Until those proofs exist, per-file process isolation is slow but correct.
 
+## 2026-08-04 reproduction
+
+The robust lifecycle persistence verification lane reproduced the blocker with
+`simple check src/compiler`. The default 60-second CPU guard killed the first
+delegated checker at 64 seconds. With `SIMPLE_TIMEOUT_SECONDS=300`, the next
+delegated checker remained CPU-bound for more than two minutes while the parent
+had not advanced past the first compiler file. The bounded run was terminated
+and its logs retained under `build/verify_robust_lifecycle/`; extrapolating this
+per-file startup across the compiler tree is not a viable release check.
+
 ## Cached executable build attempt
 
 Compiler identity:

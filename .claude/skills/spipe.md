@@ -1323,15 +1323,18 @@ SPipe verify and implementation phases enforce these quality gates:
 
 ### Strictness Tiers (lint-tier axis)
 
-Code-strictness is a `moderate | lib | reliable` tier, **orthogonal** to the
-stdlib memory tiers (`nogc_sync_mut`, ...) — never conflate the two. `reliable`
-is the strict-lint + (planned) primitive-use + proof-coverage ladder that
-supersedes the rejected "High-robustness mode". Select via `simple.sdn [lints]
-profile=`, `simple lint --profile=<tier>`, or a `@lint_profile(<tier>)` file
-header (most-local-wins; distinct from the R9 `@profile(critical)` must-use
-annotation). Unset = legacy defaults. Every lint code is configurable via
-`[lints]` / `@allow`/`@warn`/`@deny`. Guide: `doc/07_guide/language/strictness_tiers.md`
-(tldr alongside); plan: `doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md`.
+Code strictness uses the `moderate | strict | robust | critical` tier axis,
+**orthogonal** to the stdlib memory tiers (`nogc_sync_mut`, ...) — never
+conflate the two. `robust` is the strict-lint + planned primitive-use and proof-
+coverage ladder that supersedes the rejected "High-robustness mode";
+`critical` adds the mission-critical release rules. `lib`, `reliable`, and
+`mission-critical` are deprecated compatibility aliases for `strict`, `robust`,
+and `critical`. Select via `simple.sdn [lints] profile=`, `simple lint
+--profile=<tier>`, or a `@lint_profile(<tier>)` file header (most-local-wins;
+distinct from the R9 `@profile(critical)` must-use annotation). Unset = legacy
+defaults. Every lint code is configurable via `[lints]` / `@allow`/`@warn`/
+`@deny`. Guide: `doc/07_guide/language/strictness_tiers.md` (tldr alongside);
+plan: `doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md`.
 
 ## Feature Module Packaging (`.sfm`)
 
