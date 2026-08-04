@@ -5,6 +5,16 @@
 > rendering, capture, or input-delivery evidence. Only a successful canonical
 > live checker run can produce that evidence.
 
+Requirement traceability: `REQ-AQMP-001` binds the selected compiler to the
+clean Stage 2/Stage 3 provenance manifest and its sanity evidence;
+`REQ-AQMP-002` requires zero fabricated freestanding stubs with fallback
+disabled; `REQ-AQMP-003` requires one same-run chain across admitted artifact
+identities, serial receipts, ordered QMP input, guest frame/RAMFB commits, and
+distinct QEMU screendumps.  The executable source-contract scenario checks the
+fail-closed producers for all three requirements.  Only its live scenario can
+produce runtime evidence, and that diagnostic evidence never substitutes for
+physical-input `REQ-QRS` rows.
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 2 | 2 | 0 | 0 |

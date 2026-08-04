@@ -50,6 +50,22 @@ another run.
 | REQ-QRS-007 | A user physically presses/releases Ctrl; serial proves distinct modifier down/up transitions. |
 | REQ-QRS-008 | The interaction interval has ten or more guest frame intervals, p50/p95 render/present timing, QEMU host CPU samples and bounded heap delta. |
 
+The automated AArch64 diagnostic lane has a separate, non-physical acceptance
+contract.  These rows are prerequisites for artifact admission and diagnostic
+QMP evidence; they cannot satisfy `REQ-QRS-004` through `REQ-QRS-007`.
+
+| ID | Required proof |
+|---|---|
+| REQ-AQMP-001 | The selected current self-hosted compiler is bound by SHA-256 to a `status=pass` Stage 2/Stage 3 provenance manifest containing admitted Stage 2 identity, Stage 2 and Stage 3 sanity PASS, source fingerprint, command transcripts, and Stage 3 output identity. A mechanically usable early-phase artifact is admissible only when this provenance is complete and clean; copying or renaming an older binary is forbidden. |
+| REQ-AQMP-002 | The same artifact build runs with stub fallback disabled and the strict fabricated-stub ratchet enabled, records `Fabricated freestanding stubs: 0 symbol(s)`, and fails closed on `FABRICATED-NEW`, unmeasured fabrication, or a missing baseline. |
+| REQ-AQMP-003 | One bounded live run binds the admitted compiler, guest source, kernel, disk, and disk producer identities to serial receipts, ordered QMP `input-send-event` sequences, guest frame/RAMFB commit revisions and checksums, and distinct before/after QEMU RAMFB screendumps. |
+
+| Requirement | Executable acceptance artifact | Retained evidence | Current status |
+|---|---|---|---|
+| REQ-AQMP-001 | `test/03_system/os/wm/arm64_simpleos_qmp_input_spec.spl` checks the Stage 2/3 manifest fields, compiler admission, and build-manifest compiler identity contract. | Stage 2/3 `provenance.env`, sanity evidence, command transcripts, selected compiler SHA-256, ARM64 build manifest and frozen-source manifest. | Pending a current producer receipt; source contract present. |
+| REQ-AQMP-002 | The same spec checks no-stub environment flags, the literal zero-fabrication receipt, self-test rejection fixtures, and fail-closed rejection reason. | Canonical build log plus its SHA-256 and the ARM64 build manifest. | Pending a current canonical build; source contract present. |
+| REQ-AQMP-003 | The same spec's live scenario invokes the canonical wrapper; `arm64_wm_ramfb_screendump_spec.spl` covers live RAMFB capture and the wrapper correlates QMP input, serial receipts, guest frames, and captures. | Serial/QMP logs, before/after PPMs and SHA-256 values, correlation report, manifest/frozen-source identities, launch hashes, and cleanup receipt from one run root. | Pending one admitted live run; no historical or source-only evidence is PASS. |
+
 QMP `send-key`, QMP pointer injection, AppleScript input, headless capture,
 source-only assertions, or an unsupported human assertion are never manual
 acceptance evidence.  Automated wrappers and QMP input are useful diagnostic
