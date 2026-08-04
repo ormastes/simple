@@ -90,8 +90,11 @@ bookmark is synchronized with GitHub and is rebased onto the current
   `CompilerBackend`, shared post-transform adapter handoff, `CodegenPipeline`,
   and prepared/final VHDL boundaries. `MirExceptionCleanupContract` now records
   exact owner/lease/guard locals, release instruction sites, and execution
-  order on `MirFunction`/`MirBody`; JSON serialization and optimizer retention
-  preserve it. The verifier's guarded `(block, entry-index)` dataflow rejects
+  order on `MirFunction`/`MirBody`; compile-pipeline JSON, clone, optimizer,
+  VHDL catalog, and CUDA/Vulkan/VHDL body adapters preserve it through the
+  final pre-backend gate. This is compiler-internal metadata, not production
+  SMF persistence or deserializer coverage. The verifier's guarded
+  `(block, entry-index)` dataflow rejects
   missing, duplicate, extra, reordered, stale, wrong-argument, and inconsistent
   join manifests and requires every Resume path to consume the declared entries.
   Exact static release count and reverse registration order are therefore

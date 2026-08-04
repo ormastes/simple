@@ -219,6 +219,12 @@ validation checks exact sites, symbol/signature/typed argument order, guarded
 true-release/false-bypass joins, and complete ordered consumption before every
 `Resume`.
 
+The manifest is compiler-internal metadata carried by `MirFunction`, `MirBody`,
+compile-pipeline MIR JSON, and identity-preserving pre-backend adapters. It is
+not persisted in production SMF and has no production SMF deserializer.
+Versioned SMF persistence remains future work only if a later loader must
+reconstruct and validate MIR cleanup contracts after loading.
+
 For one `MayUnwind` call with live facet scopes, lowering must build this CFG:
 
 ```text

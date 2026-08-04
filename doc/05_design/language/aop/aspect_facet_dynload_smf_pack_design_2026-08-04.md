@@ -2585,7 +2585,12 @@ non-local operand before creating the manifest.
 `FacetCleanupScope.entries`, emits the CFG, and appends one contract only after
 all referenced blocks and instruction indices are final. `MirFunction` owns
 `exception_cleanup_contracts: [MirExceptionCleanupContract]`; `MirBody` carries
-that field through `from_function`. MIR JSON/SMF serialization must preserve it.
+that field through `from_function`. Compile-pipeline MIR JSON serialization and
+identity-preserving function/body/backend adapters preserve it through the
+final pre-backend gate. Production SMF persistence and deserialization do not
+carry this compiler-only manifest today; adding a versioned SMF representation
+and reader contract remains future work if post-load MIR validation ever needs
+the metadata.
 Every MIR transform must either preserve/remap all referenced local, block, and
 instruction identities or explicitly invalidate the module before the final
 gate. Silent metadata dropping is an E-MIR-UNWIND003 failure.
@@ -2622,7 +2627,8 @@ nested scopes; guarded true and false paths; two independently guarded entries;
 missing, duplicate, extra, and reordered release sites; swapped owner/lease;
 wrong owner/lease/guard types; wrong guard block or continuation; a join with
 different manifest cursors; stale block/local/instruction identities after an
-optimizer rewrite; and JSON/SMF round-trip preservation. The production test
+optimizer rewrite; and compile-pipeline JSON, clone, optimizer, and backend
+adapter preservation. The production test
 mutates MIR after optimization and proves the final backend gate rejects a stale
 manifest. These are static structural proofs until the executable compiler and
 an admitted unwind backend pass their release gates.
