@@ -48,7 +48,7 @@ use app.startup.aspect_lazy_singleflight.{
 }
 use app.startup.aspect_lifecycle_gate.{AspectLifecycleGate}
 use app.startup.aspect_advice_dispatch_ledger.{
-    AspectAdviceDispatchLedger, AspectPreparedAdviceClaim
+    AspectAdviceDispatchLedger, AspectPreparedAdviceInvocation
 }
 use app.startup.aspect_facet_runtime_contract.{
     AspectApplicationPhase, AspectApplicationOperation,
@@ -459,6 +459,11 @@ impl AspectExecutionContext:
     # FacetRef integration pins the exact published generation before it
     # dereferences a witness. The opaque token rejects replay and forgery.
     me fn acquire_published_generation(aspect_id: text) -> Result<GenerationToken, text>:
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.acquire_published_generation_locked(aspect_id))
+
+    me fn acquire_published_generation_locked(aspect_id: text) -> Result<GenerationToken, text>:
         if not self.coordinator.published.has(aspect_id):
             return Err("E-AF004 aspect has no published generation: {aspect_id}")
         if self.coordinator.published[aspect_id].state != "active":
@@ -473,6 +478,11 @@ impl AspectExecutionContext:
     # Release accepts only a generation represented by this application's
     # publication table, preventing arbitrary lifecycle-owner manipulation.
     me fn release_published_generation(token: GenerationToken) -> Result<(), text>:
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.release_published_generation_locked(token))
+
+    me fn release_published_generation_locked(token: GenerationToken) -> Result<(), text>:
         var published = false
         for aspect_id in self.coordinator.published.keys():
             val activation = self.coordinator.published[aspect_id]
@@ -485,6 +495,11 @@ impl AspectExecutionContext:
         Ok(())
 
     fn published_generation_pin_count(aspect_id: text) -> Result<i64, text>:
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.published_generation_pin_count_locked(aspect_id))
+
+    fn published_generation_pin_count_locked(aspect_id: text) -> Result<i64, text>:
         if not self.coordinator.published.has(aspect_id):
             return Err("E-AF004 aspect has no published generation: {aspect_id}")
         val activation = self.coordinator.published[aspect_id]
@@ -499,6 +514,17 @@ impl AspectExecutionContext:
         implemented_business_interfaces: [text],
         facet_interface_id: text
     ) -> Result<FacetBindingRecord?, text>:
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.lookup_published_facet_locked(
+                    concrete_type_id, implemented_business_interfaces,
+                    facet_interface_id))
+
+    fn lookup_published_facet_locked(
+        concrete_type_id: text,
+        implemented_business_interfaces: [text],
+        facet_interface_id: text
+    ) -> Result<FacetBindingRecord?, text>:
         facet_lookup(
             self.coordinator.facet_bindings,
             concrete_type_id,
@@ -509,12 +535,19 @@ impl AspectExecutionContext:
     # it returns the preordered visible chain and records exact harness
     # counters for both enabled and disabled slots.
     me fn lookup_published_advice(slot_id: text) -> Result<[AdviceBindingRecord], text>:
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.lookup_published_advice_locked(slot_id))
+
+    me fn lookup_published_advice_locked(slot_id: text) -> Result<[AdviceBindingRecord], text>:
         val lookup = advice_lookup_slot(self.coordinator.advice_bindings, slot_id)?
         self.coordinator.advice_bindings = lookup.registry
         Ok(lookup.chain)
 
     fn advice_binding_counters() -> AdviceBindingCounters:
-        self.coordinator.advice_bindings.counters
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.coordinator.advice_bindings.counters)
 
     fn advice_disabled_footprint() -> AdviceDisabledPathFootprint:
         advice_disabled_path_footprint()
@@ -532,80 +565,88 @@ impl AspectExecutionContext:
         _ = loader
         self.invoke_prepared_advice(slot_id, form)
 
-    me fn prepare_advice_dispatch_under_gate(
-        slot_id: text, form: text
-    ) -> Result<AspectPreparedAdviceClaim, text>:
-        val prepared = advice_dispatch_projection_prepare(
-            self.coordinator.advice_projection,
-            self.coordinator.advice_bindings,
-            self.coordinator.lifecycle,
-            self.loader, slot_id, form)
-        self.coordinator.lifecycle = prepared.lifecycle
-        self.coordinator.advice_bindings = advice_merge_counter_delta(
-            self.coordinator.advice_bindings, prepared.counter_delta)
-        if prepared.status != "prepared" or prepared.permit == nil:
-            return Err(prepared.reason)
-        val permit = prepared.permit.unwrap()
-        val claimed = self.advice_dispatch_ledger.claim(permit.permit_id)
-        if claimed.is_err():
-            val claim_error = claimed.unwrap_err()
-            val rejected = AdviceDispatchInvocationReceipt(
-                permit_id: "unclaimed-application-permit",
-                status: "failed",
-                reason: claim_error,
-                invoked_count: 0,
-                return_values: [])
-            val finalized = advice_dispatch_projection_finalize(
-                permit, rejected,
-                self.coordinator.advice_bindings,
-                self.coordinator.lifecycle)
-            self.coordinator.advice_bindings = finalized.registry
-            self.coordinator.lifecycle = finalized.lifecycle
-            return Err(claim_error)
-        val claim_id = claimed.unwrap()
-        Ok(AspectPreparedAdviceClaim(claim_id: claim_id, permit: permit))
-
-    me fn finalize_advice_dispatch_under_gate(
-        claim: AspectPreparedAdviceClaim,
-        receipt: AdviceDispatchInvocationReceipt
-    ) -> Result<[i64], text>:
-        var effective_receipt = receipt
-        val claim_owned = self.advice_dispatch_ledger.owns(
-            claim.claim_id, claim.permit.permit_id)
-        if not claim_owned:
-            effective_receipt = AdviceDispatchInvocationReceipt(
-                permit_id: "invalid-application-claim",
-                status: "failed",
-                reason: "E-AF010 prepared advice dispatch claim is missing or mismatched",
-                invoked_count: 0,
-                return_values: [])
-        val outcome = advice_dispatch_projection_finalize(
-            claim.permit, effective_receipt,
-            self.coordinator.advice_bindings,
-            self.coordinator.lifecycle)
-        self.coordinator.advice_bindings = outcome.registry
-        self.coordinator.lifecycle = outcome.lifecycle
-        if claim_owned:
-            self.advice_dispatch_ledger.terminalize(
-                claim.claim_id, claim.permit.permit_id)?
-        if outcome.status != "dispatched":
-            return Err(outcome.reason)
-        Ok(outcome.return_values)
-
     # Intrinsic-facing split dispatch. Canonical pin state is installed before
     # unlock; native callbacks run without lifecycle ownership; finalization
     # starts from then-current state and always installs its returned state.
     me fn invoke_prepared_advice(slot_id: text, form: text) -> Result<[i64], text>:
         val prepared = mutex_with_lock_keeping(
             self.lifecycle_gate.mutex, 0, \:
-                self.prepare_advice_dispatch_under_gate(slot_id, form))
+                val outcome = advice_dispatch_projection_prepare(
+                    self.coordinator.advice_projection,
+                    self.coordinator.advice_bindings,
+                    self.coordinator.lifecycle,
+                    self.loader, slot_id, form)
+                self.coordinator.lifecycle = outcome.lifecycle
+                self.coordinator.advice_bindings = advice_merge_counter_delta(
+                    self.coordinator.advice_bindings, outcome.counter_delta)
+                if outcome.status != "prepared" or outcome.permit == nil:
+                    Err(outcome.reason)
+                else:
+                    val permit = outcome.permit.unwrap()
+                    val claimed = self.advice_dispatch_ledger.claim(
+                        permit.permit_id)
+                    if claimed.is_err():
+                        val claim_error = claimed.unwrap_err()
+                        val rejected = AdviceDispatchInvocationReceipt(
+                            permit_id: "unclaimed-application-permit",
+                            status: "failed",
+                            reason: claim_error,
+                            invoked_count: 0,
+                            return_values: [])
+                        val finalized = advice_dispatch_projection_finalize(
+                            permit, rejected,
+                            self.coordinator.advice_bindings,
+                            self.coordinator.lifecycle)
+                        self.coordinator.advice_bindings = finalized.registry
+                        self.coordinator.lifecycle = finalized.lifecycle
+                        if finalized.status != "dispatched" and finalized.reason != "":
+                            Err("{claim_error}; {finalized.reason}")
+                        else:
+                            Err(claim_error)
+                    else:
+                        Ok(AspectPreparedAdviceInvocation(
+                            claim_id: claimed.unwrap(),
+                            permit: permit,
+                            receipt: nil))
+        )
         if prepared.is_err():
             return Err(prepared.unwrap_err())
-        val claim = prepared.unwrap()
-        val receipt = advice_dispatch_permit_invoke_native(claim.permit)
+        val invocation = prepared.unwrap()
+        invocation.receipt = Some(
+            advice_dispatch_permit_invoke_native(invocation.permit))
         mutex_with_lock_keeping(
             self.lifecycle_gate.mutex, 0, \:
-                self.finalize_advice_dispatch_under_gate(claim, receipt))
+                val claim_owned = self.advice_dispatch_ledger.owns(
+                    invocation.claim_id, invocation.permit.permit_id)
+                var receipt = invocation.receipt.unwrap()
+                if not claim_owned:
+                    receipt = AdviceDispatchInvocationReceipt(
+                        permit_id: "invalid-application-claim",
+                        status: "failed",
+                        reason: "E-AF010 prepared advice dispatch claim is missing or mismatched",
+                        invoked_count: 0,
+                        return_values: [])
+                val outcome = advice_dispatch_projection_finalize(
+                    invocation.permit, receipt,
+                    self.coordinator.advice_bindings,
+                    self.coordinator.lifecycle)
+                self.coordinator.advice_bindings = outcome.registry
+                self.coordinator.lifecycle = outcome.lifecycle
+                if claim_owned:
+                    val terminalized = self.advice_dispatch_ledger.terminalize(
+                        invocation.claim_id, invocation.permit.permit_id)
+                    if terminalized.is_err():
+                        if outcome.status != "dispatched" and outcome.reason != "":
+                            Err("{terminalized.unwrap_err()}; {outcome.reason}")
+                        else:
+                            Err(terminalized.unwrap_err())
+                    else:
+                        if outcome.status != "dispatched":
+                            Err(outcome.reason)
+                        else:
+                            Ok(outcome.return_values)
+                else:
+                    Err(outcome.reason))
 
     fn advice_dispatch_in_flight_count() -> i64:
         mutex_with_lock_keeping(
@@ -619,13 +660,24 @@ impl AspectExecutionContext:
         implemented_business_interfaces: [text],
         facet_interface_id: text
     ) -> Result<(FacetBindingRecord, FacetGenerationLease)?, text>:
-        val binding = self.lookup_published_facet(
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.acquire_published_facet_locked(
+                    concrete_type_id, implemented_business_interfaces,
+                    facet_interface_id))
+
+    me fn acquire_published_facet_locked(
+        concrete_type_id: text,
+        implemented_business_interfaces: [text],
+        facet_interface_id: text
+    ) -> Result<(FacetBindingRecord, FacetGenerationLease)?, text>:
+        val binding = self.lookup_published_facet_locked(
             concrete_type_id, implemented_business_interfaces,
             facet_interface_id)?
         if binding == nil:
             return Ok(nil)
         val record = binding.unwrap()
-        val lease = self.acquire_facet_generation_lease(record.aspect_id)?
+        val lease = self.acquire_facet_generation_lease_locked(record.aspect_id)?
         Ok(Some((record, lease)))
 
     # Acquires the generation lease and the exact resolved ordinary-SMF method
@@ -636,7 +688,19 @@ impl AspectExecutionContext:
         facet_interface_id: text,
         method_name: text
     ) -> Result<(FacetWitnessMethodEntry, FacetGenerationLease)?, text>:
-        val acquired = self.acquire_published_facet(
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.acquire_published_facet_method_locked(
+                    concrete_type_id, implemented_business_interfaces,
+                    facet_interface_id, method_name))
+
+    me fn acquire_published_facet_method_locked(
+        concrete_type_id: text,
+        implemented_business_interfaces: [text],
+        facet_interface_id: text,
+        method_name: text
+    ) -> Result<(FacetWitnessMethodEntry, FacetGenerationLease)?, text>:
+        val acquired = self.acquire_published_facet_locked(
             concrete_type_id, implemented_business_interfaces,
             facet_interface_id)?
         if acquired == nil:
@@ -644,7 +708,7 @@ impl AspectExecutionContext:
         val pair = acquired.unwrap()
         val method = facet_witness_method_entry(pair.0, method_name)
         if method.is_err():
-            self.release_facet_generation_lease(pair.1)?
+            self.release_facet_generation_lease_locked(pair.1)?
             return Err(method.unwrap_err())
         Ok(Some((method.unwrap(), pair.1)))
 
@@ -656,7 +720,18 @@ impl AspectExecutionContext:
         implemented_business_interfaces: [text],
         facet_interface_id: text
     ) -> Result<PublishedFacetDescriptorLease?, text>:
-        val acquired = self.acquire_published_facet(
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.acquire_published_facet_descriptor_locked(
+                    concrete_type_id, implemented_business_interfaces,
+                    facet_interface_id))
+
+    me fn acquire_published_facet_descriptor_locked(
+        concrete_type_id: text,
+        implemented_business_interfaces: [text],
+        facet_interface_id: text
+    ) -> Result<PublishedFacetDescriptorLease?, text>:
+        val acquired = self.acquire_published_facet_locked(
             concrete_type_id, implemented_business_interfaces,
             facet_interface_id)?
         if acquired == nil:
@@ -666,7 +741,7 @@ impl AspectExecutionContext:
         val descriptor = record.witness_descriptor
         val validation = aspect_published_facet_descriptor_validate(record)
         if validation.is_err():
-            self.release_facet_generation_lease(pair.1)?
+            self.release_facet_generation_lease_locked(pair.1)?
             return Err(validation.unwrap_err())
         Ok(Some(PublishedFacetDescriptorLease(
             aspect_id: record.aspect_id,
@@ -679,14 +754,21 @@ impl AspectExecutionContext:
     me fn release_published_facet_descriptor(
         acquired: PublishedFacetDescriptorLease
     ) -> Result<(), text>:
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.release_published_facet_descriptor_locked(acquired))
+
+    me fn release_published_facet_descriptor_locked(
+        acquired: PublishedFacetDescriptorLease
+    ) -> Result<(), text>:
         if acquired.aspect_id != acquired.generation_lease.aspect_id:
             # The compiler-generated wrapper is private, but a corrupted
             # handle still must not strand its canonical generation token.
-            self.release_facet_generation_lease(acquired.generation_lease)?
+            self.release_facet_generation_lease_locked(acquired.generation_lease)?
             return Err("E-AF004 facet descriptor lease aspect identity is inconsistent")
-        self.release_facet_generation_lease(acquired.generation_lease)
+        self.release_facet_generation_lease_locked(acquired.generation_lease)
 
-    fn published_facet_descriptor_handle_validate(
+    fn published_facet_descriptor_handle_validate_locked(
         acquired: PublishedFacetDescriptorLease
     ) -> Result<(), text>:
         if acquired.aspect_id != acquired.generation_lease.aspect_id:
@@ -710,7 +792,19 @@ impl AspectExecutionContext:
         expected_abi_hash: text,
         expected_method_names: [text]
     ) -> Result<(), text>:
-        self.published_facet_descriptor_handle_validate(acquired)?
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.validate_published_facet_descriptor_contract_locked(
+                    acquired, expected_facet_interface_id, expected_abi_hash,
+                    expected_method_names))
+
+    fn validate_published_facet_descriptor_contract_locked(
+        acquired: PublishedFacetDescriptorLease,
+        expected_facet_interface_id: text,
+        expected_abi_hash: text,
+        expected_method_names: [text]
+    ) -> Result<(), text>:
+        self.published_facet_descriptor_handle_validate_locked(acquired)?
         if expected_facet_interface_id == "" or expected_abi_hash == "":
             return Err("E-AF002 facet contract identity is incomplete")
         if acquired.facet_interface_id != expected_facet_interface_id:
@@ -741,7 +835,17 @@ impl AspectExecutionContext:
         ordinal: i64,
         expected_name: text
     ) -> Result<i64, text>:
-        self.published_facet_descriptor_handle_validate(acquired)?
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.published_facet_descriptor_method_address_locked(
+                    acquired, ordinal, expected_name))
+
+    fn published_facet_descriptor_method_address_locked(
+        acquired: PublishedFacetDescriptorLease,
+        ordinal: i64,
+        expected_name: text
+    ) -> Result<i64, text>:
+        self.published_facet_descriptor_handle_validate_locked(acquired)?
         if expected_name == "":
             return Err("E-AF005 facet contract method name is empty")
         if ordinal < 0 or ordinal >= acquired.witness_descriptor.method_entries.len():
@@ -756,7 +860,12 @@ impl AspectExecutionContext:
     # Ownership-neutral std.aop lease adapter. The lease carries no app/os
     # object; this boundary reconstructs the canonical lifecycle token.
     me fn acquire_facet_generation_lease(aspect_id: text) -> Result<FacetGenerationLease, text>:
-        val token = self.acquire_published_generation(aspect_id)?
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.acquire_facet_generation_lease_locked(aspect_id))
+
+    me fn acquire_facet_generation_lease_locked(aspect_id: text) -> Result<FacetGenerationLease, text>:
+        val token = self.acquire_published_generation_locked(aspect_id)?
         Ok(FacetGenerationLease(
             aspect_id: aspect_id,
             generation_id: token.generation_id,
@@ -764,12 +873,17 @@ impl AspectExecutionContext:
         ))
 
     me fn release_facet_generation_lease(lease: FacetGenerationLease) -> Result<(), text>:
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.release_facet_generation_lease_locked(lease))
+
+    me fn release_facet_generation_lease_locked(lease: FacetGenerationLease) -> Result<(), text>:
         if not self.coordinator.published.has(lease.aspect_id):
             return Err("E-AF004 facet lease aspect is not published: {lease.aspect_id}")
         val activation = self.coordinator.published[lease.aspect_id]
         if activation.generation != lease.generation_id:
             return Err("E-AF004 facet lease generation does not match publication")
-        self.release_published_generation(GenerationToken(
+        self.release_published_generation_locked(GenerationToken(
             owner_key: activation.activation_key,
             generation_id: lease.generation_id,
             token_id: lease.token_id
@@ -780,7 +894,13 @@ impl AspectExecutionContext:
     # callers release them and retry; no wait loop or forced lease release is
     # hidden here.
     me fn unload_published_aspect(aspect_id: text, loader: ModuleLoader) -> Result<text, text>:
-        self.loader = loader
+        # Compatibility parameter only; never replace the canonical loader.
+        _ = loader
+        mutex_with_lock_keeping(
+            self.lifecycle_gate.mutex, 0, \:
+                self.unload_published_aspect_locked(aspect_id))
+
+    me fn unload_published_aspect_locked(aspect_id: text) -> Result<text, text>:
         self.authorize(AspectApplicationOperation.Unload)?
         if not self.coordinator.published.has(aspect_id):
             return Err("E-AF004 aspect has no published generation: {aspect_id}")

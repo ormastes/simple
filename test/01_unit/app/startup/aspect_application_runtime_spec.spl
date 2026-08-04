@@ -714,16 +714,17 @@ describe "Application aspect runtime policy owner":
         expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(0)
 
     it "quiesces drains releases cache pins and completes ordinary unload":
-        val runtime = AspectApplicationRuntime.create(
+        val loader = moduleloader_with_defaults()
+        val runtime = AspectApplicationRuntime.create_with_loader(
             app_aspect_catalog("startup"),
             app_aspect_session(),
             LifecycleManager.new_manager(),
             AspectPackTrustPolicy.ordinary_unsigned(),
+            loader,
             2,
             2,
             2
         ).unwrap()
-        val loader = moduleloader_with_defaults()
         val provider_key = app_aspect_key()
         val module_key = AspectPackModuleKey(
             provider: provider_key,
@@ -761,8 +762,14 @@ describe "Application aspect runtime policy owner":
             runtime.coordinator.facet_bindings, candidate,
             activation_key, 4).unwrap()
         val lease = runtime.acquire_facet_generation_lease("security.audit").unwrap()
+        runtime.loader.global_symbols["canonical-unload-marker"] = (
+            "canonical-owner", 19)
+        val stale_loader = moduleloader_with_defaults()
 
-        expect(runtime.unload_published_aspect("security.audit", loader).unwrap()).to_equal("quiescing")
+        expect(runtime.unload_published_aspect(
+            "security.audit", stale_loader).unwrap()).to_equal("quiescing")
+        expect(runtime.loader.global_symbols[
+            "canonical-unload-marker"][1]).to_equal(19)
         expect(runtime.coordinator.facet_bindings.active_count()).to_equal(0)
         expect(runtime.coordinator.published["security.audit"].bindings.len()).to_equal(0)
         expect(runtime.coordinator.published["security.audit"].state).to_equal("quiescing")
@@ -771,7 +778,8 @@ describe "Application aspect runtime policy owner":
         expect(runtime.acquire_facet_generation_lease(
             "security.audit").unwrap_err()).to_contain("not published")
         runtime.release_facet_generation_lease(lease).unwrap()
-        expect(runtime.unload_published_aspect("security.audit", loader).unwrap()).to_equal("unloaded")
+        expect(runtime.unload_published_aspect(
+            "security.audit", stale_loader).unwrap()).to_equal("unloaded")
         if runtime.coordinator.published.has("security.audit"):
             fail("unloaded aspect publication remains visible")
         if runtime.provider_cache.has_module(module_key):
