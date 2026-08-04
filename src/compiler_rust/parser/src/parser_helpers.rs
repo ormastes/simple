@@ -519,11 +519,7 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 _ => {
-                    return if saw_indent {
-                        Some(token.kind.clone())
-                    } else {
-                        None
-                    };
+                    return if saw_indent { Some(token.kind.clone()) } else { None };
                 }
             }
 
@@ -537,13 +533,51 @@ impl<'a> Parser<'a> {
     /// Used for multi-line method chaining and binary operator line continuation.
     /// Call this AFTER peek_through_newlines_and_indents_is returns true.
     /// Returns the number of INDENT tokens skipped (need to consume matching DEDENTs later).
+    ///
+    /// Also absorbs a DEDENT that merely *rejoins* a continuation level this
+    /// expression already entered. Every caller invokes this immediately after
+    /// consuming a binary operator, so an operand MUST follow; a DEDENT here is
+    /// the chain stepping back out of a deeper sub-continuation, not the end of
+    /// the expression. Without this, a chain that nests deeper and then returns
+    /// to the outer continuation level twice — e.g.
+    ///
+    /// ```text
+    /// a == b and
+    ///     a ==
+    ///         g(b) and
+    ///     a ==
+    ///         g(b)
+    /// ```
+    ///
+    /// died on the DEDENT before the second `a` with "expected expression,
+    /// found Dedent". Absorption is strictly credit-bounded: we only consume a
+    /// DEDENT while this expression still holds an unmatched INDENT (locally in
+    /// `indent_count`, else in `binary_indent_count`), so a DEDENT that closes
+    /// the enclosing *block* is never eaten and the INDENT/DEDENT books stay
+    /// balanced for `consume_dedents_for_method_chain`.
+    /// See doc/08_tracking/bug/
+    /// parser_rejects_rejoined_nested_operator_continuation_2026-08-04.md.
     pub(crate) fn skip_newlines_and_indents_for_method_chain(&mut self) -> usize {
-        let mut indent_count = 0;
-        while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
-            if matches!(self.current.kind, TokenKind::Indent) {
-                indent_count += 1;
+        let mut indent_count: usize = 0;
+        loop {
+            match self.current.kind {
+                TokenKind::Indent => {
+                    indent_count += 1;
+                    self.advance();
+                }
+                TokenKind::Newline => {
+                    self.advance();
+                }
+                TokenKind::Dedent if indent_count > 0 => {
+                    indent_count -= 1;
+                    self.advance();
+                }
+                TokenKind::Dedent if self.binary_indent_count > 0 => {
+                    self.binary_indent_count -= 1;
+                    self.advance();
+                }
+                _ => break,
             }
-            self.advance();
         }
         indent_count
     }
@@ -637,7 +671,11 @@ impl<'a> Parser<'a> {
     ///
     /// See doc/08_tracking/bug/
     /// parser_while_continuation_swallows_following_declarations_2026-08-01.md.
-    pub(crate) fn header_continuation_dedents_to_reconcile(&mut self, deferred_before: usize, equal_column: bool) -> usize {
+    pub(crate) fn header_continuation_dedents_to_reconcile(
+        &mut self,
+        deferred_before: usize,
+        equal_column: bool,
+    ) -> usize {
         let pending = if equal_column {
             deferred_before.saturating_sub(1)
         } else {

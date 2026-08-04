@@ -47,4 +47,5 @@ mod fstring_bug_tests;
 mod import_parse_tests;
 #[cfg(test)]
 mod recovery_bound_tests;
+mod rejoined_continuation_test;
 mod try_probe_test;
