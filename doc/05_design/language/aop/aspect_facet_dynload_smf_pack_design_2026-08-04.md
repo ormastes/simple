@@ -1312,10 +1312,11 @@ The required producer sequence is:
 6. the context-owned loader registry binds an exact generation, and runtime
    dispatch invokes the preordered chain under its matching generation lease.
 
-Steps 1–3 and the deterministic table contract now exist for execution join
-points. Steps 4–6 remain release-blocking: the stable context capsule, driver
-rewrite, atomic projection install with publication, invalidation before drain,
-and exact-generation pinning across each callback must be proven together.
+Steps 1–6 and the deterministic table contract exist for the admitted
+sequential execution path. Release remains blocked on the callback-safe state
+gate: projection/publication/lifecycle mutation must be serialized, pins must
+be committed to canonical state before callbacks run, no lock may cross a
+callback, and unload must observe those committed pins before resource cleanup.
 
 The backend bridge cannot be implemented as a slot/phase-only native lookup.
 The emitted operation currently has no loader-owned lifecycle handle or
@@ -2361,6 +2362,47 @@ compiler-inserted on every modeled lexical exit.
 Rejected designs are a global/current context cell, a numeric handle registry,
 copied coordinator/lifecycle state, backend-specific raw callbacks, existing
 `dyn Trait` (no production vtable ABI), and `Any`/raw-pointer base erasure.
+
+### 31.0 Callback-safe concurrency correction
+
+The present dispatch function still accepts copied registry/lifecycle values
+and returns replacements after invoking callbacks. That is valid only for the
+sequential tests. It does not make `AspectExecutionContext` a synchronized sole
+owner: concurrent dispatch can lose token/counter mutations, and unload can
+observe zero canonical pins while a callback runs on a local lifecycle copy.
+The compatibility methods that assign a caller-provided `ModuleLoader` into
+`self.loader` likewise cannot participate in the concurrent path; a stale
+loader value must never replace the context-owned loader.
+
+Production advice dispatch therefore requires a three-part operation owned by
+`app/startup`, not by `AdviceBindingRegistry`:
+
+1. **Prepare under the application state mutex:** validate the current
+   publication/projection and loader identity, acquire every exact generation
+   token, and commit lifecycle/counter mutations before returning a private
+   ticket.
+2. **Invoke with no locks held:** execute the immutable ordered callback plan.
+   Reentrant dispatch and callback-requested unload must not deadlock.
+3. **Finish under the same mutex:** release the ticket tokens in reverse order,
+   commit outcome counters, and only then return or panic.
+
+Activation publication and unload invalidation/quiesce must use that same state
+mutex. Physical loader cleanup remains outside callback execution and may begin
+only after the canonical lifecycle is quiescing and drained; one retirement
+claim prevents duplicate cleanup by concurrent unload retries. The lazy I/O
+single-flight mutex is a separate gate and is not a substitute for this state
+owner.
+
+`advice_binding_registry.spl` must shrink to publication/order/lookup/unbind.
+An immutable loader projection module owns row derivation and owner/address
+validation. `os/smf/LifecycleManager` remains the sole token authority.
+`ModuleLoader`/`ResourceLifecycleManager` remain the physical mapping/cache
+owners. `AspectExecutionContext` composes those owners and alone serializes
+their transition order. Publication/lookup counters remain registry-owned;
+dispatch attempt/invocation/failure counters move with the application
+coordinator so updates cannot be lost. Until this split and a guaranteed finish path exist,
+callback-safe concurrent advice dispatch/unload and portable unwind remain
+release-blocking; sequential token accounting is not concurrency evidence.
 
 ### 31.1 Implementation checkpoint
 

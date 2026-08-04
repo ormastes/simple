@@ -32,6 +32,11 @@ flow:
   The reviewed v2 intrinsic carries that exact typed context and rewrites to a
   source-owned unit fail-stop call after exact dispatcher/coverage proof.
   Cleanup completes before panic and arbitrary business returns are preserved.
+- Current advice dispatch is sequential copy-in/copy-out, not callback-safe
+  concurrency: local lifecycle pins are not committed before callbacks and can
+  race unload. The required split is application-mutex prepare/commit, callback
+  with no locks held, then application-mutex release/commit; loader registry,
+  `os/smf` leases, and physical unload remain separate owners.
 - Residual v1/v2 intrinsics and non-admitted targets remain E-AF010. No backend
   trampoline, process-global handle, or second lease authority is permitted.
 - Check/interpreter reject the option directly; JIT and every AOT backend reject
@@ -42,7 +47,8 @@ flow:
   HIR-symbol capture rejection, wrapper-aware provenance, and reverse-order
   cleanup on every currently modeled lexical exit, exact-route injected lazy
   I/O, canonical typed acquisition errors, and blocking single-flight sharing
-  for lazy callers. Production port binding, lifecycle-wide concurrency,
+  for lazy callers. Production port binding, callback-safe advice/lifecycle
+  concurrency,
   portable unwind/cancellation cleanup, and executable evidence remain open;
   verification is `STATUS: FAIL`.
 - Resolver startup now crosses `85.mdsoc` through

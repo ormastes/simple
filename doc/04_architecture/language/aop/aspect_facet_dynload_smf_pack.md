@@ -76,7 +76,7 @@ architecture:
 | catalog and generation adapter | `compiler/99.loader/loader/aspect_catalog.spl`, `aspect_activation.spl` |
 | dynamic facet publication | `compiler/99.loader/loader/facet_binding_registry.spl` (validated candidates, exact `activation_key@generation` publication, concrete/open-world lookup, exact unbind; no lifecycle ownership) |
 | facet artifact contract | `compiler/00.common/structural_contracts/facet_artifact.spl`; SHB v1.1 optional facet-contract section and ordinary-SMF `.facet_bindings` Note consumed through existing readers |
-| dynamic advice publication | `compiler/99.loader/loader/advice_binding_registry.spl` (catalog-prepared slots, canonical preordered chains, exact-generation publish/unbind, disabled-path counters; no pointcut evaluator or lifecycle ownership) |
+| dynamic advice publication | `compiler/99.loader/loader/advice_binding_registry.spl` (catalog-prepared slots, canonical preordered chains, exact-generation publish/unbind, disabled-path counters; no pointcut evaluator). Its current lifecycle/callback executor is the audited cohesion violation described below. |
 | application runtime owner | `app/startup/aspect_application_runtime.spl` (retained trust/cache/coordinator, exact relative routes, mission seal, opaque per-aspect generation leases, quiesce/drain unload) |
 
 The syntax parser is an explicitly feature-scoped frontend surface; it does not
@@ -93,7 +93,7 @@ counters and a footprint descriptor. The application runtime removes both
 facet and advice visibility before unload drain. Mission policy rejects runtime
 advice-patch activation.
 
-`advice_dispatch_slot` is the loader-validated production execution seam for
+`advice_dispatch_slot` is the current loader-validated sequential execution seam for
 zero-argument `before`, `after_success`, and `after_error` witnesses. Admission
 captures the resolved address and owner; dispatch revalidates both against the
 existing `ModuleLoader` before invoking any callback, so an invalid chain fails
@@ -112,8 +112,9 @@ lowering, AOP/debug reconstruction, MIR optimizers, and VHDL aggregation;
 The driver collects a deterministic schema-v1 table. The loader derives an
 immutable schema-v1 dispatch projection containing exact publication,
 generation, witness-owner, and address identity from its canonical registry.
-Projection install is atomic with publication, invalidation precedes drain,
-and application-runtime dispatch pins the exact generation. Check/interpreter
+Projection install is atomic with publication and invalidation precedes drain.
+Sequential application-runtime dispatch pins the exact generation; concurrent
+pin visibility requires the audited state-gate split below. Check/interpreter
 reject the option directly; JIT and every AOT backend reject produced slots
 before code generation until they can reach that canonical dispatch owner.
 
@@ -137,14 +138,15 @@ config producer inserts phase-specific prepared-dispatch intrinsics. Catalog
 slot strings and the loader projection consume the same finite slot identity;
 no runtime pointcut evaluator is introduced.
 
-The remaining implementation owner is the explicit application execution
-context bridge. `AspectExecutionContext` is the sole stable owner of the
+The explicit application execution context bridge is implemented for the
+admitted sequential path. `AspectExecutionContext` is the sole stored owner of the
 loader, lifecycle manager, facet/advice registries, and dispatch projection.
 The driver validates the exact context argument and rewrites v2 to an ordinary
 source-owned dispatch call; no generated backend trampoline or process-global
 handle is admitted. Projection publication, invalidation, and exact-generation
-pinning remain context-owned loader/application-runtime responsibilities. The
-projection is never an independently mutable registry.
+pinning remain context-owned loader/application-runtime responsibilities.
+Concurrent mutation is not safe until the callback-safe application state gate
+below exists. The projection is never an independently mutable registry.
 
 ### Facet witness descriptors
 
@@ -223,3 +225,87 @@ is introduced.
 The former registry-plus-loader executor is not part of the public surface:
 native execution is reachable only through the projection-plus-lifecycle seam.
 Canonical registry lookup remains separately available for inspection.
+
+## 2026-08-04 callback-safe advice concurrency audit
+
+### Current state
+
+The exact-generation algorithm is sequentially correct but is not currently a
+concurrent ownership boundary. `advice_dispatch_projection_with_invoker` in
+`compiler/99.loader/loader/advice_binding_registry.spl` receives value snapshots
+of `AdviceBindingRegistry` and `LifecycleManager`, acquires tokens in the local
+lifecycle value, invokes callbacks, and returns updated values. Only afterward
+does `AspectExecutionContext.invoke_prepared_advice` assign those values back to
+the application context. No mutex covers that copy-in/copy-out interval.
+
+Consequently, concurrent dispatches can start from the same token counter and
+lose pin/counter updates, while `unload_published_aspect` can invalidate,
+quiesce, observe the canonical pin count as zero, and reclaim loader resources
+while a callback is running with pins held only in a local lifecycle copy. The
+existing tests prove ordering, validation, cleanup, and sequential unload retry;
+they do not prove concurrent dispatch/unload safety. `LifecycleManager` remains
+the correct sole generation-lease registry, but its immutable-copy API requires
+one serialized application owner for every mutation.
+
+The context methods `advice_dispatch_slot(loader, ...)` and
+`unload_published_aspect(..., loader)` also overwrite `self.loader` from a
+caller-supplied `ModuleLoader` value. That compatibility shape permits a stale
+loader copy to replace the supposed canonical owner and must not be used by the
+concurrent path; context-owned operations must use only `self.loader`.
+
+The current module also violates its stated cohesion boundary: the loader
+registry owns publication data but imports `LifecycleManager`, `ModuleLoader`,
+and the native callback primitive and performs callback execution. Registry
+publication, generation leasing, physical resource ownership, and application
+synchronization are distinct concerns.
+
+### Required owner split
+
+| Raw layer | Common/owned node | Public to parent | Public to next-layer sibling |
+|---|---|---|---|
+| `compiler/99.loader` | advice publication registry | immutable ordered records, publish/unbind/lookup | projection derivation only |
+| `compiler/99.loader` | immutable dispatch projection | exact owner/symbol/address/generation rows | validated invocation plan to `app/startup` |
+| `os/smf` | generation lifecycle | acquire/release exact opaque tokens; quiesce/drain | no registry or callback execution |
+| `compiler/99.loader` | module/resource lifecycle | validate loaded owner/address; unload mapped owners | no generation-pin authority |
+| `app/startup` | advice dispatch coordination | context-first dispatch result | sole serialized mutation of registry/lifecycle/projection |
+| `app/startup` | retirement coordination | visibility invalidation then quiesce/drain/unload | sole ordering bridge between generation and physical owners |
+
+Tree-private implementation should split as follows without new language
+visibility grammar:
+
+1. Keep candidate staging, deterministic ordering, publication, lookup, and
+   unbind in `advice_binding_registry.spl`. Retain publication/lookup counters
+   there, but move dispatch attempt/invocation/failure counters into the
+   application dispatch coordinator that serializes their mutation.
+2. Move projection derivation/invalidation and loader-owner validation to a
+   loader-private projection module. It returns immutable rows and never owns
+   tokens or invokes callbacks.
+3. Add an application-private dispatch coordinator beside
+   `AspectExecutionContext`. Under one application state mutex it revalidates
+   the current projection/publication, acquires exact lifecycle tokens, commits
+   the updated canonical lifecycle and attempt counters, and returns a
+   tree-private dispatch ticket.
+   The concurrent entrypoint accepts no caller-supplied `ModuleLoader`; it uses
+   the context's retained loader exclusively.
+4. Release the state mutex before invoking any callback. This is mandatory for
+   callback re-entry and for callbacks that request unload; no application or
+   lifecycle lock may be held across foreign/generated code.
+5. In a guaranteed finish path, reacquire the same state mutex, release the
+   ticket's exact tokens in reverse order, commit counters/lifecycle, then
+   expose success or failure. Portable unwind/cancellation remains blocked until
+   the language can guarantee this finish path.
+6. Serialize activation publication and unload invalidation/quiesce through the
+   same application state mutex. Unload commits invisibility and quiescing
+   before checking pins, returns `quiescing` while tickets exist, and claims one
+   retirement completion before performing physical `ModuleLoader` cleanup so
+   concurrent retries cannot unload twice.
+
+The lazy-activation single-flight gate is not this state mutex and must not be
+reused as one: it coordinates one I/O/activation request and intentionally
+releases its lock around callbacks. The advice state mutex protects canonical
+publication/lifecycle mutation; the two gates have different keys and owners.
+
+This split retains MDSOC direction: loader owns inert validated projection,
+`os/smf` owns leases, and the application capsule composes them. No process-global
+table, second reference count, copied runtime snapshot, or backend-owned pin is
+admitted.
