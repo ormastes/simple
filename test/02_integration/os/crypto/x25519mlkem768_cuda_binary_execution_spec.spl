@@ -1,0 +1,92 @@
+# Physical CUDA evidence for the exact admitted sm86 cubin byte path.
+# @tag: integration, crypto, x25519mlkem768, cuda, physical, binary
+# @cover src/os/crypto/x25519_mlkem768/cuda_ntt_provider.spl 98%
+
+use std.spec.{describe, it, expect, step}
+use std.sffi.io.{file_hash_sha256, file_size}
+use std.gc_async_mut.cuda.{cuda_available}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.crypto.ml_kem_ntt.{ntt, intt}
+use os.crypto.x25519_mlkem768.cuda_ntt_provider.{
+    X25519MlKem768CudaNttExecutor,
+    x25519_mlkem768_cuda_ntt_execute,
+    x25519_mlkem768_cuda_intt_execute}
+use test.fixtures.crypto.x25519mlkem768.canonical_fixture.{
+    x25519_mlkem768_ntt_fixture}
+
+val _SM86_CUBIN_PATH = "build/evidence/x25519mlkem768/cuda/sm_86.cubin"
+val _SM86_CUBIN_SHA256 =
+    "562bfee3e9cd630425a69a5b27a0cc6661f0a00609a85078ef376565fb5b7711"
+
+fn _cuda_binary_lists_equal(left: list, right: list) -> bool:
+    if left.len() != right.len():
+        return false
+    var index = 0
+    while index < left.len():
+        if left.get(index) != right.get(index):
+            return false
+        index = index + 1
+    true
+
+describe "X25519MLKEM768 pure-Simple exact CUDA binary execution":
+    it "should load admitted sm86 cubin bytes and execute both NTT entries":
+        step("Verify cubin provenance and execute forward and inverse NTT")
+        val host_available = cuda_available()
+        expect(host_available).to_be(true)
+
+        val retained_digest = file_hash_sha256(_SM86_CUBIN_PATH)
+        val retained_byte_count = file_size(_SM86_CUBIN_PATH)
+        expect(retained_digest).to_equal(_SM86_CUBIN_SHA256)
+        expect(retained_byte_count).to_be_greater_than(0)
+
+        val fixture = x25519_mlkem768_ntt_fixture(1)
+        val expected_forward = ntt(fixture)
+        val expected_inverse = intt(expected_forward)
+        var executor = X25519MlKem768CudaNttExecutor.create_binary(
+            _SM86_CUBIN_PATH, _SM86_CUBIN_SHA256)
+        val admitted_byte_count = executor.artifact_bytes.len()
+        val independently_hashed_admitted_bytes =
+            sha256_u8_hex(executor.artifact_bytes)
+        val admitted_digest = executor.artifact_digest
+        val binary_mode = executor.use_binary
+        val source_digest = executor.source_digest
+        expect(admitted_byte_count).to_equal(retained_byte_count)
+        expect(independently_hashed_admitted_bytes).to_equal(
+            _SM86_CUBIN_SHA256)
+        expect(admitted_digest).to_equal(_SM86_CUBIN_SHA256)
+        expect(binary_mode).to_be(true)
+        expect(source_digest).to_equal("")
+
+        val forward = x25519_mlkem768_cuda_ntt_execute(executor, fixture)
+        expect(forward.completed).to_be(true)
+        expect(forward.compiled).to_be(true)
+        expect(forward.submitted).to_be(true)
+        expect(forward.fence_completed).to_be(true)
+        expect(forward.device_readback).to_be(true)
+        expect(forward.device_identity).to_be_greater_than(0)
+        expect(forward.kernel_invocations).to_equal(1)
+        expect(forward.artifact_digest).to_equal(_SM86_CUBIN_SHA256)
+        expect(_cuda_binary_lists_equal(
+            forward.values, expected_forward)).to_be(true)
+
+        val inverse = x25519_mlkem768_cuda_intt_execute(
+            executor, forward.values)
+        expect(inverse.completed).to_be(true)
+        expect(inverse.compiled).to_be(true)
+        expect(inverse.submitted).to_be(true)
+        expect(inverse.fence_completed).to_be(true)
+        expect(inverse.device_readback).to_be(true)
+        expect(inverse.device_identity).to_equal(forward.device_identity)
+        expect(inverse.kernel_invocations).to_equal(1)
+        expect(inverse.artifact_digest).to_equal(_SM86_CUBIN_SHA256)
+        expect(_cuda_binary_lists_equal(
+            inverse.values, expected_inverse)).to_be(true)
+
+        val module_loaded = executor.session.module > 0
+        val generation = executor.session.generation
+        val invocation_count = executor.kernel_invocations
+        executor.shutdown()
+
+        expect(module_loaded).to_be(true)
+        expect(generation).to_equal(1)
+        expect(invocation_count).to_equal(2)

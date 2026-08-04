@@ -1,0 +1,743 @@
+# Canonical deterministic A/B/C workload shared by CPU, SIMD, and GPU runs.
+#
+# Secret fixture material stays private to this module.  The public result is
+# safe to retain in evidence receipts: it contains only identities, lengths,
+# typed set receipts, and digests of public wire values. Secret-derived digests
+# are checked inside this module and are never returned.
+
+mod app.test.x25519mlkem768_pinned_workload
+
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768SelectionMode,
+    X25519MlKem768VerificationPolicy, X25519MlKem768Config,
+    X25519MlKem768SimdAdmission, X25519MlKem768KeyPair,
+    X25519MlKem768Encapsulation, X25519MlKem768Decapsulation,
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION}
+use os.crypto.x25519_mlkem768.hybrid.{
+    x25519_mlkem768_keygen, x25519_mlkem768_encapsulate,
+    x25519_mlkem768_decapsulate,
+    x25519_mlkem768_keygen_simd_candidate,
+    x25519_mlkem768_encapsulate_simd_candidate,
+    x25519_mlkem768_decapsulate_simd_candidate,
+    x25519_mlkem768_keygen_cuda_candidate,
+    x25519_mlkem768_encapsulate_cuda_candidate,
+    x25519_mlkem768_decapsulate_cuda_candidate,
+    x25519_mlkem768_keygen_vulkan_candidate,
+    x25519_mlkem768_encapsulate_vulkan_candidate,
+    x25519_mlkem768_decapsulate_vulkan_candidate,
+    x25519_mlkem768_keygen_metal_candidate,
+    x25519_mlkem768_encapsulate_metal_candidate,
+    x25519_mlkem768_decapsulate_metal_candidate}
+use os.crypto.x25519_mlkem768.cuda_ntt_provider.{
+    X25519MlKem768CudaNttExecutor}
+use os.crypto.x25519_mlkem768.vulkan_ntt_provider.{
+    X25519MlKem768VulkanNttExecutor}
+use os.crypto.x25519_mlkem768.metal_ntt_provider.{
+    X25519MlKem768MetalNttExecutor}
+use os.crypto.sha256.{sha256}
+use os.crypto.x25519_mlkem768.hybrid_support.{
+    x25519_mlkem768_slice_list, x25519_mlkem768_buffer_error_text,
+    x25519_mlkem768_wipe_owned, x25519_mlkem768_wipe_owned_bytes}
+export use lib.common.crypto.x25519_mlkem768.pinned_public_receipt.{
+    X25519MlKem768PinnedSet, X25519MlKem768PinnedSetReceipt,
+    X25519_MLKEM768_PINNED_MLKEM_EK_SHA256,
+    X25519_MLKEM768_PINNED_MLKEM_CT_SHA256,
+    X25519_MLKEM768_PINNED_CLIENT_X25519_SHA256,
+    X25519_MLKEM768_PINNED_SERVER_X25519_SHA256,
+    X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256,
+    X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256}
+
+val X25519_MLKEM768_PINNED_WORKLOAD_SCHEMA: text =
+    "x25519mlkem768-pinned-workload-v3"
+val X25519_MLKEM768_PINNED_FIXTURE_ID: text =
+    "mlkem-native-fd58+rfc7748-abc-v1"
+val X25519_MLKEM768_PINNED_ORACLE_ID: text =
+    "mlkem-native-fd58+rfc7748"
+val X25519_MLKEM768_PINNED_SHARED_SECRET_SHA256: text =
+    "0fc6a0c999313693b1a2fa990e49a585f639d3460254907bb42ea4a95b18a8fc"
+val _X25519_MLKEM768_PINNED_MLKEM_SHARED_SHA256: text =
+    "340f07be0ffe3d996f44bb05f10eecaca6f494c77a3c353cb1872cacb834f596"
+val _X25519_MLKEM768_PINNED_X25519_SHARED_SHA256: text =
+    "dead45a1d43d6902aa9240b43c0d75a0b5fc750660590d6d45461cbfc4010684"
+val _X25519_MLKEM768_PINNED_MLKEM_EK_BYTES: i64 = 1184
+val _X25519_MLKEM768_PINNED_MLKEM_CT_BYTES: i64 = 1088
+val _X25519_MLKEM768_PINNED_COMPONENT_BYTES: i64 = 32
+val X25519_MLKEM768_PINNED_CLIENT_SHARE_BYTES: i64 = 1216
+val X25519_MLKEM768_PINNED_SERVER_SHARE_BYTES: i64 = 1120
+val X25519_MLKEM768_PINNED_SHARED_SECRET_BYTES: i64 = 64
+val X25519_MLKEM768_PINNED_PUBLIC_WIRE_BYTES: i64 = 2336
+val X25519_MLKEM768_PINNED_TOTAL_OBSERVED_BYTES: i64 = 2400
+
+struct X25519MlKem768PinnedSetChecks:
+    set_id: X25519MlKem768PinnedSet
+    first_output_bytes: i64
+    second_output_bytes: i64
+    shared_secret_bytes: i64
+    recovered_secret_bytes: i64
+    first_output_sha256: text
+    second_output_sha256: text
+    shared_secret_oracle_match: bool
+    recovered_secret_oracle_match: bool
+    roundtrip_match: bool
+
+struct X25519MlKem768PinnedPublicOutputs:
+    schema: text
+    fixture_id: text
+    oracle_id: text
+    set_a: X25519MlKem768PinnedSetReceipt
+    set_b: X25519MlKem768PinnedSetReceipt
+    set_c: X25519MlKem768PinnedSetReceipt
+    client_share_bytes: i64
+    server_share_bytes: i64
+    shared_secret_bytes: i64
+    public_wire_bytes: i64
+    total_observed_bytes: i64
+    client_share_sha256: text
+    server_share_sha256: text
+    keygen_output_digest: text
+    encapsulate_output_digest: text
+    decapsulate_output_digest: text
+    requested_backend: X25519MlKem768Backend
+    selected_backend: X25519MlKem768Backend
+    executor_identity: text
+    artifact_digest: text
+    execution_proof_digest: text
+    fallback_used: bool
+    candidate_oracle_match: bool
+    accelerated_operation_count: i64
+    kernel_invocations: i64
+    simd_chunk_hits: i64
+    observed_rvv_vlen_bits: i64
+    compiled: bool
+    submitted: bool
+    fence_completed: bool
+    device_readback: bool
+
+struct _X25519MlKem768PinnedInputs:
+    d: list
+    z: list
+    client_private: [u8]
+    server_private: [u8]
+
+fn _pinned_hex_list(value: text) -> list:
+    var out: list = []
+    var index: i64 = 0
+    while index < value.len():
+        val high_code = value.char_code_at(index)
+        val low_code = value.char_code_at(index + 1)
+        val high = if high_code <= 57: high_code - 48 else: high_code - 87
+        val low = if low_code <= 57: low_code - 48 else: low_code - 87
+        out.push(high * 16 + low)
+        index = index + 2
+    out
+
+fn _pinned_typed_bytes(values: list) -> [u8]:
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < values.len():
+        out.push(values.get(index).to_u8())
+        index = index + 1
+    out
+
+fn _pinned_inputs() -> _X25519MlKem768PinnedInputs:
+    # Test secrets have one private owner and are materialized only per run.
+    val d = _pinned_hex_list(
+        "934d60b35624d740b30a7f227af2ae7c678e4e04e13c5f509eade2b79aea77e2")
+    val z = _pinned_hex_list(
+        "3e2a2ea6c9c476fc4937b013c993a793d6c0ab9960695ba838f649da539ca3d0")
+    val client_private = _pinned_typed_bytes(_pinned_hex_list(
+        "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"))
+    val server_private = _pinned_typed_bytes(_pinned_hex_list(
+        "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"))
+    _X25519MlKem768PinnedInputs(
+        d: d, z: z, client_private: client_private,
+        server_private: server_private)
+
+fn _pinned_hex_digit(value: i64) -> text:
+    if value < 10: value.to_text()
+    elif value == 10: "a"
+    elif value == 11: "b"
+    elif value == 12: "c"
+    elif value == 13: "d"
+    elif value == 14: "e"
+    else: "f"
+
+fn _pinned_digest(values: list) -> text:
+    val typed_values = _pinned_typed_bytes(values)
+    defer x25519_mlkem768_wipe_owned_bytes(typed_values)
+    val digest = sha256(typed_values)
+    defer x25519_mlkem768_wipe_owned_bytes(digest)
+    var out = ""
+    var index: i64 = 0
+    while index < digest.len().to_i64():
+        val value = digest[index].to_i64()
+        out = out + _pinned_hex_digit((value >> 4) & 15) +
+            _pinned_hex_digit(value & 15)
+        index = index + 1
+    out
+
+fn _pinned_wipe_inputs(inputs: _X25519MlKem768PinnedInputs):
+    x25519_mlkem768_wipe_owned(inputs.d)
+    x25519_mlkem768_wipe_owned(inputs.z)
+    x25519_mlkem768_wipe_owned_bytes(inputs.client_private)
+    x25519_mlkem768_wipe_owned_bytes(inputs.server_private)
+
+fn _pinned_wipe_key_pair(key_pair: X25519MlKem768KeyPair):
+    x25519_mlkem768_wipe_owned(key_pair.decapsulation_key)
+    x25519_mlkem768_wipe_owned_bytes(key_pair.x25519_private_key)
+
+fn _pinned_wipe_encapsulation(
+        encapsulation: X25519MlKem768Encapsulation):
+    x25519_mlkem768_wipe_owned(encapsulation.shared_secret)
+
+fn _pinned_wipe_decapsulation(
+        decapsulation: X25519MlKem768Decapsulation):
+    x25519_mlkem768_wipe_owned(decapsulation.shared_secret)
+
+fn _pinned_same(left: list, right: list) -> bool:
+    var difference: i64 = left.len() ^ right.len()
+    val compared = if left.len() < right.len(): left.len() else: right.len()
+    var index: i64 = 0
+    while index < compared:
+        difference = difference | (left.get(index) ^ right.get(index))
+        index = index + 1
+    difference == 0
+
+fn _pinned_slice(values: list, start: i64, count: i64) -> Result<list, text>:
+    match x25519_mlkem768_slice_list(values, start, count):
+        case Ok(value): Ok(value)
+        case Err(error): Err(x25519_mlkem768_buffer_error_text(error))
+
+fn _pinned_set_receipt(checks: X25519MlKem768PinnedSetChecks,
+        expected_set: X25519MlKem768PinnedSet, set_name: text,
+        first_label: text, second_label: text,
+        expected_first_bytes: i64, expected_second_bytes: i64,
+        expected_secret_bytes: i64, expected_first_sha256: text,
+        expected_second_sha256: text
+        ) -> Result<X25519MlKem768PinnedSetReceipt, text>:
+    val prefix = "pinned-set-" + set_name
+    if checks.set_id != expected_set:
+        return Err(prefix + "-identity-mismatch")
+    if checks.first_output_bytes != expected_first_bytes:
+        return Err(prefix + "-first-output-length-mismatch")
+    if checks.second_output_bytes != expected_second_bytes:
+        return Err(prefix + "-second-output-length-mismatch")
+    if checks.shared_secret_bytes != expected_secret_bytes:
+        return Err(prefix + "-shared-secret-length-mismatch")
+    if checks.recovered_secret_bytes != expected_secret_bytes:
+        return Err(prefix + "-recovered-secret-length-mismatch")
+    if checks.first_output_sha256 != expected_first_sha256:
+        return Err(prefix + "-first-output-mismatch")
+    if checks.second_output_sha256 != expected_second_sha256:
+        return Err(prefix + "-second-output-mismatch")
+    if not checks.shared_secret_oracle_match:
+        return Err(prefix + "-shared-secret-oracle-mismatch")
+    if not checks.recovered_secret_oracle_match:
+        return Err(prefix + "-recovered-secret-oracle-mismatch")
+    if not checks.roundtrip_match:
+        return Err(prefix + "-roundtrip-secret-mismatch")
+    Ok(X25519MlKem768PinnedSetReceipt(
+        set_id: expected_set,
+        first_output_label: first_label,
+        second_output_label: second_label,
+        first_output_bytes: checks.first_output_bytes,
+        second_output_bytes: checks.second_output_bytes,
+        shared_secret_bytes: checks.shared_secret_bytes,
+        recovered_secret_bytes: checks.recovered_secret_bytes,
+        first_output_sha256: checks.first_output_sha256,
+        second_output_sha256: checks.second_output_sha256))
+
+fn x25519_mlkem768_validate_pinned_set_a(
+        checks: X25519MlKem768PinnedSetChecks
+        ) -> Result<X25519MlKem768PinnedSetReceipt, text>:
+    _pinned_set_receipt(checks, X25519MlKem768PinnedSet.MlKem, "a",
+        "mlkem768-encapsulation-key", "mlkem768-ciphertext",
+        _X25519_MLKEM768_PINNED_MLKEM_EK_BYTES,
+        _X25519_MLKEM768_PINNED_MLKEM_CT_BYTES,
+        _X25519_MLKEM768_PINNED_COMPONENT_BYTES,
+        X25519_MLKEM768_PINNED_MLKEM_EK_SHA256,
+        X25519_MLKEM768_PINNED_MLKEM_CT_SHA256)
+
+fn x25519_mlkem768_validate_pinned_set_b(
+        checks: X25519MlKem768PinnedSetChecks
+        ) -> Result<X25519MlKem768PinnedSetReceipt, text>:
+    _pinned_set_receipt(checks, X25519MlKem768PinnedSet.X25519, "b",
+        "x25519-client-public", "x25519-server-public",
+        _X25519_MLKEM768_PINNED_COMPONENT_BYTES,
+        _X25519_MLKEM768_PINNED_COMPONENT_BYTES,
+        _X25519_MLKEM768_PINNED_COMPONENT_BYTES,
+        X25519_MLKEM768_PINNED_CLIENT_X25519_SHA256,
+        X25519_MLKEM768_PINNED_SERVER_X25519_SHA256)
+
+fn x25519_mlkem768_validate_pinned_set_c(
+        checks: X25519MlKem768PinnedSetChecks
+        ) -> Result<X25519MlKem768PinnedSetReceipt, text>:
+    _pinned_set_receipt(checks, X25519MlKem768PinnedSet.Hybrid, "c",
+        "x25519mlkem768-client-share", "x25519mlkem768-server-share",
+        X25519_MLKEM768_PINNED_CLIENT_SHARE_BYTES,
+        X25519_MLKEM768_PINNED_SERVER_SHARE_BYTES,
+        X25519_MLKEM768_PINNED_SHARED_SECRET_BYTES,
+        X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256,
+        X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256)
+
+fn x25519_mlkem768_pinned_scalar_config() -> X25519MlKem768Config:
+    X25519MlKem768Config(
+        implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        profile_version: X25519_MLKEM768_PROFILE_VERSION,
+        requested_backend: X25519MlKem768Backend.ScalarCpu,
+        selection_mode: X25519MlKem768SelectionMode.Require,
+        verification_policy: X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+        minimum_batch: 1,
+        batch_size: 1)
+
+fn _pinned_backend_is_simd(backend: X25519MlKem768Backend) -> bool:
+    (backend == X25519MlKem768Backend.Avx2 or
+        backend == X25519MlKem768Backend.Neon or
+        backend == X25519MlKem768Backend.Rvv)
+
+fn _pinned_backend_is_gpu(backend: X25519MlKem768Backend) -> bool:
+    (backend == X25519MlKem768Backend.Cuda or
+        backend == X25519MlKem768Backend.Vulkan or
+        backend == X25519MlKem768Backend.Metal)
+
+fn _pinned_config_reason(config: X25519MlKem768Config,
+        expected_backend: X25519MlKem768Backend) -> text:
+    if config.requested_backend != expected_backend:
+        return "pinned-workload-requested-backend-mismatch"
+    if config.selection_mode != X25519MlKem768SelectionMode.Require:
+        return "pinned-workload-requires-fail-closed-backend-selection"
+    if config.verification_policy !=
+            X25519MlKem768VerificationPolicy.AbsoluteAndScalar:
+        return "pinned-workload-requires-absolute-and-scalar-verification"
+    if config.minimum_batch != 1 or config.batch_size != 1:
+        return "pinned-workload-requires-one-operation-batch"
+    ""
+
+fn _pinned_operation_accelerated(
+        backend: X25519MlKem768Backend,
+        simd_chunk_hits: i64, kernel_invocations: i64,
+        compiled: bool, submitted: bool, fence_completed: bool,
+        device_readback: bool) -> bool:
+    if _pinned_backend_is_simd(backend):
+        return simd_chunk_hits > 0
+    if _pinned_backend_is_gpu(backend):
+        return (kernel_invocations > 0 and compiled and submitted and
+            fence_completed and device_readback)
+    false
+
+fn _pinned_finalize(config: X25519MlKem768Config,
+        expected_backend: X25519MlKem768Backend,
+        key_pair: X25519MlKem768KeyPair,
+        encapsulation: X25519MlKem768Encapsulation,
+        decapsulation: X25519MlKem768Decapsulation
+        ) -> Result<X25519MlKem768PinnedPublicOutputs, text>:
+    val key_evidence = key_pair.evidence
+    val encapsulation_evidence = encapsulation.evidence
+    val decapsulation_evidence = decapsulation.evidence
+    val is_candidate = (_pinned_backend_is_simd(expected_backend) or
+        _pinned_backend_is_gpu(expected_backend))
+    if (key_evidence.requested_backend != config.requested_backend or
+            encapsulation_evidence.requested_backend != config.requested_backend or
+            decapsulation_evidence.requested_backend != config.requested_backend):
+        return Err("pinned-execution-requested-backend-mismatch")
+    if (key_evidence.selected_backend != expected_backend or
+            encapsulation_evidence.selected_backend != expected_backend or
+            decapsulation_evidence.selected_backend != expected_backend):
+        return Err("pinned-execution-selected-backend-mismatch")
+    if is_candidate and key_evidence.executor_identity.trim() == "":
+        return Err("pinned-candidate-executor-identity-empty")
+    if (key_evidence.executor_identity != encapsulation_evidence.executor_identity or
+            key_evidence.executor_identity != decapsulation_evidence.executor_identity):
+        return Err("pinned-execution-identity-mismatch")
+    val artifact_digest_matches = (
+        key_evidence.artifact_digest == encapsulation_evidence.artifact_digest and
+        key_evidence.artifact_digest == decapsulation_evidence.artifact_digest)
+    val execution_proof_matches = (
+        key_evidence.execution_proof_digest ==
+            encapsulation_evidence.execution_proof_digest and
+        key_evidence.execution_proof_digest ==
+            decapsulation_evidence.execution_proof_digest)
+    if is_candidate and (key_evidence.artifact_digest == "" or
+            key_evidence.execution_proof_digest == "" or
+            not artifact_digest_matches or not execution_proof_matches or
+            key_evidence.artifact_digest != key_evidence.execution_proof_digest):
+        return Err("pinned-execution-artifact-proof-mismatch")
+    val fallback_used = (key_evidence.fallback_used or
+        encapsulation_evidence.fallback_used or
+        decapsulation_evidence.fallback_used)
+    if fallback_used:
+        return Err("pinned-execution-fallback-forbidden")
+
+    val client_bytes = key_pair.client_key_share.len()
+    val server_bytes = encapsulation.server_key_share.len()
+    val secret_bytes = encapsulation.shared_secret.len()
+    val recovered_bytes = decapsulation.shared_secret.len()
+    val public_wire_bytes = client_bytes + server_bytes
+    val total_observed_bytes = public_wire_bytes + secret_bytes
+    if (client_bytes != X25519_MLKEM768_PINNED_CLIENT_SHARE_BYTES or
+            server_bytes != X25519_MLKEM768_PINNED_SERVER_SHARE_BYTES or
+            secret_bytes != X25519_MLKEM768_PINNED_SHARED_SECRET_BYTES or
+            recovered_bytes != X25519_MLKEM768_PINNED_SHARED_SECRET_BYTES or
+            public_wire_bytes != X25519_MLKEM768_PINNED_PUBLIC_WIRE_BYTES or
+            total_observed_bytes !=
+                X25519_MLKEM768_PINNED_TOTAL_OBSERVED_BYTES):
+        return Err("pinned-observed-output-length-mismatch")
+
+    val mlkem_ek = match _pinned_slice(key_pair.client_key_share, 0,
+            _X25519_MLKEM768_PINNED_MLKEM_EK_BYTES):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-a-ek-slice:" + reason)
+    val client_x25519 = match _pinned_slice(key_pair.client_key_share,
+            _X25519_MLKEM768_PINNED_MLKEM_EK_BYTES,
+            _X25519_MLKEM768_PINNED_COMPONENT_BYTES):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-b-client-slice:" + reason)
+    val mlkem_ct = match _pinned_slice(encapsulation.server_key_share, 0,
+            _X25519_MLKEM768_PINNED_MLKEM_CT_BYTES):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-a-ct-slice:" + reason)
+    val server_x25519 = match _pinned_slice(encapsulation.server_key_share,
+            _X25519_MLKEM768_PINNED_MLKEM_CT_BYTES,
+            _X25519_MLKEM768_PINNED_COMPONENT_BYTES):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-b-server-slice:" + reason)
+    val mlkem_shared = match _pinned_slice(encapsulation.shared_secret, 0,
+            _X25519_MLKEM768_PINNED_COMPONENT_BYTES):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-a-secret-slice:" + reason)
+    defer x25519_mlkem768_wipe_owned(mlkem_shared)
+    val x25519_shared = match _pinned_slice(encapsulation.shared_secret,
+            _X25519_MLKEM768_PINNED_COMPONENT_BYTES,
+            _X25519_MLKEM768_PINNED_COMPONENT_BYTES):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-b-secret-slice:" + reason)
+    defer x25519_mlkem768_wipe_owned(x25519_shared)
+    val recovered_mlkem_shared = match _pinned_slice(
+            decapsulation.shared_secret, 0,
+            _X25519_MLKEM768_PINNED_COMPONENT_BYTES):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-a-recovered-slice:" + reason)
+    defer x25519_mlkem768_wipe_owned(recovered_mlkem_shared)
+    val recovered_x25519_shared = match _pinned_slice(
+            decapsulation.shared_secret,
+            _X25519_MLKEM768_PINNED_COMPONENT_BYTES,
+            _X25519_MLKEM768_PINNED_COMPONENT_BYTES):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-b-recovered-slice:" + reason)
+    defer x25519_mlkem768_wipe_owned(recovered_x25519_shared)
+
+    val client_digest = _pinned_digest(key_pair.client_key_share)
+    val server_digest = _pinned_digest(encapsulation.server_key_share)
+    val secret_digest = _pinned_digest(encapsulation.shared_secret)
+    val recovered_digest = _pinned_digest(decapsulation.shared_secret)
+    val mlkem_shared_digest = _pinned_digest(mlkem_shared)
+    val recovered_mlkem_digest = _pinned_digest(recovered_mlkem_shared)
+    val x25519_shared_digest = _pinned_digest(x25519_shared)
+    val recovered_x25519_digest = _pinned_digest(recovered_x25519_shared)
+
+    val set_a = match x25519_mlkem768_validate_pinned_set_a(
+            X25519MlKem768PinnedSetChecks(
+                set_id: X25519MlKem768PinnedSet.MlKem,
+                first_output_bytes: mlkem_ek.len(),
+                second_output_bytes: mlkem_ct.len(),
+                shared_secret_bytes: mlkem_shared.len(),
+                recovered_secret_bytes: recovered_mlkem_shared.len(),
+                first_output_sha256: _pinned_digest(mlkem_ek),
+                second_output_sha256: _pinned_digest(mlkem_ct),
+                shared_secret_oracle_match: mlkem_shared_digest ==
+                    _X25519_MLKEM768_PINNED_MLKEM_SHARED_SHA256,
+                recovered_secret_oracle_match: recovered_mlkem_digest ==
+                    _X25519_MLKEM768_PINNED_MLKEM_SHARED_SHA256,
+                roundtrip_match: _pinned_same(
+                    mlkem_shared, recovered_mlkem_shared))):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    val set_b = match x25519_mlkem768_validate_pinned_set_b(
+            X25519MlKem768PinnedSetChecks(
+                set_id: X25519MlKem768PinnedSet.X25519,
+                first_output_bytes: client_x25519.len(),
+                second_output_bytes: server_x25519.len(),
+                shared_secret_bytes: x25519_shared.len(),
+                recovered_secret_bytes: recovered_x25519_shared.len(),
+                first_output_sha256: _pinned_digest(client_x25519),
+                second_output_sha256: _pinned_digest(server_x25519),
+                shared_secret_oracle_match: x25519_shared_digest ==
+                    _X25519_MLKEM768_PINNED_X25519_SHARED_SHA256,
+                recovered_secret_oracle_match: recovered_x25519_digest ==
+                    _X25519_MLKEM768_PINNED_X25519_SHARED_SHA256,
+                roundtrip_match: _pinned_same(
+                    x25519_shared, recovered_x25519_shared))):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    val set_c = match x25519_mlkem768_validate_pinned_set_c(
+            X25519MlKem768PinnedSetChecks(
+                set_id: X25519MlKem768PinnedSet.Hybrid,
+                first_output_bytes: client_bytes,
+                second_output_bytes: server_bytes,
+                shared_secret_bytes: secret_bytes,
+                recovered_secret_bytes: recovered_bytes,
+                first_output_sha256: client_digest,
+                second_output_sha256: server_digest,
+                shared_secret_oracle_match: secret_digest ==
+                    X25519_MLKEM768_PINNED_SHARED_SECRET_SHA256,
+                recovered_secret_oracle_match: recovered_digest ==
+                    X25519_MLKEM768_PINNED_SHARED_SECRET_SHA256,
+                roundtrip_match: _pinned_same(
+                    encapsulation.shared_secret,
+                    decapsulation.shared_secret))):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+
+    val key_accelerated = _pinned_operation_accelerated(
+        expected_backend, key_evidence.simd_chunk_hits,
+        key_evidence.kernel_invocations, key_evidence.compiled,
+        key_evidence.submitted,
+        key_evidence.fence_completed, key_evidence.device_readback)
+    val encapsulation_accelerated = _pinned_operation_accelerated(
+        expected_backend, encapsulation_evidence.simd_chunk_hits,
+        encapsulation_evidence.kernel_invocations,
+        encapsulation_evidence.compiled,
+        encapsulation_evidence.submitted,
+        encapsulation_evidence.fence_completed,
+        encapsulation_evidence.device_readback)
+    val decapsulation_accelerated = _pinned_operation_accelerated(
+        expected_backend, decapsulation_evidence.simd_chunk_hits,
+        decapsulation_evidence.kernel_invocations,
+        decapsulation_evidence.compiled,
+        decapsulation_evidence.submitted,
+        decapsulation_evidence.fence_completed,
+        decapsulation_evidence.device_readback)
+    val accelerated_operation_count =
+        (if key_accelerated: 1 else: 0) +
+        (if encapsulation_accelerated: 1 else: 0) +
+        (if decapsulation_accelerated: 1 else: 0)
+    val candidate_oracle_match = (is_candidate and
+        key_evidence.oracle_match and encapsulation_evidence.oracle_match and
+        decapsulation_evidence.oracle_match)
+    val rvv_vlen_matches = (
+        key_evidence.observed_rvv_vlen_bits ==
+            encapsulation_evidence.observed_rvv_vlen_bits and
+        key_evidence.observed_rvv_vlen_bits ==
+            decapsulation_evidence.observed_rvv_vlen_bits)
+    if not rvv_vlen_matches:
+        return Err("pinned-execution-rvv-vlen-mismatch")
+    if is_candidate and (accelerated_operation_count != 3 or
+            not candidate_oracle_match):
+        return Err("pinned-candidate-execution-proof-incomplete")
+
+    Ok(X25519MlKem768PinnedPublicOutputs(
+        schema: X25519_MLKEM768_PINNED_WORKLOAD_SCHEMA,
+        fixture_id: X25519_MLKEM768_PINNED_FIXTURE_ID,
+        oracle_id: X25519_MLKEM768_PINNED_ORACLE_ID,
+        set_a: set_a, set_b: set_b, set_c: set_c,
+        client_share_bytes: client_bytes,
+        server_share_bytes: server_bytes,
+        shared_secret_bytes: secret_bytes,
+        public_wire_bytes: public_wire_bytes,
+        total_observed_bytes: total_observed_bytes,
+        client_share_sha256: client_digest,
+        server_share_sha256: server_digest,
+        keygen_output_digest: key_evidence.output_digest,
+        encapsulate_output_digest: encapsulation_evidence.output_digest,
+        decapsulate_output_digest: decapsulation_evidence.output_digest,
+        requested_backend: config.requested_backend,
+        selected_backend: expected_backend,
+        executor_identity: key_evidence.executor_identity,
+        artifact_digest: key_evidence.artifact_digest,
+        execution_proof_digest: key_evidence.execution_proof_digest,
+        fallback_used: false,
+        candidate_oracle_match: candidate_oracle_match,
+        accelerated_operation_count: accelerated_operation_count,
+        kernel_invocations: key_evidence.kernel_invocations +
+            encapsulation_evidence.kernel_invocations +
+            decapsulation_evidence.kernel_invocations,
+        simd_chunk_hits: key_evidence.simd_chunk_hits +
+            encapsulation_evidence.simd_chunk_hits +
+            decapsulation_evidence.simd_chunk_hits,
+        observed_rvv_vlen_bits: key_evidence.observed_rvv_vlen_bits,
+        compiled: (key_evidence.compiled and
+            encapsulation_evidence.compiled and decapsulation_evidence.compiled),
+        submitted: (key_evidence.submitted and
+            encapsulation_evidence.submitted and decapsulation_evidence.submitted),
+        fence_completed: (key_evidence.fence_completed and
+            encapsulation_evidence.fence_completed and
+            decapsulation_evidence.fence_completed),
+        device_readback: (key_evidence.device_readback and
+            encapsulation_evidence.device_readback and
+            decapsulation_evidence.device_readback)))
+
+fn x25519_mlkem768_run_pinned_workload(
+        config: X25519MlKem768Config
+        ) -> Result<X25519MlKem768PinnedPublicOutputs, text>:
+    val config_reason = _pinned_config_reason(
+        config, X25519MlKem768Backend.ScalarCpu)
+    if config_reason != "":
+        return Err(config_reason)
+    val inputs = _pinned_inputs()
+    defer _pinned_wipe_inputs(inputs)
+
+    val key_pair = match x25519_mlkem768_keygen(
+            config, inputs.client_private, inputs.d, inputs.z):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-a-keygen:" + reason)
+    defer _pinned_wipe_key_pair(key_pair)
+    val encapsulation = match x25519_mlkem768_encapsulate(
+            config, key_pair.client_key_share,
+            inputs.server_private, inputs.d):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-abc-encapsulation:" + reason)
+    defer _pinned_wipe_encapsulation(encapsulation)
+    val decapsulation = match x25519_mlkem768_decapsulate(
+            config, encapsulation.server_key_share, inputs.client_private,
+            key_pair.decapsulation_key):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-abc-decapsulation:" + reason)
+    defer _pinned_wipe_decapsulation(decapsulation)
+    _pinned_finalize(config, X25519MlKem768Backend.ScalarCpu,
+        key_pair, encapsulation, decapsulation)
+
+fn x25519_mlkem768_run_pinned_simd_workload(
+        config: X25519MlKem768Config,
+        admission: X25519MlKem768SimdAdmission
+        ) -> Result<X25519MlKem768PinnedPublicOutputs, text>:
+    if not _pinned_backend_is_simd(config.requested_backend):
+        return Err("pinned-simd-workload-requires-avx2-neon-or-rvv")
+    val config_reason = _pinned_config_reason(config, config.requested_backend)
+    if config_reason != "":
+        return Err(config_reason)
+    val inputs = _pinned_inputs()
+    defer _pinned_wipe_inputs(inputs)
+    val key_pair = match x25519_mlkem768_keygen_simd_candidate(
+            config, admission, inputs.client_private, inputs.d, inputs.z):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-a-simd-keygen:" + reason)
+    defer _pinned_wipe_key_pair(key_pair)
+    val encapsulation = match x25519_mlkem768_encapsulate_simd_candidate(
+            config, admission, key_pair.client_key_share,
+            inputs.server_private, inputs.d):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-abc-simd-encapsulation:" + reason)
+    defer _pinned_wipe_encapsulation(encapsulation)
+    val decapsulation = match x25519_mlkem768_decapsulate_simd_candidate(
+            config, admission, encapsulation.server_key_share,
+            inputs.client_private,
+            key_pair.decapsulation_key):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-abc-simd-decapsulation:" + reason)
+    defer _pinned_wipe_decapsulation(decapsulation)
+    _pinned_finalize(config, config.requested_backend,
+        key_pair, encapsulation, decapsulation)
+
+fn x25519_mlkem768_run_pinned_cuda_workload(
+        config: X25519MlKem768Config,
+        executor: X25519MlKem768CudaNttExecutor
+        ) -> Result<X25519MlKem768PinnedPublicOutputs, text>:
+    val config_reason = _pinned_config_reason(
+        config, X25519MlKem768Backend.Cuda)
+    if config_reason != "":
+        return Err(config_reason)
+    val inputs = _pinned_inputs()
+    defer _pinned_wipe_inputs(inputs)
+    val key_pair = match x25519_mlkem768_keygen_cuda_candidate(
+            config, executor, inputs.client_private, inputs.d, inputs.z):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-a-cuda-keygen:" + reason)
+    defer _pinned_wipe_key_pair(key_pair)
+    val encapsulation = match x25519_mlkem768_encapsulate_cuda_candidate(
+            config, executor, key_pair.client_key_share,
+            inputs.server_private, inputs.d):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-abc-cuda-encapsulation:" + reason)
+    defer _pinned_wipe_encapsulation(encapsulation)
+    val decapsulation = match x25519_mlkem768_decapsulate_cuda_candidate(
+            config, executor, encapsulation.server_key_share,
+            inputs.client_private,
+            key_pair.decapsulation_key):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-abc-cuda-decapsulation:" + reason)
+    defer _pinned_wipe_decapsulation(decapsulation)
+    _pinned_finalize(config, X25519MlKem768Backend.Cuda,
+        key_pair, encapsulation, decapsulation)
+
+fn x25519_mlkem768_run_pinned_vulkan_workload(
+        config: X25519MlKem768Config,
+        executor: X25519MlKem768VulkanNttExecutor
+        ) -> Result<X25519MlKem768PinnedPublicOutputs, text>:
+    val config_reason = _pinned_config_reason(
+        config, X25519MlKem768Backend.Vulkan)
+    if config_reason != "":
+        return Err(config_reason)
+    val inputs = _pinned_inputs()
+    defer _pinned_wipe_inputs(inputs)
+    val key_pair = match x25519_mlkem768_keygen_vulkan_candidate(
+            config, executor, inputs.client_private, inputs.d, inputs.z):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-a-vulkan-keygen:" + reason)
+    defer _pinned_wipe_key_pair(key_pair)
+    val encapsulation = match x25519_mlkem768_encapsulate_vulkan_candidate(
+            config, executor, key_pair.client_key_share,
+            inputs.server_private, inputs.d):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-abc-vulkan-encapsulation:" + reason)
+    defer _pinned_wipe_encapsulation(encapsulation)
+    val decapsulation = match x25519_mlkem768_decapsulate_vulkan_candidate(
+            config, executor, encapsulation.server_key_share,
+            inputs.client_private,
+            key_pair.decapsulation_key):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-abc-vulkan-decapsulation:" + reason)
+    defer _pinned_wipe_decapsulation(decapsulation)
+    _pinned_finalize(config, X25519MlKem768Backend.Vulkan,
+        key_pair, encapsulation, decapsulation)
+
+fn x25519_mlkem768_run_pinned_metal_workload(
+        config: X25519MlKem768Config,
+        executor: X25519MlKem768MetalNttExecutor
+        ) -> Result<X25519MlKem768PinnedPublicOutputs, text>:
+    val config_reason = _pinned_config_reason(
+        config, X25519MlKem768Backend.Metal)
+    if config_reason != "":
+        return Err(config_reason)
+    val inputs = _pinned_inputs()
+    defer _pinned_wipe_inputs(inputs)
+    val key_pair = match x25519_mlkem768_keygen_metal_candidate(
+            config, executor, inputs.client_private, inputs.d, inputs.z):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-a-metal-keygen:" + reason)
+    defer _pinned_wipe_key_pair(key_pair)
+    val encapsulation = match x25519_mlkem768_encapsulate_metal_candidate(
+            config, executor, key_pair.client_key_share,
+            inputs.server_private, inputs.d):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-abc-metal-encapsulation:" + reason)
+    defer _pinned_wipe_encapsulation(encapsulation)
+    val decapsulation = match x25519_mlkem768_decapsulate_metal_candidate(
+            config, executor, encapsulation.server_key_share,
+            inputs.client_private,
+            key_pair.decapsulation_key):
+        case Ok(value): value
+        case Err(reason): return Err("pinned-set-abc-metal-decapsulation:" + reason)
+    defer _pinned_wipe_decapsulation(decapsulation)
+    _pinned_finalize(config, X25519MlKem768Backend.Metal,
+        key_pair, encapsulation, decapsulation)
+
+export X25519MlKem768PinnedSetChecks, X25519MlKem768PinnedPublicOutputs
+export X25519_MLKEM768_PINNED_WORKLOAD_SCHEMA
+export X25519_MLKEM768_PINNED_FIXTURE_ID, X25519_MLKEM768_PINNED_ORACLE_ID
+export X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256
+export X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256
+export X25519_MLKEM768_PINNED_CLIENT_SHARE_BYTES
+export X25519_MLKEM768_PINNED_SERVER_SHARE_BYTES
+export X25519_MLKEM768_PINNED_SHARED_SECRET_BYTES
+export X25519_MLKEM768_PINNED_PUBLIC_WIRE_BYTES
+export X25519_MLKEM768_PINNED_TOTAL_OBSERVED_BYTES
+export x25519_mlkem768_validate_pinned_set_a
+export x25519_mlkem768_validate_pinned_set_b
+export x25519_mlkem768_validate_pinned_set_c
+export x25519_mlkem768_pinned_scalar_config
+export x25519_mlkem768_run_pinned_workload
+export x25519_mlkem768_run_pinned_simd_workload
+export x25519_mlkem768_run_pinned_cuda_workload
+export x25519_mlkem768_run_pinned_vulkan_workload
+export x25519_mlkem768_run_pinned_metal_workload

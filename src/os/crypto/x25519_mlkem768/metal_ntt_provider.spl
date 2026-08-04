@@ -1,0 +1,307 @@
+# Persistent Metal batch provider for ML-KEM forward/inverse NTT candidates.
+
+mod os.crypto.x25519_mlkem768.metal_ntt_provider
+
+use std.gc_async_mut.crypto_accel.metal_session.{CryptoMetalSession}
+use std.sffi.io.{file_read_text, file_read_bytes, file_size}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use os.crypto.ml_kem_kpke.{MlKemNttBatchProvider}
+use os.crypto.x25519_mlkem768.cache_identity.{
+    X25519MlKem768CacheIdentity, x25519_mlkem768_cache_identity,
+    x25519_mlkem768_cache_bind, x25519_mlkem768_cache_bind_device}
+use os.crypto.x25519_mlkem768.artifact_snapshot_admission.{
+    x25519_mlkem768_artifact_size_admitted,
+    x25519_mlkem768_artifact_read_exact}
+use os.crypto.x25519_mlkem768.gpu_lifecycle_snapshot.{
+    X25519MlKem768GpuLifecycleSnapshot,
+    x25519_mlkem768_gpu_lifecycle_snapshot}
+
+val X25519_MLKEM768_METAL_NTT_FORWARD_ENTRY: text =
+    "x25519_mlkem768_ntt_forward_metal"
+val X25519_MLKEM768_METAL_NTT_INVERSE_ENTRY: text =
+    "x25519_mlkem768_ntt_inverse_metal"
+val X25519_MLKEM768_METAL_NTT_SOURCE_SHA256: text =
+    "74608e1e4f5fb40da7205dd8e8d57038d73f824b2b3ca85de1f159543e6897cc"
+val X25519_MLKEM768_METAL_NTT_MAX_BATCH: i64 = 65535
+val _METAL_NTT_MAX_SOURCE_BYTES: i64 = 16777216
+val _METAL_NTT_MAX_ARTIFACT_BYTES: i64 = 268435456
+val _GPU_LIFECYCLE_COUNTER_MAX: i64 = 9223372036854775807
+
+fn _metal_i32_bytes(values: list) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < values.len():
+        val value = values.get(i)
+        out.push((value & 0xFF).to_u8())
+        out.push(((value >> 8) & 0xFF).to_u8())
+        out.push(((value >> 16) & 0xFF).to_u8())
+        out.push(((value >> 24) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn _metal_i32_values_valid(values: list) -> bool:
+    var i: i64 = 0
+    while i < values.len():
+        val value = values.get(i)
+        if value < -2147483648 or value > 2147483647:
+            return false
+        i = i + 1
+    true
+
+fn _metal_i32_list(bytes: [u8]) -> list:
+    var out: list = []
+    if bytes.len() % 4 != 0:
+        return out
+    var i: i64 = 0
+    while i < bytes.len().to_i64():
+        val unsigned = bytes[i].to_i64() |
+            (bytes[i + 1].to_i64() << 8) |
+            (bytes[i + 2].to_i64() << 16) |
+            (bytes[i + 3].to_i64() << 24)
+        val value = if unsigned >= 2147483648:
+            unsigned - 4294967296
+        else:
+            unsigned
+        out.push(value)
+        i = i + 4
+    out
+
+class X25519MlKem768MetalNttExecutor:
+    session: CryptoMetalSession
+    source: text
+    source_digest: text
+    expected_source_digest: text
+    artifact_path: text
+    artifact_bytes: [u8]
+    artifact_digest: text
+    expected_artifact_digest: text
+    cache_identity: X25519MlKem768CacheIdentity
+    use_binary: bool
+    closed: bool
+    kernel_invocations: i64
+    transfer_count: i64
+    launch_count: i64
+    synchronization_count: i64
+    readback_count: i64
+    fence_completed: bool
+
+    fn lifecycle_snapshot() -> X25519MlKem768GpuLifecycleSnapshot:
+        x25519_mlkem768_gpu_lifecycle_snapshot(
+            self.transfer_count, self.launch_count,
+            self.synchronization_count, self.readback_count,
+            self.kernel_invocations)
+
+    static fn create(shader_path: text) -> X25519MlKem768MetalNttExecutor:
+        val source_size = file_size(shader_path)
+        val source_admitted = x25519_mlkem768_artifact_size_admitted(
+            source_size, _METAL_NTT_MAX_SOURCE_BYTES)
+        val source_read = if source_admitted:
+            file_read_text(shader_path)
+        else:
+            ""
+        val source = if x25519_mlkem768_artifact_read_exact(
+                source_admitted, source_size, source_read.len().to_i64()):
+            source_read
+        else:
+            ""
+        val source_digest = if source == "": "" else: sha256_text(source)
+        X25519MlKem768MetalNttExecutor(
+            session: CryptoMetalSession.create(), source: source,
+            source_digest: source_digest,
+            expected_source_digest: X25519_MLKEM768_METAL_NTT_SOURCE_SHA256,
+            artifact_path: "", artifact_bytes: [], artifact_digest: "",
+            expected_artifact_digest: "",
+            cache_identity: x25519_mlkem768_cache_identity(
+                "metal", source_digest, ""),
+            use_binary: false,
+            closed: false, kernel_invocations: 0,
+            transfer_count: 0, launch_count: 0,
+            synchronization_count: 0, readback_count: 0,
+            fence_completed: false)
+
+    static fn create_binary(artifact_path: text,
+            expected_artifact_digest: text) -> X25519MlKem768MetalNttExecutor:
+        val artifact_size = file_size(artifact_path)
+        val artifact_admitted = x25519_mlkem768_artifact_size_admitted(
+            artifact_size, _METAL_NTT_MAX_ARTIFACT_BYTES)
+        val artifact_read = if artifact_admitted:
+            file_read_bytes(artifact_path)
+        else:
+            []
+        val artifact_bytes = if x25519_mlkem768_artifact_read_exact(
+                artifact_admitted, artifact_size,
+                artifact_read.len().to_i64()):
+            artifact_read
+        else:
+            []
+        val artifact_digest = if artifact_bytes.len() == 0:
+            ""
+        else:
+            sha256_u8_hex(artifact_bytes)
+        X25519MlKem768MetalNttExecutor(
+            session: CryptoMetalSession.create(), source: "",
+            # A metallib digest is exact binary provenance, not source proof.
+            source_digest: "",
+            expected_source_digest: X25519_MLKEM768_METAL_NTT_SOURCE_SHA256,
+            artifact_path: artifact_path, artifact_bytes: artifact_bytes,
+            artifact_digest: artifact_digest,
+            expected_artifact_digest: expected_artifact_digest,
+            cache_identity: x25519_mlkem768_cache_identity(
+                "metal", "", artifact_digest),
+            use_binary: true, closed: false, kernel_invocations: 0,
+            transfer_count: 0, launch_count: 0,
+            synchronization_count: 0, readback_count: 0,
+            fence_completed: false)
+
+    me bind_cache_contract(implementation_version: text,
+            profile_version: text, configuration_digest: text) -> text:
+        if self.closed:
+            return "metal-ntt-executor-closed"
+        if self.use_binary:
+            if not self.artifact_path.ends_with(".metallib"):
+                return "metal-ntt-binary-extension-invalid"
+            if self.artifact_digest == "":
+                return "metal-ntt-binary-artifact-invalid"
+            if (self.expected_artifact_digest == "" or
+                    self.artifact_digest != self.expected_artifact_digest):
+                return "metal-ntt-binary-digest-mismatch"
+        else:
+            if self.source_digest == "":
+                return "metal-ntt-artifact-invalid"
+            if self.source_digest != self.expected_source_digest:
+                return "metal-ntt-artifact-digest-mismatch"
+        match x25519_mlkem768_cache_bind(
+                self.cache_identity, implementation_version,
+                profile_version, configuration_digest):
+            case Ok(bound):
+                self.cache_identity = bound
+                ""
+            case Err(reason): reason
+
+    me warmup() -> text:
+        """Validate and load or compile the pinned Metal artifact without dispatch."""
+        self._ensure_ready()
+
+    me _terminal_session_reason() -> text:
+        # Unknown completion transfers resource ownership to the session's
+        # quarantine. The executor must become terminal immediately so it
+        # cannot be rebound or reused while those dependencies remain live.
+        if self.session.completion_unknown:
+            self.closed = true
+            self.fence_completed = false
+            return "metal-session-unavailable"
+        ""
+
+    me _ensure_ready() -> text:
+        if self.closed:
+            return "metal-ntt-executor-closed"
+        val terminal_reason = self._terminal_session_reason()
+        if terminal_reason != "":
+            return terminal_reason
+        if self.use_binary:
+            if not self.artifact_path.ends_with(".metallib"):
+                return "metal-ntt-binary-extension-invalid"
+            if self.artifact_bytes.len() == 0:
+                return "metal-ntt-binary-artifact-invalid"
+            val digest_unpinned = self.expected_artifact_digest == ""
+            val digest_mismatch = self.artifact_digest != self.expected_artifact_digest
+            if digest_unpinned or digest_mismatch:
+                return "metal-ntt-binary-digest-mismatch"
+        else:
+            if self.source == "":
+                return "metal-ntt-artifact-invalid"
+            if self.source_digest != self.expected_source_digest:
+                return "metal-ntt-artifact-digest-mismatch"
+        if not self.session.initialized:
+            val reason = if self.use_binary:
+                self.session.init_binary(self.artifact_bytes,
+                    X25519_MLKEM768_METAL_NTT_FORWARD_ENTRY,
+                    X25519_MLKEM768_METAL_NTT_INVERSE_ENTRY)
+            else:
+                self.session.init(self.source,
+                    X25519_MLKEM768_METAL_NTT_FORWARD_ENTRY,
+                    X25519_MLKEM768_METAL_NTT_INVERSE_ENTRY)
+            if reason != "":
+                return reason
+        if self.session.device <= 0:
+            self.session.shutdown()
+            return "metal-ntt-device-identity-unavailable"
+        if self.cache_identity.bound:
+            match x25519_mlkem768_cache_bind_device(
+                    self.cache_identity, self.session.device):
+                case Ok(bound): self.cache_identity = bound
+                case Err(reason):
+                    self.session.shutdown()
+                    self.closed = true
+                    return reason
+        ""
+
+    me _execute(polynomials: list, inverse: bool) -> Result<list, text>:
+        if self.closed:
+            return Err("metal-ntt-executor-closed")
+        if polynomials.len() == 0 or polynomials.len() % 256 != 0:
+            return Err("metal-ntt-input-size-invalid")
+        if not _metal_i32_values_valid(polynomials):
+            return Err("metal-ntt-input-value-out-of-range")
+        if polynomials.len() / 256 > X25519_MLKEM768_METAL_NTT_MAX_BATCH:
+            return Err("metal-ntt-batch-too-large")
+        val counters_exhausted = (
+            self.transfer_count >= _GPU_LIFECYCLE_COUNTER_MAX or
+            self.launch_count >= _GPU_LIFECYCLE_COUNTER_MAX or
+            self.synchronization_count >= _GPU_LIFECYCLE_COUNTER_MAX or
+            self.readback_count >= _GPU_LIFECYCLE_COUNTER_MAX or
+            self.kernel_invocations >= _GPU_LIFECYCLE_COUNTER_MAX)
+        if counters_exhausted:
+            self.closed = true
+            return Err("metal-ntt-lifecycle-counter-overflow")
+        val warmup_reason = self._ensure_ready()
+        if warmup_reason != "":
+            return Err(warmup_reason)
+        val bytes = match self.session.execute(_metal_i32_bytes(polynomials),
+                polynomials.len() / 256, inverse):
+            case Ok(value): value
+            case Err(reason):
+                val _terminal_reason = self._terminal_session_reason()
+                return Err(reason)
+        val values = _metal_i32_list(bytes)
+        if values.len() != polynomials.len():
+            return Err("metal-ntt-readback-size-mismatch")
+        # CryptoMetalSession returns success only after its payload upload,
+        # compute frame completion, and device download all succeed.
+        self.transfer_count = self.transfer_count + 1
+        self.launch_count = self.launch_count + 1
+        self.synchronization_count = self.synchronization_count + 1
+        self.readback_count = self.readback_count + 1
+        self.kernel_invocations = self.kernel_invocations + 1
+        self.fence_completed = true
+        Ok(values)
+
+    me shutdown():
+        self.closed = true
+        self.session.shutdown()
+
+fn x25519_mlkem768_metal_ntt_execute(
+        executor: X25519MlKem768MetalNttExecutor,
+        polynomials: list) -> Result<list, text>:
+    executor._execute(polynomials, false)
+
+fn x25519_mlkem768_metal_intt_execute(
+        executor: X25519MlKem768MetalNttExecutor,
+        polynomials: list) -> Result<list, text>:
+    executor._execute(polynomials, true)
+
+impl MlKemNttBatchProvider for X25519MlKem768MetalNttExecutor:
+
+    fn forward(polynomials: list) -> Result<list, text>:
+        self._execute(polynomials, false)
+
+    fn inverse(polynomials: list) -> Result<list, text>:
+        self._execute(polynomials, true)
+
+export X25519MlKem768MetalNttExecutor
+export x25519_mlkem768_metal_ntt_execute
+export x25519_mlkem768_metal_intt_execute
+export X25519_MLKEM768_METAL_NTT_FORWARD_ENTRY
+export X25519_MLKEM768_METAL_NTT_INVERSE_ENTRY
+export X25519_MLKEM768_METAL_NTT_SOURCE_SHA256
+export X25519_MLKEM768_METAL_NTT_MAX_BATCH

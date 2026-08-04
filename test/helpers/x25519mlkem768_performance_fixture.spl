@@ -1,0 +1,395 @@
+# Synthetic branch fixture for qualification/attestation unit specs.
+# Never use this module as native or promotion evidence.
+
+mod test.helpers.x25519mlkem768_performance_fixture
+
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION}
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend, X25519MlKem768EvidenceMode,
+    X25519MlKem768EvidenceScope, X25519MlKem768EvidenceStatus,
+    X25519MlKem768RunReceipt}
+use lib.common.crypto.x25519_mlkem768.pinned_public_receipt.{
+    X25519MlKem768PinnedSet, X25519MlKem768PinnedSetReceipt,
+    X25519_MLKEM768_PINNED_MLKEM_EK_SHA256,
+    X25519_MLKEM768_PINNED_MLKEM_CT_SHA256,
+    X25519_MLKEM768_PINNED_CLIENT_X25519_SHA256,
+    X25519_MLKEM768_PINNED_SERVER_X25519_SHA256,
+    X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256,
+    X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256}
+use lib.common.crypto.x25519_mlkem768.matrix_receipt.{
+    X25519MlKem768MatrixAdmissionPhase, X25519MlKem768MatrixRow,
+    x25519_mlkem768_admit_full_backend_matrix}
+use lib.common.crypto.x25519_mlkem768.measurement_qualification.{
+    X25519MlKem768CaptureKind, X25519MlKem768MeasurementTarget,
+    X25519MlKem768MeasurementQualification,
+    x25519_mlkem768_qualify_measurement}
+use lib.common.crypto.x25519_mlkem768.qualified_timing.{
+    X25519_MLKEM768_WARM_SETUP_SCHEMA,
+    X25519_MLKEM768_TIMED_OPERATION_SCHEMA,
+    X25519_MLKEM768_PAIRED_SCHEDULE_SCHEMA,
+    X25519MlKem768TimingRole,
+    X25519MlKem768WarmSetupReceipt,
+    X25519MlKem768TimedOperationReceipt,
+    X25519MlKem768PairedScheduleReceipt,
+    x25519_mlkem768_warm_setup_receipt_sha256,
+    x25519_mlkem768_sample_set_sha256,
+    x25519_mlkem768_timed_operation_receipt_sha256,
+    x25519_mlkem768_paired_schedule_receipt_sha256}
+use lib.common.platform_measurement_observation.{
+    PLATFORM_MEASUREMENT_OBSERVATION_SCHEMA,
+    PlatformMeasurementObservation, PlatformPeakMemoryMetric,
+    platform_measurement_observation_sha256}
+
+val _PERF_FIXTURE_SESSION_NONCE_SHA256: text = "7" * 64
+val _PERF_FIXTURE_CLOCK_IDENTITY: text =
+    "monotonic-clock-v1|source=synthetic-clock|epoch=fixture|lane=unit-test"
+
+fn _perf_fixture_observation(
+        runner_artifact_sha256: text) -> PlatformMeasurementObservation:
+    var value = PlatformMeasurementObservation(
+        schema: PLATFORM_MEASUREMENT_OBSERVATION_SCHEMA,
+        observation_sha256: "",
+        host_os: "linux", host_arch: "x86_64",
+        runtime_lane: "unit-test", clock_source: "synthetic-clock",
+        clock_epoch_semantics: "fixture",
+        session_nonce_sha256: _PERF_FIXTURE_SESSION_NONCE_SHA256,
+        observer_artifact_sha256: runner_artifact_sha256,
+        peak_memory_metric: PlatformPeakMemoryMetric.PeakResidentSetKiB,
+        peak_memory_kib: 16384)
+    value.observation_sha256 =
+        platform_measurement_observation_sha256(value)
+    value
+
+fn _perf_fixture_gpu(backend: X25519MlKem768EvidenceBackend) -> bool:
+    backend == X25519MlKem768EvidenceBackend.Cuda or
+    backend == X25519MlKem768EvidenceBackend.Vulkan or
+    backend == X25519MlKem768EvidenceBackend.Metal
+
+fn _perf_fixture_simd(backend: X25519MlKem768EvidenceBackend) -> bool:
+    backend == X25519MlKem768EvidenceBackend.Avx2 or
+    backend == X25519MlKem768EvidenceBackend.Neon or
+    backend == X25519MlKem768EvidenceBackend.Rvv
+
+fn _perf_fixture_arch(backend: X25519MlKem768EvidenceBackend) -> text:
+    if backend == X25519MlKem768EvidenceBackend.Neon or
+            backend == X25519MlKem768EvidenceBackend.Metal:
+        return "aarch64"
+    if backend == X25519MlKem768EvidenceBackend.Rvv: return "riscv64"
+    "x86_64"
+
+fn _perf_fixture_set(set_id: X25519MlKem768PinnedSet
+        ) -> X25519MlKem768PinnedSetReceipt:
+    if set_id == X25519MlKem768PinnedSet.MlKem:
+        return X25519MlKem768PinnedSetReceipt(
+            set_id: set_id,
+            first_output_label: "mlkem768-encapsulation-key",
+            second_output_label: "mlkem768-ciphertext",
+            first_output_bytes: 1184, second_output_bytes: 1088,
+            shared_secret_bytes: 32, recovered_secret_bytes: 32,
+            first_output_sha256: X25519_MLKEM768_PINNED_MLKEM_EK_SHA256,
+            second_output_sha256: X25519_MLKEM768_PINNED_MLKEM_CT_SHA256)
+    if set_id == X25519MlKem768PinnedSet.X25519:
+        return X25519MlKem768PinnedSetReceipt(
+            set_id: set_id,
+            first_output_label: "x25519-client-public",
+            second_output_label: "x25519-server-public",
+            first_output_bytes: 32, second_output_bytes: 32,
+            shared_secret_bytes: 32, recovered_secret_bytes: 32,
+            first_output_sha256: X25519_MLKEM768_PINNED_CLIENT_X25519_SHA256,
+            second_output_sha256: X25519_MLKEM768_PINNED_SERVER_X25519_SHA256)
+    X25519MlKem768PinnedSetReceipt(
+        set_id: set_id,
+        first_output_label: "x25519mlkem768-client-share",
+        second_output_label: "x25519mlkem768-server-share",
+        first_output_bytes: 1216, second_output_bytes: 1120,
+        shared_secret_bytes: 64, recovered_secret_bytes: 64,
+        first_output_sha256: X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256,
+        second_output_sha256: X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256)
+
+fn _perf_fixture_execution(
+        backend: X25519MlKem768EvidenceBackend) -> X25519MlKem768RunReceipt:
+    val gpu = _perf_fixture_gpu(backend)
+    val simd = _perf_fixture_simd(backend)
+    X25519MlKem768RunReceipt(
+        schema: "x25519mlkem768-evidence-v1",
+        status: X25519MlKem768EvidenceStatus.Pass,
+        reason: "synthetic-branch-fixture-not-promotion-evidence",
+        scope: X25519MlKem768EvidenceScope.FullOperation,
+        requested_backend: backend, selected_backend: Some(backend),
+        mode: X25519MlKem768EvidenceMode.Native,
+        emulated: false, promotion_eligible: true,
+        implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        profile_version: X25519_MLKEM768_PROFILE_VERSION,
+        fixture_id: "mlkem-native-fd58+rfc7748-abc-v1",
+        fixture_manifest_sha256: "a" * 64,
+        fixture_source_sha256: "b" * 64,
+        runner_source_sha256: "c" * 64,
+        batch_size: 1, client_share_bytes: 1216,
+        server_share_bytes: 1120, shared_secret_bytes: 64,
+        keygen_output_digest: "d" * 64,
+        encapsulate_output_digest: "e" * 64,
+        decapsulate_output_digest: "e" * 64,
+        scalar_roundtrip_match: true, fallback_used: false,
+        absolute_oracle_match: true,
+        simd_chunk_hits: if simd: 4 else: 0,
+        observed_rvv_vlen_bits:
+            if backend == X25519MlKem768EvidenceBackend.Rvv: 256 else: 0,
+        kernel_invocations: if gpu: 7 else: 0,
+        compiled: gpu, submitted: gpu, fence_completed: gpu,
+        device_readback: gpu,
+        artifact_sha256: if gpu or simd: "f" * 64 else: "",
+        device_identity: if gpu:
+            "physical-device"
+        elif backend == X25519MlKem768EvidenceBackend.Avx2:
+            "native-avx2-candidate"
+        elif backend == X25519MlKem768EvidenceBackend.Neon:
+            "native-neon-candidate"
+        elif backend == X25519MlKem768EvidenceBackend.Rvv:
+            "native-rvv-candidate"
+        else:
+            "pure-simple-scalar")
+
+fn _perf_fixture_row(
+        backend: X25519MlKem768EvidenceBackend) -> X25519MlKem768MatrixRow:
+    X25519MlKem768MatrixRow(
+        execution: _perf_fixture_execution(backend),
+        admission_phase: X25519MlKem768MatrixAdmissionPhase.Executed,
+        runner_artifact_sha256: "9" * 64,
+        admitted_artifact_sha256:
+            if backend == X25519MlKem768EvidenceBackend.ScalarCpu:
+                "9" * 64
+            else:
+                "f" * 64,
+        host_os: if backend == X25519MlKem768EvidenceBackend.Metal:
+            "macos" else: "linux",
+        host_arch: _perf_fixture_arch(backend),
+        pinned_workload_schema: "x25519mlkem768-pinned-workload-v3",
+        pinned_oracle_id: "mlkem-native-fd58+rfc7748",
+        set_a: Some(_perf_fixture_set(X25519MlKem768PinnedSet.MlKem)),
+        set_b: Some(_perf_fixture_set(X25519MlKem768PinnedSet.X25519)),
+        set_c: Some(_perf_fixture_set(X25519MlKem768PinnedSet.Hybrid)),
+        public_wire_bytes: 2336,
+        client_share_sha256: X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256,
+        server_share_sha256: X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256)
+
+fn x25519_mlkem768_synthetic_performance_rows(
+        ) -> [X25519MlKem768MatrixRow]:
+    [
+        _perf_fixture_row(X25519MlKem768EvidenceBackend.ScalarCpu),
+        _perf_fixture_row(X25519MlKem768EvidenceBackend.Avx2),
+        _perf_fixture_row(X25519MlKem768EvidenceBackend.Neon),
+        _perf_fixture_row(X25519MlKem768EvidenceBackend.Rvv),
+        _perf_fixture_row(X25519MlKem768EvidenceBackend.Cuda),
+        _perf_fixture_row(X25519MlKem768EvidenceBackend.Vulkan),
+        _perf_fixture_row(X25519MlKem768EvidenceBackend.Metal)
+    ]
+
+fn _perf_fixture_index(backend: X25519MlKem768EvidenceBackend) -> i64:
+    if backend == X25519MlKem768EvidenceBackend.Avx2: return 1
+    if backend == X25519MlKem768EvidenceBackend.Neon: return 2
+    if backend == X25519MlKem768EvidenceBackend.Rvv: return 3
+    if backend == X25519MlKem768EvidenceBackend.Cuda: return 4
+    if backend == X25519MlKem768EvidenceBackend.Vulkan: return 5
+    6
+
+fn x25519_mlkem768_synthetic_measurement_target(
+        rows: [X25519MlKem768MatrixRow],
+        backend: X25519MlKem768EvidenceBackend
+        ) -> X25519MlKem768MeasurementTarget:
+    val matrix = x25519_mlkem768_admit_full_backend_matrix(rows)
+    val row = matrix.rows[_perf_fixture_index(backend)].source
+    val scalar_row = matrix.rows[0].source
+    X25519MlKem768MeasurementTarget(
+        backend: backend,
+        capture_kind: X25519MlKem768CaptureKind.NativePhysicalFullOperation,
+        fixture_id: row.execution.fixture_id,
+        fixture_manifest_sha256: row.execution.fixture_manifest_sha256,
+        fixture_source_sha256: row.execution.fixture_source_sha256,
+        runner_source_sha256: row.execution.runner_source_sha256,
+        runner_artifact_sha256: row.runner_artifact_sha256,
+        scalar_backend_artifact_sha256:
+            scalar_row.admitted_artifact_sha256,
+        backend_artifact_sha256: row.admitted_artifact_sha256,
+        accelerator_build_binding_sha256:
+            if _perf_fixture_gpu(backend): "4" * 64 else: "",
+        host_os: row.host_os, host_arch: row.host_arch,
+        executor_identity: row.execution.device_identity,
+        scalar_backend_identity: scalar_row.execution.device_identity,
+        session_id: _PERF_FIXTURE_SESSION_NONCE_SHA256,
+        monotonic_clock_id: _PERF_FIXTURE_CLOCK_IDENTITY,
+        workload_configuration_sha256: "5" * 64,
+        scalar_configuration_sha256: "3" * 64,
+        candidate_configuration_sha256: "6" * 64,
+        matrix_row_set_sha256: matrix.row_set_sha256)
+
+fn x25519_mlkem768_synthetic_measurement_qualification(
+        backend: X25519MlKem768EvidenceBackend
+        ) -> X25519MlKem768MeasurementQualification:
+    val rows = x25519_mlkem768_synthetic_performance_rows()
+    val target = x25519_mlkem768_synthetic_measurement_target(rows, backend)
+    x25519_mlkem768_qualify_measurement(
+        rows, target,
+        _perf_fixture_observation(target.runner_artifact_sha256)).unwrap()
+
+fn x25519_mlkem768_synthetic_timing_samples(base_ns: i64) -> [i64]:
+    var samples: [i64] = []
+    var index: i64 = 0
+    while index < 30:
+        samples.push(base_ns + index * 1000)
+        index = index + 1
+    samples
+
+fn x25519_mlkem768_synthetic_warm_setup(
+        qualification: X25519MlKem768MeasurementQualification,
+        role: X25519MlKem768TimingRole) -> X25519MlKem768WarmSetupReceipt:
+    val scalar = role == X25519MlKem768TimingRole.ScalarReference
+    var receipt = X25519MlKem768WarmSetupReceipt(
+        schema: X25519_MLKEM768_WARM_SETUP_SCHEMA, receipt_sha256: "",
+        role: role,
+        backend: if scalar: X25519MlKem768EvidenceBackend.ScalarCpu
+            else: qualification.target.backend,
+        qualification_sha256: qualification.qualification_sha256,
+        matrix_row_set_sha256:
+            qualification.target.matrix_row_set_sha256,
+        scalar_source_receipt_sha256:
+            qualification.scalar_source_receipt_sha256,
+        candidate_source_receipt_sha256:
+            qualification.candidate_source_receipt_sha256,
+        host_os: qualification.target.host_os,
+        host_arch: qualification.target.host_arch,
+        session_id: qualification.target.session_id,
+        monotonic_clock_id: qualification.target.monotonic_clock_id,
+        workload_configuration_sha256:
+            qualification.target.workload_configuration_sha256,
+        backend_configuration_sha256:
+            if scalar: qualification.target.scalar_configuration_sha256
+            else: qualification.target.candidate_configuration_sha256,
+        runner_artifact_sha256: qualification.target.runner_artifact_sha256,
+        backend_artifact_sha256:
+            if scalar: qualification.target.scalar_backend_artifact_sha256
+            else: qualification.target.backend_artifact_sha256,
+        backend_identity:
+            if scalar: qualification.target.scalar_backend_identity
+            else: qualification.target.executor_identity,
+        completed_full_exchanges: if scalar: 2 else: 3,
+        scalar_qualification_count: if scalar: 2 else: 1,
+        candidate_warmup_count: if scalar: 0 else: 2,
+        setup_operations_timed: 0,
+        oracle_match: true, fallback_used: false)
+    receipt.receipt_sha256 =
+        x25519_mlkem768_warm_setup_receipt_sha256(receipt)
+    receipt
+
+fn x25519_mlkem768_synthetic_timed_operations(
+        qualification: X25519MlKem768MeasurementQualification,
+        warm: X25519MlKem768WarmSetupReceipt,
+        base_ns: i64) -> X25519MlKem768TimedOperationReceipt:
+    val samples = x25519_mlkem768_synthetic_timing_samples(base_ns)
+    val scalar = warm.role == X25519MlKem768TimingRole.ScalarReference
+    val gpu = _perf_fixture_gpu(warm.backend)
+    val rvv = warm.backend == X25519MlKem768EvidenceBackend.Rvv
+    val exchanges = samples.len()
+    val operations = exchanges * 3
+    var receipt = X25519MlKem768TimedOperationReceipt(
+        schema: X25519_MLKEM768_TIMED_OPERATION_SCHEMA, receipt_sha256: "",
+        warm_setup_receipt_sha256: warm.receipt_sha256,
+        role: warm.role, backend: warm.backend,
+        qualification_sha256: warm.qualification_sha256,
+        matrix_row_set_sha256: warm.matrix_row_set_sha256,
+        scalar_source_receipt_sha256:
+            warm.scalar_source_receipt_sha256,
+        candidate_source_receipt_sha256:
+            warm.candidate_source_receipt_sha256,
+        host_os: warm.host_os, host_arch: warm.host_arch,
+        session_id: warm.session_id,
+        monotonic_clock_id: warm.monotonic_clock_id,
+        workload_configuration_sha256:
+            warm.workload_configuration_sha256,
+        backend_configuration_sha256:
+            warm.backend_configuration_sha256,
+        runner_artifact_sha256: warm.runner_artifact_sha256,
+        backend_artifact_sha256: warm.backend_artifact_sha256,
+        backend_identity: warm.backend_identity,
+        samples_ns: samples,
+        sample_set_sha256: x25519_mlkem768_sample_set_sha256(samples),
+        full_exchange_count: exchanges,
+        hybrid_operation_count: operations,
+        setup_operations_during_timing: 0,
+        kernel_only_operations: 0, fallback_operations: 0,
+        public_mismatch_operations: 0, secret_mismatch_operations: 0,
+        accelerated_operation_count: if scalar: 0 else: operations,
+        simd_chunk_hits: if scalar or gpu: 0 else: operations,
+        observed_rvv_vlen_bits: if rvv: 256 else: 0,
+        gpu_transfer_count: if gpu: operations * 2 else: 0,
+        gpu_launch_count: if gpu: operations * 2 else: 0,
+        gpu_synchronization_count: if gpu: operations * 2 else: 0,
+        gpu_readback_count: if gpu: operations * 2 else: 0,
+        gpu_kernel_count: if gpu: operations * 2 else: 0,
+        max_rss_kb: qualification.platform_observation.peak_memory_kib)
+    receipt.receipt_sha256 =
+        x25519_mlkem768_timed_operation_receipt_sha256(receipt)
+    receipt
+
+fn x25519_mlkem768_synthetic_paired_schedule(
+        qualification: X25519MlKem768MeasurementQualification,
+        scalar: X25519MlKem768TimedOperationReceipt,
+        candidate: X25519MlKem768TimedOperationReceipt
+        ) -> X25519MlKem768PairedScheduleReceipt:
+    var scalar_started_ns: [i64] = []
+    var scalar_finished_ns: [i64] = []
+    var candidate_started_ns: [i64] = []
+    var candidate_finished_ns: [i64] = []
+    var cursor_ns: i64 = 1000000000
+    var index: i64 = 0
+    val paired_count = if scalar.samples_ns.len() < candidate.samples_ns.len():
+        scalar.samples_ns.len()
+    else:
+        candidate.samples_ns.len()
+    while index < paired_count:
+        if index % 2 == 0:
+            val scalar_start = cursor_ns
+            val scalar_finish = scalar_start + scalar.samples_ns[index]
+            val candidate_start = scalar_finish + 1000
+            val candidate_finish = candidate_start + candidate.samples_ns[index]
+            scalar_started_ns.push(scalar_start)
+            scalar_finished_ns.push(scalar_finish)
+            candidate_started_ns.push(candidate_start)
+            candidate_finished_ns.push(candidate_finish)
+            cursor_ns = candidate_finish + 1000
+        else:
+            val candidate_start = cursor_ns
+            val candidate_finish = candidate_start + candidate.samples_ns[index]
+            val scalar_start = candidate_finish + 1000
+            val scalar_finish = scalar_start + scalar.samples_ns[index]
+            scalar_started_ns.push(scalar_start)
+            scalar_finished_ns.push(scalar_finish)
+            candidate_started_ns.push(candidate_start)
+            candidate_finished_ns.push(candidate_finish)
+            cursor_ns = scalar_finish + 1000
+        index = index + 1
+    var receipt = X25519MlKem768PairedScheduleReceipt(
+        schema: X25519_MLKEM768_PAIRED_SCHEDULE_SCHEMA,
+        receipt_sha256: "",
+        qualification_sha256: qualification.qualification_sha256,
+        scalar_timed_receipt_sha256: scalar.receipt_sha256,
+        candidate_timed_receipt_sha256: candidate.receipt_sha256,
+        session_id: qualification.target.session_id,
+        monotonic_clock_id: qualification.target.monotonic_clock_id,
+        ordinal_base: 0, pair_count: paired_count,
+        scalar_started_ns: scalar_started_ns,
+        scalar_finished_ns: scalar_finished_ns,
+        candidate_started_ns: candidate_started_ns,
+        candidate_finished_ns: candidate_finished_ns)
+    receipt.receipt_sha256 =
+        x25519_mlkem768_paired_schedule_receipt_sha256(receipt)
+    receipt
+
+export x25519_mlkem768_synthetic_performance_rows
+export x25519_mlkem768_synthetic_measurement_target
+export x25519_mlkem768_synthetic_measurement_qualification
+export x25519_mlkem768_synthetic_timing_samples
+export x25519_mlkem768_synthetic_warm_setup
+export x25519_mlkem768_synthetic_timed_operations
+export x25519_mlkem768_synthetic_paired_schedule

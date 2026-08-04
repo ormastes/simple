@@ -1,0 +1,328 @@
+# Backend-neutral, fail-closed GPU build and stable-device admission.
+#
+# This policy duplicates the reviewed CUDA/Vulkan tuple constants from the
+# app-level evidence producer so OS crypto code never imports app.test.  The
+# caller-supplied qualification-v4 digest is admitted only when it is the
+# canonical digest of every execution-relevant field below.
+
+mod os.crypto.x25519_mlkem768.gpu_build_admission
+
+use std.common.crypto.sha256.{sha256_text}
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend,
+    x25519_mlkem768_evidence_backend_name}
+use lib.common.crypto.x25519_mlkem768.measurement_qualification.{
+    X25519MlKem768MeasurementTarget}
+use os.crypto.x25519_mlkem768.cuda_ntt_provider.{
+    X25519MlKem768CudaNttExecutor}
+use os.crypto.x25519_mlkem768.vulkan_ntt_provider.{
+    X25519MlKem768VulkanNttExecutor}
+
+val X25519_MLKEM768_GPU_BUILD_ADMISSION_SCHEMA =
+    "x25519mlkem768-gpu-build-admission-v1"
+
+struct X25519MlKem768GpuBuildAdmission:
+    backend: X25519MlKem768EvidenceBackend
+    runner_artifact_sha256: text
+    backend_artifact_sha256: text
+    accelerator_source_sha256: text
+    accelerator_binary_sha256: text
+    accelerator_source_aux_sha256: text
+    accelerator_binary_aux_sha256: text
+    build_toolchain: text
+    device_capability: text
+    device_name: text
+    live_device_identity: text
+    live_device_identity_tag: i64
+    executor_cache_identity_sha256: text
+
+fn _gpu_build_hex64(value: text) -> bool:
+    if value.len() != 64: return false
+    var index: i64 = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        val decimal = code >= 48 and code <= 57
+        val lower_hex = code >= 97 and code <= 102
+        if not decimal and not lower_hex: return false
+        index = index + 1
+    true
+
+fn _gpu_build_field_valid(value: text) -> bool:
+    value != "" and value == value.trim() and
+        not value.contains("\n") and not value.contains("\r") and
+        not value.contains("\t")
+
+fn _gpu_build_frame(key: text, value: text) -> text:
+    key.len().to_text() + ":" + key + "=" + value.len().to_text() +
+        ":" + value + ";"
+
+fn _gpu_build_material(value: X25519MlKem768GpuBuildAdmission) -> text:
+    _gpu_build_frame("schema", X25519_MLKEM768_GPU_BUILD_ADMISSION_SCHEMA) +
+    _gpu_build_frame("backend",
+        x25519_mlkem768_evidence_backend_name(value.backend)) +
+    _gpu_build_frame("runner_artifact_sha256",
+        value.runner_artifact_sha256) +
+    _gpu_build_frame("backend_artifact_sha256",
+        value.backend_artifact_sha256) +
+    _gpu_build_frame("accelerator_source_sha256",
+        value.accelerator_source_sha256) +
+    _gpu_build_frame("accelerator_binary_sha256",
+        value.accelerator_binary_sha256) +
+    _gpu_build_frame("accelerator_source_aux_sha256",
+        value.accelerator_source_aux_sha256) +
+    _gpu_build_frame("accelerator_binary_aux_sha256",
+        value.accelerator_binary_aux_sha256) +
+    _gpu_build_frame("build_toolchain", value.build_toolchain) +
+    _gpu_build_frame("device_capability", value.device_capability) +
+    _gpu_build_frame("device_name", value.device_name) +
+    _gpu_build_frame("live_device_identity", value.live_device_identity) +
+    _gpu_build_frame("live_device_identity_tag",
+        value.live_device_identity_tag.to_text()) +
+    _gpu_build_frame("executor_cache_identity_sha256",
+        value.executor_cache_identity_sha256)
+
+fn x25519_mlkem768_gpu_build_admission_sha256(
+        value: X25519MlKem768GpuBuildAdmission) -> text:
+    sha256_text(_gpu_build_material(value))
+
+fn _gpu_build_required_hash_reason(
+        value: X25519MlKem768GpuBuildAdmission) -> text:
+    if not _gpu_build_hex64(value.runner_artifact_sha256):
+        return "gpu-build-runner-artifact-sha256-invalid"
+    if not _gpu_build_hex64(value.backend_artifact_sha256):
+        return "gpu-build-backend-artifact-sha256-invalid"
+    if not _gpu_build_hex64(value.accelerator_source_sha256):
+        return "gpu-build-accelerator-source-sha256-invalid"
+    if not _gpu_build_hex64(value.accelerator_binary_sha256):
+        return "gpu-build-accelerator-binary-sha256-invalid"
+    if not _gpu_build_hex64(value.executor_cache_identity_sha256):
+        return "gpu-build-executor-cache-identity-sha256-invalid"
+    ""
+
+fn _gpu_build_metadata_reason(
+        value: X25519MlKem768GpuBuildAdmission) -> text:
+    if (not _gpu_build_field_valid(value.build_toolchain) or
+            not _gpu_build_field_valid(value.device_capability) or
+            not _gpu_build_field_valid(value.device_name) or
+            not _gpu_build_field_valid(value.live_device_identity)):
+        return "gpu-build-metadata-invalid"
+    ""
+
+fn _cuda_build_tuple_reason(
+        value: X25519MlKem768GpuBuildAdmission) -> text:
+    if (value.accelerator_source_aux_sha256 != "" or
+            value.accelerator_binary_aux_sha256 != ""):
+        return "gpu-build-cuda-unexpected-aux-sha256"
+    if value.accelerator_source_sha256 !=
+            "e3201ae10f48e284d703cff81d42a02d9ba7f96e4bcc9b03872094b25a5a26aa":
+        return "gpu-build-cuda-source-mismatch"
+    if value.build_toolchain != "CUDA ptxas 13.0 V13.0.88":
+        return "gpu-build-cuda-toolchain-mismatch"
+    val a6000_binary =
+        "562bfee3e9cd630425a69a5b27a0cc6661f0a00609a85078ef376565fb5b7711"
+    val titan_binary =
+        "41a90792d1286c42014da98d1205972acbf9d60220981c9cc505dddf2b18069f"
+    val expected_binary = if value.device_name == "NVIDIA RTX A6000" and
+            value.device_capability == "8.6":
+        a6000_binary
+    elif value.device_name == "NVIDIA TITAN RTX" and
+            value.device_capability == "7.5":
+        titan_binary
+    else:
+        return "gpu-build-cuda-device-capability-mismatch"
+    if (value.accelerator_binary_sha256 != expected_binary or
+            value.backend_artifact_sha256 != expected_binary):
+        return "gpu-build-cuda-artifact-mismatch"
+    if (not value.live_device_identity.starts_with(
+            "cuda-device-identity:") or
+            value.live_device_identity != "cuda-device-identity:" +
+                value.live_device_identity_tag.to_text() or
+            value.live_device_identity_tag <= 0):
+        return "gpu-build-cuda-live-device-identity-invalid"
+    ""
+
+fn _vulkan_build_tuple_reason(
+        value: X25519MlKem768GpuBuildAdmission) -> text:
+    val forward_source =
+        "f29443943a381012f34e26a7ab2ac44bee51338d78662109c47e0182aa1fc668"
+    val inverse_source =
+        "b1e5a9ed87e4331abb5ac7ab906418aa9e4c927d2e284174990110318382e09c"
+    val forward_binary =
+        "0865f588f0825a3ff66a1d5e2cd2a9d0c356bb75b4fceaaf5c2196ffa05f6379"
+    val inverse_binary =
+        "07a11b541ef204a4fb6c907338dafc99bdf870d2046edcfad02a3d42dcca2687"
+    if (value.accelerator_source_sha256 != forward_source or
+            value.accelerator_source_aux_sha256 != inverse_source):
+        return "gpu-build-vulkan-source-set-mismatch"
+    if (value.accelerator_binary_sha256 != forward_binary or
+            value.accelerator_binary_aux_sha256 != inverse_binary):
+        return "gpu-build-vulkan-binary-set-mismatch"
+    val toolchain =
+        "glslangValidator-sha256:96ea85d4228d7065507cd58454628e0d3c9ec8bbd29a0cd20ee0f3cefaf6d026" +
+        "+spirv-val-sha256:20c5998a46f02310f56bf11be238c34d374bb50104b7ccf85bb909f9da883ff9"
+    if value.build_toolchain != toolchain:
+        return "gpu-build-vulkan-toolchain-mismatch"
+    if (value.device_capability != "vulkan1.1" or
+            (value.device_name != "NVIDIA RTX A6000" and
+                value.device_name != "NVIDIA TITAN RTX")):
+        return "gpu-build-vulkan-device-capability-mismatch"
+    val artifact_set = sha256_text(
+        "forward=" + forward_binary + ";inverse=" + inverse_binary)
+    if value.backend_artifact_sha256 != artifact_set:
+        return "gpu-build-vulkan-backend-artifact-set-mismatch"
+    if (not value.live_device_identity.starts_with(value.device_name + "|") or
+            not value.live_device_identity.contains("|vendor=") or
+            not value.live_device_identity.contains("|device=") or
+            not value.live_device_identity.contains("|driver=") or
+            not value.live_device_identity.contains("|api=")):
+        return "gpu-build-vulkan-live-device-identity-invalid"
+    val api_parts = value.live_device_identity.split("|api=")
+    val api_admitted = api_parts.len() == 2 and (
+        api_parts[1] == "00401000" or api_parts[1] == "00402000" or
+        api_parts[1] == "00403000" or api_parts[1] == "00404000")
+    if value.live_device_identity_tag <= 0 or not api_admitted:
+        return "gpu-build-vulkan-live-device-identity-invalid"
+    ""
+
+fn _gpu_build_expected_executor_identity(
+        value: X25519MlKem768GpuBuildAdmission) -> text:
+    if value.backend == X25519MlKem768EvidenceBackend.Cuda:
+        return "cuda-device:" + value.live_device_identity_tag.to_text() +
+            ":cubin:" + value.backend_artifact_sha256 + ":cache:" +
+            value.executor_cache_identity_sha256
+    if value.backend == X25519MlKem768EvidenceBackend.Vulkan:
+        return "vulkan-device:" + value.live_device_identity_tag.to_text() +
+            ":spirv-set:" + value.backend_artifact_sha256 + ":cache:" +
+            value.executor_cache_identity_sha256
+    ""
+
+fn x25519_mlkem768_gpu_build_admission_reason(
+        target: X25519MlKem768MeasurementTarget,
+        value: X25519MlKem768GpuBuildAdmission) -> text:
+    if (value.backend != X25519MlKem768EvidenceBackend.Cuda and
+            value.backend != X25519MlKem768EvidenceBackend.Vulkan and
+            value.backend != X25519MlKem768EvidenceBackend.Metal):
+        return "gpu-build-backend-invalid"
+    if target.backend != value.backend:
+        return "gpu-build-qualification-backend-mismatch"
+    val hash_reason = _gpu_build_required_hash_reason(value)
+    if hash_reason != "": return hash_reason
+    val metadata_reason = _gpu_build_metadata_reason(value)
+    if metadata_reason != "": return metadata_reason
+    val tuple_reason = if value.backend == X25519MlKem768EvidenceBackend.Cuda:
+        _cuda_build_tuple_reason(value)
+    elif value.backend == X25519MlKem768EvidenceBackend.Vulkan:
+        _vulkan_build_tuple_reason(value)
+    else:
+        "gpu-build-metal-metallib-and-live-identity-not-pinned"
+    if tuple_reason != "": return tuple_reason
+    if target.runner_artifact_sha256 != value.runner_artifact_sha256:
+        return "gpu-build-qualification-runner-artifact-mismatch"
+    if target.backend_artifact_sha256 != value.backend_artifact_sha256:
+        return "gpu-build-qualification-backend-artifact-mismatch"
+    if target.executor_identity != _gpu_build_expected_executor_identity(value):
+        return "gpu-build-qualification-stable-executor-identity-mismatch"
+    if not _gpu_build_hex64(target.accelerator_build_binding_sha256):
+        return "gpu-build-binding-sha256-invalid"
+    if target.accelerator_build_binding_sha256 !=
+            x25519_mlkem768_gpu_build_admission_sha256(value):
+        return "gpu-build-binding-sha256-mismatch"
+    ""
+
+fn x25519_mlkem768_observe_cuda_gpu_build_admission(
+        executor: X25519MlKem768CudaNttExecutor,
+        runner_artifact_sha256: text
+        ) -> Result<X25519MlKem768GpuBuildAdmission, text>:
+    if (not executor.use_binary or executor.closed or
+            not executor.session.is_valid() or executor.device_identity <= 0 or
+            executor.device_identity != executor.session.identity() or
+            executor.artifact_digest == "" or
+            executor.artifact_digest != executor.expected_artifact_digest or
+            not executor.cache_identity.bound or
+            executor.cache_identity.device_identity !=
+                executor.device_identity or
+            executor.cache_identity.key_digest == ""):
+        return Err("gpu-build-cuda-live-executor-not-admitted")
+    val device_name = executor.session.stable_device_name()
+    val capability_number = executor.session.stable_device_capability()
+    val capability = if capability_number == 86:
+        "8.6"
+    elif capability_number == 75:
+        "7.5"
+    else:
+        ""
+    val value = X25519MlKem768GpuBuildAdmission(
+        backend: X25519MlKem768EvidenceBackend.Cuda,
+        runner_artifact_sha256: runner_artifact_sha256,
+        backend_artifact_sha256: executor.artifact_digest,
+        accelerator_source_sha256:
+            "e3201ae10f48e284d703cff81d42a02d9ba7f96e4bcc9b03872094b25a5a26aa",
+        accelerator_binary_sha256: executor.artifact_digest,
+        accelerator_source_aux_sha256: "",
+        accelerator_binary_aux_sha256: "",
+        build_toolchain: "CUDA ptxas 13.0 V13.0.88",
+        device_capability: capability, device_name: device_name,
+        live_device_identity: "cuda-device-identity:" +
+            executor.device_identity.to_text(),
+        live_device_identity_tag: executor.device_identity,
+        executor_cache_identity_sha256: executor.cache_identity.key_digest)
+    val hash_reason = _gpu_build_required_hash_reason(value)
+    if hash_reason != "": return Err(hash_reason)
+    val tuple_reason = _cuda_build_tuple_reason(value)
+    if tuple_reason != "": return Err(tuple_reason)
+    Ok(value)
+
+fn x25519_mlkem768_observe_vulkan_gpu_build_admission(
+        executor: X25519MlKem768VulkanNttExecutor,
+        runner_artifact_sha256: text
+        ) -> Result<X25519MlKem768GpuBuildAdmission, text>:
+    if (executor.closed or not executor.session.initialized or
+            executor.session.completion_unknown or
+            executor.session.release_pending or
+            executor.session.device_identity <= 0 or
+            executor.session.device_name == "" or
+            executor.session.driver_identity == "" or
+            executor.forward_artifact_digest == "" or
+            executor.inverse_artifact_digest == "" or
+            executor.forward_artifact_digest !=
+                executor.expected_forward_artifact_digest or
+            executor.inverse_artifact_digest !=
+                executor.expected_inverse_artifact_digest or
+            not executor.cache_identity.bound or
+            executor.cache_identity.device_identity !=
+                executor.session.device_identity or
+            executor.cache_identity.key_digest == ""):
+        return Err("gpu-build-vulkan-live-executor-not-admitted")
+    val artifact_set = sha256_text(
+        "forward=" + executor.forward_artifact_digest + ";inverse=" +
+            executor.inverse_artifact_digest)
+    val value = X25519MlKem768GpuBuildAdmission(
+        backend: X25519MlKem768EvidenceBackend.Vulkan,
+        runner_artifact_sha256: runner_artifact_sha256,
+        backend_artifact_sha256: artifact_set,
+        accelerator_source_sha256:
+            "f29443943a381012f34e26a7ab2ac44bee51338d78662109c47e0182aa1fc668",
+        accelerator_binary_sha256: executor.forward_artifact_digest,
+        accelerator_source_aux_sha256:
+            "b1e5a9ed87e4331abb5ac7ab906418aa9e4c927d2e284174990110318382e09c",
+        accelerator_binary_aux_sha256: executor.inverse_artifact_digest,
+        build_toolchain:
+            "glslangValidator-sha256:96ea85d4228d7065507cd58454628e0d3c9ec8bbd29a0cd20ee0f3cefaf6d026" +
+            "+spirv-val-sha256:20c5998a46f02310f56bf11be238c34d374bb50104b7ccf85bb909f9da883ff9",
+        device_capability: "vulkan1.1",
+        device_name: executor.session.device_name,
+        live_device_identity: executor.session.driver_identity,
+        live_device_identity_tag: executor.session.device_identity,
+        executor_cache_identity_sha256: executor.cache_identity.key_digest)
+    val hash_reason = _gpu_build_required_hash_reason(value)
+    if hash_reason != "": return Err(hash_reason)
+    val tuple_reason = _vulkan_build_tuple_reason(value)
+    if tuple_reason != "": return Err(tuple_reason)
+    Ok(value)
+
+export X25519_MLKEM768_GPU_BUILD_ADMISSION_SCHEMA
+export X25519MlKem768GpuBuildAdmission
+export x25519_mlkem768_gpu_build_admission_sha256
+export x25519_mlkem768_gpu_build_admission_reason
+export x25519_mlkem768_observe_cuda_gpu_build_admission
+export x25519_mlkem768_observe_vulkan_gpu_build_admission

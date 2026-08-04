@@ -1,0 +1,223 @@
+# TLS 1.3 X25519MLKEM768 protocol-boundary scenarios.
+# @cover src/os/tls13/hybrid_key_share.spl 100%
+# @cover src/os/tls13/hybrid_handshake.spl 100%
+# @cover src/os/tls13/named_groups.spl 100%
+
+use std.spipe.*
+use os.tls13.named_groups.{
+    GROUP_X25519_MLKEM768, OBSOLETE_GROUP_X25519_KYBER768_DRAFT00,
+    OBSOLETE_GROUP_X25519_MLKEM768_DRAFT00}
+use os.tls13.hybrid_key_share.{
+    TlsHybridAlert, tls13_validate_x25519_mlkem768_client_share,
+    tls13_validate_x25519_mlkem768_server_share}
+use os.tls13.handshake13.{
+    ServerHello13, build_client_hello_bytes_with_x25519_mlkem768,
+    parse_handshake_header}
+use os.tls13.server_handshake.{process_client_hello}
+use os.tls13.hybrid_handshake.{
+    tls13_decapsulate_x25519_mlkem768_server_hello}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    x25519_mlkem768_default_config}
+use os.crypto.x25519_mlkem768.hybrid.{
+    x25519_mlkem768_keygen, x25519_mlkem768_encapsulate}
+use test.fixtures.crypto.x25519mlkem768.canonical_fixture.{
+    x25519_mlkem768_fixture_list, x25519_mlkem768_fixture_bytes}
+
+fn _octets(count: i64) -> list:
+    var out = []
+    var i: i64 = 0
+    while i < count:
+        out.push(i & 0xFF)
+        i = i + 1
+    out
+
+fn _byte_octets(count: i64, offset: i64) -> [u8]:
+    x25519_mlkem768_fixture_bytes(count, offset)
+
+fn _list_octets(count: i64, offset: i64) -> list:
+    x25519_mlkem768_fixture_list(count, offset)
+
+fn _list_to_bytes(values: list) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < values.len():
+        out.push(values.get(i).to_u8())
+        i = i + 1
+    out
+
+fn _long_server_name() -> text:
+    var first_label = ""
+    var i: i64 = 0
+    while i < 63:
+        first_label = first_label + "a"
+        i = i + 1
+    first_label + "." + first_label + "." + first_label + ".example.test"
+
+fn _lists_equal(a: list, b: list) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a.get(i) != b.get(i):
+            return false
+        i = i + 1
+    true
+
+fn _server_hello_hybrid(share: list, group: u16) -> ServerHello13:
+    ServerHello13(
+        random: _byte_octets(32, 201), cipher_suite: 0x1301u16,
+        named_group: group, x25519_pub: [],
+        x25519_mlkem768_share: _list_to_bytes(share), p256_pub: [])
+
+describe "TLS 1.3 X25519MLKEM768 negotiation contract":
+    it "should REQ-005 uses the draft-05 NamedGroup code point":
+        step("Load the shared X25519MLKEM768 fixture")
+        expect(GROUP_X25519_MLKEM768.to_i64()).to_equal(0x11EC)
+
+    it "should REQ-005 accepts the exact 1216-byte client key share":
+        step("Negotiate the TLS 1.3 hybrid group")
+        match tls13_validate_x25519_mlkem768_client_share(
+                GROUP_X25519_MLKEM768, _octets(1216)):
+            case Ok(valid): expect(valid).to_be(true)
+            case Err(error): fail(error.reason)
+
+    it "should REQ-006 accepts the exact 1120-byte server key share":
+        step("Negotiate the TLS 1.3 hybrid group")
+        match tls13_validate_x25519_mlkem768_server_share(
+                GROUP_X25519_MLKEM768, _octets(1120)):
+            case Ok(valid): expect(valid).to_be(true)
+            case Err(error): fail(error.reason)
+
+    it "should REQ-004 NFR-013 maps a malformed client share to illegal_parameter":
+        step("Negotiate the TLS 1.3 hybrid group")
+        match tls13_validate_x25519_mlkem768_client_share(
+                GROUP_X25519_MLKEM768, _octets(1215)):
+            case Ok(_): fail("malformed client share was accepted")
+            case Err(error):
+                expect(error.alert == TlsHybridAlert.IllegalParameter).to_be(true)
+                expect(error.reason).to_contain("1216")
+
+    it "should REQ-004 NFR-013 maps a malformed server share to illegal_parameter":
+        step("Validate the exact hybrid ServerHello key-share length")
+        match tls13_validate_x25519_mlkem768_server_share(
+                GROUP_X25519_MLKEM768, _octets(1119)):
+            case Ok(_): fail("malformed server share was accepted")
+            case Err(error):
+                expect(error.alert == TlsHybridAlert.IllegalParameter).to_be(true)
+                expect(error.reason).to_contain("1120")
+
+    it "should REQ-004 rejects unexpected groups on both share directions":
+        step("Validate the negotiated group on client and server shares")
+        match tls13_validate_x25519_mlkem768_client_share(
+                0x001Du16, _octets(1216)):
+            case Ok(_): fail("unexpected client group was accepted")
+            case Err(error): expect(error.reason).to_contain("unexpected")
+        match tls13_validate_x25519_mlkem768_server_share(
+                0x001Du16, _octets(1120)):
+            case Ok(_): fail("unexpected server group was accepted")
+            case Err(error): expect(error.reason).to_contain("unexpected")
+
+    it "should REQ-004 rejects obsolete experimental group identifiers":
+        step("Negotiate the TLS 1.3 hybrid group")
+        match tls13_validate_x25519_mlkem768_client_share(
+                OBSOLETE_GROUP_X25519_KYBER768_DRAFT00, _octets(1216)):
+            case Ok(_): fail("obsolete hybrid group was accepted")
+            case Err(error): expect(error.reason).to_contain("obsolete")
+        match tls13_validate_x25519_mlkem768_server_share(
+                OBSOLETE_GROUP_X25519_MLKEM768_DRAFT00, _octets(1120)):
+            case Ok(_): fail("obsolete ML-KEM draft group was accepted")
+            case Err(error): expect(error.reason).to_contain("obsolete")
+
+    it "should REQ-005 REQ-006 REQ-014 advertises and parses a hybrid ClientHello":
+        step("Load the shared X25519MLKEM768 fixture")
+        val encoded = match build_client_hello_bytes_with_x25519_mlkem768(
+                _byte_octets(32, 1), _byte_octets(1216, 33),
+                _byte_octets(32, 65), [], "example.test"):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        step("Negotiate the TLS 1.3 hybrid group")
+        val parsed = process_client_hello(parse_handshake_header(encoded).body)
+        expect(parsed.named_groups[0] == GROUP_X25519_MLKEM768).to_be(true)
+        expect(parsed.key_share_groups[0] == GROUP_X25519_MLKEM768).to_be(true)
+        expect(parsed.x25519_mlkem768_key_share.len()).to_equal(1216)
+
+    it "keeps REQ-014 REQ-017 NFR-018 hybrid parsing above a common TCP MSS":
+        step("Build a large hybrid-first ClientHello without disabling ML-KEM")
+        val encoded = match build_client_hello_bytes_with_x25519_mlkem768(
+                _byte_octets(32, 1), _byte_octets(1216, 33),
+                _byte_octets(32, 65), [], _long_server_name()):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(encoded.len().to_i64()).to_be_greater_than(1460)
+
+        step("Parse the large complete handshake at the protocol boundary")
+        val parsed = process_client_hello(parse_handshake_header(encoded).body)
+        expect(parsed.named_groups[0]).to_equal(GROUP_X25519_MLKEM768)
+        expect(parsed.key_share_groups[0]).to_equal(GROUP_X25519_MLKEM768)
+        expect(parsed.x25519_mlkem768_key_share.len()).to_equal(1216)
+
+    it "should REQ-003 REQ-006 completes client decapsulation from ServerHello":
+        step("Run the scalar CPU reference exchange")
+        val config = x25519_mlkem768_default_config()
+        val client = match x25519_mlkem768_keygen(
+                config, _byte_octets(32, 1), _list_octets(32, 33),
+                _list_octets(32, 65)):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        val server = match x25519_mlkem768_encapsulate(
+                config, client.client_key_share, _byte_octets(32, 97),
+                _list_octets(32, 129)):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        val recovered = match tls13_decapsulate_x25519_mlkem768_server_hello(
+                _server_hello_hybrid(
+                    server.server_key_share, GROUP_X25519_MLKEM768),
+                config, client.x25519_private_key, client.decapsulation_key):
+            case Ok(value): value
+            case Err(error): fail(error.reason)
+        expect(_lists_equal(
+            recovered.shared_secret, server.shared_secret)).to_be(true)
+
+    it "should REQ-004 REQ-016 maps all-zero X25519 output to illegal_parameter":
+        step("Reject a prohibited all-zero classical contribution")
+        val config = x25519_mlkem768_default_config()
+        val client = match x25519_mlkem768_keygen(
+                config, _byte_octets(32, 1), _list_octets(32, 33),
+                _list_octets(32, 65)):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        val server = match x25519_mlkem768_encapsulate(
+                config, client.client_key_share, _byte_octets(32, 97),
+                _list_octets(32, 129)):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        var prohibited_share = server.server_key_share
+        var i: i64 = 1088
+        while i < 1120:
+            prohibited_share[i] = 0
+            i = i + 1
+        match tls13_decapsulate_x25519_mlkem768_server_hello(
+                _server_hello_hybrid(prohibited_share, GROUP_X25519_MLKEM768),
+                config, client.x25519_private_key, client.decapsulation_key):
+            case Ok(_): fail("all-zero peer X25519 share was accepted")
+            case Err(error):
+                expect(error.alert == TlsHybridAlert.IllegalParameter).to_be(true)
+                expect(error.reason).to_contain("all-zero")
+
+    it "should REQ-004 NFR-013 maps validation and decapsulation failures to alerts":
+        step("Map hybrid validation failures to TLS alerts")
+        val config = x25519_mlkem768_default_config()
+        match tls13_decapsulate_x25519_mlkem768_server_hello(
+                _server_hello_hybrid(_octets(1120), 0x001Du16),
+                config, _byte_octets(32, 1), _octets(2400)):
+            case Ok(_): fail("unexpected ServerHello group was accepted")
+            case Err(error):
+                expect(error.alert == TlsHybridAlert.IllegalParameter).to_be(true)
+        match tls13_decapsulate_x25519_mlkem768_server_hello(
+                _server_hello_hybrid(
+                    _octets(1120), GROUP_X25519_MLKEM768),
+                config, _byte_octets(32, 1), []):
+            case Ok(_): fail("invalid ML-KEM decapsulation key was accepted")
+            case Err(error):
+                expect(error.alert == TlsHybridAlert.InternalError).to_be(true)
+                expect(error.reason).to_contain("decapsulation key")

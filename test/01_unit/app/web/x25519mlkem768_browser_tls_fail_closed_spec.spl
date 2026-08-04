@@ -1,0 +1,143 @@
+# @req REQ-017 NFR-018
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/tls.spl 80%
+use std.spec.*
+use app.io.mod.{file_read}
+use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types.{
+    TlsConfig, TlsVersion
+}
+use std.gc_async_mut.gpu.browser_engine.net.tls.{TlsManager}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{
+    Logger, BrowserLogLevel
+}
+
+fn _browser_tls_config(
+    min_version: TlsVersion, verify_peer: bool, roots: [[u8]]
+) -> TlsConfig:
+    TlsConfig(
+        min_version: min_version,
+        verify_peer: verify_peer,
+        sni_hostname: "",
+        root_store: roots,
+        enable_x25519_mlkem768: true,
+        require_x25519_mlkem768: false
+    )
+
+describe "X25519MLKEM768 browser TLS fail-closed policy":
+    it "should REQ-017 rejects disabled certificate verification before transport":
+        step("Reject an insecure browser certificate-verification configuration")
+        val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
+        var manager = TlsManager.new(
+            logger, _browser_tls_config(TlsVersion.Tls13, false, []))
+        match manager.handshake_address(
+            "192.0.2.1", "example.test", 443, 100
+        ):
+            case Ok(_): fail("browser accepted disabled peer verification")
+            case Err(error):
+                expect(error.message).to_equal(
+                    "TLS peer verification cannot be disabled for browser connections")
+
+    it "should REQ-017 rejects an empty service identity before transport":
+        step("Reject browser TLS without a certificate service identity")
+        val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
+        var manager = TlsManager.new(
+            logger, _browser_tls_config(TlsVersion.Tls13, true, []))
+        match manager.handshake_address("192.0.2.1", "", 443, 100):
+            case Ok(_): fail("browser accepted an empty certificate identity")
+            case Err(error):
+                expect(error.message).to_equal("TLS handshake: empty hostname")
+
+    it "should NFR-018 rejects invalid ports and expired deadlines before transport":
+        step("Validate transport bounds before opening a socket")
+        val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
+        var manager = TlsManager.new(
+            logger, _browser_tls_config(TlsVersion.Tls13, true, []))
+        match manager.handshake_address(
+            "192.0.2.1", "example.test", 0, 100
+        ):
+            case Ok(_): fail("browser accepted an invalid port")
+            case Err(error):
+                expect(error.message).to_equal("TLS handshake: invalid port 0")
+        match manager.handshake_address(
+            "192.0.2.1", "example.test", 443, 0
+        ):
+            case Ok(_): fail("browser accepted an expired deadline")
+            case Err(error):
+                expect(error.message).to_equal("TLS handshake: deadline exceeded")
+
+    it "should REQ-017 rejects TLS 1.2 on the pure-Simple hybrid browser path":
+        step("Require TLS 1.3 for the hybrid browser connection")
+        val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
+        var manager = TlsManager.new(
+            logger,
+            _browser_tls_config(TlsVersion.Tls12, true, [[1u8]])
+        )
+        match manager.handshake_address(
+            "192.0.2.1", "example.test", 443, 100
+        ):
+            case Ok(_): fail("hybrid browser path accepted TLS 1.2")
+            case Err(error):
+                expect(error.message).to_equal(
+                    "Pure-Simple browser HTTPS requires a TLS 1.3 minimum")
+
+    it "should NFR-018 rejects an empty trust store before transport":
+        step("Reject browser TLS without a trust anchor")
+        val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
+        var manager = TlsManager.new(
+            logger, _browser_tls_config(TlsVersion.Tls13, true, []))
+        match manager.handshake_address(
+            "192.0.2.1", "example.test", 443, 100
+        ):
+            case Ok(_): fail("browser connected without a trust anchor")
+            case Err(error):
+                expect(error.message).to_equal(
+                    "Pure-Simple browser TLS trust store is empty")
+
+    it "should NFR-018 preserve one absolute deadline through TCP and TLS":
+        step("Bind the HTTP deadline to deadline-aware TLS record I/O")
+        val h1 = file_read(
+            "src/lib/gc_async_mut/gpu/browser_engine/net/h1_client.spl")
+        val browser_tls = file_read(
+            "src/lib/gc_async_mut/gpu/browser_engine/net/tls.spl")
+        val tls_io = file_read("src/os/tls13/_Tls13/context_io.spl")
+        val tls_connect = file_read("src/os/tls13/_Tls13/psk_connect.spl")
+
+        expect(h1).to_contain("self.tls.handshake_address_deadline(")
+        expect(h1).to_contain("request_deadline_ms")
+        expect(browser_tls).to_contain(
+            "val handshake_budget_ms = deadline_ms - browser_monotonic_ms()")
+        expect(browser_tls).to_contain(
+            "tls13_connect_host_stream_with_config_deadline(")
+        expect(tls_connect).to_contain(
+            "_host_stream_io_deadline(stream, deadline_ms)")
+        expect(tls_io).to_contain("if _io_deadline_expired(io):")
+        expect(tls_io).to_contain(
+            "io.host_stream.set_read_timeout(Some(remaining_ms))")
+        expect(tls_io).to_contain(
+            "io.host_stream.set_write_timeout(Some(remaining_ms))")
+        expect(tls_io).to_contain("if io.kind == \"host_stream\":\n                return result")
+
+    it "should NFR-018 keep server read and write timeout owners distinct":
+        step("Use the configured write timeout on the hybrid accept path")
+        val worker = file_read(
+            "src/lib/nogc_async_mut/http_server/worker.spl")
+        val tls_server = file_read("src/os/tls13/server.spl")
+        val accept_start = worker.index_of("me handle_tls13_pqc_accept")
+        val accept_end = worker.index_of("me handle_tls_accept")
+        val accept_path = worker.slice(accept_start, accept_end)
+
+        expect(accept_path).to_contain(
+            "client_fd, Some(self.config.read_timeout_ms)")
+        expect(accept_path).to_contain(
+            "client_fd, Some(self.config.write_timeout_ms)")
+        expect(accept_path).to_contain(
+            "time_now_micros() / 1000 + handshake_budget_ms")
+        expect(accept_path).to_contain(
+            "tls13_accept_x25519_mlkem768_with_deadline(")
+        expect(tls_server).to_contain(
+            "if _tls13_server_deadline_expired(deadline_ms):")
+        expect(tls_server).to_contain(
+            "_recv_record(socket_fd, deadline_ms)")
+        expect(tls_server).to_contain(
+            "tcp_backend_set_read_timeout(\n                socket_fd, Some(remaining_ms))")
+        expect(tls_server).to_contain(
+            "tcp_backend_set_write_timeout(\n                socket_fd, Some(remaining_ms))")

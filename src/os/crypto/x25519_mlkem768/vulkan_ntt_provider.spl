@@ -1,0 +1,347 @@
+# Pinned-SPIR-V Vulkan batch provider for ML-KEM forward/inverse NTT.
+
+mod os.crypto.x25519_mlkem768.vulkan_ntt_provider
+
+use std.gc_async_mut.crypto_accel.vulkan_session.{CryptoVulkanSession}
+use std.sffi.io.{file_read_bytes, file_size}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use os.crypto.ml_kem_ntt.{ml_kem_ntt_zetas}
+use os.crypto.ml_kem_kpke.{MlKemNttBatchProvider}
+use os.crypto.x25519_mlkem768.cache_identity.{
+    X25519MlKem768CacheIdentity, x25519_mlkem768_cache_identity,
+    x25519_mlkem768_cache_bind, x25519_mlkem768_cache_bind_device}
+use os.crypto.x25519_mlkem768.artifact_snapshot_admission.{
+    x25519_mlkem768_artifact_size_admitted,
+    x25519_mlkem768_artifact_read_exact}
+use os.crypto.x25519_mlkem768.gpu_lifecycle_snapshot.{
+    X25519MlKem768GpuLifecycleSnapshot,
+    x25519_mlkem768_gpu_lifecycle_snapshot}
+
+val X25519_MLKEM768_VULKAN_NTT_ENTRY: text = "main"
+val X25519_MLKEM768_VULKAN_NTT_MAX_BATCH: i64 = 65535
+val _VULKAN_NTT_MAX_ARTIFACT_BYTES: i64 = 67108864
+val _GPU_LIFECYCLE_COUNTER_MAX: i64 = 9223372036854775807
+
+fn _vulkan_artifact_set_digest(forward_digest: text,
+        inverse_digest: text) -> text:
+    if forward_digest.len() != 64 or inverse_digest.len() != 64:
+        return ""
+    sha256_text("forward=" + forward_digest + ";inverse=" + inverse_digest)
+
+fn _vulkan_i32_bytes(values: list) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < values.len():
+        val value = values.get(i)
+        out.push((value & 0xFF).to_u8())
+        out.push(((value >> 8) & 0xFF).to_u8())
+        out.push(((value >> 16) & 0xFF).to_u8())
+        out.push(((value >> 24) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn _vulkan_i32_values_valid(values: list) -> bool:
+    var i: i64 = 0
+    while i < values.len():
+        val value = values.get(i)
+        if value < -2147483648 or value > 2147483647:
+            return false
+        i = i + 1
+    true
+
+fn _vulkan_i32_list(bytes: [u8]) -> list:
+    var out: list = []
+    if bytes.len() % 4 != 0:
+        return out
+    var i: i64 = 0
+    while i < bytes.len().to_i64():
+        val unsigned = bytes[i].to_i64() |
+            (bytes[i + 1].to_i64() << 8) |
+            (bytes[i + 2].to_i64() << 16) |
+            (bytes[i + 3].to_i64() << 24)
+        val value = if unsigned >= 2147483648:
+            unsigned - 4294967296
+        else:
+            unsigned
+        out.push(value)
+        i = i + 4
+    out
+
+fn _vulkan_spirv_magic_valid(bytes: [u8]) -> bool:
+    if bytes.len() < 20 or bytes.len() % 4 != 0:
+        return false
+    val first_half_valid = bytes[0] == 3 and bytes[1] == 2
+    val second_half_valid = bytes[2] == 35 and bytes[3] == 7
+    first_half_valid and second_half_valid
+
+fn _vulkan_snapshot_admission_reason(
+        forward_artifact_path: text, inverse_artifact_path: text,
+        forward_size: i64, inverse_size: i64,
+        forward_spirv: [u8], inverse_spirv: [u8],
+        expected_forward_digest: text, expected_inverse_digest: text,
+        current_forward_digest: text, current_inverse_digest: text) -> text:
+    val forward_extension_valid = forward_artifact_path.ends_with(".spv")
+    val inverse_extension_valid = inverse_artifact_path.ends_with(".spv")
+    if not forward_extension_valid or not inverse_extension_valid:
+        return "vulkan-ntt-binary-extension-invalid"
+    val forward_size_valid = x25519_mlkem768_artifact_size_admitted(
+        forward_size, _VULKAN_NTT_MAX_ARTIFACT_BYTES)
+    val inverse_size_valid = x25519_mlkem768_artifact_size_admitted(
+        inverse_size, _VULKAN_NTT_MAX_ARTIFACT_BYTES)
+    if not forward_size_valid or not inverse_size_valid:
+        return "vulkan-ntt-binary-artifact-invalid"
+    val forward_read_exact = x25519_mlkem768_artifact_read_exact(
+        forward_size_valid, forward_size, forward_spirv.len().to_i64())
+    val inverse_read_exact = x25519_mlkem768_artifact_read_exact(
+        inverse_size_valid, inverse_size, inverse_spirv.len().to_i64())
+    if not forward_read_exact or not inverse_read_exact:
+        return "vulkan-ntt-binary-artifact-invalid"
+    val forward_digest_pinned = expected_forward_digest != ""
+    val inverse_digest_pinned = expected_inverse_digest != ""
+    val forward_digest_matches = current_forward_digest == expected_forward_digest
+    val inverse_digest_matches = current_inverse_digest == expected_inverse_digest
+    val digests_pinned = forward_digest_pinned and inverse_digest_pinned
+    val digests_match = forward_digest_matches and inverse_digest_matches
+    if not digests_pinned or not digests_match:
+        return "vulkan-ntt-binary-digest-mismatch"
+    val forward_magic_valid = _vulkan_spirv_magic_valid(forward_spirv)
+    val inverse_magic_valid = _vulkan_spirv_magic_valid(inverse_spirv)
+    if not forward_magic_valid or not inverse_magic_valid:
+        return "vulkan-ntt-binary-magic-invalid"
+    ""
+
+class X25519MlKem768VulkanNttExecutor:
+    session: CryptoVulkanSession
+    forward_artifact_path: text
+    forward_artifact_digest: text
+    expected_forward_artifact_digest: text
+    inverse_artifact_path: text
+    inverse_artifact_digest: text
+    expected_inverse_artifact_digest: text
+    forward_spirv: [u8]
+    inverse_spirv: [u8]
+    zeta_bytes: [u8]
+    zeta_encoding_count: i64
+    admission_reason: text
+    closed: bool
+    kernel_invocations: i64
+    transfer_count: i64
+    launch_count: i64
+    synchronization_count: i64
+    readback_count: i64
+    fence_completed: bool
+    cache_identity: X25519MlKem768CacheIdentity
+
+    fn lifecycle_snapshot() -> X25519MlKem768GpuLifecycleSnapshot:
+        x25519_mlkem768_gpu_lifecycle_snapshot(
+            self.transfer_count, self.launch_count,
+            self.synchronization_count, self.readback_count,
+            self.kernel_invocations)
+
+    static fn create_binaries(forward_artifact_path: text,
+            expected_forward_artifact_digest: text,
+            inverse_artifact_path: text,
+            expected_inverse_artifact_digest: text) -> X25519MlKem768VulkanNttExecutor:
+        val forward_size = file_size(forward_artifact_path)
+        val inverse_size = file_size(inverse_artifact_path)
+        val extensions_admitted = (
+            forward_artifact_path.ends_with(".spv") and
+            inverse_artifact_path.ends_with(".spv"))
+        val sizes_admitted = (
+            x25519_mlkem768_artifact_size_admitted(
+                forward_size, _VULKAN_NTT_MAX_ARTIFACT_BYTES) and
+            x25519_mlkem768_artifact_size_admitted(
+                inverse_size, _VULKAN_NTT_MAX_ARTIFACT_BYTES))
+        val snapshot_read_admitted = extensions_admitted and sizes_admitted
+        val forward_read = if snapshot_read_admitted:
+            file_read_bytes(forward_artifact_path)
+        else:
+            []
+        val inverse_read = if snapshot_read_admitted:
+            file_read_bytes(inverse_artifact_path)
+        else:
+            []
+        val reads_exact = (
+            x25519_mlkem768_artifact_read_exact(
+                snapshot_read_admitted, forward_size,
+                forward_read.len().to_i64()) and
+            x25519_mlkem768_artifact_read_exact(
+                snapshot_read_admitted, inverse_size,
+                inverse_read.len().to_i64()))
+        val current_forward_digest = if reads_exact:
+            sha256_u8_hex(forward_read)
+        else:
+            ""
+        val current_inverse_digest = if reads_exact:
+            sha256_u8_hex(inverse_read)
+        else:
+            ""
+        val admission_reason = _vulkan_snapshot_admission_reason(
+            forward_artifact_path, inverse_artifact_path,
+            forward_size, inverse_size, forward_read, inverse_read,
+            expected_forward_artifact_digest,
+            expected_inverse_artifact_digest,
+            current_forward_digest, current_inverse_digest)
+        val forward_spirv = if admission_reason == "": forward_read else: []
+        val inverse_spirv = if admission_reason == "": inverse_read else: []
+        X25519MlKem768VulkanNttExecutor(
+            session: CryptoVulkanSession.create(),
+            forward_artifact_path: forward_artifact_path,
+            forward_artifact_digest: if admission_reason == "":
+                current_forward_digest
+            else:
+                "",
+            expected_forward_artifact_digest:
+                expected_forward_artifact_digest,
+            inverse_artifact_path: inverse_artifact_path,
+            inverse_artifact_digest: if admission_reason == "":
+                current_inverse_digest
+            else:
+                "",
+            expected_inverse_artifact_digest:
+                expected_inverse_artifact_digest,
+            forward_spirv: forward_spirv, inverse_spirv: inverse_spirv,
+            zeta_bytes: _vulkan_i32_bytes(ml_kem_ntt_zetas()),
+            zeta_encoding_count: 1,
+            admission_reason: admission_reason,
+            closed: false, kernel_invocations: 0,
+            transfer_count: 0, launch_count: 0,
+            synchronization_count: 0, readback_count: 0,
+            fence_completed: false,
+            cache_identity: x25519_mlkem768_cache_identity(
+                "vulkan", "", _vulkan_artifact_set_digest(
+                    expected_forward_artifact_digest,
+                    expected_inverse_artifact_digest)))
+
+    me bind_cache_contract(implementation_version: text,
+            profile_version: text, configuration_digest: text) -> text:
+        if self.closed:
+            return "vulkan-ntt-executor-closed"
+        if self.admission_reason != "":
+            return self.admission_reason
+        match x25519_mlkem768_cache_bind(
+                self.cache_identity, implementation_version,
+                profile_version, configuration_digest):
+            case Ok(bound):
+                self.cache_identity = bound
+                ""
+            case Err(reason): reason
+
+    me warmup() -> text:
+        """Validate and load the pinned SPIR-V pair without dispatching work."""
+        self._ensure_ready()
+
+    me _terminal_session_reason() -> text:
+        # Unknown completion transfers resource ownership to the session's
+        # quarantine. The executor must become terminal immediately so it
+        # cannot be rebound or reused while those dependencies remain live.
+        if (self.session.completion_unknown or
+                self.session.release_pending):
+            self.closed = true
+            self.fence_completed = false
+            return "vulkan-session-unavailable"
+        ""
+
+    me _ensure_ready() -> text:
+        if self.closed:
+            return "vulkan-ntt-executor-closed"
+        val terminal_reason = self._terminal_session_reason()
+        if terminal_reason != "":
+            return terminal_reason
+        if self.admission_reason != "":
+            return self.admission_reason
+        val artifact_set_digest = _vulkan_artifact_set_digest(
+            self.forward_artifact_digest, self.inverse_artifact_digest)
+        if (self.cache_identity.bound and
+                self.cache_identity.artifact_digest != artifact_set_digest):
+            return "x25519mlkem768-cache-artifact-mismatch"
+        if not self.session.initialized:
+            val reason = self.session.init(
+                self.forward_spirv, self.inverse_spirv,
+                X25519_MLKEM768_VULKAN_NTT_ENTRY)
+            if reason != "":
+                return reason
+        if self.session.device_identity <= 0:
+            self.session.shutdown()
+            return "vulkan-ntt-device-identity-unavailable"
+        if self.cache_identity.bound:
+            match x25519_mlkem768_cache_bind_device(
+                    self.cache_identity, self.session.device_identity):
+                case Ok(bound): self.cache_identity = bound
+                case Err(reason):
+                    self.session.shutdown()
+                    self.closed = true
+                    return reason
+        ""
+
+    me _execute(polynomials: list, inverse: bool) -> Result<list, text>:
+        if self.closed:
+            return Err("vulkan-ntt-executor-closed")
+        self.fence_completed = false
+        if polynomials.len() == 0 or polynomials.len() % 256 != 0:
+            return Err("vulkan-ntt-input-size-invalid")
+        if not _vulkan_i32_values_valid(polynomials):
+            return Err("vulkan-ntt-input-value-out-of-range")
+        if polynomials.len() / 256 > X25519_MLKEM768_VULKAN_NTT_MAX_BATCH:
+            return Err("vulkan-ntt-batch-too-large")
+        val counters_exhausted = (
+            self.transfer_count >= _GPU_LIFECYCLE_COUNTER_MAX or
+            self.launch_count >= _GPU_LIFECYCLE_COUNTER_MAX or
+            self.synchronization_count >= _GPU_LIFECYCLE_COUNTER_MAX or
+            self.readback_count >= _GPU_LIFECYCLE_COUNTER_MAX or
+            self.kernel_invocations >= _GPU_LIFECYCLE_COUNTER_MAX)
+        if counters_exhausted:
+            self.closed = true
+            return Err("vulkan-ntt-lifecycle-counter-overflow")
+        val warmup_reason = self._ensure_ready()
+        if warmup_reason != "":
+            return Err(warmup_reason)
+        val output = match self.session.execute(
+                _vulkan_i32_bytes(polynomials),
+                self.zeta_bytes,
+                polynomials.len() / 256, inverse):
+            case Ok(value): value
+            case Err(reason):
+                val _terminal_reason = self._terminal_session_reason()
+                return Err(reason)
+        val values = _vulkan_i32_list(output)
+        if values.len() != polynomials.len():
+            return Err("vulkan-ntt-readback-size-mismatch")
+        # A successful session execution proves one payload upload, dispatch,
+        # fence completion, and device readback. Setup-only zeta uploads are
+        # deliberately excluded from the per-operation lifecycle counters.
+        self.transfer_count = self.transfer_count + 1
+        self.launch_count = self.launch_count + 1
+        self.synchronization_count = self.synchronization_count + 1
+        self.readback_count = self.readback_count + 1
+        self.kernel_invocations = self.kernel_invocations + 1
+        self.fence_completed = true
+        Ok(values)
+
+    me shutdown() -> text:
+        self.closed = true
+        self.session.shutdown()
+
+fn x25519_mlkem768_vulkan_ntt_execute(
+        executor: X25519MlKem768VulkanNttExecutor,
+        polynomials: list) -> Result<list, text>:
+    executor._execute(polynomials, false)
+
+fn x25519_mlkem768_vulkan_intt_execute(
+        executor: X25519MlKem768VulkanNttExecutor,
+        polynomials: list) -> Result<list, text>:
+    executor._execute(polynomials, true)
+
+impl MlKemNttBatchProvider for X25519MlKem768VulkanNttExecutor:
+
+    fn forward(polynomials: list) -> Result<list, text>:
+        self._execute(polynomials, false)
+
+    fn inverse(polynomials: list) -> Result<list, text>:
+        self._execute(polynomials, true)
+
+export X25519MlKem768VulkanNttExecutor
+export x25519_mlkem768_vulkan_ntt_execute
+export x25519_mlkem768_vulkan_intt_execute
+export X25519_MLKEM768_VULKAN_NTT_ENTRY
+export X25519_MLKEM768_VULKAN_NTT_MAX_BATCH
