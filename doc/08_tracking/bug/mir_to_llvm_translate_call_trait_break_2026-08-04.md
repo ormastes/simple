@@ -1,6 +1,6 @@
 # `MirToLlvm` no longer satisfies `MirTextCodegen.translate_call` — main is red for every spec
 
-**Status:** OPEN
+**Status:** FIXED (2026-08-04)
 **Date:** 2026-08-04
 **Severity:** BLOCKER — `bin/simple test` cannot compile *any* spec at current `main`.
 **Offending commit:** `0ae43f73ac9` — `fix(compiler): translate bootstrap calls by index`
@@ -102,3 +102,98 @@ A shared working copy that is behind `main` will show these lanes **green**,
 because `.spl` libraries execute from source and a stale checkout still has the
 pre-rename `translate_call`. Verify `git merge-base --is-ancestor <tip> HEAD`
 before treating a green run as evidence about `main`.
+
+---
+
+## Resolution (2026-08-04)
+
+### Re-verified at a later tip — still broken, and WIDER than first reported
+
+Pristine detached worktree at `85b994093c47a0a6ddf1da1a6740a0957089704b`
+(`refs/heads/main`, ~9 commits past the tip in the report above), zero
+uncommitted `src/`, same seed binary. Verbatim outcome — no `Results:` line
+(`grep -c '^Results:'` == 0), aborting on the **last** line of the log:
+
+```
+error: semantic: type `MirToLlvm` does not implement required method `translate_block` from trait `MirTextCodegen`
+```
+
+Note the method name: `translate_block`, not `translate_call`. The trait check
+reports only the **first** missing name in declaration order, and
+`translate_block` is declared at `:23`, ahead of `translate_call` at `:31`. So
+the original report saw only the tail of the drift. The index/owner-based
+rename campaign had actually moved **three** required methods on the sole
+implementer:
+
+| trait required (stale) | `MirToLlvm` actually provides |
+|---|---|
+| `translate_block(block)` (`:23`) | `translate_block_at(blocks, block_index, return_type_text, is_start, return_slot_id)` |
+| `translate_terminator(term)` (`:24`) | `translate_terminator_at(blocks, block_index, return_type_text, is_start, return_slot_id)` |
+| `translate_call(dest, func, args)` (`:31`) | `translate_call_at(instructions, index)` |
+
+### The fact that decided the fix shape
+
+**`MirToLlvm` is the only implementer of `MirTextCodegen`.** A repo-wide scan
+for `impl MirTextCodegen` returns exactly one real hit
+(`_MirToLlvm/core_codegen.spl:153`); the only other mention is a *stale comment*
+at `c_backend_stubs.spl:7`. `MirToC`, the Lua backend and the WASM/WAT backend
+each declare their own `translate_instruction` / `translate_block` /
+`translate_terminator` in **inherent** impls (`impl MirToC:` at
+`_CBackendTranslate/class_core.spl:57`, `lua_backend.spl`,
+`wasm/wat_codegen.spl`) and never route through this trait. Their
+`self.translate_instruction(inst)` call sites resolve to their own inherent
+methods, not to the trait default.
+
+Consequently the trait's default `translate_instruction(inst)` dispatch has
+**zero live callers**: its sole implementer shadows it entirely with
+`translate_instruction_at(instructions, index)`
+(`_MirToLlvm/core_codegen.spl:553`), whose `case Call` already routes to
+`self.translate_call_at(instructions, index)` at `:608`.
+
+A `translate_call` shim on `MirToLlvm` (candidate shape (b)) was ruled out on
+evidence rather than taste: it is not even expressible for
+`translate_block`/`translate_terminator`, because the `_at` forms need the
+owning `[MirBlock]` array plus an index and a detached single block cannot
+reconstruct them.
+
+### Change
+
+One file, `src/compiler/70.backend/backend/common/mir_text_codegen.spl`:
+
+1. `:23`/`:24` — required `translate_block` / `translate_terminator` replaced by
+   the `translate_block_at` / `translate_terminator_at` signatures the sole
+   implementer provides.
+2. `:31` — required `translate_call` replaced by `translate_call_at(instructions, index)`.
+3. `:67` — the default dispatch's `case Call(dest, func, args)` arm removed. A
+   detached-instruction default cannot supply the instruction list and index
+   that `translate_call_at` requires, so a `Call` reaching this dead default now
+   falls through to the pre-existing `case _: self.translate_unsupported(inst)`
+   rather than to a method that no longer exists. Replaced by a comment
+   explaining why the arm is absent.
+
+No backend method bodies were touched and no codegen semantics changed — the
+change is confined to the trait's required-method list and to a dispatch arm
+that no implementer reaches.
+
+### Verification
+
+Same pristine worktree, `SIMPLE_TIMEOUT_SECONDS=0`, `--timeout 3000`, each log
+`grep -c '^Results:'` == 1:
+
+| lane | spec | verbatim `Results:` |
+|---|---|---|
+| 1 | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/html_parser_gpu_flat_spec.spl` | `Results: 24 total, 24 passed, 0 failed` |
+| 2 | `test/01_unit/browser_engine/html_tree_builder_spec.spl` | `Results: 29 total, 29 passed, 0 failed` |
+
+(Lane 2 is 29, matching the figure in the table above; a "26" figure quoted
+elsewhere was stale.)
+
+### Standing hazard this leaves
+
+The trait check reports only the first missing name, so a multi-method drift
+looks like a single-method break. It is also **name-based only**:
+`translate_function` is declared 2-arg at `:22` while `MirToLlvm` defines it
+3-arg (`name, body, span`) and `driver_bootstrap.spl:479` still calls it 2-arg —
+that arity mismatch passes the check silently today and is deliberately left
+untouched here as out of scope for the compile break. It is worth a separate
+look.

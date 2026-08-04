@@ -20,15 +20,20 @@ trait MirTextCodegen:
     # === Required (each backend implements) ===
     me translate_module(module: MirModule) -> text
     me translate_function(name: text, body: MirBody)
-    me translate_block(block: MirBlock)
-    me translate_terminator(term: MirTerminator)
+    # Blocks and terminators are translated through their indexed owner
+    # ([MirBlock] + block_index) rather than a detached copy, so the callee
+    # can inspect neighbouring blocks. See _MirToLlvm/core_codegen.spl.
+    me translate_block_at(blocks: [MirBlock], block_index: i64, return_type_text: text, is_start: bool, return_slot_id: i64)
+    me translate_terminator_at(blocks: [MirBlock], block_index: i64, return_type_text: text, is_start: bool, return_slot_id: i64)
 
     # Per-category instruction methods (required)
     me translate_const(dest: LocalId, value: MirConstValue, ty: MirType)
     me translate_copy_move(dest: LocalId, src: LocalId, is_move: bool)
     me translate_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand)
     me translate_unaryop(dest: LocalId, op: MirUnaryOp, operand: MirOperand)
-    me translate_call(dest: LocalId?, func: MirOperand, args: [MirOperand])
+    # Calls are translated through their indexed owner ([MirInst] + index)
+    # so the callee can inspect neighbouring instructions.
+    me translate_call_at(instructions: [MirInst], index: i64)
 
     # Helpers (required)
     me translate_operand(operand: MirOperand) -> text
@@ -64,7 +69,12 @@ trait MirTextCodegen:
             case Bitcast(dest, op, target): self.translate_bitcast(dest, op, target)
 
             # Calls
-            case Call(dest, func, args): self.translate_call(dest, func, args)
+            # Call has no arm here: translating a call needs the owning
+            # instruction list plus the index (translate_call_at), which this
+            # detached-instruction default cannot supply. Backends dispatch
+            # calls from their own indexed loop (translate_instruction_at);
+            # anything reaching this default falls through to
+            # translate_unsupported below.
             case CallIndirect(dest, ptr, args, sig): self.translate_call_indirect(dest, ptr, args, sig)
             case Intrinsic(dest, name, args): self.translate_intrinsic(dest, name, args)
 
