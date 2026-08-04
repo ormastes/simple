@@ -585,10 +585,18 @@ void rt_print_value(RuntimeValue val);
  * doc/08_tracking/bug/simpleos_bump_heap_no_free_interactive_session_2026-07-26.md.
  * The identity map covers 4GiB (crt0.s boot_pd 2048 x 2MiB), and the lane's
  * VM has 2GB, so 512MB of .bss is mapped and physically present. */
-static const size_t BAREMETAL_HEAP_SIZE = 512ULL * 1024ULL * 1024ULL;
-static const size_t BAREMETAL_HEAP_WARN_SIZE = 448ULL * 1024ULL * 1024ULL;
+/* 1GiB, raised from 512MB on 2026-08-04: after the sfnt fvar fix let boot
+ * proceed, initial desktop bring-up alone (3 app surfaces + web content
+ * font/style layout at 4K CPU fallback) exhausted 512MB before the
+ * [production-readiness] marker — same no-free-bump-allocator arithmetic as
+ * the 07-26 raise. The lane's VM has 2GB and the identity map covers 4GiB,
+ * so 1GiB of .bss stays mapped and physically present (heap start ~145MB +
+ * 1GiB ≈ 1.17GB reserved end). Frame-arena reclamation remains the real fix:
+ * doc/08_tracking/bug/simpleos_bump_heap_no_free_interactive_session_2026-07-26.md. */
+static const size_t BAREMETAL_HEAP_SIZE = 1024ULL * 1024ULL * 1024ULL;
+static const size_t BAREMETAL_HEAP_WARN_SIZE = 896ULL * 1024ULL * 1024ULL;
 
-static char   _heap[512ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
+static char   _heap[1024ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz);
