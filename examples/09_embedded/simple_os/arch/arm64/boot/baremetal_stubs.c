@@ -2795,6 +2795,18 @@ static void arm64_invalidate_dcache_range(uint64_t addr, uint64_t size)
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
+RuntimeValue rt_arm64_dcache_clean_range(RuntimeValue addr, RuntimeValue size)
+{
+    arm64_clean_dcache_range((uint64_t)addr, (uint64_t)size);
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_arm64_dcache_invalidate_range(RuntimeValue addr, RuntimeValue size)
+{
+    arm64_invalidate_dcache_range((uint64_t)addr, (uint64_t)size);
+    return NIL_VALUE;
+}
+
 static void arm64_sync_icache_range(uint64_t addr, uint64_t size)
 {
     uint64_t line = addr & ~63ULL;

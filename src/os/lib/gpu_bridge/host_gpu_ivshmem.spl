@@ -13,7 +13,7 @@ use common.gpu.simpleos_host_gpu_draw_ir.{
     simpleos_host_gpu_image_resources_encode_retained
 }
 use common.ui.draw_ir.{DrawIrComposition}
-use os.kernel.boot.mmio_hardware.{mmio_read64, mmio_write64, mmio_write8, mmio_memory_barrier}
+use os.kernel.boot.mmio_hardware.{mmio_read64, mmio_write64, mmio_write8, mmio_memory_barrier, mmio_shared_clean_range, mmio_shared_invalidate_range}
 use os.kernel.boot.monotonic_hardware.{boot_monotonic_deadline_us, boot_monotonic_now_us}
 
 val HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS: i64 = 50000000
@@ -85,8 +85,12 @@ fn host_gpu_ivshmem_fallback_receipt_valid(receipt: HostGpuIvshmemReceipt, expec
 
 fn _host_gpu_write(base: u64, offset: i64, value: i64):
     mmio_write64(base + (offset as u64), value as u64)
+    if base == 0x5F800000u64:
+        mmio_shared_clean_range(base + (offset as u64), 8u64)
 
 fn _host_gpu_read(base: u64, offset: i64) -> i64:
+    if base == 0x5F800000u64:
+        mmio_shared_invalidate_range(base + (offset as u64), 8u64)
     mmio_read64(base + (offset as u64)) as i64
 
 fn _host_gpu_slot_is_idle(base: u64, completion: i64) -> bool:
@@ -120,6 +124,10 @@ fn _host_gpu_write_bytes_at(base: u64, wire_offset: i64, bytes: [u8]):
     while i < bytes.len():
         mmio_write8(base + (wire_offset as u64) + (i as u64), bytes[i])
         i = i + 1
+    if base == 0x5F800000u64 and bytes.len() > 0:
+        mmio_shared_clean_range(
+            base + (wire_offset as u64), bytes.len().to_u64()
+        )
 
 fn _host_gpu_publish_payload(base: u64, generation: i64, completion: i64, run_id_hash: i64, frame_id: i64, kind: i64, backend_code: i64, width: i64, height: i64, element_count: i64, payload_bytes: i64, checksum: i64, image_resource_count: i64, image_resource_bytes: i64, image_resource_checksum: i64, timeout_polls: i64) -> HostGpuIvshmemReceipt:
     val started_now = boot_monotonic_now_us()
