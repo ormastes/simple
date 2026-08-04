@@ -45,7 +45,7 @@ use app.startup.aspect_pack_io_port.{
     aspect_pack_io_port_unavailable
 }
 use app.startup.aspect_lazy_singleflight.{
-    AspectLazyFlightRole, AspectLazySingleFlight
+    AspectLazyFlightRole, AspectLazyFlightTicket, AspectLazySingleFlight
 }
 use app.startup.aspect_lifecycle_gate.{AspectLifecycleGate}
 use app.startup.aspect_advice_dispatch_ledger.{
@@ -114,6 +114,7 @@ class AspectActivationInputBox:
 class AspectLazyActivationCapsule:
     query: AspectFacetQueryBox
     facet_contract_abi_hash: text
+    activation_key: text
     request: AspectActivationRequest
     provider_key: AspectPackProviderKey
     io_request: AspectPackIoRequest
@@ -131,6 +132,19 @@ class AspectLazyCommitBox:
 class AspectLazyFlightIdentity:
     route_key: text
     request_prefix: text
+
+fn aspect_execution_context_lazy_complete_failure(
+    singleflight: AspectLazySingleFlight,
+    ticket: AspectLazyFlightTicket,
+    failure: FacetAcquireError
+) -> FacetAcquireError:
+    val completed = singleflight.complete_failure(ticket, failure)
+    if completed.is_err():
+        return FacetAcquireError(
+            kind: failure.kind,
+            facet_id: failure.facet_id,
+            message: "{failure.message}; {completed.unwrap_err()}")
+    failure
 
 # Compatibility facade: existing constructors, methods, and public fields keep
 # the AspectApplicationRuntime spelling while sharing the stable context.
@@ -405,8 +419,8 @@ impl AspectExecutionContext:
                         request_id))
             if preflight.is_err():
                 val failure = preflight.unwrap_err()
-                _ = self.lazy_singleflight.complete_failure(ticket, failure)
-                return Err(failure)
+                return Err(aspect_execution_context_lazy_complete_failure(
+                    self.lazy_singleflight, ticket, failure))
             val prepared = preflight.unwrap()
             if prepared.kind == "existing":
                 val acquired = prepared.existing.unwrap()
@@ -428,11 +442,11 @@ impl AspectExecutionContext:
                 mutex_with_lock_keeping(
                     self.lifecycle_gate.mutex, 0, \:
                         aspect_execution_context_cancel_lazy_activation_locked(
-                            self, capsule.request))
+                            self, capsule.activation_key, capsule.request))
                 val failure = aspect_facet_acquire_error_from_runtime_text(
                     facet_interface_id, payload.unwrap_err())
-                _ = self.lazy_singleflight.complete_failure(ticket, failure)
-                return Err(failure)
+                return Err(aspect_execution_context_lazy_complete_failure(
+                    self.lazy_singleflight, ticket, failure))
 
             val commit = AspectLazyCommitBox(
                 capsule: capsule, payload: payload.unwrap())
@@ -442,8 +456,8 @@ impl AspectExecutionContext:
                         self, commit.capsule, commit.payload))
             if acquired.is_err():
                 val failure = acquired.unwrap_err()
-                _ = self.lazy_singleflight.complete_failure(ticket, failure)
-                return Err(failure)
+                return Err(aspect_execution_context_lazy_complete_failure(
+                    self.lazy_singleflight, ticket, failure))
             val lease = acquired.unwrap()
             val completed = self.lazy_singleflight.complete_success(ticket)
             if completed.is_err():
@@ -481,21 +495,22 @@ fn aspect_execution_context_lazy_flight_identity_locked(
         request_prefix: "lazy-facet:{generation}:{query.facet_interface_id}")
 
 fn aspect_execution_context_lazy_reservation_owned_locked(
-    context: AspectExecutionContext, request: AspectActivationRequest
+    context: AspectExecutionContext,
+    activation_key: text,
+    request: AspectActivationRequest
 ) -> bool:
-    for key in context.coordinator.in_flight.keys():
-        if context.coordinator.in_flight[key] == request.request_id:
-            return true
-    false
+    context.coordinator.in_flight.has(activation_key) and
+        context.coordinator.in_flight[activation_key] == request.request_id
 
 fn aspect_execution_context_cancel_lazy_activation_locked(
-    context: AspectExecutionContext, request: AspectActivationRequest
+    context: AspectExecutionContext,
+    activation_key: text,
+    request: AspectActivationRequest
 ) -> ():
-    var in_flight = context.coordinator.in_flight
-    for key in context.coordinator.in_flight.keys():
-        if context.coordinator.in_flight[key] == request.request_id:
-            in_flight = in_flight.remove(key)
-    context.coordinator.in_flight = in_flight
+    if (context.coordinator.in_flight.has(activation_key) and
+        context.coordinator.in_flight[activation_key] == request.request_id):
+        context.coordinator.in_flight =
+            context.coordinator.in_flight.remove(activation_key)
 
 fn aspect_execution_context_lazy_preflight_locked(
     context: AspectExecutionContext,
@@ -534,12 +549,15 @@ fn aspect_execution_context_lazy_preflight_locked(
     val request = AspectActivationRequest(
         aspect_id: entry.aspect_id, request_id: request_id,
         catalog_generation: context.catalog.generation)
+    val activation_key = "{entry.pack_id}:{entry.module_id}:" +
+        "{entry.aspect_id}:{context.catalog.generation}"
     val reservation = context.coordinator.reserve(request)
     if reservation.is_err():
         return Err(aspect_facet_acquire_error_from_runtime_text(
             query.facet_interface_id, reservation.unwrap_err()))
     context.coordinator = reservation.unwrap()
-    if not aspect_execution_context_lazy_reservation_owned_locked(context, request):
+    if not aspect_execution_context_lazy_reservation_owned_locked(
+        context, activation_key, request):
         return Err(aspect_facet_acquire_error_from_runtime_text(
             query.facet_interface_id,
             "E-APACK009 activation reservation is owned outside the application single-flight gate"))
@@ -550,6 +568,7 @@ fn aspect_execution_context_lazy_preflight_locked(
         capsule: Some(AspectLazyActivationCapsule(
             query: query,
             facet_contract_abi_hash: facet_contract_abi_hash,
+            activation_key: activation_key,
             request: request,
             provider_key: provider_key,
             io_request: AspectPackIoRequest(
@@ -592,9 +611,9 @@ fn aspect_execution_context_lazy_commit_and_acquire_locked(
     if (not aspect_execution_context_lazy_route_still_exact_locked(
             context, capsule) or
         not aspect_execution_context_lazy_reservation_owned_locked(
-            context, capsule.request)):
+            context, capsule.activation_key, capsule.request)):
         aspect_execution_context_cancel_lazy_activation_locked(
-            context, capsule.request)
+            context, capsule.activation_key, capsule.request)
         return Err(aspect_facet_acquire_error_from_runtime_text(
             capsule.query.facet_interface_id,
             "E-APACK001 stale lazy activation commit or lost reservation"))
@@ -603,7 +622,7 @@ fn aspect_execution_context_lazy_commit_and_acquire_locked(
         context.coordinator.dynsmf_session.policy,
         capsule.request.aspect_id):
         aspect_execution_context_cancel_lazy_activation_locked(
-            context, capsule.request)
+            context, capsule.activation_key, capsule.request)
         val reason = if authorization.is_err():
             authorization.unwrap_err()
         else:
@@ -615,7 +634,7 @@ fn aspect_execution_context_lazy_commit_and_acquire_locked(
         payload.signature, capsule.request)
     if activation.status != "published" and activation.status != "coalesced_active":
         aspect_execution_context_cancel_lazy_activation_locked(
-            context, capsule.request)
+            context, capsule.activation_key, capsule.request)
         return Err(aspect_facet_acquire_error_from_runtime_text(
             capsule.query.facet_interface_id, activation.reason))
     val acquired = aspect_execution_context_acquire_published_facet_descriptor_locked(

@@ -479,11 +479,33 @@ describe "Application aspect runtime policy owner":
         aspect_execution_context_release_facet_descriptor(runtime, acquired).unwrap()
         expect(runtime.published_generation_pin_count("fixture.debug").unwrap()).to_equal(0)
 
+    it "does not confuse a reused request ID on another activation key":
+        val runtime = AspectApplicationRuntime.create_with_pack_io(
+            app_execution_context_catalog(), app_aspect_session(),
+            LifecycleManager.new_manager(), AspectPackTrustPolicy.ordinary_unsigned(),
+            app_execution_context_pack_io(), 2, 2, 2).unwrap()
+        val unrelated_key = "other-pack:other-module:other.aspect:9"
+        val reused_request_id = "lazy-facet:9:Debuggable:1"
+        runtime.coordinator.in_flight[unrelated_key] = reused_request_id
+
+        val acquired = aspect_execution_context_acquire_or_activate_facet_descriptor(
+            runtime, "fixture.Cache", [], "Debuggable",
+            "fixture-facet-abi-v1").unwrap().unwrap()
+        expect(runtime.coordinator.in_flight.has(unrelated_key)).to_be(true)
+        expect(runtime.coordinator.in_flight[unrelated_key]).to_equal(
+            reused_request_id)
+        expect(runtime.coordinator.in_flight.keys().len()).to_equal(1)
+        aspect_execution_context_release_facet_descriptor(
+            runtime, acquired).unwrap()
+
     it "fails closed without an IO owner and clears its canonical reservation":
         val runtime = AspectApplicationRuntime.create(
             app_execution_context_catalog(), app_aspect_session(),
             LifecycleManager.new_manager(), AspectPackTrustPolicy.ordinary_unsigned(),
             2, 2, 2).unwrap()
+        val unrelated_key = "other-pack:other-module:other.aspect:9"
+        val reused_request_id = "lazy-facet:9:Debuggable:1"
+        runtime.coordinator.in_flight[unrelated_key] = reused_request_id
         val failed = aspect_execution_context_acquire_or_activate_facet_descriptor(
             runtime, "fixture.Cache", [], "Debuggable",
             "fixture-facet-abi-v1")
@@ -491,7 +513,10 @@ describe "Application aspect runtime policy owner":
         if failure.kind != FacetAcquireErrorKind.ActivationFailed:
             fail("missing I/O owner did not return ActivationFailed")
         expect(failure.message).to_contain("no application aspect-pack I/O owner")
-        expect(runtime.coordinator.in_flight.keys().len()).to_equal(0)
+        expect(runtime.coordinator.in_flight.has(unrelated_key)).to_be(true)
+        expect(runtime.coordinator.in_flight[unrelated_key]).to_equal(
+            reused_request_id)
+        expect(runtime.coordinator.in_flight.keys().len()).to_equal(1)
         expect(runtime.provider_cache.index_count()).to_equal(0)
 
     it "fails closed when activation bypasses the application single-flight gate":
