@@ -89,9 +89,19 @@ fn _host_gpu_write(base: u64, offset: i64, value: i64):
         mmio_shared_clean_range(base + (offset as u64), 8u64)
 
 fn _host_gpu_read(base: u64, offset: i64) -> i64:
-    if base == 0x5F800000u64:
-        mmio_shared_invalidate_range(base + (offset as u64), 8u64)
     mmio_read64(base + (offset as u64)) as i64
+
+fn _host_gpu_read_completion(base: u64) -> i64:
+    if base == 0x5F800000u64:
+        mmio_shared_invalidate_range(
+            base + (SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION as u64),
+            8u64
+        )
+    _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
+
+fn _host_gpu_refresh_response(base: u64):
+    if base == 0x5F800000u64:
+        mmio_shared_invalidate_range(base, 320u64)
 
 fn _host_gpu_slot_is_idle(base: u64, completion: i64) -> bool:
     _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_REQUEST_GENERATION) == completion
@@ -99,7 +109,7 @@ fn _host_gpu_slot_is_idle(base: u64, completion: i64) -> bool:
 fn host_gpu_ivshmem_next_generation(base: u64) -> i64:
     if base == 0u64:
         return 0
-    val completion = _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
+    val completion = _host_gpu_read_completion(base)
     if completion < 0 or completion >= _HOST_GPU_IVSHMEM_MAX_GENERATION or not _host_gpu_slot_is_idle(base, completion):
         return 0
     completion + 1
@@ -161,10 +171,14 @@ fn _host_gpu_publish_payload(base: u64, generation: i64, completion: i64, run_id
     var now_us = started_now
     while polls < bounded_timeout_polls and observed < generation and now_us > 0 and now_us <= deadline_us:
         polls = polls + 1
-        observed = _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
+        if polls % 1024 == 0:
+            observed = _host_gpu_read_completion(base)
+        else:
+            observed = _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
         now_us = boot_monotonic_now_us()
     if observed != generation or now_us <= 0 or now_us > deadline_us:
         return _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, if observed > generation: SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION else: SIMPLEOS_HOST_GPU_REASON_TIMEOUT, generation)
+    _host_gpu_refresh_response(base)
     mmio_memory_barrier()
     val receipt = HostGpuIvshmemReceipt(
         completed: true,
@@ -190,7 +204,7 @@ fn host_gpu_ivshmem_negotiate(base: u64, generation: i64, guest_isa: text, rende
     val started_now = boot_monotonic_now_us()
     if deadline_us <= 0 or started_now <= 0 or started_now >= deadline_us:
         return HostGpuIvshmemHelloReceipt(published: false, completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: SIMPLEOS_HOST_GPU_REASON_TIMEOUT, generation: generation, render_mask: 0, processing_mask: 0, max_payload_bytes: 0, max_readback_bytes: 0, version: 0, elapsed_us: 0, capability_mask: 0)
-    val completion = if base == 0u64: generation else: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
+    val completion = if base == 0u64: generation else: _host_gpu_read_completion(base)
     if base == 0u64 or not simpleos_host_gpu_generation_is_fresh(generation, completion) or not _host_gpu_slot_is_idle(base, completion):
         return HostGpuIvshmemHelloReceipt(published: false, completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION, generation: generation, render_mask: 0, processing_mask: 0, max_payload_bytes: 0, max_readback_bytes: 0, version: 0, elapsed_us: 0, capability_mask: 0)
     val backend_code = simpleos_host_gpu_backend_code(render_backend)
@@ -218,10 +232,14 @@ fn host_gpu_ivshmem_negotiate(base: u64, generation: i64, guest_isa: text, rende
     var now_us = started_now
     while polls < timeout_polls and observed < generation and now_us > 0 and now_us <= deadline_us:
         polls = polls + 1
-        observed = _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
+        if polls % 1024 == 0:
+            observed = _host_gpu_read_completion(base)
+        else:
+            observed = _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
         now_us = boot_monotonic_now_us()
     if observed != generation or now_us <= 0 or now_us > deadline_us:
         return HostGpuIvshmemHelloReceipt(published: true, completed: false, status: SIMPLEOS_HOST_GPU_STATUS_FAIL, reason: if observed > generation: SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION else: SIMPLEOS_HOST_GPU_REASON_TIMEOUT, generation: generation, render_mask: 0, processing_mask: 0, max_payload_bytes: 0, max_readback_bytes: 0, version: 0, elapsed_us: 0, capability_mask: 0)
+    _host_gpu_refresh_response(base)
     mmio_memory_barrier()
     HostGpuIvshmemHelloReceipt(published: true, completed: true, status: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_STATUS), reason: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_REASON), generation: generation, render_mask: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_RENDER_MASK), processing_mask: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK), max_payload_bytes: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_PAYLOAD), max_readback_bytes: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK), version: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION), elapsed_us: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_ELAPSED_US), capability_mask: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_CAPABILITY_MASK))
 
@@ -239,7 +257,7 @@ fn host_gpu_ivshmem_submit(
     timeout_polls: i64
 ) -> HostGpuIvshmemReceipt:
     val payload_bytes = commands.len().to_i64() * SIMPLEOS_HOST_GPU_WIRE_COMMAND_BYTES
-    val completion = if base == 0u64: generation else: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
+    val completion = if base == 0u64: generation else: _host_gpu_read_completion(base)
     if base == 0u64 or not simpleos_host_gpu_generation_is_fresh(generation, completion) or not _host_gpu_slot_is_idle(base, completion):
         return _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION, generation)
     if not simpleos_host_gpu_wire_correlation_valid(run_id_hash, frame_id) or payload_bytes <= 0:
@@ -268,7 +286,7 @@ fn _host_gpu_submit_draw_ir_common(base: u64, generation: i64, completion: i64, 
     _host_gpu_publish_payload(base, generation, completion, run_id_hash, frame_id, SIMPLEOS_HOST_GPU_KIND_DRAW_IR, backend_code, width, height, command_count, payload_bytes, payload_checksum, resource_count, resource_bytes.len().to_i64(), resource_checksum, timeout_polls)
 
 fn host_gpu_ivshmem_submit_draw_ir(base: u64, generation: i64, run_id_hash: i64, frame_id: i64, backend: text, width: i64, height: i64, composition: DrawIrComposition, image_resources: [SimpleOsHostGpuImageResource], timeout_polls: i64) -> HostGpuIvshmemReceipt:
-    val completion = if base == 0u64: generation else: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
+    val completion = if base == 0u64: generation else: _host_gpu_read_completion(base)
     if base == 0u64 or not simpleos_host_gpu_generation_is_fresh(generation, completion) or not _host_gpu_slot_is_idle(base, completion):
         return _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION, generation)
     if not simpleos_host_gpu_wire_correlation_valid(run_id_hash, frame_id):
@@ -312,7 +330,7 @@ fn _host_gpu_revision_for(sent: [SimpleOsHostGpuImageResourceRevision], image_ur
 # frame re-sends everything full (fail closed, no assumption the host
 # still has what it last accepted).
 fn host_gpu_ivshmem_submit_draw_ir_retained(base: u64, generation: i64, run_id_hash: i64, frame_id: i64, backend: text, width: i64, height: i64, composition: DrawIrComposition, image_resources: [SimpleOsHostGpuImageResource], sent_resources: [SimpleOsHostGpuImageResourceRevision], timeout_polls: i64) -> HostGpuIvshmemDrawIrResult:
-    val completion = if base == 0u64: generation else: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
+    val completion = if base == 0u64: generation else: _host_gpu_read_completion(base)
     if base == 0u64 or not simpleos_host_gpu_generation_is_fresh(generation, completion) or not _host_gpu_slot_is_idle(base, completion):
         return HostGpuIvshmemDrawIrResult(receipt: _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION, generation), sent_resources: [])
     if not simpleos_host_gpu_wire_correlation_valid(run_id_hash, frame_id):
