@@ -166,6 +166,28 @@ describe "MIR cleanup manifest exact acceptance":
         expect(validate_mir_exception_cfg(repeated).unwrap_err()).to_contain(
             "local must have exactly one definition")
 
+        var global_redefined = reverse_cleanup_body(
+            "load_global_lease_redefinition", 1116)
+        val global_lease = global_redefined.exception_cleanup_contracts[0].entries[0].lease
+        var global_entry = global_redefined.blocks[0]
+        global_entry.instructions.push(MirInst(kind: MirInstKind.LoadGlobal(
+            global_lease, SymbolId(id: 9916)), span: nil))
+        global_redefined.blocks[0] = global_entry
+        expect(validate_mir_exception_cfg(
+            global_redefined).unwrap_err()).to_contain(
+            "local must have exactly one definition")
+
+        var simd_redefined = reverse_cleanup_body(
+            "simd_lease_redefinition", 1117)
+        val simd_lease = simd_redefined.exception_cleanup_contracts[0].entries[0].lease
+        var simd_entry = simd_redefined.blocks[0]
+        simd_entry.instructions.push(MirInst(kind: MirInstKind.SimdHminF32x4(
+            simd_lease, mir_operand_const_int(0)), span: nil))
+        simd_redefined.blocks[0] = simd_entry
+        expect(validate_mir_exception_cfg(
+            simd_redefined).unwrap_err()).to_contain(
+            "local must have exactly one definition")
+
         var late = reverse_cleanup_body("post_call_lease_definition", 1115)
         var late_entry = late.blocks[0]
         val late_definition = late_entry.instructions.pop()
@@ -175,6 +197,12 @@ describe "MIR cleanup manifest exact acceptance":
         late.blocks[cleanup_block_index(late, BlockId(id: 1))] = late_normal
         expect(validate_mir_exception_cfg(late).unwrap_err()).to_contain(
             "local definition does not dominate unwind call")
+
+    it "roots dominance at the explicit entry when blocks are not entry-first":
+        var body = reverse_cleanup_body("non_first_entry", 1118)
+        body.blocks = [body.blocks[1], body.blocks[2], body.blocks[0]]
+        expect(body.blocks[0].id.id == body.entry_block.id).to_be(false)
+        expect(validate_mir_exception_cfg(body).is_ok()).to_be(true)
 
     it "rejects stale locals and blocks plus wrong lease and presence types":
         var stale_local = reverse_cleanup_body("stale_local", 1104)
