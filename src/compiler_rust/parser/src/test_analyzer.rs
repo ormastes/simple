@@ -281,6 +281,103 @@ impl TestMetaAnalyzer {
     }
 }
 
+/// A *lower bound* on the number of BDD examples a file is obliged to execute.
+///
+/// This exists to catch **silently dropped examples**: when a module-level
+/// statement inside a `describe` body aborts (a bare `return`, a failed import
+/// whose symbol is only used there, a registration-time error), the remaining
+/// `it` blocks in that `describe` — and every later `describe` — are never
+/// registered.  The run then prints a green per-describe summary such as
+/// `0 examples, 0 failures` and exits 0.  Measured: a five-example fixture whose
+/// second `describe` body starts with a bare `return` executes 3 of 5 examples,
+/// prints all-green, and exits 0.  Nothing in the output says two examples
+/// vanished.
+///
+/// # Why this is NOT `extract_file_test_meta(..).total_tests`
+///
+/// `total_tests` descends into `if` / `for` / `while` / `match` bodies, so it
+/// counts *conditionally generated* examples.  Comparing it against the executed
+/// count would cry wolf on every legitimate `if cfg: describe ...` (declared 2,
+/// executed 0 — perfectly fine) and would also undercount a `for` loop that
+/// generates N examples from one `it` node.  A runner that cries wolf gets
+/// worked around, which is worse than the bug.
+///
+/// This function therefore counts only examples that are **unconditionally
+/// reachable**: it walks module-level statements and `describe`/`context` bodies
+/// and nothing else.  It never enters a conditional, a loop, a `match`, a lambda
+/// or a function body.  Every example it counts *must* run on every execution of
+/// the file, so `executed < floor` is proof of a drop rather than a heuristic.
+///
+/// Skipped/ignored example forms (`skip_it`, `pending`, `ignore_it`, ...) are
+/// deliberately **excluded** — whether the runtime records them as results is a
+/// separate contract, and counting them could only produce false positives.
+pub fn unconditional_example_floor(statements: &[Node]) -> usize {
+    let mut count = 0usize;
+    count_unconditional_statements(statements, &mut count);
+    count
+}
+
+fn count_unconditional_statements(statements: &[Node], count: &mut usize) {
+    for node in statements {
+        match node {
+            Node::Expression(expr) => count_unconditional_expr(expr, count),
+            // A `val x = describe(...)` is unusual but harmless to follow; the
+            // binding itself is still unconditional.
+            Node::Let(let_stmt) => {
+                if let Some(ref value) = let_stmt.value {
+                    count_unconditional_expr(value, count);
+                }
+            }
+            // Everything else — If/For/While/Loop/Match/Function — is either
+            // conditional or not module-level, and is deliberately not counted.
+            _ => {}
+        }
+    }
+}
+
+fn count_unconditional_expr(expr: &Expr, count: &mut usize) {
+    match expr {
+        Expr::Call { callee, args } => {
+            let func_name = match &**callee {
+                Expr::Identifier(name) => name.as_str(),
+                Expr::Path(path) => path.last().map(|s| s.as_str()).unwrap_or(""),
+                _ => return,
+            };
+            if TEST_FUNCTIONS.contains(&func_name) || SLOW_TEST_FUNCTIONS.contains(&func_name) {
+                *count += 1;
+            } else if GROUP_FUNCTIONS.contains(&func_name) {
+                // Descend into the group body only — the second argument. The
+                // `it` body (also an argument) is deliberately NOT descended
+                // into: an example is counted once, whatever it contains.
+                if args.len() > 1 {
+                    count_group_body(&args[1].value, count);
+                }
+            }
+            // Any other call (including `it_behaves_like`, which expands at
+            // runtime to an unknown number of examples) contributes nothing:
+            // executed > floor is fine, executed < floor is the bug.
+        }
+        _ => {}
+    }
+}
+
+/// Walk the body of a `describe`/`context`.
+///
+/// Block syntax (`describe "x":` followed by an indented body) parses as a call
+/// whose second argument is a zero-argument lambda wrapping the block, so the
+/// lambda must be unwrapped here. The DSL invokes that body exactly once, at
+/// registration time, unconditionally — which is what makes everything reached
+/// through it part of the floor.
+fn count_group_body(expr: &Expr, count: &mut usize) {
+    match expr {
+        Expr::DoBlock(statements) | Expr::UnsafeBlock(statements) => {
+            count_unconditional_statements(statements, count);
+        }
+        Expr::Lambda { body, .. } => count_group_body(body, count),
+        other => count_unconditional_expr(other, count),
+    }
+}
+
 /// Extract a string literal from an expression
 fn extract_string(expr: &Expr) -> Option<String> {
     match expr {
@@ -421,6 +518,108 @@ mod tests {
                 },
             ],
         })
+    }
+
+    /// The floor counts every unconditionally-reachable example, across every
+    /// top-level `describe` — this is the count a dropped-example check compares
+    /// the executed total against.
+    #[test]
+    fn floor_counts_all_unconditional_examples_across_groups() {
+        let statements = [
+            make_group_call(
+                "describe",
+                "alpha",
+                vec![make_test_call("it", "a1"), make_test_call("it", "a2")],
+            ),
+            make_group_call("describe", "beta", vec![make_test_call("it", "b1")]),
+            make_test_call("it", "top level"),
+        ];
+
+        assert_eq!(unconditional_example_floor(&statements), 4);
+    }
+
+    /// A nested `context` inside a `describe` is still unconditional.
+    #[test]
+    fn floor_descends_through_nested_groups() {
+        let statements = [make_group_call(
+            "describe",
+            "outer",
+            vec![
+                make_test_call("it", "direct"),
+                make_group_call("context", "inner", vec![make_test_call("test", "nested")]),
+            ],
+        )];
+
+        assert_eq!(unconditional_example_floor(&statements), 2);
+    }
+
+    /// The whole point of the floor: conditional generation must NOT be counted,
+    /// or a legitimate `if cfg:` guard would be reported as a dropped example.
+    #[test]
+    fn floor_ignores_conditionally_generated_examples() {
+        use crate::ast::{Block, IfStmt};
+
+        let conditional = Node::If(IfStmt {
+            span: Span::new(0, 0, 0, 0),
+            let_pattern: None,
+            condition: Expr::Bool(false),
+            then_block: Block {
+                span: Span::new(0, 0, 0, 0),
+                statements: vec![make_test_call("it", "only sometimes")],
+            },
+            elif_branches: Vec::new(),
+            else_block: None,
+            is_suspend: false,
+        });
+        let statements = [make_test_call("it", "always"), conditional];
+
+        // `total_tests` counts both; the floor counts only the unconditional one.
+        assert_eq!(extract_file_test_meta(&statements, None).total_tests, 2);
+        assert_eq!(unconditional_example_floor(&statements), 1);
+    }
+
+    /// Skipped/ignored forms are excluded: whether the runtime records them as
+    /// results is a separate contract, and counting them could only produce
+    /// false "dropped" reports.
+    #[test]
+    fn floor_excludes_skipped_and_ignored_forms() {
+        let statements = [
+            make_test_call("it", "real"),
+            make_test_call("skip_it", "skipped"),
+            make_test_call("pending", "pending"),
+            make_test_call("ignore_it", "ignored"),
+        ];
+
+        assert_eq!(unconditional_example_floor(&statements), 1);
+    }
+
+    /// `it_behaves_like` expands at runtime to an unknown number of examples, so
+    /// it contributes zero to the floor: executed > floor is fine, only
+    /// executed < floor is a drop.
+    #[test]
+    fn floor_does_not_count_runtime_expanded_shared_examples() {
+        let statements = [make_group_call(
+            "describe",
+            "alpha",
+            vec![
+                make_test_call("it", "a1"),
+                make_test_call("it_behaves_like", "some shared group"),
+            ],
+        )];
+
+        assert_eq!(unconditional_example_floor(&statements), 1);
+    }
+
+    /// A file with no BDD DSL at all has a floor of zero, so ordinary programs
+    /// are never subject to the check.
+    #[test]
+    fn floor_is_zero_for_a_non_spec_file() {
+        let statements = [Node::Expression(Expr::Call {
+            callee: Box::new(Expr::Identifier("print".to_string())),
+            args: vec![],
+        })];
+
+        assert_eq!(unconditional_example_floor(&statements), 0);
     }
 
     #[test]

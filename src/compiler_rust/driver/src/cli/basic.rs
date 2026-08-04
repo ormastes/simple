@@ -79,6 +79,147 @@ fn bdd_failure_exit_code(module_exit_code: i32, results: &[(String, String, bool
     SPEC_EXAMPLE_FAILURE_EXIT
 }
 
+/// Exit status returned by `simple run <spec>` when the file executed FEWER
+/// examples than it unconditionally declares — i.e. examples were silently
+/// dropped.
+///
+/// Same status as a spec-example failure, because it is one: a dropped example
+/// is an example that did not pass. The mode is distinguishable by the
+/// `DROPPED:` diagnostic, which no other failure prints.
+const SPEC_EXAMPLE_DROPPED_EXIT: i32 = 1;
+
+/// Number of examples the run actually executed, including skipped ones.
+///
+/// Skipped examples are still *executed* as far as registration goes — they are
+/// recorded in `BDD_TEST_RESULTS` — so they must be counted here, otherwise a
+/// legitimately-skipped example would be reported as dropped.
+fn bdd_executed_count(results: &[(String, String, bool, bool)]) -> usize {
+    results.len()
+}
+
+/// Detect silently dropped examples and emit the authoritative per-file verdict.
+///
+/// # The defect this closes
+///
+/// When a statement in a `describe` body aborts at registration time — a bare
+/// `return`, a symbol that only resolves inside that block, an import that
+/// failed — the remaining `it` blocks in that group and every LATER top-level
+/// `describe` are never registered. The run prints a green per-describe summary
+/// (`0 examples, 0 failures`) for the truncated group, omits the vanished groups
+/// entirely, and exits 0. Measured on a five-example fixture whose second
+/// `describe` body begins with a bare `return`: 3 of 5 examples executed,
+/// all-green output, exit 0, and no line anywhere saying two examples were lost.
+///
+/// # The reporting defect this also closes
+///
+/// The `N examples, M failures` line is printed once per top-level `describe`,
+/// and the file-level `spec failure:` line is printed only on failure and only
+/// to stderr. So `tail -1` of a spec log yields the LAST GROUP's count, not the
+/// file's. Measured: the nine-example `trait_scanner_spec.spl` ends its stdout
+/// with `3 examples, 0 failures` — the size of its last `describe`. This is
+/// exactly the "9 examples became 3" report; the file's real verdict was never
+/// printed at all.
+///
+/// The fix is a single authoritative line per FILE, always, on stdout, last:
+///
+/// ```text
+/// SPEC FILE VERDICT: <path> declared>=9 executed=9 passed=9 failed=0 dropped=0
+/// ```
+///
+/// It deliberately does NOT contain the substring `examples, ` or `failures`:
+/// `src/app/test_runner_new/test_runner_single.spl` SUMS every per-describe
+/// `N examples, M failures` line it sees, so a file-level line in that shape
+/// would double every count in the repo. The existing per-describe lines and the
+/// `Results: N total, M passed, K failed` contract are untouched.
+///
+/// # Why this cannot cry wolf
+///
+/// `declared` is `unconditional_example_floor` — a strict lower bound counting
+/// only examples reachable through module-level statements and describe/context
+/// bodies. Conditional generation (`if cfg:`, `for x in xs:`), runtime expansion
+/// (`it_behaves_like`), and skip/pending forms all contribute ZERO to the floor,
+/// so a file that legitimately runs fewer, more, or a variable number of
+/// examples than another can never trip the check. Only `executed < floor` —
+/// which is arithmetically impossible without a drop — is reported.
+fn report_spec_file_verdict(
+    path: &Path,
+    module_exit_code: i32,
+    results: &[(String, String, bool, bool)],
+) -> i32 {
+    let declared = match declared_example_floor(path) {
+        Some(n) => n,
+        // Unparseable or unreadable: the run itself would have failed. Never
+        // invent a drop from a measurement we could not take.
+        None => return module_exit_code,
+    };
+    let executed = bdd_executed_count(results);
+
+    // Not a spec file at all: no examples declared and none ran. Ordinary
+    // programs must keep their own status and print nothing extra.
+    if declared == 0 && executed == 0 {
+        return module_exit_code;
+    }
+
+    let (counted_total, failed) = bdd_example_counts(results);
+    let passed = counted_total.saturating_sub(failed);
+    let skipped = executed.saturating_sub(counted_total);
+    let dropped = declared.saturating_sub(executed);
+
+    println!(
+        "SPEC FILE VERDICT: {} declared>={} executed={} passed={} failed={} dropped={}",
+        path.display(),
+        declared,
+        executed,
+        passed,
+        failed,
+        dropped
+    );
+
+    if dropped > 0 {
+        eprintln!(
+            "DROPPED: {} of {} unconditionally-declared example(s) in {} never executed. \
+             A describe/it block was skipped — typically a module-load or registration \
+             failure inside a describe body. The examples that did run are NOT a verdict \
+             for this file.",
+            dropped,
+            declared,
+            path.display()
+        );
+        // A drop must outrank a clean module exit, but must never mask a real error.
+        if module_exit_code == 0 {
+            return SPEC_EXAMPLE_DROPPED_EXIT;
+        }
+    }
+
+    module_exit_code
+}
+
+/// Parse `path` and return its unconditional example floor, or `None` if the
+/// file cannot be read or parsed.
+///
+/// Gated on a cheap substring probe so that ordinary (non-spec) programs are not
+/// re-parsed: a file containing none of the group/example keywords has a floor
+/// of zero by construction.
+fn declared_example_floor(path: &Path) -> Option<usize> {
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !matches!(extension, "spl" | "simple" | "sscript" | "") {
+        return None;
+    }
+    let source = std::fs::read_to_string(path).ok()?;
+    if !source.contains("describe")
+        && !source.contains("context")
+        && !source.contains("feature")
+        && !source.contains("scenario")
+        && !source.contains("it ")
+        && !source.contains("it(")
+    {
+        return Some(0);
+    }
+    let mut parser = simple_parser::Parser::new(&source);
+    let ast = parser.parse().ok()?;
+    Some(simple_parser::test_analyzer::unconditional_example_floor(&ast.items))
+}
+
 /// Create a runner with appropriate GC configuration
 pub fn create_runner(gc_log: bool, gc_off: bool) -> Runner {
     if gc_off {
@@ -199,7 +340,15 @@ pub fn run_file_with_args(path: &Path, gc_log: bool, gc_off: bool, args: Vec<Str
             // Fail-closed: a spec whose examples failed must not exit 0 just
             // because the module body itself returned 0. See
             // `bdd_failure_exit_code`.
-            Ok(code) => bdd_failure_exit_code(code, &simple_compiler::interpreter::get_test_results()),
+            Ok(code) => {
+                let results = simple_compiler::interpreter::get_test_results();
+                // Order matters: the drop check runs LAST so its `SPEC FILE
+                // VERDICT` line is the final stdout line of the run, which is
+                // what makes `tail -1` on a spec log authoritative for the FILE
+                // instead of for its last `describe`.
+                let code = bdd_failure_exit_code(code, &results);
+                report_spec_file_verdict(&path, code, &results)
+            }
             Err(e) => {
                 if watchdog.is_active() && is_timeout_error(&e) {
                     eprintln!("error: {}", timeout_error_message(&path, watchdog.timeout_secs()));
@@ -495,6 +644,147 @@ mod tests {
     /// `simple_compiler::interpreter::get_test_results()`.
     fn ex(group: &str, name: &str, passed: bool, skipped: bool) -> (String, String, bool, bool) {
         (group.to_string(), name.to_string(), passed, skipped)
+    }
+
+    /// Write `source` to a uniquely-named temp `.spl` file and return its path.
+    fn spec_fixture(tag: &str, source: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "simple_dropcheck_{}_{}.spl",
+            tag,
+            std::process::id()
+        ));
+        std::fs::write(&path, source).expect("write fixture");
+        path
+    }
+
+    /// The measured drop shape: a bare `return` in the second `describe` body
+    /// truncates that group and erases every later group. Five examples are
+    /// unconditionally declared, three execute, and before the fix the run was
+    /// all-green with exit 0.
+    const DROPPING_SPEC: &str = "describe \"alpha\":\n    it \"a1\":\n        expect(1).to_equal(1)\n    it \"a2\":\n        expect(2).to_equal(2)\n\ndescribe \"beta\":\n    return\n    it \"b1\":\n        expect(3).to_equal(3)\n    it \"b2\":\n        expect(4).to_equal(4)\n\ndescribe \"gamma\":\n    it \"g1\":\n        expect(5).to_equal(5)\n";
+
+    #[test]
+    fn declared_floor_counts_every_unconditional_example_in_the_dropping_spec() {
+        let path = spec_fixture("floor", DROPPING_SPEC);
+        let floor = declared_example_floor(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(floor, Some(5));
+    }
+
+    /// A dropped example must flip a clean exit to a failure. This is the case
+    /// that previously exited 0 with an all-green report.
+    #[test]
+    fn dropped_examples_turn_a_clean_run_into_a_failure() {
+        let path = spec_fixture("dropped", DROPPING_SPEC);
+        let executed = [
+            ex("alpha", "a1", true, false),
+            ex("alpha", "a2", true, false),
+            ex("gamma", "g1", true, false),
+        ];
+
+        let code = report_spec_file_verdict(&path, 0, &executed);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(code, SPEC_EXAMPLE_DROPPED_EXIT);
+        assert_ne!(code, 0);
+    }
+
+    /// The inverse, and the cry-wolf guard: a spec that runs everything it
+    /// declares must stay green.
+    #[test]
+    fn a_complete_run_of_the_same_spec_stays_green() {
+        let path = spec_fixture("complete", DROPPING_SPEC);
+        let executed = [
+            ex("alpha", "a1", true, false),
+            ex("alpha", "a2", true, false),
+            ex("beta", "b1", true, false),
+            ex("beta", "b2", true, false),
+            ex("gamma", "g1", true, false),
+        ];
+
+        let code = report_spec_file_verdict(&path, 0, &executed);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(code, 0);
+    }
+
+    /// Skipped examples are recorded as results, so they are executed, not
+    /// dropped. A file whose examples are all skipped must not fail.
+    #[test]
+    fn skipped_examples_are_not_reported_as_dropped() {
+        let path = spec_fixture("skipped", DROPPING_SPEC);
+        let executed = [
+            ex("alpha", "a1", true, true),
+            ex("alpha", "a2", true, true),
+            ex("beta", "b1", true, true),
+            ex("beta", "b2", true, true),
+            ex("gamma", "g1", true, true),
+        ];
+
+        let code = report_spec_file_verdict(&path, 0, &executed);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(code, 0);
+    }
+
+    /// Runtime-expanded examples (`it_behaves_like`, loop-generated) mean
+    /// executed can legitimately EXCEED the floor. That is never a failure.
+    #[test]
+    fn executing_more_than_the_floor_is_not_a_failure() {
+        let path = spec_fixture("expanded", DROPPING_SPEC);
+        let mut executed = vec![
+            ex("alpha", "a1", true, false),
+            ex("alpha", "a2", true, false),
+            ex("beta", "b1", true, false),
+            ex("beta", "b2", true, false),
+            ex("gamma", "g1", true, false),
+        ];
+        for i in 0..7 {
+            executed.push(ex("gamma", &format!("shared {}", i), true, false));
+        }
+
+        let code = report_spec_file_verdict(&path, 0, &executed);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(code, 0);
+    }
+
+    /// An ordinary program is not a spec: no floor, no results, no verdict line,
+    /// and its own exit status is preserved untouched.
+    #[test]
+    fn a_non_spec_program_keeps_its_own_exit_status() {
+        let path = spec_fixture("plain", "fn main() -> i64:\n    return 3\n");
+
+        let zero = report_spec_file_verdict(&path, 0, &[]);
+        let seven = report_spec_file_verdict(&path, 7, &[]);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(zero, 0);
+        assert_eq!(seven, 7);
+    }
+
+    /// A real error must never be masked by, or downgraded to, a drop status.
+    #[test]
+    fn a_real_error_outranks_a_drop() {
+        let path = spec_fixture("errmask", DROPPING_SPEC);
+        let executed = [ex("alpha", "a1", true, false)];
+
+        let code = report_spec_file_verdict(&path, 101, &executed);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(code, 101);
+    }
+
+    /// An unreadable path yields no measurement, and a measurement we could not
+    /// take must never be turned into a drop report.
+    #[test]
+    fn an_unmeasurable_file_never_invents_a_drop() {
+        let missing = std::env::temp_dir().join("simple_dropcheck_definitely_absent.spl");
+        let _ = std::fs::remove_file(&missing);
+
+        assert_eq!(declared_example_floor(&missing), None);
+        assert_eq!(report_spec_file_verdict(&missing, 0, &[]), 0);
     }
 
     #[test]
