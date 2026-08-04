@@ -1,0 +1,54 @@
+# @cover src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl
+# @cover src/compiler/70.backend/backend/native/isel_x86_64.spl
+# @cover src/compiler/95.interp/mir_interpreter.spl
+
+extern fn rt_file_read_text(path: text) -> text
+
+use std.spec.*
+
+fn unwind_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "CallTerminator unwind-contract backend consumption":
+    it "uses LLVM invoke only for the explicit MayUnwind contract":
+        val source = unwind_source(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
+        expect(source).to_contain(
+            "case CallTerminator(dest, func, args, normal, unwind_contract, unwind)")
+        expect(source).to_contain(
+            "unwind_contract == MirCallUnwindContract.MayUnwind")
+        expect(source).to_contain(" = invoke ")
+        expect(source).to_contain("  invoke void ")
+        expect(source).to_contain("E-MIR-UNWIND001 LLVM NoUnwind")
+
+    it "rejects MayUnwind in every native instruction selector":
+        for target in ["x86_64", "aarch64", "riscv32", "riscv64"]:
+            val source = unwind_source(
+                "src/compiler/70.backend/backend/native/isel_{target}.spl")
+            expect(source).to_contain(
+                "case CallTerminator(dest, func, args, normal, unwind_contract, unwind)")
+            expect(source).to_contain(
+                "E-MIR-UNWIND001 {target} native backend does not support MayUnwind calls")
+            expect(source).to_contain("NoUnwind call has an unwind edge")
+
+    it "routes interpreter call failures only through explicit MayUnwind edges":
+        val source = unwind_source(
+            "src/compiler/95.interp/mir_interpreter.spl")
+        expect(source).to_contain(
+            "case CallTerminator(dest, call_target, args, normal, unwind_contract, unwind)")
+        expect(source).to_contain(
+            "unwind_contract == MirCallUnwindContract.MayUnwind and unwind.?")
+        expect(source).to_contain(
+            "MayUnwind call requires an explicit unwind edge")
+
+    it "makes unsupported portable backends reject instead of dropping unwind":
+        for path in [
+            "src/compiler/70.backend/backend/_CBackendTranslate/instruction_lowering.spl",
+            "src/compiler/70.backend/backend/cranelift_codegen_adapter.spl",
+            "src/compiler/70.backend/backend/lua_backend.spl",
+            "src/compiler/70.backend/backend/lean_mir_translate.spl",
+            "src/compiler/70.backend/backend/opencl_backend.spl",
+            "src/compiler/70.backend/backend/vhdl/vhdl_design_catalog.spl"]:
+            val source = unwind_source(path)
+            expect(source).to_contain("E-MIR-UNWIND001")
+            expect(source).to_contain("does not support MayUnwind calls")

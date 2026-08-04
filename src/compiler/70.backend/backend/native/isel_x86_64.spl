@@ -7,6 +7,7 @@
 # Pipeline: MIR -> ISel (this module) -> RegAlloc -> Encode -> ELF
 
 use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind, MirBinOp, MirUnaryOp, MirOperand, MirOperandKind, MirConstValue, MirTerminator, MirType, MirTypeKind, LocalId, LocalKind, BlockId, SwitchCase}
+use compiler.mir.mir_instructions.{MirCallUnwindContract}
 use compiler.mir.intrinsics.{BIT_ROTATE_LEFT, BIT_ROTATE_RIGHT, BIT_POPCOUNT, BIT_BSWAP}
 use compiler.backend.native.mach_inst.{MachReg, virtual_reg, physical_reg, reg_id, Operand, OperandKind, op_reg, op_phys, op_virt, op_imm, op_mem, op_label, op_sym, operand_get_reg, MachInst, new_mach_inst, MachBlock, new_mach_block, mach_block_add_inst, MachFunction, new_mach_function, mach_func_add_block, mach_func_set_frame_size, MachModule, DataEntry, new_mach_module, mach_module_add_func, mach_module_add_data, mach_module_add_extern}
 use compiler.backend.common.isel_common.{LoweredOperand, ISelFuncResult, ISelBlockResult, ISelInstResult, local_to_vreg, local_vreg_op, isel_fresh_dest, isel_emit_one}
@@ -623,15 +624,17 @@ fn isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult:
             # then ran straight on into whatever block was laid out next, with
             # exactly the corrupt state the abort existed to stop. INT3 traps.
             ISelInstResult(insts: [new_mach_inst(X86_OP_INT3, [])], ctx: ctx)
-        case CallTerminator(dest, func, args, normal, unwind):
+        case CallTerminator(dest, func, args, normal, unwind_contract, unwind):
             # Contract (mir_interpreter.spl `case CallTerminator`): perform the
             # call, bind the return value into `dest` when present, then
             # transfer to `normal`. The NOP this used to emit dropped both the
             # call and the edge.
-            if unwind.?:
+            if unwind_contract == MirCallUnwindContract.MayUnwind:
                 # The native backend has no landing pads. Silently discarding
                 # the unwind edge would send an unwinding call into `normal`.
-                panic("x86_64 isel: CallTerminator with an unwind edge has no lowering (native backend has no exception handling)")
+                panic("E-MIR-UNWIND001 x86_64 native backend does not support MayUnwind calls")
+            if unwind.?:
+                panic("E-MIR-UNWIND001 x86_64 NoUnwind call has an unwind edge")
             val call_res = isel_call(ctx, dest, func, args)
             var insts = call_res.insts
             insts.push(new_mach_inst(X86_OP_JMP, [op_label(normal.id)]))
