@@ -88,7 +88,9 @@ for box_name in \
     AspectFacetQueryBox \
     AspectFacetMethodQueryBox \
     AspectFacetDescriptorBox \
-    AspectFacetContractQueryBox
+    AspectFacetContractQueryBox \
+    AspectActivationInputBox \
+    AspectLazyCommitBox
 do
     if ! rg -q "^class ${box_name}:" "$runtime_source"; then
         echo "FAIL: missing lifecycle mutex capture box: ${box_name}" >&2
@@ -99,6 +101,19 @@ do
         exit 1
     fi
 done
+
+preflight_line=$(rg -n 'aspect_execution_context_lazy_preflight_locked\(' "$runtime_source" | head -n 1 | cut -d: -f1)
+io_line=$(rg -n 'capsule\.pack_io\.load_exact_route\(' "$runtime_source" | cut -d: -f1)
+commit_line=$(rg -n 'aspect_execution_context_lazy_commit_and_acquire_locked\(' "$runtime_source" | head -n 1 | cut -d: -f1)
+if [ -z "$preflight_line" ] || [ -z "$io_line" ] || [ -z "$commit_line" ] || \
+    [ "$preflight_line" -ge "$io_line" ] || [ "$io_line" -ge "$commit_line" ]; then
+    echo "FAIL: lazy activation is not ordered as gated preflight, exact I/O, gated commit" >&2
+    exit 1
+fi
+if [ "$(rg -c 'capsule\.pack_io\.load_exact_route\(' "$runtime_source")" -ne 1 ]; then
+    echo "FAIL: lazy activation must have one exact-route I/O call site" >&2
+    exit 1
+fi
 
 if has_discarded_release "$runtime_source"; then
     echo "FAIL: lazy completion discards descriptor release failure" >&2
