@@ -1,0 +1,78 @@
+# @req REQ-AF-007
+# @cover src/app/startup/aspect_unload_transition.spl 80%
+
+use std.spec.*
+use compiler.loader.loader.aspect_catalog.{AspectCatalog}
+use compiler.loader.loader.aspect_activation.{
+    AspectActivationCoordinator, AspectPublishedActivation
+}
+use compiler.loader.loader.aspect_pack_provider.{AspectPackProviderCache}
+use compiler.loader.loader.module_loader.{moduleloader_with_defaults}
+use os.smf.dynsmf_session.{DynSmfPolicy, dynsmf_session_new}
+use os.smf.smf_generation.{LifecycleManager}
+use app.startup.aspect_unload_transition.{aspect_unload_transition}
+
+fn unload_transition_coordinator(
+    with_publication: bool, with_pin: bool
+) -> AspectActivationCoordinator:
+    val catalog = AspectCatalog(
+        generation: 7, target: "x86_64-unknown-linux-gnu",
+        variant_fingerprint: "variant-a", runtime_abi: "simple-runtime-1",
+        entries: [])
+    val policy = DynSmfPolicy(
+        disabled_all: false, disabled_ids: [], source: "test")
+    var coordinator = AspectActivationCoordinator.create(
+        catalog, dynsmf_session_new("unload-transition-test", policy),
+        LifecycleManager.new_manager()).unwrap()
+    if not with_publication:
+        return coordinator
+    var lifecycle = coordinator.lifecycle.register_candidate(
+        "pack:module:audit:7", 7).promote_candidate()
+    if with_pin:
+        lifecycle = lifecycle.acquire_generation_for(
+            "pack:module:audit:7", 7).unwrap()
+    coordinator.lifecycle = lifecycle
+    coordinator.published["audit"] = AspectPublishedActivation(
+        activation_key: "pack:module:audit:7",
+        aspect_id: "audit", generation: 7,
+        owners: [], module_keys: [], bindings: [], advices: [],
+        state: "active")
+    coordinator
+
+fn unload_transition_cache() -> AspectPackProviderCache:
+    AspectPackProviderCache.create(4, 4, 4).unwrap()
+
+describe "Published aspect unload transition leaf":
+    it "preserves state when explicit authorization rejects unload":
+        val coordinator = unload_transition_coordinator(true, false)
+        val outcome = aspect_unload_transition(
+            Err("E-APACK008 unload denied"), coordinator,
+            moduleloader_with_defaults(), unload_transition_cache(), "audit")
+        expect(outcome.status).to_equal("failed")
+        expect(outcome.reason).to_contain("unload denied")
+        expect(outcome.coordinator.published["audit"].state).to_equal("active")
+
+    it "rejects an absent publication without mutating state":
+        val outcome = aspect_unload_transition(
+            Ok(()), unload_transition_coordinator(false, false),
+            moduleloader_with_defaults(), unload_transition_cache(), "audit")
+        expect(outcome.status).to_equal("failed")
+        expect(outcome.reason).to_contain("has no published generation")
+        expect(outcome.coordinator.published.has("audit")).to_be(false)
+
+    it "installs quiescing visibility state while an exact pin remains":
+        val outcome = aspect_unload_transition(
+            Ok(()), unload_transition_coordinator(true, true),
+            moduleloader_with_defaults(), unload_transition_cache(), "audit")
+        expect(outcome.status).to_equal("quiescing")
+        expect(outcome.coordinator.published["audit"].state).to_equal("quiescing")
+        expect(outcome.coordinator.lifecycle.generation_is_drained_for(
+            "pack:module:audit:7", 7)).to_be(false)
+
+    it "completes and removes a drained publication":
+        val outcome = aspect_unload_transition(
+            Ok(()), unload_transition_coordinator(true, false),
+            moduleloader_with_defaults(), unload_transition_cache(), "audit")
+        expect(outcome.status).to_equal("unloaded")
+        expect(outcome.reason).to_equal("")
+        expect(outcome.coordinator.published.has("audit")).to_be(false)

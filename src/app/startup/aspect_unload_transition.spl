@@ -1,0 +1,103 @@
+# State-parameterized published-aspect unload transition.
+#
+# The application owns serialization and must install the returned coordinator
+# on every status. This leaf uses only the supplied canonical loader/cache and
+# performs no authorization lookup, mutex callback, or execution-context access.
+
+use compiler.loader.loader.aspect_activation.{
+    AspectActivationCoordinator, AspectPublishedActivation
+}
+use compiler.loader.loader.aspect_pack_provider.{AspectPackProviderCache}
+use compiler.loader.loader.module_loader.{ModuleLoader, moduleloader_unload}
+use compiler.loader.loader.facet_binding_registry.{facet_unbind_generation}
+use compiler.loader.loader.advice_binding_registry.{
+    advice_unbind_generation, advice_dispatch_projection_invalidate
+}
+
+struct AspectUnloadTransition:
+    coordinator: AspectActivationCoordinator
+    status: text
+    reason: text
+
+fn aspect_unload_transition_failure(
+    coordinator: AspectActivationCoordinator, reason: text
+) -> AspectUnloadTransition:
+    AspectUnloadTransition(
+        coordinator: coordinator, status: "failed", reason: reason)
+
+fn aspect_unload_transition(
+    authorization: Result<(), text>,
+    coordinator: AspectActivationCoordinator,
+    canonical_loader: ModuleLoader,
+    canonical_provider_cache: AspectPackProviderCache,
+    aspect_id: text
+) -> AspectUnloadTransition:
+    if authorization.is_err():
+        return aspect_unload_transition_failure(
+            coordinator, authorization.unwrap_err())
+    if not coordinator.published.has(aspect_id):
+        return aspect_unload_transition_failure(
+            coordinator,
+            "E-AF004 aspect has no published generation: {aspect_id}")
+
+    var updated = coordinator
+    var activation: AspectPublishedActivation = updated.published[aspect_id]
+    val generation = activation.generation
+    # Compute the full visibility transition before installing any mutation.
+    val facet_bindings = facet_unbind_generation(
+        updated.facet_bindings, activation.activation_key, generation)
+    val advice_bindings = advice_unbind_generation(
+        updated.advice_bindings, activation.activation_key, generation)
+    val advice_projection = advice_dispatch_projection_invalidate(
+        updated.advice_projection, activation.activation_key, generation)
+    val quiesced = updated.lifecycle.quiesce_generation_for(
+        activation.activation_key, generation)
+    if quiesced.is_err():
+        return aspect_unload_transition_failure(
+            updated, quiesced.unwrap_err())
+
+    activation.bindings = []
+    activation.advices = []
+    activation.state = "quiescing"
+    updated.facet_bindings = facet_bindings
+    updated.advice_bindings = advice_bindings
+    updated.advice_projection = advice_projection
+    updated.lifecycle = quiesced.unwrap()
+    updated.published[aspect_id] = activation
+    if not updated.lifecycle.generation_is_drained_for(
+        activation.activation_key, generation):
+        return AspectUnloadTransition(
+            coordinator: updated, status: "quiescing", reason: "")
+
+    # Validate all pins before executable state changes. After this point every
+    # failure returns the exact partially advanced canonical state.
+    for module_key in activation.module_keys:
+        if canonical_provider_cache.module_ref_count(
+            module_key, canonical_loader.lifecycle.smf_cache_mgr) <= 0:
+            return aspect_unload_transition_failure(
+                updated,
+                "E-APACK003 published aspect module has no cache pin: {module_key.module_id}")
+
+    for owner_id in activation.owners:
+        moduleloader_unload(canonical_loader, owner_id)
+    for module_key in activation.module_keys:
+        val released = canonical_provider_cache.release_module(
+            module_key, canonical_loader.lifecycle.smf_cache_mgr)
+        if released.is_err():
+            return aspect_unload_transition_failure(
+                updated, released.unwrap_err())
+    for module_key in activation.module_keys:
+        _ = canonical_provider_cache.invalidate_provider(
+            module_key.provider, canonical_loader.lifecycle.smf_cache_mgr)
+
+    val completed = updated.lifecycle.complete_generation_unload_for(
+        activation.activation_key, generation)
+    if completed.is_err():
+        return aspect_unload_transition_failure(
+            updated, completed.unwrap_err())
+    updated.lifecycle = completed.unwrap()
+    updated.published = updated.published.remove(aspect_id)
+    AspectUnloadTransition(
+        coordinator: updated, status: "unloaded", reason: "")
+
+export AspectUnloadTransition, aspect_unload_transition
