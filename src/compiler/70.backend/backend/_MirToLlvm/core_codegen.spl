@@ -17,9 +17,12 @@ use compiler.backend.backend_api.*
 use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
-    llvm_ir_builder_build, llvm_ir_builder_push_line}
+    llvm_ir_builder_build}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
+
+extern fn rt_string_builder_len(handle: i64) -> i64
+extern fn rt_string_builder_push(handle: i64, value: text)
 
 # DS3 debug-info path split: NOT std.nogc_sync_mut.path.{basename, dirname} --
 # empirically, that dirname()'s rfind()-based fast path throws ("match
@@ -536,7 +539,9 @@ impl MirTextCodegen for MirToLlvm:
             match dbg_id:
                 Some(id): dbg_suffix = " !dbg !{id}"
                 nil: ()
-            llvm_ir_builder_push_line(ir_handle, "define {effective_ret_ty} @{fn_name}({param_str}){attrs}{dbg_suffix} {{")
+            if rt_string_builder_len(ir_handle) > 0:
+                rt_string_builder_push(ir_handle, "\n")
+            rt_string_builder_push(ir_handle, "define {effective_ret_ty} @{fn_name}({param_str}){attrs}{dbg_suffix} {{")
         else:
             self.builder.start_function_opt(fn_name, params, effective_ret_ty, is_readonly, is_small, dbg_id)
         if bootstrap_debug:
@@ -545,18 +550,17 @@ impl MirTextCodegen for MirToLlvm:
         val is_start = name == "_start"
         var block_i = 0
         while block_i < body.blocks.len():
-            self.translate_block_at(body.blocks, block_i, effective_ret_ty, is_start, return_slot_id, module_index)
+            self.translate_block_at(body.blocks, block_i, effective_ret_ty, is_start, return_slot_id, module_index, ir_handle)
             block_i = block_i + 1
 
         if ir_handle >= 0:
-            llvm_ir_builder_push_line(ir_handle, "}")
-            llvm_ir_builder_push_line(ir_handle, "")
+            rt_string_builder_push(ir_handle, "\n}\n")
         else:
             self.builder.end_function()
         if bootstrap_debug:
             print "[mir-to-llvm] function:done {name}"
 
-    me translate_block_at(blocks: [MirBlock], block_index: i64, return_type_text: text, is_start: bool, return_slot_id: i64, module_index: i64):
+    me translate_block_at(blocks: [MirBlock], block_index: i64, return_type_text: text, is_start: bool, return_slot_id: i64, module_index: i64, ir_handle: i64):
         """Translate a MIR basic block."""
         val block = blocks[block_index]
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
@@ -571,7 +575,7 @@ impl MirTextCodegen for MirToLlvm:
         while bootstrap_inst_i < bootstrap_instructions.len():
             if bootstrap_debug:
                 print "[mir-to-llvm] block:instruction-before bb{bootstrap_block_id} index={bootstrap_inst_i}"
-            self.translate_instruction_at(bootstrap_instructions, bootstrap_inst_i, module_index)
+            self.translate_instruction_at(bootstrap_instructions, bootstrap_inst_i, module_index, ir_handle)
             if bootstrap_debug:
                 print "[mir-to-llvm] block:instruction-after bb{bootstrap_block_id} index={bootstrap_inst_i}"
             bootstrap_inst_i = bootstrap_inst_i + 1
@@ -581,7 +585,7 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] block:terminator-after bb{bootstrap_block_id}"
 
-    me translate_instruction_at(instructions: [MirInst], index: i64, module_index: i64):
+    me translate_instruction_at(instructions: [MirInst], index: i64, module_index: i64, ir_handle: i64):
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:entry index={index}"
@@ -624,7 +628,7 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:store-global-discriminant index={index}"
         if rt_enum_discriminant(inst_kind) == store_global_disc:
-            self.translate_store_global_at(instructions, index, module_index)
+            self.translate_store_global_at(instructions, index, module_index, ir_handle)
             return
 
         val load_global_disc = rt_enum_discriminant(MirInstKind.LoadGlobal(LocalId(id: 0), SymbolId(id: 0)))
@@ -648,7 +652,7 @@ impl MirTextCodegen for MirToLlvm:
             val load_symbol_id = rt_value_as_int(load_symbol_slot >> 32)
             if bootstrap_debug:
                 print "[mir-to-llvm] load-global:symbol-decoded index={index} slot={load_symbol_slot} symbol={load_symbol_id}"
-            self.translate_load_global_ids(load_dest_id, load_symbol_id, module_index)
+            self.translate_load_global_ids(load_dest_id, load_symbol_id, module_index, ir_handle)
             return
 
         match inst_kind:
@@ -670,7 +674,7 @@ impl MirTextCodegen for MirToLlvm:
             case Call(_, _, _):
                 if bootstrap_debug:
                     print "[mir-to-llvm] instruction:call index={index}"
-                self.translate_call_at(instructions, index)
+                self.translate_call_at(instructions, index, ir_handle)
             case CallIndirect(dest, ptr, args, sig): self.translate_call_indirect(dest, ptr, args, sig)
             case Intrinsic(dest, name, args): self.translate_intrinsic(dest, name, args)
             case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers):
@@ -1497,7 +1501,7 @@ impl MirTextCodegen for MirToLlvm:
             case Transpose:
                 self.emit_unsupported_panic("LLVM backend does not support Transpose lowering")
 
-    me translate_call_at(instructions: [MirInst], index: i64):
+    me translate_call_at(instructions: [MirInst], index: i64, ir_handle: i64):
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] call:entry index={index}"
@@ -1633,9 +1637,17 @@ impl MirTextCodegen for MirToLlvm:
                 # must be tracked so a later print(f()) zext's instead of
                 # sext's. See is_unsigned_mir_kind / lookup_function_return_unsigned.
                 self.unsigned_locals[dest_id] = self.lookup_function_return_unsigned(call_func_name)
-                self.builder.emit("  {name} = call {ret_ty} {call_sig}{call_func_name}({args_str})")
+                val call_line = "  {name} = call {ret_ty} {call_sig}{call_func_name}({args_str})"
+                if ir_handle >= 0:
+                    rt_string_builder_push(ir_handle, "\n{call_line}")
+                else:
+                    self.builder.emit(call_line)
         else:
-            self.builder.emit("  call void {call_sig}{call_func_name}({args_str})")
+            val call_line = "  call void {call_sig}{call_func_name}({args_str})"
+            if ir_handle >= 0:
+                rt_string_builder_push(ir_handle, "\n{call_line}")
+            else:
+                self.builder.emit(call_line)
         if bootstrap_debug:
             print "[mir-to-llvm] call:emit index={index} present={has_dest}"
 
@@ -2020,7 +2032,7 @@ impl MirTextCodegen for MirToLlvm:
             self.mark_ptr_local(dest_id)
         self.builder.emit_load(dest_name, g_ty, g_name)
 
-    me translate_load_global_ids(dest_id: i64, symbol_id: i64, module_index: i64):
+    me translate_load_global_ids(dest_id: i64, symbol_id: i64, module_index: i64, ir_handle: i64):
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] load-global:scalar dest={dest_id} symbol={symbol_id}"
@@ -2046,7 +2058,10 @@ impl MirTextCodegen for MirToLlvm:
         self.defined_locals[dest_id] = true
         if g_ty == "ptr":
             self.ptr_locals[dest_id] = true
-        self.builder.emit_load(dest_name, g_ty, g_name)
+        if ir_handle >= 0:
+            rt_string_builder_push(ir_handle, "\n  {dest_name} = load {g_ty}, ptr {g_name}, align 8")
+        else:
+            self.builder.emit_load(dest_name, g_ty, g_name)
         if bootstrap_debug:
             print "[mir-to-llvm] load-global:emit dest={dest_id} type={g_ty}"
 
@@ -2058,7 +2073,7 @@ impl MirTextCodegen for MirToLlvm:
         val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), g_ty)
         self.builder.emit_store(g_ty, value_val, g_name)
 
-    me translate_store_global_at(instructions: [MirInst], index: i64, module_index: i64):
+    me translate_store_global_at(instructions: [MirInst], index: i64, module_index: i64, ir_handle: i64):
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] store-global:entry index={index}"
@@ -2098,7 +2113,10 @@ impl MirTextCodegen for MirToLlvm:
                 value_text = "getelementptr inbounds ([{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0)"
         if bootstrap_debug:
             print "[mir-to-llvm] store-global:value index={index} type={g_ty} value={value_text}"
-        self.builder.emit_store(g_ty, value_text, g_name)
+        if ir_handle >= 0:
+            rt_string_builder_push(ir_handle, "\n  store {g_ty} {value_text}, ptr {g_name}, align 8")
+        else:
+            self.builder.emit_store(g_ty, value_text, g_name)
         if bootstrap_debug:
             print "[mir-to-llvm] store-global:emit index={index} type={g_ty}"
 
