@@ -176,27 +176,24 @@ fn _be_dom_push_html_attribute(
         " " + name + "=\"" + html_escape_core(value) + "\"", length
     )
 
-fn _be_dom_collect_html(
+fn _be_dom_open_html_node(
     node: BeDomNode, render_only: bool,
-    state: _BeDomHtmlSerializationState, depth: i32
-):
-    if state.failed:
-        return
-    if depth > BE_DOM_HTML_SERIALIZE_MAX_DEPTH:
-        state.fail_closed()
-        return
+    state: _BeDomHtmlSerializationState
+) -> bool:
+    """Emit a node's own opening markup.
+
+    Returns true when the caller must still walk `node.children` and then emit
+    the matching closing markup; false when the node is already complete (text
+    node, void element) or the state has failed closed.
+    """
     if node.tag_name == "#text":
         _be_dom_push_escaped_html(state, node.data)
-        return
+        return false
     if node.tag_name == "#document":
-        for child in node.children:
-            _be_dom_collect_html(child, render_only, state, depth + 1)
-            if state.failed:
-                return
-        return
+        return true
     val open_tag_length = node.tag_name.len().to_i64() + 1
     if not state.can_push_length(open_tag_length):
-        return
+        return false
     state.push_known_length("<" + node.tag_name, open_tag_length)
     for name in node.attributes.keys():
         if not name.starts_with("\u0000"):
@@ -217,18 +214,82 @@ fn _be_dom_collect_html(
                 authored_value
             _be_dom_push_html_attribute(state, name, render_value)
             if state.failed:
-                return
+                return false
     state.push_known_length(">", 1)
     if _be_dom_void_tag(node.tag_name):
+        return false
+    return not state.failed
+
+fn _be_dom_close_html_node(
+    node: BeDomNode, state: _BeDomHtmlSerializationState
+):
+    """Emit a node's closing markup. A `#document` node has none."""
+    if node.tag_name == "#document":
         return
-    for child in node.children:
-        _be_dom_collect_html(child, render_only, state, depth + 1)
-        if state.failed:
-            return
     val close_tag_length = node.tag_name.len().to_i64() + 3
     if not state.can_push_length(close_tag_length):
         return
     state.push_known_length("</" + node.tag_name + ">", close_tag_length)
+
+fn _be_dom_collect_html(
+    node: BeDomNode, render_only: bool,
+    state: _BeDomHtmlSerializationState, depth: i32
+):
+    """Serialize `node` and its subtree using an explicit work stack.
+
+    This walk used to recurse once per DOM level, so a document nested deeper
+    than the native stack allows aborted the entire process ("has overflowed
+    its stack") before `BE_DOM_HTML_SERIALIZE_MAX_DEPTH` could fail closed —
+    a renderer denial of service, since the HTML tree builder admits documents
+    right up to that cap. Depth is now bounded by the heap, and the depth cap
+    is what actually stops the walk.
+
+    Per-node work stays O(1) amortized: the frame stacks are grown with `push`
+    only while descending past the deepest level reached so far (at most
+    `BE_DOM_HTML_SERIALIZE_MAX_DEPTH` pushes for an entire document) and are
+    reused in place by index assignment afterwards, so a wide sibling list can
+    never turn the walk into repeated whole-array copies.
+    """
+    if state.failed:
+        return
+    if depth > BE_DOM_HTML_SERIALIZE_MAX_DEPTH:
+        state.fail_closed()
+        return
+    if not _be_dom_open_html_node(node, render_only, state):
+        return
+    # Frame `k` holds an already-opened node at DOM depth `depth + k`;
+    # `frame_next` is the index of its next unvisited child.
+    var frame_nodes: [BeDomNode] = [node]
+    var frame_next: [i32] = [0]
+    var frame_count: [i32] = [node.children.len()]
+    var top: i32 = 0
+    while top >= 0:
+        val cursor = frame_nodes[top]
+        val next_child = frame_next[top]
+        if next_child >= frame_count[top]:
+            _be_dom_close_html_node(cursor, state)
+            if state.failed:
+                return
+            top = top - 1
+        else:
+            frame_next[top] = next_child + 1
+            if depth + top + 1 > BE_DOM_HTML_SERIALIZE_MAX_DEPTH:
+                state.fail_closed()
+                return
+            val child = cursor.children[next_child]
+            val descend = _be_dom_open_html_node(child, render_only, state)
+            if state.failed:
+                return
+            if descend:
+                top = top + 1
+                if top < frame_nodes.len():
+                    frame_nodes[top] = child
+                    frame_next[top] = 0
+                    frame_count[top] = child.children.len()
+                else:
+                    frame_nodes.push(child)
+                    frame_next.push(0)
+                    frame_count.push(child.children.len())
 
 fn _be_dom_serialize_html(node: BeDomNode, render_only: bool) -> text:
     val state = _BeDomHtmlSerializationState.create()
