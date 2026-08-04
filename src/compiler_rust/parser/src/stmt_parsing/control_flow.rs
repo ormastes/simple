@@ -248,7 +248,20 @@ impl<'a> Parser<'a> {
             // Inline-style: could be expression (if x < 0: -x else: x)
             // or statement (if cond: func_call())
             // Parse the body first, then check if else follows
-            let then_expr = self.parse_expression()?;
+            //
+            // The body may also be an ASSIGNMENT (`if cond: d[k] = v`), which
+            // `parse_expression` alone rejected with "expected expression,
+            // found Assign" even though the block form
+            // (`if cond:\n    d[k] = v`) has always worked. An assignment is
+            // not an expression, so such an `if` can only be statement-form
+            // and is finished by a separate path below.
+            let then_node = self.parse_expression_or_assignment()?;
+            let then_expr = match then_node {
+                Node::Expression(expr) => expr,
+                stmt => {
+                    return self.finish_inline_statement_if(start_span, let_pattern, condition, stmt);
+                }
+            };
 
             // Peek through newlines/dedents to check for elif/else continuation.
             // Only consume newlines if elif/else actually follows,
@@ -1025,9 +1038,7 @@ impl<'a> Parser<'a> {
     /// the end of the arm list. At statement level this only changes which
     /// parser reports the stray closer, never whether it is reported.
     pub(crate) fn at_enclosing_list_terminator(&mut self) -> bool {
-        self.check(&TokenKind::RParen)
-            || self.check(&TokenKind::RBracket)
-            || self.check(&TokenKind::RBrace)
+        self.check(&TokenKind::RParen) || self.check(&TokenKind::RBracket) || self.check(&TokenKind::RBrace)
     }
 
     pub(crate) fn parse_match_arm(&mut self) -> Result<MatchArm, ParseError> {
@@ -1327,6 +1338,106 @@ impl<'a> Parser<'a> {
                 start_span.column,
             ),
             body,
+        }))
+    }
+
+    /// Finish an inline `if` whose then-body is a STATEMENT rather than an
+    /// expression — in practice an assignment, e.g. `if cond: d[k] = v`.
+    ///
+    /// The expression-form path builds a ternary-like `IfExpr`, which cannot
+    /// represent an assignment, so this builds a plain statement `IfStmt` with
+    /// single-statement blocks instead. An inline `else` is accepted in the
+    /// same shape (assignment or expression), and `elif` / `else if` recurse
+    /// through the normal `if` parser so chains keep working.
+    /// See doc/08_tracking/bug/
+    /// parser_inline_if_assignment_body_2026-08-04.md.
+    fn finish_inline_statement_if(
+        &mut self,
+        start_span: Span,
+        let_pattern: Option<Pattern>,
+        condition: Expr,
+        then_stmt: Node,
+    ) -> Result<Node, ParseError> {
+        let then_block = Block {
+            span: self.previous.span,
+            statements: vec![then_stmt],
+        };
+
+        // Only consume the separating newlines when elif/else actually
+        // follows; otherwise they belong to the enclosing block parser.
+        if self.check(&TokenKind::Newline) || self.check(&TokenKind::Dedent) {
+            let has_elif_or_else = self.peek_through_newlines_and_indents_is(&TokenKind::Elif)
+                || self.peek_through_newlines_and_indents_is(&TokenKind::Else);
+            if has_elif_or_else {
+                while self.check(&TokenKind::Newline) || self.check(&TokenKind::Dedent) {
+                    self.advance();
+                }
+            }
+        }
+
+        let else_block = if self.check(&TokenKind::Elif) {
+            // `elif cond: ...` continues the chain as a nested statement if.
+            let elif_span = self.current.span;
+            self.advance();
+            let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
+            self.expect(&TokenKind::Colon)?;
+            let nested = if self.check(&TokenKind::Newline) {
+                let block = self.parse_block()?;
+                Node::If(IfStmt {
+                    span: elif_span,
+                    let_pattern: elif_pattern,
+                    condition: elif_condition,
+                    then_block: block,
+                    elif_branches: Vec::new(),
+                    else_block: None,
+                    is_suspend: false,
+                })
+            } else {
+                let stmt = self.parse_expression_or_assignment()?;
+                self.finish_inline_statement_if(elif_span, elif_pattern, elif_condition, stmt)?
+            };
+            Some(Block {
+                span: self.previous.span,
+                statements: vec![nested],
+            })
+        } else if self.check(&TokenKind::Else) {
+            self.advance();
+            if self.check(&TokenKind::If) {
+                // `else if` — parse_if expects to consume the `if` itself.
+                let nested = self.parse_if()?;
+                Some(Block {
+                    span: self.previous.span,
+                    statements: vec![nested],
+                })
+            } else {
+                self.expect(&TokenKind::Colon)?;
+                if self.check(&TokenKind::Newline) {
+                    Some(self.parse_block()?)
+                } else {
+                    let stmt = self.parse_expression_or_assignment()?;
+                    Some(Block {
+                        span: self.previous.span,
+                        statements: vec![stmt],
+                    })
+                }
+            }
+        } else {
+            None
+        };
+
+        Ok(Node::If(IfStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            let_pattern,
+            condition,
+            then_block,
+            elif_branches: Vec::new(),
+            else_block,
+            is_suspend: false,
         }))
     }
 

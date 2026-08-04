@@ -108,7 +108,27 @@ impl<'a> Parser<'a> {
 
         let return_type = if self.check(&TokenKind::Arrow) {
             self.advance();
-            Some(self.parse_type()?)
+            // Trailing-`->` signature continuation:
+            //   fn name(params) ->
+            //       ReturnType:
+            // The block above already handles the *leading* form (`->` on the
+            // next line); this handles the arrow staying on the parameter line
+            // with the type wrapped after it. Without the skip, parse_type()
+            // sees the line's Newline and fails with "expected identifier,
+            // found Newline".
+            //
+            // Drained locally rather than folded into `sig_indents`: that
+            // variable also tells the body parser below whether the body sits
+            // at the signature's continuation level, and adding to it made a
+            // normally-indented body fail with "expected expression, found
+            // Indent". Keeping it local leaves the leading-arrow semantics
+            // exactly as they were.
+            let arrow_indents = self.skip_newlines_and_indents_for_method_chain();
+            let ty = self.parse_type()?;
+            if arrow_indents > 0 {
+                self.consume_dedents_for_method_chain(arrow_indents);
+            }
+            Some(ty)
         } else {
             None
         };
@@ -158,6 +178,15 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Newline) {
                 // Block form: fn name(): \n INDENT body
                 self.expect(&TokenKind::Newline)?;
+
+                // A trailing-`->` continuation consumed an INDENT for the
+                // return-type line, but its matching DEDENT is not emitted
+                // until after the signature's `:` and Newline — so the drain
+                // attempted next to `parse_type` could only defer it. The
+                // stream here is `Dedent Indent <body>`; drain the deferred
+                // DEDENT now so the INDENT check below sees the body's own
+                // INDENT rather than the balancing DEDENT.
+                self.drain_available_deferred_dedents();
 
                 // For multiline signatures where the colon is on the indented line
                 // (e.g., `fn foo()\n    -> T:\n    body`), the body is at the same

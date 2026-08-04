@@ -39,11 +39,23 @@ impl<'a> Parser<'a> {
             // seed_assignment_trailing_equals_continuation_2026-07-31.md.
             let indent_count = self.skip_newlines_and_indents_for_method_chain();
             let mut value = self.parse_expression()?;
+            // Support no-paren calls in assignment: x = double 5
+            //
+            // This MUST run before the DEDENT drain below. Draining consumes
+            // the RHS line's terminating Newline along with the Dedent, which
+            // erases the statement boundary; a no-paren scan performed after
+            // that sees the *next statement* sitting at the current token and
+            // swallows it as an argument list. Two consecutive trailing-`=`
+            // continuations then died on the second `=` with "expected
+            // expression, found Assign" — one continuation alone parsed,
+            // because EOF or a keyword-led statement gave the scan nothing to
+            // eat. Running first, the scan still sees the Newline and stops.
+            // See doc/08_tracking/bug/
+            // parser_consecutive_trailing_equals_continuations_2026-08-04.md.
+            value = self.parse_with_no_paren_calls(value)?;
             if indent_count > 0 {
                 self.consume_dedents_for_method_chain(indent_count);
             }
-            // Support no-paren calls in assignment: x = double 5
-            value = self.parse_with_no_paren_calls(value)?;
 
             // B4: desugar `x.bits[lo..hi] = v` to `x = (x & ~mask) | ((v & mask) << lo)`.
             // Phase 2 also desugars arithmetic augmented assigns

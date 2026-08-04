@@ -115,27 +115,62 @@ not baked into the crypto files.
 
 ## Evidence
 
-- `simple-parser` unit suite: **258 passed, 0 failed** (254 pre-existing + 4 new
-  in `parser/src/rejoined_continuation_test.rs`). `cargo fmt --check` exit 0,
-  `cargo clippy` clean.
-- The new tests are **not vacuous**: reverting the fix and re-running turns
-  exactly the 2 bug-shape tests RED (`rejoined_nested_continuation_parses`,
-  `observation_matches_shape_parses`) while the 2 guard tests stay green.
-- Whole-campaign parse scan over the 90 `.spl` files, with the source workaround
-  reverted: **81 ok / 9 failing**, improved from **15 failing** before the fix.
+- `simple-parser` suite: **266 lib tests passed, 0 failed** (254 pre-existing,
+  4 in `rejoined_continuation_test.rs`, 8 in `multiline_shapes_test.rs`), plus
+  every integration binary green. `cargo clippy` reports 0 warnings/errors.
+- The new tests are **not vacuous**. Reverting the rejoin fix turns exactly its
+  2 bug-shape tests RED while its 2 guards stay green. Reverting the other four
+  fix sites turns 5 of the 8 `multiline_shapes` tests RED and leaves 3 guards
+  green.
+- Whole-campaign parse scan over the 90 `.spl` files, source workaround
+  reverted: **90 ok / 0 failing**, down from 15 failing at the start
+  (15 → 9 → 4 → 2 → 0 as each defect landed).
+- My fixes introduced **no** new failures: the post-fix failing set was verified
+  a strict subset of the pre-fix set at every step (`comm -13 before after`
+  empty).
 
-## Remaining 9 — different defects, not this one
+## The other 9 — three further defects, now also fixed
 
-The survivors fail with unrelated errors and need separate triage:
+The survivors were unrelated to the rejoin bug. Each was reduced to a minimal
+repro, fixed, and covered in `parser/src/multiline_shapes_test.rs`. Campaign
+parse status went **15 → 9 → 4 → 2 → 0 of 90 failing**.
 
-- `expected expression, found Assign` — `x25519mlkem768_candidate_batch_measurement.spl:535`,
-  `x25519mlkem768_coverage_receipt.spl:406`, `x25519mlkem768_gpu_dispatch.spl:270`,
-  `x25519mlkem768_measurement_qualification_spec.spl:330`,
-  `x25519mlkem768_performance_attestation_spec.spl:249`,
-  `x25519mlkem768_gpu_measurement_qualification_spec.spl:127`
-- `expected Indent, found Dedent` — `gpu_build_admission.spl:127`,
-  `x25519mlkem768_gpu_build_admission_spec.spl:78`
-- `expected identifier, found Newline` — `gpu_lifecycle_snapshot.spl:61`
+**1. Consecutive trailing-`=` continuations** (6 files) —
+`expected expression, found Assign`.
+`parse_expression_or_assignment` drained the continuation's DEDENT *before*
+scanning for no-paren call arguments. The drain also consumes the RHS line's
+terminating Newline, erasing the statement boundary, so the no-paren scan saw
+the *next statement* and swallowed it as an argument list, then choked on its
+`=`. One continuation alone parsed, because EOF or a keyword-led statement gave
+the scan nothing to eat. Fix: run the no-paren scan first, while the Newline is
+still visible (`expressions/no_paren.rs`).
+
+**2. Trailing-`->` signature continuation** (1 file) —
+`expected identifier, found Newline`.
+`fn f(...) ->` with the return type on the next line. The *leading* form
+(`->` starting the next line) was handled; the trailing one called `parse_type`
+with a Newline current. Fix: skip newlines/indents after the arrow, and drain
+the balancing DEDENT after the signature's `:` and Newline — the token stream
+there is `Dedent Indent <body>`, so the drain has to happen at the body, not at
+`parse_type` (`parser_impl/functions.rs`).
+
+**3. Inline `if cond: <assignment>`** (1 file) —
+`expected expression, found Assign`.
+The block form always worked; the inline form parsed its body with
+`parse_expression`, which cannot represent an assignment. Fix: parse the inline
+body with `parse_expression_or_assignment` and, when it yields a statement,
+finish as a statement-form `IfStmt` with single-statement blocks, including
+inline `else` / `elif` / `else if` (`stmt_parsing/control_flow.rs`).
+
+**4. `if`-expression with a multi-line condition** (2 files) —
+`expected Indent, found Dedent`.
+`val x = if a == p and\n        b == q:` — the statement-form `if` drained the
+compensating DEDENT (the "Deep" case on `drain_available_deferred_dedents`) but
+the expression form did not, so it met the DEDENT where it wanted the body's
+INDENT. Fix: same drain in `parse_if_expr` (`expressions/helpers.rs`).
+
+Fixing 2 also repaired a pre-existing break in the *leading*-arrow form: the
+`other_arrow_forms_still_parse` guard fails on the unfixed parser.
 
 ## Verification notes
 

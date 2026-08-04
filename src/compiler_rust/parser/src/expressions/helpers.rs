@@ -180,6 +180,16 @@ impl<'a> Parser<'a> {
             // Block-form: parse as DoBlock expression
             self.advance(); // consume Newline
 
+            // A multi-line condition (`if a == x and\n        b == y:`) leaves
+            // a compensating DEDENT queued when the continuation column is
+            // deeper than the body column — exactly the "Deep" case described
+            // on drain_available_deferred_dedents. The statement-form `if`
+            // already drains here; without the same drain this expression form
+            // hit the DEDENT where it wanted the body's INDENT and failed with
+            // "expected Indent, found Dedent", so `val x = if <multi-line
+            // cond>:` could not be written at all.
+            self.drain_available_deferred_dedents();
+
             // Empty then-branch: `if cond:\nelse: ...` or `if cond:\nelif ...:`
             if self.check(&TokenKind::Else) || self.check(&TokenKind::Elif) {
                 Expr::Tuple(vec![]) // unit value
