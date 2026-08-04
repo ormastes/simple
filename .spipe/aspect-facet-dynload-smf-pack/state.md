@@ -228,3 +228,30 @@ verification-failed
   killed during startup, and the deployed runtime ABI probe failed.
 - phase remains `verification-failed`; the new work is a safe, fail-closed
   implementation foundation rather than executable D4/D5 completion.
+
+## 2026-08-04 — executable D4 and source/HIR D5 continuation
+
+- sync: fetched GitHub and confirmed the feature bookmark was already rebased
+  on current `main@origin` before edits.
+- D4 runtime: added the source-owned unit fail-stop wrapper. It synchronously
+  runs the Result dispatcher and stores released-token state before canonical
+  panic, preserving arbitrary business return values and preventing continuation
+  after advice infrastructure failure.
+- D4 compiler: exact dispatcher module/name/signature and entry-closure proof,
+  v2-to-ordinary-Call rewriting, slot/phase rewritten-call coverage, artifact
+  admission, and residual v1/v2 rejection now exist for hosted CPU AOT
+  entry-closure only. D4 is implemented but not executable-verified.
+- D5 runtime: added validated context-first whole-descriptor acquisition and
+  exact release; no base/view crosses this boundary. Validation failures and
+  corrupted aggregate identity release the canonical lease before error.
+- D5 compiler: added genuine parser/flat-AST/rich-AST/HIR nodes for
+  `context.try_facet<T>(base)`, `facet<T>`, and `require_facet<T>`, HIR member
+  provenance, symbol-based copy/return/store/call/spawn checks, and downstream
+  traversal preservation. This is not source projection or text scanning.
+- D5 remains fail-closed at MIR: exact context-type proof, runtime descriptor
+  extraction into the typed adapter, method ordinal/signature resolution,
+  complete lambda-capture rejection, and balanced releases on every exit are
+  still required.
+- no compiler/bootstrap/test command was run in this continuation. Root static
+  integration review remains the only admissible verification pass; authoritative
+  status remains `verification-failed` / `STATUS: FAIL`.

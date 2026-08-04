@@ -1,0 +1,101 @@
+# @req REQ-AF-003 REQ-AF-006
+# @cover src/compiler/10.frontend/core/parser_expr.spl 80%
+# @cover src/compiler/20.hir/hir_lowering/expressions.spl 80%
+# @cover src/compiler/35.semantics/safety_checker.spl 80%
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_definitions.{HirExprKind, HirStmtKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.semantics.safety_checker.{
+    SafetyChecker, SafetyError, safetychecker_check_module
+}
+
+fn typed_facet_source(body: text) -> text:
+    "struct AspectExecutionContext:\n" +
+    "    marker: i64\n" +
+    "struct Cache:\n" +
+    "    marker: i64\n" +
+    "struct Debuggable:\n" +
+    "    marker: i64\n" +
+    "fn use_facet(context: AspectExecutionContext, cache: Cache) -> i64:\n" +
+    body
+
+fn lower_typed_facet_source(body: text):
+    val parsed = parse_full_frontend(
+        typed_facet_source(body), "typed_facet_source.spl",
+        "typed_facet_source", Logger(level: 0))
+    var lowering = HirLowering.with_filename("typed_facet_source.spl")
+    lowering.lower_module(parsed)
+
+fn count_facet_escape_errors(errors: [SafetyError]) -> i64:
+    var count = 0
+    for error in errors:
+        match error:
+            case Other(message, _):
+                if message.starts_with("E-AF006"):
+                    count = count + 1
+            case _: pass
+    count
+
+describe "typed facet source and HIR ownership":
+    it "preserves explicit context, typed base, contract, and member provenance":
+        val hir = lower_typed_facet_source(
+            "    val debug = context.require_facet<Debuggable>(cache)\n" +
+            "    debug.snapshot()\n" +
+            "    0\n")
+        var saw_acquire = false
+        var saw_member = false
+        for item in hir.functions:
+            val function = item[1]
+            if function.name == "use_facet":
+                for statement in function.body.stmts:
+                    match statement.kind:
+                        case Let(_, _, init):
+                            match init.kind:
+                                case FacetAcquire(_, _, _, mode):
+                                    expect(mode).to_equal("require_facet")
+                                    saw_acquire = true
+                                case _: pass
+                        case Expr(expr):
+                            match expr.kind:
+                                case FacetMemberCall(_, method, _, _):
+                                    expect(method).to_equal("snapshot")
+                                    saw_member = true
+                                case _: pass
+                        case _: pass
+        if not saw_acquire:
+            fail("expected real FacetAcquire HIR")
+        if not saw_member:
+            fail("expected FacetMemberCall provenance")
+
+    it "rejects copy and return escapes by HIR symbol identity":
+        val hir = lower_typed_facet_source(
+            "    val debug = context.require_facet<Debuggable>(cache)\n" +
+            "    val copied = debug\n" +
+            "    return debug\n")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(count_facet_escape_errors(errors)).to_equal(2)
+
+    it "rejects assignment copies and leased facet method arguments":
+        val hir = lower_typed_facet_source(
+            "    var first = context.require_facet<Debuggable>(cache)\n" +
+            "    val second = context.require_facet<Debuggable>(cache)\n" +
+            "    first = second\n" +
+            "    first.merge(second)\n" +
+            "    0\n")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(count_facet_escape_errors(errors)).to_equal(2)
+
+    it "allows local member use without treating it as an escape":
+        val hir = lower_typed_facet_source(
+            "    val debug = context.require_facet<Debuggable>(cache)\n" +
+            "    debug.snapshot()\n" +
+            "    0\n")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(count_facet_escape_errors(errors)).to_equal(0)

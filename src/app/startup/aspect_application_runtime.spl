@@ -25,7 +25,10 @@ use compiler.loader.loader.facet_binding_registry.{
     FacetBindingRecord, facet_lookup, facet_unbind_generation,
     facet_witness_method_entry
 }
-use compiler.common.structural_contracts.facet_artifact.{FacetWitnessMethodEntry}
+use compiler.common.structural_contracts.facet_artifact.{
+    FACET_WITNESS_DESCRIPTOR_VERSION,
+    FacetWitnessMethodEntry, FacetWitnessDescriptorV1
+}
 use compiler.loader.loader.advice_binding_registry.{
     AdviceBindingRecord, AdviceBindingCounters, AdviceDisabledPathFootprint,
     advice_lookup_slot, advice_unbind_generation,
@@ -45,6 +48,17 @@ enum AspectApplicationOperation:
     DynamicAttach
     Unload
     Patch
+
+# Whole-descriptor acquisition returned to compiler-generated private typed
+# adapters. The application owns the lease and descriptor; the compiler keeps
+# the concrete base operand separately and supplies no caller-created view.
+struct PublishedFacetDescriptorLease:
+    aspect_id: text
+    binding_id: text
+    facet_interface_id: text
+    facet_contract_abi_hash: text
+    witness_descriptor: FacetWitnessDescriptorV1
+    generation_lease: FacetGenerationLease
 
 # Stable application-owned reference capsule. The coordinator is the canonical
 # aggregate owner of lifecycle and facet/advice publication state; the loader
@@ -76,6 +90,28 @@ fn aspect_application_mission_catalog_valid(catalog: AspectCatalog) -> Result<()
     for entry in catalog.entries:
         if entry.activation_policy != "startup" and entry.activation_policy != "excluded":
             return Err("E-APACK008 mission profile permits only static, startup, or excluded aspects")
+    Ok(())
+
+fn aspect_published_facet_descriptor_validate(
+    record: FacetBindingRecord
+) -> Result<(), text>:
+    val descriptor = record.witness_descriptor
+    if descriptor.descriptor_version != FACET_WITNESS_DESCRIPTOR_VERSION:
+        return Err("E-AF002 published facet descriptor version is unsupported")
+    if (descriptor.owner_id != record.witness_owner_id or
+        descriptor.descriptor_symbol != record.witness_symbol or
+        descriptor.facet_contract_abi_hash != record.facet_contract_abi_hash):
+        return Err("E-AF002 published facet descriptor no longer matches its binding")
+    if descriptor.method_entries.len() == 0:
+        return Err("E-AF002 published facet descriptor has no resolved methods")
+    var method_names: [text] = []
+    for method in descriptor.method_entries:
+        if (method.method_name == "" or method.method_symbol == "" or
+            method.resolved_address <= 0):
+            return Err("E-AF002 published facet descriptor contains an unresolved method")
+        if method_names.contains(method.method_name):
+            return Err("E-AF002 published facet descriptor contains a duplicate method")
+        method_names.push(method.method_name)
     Ok(())
 
 fn aspect_application_startup_complete(runtime: AspectApplicationRuntime) -> Result<(), text>:
@@ -379,6 +415,44 @@ impl AspectExecutionContext:
             return Err(method.unwrap_err())
         Ok(Some((method.unwrap(), pair.1)))
 
+    # Compiler-facing whole-descriptor acquisition. Method selection remains a
+    # compile-time ordinal operation over this descriptor; this boundary never
+    # accepts or constructs an erased/caller-provided facet view.
+    me fn acquire_published_facet_descriptor(
+        concrete_type_id: text,
+        implemented_business_interfaces: [text],
+        facet_interface_id: text
+    ) -> Result<PublishedFacetDescriptorLease?, text>:
+        val acquired = self.acquire_published_facet(
+            concrete_type_id, implemented_business_interfaces,
+            facet_interface_id)?
+        if acquired == nil:
+            return Ok(nil)
+        val pair = acquired.unwrap()
+        val record = pair.0
+        val descriptor = record.witness_descriptor
+        val validation = aspect_published_facet_descriptor_validate(record)
+        if validation.is_err():
+            self.release_facet_generation_lease(pair.1)?
+            return Err(validation.unwrap_err())
+        Ok(Some(PublishedFacetDescriptorLease(
+            aspect_id: record.aspect_id,
+            binding_id: record.binding_id,
+            facet_interface_id: record.facet_interface_id,
+            facet_contract_abi_hash: record.facet_contract_abi_hash,
+            witness_descriptor: descriptor,
+            generation_lease: pair.1)))
+
+    me fn release_published_facet_descriptor(
+        acquired: PublishedFacetDescriptorLease
+    ) -> Result<(), text>:
+        if acquired.aspect_id != acquired.generation_lease.aspect_id:
+            # The compiler-generated wrapper is private, but a corrupted
+            # aggregate still must not strand its canonical generation token.
+            self.release_facet_generation_lease(acquired.generation_lease)?
+            return Err("E-AF004 facet descriptor lease aspect identity is inconsistent")
+        self.release_facet_generation_lease(acquired.generation_lease)
+
     # Ownership-neutral std.aop lease adapter. The lease carries no app/os
     # object; this boundary reconstructs the canonical lifecycle token.
     me fn acquire_facet_generation_lease(aspect_id: text) -> Result<FacetGenerationLease, text>:
@@ -473,8 +547,41 @@ fn prepared_advice_dispatch_context_invoke(
 ) -> Result<[i64], text>:
     context.invoke_prepared_advice(slot_id, form)
 
+# Fail-stop ABI for compiler-injected prepared advice. The Result-returning
+# operation synchronously writes the released-token lifecycle state before an
+# error reaches this wrapper, so panic cannot strand an acquired generation.
+fn prepared_advice_dispatch_context_invoke_or_panic(
+    context: AspectExecutionContext,
+    slot_id: text,
+    form: text
+) -> ():
+    val dispatched = prepared_advice_dispatch_context_invoke(
+        context, slot_id, form)
+    if dispatched.is_err():
+        panic(dispatched.unwrap_err())
+
+fn aspect_execution_context_acquire_facet_descriptor(
+    context: AspectExecutionContext,
+    concrete_type_id: text,
+    implemented_business_interfaces: [text],
+    facet_interface_id: text
+) -> Result<PublishedFacetDescriptorLease?, text>:
+    context.acquire_published_facet_descriptor(
+        concrete_type_id, implemented_business_interfaces,
+        facet_interface_id)
+
+fn aspect_execution_context_release_facet_descriptor(
+    context: AspectExecutionContext,
+    acquired: PublishedFacetDescriptorLease
+) -> Result<(), text>:
+    context.release_published_facet_descriptor(acquired)
+
 export AspectApplicationPhase
 export AspectApplicationOperation
+export PublishedFacetDescriptorLease
 export AspectExecutionContext
 export AspectApplicationRuntime
 export prepared_advice_dispatch_context_invoke
+export prepared_advice_dispatch_context_invoke_or_panic
+export aspect_execution_context_acquire_facet_descriptor
+export aspect_execution_context_release_facet_descriptor

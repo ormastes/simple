@@ -32,6 +32,9 @@ use compiler.frontend.core.aop_predicate_parser.{
 }
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_log_helpers.{log_debug}
+use compiler.driver.prepared_advice_slot_handoff.{
+    prepared_advice_dispatcher_signature
+}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -84,6 +87,15 @@ impl CompilerDriver:
 
         val all_rules = weavingconfig_all_rules(config)
         val prepare_dynamic = self.ctx.options.prepared_dynamic_advice
+        var prepared_dispatcher_signature: MirSignature? = nil
+        var prepared_dispatcher_error = ""
+        if prepare_dynamic:
+            val dispatcher = prepared_advice_dispatcher_signature(
+                self.ctx.mir_modules)
+            if dispatcher.is_err():
+                prepared_dispatcher_error = dispatcher.unwrap_err()
+            else:
+                prepared_dispatcher_signature = Some(dispatcher.unwrap())
         log_debug("AOP weaving")
         val conflicts = detect_advice_conflicts(all_rules)
         for conflict in conflicts:
@@ -102,8 +114,14 @@ impl CompilerDriver:
                     config, func.name, mod_name, [], [], blocks)
                 if result.advices_inserted > 0:
                     if prepare_dynamic:
+                        if prepared_dispatcher_signature == nil:
+                            self.ctx.errors.push(
+                                "[AOP] {prepared_dispatcher_error}")
+                            woven_functions[func.symbol] = func
+                            continue
                         val prepared = apply_prepared_advice_result(
-                            func, mod_name, result, mir_module.types)
+                            func, mod_name, result,
+                            prepared_dispatcher_signature.unwrap().params[0])
                         if prepared.is_err():
                             self.ctx.errors.push("[AOP] {prepared.unwrap_err()}")
                             woven_functions[func.symbol] = func

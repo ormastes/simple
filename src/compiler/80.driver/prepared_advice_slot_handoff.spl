@@ -6,10 +6,11 @@
 
 use compiler.mir.mir_data.{MirModule}
 use compiler.mir.mir_instructions.{
-    MirFunction, MirInstKind, MirOperand, MirOperandKind
+    MirBlock, MirFunction, MirInst, MirInstKind, MirOperand, MirOperandKind
 }
 use compiler.mir.mir_types.{
-    LocalId, LocalKind, MirConstValue, MirType, MirTypeDef, MirTypeKind
+    LocalId, LocalKind, MirConstValue, MirSignature, MirType, MirTypeDef,
+    MirTypeKind
 }
 use compiler.hir.hir_types.{SymbolId}
 use compiler.common.structural_contracts.aop.{
@@ -40,8 +41,13 @@ fn prepared_advice_slot_artifact_gate(
     modules: Dict<text, MirModule>
 ) -> Result<(), text>:
     val table = collect_prepared_advice_slot_table_bytes(modules)?
-    if table.len() > 0:
-        return Err("E-AF010 prepared advice dispatch projection/trampoline is not lifecycle-safe")
+    if table.len() == 0:
+        return Ok(())
+    if val residual = prepared_advice_residual_intrinsic(modules):
+        return Err(
+            "E-AF010 prepared advice artifact retains residual intrinsic: {residual}")
+    val _ = prepared_advice_dispatcher_signature(modules)?
+    prepared_advice_rewritten_coverage(modules)?
     Ok(())
 
 fn prepared_advice_context_type_matches(
@@ -60,7 +66,7 @@ fn prepared_advice_context_arg_local(
     func: MirFunction,
     module_types: Dict<SymbolId, MirTypeDef>,
     operand: MirOperand
-) -> Result<(), text>:
+) -> Result<MirType, text>:
     var expected_index: i64 = -1
     for index in 0..func.signature.params.len():
         if prepared_advice_context_type_matches(
@@ -82,7 +88,7 @@ fn prepared_advice_context_arg_local(
                             if index == expected_index and
                                 prepared_advice_context_type_matches(
                                     local.type_, module_types):
-                                return Ok(())
+                                return Ok(local.type_)
                         case _:
                             ()
             Err("E-AF010 prepared advice v2 context must copy the exact typed context Arg")
@@ -107,36 +113,86 @@ fn prepared_advice_slot_admits(
 fn validate_prepared_advice_v2_inst(
     func: MirFunction,
     module: MirModule,
+    dispatcher_signature: MirSignature,
+    inst: MirInst,
     destination: LocalId?,
     args: [MirOperand]
-) -> Result<(), text>:
+) -> Result<MirInst, text>:
     if destination != nil:
         return Err("E-AF010 prepared advice v2 cannot produce a result")
     if args.len() != 3:
         return Err("E-AF010 prepared advice v2 requires context, slot, and phase")
-    prepared_advice_context_arg_local(func, module.types, args[0])?
+    val context_type = prepared_advice_context_arg_local(
+        func, module.types, args[0])?
+    if context_type.kind != dispatcher_signature.params[0].kind:
+        return Err(
+            "E-AF010 prepared advice v2 context does not match the source-owned dispatcher ABI")
     val slot_id = prepared_advice_const_text(args[1], "slot")?
     val phase = prepared_advice_const_text(args[2], "phase")?
     if not prepared_advice_slot_admits(module, slot_id, phase):
         return Err("E-AF010 prepared advice v2 slot or phase is not admitted")
-    Ok(())
+    val dispatcher = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(
+            "prepared_advice_dispatch_context_invoke_or_panic"),
+        MirType(kind: MirTypeKind.FuncPtr(dispatcher_signature))))
+    Ok(MirInst(
+        kind: MirInstKind.Call(nil, dispatcher, args),
+        span: inst.span))
 
-fn validate_prepared_advice_v2_function(
+fn rewrite_prepared_advice_v2_function(
     func: MirFunction,
-    module: MirModule
-) -> Result<bool, text>:
-    var found = false
+    module: MirModule,
+    dispatcher_signature: MirSignature
+) -> Result<MirFunction, text>:
+    var blocks: [MirBlock] = []
     for block in func.blocks:
+        var instructions: [MirInst] = []
         for inst in block.instructions:
             match inst.kind:
                 case Intrinsic(destination, name, args):
                     if name == "simple.prepared_advice_dispatch.v2":
-                        validate_prepared_advice_v2_inst(
-                            func, module, destination, args)?
-                        found = true
+                        instructions.push(validate_prepared_advice_v2_inst(
+                            func, module, dispatcher_signature, inst,
+                            destination, args)?)
+                    else:
+                        instructions.push(inst)
                 case _:
-                    ()
-    Ok(found)
+                    instructions.push(inst)
+        blocks.push(MirBlock(..block, instructions: instructions))
+    Ok(MirFunction(..func, blocks: blocks))
+
+fn prepared_advice_text_type(type_: MirType) -> bool:
+    match type_.kind:
+        case Opaque(name): name == "str"
+        case _: false
+
+fn prepared_advice_dispatcher_signature(
+    modules: Dict<text, MirModule>
+) -> Result<MirSignature, text>:
+    var signature: MirSignature? = nil
+    for module in modules.values():
+        for func in module.functions.values():
+            if func.name == "prepared_advice_dispatch_context_invoke_or_panic":
+                if module.name != "app.startup.aspect_application_runtime":
+                    return Err(
+                        "E-AF010 prepared advice fail-stop dispatcher symbol is shadowed outside its source owner")
+                if signature != nil:
+                    return Err(
+                        "E-AF010 prepared advice fail-stop dispatcher symbol is ambiguous")
+                if (func.signature.is_variadic or
+                    func.signature.params.len() != 3 or
+                    func.signature.return_type.kind != MirTypeKind.Unit or
+                    not prepared_advice_context_type_matches(
+                        func.signature.params[0], module.types) or
+                    not prepared_advice_text_type(func.signature.params[1]) or
+                    not prepared_advice_text_type(func.signature.params[2])):
+                    return Err(
+                        "E-AF010 prepared advice fail-stop dispatcher has an invalid ABI")
+                signature = Some(func.signature)
+    if signature == nil:
+        return Err(
+            "E-AF010 prepared advice fail-stop dispatcher is absent from the entry closure")
+    Ok(signature.unwrap())
 
 fn prepared_advice_surface_is_hosted_cpu_entry_closure(surface: text) -> bool:
     for backend in ["auto", "llvm", "llvm-lib", "cranelift", "native"]:
@@ -152,17 +208,25 @@ fn prepared_advice_driver_bridge(
     if table.len() > 0 and not prepared_advice_surface_is_hosted_cpu_entry_closure(surface):
         return Err(
             "E-AF010 prepared dynamic advice is unsupported on {surface}; hosted CPU AOT entry-closure is required")
-    var found_v2 = false
+    if table.len() == 0:
+        if val residual = prepared_advice_residual_intrinsic(modules):
+            return Err(
+                "E-AF010 prepared dynamic advice residual intrinsic has no slot table: {residual}")
+        return Ok(modules)
+    val dispatcher_signature = prepared_advice_dispatcher_signature(modules)?
+    var rewritten = modules
     for module_name in modules.keys():
         val module = modules[module_name]
+        var functions = module.functions
         for symbol in module.functions.keys():
-            if validate_prepared_advice_v2_function(
-                module.functions[symbol], module)?:
-                found_v2 = true
-    if found_v2 or table.len() > 0:
+            functions[symbol] = rewrite_prepared_advice_v2_function(
+                module.functions[symbol], module, dispatcher_signature)?
+        rewritten[module_name] = MirModule(..module, functions: functions)
+    if val residual = prepared_advice_residual_intrinsic(rewritten):
         return Err(
-            "E-AF010 prepared advice v2 is validated but cannot be rewritten safely: prepared_advice_dispatch_context_invoke Result propagation has no MIR owner")
-    Ok(modules)
+            "E-AF010 prepared dynamic advice residual intrinsic is unsupported after driver rewrite: {residual}")
+    prepared_advice_rewritten_coverage(rewritten)?
+    Ok(rewritten)
 
 fn prepared_advice_residual_intrinsic(
     modules: Dict<text, MirModule>
@@ -180,6 +244,48 @@ fn prepared_advice_residual_intrinsic(
                             ()
     nil
 
+fn prepared_advice_rewritten_call_keys(
+    modules: Dict<text, MirModule>
+) -> [text]:
+    var keys: [text] = []
+    for module in modules.values():
+        for func in module.functions.values():
+            for block in func.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case Call(_, callee, args):
+                            var is_dispatcher = false
+                            match callee.kind:
+                                case Const(Str(name), _):
+                                    is_dispatcher = name ==
+                                        "prepared_advice_dispatch_context_invoke_or_panic"
+                                case _:
+                                    ()
+                            if is_dispatcher and args.len() == 3:
+                                val slot = prepared_advice_const_text(
+                                    args[1], "slot")
+                                val phase = prepared_advice_const_text(
+                                    args[2], "phase")
+                                if slot.is_ok() and phase.is_ok():
+                                    val key = "{slot.unwrap()}\n{phase.unwrap()}"
+                                    if not keys.contains(key):
+                                        keys.push(key)
+                        case _:
+                            ()
+    keys
+
+fn prepared_advice_rewritten_coverage(
+    modules: Dict<text, MirModule>
+) -> Result<(), text>:
+    val keys = prepared_advice_rewritten_call_keys(modules)
+    for module in modules.values():
+        for plan in module.prepared_advice_slots:
+            for phase in plan.admitted_forms:
+                if not keys.contains("{plan.slot_id}\n{phase}"):
+                    return Err(
+                        "E-AF010 prepared advice slot phase has no rewritten ordinary call: {plan.slot_id}/{phase}")
+    Ok(())
+
 # One admission boundary shared by check/interpreter/JIT/AOT dispatch. Modes
 # that cannot even materialize the prepared MIR reject the semantic option
 # directly; MIR-capable paths reject any produced slot before backend codegen.
@@ -192,13 +298,14 @@ fn prepared_advice_execution_admission(
         (surface == "check" or surface == "interpret" or surface == "smf_exec"):
         return Err(
             "E-AF010 prepared dynamic advice is unsupported on {surface}; no MIR dispatch may be ignored")
+    if options.prepared_dynamic_advice and
+        not prepared_advice_surface_is_hosted_cpu_entry_closure(surface):
+        return Err(
+            "E-AF010 prepared dynamic advice is unsupported on {surface}; hosted CPU AOT entry-closure is required")
     val table = collect_prepared_advice_slot_table_bytes(modules)?
     if table.len() > 0 and not prepared_advice_surface_is_hosted_cpu_entry_closure(surface):
         return Err(
             "E-AF010 prepared dynamic advice is unsupported on {surface}; hosted CPU AOT entry-closure is required")
-    if table.len() > 0:
-        return Err(
-            "E-AF010 prepared advice v2 ordinary-call Result propagation is not implemented")
     if val residual = prepared_advice_residual_intrinsic(modules):
         return Err(
             "E-AF010 prepared dynamic advice residual intrinsic is unsupported on {surface}: {residual}")
@@ -208,3 +315,4 @@ export collect_prepared_advice_slot_table_bytes
 export prepared_advice_slot_artifact_gate
 export prepared_advice_execution_admission
 export prepared_advice_driver_bridge
+export prepared_advice_dispatcher_signature

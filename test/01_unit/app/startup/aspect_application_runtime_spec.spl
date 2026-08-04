@@ -23,7 +23,10 @@ use app.startup.aspect_application_runtime.{
     AspectApplicationOperation,
     AspectExecutionContext,
     AspectApplicationRuntime,
-    prepared_advice_dispatch_context_invoke
+    prepared_advice_dispatch_context_invoke,
+    prepared_advice_dispatch_context_invoke_or_panic,
+    aspect_execution_context_acquire_facet_descriptor,
+    aspect_execution_context_release_facet_descriptor
 }
 use os.smf.dynsmf_session.{DynSmfSession, DynSmfPolicy, dynsmf_session_new}
 use os.smf.smf_generation.{LifecycleManager}
@@ -301,6 +304,16 @@ describe "Application aspect runtime policy owner":
         expect(around.unwrap_err()).to_contain("exactly-once proceed path")
         expect(runtime.advice_binding_counters().around_rejections).to_equal(1)
 
+    it "returns from the compiler fail-stop wrapper only after successful dispatch":
+        val context = AspectApplicationRuntime.create(
+            app_advice_catalog(), app_aspect_session(),
+            LifecycleManager.new_manager(),
+            AspectPackTrustPolicy.ordinary_unsigned(), 2, 2, 2).unwrap()
+        prepared_advice_dispatch_context_invoke_or_panic(
+            context, "security.audit.prepared", "before")
+        expect(context.advice_binding_counters().dispatch_attempts).to_equal(1)
+        expect(context.advice_binding_counters().dispatch_failures).to_equal(0)
+
     it "keeps two execution contexts isolated and releases exact dispatch tokens":
         val first: AspectExecutionContext = AspectApplicationRuntime.create(
             app_execution_context_catalog(), app_aspect_session(),
@@ -441,6 +454,36 @@ describe "Application aspect runtime policy owner":
         expect(acquired_method.0.method_symbol).to_end_with("__audit")
         expect(acquired_method.1.generation_id).to_equal(4)
         runtime.release_facet_generation_lease(acquired_method.1).unwrap()
+
+        val descriptor = aspect_execution_context_acquire_facet_descriptor(
+            runtime, "security.AuditRecord", [], "Auditable").unwrap().unwrap()
+        expect(descriptor.aspect_id).to_equal("security.audit")
+        expect(descriptor.binding_id).to_equal("security.audit.binding")
+        expect(descriptor.facet_interface_id).to_equal("Auditable")
+        expect(descriptor.facet_contract_abi_hash).to_equal("facet-audit-v1")
+        expect(descriptor.witness_descriptor.owner_id).to_equal(
+            "mission-pack:security.audit:4")
+        expect(descriptor.witness_descriptor.method_entries.len()).to_equal(1)
+        expect(descriptor.witness_descriptor.method_entries[0].method_name).to_equal("audit")
+        expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(1)
+        aspect_execution_context_release_facet_descriptor(
+            runtime, descriptor).unwrap()
+        expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(0)
+        expect(aspect_execution_context_release_facet_descriptor(
+            runtime, descriptor).unwrap_err()).to_contain("lease")
+
+        var inconsistent = aspect_execution_context_acquire_facet_descriptor(
+            runtime, "security.AuditRecord", [], "Auditable").unwrap().unwrap()
+        inconsistent.aspect_id = "forged-aspect"
+        expect(aspect_execution_context_release_facet_descriptor(
+            runtime, inconsistent).unwrap_err()).to_contain("identity is inconsistent")
+        expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(0)
+
+        runtime.coordinator.facet_bindings.records[0].witness_descriptor.method_entries[0].resolved_address = 0
+        val invalid_descriptor = aspect_execution_context_acquire_facet_descriptor(
+            runtime, "security.AuditRecord", [], "Auditable")
+        expect(invalid_descriptor.unwrap_err()).to_contain("unresolved method")
+        expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(0)
 
     it "quiesces drains releases cache pins and completes ordinary unload":
         val runtime = AspectApplicationRuntime.create(

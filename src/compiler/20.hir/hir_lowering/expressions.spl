@@ -146,6 +146,17 @@ fn _hir_missing_field_type() -> HirType:
 # ============================================================================
 
 impl HirLowering:
+    fn facet_contract_for_lowered_receiver(receiver: HirExpr) -> HirType?:
+        match receiver.kind:
+            case HirExprKind.FacetAcquire(_, _, contract, _): contract
+            case HirExprKind.Try(inner) | HirExprKind.Unwrap(inner):
+                self.facet_contract_for_lowered_receiver(inner)
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                if self.local_facet_contracts.has(symbol.id):
+                    return self.local_facet_contracts[symbol.id]
+                nil
+            case _: nil
+
     me field_module_callable(module_name: text, field_name: text) -> SymbolId?:
         # NOTE: deliberately does NOT filter candidates by `candidate.kind ==
         # SymbolKind.Function`. A same-process cross-module symbol-kind
@@ -467,6 +478,24 @@ impl HirLowering:
         # and keep them OUT of the big match.
         val kind_disc_v: i64 = expr_kind_discriminant
         val kind_disc_dummy = Expr(kind: ExprKind.NilLit, span: e.span)
+        if kind_disc_v == hir_expr_kind_disc(ExprKind.FacetAcquire(
+            kind_disc_dummy, kind_disc_dummy,
+            Type(kind: TypeKind.Infer, span: e.span), "")):
+            match expr_kind_value:
+                case ExprKind.FacetAcquire(context, base, contract, mode):
+                    if mode != "try_facet" and mode != "facet" and mode != "require_facet":
+                        self.error("E-AF005 unsupported facet acquisition mode", e.span)
+                        return HirExpr(kind: HirExprKind.Error, type_: nil, span: e.span)
+                    return HirExpr(
+                        kind: HirExprKind.FacetAcquire(
+                            self.lower_hir_expr(context),
+                            self.lower_hir_expr(base),
+                            self.lower_type(contract),
+                            mode),
+                        type_: nil,
+                        span: e.span)
+                case _:
+                    pass
         if kind_disc_v == hir_expr_kind_disc(ExprKind.MethodCall(kind_disc_dummy, "", [])):
             match expr_kind_value:
                 case ExprKind.MethodCall(receiver, method, args):
@@ -483,6 +512,13 @@ impl HirLowering:
                             span: marg_t.span
                         ))
                     val mc_lowered_receiver = self.lower_hir_expr(method_receiver_t)
+                    if val facet_contract = self.facet_contract_for_lowered_receiver(mc_lowered_receiver):
+                        return HirExpr(
+                            kind: HirExprKind.FacetMemberCall(
+                                mc_lowered_receiver, method_name_t, hir_args,
+                                facet_contract),
+                            type_: nil,
+                            span: e.span)
                     # Module-qualified call written in method-call syntax
                     # (`provider.answer()` reached via `import provider` --
                     # the parser emits ExprKind.MethodCall for ANY
@@ -844,7 +880,18 @@ impl HirLowering:
                         value: self.lower_hir_expr(marg_t.value),
                         span: marg_t.span
                     ))
-                HirExprKind.MethodCall(self.lower_hir_expr(method_receiver_t), method_name_t, hir_args, MethodResolution.Unresolved)
+                val lowered_method_receiver = self.lower_hir_expr(method_receiver_t)
+                if val facet_contract = self.facet_contract_for_lowered_receiver(lowered_method_receiver):
+                    HirExprKind.FacetMemberCall(
+                        lowered_method_receiver, method_name_t, hir_args,
+                        facet_contract)
+                else:
+                    HirExprKind.MethodCall(lowered_method_receiver, method_name_t, hir_args, MethodResolution.Unresolved)
+
+            case ExprKind.FacetAcquire(context, base, contract, mode):
+                HirExprKind.FacetAcquire(
+                    self.lower_hir_expr(context), self.lower_hir_expr(base),
+                    self.lower_type(contract), mode)
 
             case ExprKind.MatchCase(scrutinee, arms):
                 # The scrutinee is lowered FIRST and OUTSIDE every arm scope:

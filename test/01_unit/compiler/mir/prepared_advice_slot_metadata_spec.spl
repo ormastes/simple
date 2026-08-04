@@ -76,11 +76,12 @@ fn prepared_v2_module() -> MirModule:
             nil, "simple.prepared_advice_dispatch.v2", [
                 MirOperand(kind: MirOperandKind.Copy(LocalId(0))), slot, phase]),
             span: nil)],
-        terminator: MirTerminator.Ret(nil))
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Int(7), MirType.i64())))))
     val function = MirFunction(
         symbol: SymbolId.new(1), name: "submit",
         signature: MirSignature(
-            params: [context_type], return_type: MirType.unit(), is_variadic: false),
+            params: [context_type], return_type: MirType.i64(), is_variadic: false),
         locals: [MirLocal(
             id: LocalId(0), name: Some("context"), type_: context_type,
             kind: LocalKind.Arg(0), is_ghost: false)],
@@ -97,6 +98,39 @@ fn prepared_v2_module() -> MirModule:
         name: "orders", functions: functions, statics: {}, constants: {},
         types: types, prepared_advice_slots: [prepared_slot(
             "orders.submit.prepared", "orders::submit", ["before"])])
+
+fn prepared_dispatcher_module() -> MirModule:
+    val context_symbol = SymbolId.new(99)
+    val context_type = MirType(kind: MirTypeKind.Struct(context_symbol))
+    val text_type = MirType(kind: MirTypeKind.Opaque("str"))
+    val entry = MirBlock(
+        id: BlockId.entry(), label: Some("entry"), instructions: [],
+        terminator: MirTerminator.Ret(nil))
+    val function = MirFunction(
+        symbol: SymbolId.new(2),
+        name: "prepared_advice_dispatch_context_invoke_or_panic",
+        signature: MirSignature(
+            params: [context_type, text_type, text_type],
+            return_type: MirType.unit(), is_variadic: false),
+        locals: [], blocks: [entry], entry_block: BlockId.entry(), span: nil,
+        generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    var types: Dict<SymbolId, MirTypeDef> = {}
+    types[context_symbol] = MirTypeDef(
+        symbol: context_symbol, name: "AspectExecutionContext",
+        kind: MirTypeDefKind.Struct([]), is_export_c: false, export_name: "")
+    MirModule(
+        name: "app.startup.aspect_application_runtime",
+        functions: functions, statics: {}, constants: {}, types: types,
+        prepared_advice_slots: [])
+
+fn prepared_v2_modules() -> Dict<text, MirModule>:
+    {
+        "orders": prepared_v2_module(),
+        "app.startup.aspect_application_runtime": prepared_dispatcher_module()
+    }
 
 describe "Prepared dynamic advice-slot MIR metadata":
     it "admits only versioned before and after phase plans":
@@ -142,13 +176,13 @@ describe "Prepared dynamic advice-slot MIR metadata":
         expect(vectorized.prepared_advice_slots[0].slot_id).to_equal("orders.submit.prepared")
         expect(vectorized.functions.keys().len()).to_equal(0)
 
-    it "hands a stable table to the driver and fails unsupported emission closed":
+    it "hands a stable table to the driver and rejects unrewritten artifacts":
         val plan = prepared_slot("orders.submit.prepared", "orders::submit", ["before"])
         val module = prepared_slot_module("orders", [plan])
         val bytes = collect_prepared_advice_slot_table_bytes({"orders": module}).unwrap()
         expect(bytes.len()).to_be_greater_than(0)
         expect(prepared_advice_slot_artifact_gate({"orders": module}).unwrap_err()).to_contain(
-            "projection/trampoline is not lifecycle-safe")
+            "dispatcher is absent from the entry closure")
 
         expect(prepared_advice_slot_artifact_gate({
             "orders": module,
@@ -164,6 +198,9 @@ describe "Prepared dynamic advice-slot MIR metadata":
         expect(prepared_advice_execution_admission(
             options, {}, "interpret").unwrap_err()).to_contain(
                 "no MIR dispatch may be ignored")
+        expect(prepared_advice_execution_admission(
+            options, {}, "jit").unwrap_err()).to_contain(
+                "hosted CPU AOT entry-closure is required")
 
         val module = prepared_slot_module("orders", [prepared_slot(
             "orders.submit.prepared", "orders::submit", ["before"])])
@@ -180,7 +217,7 @@ describe "Prepared dynamic advice-slot MIR metadata":
             "cuda", "hip", "opencl", "vulkan"
         ]:
             expect(backend_prepared_advice_rejection(
-                module, backend).unwrap()).to_contain(
+                prepared_intrinsic_only_module(), backend).unwrap()).to_contain(
                     "cannot execute prepared dynamic advice")
 
         # A direct backend caller cannot evade the backstop by stripping the
@@ -189,7 +226,7 @@ describe "Prepared dynamic advice-slot MIR metadata":
             prepared_intrinsic_only_module(), "native").unwrap()).to_contain(
                 "cannot execute prepared dynamic advice")
 
-    it "validates v2 but fails closed until Result propagation has a MIR owner":
+    it "rewrites validated v2 through the exact fail-stop unit dispatcher":
         var options = CompileOptions.default()
         options.prepared_dynamic_advice = true
         val input = prepared_v2_module()
@@ -204,11 +241,54 @@ describe "Prepared dynamic advice-slot MIR metadata":
         expect(prepared_advice_driver_bridge(
             {"orders": input},
             "aot-entry-closure-host:llvm").unwrap_err()).to_contain(
-                "Result propagation has no MIR owner")
-        expect(prepared_advice_execution_admission(
-            options, {"orders": input},
+                "dispatcher is absent from the entry closure")
+        expect(prepared_advice_driver_bridge({
+            "orders": prepared_slot_module("orders", [prepared_slot(
+                "orders.submit.prepared", "orders::submit", ["before"])]),
+            "app.startup.aspect_application_runtime": prepared_dispatcher_module()
+        }, "aot-entry-closure-host:llvm").unwrap_err()).to_contain(
+            "has no rewritten ordinary call")
+        var shadow = prepared_dispatcher_module()
+        shadow.name = "other.dispatcher"
+        var shadowed_modules = prepared_v2_modules()
+        shadowed_modules["other.dispatcher"] = shadow
+        expect(prepared_advice_driver_bridge(
+            shadowed_modules,
             "aot-entry-closure-host:llvm").unwrap_err()).to_contain(
-                "Result propagation is not implemented")
+                "shadowed outside its source owner")
+        val bridged = prepared_advice_driver_bridge(
+            prepared_v2_modules(),
+            "aot-entry-closure-host:llvm").unwrap()
+        val artifact_gate = prepared_advice_slot_artifact_gate(bridged)
+        if artifact_gate.is_err():
+            fail(artifact_gate.unwrap_err())
+        val rewritten = bridged["orders"].functions.values()[0]
+        match rewritten.blocks[0].instructions[0].kind:
+            case Call(destination, callee, args):
+                expect(destination).to_be_nil()
+                expect(args.len()).to_equal(3)
+                match callee.kind:
+                    case Const(Str(name), callee_type):
+                        expect(name).to_equal(
+                            "prepared_advice_dispatch_context_invoke_or_panic")
+                        match callee_type.kind:
+                            case FuncPtr(signature):
+                                expect(signature.return_type.kind).to_equal(
+                                    MirTypeKind.Unit)
+                            case _: fail("expected unit FuncPtr ABI")
+                    case _: fail("expected exact fail-stop dispatcher operand")
+            case _: fail("expected ordinary dispatcher Call")
+        match rewritten.blocks[0].terminator:
+            case Ret(Some(value)):
+                match value.kind:
+                    case Const(Int(result), _): expect(result).to_equal(7)
+                    case _: fail("expected preserved target return value")
+            case _: fail("expected preserved arbitrary-return terminator")
+        expect(prepared_advice_execution_admission(
+            options, bridged,
+            "aot-entry-closure-host:llvm").is_ok()).to_equal(true)
+        expect(backend_prepared_advice_rejection(
+            bridged["orders"], "llvm")).to_be_nil()
 
         var residual_v2 = input
         residual_v2.prepared_advice_slots = []

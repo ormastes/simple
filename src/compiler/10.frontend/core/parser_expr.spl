@@ -48,7 +48,7 @@ use compiler.core.ast.{EXPR_AWAIT, EXPR_YIELD, EXPR_SPAWN, EXPR_DO_BLOCK, EXPR_A
 use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_string_lit}
 use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident}
 use compiler.core.ast.{expr_binary, expr_unary, expr_call, expr_call_named, expr_index}
-use compiler.core.ast.{expr_field_access, expr_method_call, expr_method_call_named, expr_array_lit}
+use compiler.core.ast.{expr_field_access, expr_method_call, expr_method_call_named, expr_facet_acquire, expr_array_lit}
 use compiler.core.ast.{expr_struct_lit}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr}
 use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
@@ -61,7 +61,7 @@ use compiler.core.ast.{expr_cast, EXPR_CAST}
 use compiler.core.tokens.{TOK_KW_AS}
 use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
 use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_args, expr_get_arg_names, expr_call_args_set}
-use compiler.frontend.core.lexer.{lex_cur_suffix_get, lex_token_start_get}
+use compiler.frontend.core.lexer.{lex_cur_suffix_get, lex_token_start_get, lex_mark_current_token_as_generic_close}
 use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_restore}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
 use compiler.core.types.{flat_span_new}
@@ -878,6 +878,34 @@ fn parse_struct_lit_tail(base: i64) -> i64:
             parser_advance()  # consume ','
     return expr_struct_lit(sl_type, sl_entries, [], 0)
 
+fn parser_is_facet_acquire_name(name: text) -> bool:
+    name == "try_facet" or name == "facet" or name == "require_facet"
+
+fn parse_facet_acquire_tail(context: i64, mode: text) -> i64:
+    # The caller has consumed `.facet` and left the cursor on `<`.
+    if par_kind_get() != TOK_LT and par_kind_get() != TOK_LT_GENERIC:
+        parser_error("facet acquisition requires one contract type argument")
+        return context
+    parser_advance()
+    val contract_type = parser_parse_type()
+    lex_mark_current_token_as_generic_close()
+    parser_expect(TOK_GT)
+    parser_expect(TOK_LPAREN)
+    if par_kind_get() == TOK_RPAREN:
+        parser_error("facet acquisition requires exactly one typed base argument")
+        parser_advance()
+        return expr_facet_acquire(
+            context, expr_nil_lit(0), contract_type, mode, 0)
+    val base_arg = parse_call_arg()
+    if base_arg.1 != "":
+        parser_error("facet acquisition base argument must be positional")
+    if par_kind_get() == TOK_COMMA:
+        parser_error("facet acquisition accepts exactly one typed base argument")
+        while par_kind_get() != TOK_RPAREN and par_kind_get() != TOK_EOF:
+            parser_advance()
+    parser_expect(TOK_RPAREN)
+    expr_facet_acquire(context, base_arg.0, contract_type, mode, 0)
+
 fn parse_postfix_on(base_expr: i64) -> i64:
     # Continue postfix parsing from an already-parsed base expression
     # Disambiguate Ident<TypeArgs>.method() vs Ident < expr (binary less-than).
@@ -946,6 +974,10 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                 field_name = ppo_kw_name
             parser_advance()
             var ppo_after_member = par_kind_get()
+            if (parser_is_facet_acquire_name(field_name) and
+                (ppo_after_member == TOK_LT or ppo_after_member == TOK_LT_GENERIC)):
+                base = parse_facet_acquire_tail(base, field_name)
+                continue
             if ppo_after_member == 140:
                 val ppo_call_start = lex_token_start_get()
                 val ppo_call_line = par_line_get()
@@ -1146,6 +1178,10 @@ fn parse_postfix() -> i64:
             parser_advance()
             # Check for method call: obj.method(args)
             var pp_after_member = par_kind_get()
+            if (parser_is_facet_acquire_name(field_name) and
+                (pp_after_member == TOK_LT or pp_after_member == TOK_LT_GENERIC)):
+                base = parse_facet_acquire_tail(base, field_name)
+                continue
             if pp_after_member == 140:
                 val pp_call_start = lex_token_start_get()
                 val pp_call_line = par_line_get()

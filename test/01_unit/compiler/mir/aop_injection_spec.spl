@@ -4,8 +4,7 @@ use compiler.frontend.core.aop.{MirBlockInfo, InstructionInfo, WeavingResult, Ad
 use compiler.mir.mir_aop_injection.{extract_mir_block_info, classify_mir_inst_kind, make_advice_call_inst, apply_prepared_advice_result}
 use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirFunction, MirSignature, BlockId, LocalId}
 use compiler.mir.mir_types.{
-    LocalKind, MirLocal, MirType, MirTypeDef, MirTypeDefKind, MirTypeKind,
-    MirConstValue
+    LocalKind, MirLocal, MirType, MirTypeKind, MirConstValue
 }
 use compiler.hir.hir_types.{SymbolId}
 
@@ -29,13 +28,8 @@ fn prepared_test_function_identity(symbol_id: i64, params: [MirType]) -> MirFunc
 fn prepared_test_function() -> MirFunction:
     prepared_test_function_identity(4, [])
 
-fn prepared_context_types() -> Dict<SymbolId, MirTypeDef>:
-    val symbol = SymbolId.new(99)
-    var types: Dict<SymbolId, MirTypeDef> = {}
-    types[symbol] = MirTypeDef(
-        symbol: symbol, name: "AspectExecutionContext",
-        kind: MirTypeDefKind.Struct([]), is_export_c: false, export_name: "")
-    types
+fn prepared_context_type() -> MirType:
+    MirType(kind: MirTypeKind.Struct(SymbolId.new(99)))
 
 describe "MIR AOP Injection":
     describe "classify_mir_inst_kind":
@@ -100,7 +94,7 @@ describe "MIR AOP Injection":
                 diagnostics: [])
             val prepared = apply_prepared_advice_result(
                 prepared_test_function(), "orders", result,
-                prepared_context_types()).unwrap()
+                prepared_context_type()).unwrap()
             expect(prepared.slot.unwrap().slot_id).to_start_with("orders::submit:")
             expect(prepared.slot.unwrap().slot_id).to_contain("#symbol=4.prepared")
             expect(prepared.slot.unwrap().admitted_forms.len()).to_equal(3)
@@ -143,11 +137,11 @@ describe "MIR AOP Injection":
             val integer_slot = apply_prepared_advice_result(
                 prepared_test_function_identity(10, [MirType.i64()]),
                 "orders", result,
-                prepared_context_types()).unwrap().slot.unwrap().slot_id
+                prepared_context_type()).unwrap().slot.unwrap().slot_id
             val float_slot = apply_prepared_advice_result(
                 prepared_test_function_identity(11, [MirType.f64()]),
                 "orders", result,
-                prepared_context_types()).unwrap().slot.unwrap().slot_id
+                prepared_context_type()).unwrap().slot.unwrap().slot_id
             expect(integer_slot).to_contain("#symbol=10.prepared")
             expect(float_slot).to_contain("#symbol=11.prepared")
 
@@ -161,7 +155,7 @@ describe "MIR AOP Injection":
                 diagnostics: [])
             expect(apply_prepared_advice_result(
                 prepared_test_function(), "orders", result,
-                prepared_context_types()).unwrap_err()).to_contain(
+                prepared_context_type()).unwrap_err()).to_contain(
                     "exactly-once proceed")
 
         it "rejects targets without exactly one typed execution context Arg":
@@ -178,7 +172,7 @@ describe "MIR AOP Injection":
             missing.locals = []
             expect(apply_prepared_advice_result(
                 missing, "orders", result,
-                prepared_context_types()).unwrap_err()).to_contain(
+                prepared_context_type()).unwrap_err()).to_contain(
                     "exactly one AspectExecutionContext")
 
             val context_type = MirType(kind: MirTypeKind.Struct(SymbolId.new(99)))
@@ -188,5 +182,12 @@ describe "MIR AOP Injection":
                 return_type: MirType.unit(), is_variadic: false)
             expect(apply_prepared_advice_result(
                 duplicate, "orders", result,
-                prepared_context_types()).unwrap_err()).to_contain(
+                prepared_context_type()).unwrap_err()).to_contain(
                     "exactly one AspectExecutionContext")
+
+            var dispatcher = prepared_test_function()
+            dispatcher.name = "prepared_advice_dispatch_context_invoke_or_panic"
+            expect(apply_prepared_advice_result(
+                dispatcher, "app.startup.aspect_application_runtime", result,
+                prepared_context_type()).unwrap_err()).to_contain(
+                    "cannot itself be advised")

@@ -2356,17 +2356,21 @@ copied coordinator/lifecycle state, backend-specific raw callbacks, existing
 ### 31.1 Implementation checkpoint
 
 The stable context class, context-owned dispatcher, typed v2 producer, exact
-argument/slot/phase validator, hosted-CPU-entry-closure surface gate, and
-residual v1/v2 backend rejection now exist. The driver intentionally does not
-perform the ordinary-call rewrite yet: the dispatcher returns
-`Result<[i64], text>`, while the injected operation has no destination or
-general mechanism to propagate that failure through targets with arbitrary
-return types. Discarding the result or declaring a false unit ABI is forbidden,
-so executable admission remains E-AF010 until that MIR owner is designed.
+argument/slot/phase validator, hosted-CPU-entry-closure surface gate, ordinary
+unit-call rewrite, slot/phase coverage proof, and residual v1/v2 backend
+rejection now exist. The source-owned
+`prepared_advice_dispatch_context_invoke_or_panic` wrapper first runs the
+Result dispatcher, which stores cleanup state, and only then invokes canonical
+panic on failure. This preserves arbitrary business return values and ensures
+failure never continues the join point or strands a generation token.
 
-The compiler also now has a typed adapter plan that retains the concrete base,
+The compiler also now has genuine
+`context.try_facet<T>(base)`/`facet<T>`/`require_facet<T>` parser, AST, and HIR
+nodes plus a typed adapter plan that retains the concrete base,
 validates the entire resolved descriptor, selects by contract member, lowers
 through base-first `CallIndirect`, rejects erased bases, and diagnoses every
-specified affine escape category. This is not yet user-facing facet syntax:
-source/HIR acquisition, application-context descriptor transfer, real semantic
-escape wiring, and balanced compiler-inserted releases remain required.
+currently wired affine escape category by HIR symbol identity. The application
+exposes context-first whole-descriptor acquisition/release with validation and
+failure cleanup. Execution remains fail-closed at MIR until exact context-type
+proof, runtime descriptor extraction, contract method ordinal/signature
+resolution, lambda capture checks, and balanced release insertion are wired.
