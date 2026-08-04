@@ -191,6 +191,13 @@ var _with_ctx_counter: i64 = 0
 
 fn _transform_with_context(source: text) -> text:
     _with_ctx_counter = 0
+    _transform_with_context_pass(source)
+
+# One rewriting pass. Recurses into each block body so that a `with_context`
+# nested inside another is transformed too; the counter is module state and is
+# deliberately NOT reset here, so every block in the file gets a distinct
+# `__saved_<name>_<n>` suffix.
+fn _transform_with_context_pass(source: text) -> text:
     val lines = source.split("\n")
     var result_lines = []
     var i = 0
@@ -204,16 +211,24 @@ fn _transform_with_context(source: text) -> text:
 
             # Parse the with_context header to extract name:expr pairs
             # with_context(logger: file_logger, config: cfg):
-            val header_end = _find_char(trimmed, ":")
-            if header_end < 0:
+            # The block colon is the one AFTER the matching ')', not the first
+            # ':' in the line -- `logger:` supplies an earlier colon in every
+            # real call, and searching for that one first made the argument
+            # slice collapse and the whole pass bail out.
+            val paren_open = _find_char(trimmed, "(")
+            if paren_open < 0:
                 result_lines.push(line)
                 i = i + 1
                 continue
 
-            # Extract the argument list between the first ( and the last ) before :
-            val paren_open = _find_char(trimmed, "(")
-            val paren_close = _find_last_paren_close(trimmed, header_end)
-            if paren_open < 0 or paren_close < 0:
+            val paren_close = _find_matching_paren(trimmed, paren_open)
+            if paren_close < 0:
+                result_lines.push(line)
+                i = i + 1
+                continue
+
+            val header_end = _find_char_from(trimmed, ":", paren_close)
+            if header_end < 0:
                 result_lines.push(line)
                 i = i + 1
                 continue
@@ -246,16 +261,22 @@ fn _transform_with_context(source: text) -> text:
                 else:
                     break
 
-            # Emit body lines (de-indented by 4 spaces to remove with_context indent)
+            # Emit body lines (de-indented by 4 spaces to remove with_context
+            # indent), then rewrite the de-indented body so that a nested
+            # with_context block is transformed as well.
+            var deindented = []
             for body_line in body_lines:
                 if body_line.trim() == "":
-                    result_lines.push(body_line)
+                    deindented.push(body_line)
                 else:
                     val body_indent = _get_indent(body_line)
                     val new_indent = body_indent - 4
                     val new_indent = if new_indent < 0: 0 else: new_indent
                     val new_indent_str = " ".repeat(new_indent)
-                    result_lines.push("{new_indent_str}{body_line.trim()}")
+                    deindented.push("{new_indent_str}{body_line.trim()}")
+            val body_text = _transform_with_context_pass(deindented.join("\n"))
+            for out_line in body_text.split("\n"):
+                result_lines.push(out_line)
 
             # Emit restore lines (in reverse order)
             var rlen = pairs.len()
@@ -336,16 +357,32 @@ fn _find_char(s: text, target: text) -> i64:
         i = i + 1
     -1
 
-# Find the last ')' that occurs before position `limit` in `s`
-fn _find_last_paren_close(s: text, limit: i64) -> i64:
-    var last = -1
-    var i = 0
-    while i < limit:
+# Find the first occurrence of `target` at or after `start`, or -1.
+fn _find_char_from(s: text, target: text, start: i64) -> i64:
+    var i = start
+    val slen = s.len()
+    while i < slen:
         val ch = s[i:i + 1]
-        if ch == ")":
-            last = i
+        if ch == target:
+            return i
         i = i + 1
-    last
+    -1
+
+# Find the ')' that closes the '(' at `open_idx`, honouring nesting, or -1.
+fn _find_matching_paren(s: text, open_idx: i64) -> i64:
+    var depth = 0
+    var i = open_idx
+    val slen = s.len()
+    while i < slen:
+        val ch = s[i:i + 1]
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
 
 fn _get_indent(line: text) -> i64:
     var count = 0
