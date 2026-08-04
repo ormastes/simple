@@ -25,6 +25,10 @@ This manual mirrors
 6. Launch the production `src/os/hosted/hosted_entry.spl` artifact.
 7. Correlate windowed, fullscreen, and restored scene snapshots with their
    presented framebuffer captures and input nonces.
+8. Admit only a nonempty window identity and one of the compositor's three
+   strong material receipts (`solid-material`, `cpu-composited-material`, or
+   `metal-device-composited-material`), with a 64-lowercase-hex digest and the
+   expected theme/source binding.
 
 The wrapper remains fail-closed: source markers, missing captures, stale
 artifacts, synthetic receipts, and screenshots without framebuffer provenance

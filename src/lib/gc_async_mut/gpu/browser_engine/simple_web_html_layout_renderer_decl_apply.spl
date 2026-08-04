@@ -280,14 +280,51 @@ fn _apply_decls_without_grid(
                 background_clip_v = shorthand.clip
                 bg_layers_raw_v = ""
             else:
-                bg_v = parse_color_alpha(bgs)
-                background_gradient_from_v = 0u32
-                background_gradient_to_v = 0u32
+                # Gradient shorthands are normalized through the typed Style
+                # representation when they contain exactly one reproducible
+                # linear image layer plus an optional base-color layer. This
+                # keeps Aetheric glass material admission honest without
+                # discarding unsupported authored layers.
+                val parsed_layers = parse_background_layers(bgs)
+                val typed_linear = _background_is_exact_typed_linear_layer(
+                    bgs,
+                    parsed_layers.gradient_from,
+                    parsed_layers.gradient_to,
+                    true
+                )
+                if typed_linear:
+                    bg_v = parsed_layers.base_color
+                else:
+                    if parsed_layers.base_color != 0u32:
+                        bg_v = parsed_layers.base_color
+                    else:
+                        bg_v = parse_color_alpha(bgs)
+                background_gradient_from_v = if typed_linear: parsed_layers.gradient_from else: 0u32
+                background_gradient_to_v = if typed_linear: parsed_layers.gradient_to else: 0u32
                 background_gradient_stop_colors_v = []
                 background_gradient_stop_positions_v = []
                 background_gradient_angle_deg_v = 180
                 background_gradient_is_radial_v = false
-                bg_layers_raw_v = bgs
+                if typed_linear:
+                    val gradient_layer = split_top_level_commas(bgs)[0].trim()
+                    val stops = parse_gradient_stops(gradient_layer)
+                    var stop_colors: [u32] = []
+                    var stop_positions: [i32] = []
+                    var stop_idx = 0
+                    while stop_idx < stops.len():
+                        stop_colors.push(stops[stop_idx].color)
+                        stop_positions.push(stops[stop_idx].pos_permille)
+                        stop_idx = stop_idx + 1
+                    background_gradient_stop_colors_v = stop_colors
+                    background_gradient_stop_positions_v = stop_positions
+                    background_gradient_angle_deg_v = parse_gradient_angle_deg(
+                        gradient_layer
+                    )
+                    bg_layers_raw_v = ""
+                elif _background_has_image_syntax(bgs):
+                    bg_layers_raw_v = bgs
+                else:
+                    bg_layers_raw_v = ""
         else:
             bg_v = parse_color_alpha(bg)
             background_gradient_from_v = 0u32

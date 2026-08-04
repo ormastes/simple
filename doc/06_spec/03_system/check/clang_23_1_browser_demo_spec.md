@@ -32,4 +32,8 @@ the provider `build/native_probe/simple`. It stages the exact browser ELF as
 
 Require font, baseline, fullscreen, restored and browser frames; byte-identical
 staging; browser provenance; and correlated keyboard, pointer and click events.
-Any missing artifact is a failed gate.
+Software presentation accepts only a strong `solid-material` or
+`cpu-composited-material` receipt. Host-GPU presentation additionally accepts
+`metal-device-composited-material`. Every receipt remains bound to a rendered
+backend, a 64-lowercase-hex material digest, the expected theme and the exact
+source manifest; any rejection marker or missing artifact fails the gate.
