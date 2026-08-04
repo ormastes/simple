@@ -4,8 +4,30 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
     simple_web_layout_render_html_readback_paint,
     simple_web_layout_render_html_should_gpu_paint
 }
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
 use std.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
+
+# BINDING NOTE (verified 2026-08-04 with a BINDMARK probe, not assumed):
+# `simple_web_render_html_to_pixels_with_engine2d_backend` is declared TWICE --
+# simple_web_renderer.spl:98 and simple_web_engine2d_renderer.spl:1170 -- with
+# two genuinely different bodies. A print marker inserted into each showed all
+# four calls from this file reach the *simple_web_engine2d_renderer* definition
+# (4 hits) and none reach the simple_web_renderer one (0 hits), despite the
+# `use` above naming simple_web_renderer. Any sabotage aimed at proving these
+# examples bite must therefore perturb the engine2d_renderer body (or the
+# rasterizer beneath it); perturbing simple_web_renderer.spl:98 is a no-op and
+# will read as a false green. Tracked in
+# doc/08_tracking/bug/web_renderer_duplicate_public_entry_binding_2026-08-04.md.
+
+# The software oracle is wall-clock budgeted and DEGRADES TO A BLANK PAGE when
+# it blows that budget -- on a loaded host it intermittently returns 0 ink for
+# text instead of 134. Every oracle call below therefore pins an explicit large
+# budget so these assertions measure rendering, not host load. Without the pin
+# the text example flaps red at random. See
+# doc/08_tracking/bug/web_software_oracle_blanks_text_on_budget_exhaustion_2026-08-04.md.
+fn _oracle_budget_ms() -> i64:
+    60000
 
 fn solid_html() -> text:
     "<!doctype html><meta charset='utf-8'><style>html,body{margin:0;padding:0;width:32px;height:32px;background:#ffffff}.panel{width:16px;height:16px;background:#336699}</style><body><div class='panel'></div></body>"
@@ -27,6 +49,105 @@ fn _non_background_pixels(pixels: [u32]) -> i64:
             n = n + 1
         i = i + 1
     n
+
+fn _pixel_diff(a: [u32], b: [u32]) -> i64:
+    if a.len() != b.len():
+        return -1
+    var n = 0
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+fn _exactness_verdict(lane: [u32], oracle: [u32]) -> text:
+    val d = _pixel_diff(lane, oracle)
+    if d < 0:
+        return "length-mismatch"
+    if d == 0:
+        return "byte-exact"
+    "drifted-by-" + d.to_text()
+
+fn _row_has_ink(pixels: [u32], w: i64, y: i64) -> bool:
+    var x = 0
+    while x < w:
+        if pixels[y * w + x] != 0xFFFFFFFFu32:
+            return true
+        x = x + 1
+    false
+
+fn _rows_equal(pixels: [u32], w: i64, y0: i64, y1: i64) -> bool:
+    var x = 0
+    while x < w:
+        if pixels[y0 * w + x] != pixels[y1 * w + x]:
+            return false
+        x = x + 1
+    true
+
+fn _first_ink_row(pixels: [u32], w: i64, h: i64) -> i64:
+    var y = 0
+    while y < h:
+        if _row_has_ink(pixels, w, y):
+            return y
+        y = y + 1
+    -1
+
+fn _last_ink_row(pixels: [u32], w: i64, h: i64) -> i64:
+    var y = h - 1
+    while y >= 0:
+        if _row_has_ink(pixels, w, y):
+            return y
+        y = y - 1
+    -1
+
+# Which FAMILY of rasterizer produced this buffer, judged only from the pixels.
+# The software oracle draws a hardcoded 5x7 bitmap font (src/lib/common/ui/
+# glyph_bitmap_5x7.spl) integer-upscaled by glyph_scale(font_size)=16/8=2, so
+# every source row is emitted twice and adjacent row pairs are byte-identical.
+# The Draw IR lane rasterizes real TTF outlines through
+# sfnt_glyf.rasterize_sfnt_glyf, whose _glyf_edge_coverage kernel supersamples
+# 4x4 into 17 coverage levels, so no two adjacent rows coincide.
+fn _raster_family(pixels: [u32], w: i64, h: i64) -> text:
+    val first = _first_ink_row(pixels, w, h)
+    val last = _last_ink_row(pixels, w, h)
+    if first < 0:
+        return "blank"
+    var pairs = 0
+    var eq = 0
+    var y = first
+    while y + 1 <= last:
+        pairs = pairs + 1
+        if _rows_equal(pixels, w, y, y + 1):
+            eq = eq + 1
+        y = y + 2
+    if pairs == 0:
+        return "single-row"
+    if eq == pairs:
+        return "row-doubled"
+    if eq == 0:
+        return "per-row"
+    "mixed"
+
+fn _coverage_verdict(oracle_ink: i64, lane_ink: i64) -> text:
+    if oracle_ink <= 0:
+        return "oracle-blank"
+    if lane_ink <= 0:
+        return "lane-blank"
+    if oracle_ink > 2 * lane_ink:
+        return "oracle-over-2x"
+    if lane_ink > 2 * oracle_ink:
+        return "lane-over-2x"
+    "within-2x"
+
+fn _band_verdict(a_first: i64, a_last: i64, b_first: i64, b_last: i64) -> text:
+    if a_first < 0:
+        return "oracle-blank"
+    if b_first < 0:
+        return "lane-blank"
+    if a_last < b_first or b_last < a_first:
+        return "disjoint"
+    "overlapping"
 
 describe "web renderer CPU SIMD paint":
     it "keeps cpu simd out of explicit gpu paint routing":
@@ -89,3 +210,73 @@ describe "web renderer CPU SIMD paint":
         expect(readback.pixels[0]).to_equal(0xFF99B3CCu32)
         expect(readback.source).to_equal("cpu_mirror")
         expect(hits.fill_hits).to_equal(0)
+
+    # 3b86328c925 set a byte-exactness bar between the public engine2d lane and
+    # the software oracle; e8444b6b1a6 ("chore(sync): WC sweep", the very next
+    # commit) restored this file's pre-change blob and silently deleted it while
+    # the source change survived. Byte-exactness is still exactly the right bar
+    # for NON-TEXT content -- both lanes bottom out in the same solid/blend fill
+    # code and agree to the pixel -- so it is restored here rather than weakened.
+    it "keeps non-text pages byte-exact between the public lane and the software oracle":
+        expect(_exactness_verdict(
+            simple_web_render_html_to_pixels_with_engine2d_backend(solid_html(), 32, 32, "cpu_simd"),
+            simple_web_layout_render_html_software_pixels(solid_html(), 32, 32, _oracle_budget_ms())
+        )).to_equal("byte-exact")
+        expect(_exactness_verdict(
+            simple_web_render_html_to_pixels_with_engine2d_backend(transparent_html(), 32, 32, "cpu_simd"),
+            simple_web_layout_render_html_software_pixels(transparent_html(), 32, 32, _oracle_budget_ms())
+        )).to_equal("byte-exact")
+        expect(_exactness_verdict(
+            simple_web_render_html_to_pixels_with_engine2d_backend(opacity_html(), 32, 32, "cpu_simd"),
+            simple_web_layout_render_html_software_pixels(opacity_html(), 32, 32, _oracle_budget_ms())
+        )).to_equal("byte-exact")
+
+    # TEXT is the one place byte-exactness is the WRONG bar, and deliberately so.
+    # c6b3ee4721f ("fix(fonts): route web and GUI through Draw IR") moved the
+    # public entry onto real TTF outline rasterization, while the oracle kept its
+    # 5x7 bitmap font upscaled 2x. Measured at 32x32 for `<p>Text lane</p>`:
+    # 226/1024 pixels differ, oracle inks 134 and the Draw IR lane 111. That is
+    # not thinning and not a dropped glyph -- both lanes render all of "Text
+    # lane" (verified unclipped at 64x64, where they still differ on 432 px) --
+    # it is two different rasterizer families. Ink is split 115 oracle-only /
+    # 92 lane-only / 19 both-inked-but-different, i.e. each lane inks where the
+    # other does not, and the best pure vertical shift only reaches 0.827
+    # agreement, so no offset reconciles them. The Draw IR lane is the
+    # authoritative one: it antialiases from real outlines and uses real hmtx
+    # advances, whereas the oracle's 10x14 upscaled cell overflows this viewport
+    # and is truncated at row 31. Demanding equality would mean reimplementing a
+    # bitmap font in the outline rasterizer. So the bar below is structural.
+    it "keeps the public text lane structurally in agreement with the software oracle":
+        val oracle = simple_web_layout_render_html_software_pixels(text_html(), 32, 32, _oracle_budget_ms())
+        val lane = simple_web_render_html_to_pixels_with_engine2d_backend(text_html(), 32, 32, "cpu_simd")
+        expect(oracle.len()).to_equal(1024)
+        expect(lane.len()).to_equal(1024)
+
+        # (1) Rasterizer-family pin. This is the sharpest of the four: the most
+        # likely real regression is the Draw IR lane silently falling back to the
+        # 5x7 bitmap font -- precisely the defect c6b3ee4721f fixed -- and that
+        # regression turns "per-row" into "row-doubled" here. It also catches the
+        # oracle's budget collapse, which reports "blank".
+        expect(_raster_family(oracle, 32, 32)).to_equal("row-doubled")
+        expect(_raster_family(lane, 32, 32)).to_equal("per-row")
+
+        # (2) Ink-coverage bound. The factor is derived from the mechanism, not
+        # fitted to today's numbers: the oracle quantises every glyph pixel up to
+        # a whole 2x2 block (glyph_scale(16) = 16/8 = 2), and that upscale is the
+        # only systematic multiplier between the two lanes, so a factor of 2 is
+        # the constructive ceiling. Measured ratio is 1.21 at 32x32 and 1.19 at
+        # 64x64, both well inside it. A blank lane, a half/double-scale render,
+        # or losing half the glyphs all breach it.
+        expect(_coverage_verdict(_non_background_pixels(oracle), _non_background_pixels(lane))).to_equal("within-2x")
+
+        # (3) Same line box: both lanes must put their ink in overlapping rows.
+        # Catches a lane laying text out on the wrong line or off-canvas.
+        expect(_band_verdict(
+            _first_ink_row(oracle, 32, 32), _last_ink_row(oracle, 32, 32),
+            _first_ink_row(lane, 32, 32), _last_ink_row(lane, 32, 32)
+        )).to_equal("overlapping")
+
+        # (4) Non-vacuity, stated directly so a two-blank-lanes world cannot pass
+        # (1)-(3) by symmetry.
+        expect(_non_background_pixels(oracle)).to_be_greater_than(0)
+        expect(_non_background_pixels(lane)).to_be_greater_than(0)
