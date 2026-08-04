@@ -14,7 +14,9 @@ use compiler.common.driver_core_types.{
     driver_output_format_is_both,
     driver_output_format_is_self_contained
 }
-use compiler.driver.prepared_advice_slot_handoff.{prepared_advice_execution_admission}
+use compiler.driver.prepared_advice_slot_handoff.{
+    prepared_advice_driver_bridge, prepared_advice_execution_admission
+}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_hash_text(s: text) -> i64
@@ -86,8 +88,21 @@ impl CompilerDriver:
             self.apply_debug_trace()
             log_phase("aot:debug_trace:done")
 
+        val prepared_entry_closure =
+            (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        val prepared_target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+        val prepared_surface = if prepared_entry_closure and
+            (prepared_target == "" or prepared_target == "host"):
+            "aot-entry-closure-host:{self.ctx.options.backend}"
+        else:
+            "aot:{self.ctx.options.backend}"
+        val prepared_bridge = prepared_advice_driver_bridge(
+            self.ctx.mir_modules, prepared_surface)
+        if prepared_bridge.is_err():
+            return CompileResult.CodegenError(prepared_bridge.unwrap_err())
+        self.ctx.mir_modules = prepared_bridge.unwrap()
         val prepared_admission = prepared_advice_execution_admission(
-            self.ctx.options, self.ctx.mir_modules, "aot:{self.ctx.options.backend}")
+            self.ctx.options, self.ctx.mir_modules, prepared_surface)
         if prepared_admission.is_err():
             return CompileResult.CodegenError(prepared_admission.unwrap_err())
 

@@ -1,0 +1,181 @@
+# @req REQ-AF-003 REQ-AF-006
+# @cover src/compiler/50.mir/facet_witness_call.spl 90%
+
+use std.spec.*
+use compiler.common.structural_contracts.facet_artifact.{
+    FACET_ARTIFACT_VERSION, FACET_WITNESS_DESCRIPTOR_VERSION,
+    FacetContractMetadata, FacetWitnessDescriptorV1, FacetWitnessMethodEntry
+}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.{
+    FacetRefEscapeKind, MirConstValue, MirInstKind, MirOperandKind,
+    MirSignature, MirType, MirTypeKind,
+    facet_acquisition_context_plan, plan_typed_dynamic_facet_adapter,
+    validate_dynamic_facet_ref_escape, validate_typed_facet_descriptor,
+    lower_typed_facet_member_call, mir_operand_const_int
+}
+
+fn typed_facet_contract() -> FacetContractMetadata:
+    FacetContractMetadata(
+        contract_version: FACET_ARTIFACT_VERSION,
+        aspect_id: "debug",
+        facet_interface_id: "Debuggable",
+        parent_facets: [],
+        method_names: ["summary", "details"],
+        method_signatures: [
+            "fn summary() -> i64", "fn details(i64) -> i64"],
+        abi_hash: "debuggable-abi")
+
+fn resolved_typed_facet_descriptor() -> FacetWitnessDescriptorV1:
+    FacetWitnessDescriptorV1(
+        descriptor_version: FACET_WITNESS_DESCRIPTOR_VERSION,
+        facet_contract_abi_hash: "debuggable-abi",
+        descriptor_symbol: "CacheDebug__facet_witness",
+        owner_id: "debug-module",
+        method_entries: [
+            FacetWitnessMethodEntry(
+                method_name: "summary",
+                method_symbol: "CacheDebug__facet_witness__summary",
+                resolved_address: 4096),
+            FacetWitnessMethodEntry(
+                method_name: "details",
+                method_symbol: "CacheDebug__facet_witness__details",
+                resolved_address: 8192)
+        ])
+
+describe "typed dynamic facet adapter compiler contract":
+    it "keeps the concrete base operand and lowers a validated member by contract order":
+        val context = facet_acquisition_context_plan(
+            "app.AspectApplicationRuntime",
+            mir_operand_const_int(7),
+            "acquire_published_facet",
+            "release_facet_generation_lease").unwrap()
+        val adapter = plan_typed_dynamic_facet_adapter(
+            MirType(kind: MirTypeKind.Struct(SymbolId(id: 51))),
+            mir_operand_const_int(41),
+            typed_facet_contract(),
+            resolved_typed_facet_descriptor(),
+            context,
+            true).unwrap()
+
+        val lowered = lower_typed_facet_member_call(
+            nil, adapter, "details", [mir_operand_const_int(3)],
+            MirSignature(
+                params: [MirType.i64(), MirType.i64()],
+                return_type: MirType.i64(),
+                is_variadic: false)).unwrap()
+        match lowered:
+            case CallIndirect(_, pointer, arguments, _):
+                match pointer.kind:
+                    case Const(MirConstValue.Int(value), _): expect(value).to_equal(8192)
+                    case _: fail("typed facet member did not retain its resolved address")
+                expect(arguments.len()).to_equal(2)
+                match arguments[0].kind:
+                    case Const(MirConstValue.Int(value), _): expect(value).to_equal(41)
+                    case _: fail("typed base was not ABI argument zero")
+            case _: fail("typed facet member did not use CallIndirect")
+
+    it "rejects descriptor count, order, name, resolution, and ABI drift":
+        val contract = typed_facet_contract()
+        val resolved = resolved_typed_facet_descriptor()
+        val wrong_count = FacetWitnessDescriptorV1(
+            descriptor_version: resolved.descriptor_version,
+            facet_contract_abi_hash: resolved.facet_contract_abi_hash,
+            descriptor_symbol: resolved.descriptor_symbol,
+            owner_id: resolved.owner_id,
+            method_entries: [resolved.method_entries[0]])
+        expect(validate_typed_facet_descriptor(
+            contract, wrong_count).unwrap_err()).to_contain("method count")
+
+        val wrong_order = FacetWitnessDescriptorV1(
+            descriptor_version: resolved.descriptor_version,
+            facet_contract_abi_hash: resolved.facet_contract_abi_hash,
+            descriptor_symbol: resolved.descriptor_symbol,
+            owner_id: resolved.owner_id,
+            method_entries: [resolved.method_entries[1], resolved.method_entries[0]])
+        expect(validate_typed_facet_descriptor(
+            contract, wrong_order).unwrap_err()).to_contain("order/name")
+
+        var unresolved_entries = resolved.method_entries
+        unresolved_entries[0] = FacetWitnessMethodEntry(
+            method_name: "summary",
+            method_symbol: "CacheDebug__facet_witness__summary",
+            resolved_address: 0)
+        val unresolved = FacetWitnessDescriptorV1(
+            descriptor_version: resolved.descriptor_version,
+            facet_contract_abi_hash: resolved.facet_contract_abi_hash,
+            descriptor_symbol: resolved.descriptor_symbol,
+            owner_id: resolved.owner_id,
+            method_entries: unresolved_entries)
+        expect(validate_typed_facet_descriptor(
+            contract, unresolved).unwrap_err()).to_contain("unresolved method")
+
+        val wrong_abi = FacetWitnessDescriptorV1(
+            descriptor_version: resolved.descriptor_version,
+            facet_contract_abi_hash: "other-abi",
+            descriptor_symbol: resolved.descriptor_symbol,
+            owner_id: resolved.owner_id,
+            method_entries: resolved.method_entries)
+        expect(validate_typed_facet_descriptor(
+            contract, wrong_abi).unwrap_err()).to_contain("ABI hash")
+
+    it "rejects erased bases, missing leases, and absent acquisition ownership":
+        val missing_context = facet_acquisition_context_plan(
+            "", mir_operand_const_int(0), "", "")
+        expect(missing_context.unwrap_err()).to_contain("explicit application runtime context")
+
+        val context = facet_acquisition_context_plan(
+            "app.AspectApplicationRuntime",
+            mir_operand_const_int(7),
+            "acquire_published_facet",
+            "release_facet_generation_lease").unwrap()
+        val erased = plan_typed_dynamic_facet_adapter(
+            MirType(kind: MirTypeKind.Opaque("Any")),
+            mir_operand_const_int(41), typed_facet_contract(),
+            resolved_typed_facet_descriptor(), context, true)
+        expect(erased.unwrap_err()).to_contain("must remain typed")
+
+        val dyn_erased = plan_typed_dynamic_facet_adapter(
+            MirType(kind: MirTypeKind.Opaque("dyn_Debuggable")),
+            mir_operand_const_int(41), typed_facet_contract(),
+            resolved_typed_facet_descriptor(), context, true)
+        expect(dyn_erased.unwrap_err()).to_contain("must remain typed")
+
+        val unleased = plan_typed_dynamic_facet_adapter(
+            MirType.i64(), mir_operand_const_int(41), typed_facet_contract(),
+            resolved_typed_facet_descriptor(), context, false)
+        expect(unleased.unwrap_err()).to_contain("exact generation lease")
+
+    it "fails closed for every leased-reference escape shape":
+        val local_use = validate_dynamic_facet_ref_escape(
+            FacetRefEscapeKind.LocalUse)
+        if local_use.is_err():
+            fail(local_use.unwrap_err())
+        expect(validate_dynamic_facet_ref_escape(
+            FacetRefEscapeKind.Copy).unwrap_err()).to_contain("cannot be copied")
+        expect(validate_dynamic_facet_ref_escape(
+            FacetRefEscapeKind.Return).unwrap_err()).to_contain("by return")
+        expect(validate_dynamic_facet_ref_escape(
+            FacetRefEscapeKind.Store).unwrap_err()).to_contain("stored state")
+        expect(validate_dynamic_facet_ref_escape(
+            FacetRefEscapeKind.Capture).unwrap_err()).to_contain("captured")
+        expect(validate_dynamic_facet_ref_escape(
+            FacetRefEscapeKind.AsyncTransfer).unwrap_err()).to_contain("async boundary")
+        expect(validate_dynamic_facet_ref_escape(
+            FacetRefEscapeKind.ThreadTransfer).unwrap_err()).to_contain("thread boundary")
+
+    it "rejects unknown members after descriptor validation":
+        val context = facet_acquisition_context_plan(
+            "app.AspectApplicationRuntime",
+            mir_operand_const_int(7),
+            "acquire_published_facet",
+            "release_facet_generation_lease").unwrap()
+        val adapter = plan_typed_dynamic_facet_adapter(
+            MirType.i64(), mir_operand_const_int(41), typed_facet_contract(),
+            resolved_typed_facet_descriptor(), context, true).unwrap()
+        val result = lower_typed_facet_member_call(
+            nil, adapter, "missing", [],
+            MirSignature(
+                params: [MirType.i64()], return_type: MirType.i64(),
+                is_variadic: false))
+        expect(result.unwrap_err()).to_contain("not in the validated contract")

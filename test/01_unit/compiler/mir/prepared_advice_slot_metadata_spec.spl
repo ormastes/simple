@@ -10,9 +10,12 @@ use compiler.common.structural_contracts.aop.{
 use compiler.mir.mir_data.{MirModule}
 use compiler.mir.mir_instructions.{
     MirBlock, MirFunction, MirInst, MirInstKind, MirSignature, MirTerminator,
-    BlockId
+    BlockId, LocalId, MirOperand, MirOperandKind
 }
-use compiler.mir.mir_types.{MirType}
+use compiler.mir.mir_types.{
+    LocalKind, MirConstValue, MirLocal, MirType, MirTypeDef, MirTypeDefKind,
+    MirTypeKind
+}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_serialization.{
     serialize_mir_module, serialize_mir_prepared_advice_slots
@@ -23,6 +26,7 @@ use compiler.mir_opt.mir_opt.{
 use compiler.driver.prepared_advice_slot_handoff.{
     collect_prepared_advice_slot_table_bytes,
     prepared_advice_slot_artifact_gate,
+    prepared_advice_driver_bridge,
     prepared_advice_execution_admission
 }
 use compiler.common.driver_core_types.{CompileOptions}
@@ -57,6 +61,42 @@ fn prepared_intrinsic_only_module() -> MirModule:
     MirModule(
         name: "direct", functions: functions, statics: {},
         constants: {}, types: {}, prepared_advice_slots: [])
+
+fn prepared_v2_module() -> MirModule:
+    val context_symbol = SymbolId.new(99)
+    val context_type = MirType(kind: MirTypeKind.Struct(context_symbol))
+    val slot = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str("orders.submit.prepared"),
+        MirType(kind: MirTypeKind.Opaque("str"))))
+    val phase = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str("before"), MirType(kind: MirTypeKind.Opaque("str"))))
+    val entry = MirBlock(
+        id: BlockId.entry(), label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Intrinsic(
+            nil, "simple.prepared_advice_dispatch.v2", [
+                MirOperand(kind: MirOperandKind.Copy(LocalId(0))), slot, phase]),
+            span: nil)],
+        terminator: MirTerminator.Ret(nil))
+    val function = MirFunction(
+        symbol: SymbolId.new(1), name: "submit",
+        signature: MirSignature(
+            params: [context_type], return_type: MirType.unit(), is_variadic: false),
+        locals: [MirLocal(
+            id: LocalId(0), name: Some("context"), type_: context_type,
+            kind: LocalKind.Arg(0), is_ghost: false)],
+        blocks: [entry], entry_block: BlockId.entry(), span: nil,
+        generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    var types: Dict<SymbolId, MirTypeDef> = {}
+    types[context_symbol] = MirTypeDef(
+        symbol: context_symbol, name: "AspectExecutionContext",
+        kind: MirTypeDefKind.Struct([]), is_export_c: false, export_name: "")
+    MirModule(
+        name: "orders", functions: functions, statics: {}, constants: {},
+        types: types, prepared_advice_slots: [prepared_slot(
+            "orders.submit.prepared", "orders::submit", ["before"])])
 
 describe "Prepared dynamic advice-slot MIR metadata":
     it "admits only versioned before and after phase plans":
@@ -129,10 +169,10 @@ describe "Prepared dynamic advice-slot MIR metadata":
             "orders.submit.prepared", "orders::submit", ["before"])])
         expect(prepared_advice_execution_admission(
             options, {"orders": module}, "jit").unwrap_err()).to_contain(
-                "projection/trampoline is not lifecycle-safe")
+                "hosted CPU AOT entry-closure is required")
         expect(prepared_advice_execution_admission(
             options, {"orders": module}, "aot:llvm").unwrap_err()).to_contain(
-                "projection/trampoline is not lifecycle-safe")
+                "hosted CPU AOT entry-closure is required")
         for backend in [
             "auto", "llvm", "llvm-lib", "cranelift", "native", "c",
             "interpreter", "wasm", "lean", "byl", "lua", "vhdl", "irtc",
@@ -148,3 +188,34 @@ describe "Prepared dynamic advice-slot MIR metadata":
         expect(backend_prepared_advice_rejection(
             prepared_intrinsic_only_module(), "native").unwrap()).to_contain(
                 "cannot execute prepared dynamic advice")
+
+    it "validates v2 but fails closed until Result propagation has a MIR owner":
+        var options = CompileOptions.default()
+        options.prepared_dynamic_advice = true
+        val input = prepared_v2_module()
+        expect(prepared_advice_driver_bridge(
+            {"orders": input}, "aot:llvm").unwrap_err()).to_contain(
+                "hosted CPU AOT entry-closure is required")
+        expect(prepared_advice_driver_bridge(
+            {"orders": input},
+            "aot-entry-closure-host:wasm").unwrap_err()).to_contain(
+                "hosted CPU AOT entry-closure is required")
+
+        expect(prepared_advice_driver_bridge(
+            {"orders": input},
+            "aot-entry-closure-host:llvm").unwrap_err()).to_contain(
+                "Result propagation has no MIR owner")
+        expect(prepared_advice_execution_admission(
+            options, {"orders": input},
+            "aot-entry-closure-host:llvm").unwrap_err()).to_contain(
+                "Result propagation is not implemented")
+
+        var residual_v2 = input
+        residual_v2.prepared_advice_slots = []
+        expect(backend_prepared_advice_rejection(
+            residual_v2, "llvm").unwrap()).to_contain(
+                "cannot execute prepared dynamic advice")
+        expect(prepared_advice_execution_admission(
+            options, {"direct": prepared_intrinsic_only_module()},
+            "aot-entry-closure-host:llvm").unwrap_err()).to_contain(
+                "residual intrinsic")

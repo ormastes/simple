@@ -15,15 +15,19 @@ use compiler.loader.loader.facet_binding_registry.{
 }
 use compiler.common.structural_contracts.facet_artifact.{
     FACET_WITNESS_DESCRIPTOR_VERSION,
-    FacetWitnessMethodEntry, FacetWitnessDescriptorV1
+    FacetWitnessMethodEntry, FacetWitnessDescriptorV1,
+    facet_witness_symbol, facet_witness_method_symbol
 }
 use app.startup.aspect_application_runtime.{
     AspectApplicationPhase,
     AspectApplicationOperation,
-    AspectApplicationRuntime
+    AspectExecutionContext,
+    AspectApplicationRuntime,
+    prepared_advice_dispatch_context_invoke
 }
 use os.smf.dynsmf_session.{DynSmfSession, DynSmfPolicy, dynsmf_session_new}
 use os.smf.smf_generation.{LifecycleManager}
+use test.fixtures.aspect_facet.runtime_fixture.{facet_runtime_fixture_smf}
 
 fn app_resolved_facet_descriptor(
     summary: AspectBindingSummary, owner_id: text
@@ -122,6 +126,69 @@ fn app_advice_catalog() -> AspectCatalog:
     AspectCatalog.create(
         4, "x86_64-unknown-linux-gnu", "mission-v1",
         "simple-runtime-1", [entry]).unwrap()
+
+fn app_execution_context_pack() -> [u8]:
+    val module_bytes = facet_runtime_fixture_smf()
+    encode_aspect_pack(
+        FeatureManifest(
+            name: "execution-context-pack", version: "1.0.0",
+            security_level: SfmSecurityLevel.Trusted, layers: []),
+        [AspectPackPayload(
+            module_id: "fixture.debug", aspect_id: "fixture.debug",
+            compression: AspectPackCompression.None,
+            uncompressed_size: module_bytes.len(), dictionary_id: 0,
+            stored_bytes: module_bytes)]).unwrap()
+
+fn app_execution_context_catalog() -> AspectCatalog:
+    val module_bytes = facet_runtime_fixture_smf()
+    val module_digest = sha256_u8_hex(module_bytes)
+    AspectCatalog.create(
+        9, "x86_64-unknown-linux-gnu", "context-v1", "simple-runtime-1",
+        [AspectCatalogEntry(
+            aspect_id: "fixture.debug", pack_id: "execution-context-pack",
+            pack_path: "aspects/execution-context-pack.sfm",
+            module_id: "fixture.debug",
+            pack_digest: sha256_u8_hex(app_execution_context_pack()),
+            module_digest: module_digest,
+            core_public_abi_hash: module_digest,
+            core_layout_abi_hash: module_digest,
+            target: "x86_64-unknown-linux-gnu",
+            variant_fingerprint: "context-v1",
+            runtime_abi: "simple-runtime-1", dependencies: [],
+            activation_policy: "lazy_facet",
+            binding_summaries: [AspectBindingSummary(
+                binding_id: "fixture.debug.binding",
+                concrete_type_id: "fixture.Cache", business_interface_id: "",
+                facet_interface_id: "Debuggable",
+                facet_contract_abi_hash: "fixture-facet-abi-v1",
+                witness_symbol: facet_witness_symbol("fixture_debug"),
+                capabilities: ["facet.read"])],
+            prepared_joinpoint_slots: ["fixture.context.prepared"],
+            advice_summaries: [AspectAdviceSummary(
+                advice_id: "fixture.debug.before",
+                joinpoint_slot_id: "fixture.context.prepared", form: "before",
+                priority: 10, specificity: 1,
+                witness_symbol: facet_witness_method_symbol(
+                    "fixture_debug", "summary"),
+                capabilities: ["facet.read"])],
+            capabilities: ["facet.read"]) ]).unwrap()
+
+fn app_execution_context_key() -> AspectPackProviderKey:
+    val module_digest = sha256_u8_hex(facet_runtime_fixture_smf())
+    AspectPackProviderKey(
+        pack_id: "execution-context-pack",
+        pack_digest: sha256_u8_hex(app_execution_context_pack()),
+        catalog_generation: 9,
+        target: "x86_64-unknown-linux-gnu",
+        variant_fingerprint: "context-v1",
+        runtime_abi: "simple-runtime-1",
+        core_public_abi_hash: module_digest,
+        core_layout_abi_hash: module_digest)
+
+fn app_execution_context_request(id: text) -> AspectActivationRequest:
+    AspectActivationRequest(
+        aspect_id: "fixture.debug", request_id: id,
+        catalog_generation: 9)
 
 fn app_aspect_key() -> AspectPackProviderKey:
     val digest = sha256_u8_hex(app_aspect_smf())
@@ -233,6 +300,44 @@ describe "Application aspect runtime policy owner":
             moduleloader_with_defaults(), "security.audit.prepared", "around")
         expect(around.unwrap_err()).to_contain("exactly-once proceed path")
         expect(runtime.advice_binding_counters().around_rejections).to_equal(1)
+
+    it "keeps two execution contexts isolated and releases exact dispatch tokens":
+        val first: AspectExecutionContext = AspectApplicationRuntime.create(
+            app_execution_context_catalog(), app_aspect_session(),
+            LifecycleManager.new_manager(),
+            AspectPackTrustPolicy.ordinary_unsigned(), 2, 2, 2).unwrap()
+        val second: AspectExecutionContext = AspectApplicationRuntime.create(
+            app_execution_context_catalog(), app_aspect_session(),
+            LifecycleManager.new_manager(),
+            AspectPackTrustPolicy.ordinary_unsigned(), 2, 2, 2).unwrap()
+        val activation = first.activate_pack_bytes(
+            app_execution_context_key(), app_execution_context_pack(), [],
+            app_execution_context_request("first-context"),
+            moduleloader_with_defaults())
+        expect(activation.status).to_equal("published")
+        expect(first.coordinator.published.keys().len()).to_equal(1)
+        expect(second.coordinator.published.keys().len()).to_equal(0)
+
+        val values = prepared_advice_dispatch_context_invoke(
+            first, "fixture.context.prepared", "before").unwrap()
+        expect(values).to_equal([73])
+        expect(first.advice_binding_counters().dispatch_attempts).to_equal(1)
+        expect(first.advice_binding_counters().dispatch_invocations).to_equal(1)
+        expect(second.advice_binding_counters().dispatch_attempts).to_equal(0)
+        expect(first.published_generation_pin_count("fixture.debug").unwrap()).to_equal(0)
+
+        val witness = facet_witness_method_symbol("fixture_debug", "summary")
+        first.loader.global_symbols[witness] = (
+            "forged-owner", first.loader.global_symbols[witness][1])
+        val failed = prepared_advice_dispatch_context_invoke(
+            first, "fixture.context.prepared", "before")
+        expect(failed.unwrap_err()).to_contain("no longer loader-owned")
+        expect(first.published_generation_pin_count("fixture.debug").unwrap()).to_equal(0)
+        expect(first.advice_binding_counters().dispatch_failures).to_equal(1)
+        expect(second.advice_binding_counters().dispatch_failures).to_equal(0)
+
+        val compatible_facade: AspectApplicationRuntime = first
+        expect(compatible_facade.advice_binding_counters().dispatch_attempts).to_equal(2)
 
     it "rejects a provider whose core ABI identity differs from the catalog":
         val runtime = AspectApplicationRuntime.create(

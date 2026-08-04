@@ -4,7 +4,10 @@
 # MIR function blocks. Used by the driver's weave_aop() step.
 
 use compiler.mir.mir_instructions.*
-use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind, MirSignature}
+use compiler.mir.mir_types.{
+    LocalKind, MirConstValue, MirType, MirTypeDef, MirTypeKind, MirSignature
+}
+use compiler.hir.hir_types.{SymbolId}
 use compiler.frontend.core.aop.{MirBlockInfo, InstructionInfo, WeavingResult, AdviceCallInfo, JoinPointKind}
 use compiler.mir.mir_json.{serialize_mir_signature}
 use compiler.common.structural_contracts.aop.{
@@ -245,7 +248,8 @@ fn apply_weaving_result(func: MirFunction, result: WeavingResult) -> MirFunction
 fn apply_prepared_advice_result(
     func: MirFunction,
     module_path: text,
-    result: WeavingResult
+    result: WeavingResult,
+    module_types: Dict<SymbolId, MirTypeDef>
 ) -> Result<PreparedAdviceInjection, text>:
     var forms: [text] = []
     for call_info in result.advice_calls:
@@ -267,6 +271,8 @@ fn apply_prepared_advice_result(
             return Err("E-AF010 prepared dynamic advice currently supports execution join points only")
         return Ok(PreparedAdviceInjection(function: func, slot: nil))
 
+    val context = prepared_advice_context_arg(func, module_types)?
+
     # Name alone aliases overloads. Signature JSON plus the lowering-owned
     # symbol ID is canonical for one compilation and distinguishes every body.
     val target_id = "{module_path}::{func.name}:{serialize_mir_signature(func.signature)}#symbol={func.symbol.id}"
@@ -278,24 +284,71 @@ fn apply_prepared_advice_result(
     var prepared = func
     for form in forms:
         if form == "before":
-            prepared = inject_prepared_before(prepared, slot_id, form)?
+            prepared = inject_prepared_before(prepared, context, slot_id, form)?
         elif form == "after_success":
-            prepared = inject_prepared_after_success(prepared, slot_id, form)
+            prepared = inject_prepared_after_success(prepared, context, slot_id, form)
         elif form == "after_error":
-            prepared = inject_prepared_after_error(prepared, slot_id, form)
+            prepared = inject_prepared_after_error(prepared, context, slot_id, form)
     Ok(PreparedAdviceInjection(function: prepared, slot: Some(slot)))
 
-fn make_prepared_advice_dispatch_inst(slot_id: text, form: text) -> MirInst:
+fn prepared_advice_context_type_matches(
+    type_: MirType,
+    module_types: Dict<SymbolId, MirTypeDef>
+) -> bool:
+    match type_.kind:
+        case Struct(symbol):
+            module_types.contains_key(symbol) and
+                module_types[symbol].name == "AspectExecutionContext"
+        case Ref(referent, _):
+            prepared_advice_context_type_matches(referent, module_types)
+        case _: false
+
+fn prepared_advice_context_arg(
+    func: MirFunction,
+    module_types: Dict<SymbolId, MirTypeDef>
+) -> Result<MirOperand, text>:
+    var context_index: i64 = -1
+    for index in 0..func.signature.params.len():
+        if prepared_advice_context_type_matches(
+            func.signature.params[index], module_types):
+            if context_index >= 0:
+                return Err(
+                    "E-AF010 prepared advice target must declare exactly one AspectExecutionContext parameter")
+            context_index = index
+    if context_index < 0:
+        return Err(
+            "E-AF010 prepared advice target must declare exactly one AspectExecutionContext parameter")
+
+    for local in func.locals:
+        match local.kind:
+            case LocalKind.Arg(index):
+                if index == context_index and prepared_advice_context_type_matches(
+                    local.type_, module_types):
+                    return Ok(MirOperand(kind: MirOperandKind.Copy(local.id)))
+            case _:
+                ()
+    Err("E-AF010 prepared advice context parameter has no exact MIR Arg local")
+
+fn make_prepared_advice_dispatch_inst(
+    context: MirOperand,
+    slot_id: text,
+    form: text
+) -> MirInst:
     val slot = MirOperand(kind: MirOperandKind.Const(
         MirConstValue.Str(slot_id), MirType(kind: MirTypeKind.Opaque("str"))))
     val phase = MirOperand(kind: MirOperandKind.Const(
         MirConstValue.Str(form), MirType(kind: MirTypeKind.Opaque("str"))))
     MirInst(
         kind: MirInstKind.Intrinsic(
-            nil, "simple.prepared_advice_dispatch.v1", [slot, phase]),
+            nil, "simple.prepared_advice_dispatch.v2", [context, slot, phase]),
         span: nil)
 
-fn inject_prepared_before(func: MirFunction, slot_id: text, form: text) -> Result<MirFunction, text>:
+fn inject_prepared_before(
+    func: MirFunction,
+    context: MirOperand,
+    slot_id: text,
+    form: text
+) -> Result<MirFunction, text>:
     if func.blocks.len() == 0:
         return Err("E-AF010 prepared advice target has no entry block")
     var blocks: [MirBlock] = []
@@ -303,7 +356,8 @@ fn inject_prepared_before(func: MirFunction, slot_id: text, form: text) -> Resul
     for block in func.blocks:
         if block.id.id == func.entry_block.id:
             found_entry = true
-            var instructions: [MirInst] = [make_prepared_advice_dispatch_inst(slot_id, form)]
+            var instructions: [MirInst] = [
+                make_prepared_advice_dispatch_inst(context, slot_id, form)]
             for inst in block.instructions:
                 instructions.push(inst)
             blocks.push(MirBlock(..block, instructions: instructions))
@@ -313,24 +367,36 @@ fn inject_prepared_before(func: MirFunction, slot_id: text, form: text) -> Resul
         return Err("E-AF010 prepared advice target entry block is missing")
     Ok(MirFunction(..func, blocks: blocks))
 
-fn inject_prepared_after_success(func: MirFunction, slot_id: text, form: text) -> MirFunction:
+fn inject_prepared_after_success(
+    func: MirFunction,
+    context: MirOperand,
+    slot_id: text,
+    form: text
+) -> MirFunction:
     var blocks: [MirBlock] = []
     for block in func.blocks:
         match block.terminator:
             case Ret(_):
                 var instructions = block.instructions
-                instructions.push(make_prepared_advice_dispatch_inst(slot_id, form))
+                instructions.push(
+                    make_prepared_advice_dispatch_inst(context, slot_id, form))
                 blocks.push(MirBlock(..block, instructions: instructions))
             case _: blocks.push(block)
     MirFunction(..func, blocks: blocks)
 
-fn inject_prepared_after_error(func: MirFunction, slot_id: text, form: text) -> MirFunction:
+fn inject_prepared_after_error(
+    func: MirFunction,
+    context: MirOperand,
+    slot_id: text,
+    form: text
+) -> MirFunction:
     var blocks: [MirBlock] = []
     for block in func.blocks:
         match block.terminator:
             case MirTerminator.Abort(_):
                 var instructions = block.instructions
-                instructions.push(make_prepared_advice_dispatch_inst(slot_id, form))
+                instructions.push(
+                    make_prepared_advice_dispatch_inst(context, slot_id, form))
                 blocks.push(MirBlock(..block, instructions: instructions))
             case _: blocks.push(block)
     MirFunction(..func, blocks: blocks)

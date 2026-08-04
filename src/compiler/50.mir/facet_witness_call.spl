@@ -1,7 +1,119 @@
-"""Canonical facet witness call lowering through the existing indirect call."""
+"""Canonical typed facet adapter lowering through the existing indirect call."""
 
-use compiler.mir.mir_types.{LocalId, MirSignature}
-use compiler.mir.mir_instructions.{MirInstKind, MirOperand}
+use compiler.common.structural_contracts.facet_artifact.{
+    FACET_WITNESS_DESCRIPTOR_VERSION, FacetContractMetadata,
+    FacetWitnessDescriptorV1
+}
+use compiler.mir.mir_types.{LocalId, MirSignature, MirType, MirTypeKind}
+use compiler.mir.mir_instructions.{
+    MirInstKind, MirOperand, mir_operand_const_int
+}
+
+enum FacetRefEscapeKind:
+    LocalUse
+    Copy
+    Return
+    Store
+    Capture
+    AsyncTransfer
+    ThreadTransfer
+
+struct FacetAcquisitionContextPlan:
+    """Compiler-visible application owner used for acquire and exact release."""
+    owner_type_id: text
+    runtime_owner: MirOperand
+    acquire_symbol: text
+    release_symbol: text
+
+struct TypedFacetAdapterPlan:
+    """Application-local adapter; the base remains typed and is never erased."""
+    base_type: MirType
+    base: MirOperand
+    facet_interface_id: text
+    facet_contract_abi_hash: text
+    descriptor: FacetWitnessDescriptorV1
+    context: FacetAcquisitionContextPlan
+    has_generation_lease: bool
+
+fn facet_acquisition_context_plan(
+    owner_type_id: text,
+    runtime_owner: MirOperand,
+    acquire_symbol: text,
+    release_symbol: text
+) -> Result<FacetAcquisitionContextPlan, text>:
+    if owner_type_id == "" or acquire_symbol == "" or release_symbol == "":
+        return Err("E-AF005 dynamic facet acquisition requires an explicit application runtime context")
+    if acquire_symbol == release_symbol:
+        return Err("E-AF005 facet acquisition and release boundaries must be distinct")
+    Ok(FacetAcquisitionContextPlan(
+        owner_type_id: owner_type_id,
+        runtime_owner: runtime_owner,
+        acquire_symbol: acquire_symbol,
+        release_symbol: release_symbol))
+
+fn facet_typed_base_type_supported(base_type: MirType) -> bool:
+    # `Any` and dyn-trait names are erasure shortcuts, not typed base storage.
+    match base_type.kind:
+        case Opaque(name):
+            not (name == "Any" or name.starts_with("dyn_"))
+        case _: true
+
+fn validate_typed_facet_descriptor(
+    contract: FacetContractMetadata,
+    descriptor: FacetWitnessDescriptorV1
+) -> Result<(), text>:
+    if contract.facet_interface_id == "" or contract.abi_hash == "":
+        return Err("E-AF002 typed facet contract identity is incomplete")
+    if descriptor.descriptor_version != FACET_WITNESS_DESCRIPTOR_VERSION:
+        return Err("E-AF002 typed facet descriptor version is unsupported")
+    if descriptor.owner_id == "" or descriptor.descriptor_symbol == "":
+        return Err("E-AF002 typed facet descriptor has no resolved owner")
+    if descriptor.facet_contract_abi_hash != contract.abi_hash:
+        return Err("E-AF002 typed facet descriptor ABI hash does not match the contract")
+    if descriptor.method_entries.len() != contract.method_names.len():
+        return Err("E-AF002 typed facet descriptor method count does not match the contract")
+    var index = 0
+    while index < contract.method_names.len():
+        val expected_name = contract.method_names[index]
+        val method = descriptor.method_entries[index]
+        if expected_name == "" or method.method_name != expected_name:
+            return Err("E-AF002 typed facet descriptor method order/name does not match the contract")
+        if method.method_symbol == "" or method.resolved_address <= 0:
+            return Err("E-AF002 typed facet descriptor contains an unresolved method: {expected_name}")
+        index = index + 1
+    Ok(())
+
+fn plan_typed_dynamic_facet_adapter(
+    base_type: MirType,
+    base: MirOperand,
+    contract: FacetContractMetadata,
+    descriptor: FacetWitnessDescriptorV1,
+    context: FacetAcquisitionContextPlan,
+    has_generation_lease: bool
+) -> Result<TypedFacetAdapterPlan, text>:
+    if not facet_typed_base_type_supported(base_type):
+        return Err("E-AF005 dynamic facet base must remain typed; erased Any/dyn bases are forbidden")
+    if not has_generation_lease:
+        return Err("E-AF004 dynamic facet adapter requires an exact generation lease")
+    validate_typed_facet_descriptor(contract, descriptor)?
+    Ok(TypedFacetAdapterPlan(
+        base_type: base_type,
+        base: base,
+        facet_interface_id: contract.facet_interface_id,
+        facet_contract_abi_hash: contract.abi_hash,
+        descriptor: descriptor,
+        context: context,
+        has_generation_lease: true))
+
+fn validate_dynamic_facet_ref_escape(kind: FacetRefEscapeKind) -> Result<(), text>:
+    match kind:
+        case LocalUse: Ok(())
+        case Copy: Err("E-AF006 leased FacetRef is affine and cannot be copied")
+        case Return: Err("E-AF006 leased FacetRef cannot escape by return")
+        case Store: Err("E-AF006 leased FacetRef cannot escape into stored state")
+        case Capture: Err("E-AF006 leased FacetRef cannot be captured")
+        case AsyncTransfer: Err("E-AF006 leased FacetRef cannot cross an async boundary")
+        case ThreadTransfer: Err("E-AF006 leased FacetRef cannot cross a thread boundary")
 
 fn lower_resolved_facet_witness_call(
     destination: LocalId?,
@@ -25,4 +137,30 @@ fn lower_resolved_facet_witness_method_call(
     Ok(lower_resolved_facet_witness_call(
         destination, resolved_method, receiver_arguments, signature))
 
+fn lower_typed_facet_member_call(
+    destination: LocalId?,
+    adapter: TypedFacetAdapterPlan,
+    method_name: text,
+    arguments: [MirOperand],
+    signature: MirSignature
+) -> Result<MirInstKind, text>:
+    if method_name == "":
+        return Err("E-AF005 typed facet member name is empty")
+    var index = 0
+    while index < adapter.descriptor.method_entries.len():
+        val method = adapter.descriptor.method_entries[index]
+        if method.method_name == method_name:
+            return lower_resolved_facet_witness_method_call(
+                destination,
+                mir_operand_const_int(method.resolved_address),
+                adapter.base,
+                arguments,
+                signature)
+        index = index + 1
+    Err("E-AF005 typed facet member is not in the validated contract: {method_name}")
+
+export FacetRefEscapeKind, FacetAcquisitionContextPlan, TypedFacetAdapterPlan
+export facet_acquisition_context_plan, validate_typed_facet_descriptor
+export plan_typed_dynamic_facet_adapter, validate_dynamic_facet_ref_escape
 export lower_resolved_facet_witness_call, lower_resolved_facet_witness_method_call
+export lower_typed_facet_member_call

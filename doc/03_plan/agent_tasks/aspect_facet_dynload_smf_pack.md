@@ -46,6 +46,20 @@
 | D4 execution context | Refactor one stable application reference capsule to own loader, lifecycle, registries, and projection; validate/rewrite explicit-context v2 to an ordinary call | `AspectExecutionContext`, `simple.prepared_advice_dispatch.v2(context, slot, phase)`, `prepared_advice_dispatch_context_invoke` |
 | D5 typed facet adapter | Generate private `(Base, FacetContract)` adapter, acquire the complete descriptor once, select by ordinal, and release the affine lease on all exits | Existing `FacetRef<T>`, `FacetWitnessDescriptorV1`, `lower_resolved_facet_witness_method_call`; no dyn-trait or erased-base ABI |
 
+Current implementation status:
+
+- D4 partial: the stable `AspectExecutionContext` class, compatibility type
+  alias, context-owned dispatcher, two-context isolation coverage, exact-token
+  cleanup coverage, typed v2 producer, independent driver validation, and
+  residual v1/v2 rejection exist. The ordinary-call rewrite remains fail-closed
+  because injected arbitrary-return targets have no MIR owner for propagating
+  `Result<[i64], text>` without discarding dispatch failure.
+- D5 partial: typed-base adapter planning, descriptor version/hash/count/order/
+  name/owner/address validation, base-first indirect-call selection, erased-base
+  rejection, and affine escape diagnostics exist. Source/HIR facet acquisition,
+  construction from the application-owned whole descriptor, real escape-checker
+  wiring, and compiler-inserted release on every exit remain open.
+
 These lanes retain the five system-manual phrases already frozen in the system
 test plan. Focused setup/checker helpers are
 `build_facet_witness_descriptor_fixture`,
@@ -77,10 +91,12 @@ zero, no dynamic-ref escape, and one balanced acquire/release per retained ref.
 3. Extend prepared-target validation to require exactly one typed context Arg;
    emit v2 with `Copy` of that Arg plus constant slot/phase. Missing or wrong
    context fails before MIR publication.
-4. Add the driver rewrite from validated v2 to the ordinary dispatcher `Call`;
+4. Add safe dispatcher failure propagation and the driver rewrite from
+   validated v2 to the ordinary dispatcher `Call`;
    keep v1/v2 residual rejection in every backend and admit hosted CPU AOT
    entry-closure only after link/ABI evidence.
-5. Generate one private typed adapter per `(Base, FacetContract)`, construct it
+5. Wire source/HIR facet acquisition and generate one private typed adapter per
+   `(Base, FacetContract)`, construct it
    from one whole-descriptor acquisition, and lower member selection by exact
    contract ordinal through the existing base-first indirect-call helper.
 6. Add affine escape analysis and compiler-inserted release on normal, error,

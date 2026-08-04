@@ -203,3 +203,28 @@ verification-failed
 - phase remains `verification-failed`: D4 canonical state ownership and D5
   generated adapter/affine lowering are designed but not implemented; AC-11,
   AC-12, runtime, docgen, maintenance, coverage, and NFR evidence remain open.
+
+## 2026-08-04 — D4/D5 implementation checkpoint
+
+- parallel implementation: `activation_runtime` added the stable
+  `AspectExecutionContext` class, current-syntax compatibility type alias,
+  context-owned `ModuleLoader`, source dispatcher, two-context isolation, and
+  exact-token cleanup coverage. No process-global context or second lifecycle
+  registry was introduced.
+- parallel implementation: `aspect_registry_driver` added exact typed-context
+  v2 production, independent context/slot/phase validation, hosted CPU AOT
+  entry-closure gating, and residual v1/v2 rejection. It correctly leaves the
+  bridge E-AF010: the dispatcher returns `Result<[i64], text>` and injected
+  arbitrary-return targets lack a safe MIR failure-propagation owner.
+- parallel implementation: `facet_plan_codegen` added the typed-base adapter
+  plan, complete resolved-descriptor validation, base-first indirect-call
+  selection, erased-base rejection, and affine escape diagnostics. Source/HIR
+  acquisition, application-context descriptor transfer, semantic escape wiring,
+  and balanced release insertion remain open.
+- root review removed a stale import, replaced deprecated `alias` spelling with
+  current `type` syntax, and removed a boolean-wrapper assertion. Compiler
+  execution was not repeated after sidecar attempts: one source check passed,
+  one focused spec reached 4/5 before an import-only fix, its bounded rerun was
+  killed during startup, and the deployed runtime ABI probe failed.
+- phase remains `verification-failed`; the new work is a safe, fail-closed
+  implementation foundation rather than executable D4/D5 completion.

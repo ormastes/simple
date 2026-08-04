@@ -29,14 +29,16 @@ flow:
 - `PreparedAdviceSlotPlan` is preserved and deterministically serialized; the
   loader derives an immutable exact-generation projection from its one registry.
 - `AspectExecutionContext` solely owns loader/lifecycle/registries/projection.
-  The reviewed v2 intrinsic carries that exact typed context; the driver rewrites
-  it to an ordinary source-owned dispatch call using existing backend ABIs.
+  The reviewed v2 intrinsic carries that exact typed context. The producer and
+  driver validator exist, but ordinary-call rewriting remains fail-closed until
+  MIR can propagate the dispatcher's `Result` through arbitrary target returns.
 - Residual v1/v2 intrinsics and non-admitted targets remain E-AF010. No backend
   trampoline, process-global handle, or second lease authority is permitted.
 - Check/interpreter reject the option directly; JIT and every AOT backend reject
   produced slots through the same centralized admission boundary.
-- D4 (execution-context v2 bridge) and D5 (typed facet adapter/acquisition) are
-  not implemented; authoritative verification remains `STATUS: FAIL`.
+- D4 and D5 compiler/runtime foundations are partially implemented. Executable
+  v2 rewriting, source/HIR facet acquisition, semantic affine enforcement, and
+  balanced release insertion remain open; verification is `STATUS: FAIL`.
 - Resolver startup now crosses `85.mdsoc` through
   `ModuleResolverDiscoveryPort.resolve_inputs`; production composition injects
   the 99-loader adapter, while compatibility/test constructors stay explicitly

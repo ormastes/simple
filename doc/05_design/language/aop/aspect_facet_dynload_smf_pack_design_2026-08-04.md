@@ -2352,3 +2352,21 @@ construction. Lease release is compiler-inserted on every lexical exit.
 Rejected designs are a global/current context cell, a numeric handle registry,
 copied coordinator/lifecycle state, backend-specific raw callbacks, existing
 `dyn Trait` (no production vtable ABI), and `Any`/raw-pointer base erasure.
+
+### 31.1 Implementation checkpoint
+
+The stable context class, context-owned dispatcher, typed v2 producer, exact
+argument/slot/phase validator, hosted-CPU-entry-closure surface gate, and
+residual v1/v2 backend rejection now exist. The driver intentionally does not
+perform the ordinary-call rewrite yet: the dispatcher returns
+`Result<[i64], text>`, while the injected operation has no destination or
+general mechanism to propagate that failure through targets with arbitrary
+return types. Discarding the result or declaring a false unit ABI is forbidden,
+so executable admission remains E-AF010 until that MIR owner is designed.
+
+The compiler also now has a typed adapter plan that retains the concrete base,
+validates the entire resolved descriptor, selects by contract member, lowers
+through base-first `CallIndirect`, rejects erased bases, and diagnoses every
+specified affine escape category. This is not yet user-facing facet syntax:
+source/HIR acquisition, application-context descriptor transfer, real semantic
+escape wiring, and balanced compiler-inserted releases remain required.

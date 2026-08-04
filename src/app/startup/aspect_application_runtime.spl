@@ -18,7 +18,9 @@ use compiler.loader.loader.aspect_activation.{
     AspectActivationCoordinator,
     AspectActivationResult
 }
-use compiler.loader.loader.module_loader.{ModuleLoader, moduleloader_unload}
+use compiler.loader.loader.module_loader.{
+    ModuleLoader, moduleloader_with_defaults, moduleloader_unload
+}
 use compiler.loader.loader.facet_binding_registry.{
     FacetBindingRecord, facet_lookup, facet_unbind_generation,
     facet_witness_method_entry
@@ -44,12 +46,21 @@ enum AspectApplicationOperation:
     Unload
     Patch
 
-struct AspectApplicationRuntime:
+# Stable application-owned reference capsule. The coordinator is the canonical
+# aggregate owner of lifecycle and facet/advice publication state; the loader
+# used to validate and invoke those publications lives beside it in this same
+# reference identity.
+class AspectExecutionContext:
     catalog: AspectCatalog
     trust_policy: AspectPackTrustPolicy
     provider_cache: AspectPackProviderCache
     coordinator: AspectActivationCoordinator
+    loader: ModuleLoader
     phase: AspectApplicationPhase
+
+# Compatibility facade: existing constructors, methods, and public fields keep
+# the AspectApplicationRuntime spelling while sharing the stable context.
+type AspectApplicationRuntime = AspectExecutionContext
 
 fn aspect_application_is_mission(policy: AspectPackTrustPolicy) -> bool:
     match policy.profile:
@@ -75,7 +86,7 @@ fn aspect_application_startup_complete(runtime: AspectApplicationRuntime) -> Res
                 return Err("E-APACK008 mission operational transition requires active startup aspect: {entry.aspect_id}")
     Ok(())
 
-impl AspectApplicationRuntime:
+impl AspectExecutionContext:
     static fn create(
         catalog: AspectCatalog,
         dynsmf_session: DynSmfSession,
@@ -84,18 +95,35 @@ impl AspectApplicationRuntime:
         index_capacity: i64,
         chunk_capacity: i64,
         negative_capacity: i64
-    ) -> Result<AspectApplicationRuntime, text>:
+    ) -> Result<AspectExecutionContext, text>:
         if aspect_application_is_mission(trust_policy):
             aspect_application_mission_catalog_valid(catalog)?
         val cache = AspectPackProviderCache.create(index_capacity, chunk_capacity, negative_capacity)?
         val coordinator = AspectActivationCoordinator.create(catalog, dynsmf_session, lifecycle)?
-        Ok(AspectApplicationRuntime(
+        Ok(AspectExecutionContext(
             catalog: catalog,
             trust_policy: trust_policy,
             provider_cache: cache,
             coordinator: coordinator,
+            loader: moduleloader_with_defaults(),
             phase: AspectApplicationPhase.Startup
         ))
+
+    static fn create_with_loader(
+        catalog: AspectCatalog,
+        dynsmf_session: DynSmfSession,
+        lifecycle: LifecycleManager,
+        trust_policy: AspectPackTrustPolicy,
+        loader: ModuleLoader,
+        index_capacity: i64,
+        chunk_capacity: i64,
+        negative_capacity: i64
+    ) -> Result<AspectExecutionContext, text>:
+        val context = AspectExecutionContext.create(
+            catalog, dynsmf_session, lifecycle, trust_policy,
+            index_capacity, chunk_capacity, negative_capacity)?
+        context.loader = loader
+        Ok(context)
 
     fn authorize(operation: AspectApplicationOperation) -> Result<(), text>:
         if not aspect_application_is_mission(self.trust_policy):
@@ -213,6 +241,7 @@ impl AspectApplicationRuntime:
         val activation = self.coordinator.activate_with_loader(
             provider, request, loader, self.provider_cache)
         self.coordinator = activation.coordinator
+        self.loader = loader
         activation
 
     # Mission publication is explicit and irreversible for this process
@@ -296,11 +325,18 @@ impl AspectApplicationRuntime:
         slot_id: text,
         form: text
     ) -> Result<[i64], text>:
+        self.loader = loader
+        self.invoke_prepared_advice(slot_id, form)
+
+    # Intrinsic-facing operation. It can reach dispatch state only through this
+    # reference capsule and always writes the returned canonical lifecycle and
+    # registry values back before exposing success or failure.
+    me fn invoke_prepared_advice(slot_id: text, form: text) -> Result<[i64], text>:
         val outcome = loader_advice_dispatch_projection(
             self.coordinator.advice_projection,
             self.coordinator.advice_bindings,
             self.coordinator.lifecycle,
-            loader, slot_id, form)
+            self.loader, slot_id, form)
         self.coordinator.advice_bindings = outcome.registry
         self.coordinator.lifecycle = outcome.lifecycle
         if outcome.status != "dispatched":
@@ -370,6 +406,7 @@ impl AspectApplicationRuntime:
     # callers release them and retry; no wait loop or forced lease release is
     # hidden here.
     me fn unload_published_aspect(aspect_id: text, loader: ModuleLoader) -> Result<text, text>:
+        self.loader = loader
         self.authorize(AspectApplicationOperation.Unload)?
         if not self.coordinator.published.has(aspect_id):
             return Err("E-AF004 aspect has no published generation: {aspect_id}")
@@ -409,17 +446,17 @@ impl AspectApplicationRuntime:
         # cleanup sequence cannot discover a missing resource halfway through.
         for module_key in activation.module_keys:
             if self.provider_cache.module_ref_count(
-                module_key, loader.lifecycle.smf_cache_mgr) <= 0:
+                module_key, self.loader.lifecycle.smf_cache_mgr) <= 0:
                 return Err("E-APACK003 published aspect module has no cache pin: {module_key.module_id}")
 
         for owner_id in activation.owners:
-            moduleloader_unload(loader, owner_id)
+            moduleloader_unload(self.loader, owner_id)
         for module_key in activation.module_keys:
             self.provider_cache.release_module(
-                module_key, loader.lifecycle.smf_cache_mgr)?
+                module_key, self.loader.lifecycle.smf_cache_mgr)?
         for module_key in activation.module_keys:
             _ = self.provider_cache.invalidate_provider(
-                module_key.provider, loader.lifecycle.smf_cache_mgr)
+                module_key.provider, self.loader.lifecycle.smf_cache_mgr)
 
         val completed = self.coordinator.lifecycle.complete_generation_unload_for(
             activation.activation_key, generation)?
@@ -427,6 +464,17 @@ impl AspectApplicationRuntime:
         self.coordinator.published = self.coordinator.published.remove(aspect_id)
         Ok("unloaded")
 
+# Canonical prepared-advice ABI owner. Backend bridges must pass this typed
+# context reference explicitly; no global/current-context lookup exists.
+fn prepared_advice_dispatch_context_invoke(
+    context: AspectExecutionContext,
+    slot_id: text,
+    form: text
+) -> Result<[i64], text>:
+    context.invoke_prepared_advice(slot_id, form)
+
 export AspectApplicationPhase
 export AspectApplicationOperation
+export AspectExecutionContext
 export AspectApplicationRuntime
+export prepared_advice_dispatch_context_invoke

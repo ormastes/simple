@@ -211,8 +211,11 @@ bookmark is synchronized with GitHub and is rebased onto the current
 
 **STATUS: FAIL** — the earlier catalog/artifact and D1/D2 source slices,
 automatic registry integration, advice publication, and retained NFR harness
-are substantially complete, but release/merge remains blocked by the D4/D5
-execution-context and typed facet-adapter implementation, self-hosted runtime crash,
+are substantially complete. D4 now has the stable execution-context owner,
+typed v2 production/validation, isolation and cleanup coverage; D5 now has the
+typed adapter/descriptor/affine compiler contract. Release/merge remains blocked
+by safe v2 `Result` propagation and ordinary-call rewriting, source/HIR facet
+acquisition and balanced release insertion, the self-hosted runtime crash,
 missing generated-manual/runtime evidence, prepared-advice backend dispatch,
 user-facing facet-call sugar, and absent NFR measurements. The WIP feature bookmark may
 be committed/rebased/pushed for collaboration; no version bump, main push, tag,
