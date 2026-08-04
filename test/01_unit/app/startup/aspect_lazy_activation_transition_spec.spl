@@ -1,5 +1,7 @@
 use std.spec.*
-use compiler.loader.loader.aspect_catalog.{AspectCatalog}
+use compiler.loader.loader.aspect_catalog.{
+    AspectBindingSummary, AspectCatalogEntry, AspectCatalog
+}
 use compiler.loader.loader.aspect_activation.{
     AspectActivationRequest, AspectActivationCoordinator
 }
@@ -8,10 +10,18 @@ use os.smf.smf_generation.{LifecycleManager}
 use std.aop.facet.{FacetAcquireErrorKind, FacetAcquireError}
 use app.startup.aspect_lazy_singleflight.{AspectLazySingleFlight}
 use app.startup.aspect_lifecycle_capture_contract.{AspectFacetQueryBox}
+use app.startup.aspect_pack_io_port.{aspect_pack_io_port_unavailable}
 use app.startup.aspect_lazy_activation_transition.{
+    AspectLazyActivationCapsule,
     aspect_lazy_complete_failure, aspect_lazy_flight_identity,
-    aspect_lazy_reservation_owned, aspect_lazy_cancel_reservation
+    aspect_lazy_reservation_owned, aspect_lazy_cancel_reservation,
+    aspect_lazy_reservation_prepare, aspect_lazy_commit_validate
 }
+
+class LazyTransitionFixture:
+    catalog: AspectCatalog
+    coordinator: AspectActivationCoordinator
+    capsule: AspectLazyActivationCapsule
 
 fn lazy_transition_coordinator() -> AspectActivationCoordinator:
     val catalog = AspectCatalog(
@@ -25,6 +35,49 @@ fn lazy_transition_coordinator() -> AspectActivationCoordinator:
     AspectActivationCoordinator.create(
         catalog, dynsmf_session_new("lazy-transition-test", policy),
         LifecycleManager.new_manager()).unwrap()
+
+fn lazy_transition_catalog() -> AspectCatalog:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    AspectCatalog.create(
+        7, "x86_64-unknown-linux-gnu", "variant-a", "simple-runtime-1",
+        [AspectCatalogEntry(
+            aspect_id: "fixture.debug", pack_id: "fixture-pack",
+            pack_path: "aspects/fixture-pack.sfm", module_id: "fixture.debug",
+            pack_digest: digest, module_digest: digest,
+            core_public_abi_hash: digest, core_layout_abi_hash: digest,
+            target: "x86_64-unknown-linux-gnu",
+            variant_fingerprint: "variant-a",
+            runtime_abi: "simple-runtime-1", dependencies: [],
+            activation_policy: "lazy_facet",
+            binding_summaries: [AspectBindingSummary(
+                binding_id: "fixture.debug.binding",
+                concrete_type_id: "fixture.Cache", business_interface_id: "",
+                facet_interface_id: "Debuggable",
+                facet_contract_abi_hash: "facet-abi-v1",
+                witness_symbol: "fixture_debug_witness",
+                capabilities: ["facet.read"])],
+            prepared_joinpoint_slots: [], advice_summaries: [],
+            capabilities: ["facet.read"]) ]).unwrap()
+
+fn lazy_transition_query() -> AspectFacetQueryBox:
+    AspectFacetQueryBox(
+        concrete_type_id: "fixture.Cache",
+        implemented_business_interfaces: [],
+        facet_interface_id: "Debuggable")
+
+fn lazy_transition_fixture() -> LazyTransitionFixture:
+    val catalog = lazy_transition_catalog()
+    val policy = DynSmfPolicy(
+        disabled_all: false, disabled_ids: [], source: "test")
+    val coordinator = AspectActivationCoordinator.create(
+        catalog, dynsmf_session_new("lazy-transition-test", policy),
+        LifecycleManager.new_manager()).unwrap()
+    val prepared = aspect_lazy_reservation_prepare(
+        catalog, coordinator, lazy_transition_query(), "facet-abi-v1",
+        "request-1", aspect_pack_io_port_unavailable(), Ok(()), false).unwrap()
+    LazyTransitionFixture(
+        catalog: catalog, coordinator: prepared.coordinator,
+        capsule: prepared.capsule.unwrap())
 
 describe "Context-free lazy activation transitions":
     it "builds deterministic identity from sorted business interfaces":
@@ -79,3 +132,82 @@ describe "Context-free lazy activation transitions":
             fail("lazy completion changed the typed failure kind")
         expect(returned.facet_id).to_equal("Debuggable")
         expect(returned.message).to_equal("fixture I/O failed")
+
+    it "rejects a changed module activation key and cancels the exact reservation":
+        val fixture = lazy_transition_fixture()
+        var changed = fixture.catalog
+        changed.entries[0].module_id = "fixture.debug.v2"
+        val outcome = aspect_lazy_commit_validate(
+            changed, fixture.coordinator, fixture.capsule, Ok(()), false)
+        expect(outcome.accepted).to_be(false)
+        expect(outcome.coordinator.in_flight.has(
+            fixture.capsule.activation_key)).to_be(false)
+        expect(outcome.error.unwrap().message).to_contain(
+            "E-APACK001 stale lazy activation commit")
+
+    it "rejects changed provider identity or path and installs cancellation":
+        val provider_fixture = lazy_transition_fixture()
+        var changed_provider = provider_fixture.catalog
+        changed_provider.entries[0].pack_digest =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val provider_outcome = aspect_lazy_commit_validate(
+            changed_provider, provider_fixture.coordinator,
+            provider_fixture.capsule, Ok(()), false)
+        expect(provider_outcome.accepted).to_be(false)
+        expect(provider_outcome.coordinator.in_flight.has(
+            provider_fixture.capsule.activation_key)).to_be(false)
+
+        val path_fixture = lazy_transition_fixture()
+        var changed_path = path_fixture.catalog
+        changed_path.entries[0].pack_path = "aspects/replaced-pack.sfm"
+        val path_outcome = aspect_lazy_commit_validate(
+            changed_path, path_fixture.coordinator,
+            path_fixture.capsule, Ok(()), false)
+        expect(path_outcome.accepted).to_be(false)
+        expect(path_outcome.coordinator.in_flight.has(
+            path_fixture.capsule.activation_key)).to_be(false)
+
+    it "rejects a changed catalog generation and removes only the owned reservation":
+        val fixture = lazy_transition_fixture()
+        fixture.coordinator.in_flight["unrelated:key"] = "request-2"
+        var changed = fixture.catalog
+        changed.generation = 8
+        val outcome = aspect_lazy_commit_validate(
+            changed, fixture.coordinator, fixture.capsule, Ok(()), false)
+        expect(outcome.accepted).to_be(false)
+        expect(outcome.coordinator.in_flight.has(
+            fixture.capsule.activation_key)).to_be(false)
+        expect(outcome.coordinator.in_flight["unrelated:key"]).to_equal(
+            "request-2")
+
+    it "rejects lost reservation ownership without deleting the new owner's claim":
+        val fixture = lazy_transition_fixture()
+        fixture.coordinator.in_flight[fixture.capsule.activation_key] =
+            "replacement-owner"
+        val outcome = aspect_lazy_commit_validate(
+            fixture.catalog, fixture.coordinator, fixture.capsule, Ok(()), false)
+        expect(outcome.accepted).to_be(false)
+        expect(outcome.coordinator.in_flight[
+            fixture.capsule.activation_key]).to_equal("replacement-owner")
+        expect(outcome.error.unwrap().message).to_contain("lost reservation")
+
+    it "cancels the owned reservation when application policy rejects commit":
+        val fixture = lazy_transition_fixture()
+        val outcome = aspect_lazy_commit_validate(
+            fixture.catalog, fixture.coordinator, fixture.capsule,
+            Err("E-APACK008 operational lazy activation denied"), false)
+        expect(outcome.accepted).to_be(false)
+        expect(outcome.coordinator.in_flight.has(
+            fixture.capsule.activation_key)).to_be(false)
+        expect(outcome.error.unwrap().message).to_contain(
+            "operational lazy activation denied")
+
+    it "cancels the owned reservation when dynSMF disables activation":
+        val fixture = lazy_transition_fixture()
+        val outcome = aspect_lazy_commit_validate(
+            fixture.catalog, fixture.coordinator, fixture.capsule, Ok(()), true)
+        expect(outcome.accepted).to_be(false)
+        expect(outcome.coordinator.in_flight.has(
+            fixture.capsule.activation_key)).to_be(false)
+        expect(outcome.error.unwrap().message).to_contain(
+            "E-APACK008 dynSMF policy disabled aspect activation")
