@@ -44,6 +44,35 @@ document WITH text on the same lane and binary (prior session, `probe_vk96.log`
 | pulse red | 240 | **0** | 336 (box-d) |
 | body bg | — | 5376 | 4728 |
 
+### Same-run with-text A/B (64x48, `vulkan_drop_probe.spl` / `.log`, this session)
+
+Both arms in ONE process, one binary, one document (`<h1>Hi</h1>` plus three
+absolutely-sized boxes). Verbatim:
+
+```
+sw_len=3072     vk_len=3072
+sw_body=1656    vk_body=2304
+sw_h1=742       vk_h1=742
+sw_blue=216     vk_blue=0
+sw_green=216    vk_green=0
+sw_amber=216    vk_amber=0
+probe_done
+```
+
+The arithmetic pins the loss exactly:
+
+- `2304 - 1656 = 648 = 3 x 216` — every box pixel came back as **body
+  background**, i.e. the three box rects never landed. Not garbage, not a short
+  buffer: the frame is full-length (3072) and internally consistent.
+- `vk_h1 == sw_h1 == 742` — the h1 background rect, which document-order
+  PRECEDES the text command, painted identically on both lanes.
+- Both arms account for the same 3046 pixels, leaving the same ~26 glyph pixels
+  inside the h1 band on both lanes — so on this document the glyphs themselves
+  did land on the vulkan arm (through the CPU suffix of the font plan). **The
+  loss is confined strictly to the commands that FOLLOW the text draw**, which
+  is precisely the poison-latch signature described below, not a font-rendering
+  failure.
+
 So: rects are fine; text poisons the rest of the frame. The earlier framing
 ("drops all draws after two rect fills") was the *symptom*; the defect is that a
 **failed/incomplete font route publishes a partial frame as if it were
@@ -204,6 +233,9 @@ complete must fall back and say so, never publish a truncated frame.
 
 ## Probe artifacts (scratchpad)
 
+- `vulkan_drop_probe.spl` / `vulkan_drop_probe.log` — **same-run with-text
+  A/B**, 64x48, both backends in one process; box pixels revert to body bg on
+  vulkan while the pre-text h1 rect and the glyphs match software exactly
 - `textfree_ab_probe.spl` / `textfree_ab.log` — **the decisive A/B**, 96x72,
   text-free, vulkan == software on all five boxes, `device_readback`,
   `completion_unknown=false`
