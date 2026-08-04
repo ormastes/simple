@@ -179,6 +179,16 @@ pub(crate) fn instantiate_class(
                 local_env.insert(name, val);
             }
 
+            // Coverage tracking - enabled via SIMPLE_COVERAGE env var.
+            // A `new` body runs through `exec_block_fn` directly rather than
+            // `execute_function_body`, so it is the one function-body path the
+            // choke-point hook in function_exec.rs cannot see. Record it here,
+            // with the same idiom, so a constructor body clears the reporter's
+            // called-function gate like every other body.
+            if let Some(cov) = crate::coverage::get_global_coverage() {
+                cov.lock().unwrap().record_function_call(&new_method.name);
+            }
+
             // Mark this class as currently in its `new` method
             IN_NEW_METHOD.with(|set| set.borrow_mut().insert(class_name.to_string()));
 

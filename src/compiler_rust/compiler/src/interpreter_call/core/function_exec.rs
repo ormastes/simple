@@ -527,6 +527,30 @@ pub(crate) fn execute_function_body(
     impl_methods: &ImplMethods,
     wrap_async: bool,
 ) -> Result<Value, CompileError> {
+    // Coverage tracking - enabled via SIMPLE_COVERAGE env var.
+    //
+    // This is the SINGLE choke point every interpreted function body passes
+    // through, so it is the only place the collector's `functions` section can
+    // see instance-method dispatch. The recording used to live in the three
+    // `exec_function*_inner` helpers plus the writeback variant, all of which
+    // are plain-call paths; `exec_function_with_values_and_self` (class/enum
+    // method dispatch), `exec_function_with_captured_env` (closures/lambdas),
+    // `interpreter_control::exec_method_body` (with-statement + `call_method_if_exists`)
+    // and `interpreter_method::special::execution::exec_function_with_self_return`
+    // (mutating-self dispatch) all reach a body WITHOUT going through them, so
+    // a `me name()` body never entered the map and the reporter's
+    // called-function gate scored it 0 however thoroughly it was tested. See
+    // the KNOWN CAP note in src/app/test_runner_new/test_runner_single.spl.
+    //
+    // Recording here rather than at each entry point is also what keeps the
+    // call counts honest: every one of those entry points funnels into exactly
+    // one `execute_function_body` call, so moving the hook down (and deleting
+    // the four upstream copies) preserves the previous counts exactly instead
+    // of double-counting the paths that already recorded.
+    if let Some(cov) = crate::coverage::get_global_coverage() {
+        cov.lock().unwrap().record_function_call(&func.name);
+    }
+
     // Stack overflow detection: push depth, auto-pop on drop
     let _depth_guard = crate::interpreter::push_call_depth(&func.name)?;
 
@@ -1116,11 +1140,6 @@ fn exec_function_inner(
         crate::runtime_profile::record_full_call(&func.name, self_ctx.map(|(c, _)| c), vec![], call_type);
     }
 
-    // Coverage tracking - enabled via SIMPLE_COVERAGE env var
-    if let Some(cov) = crate::coverage::get_global_coverage() {
-        cov.lock().unwrap().record_function_call(&func.name);
-    }
-
     publish_live_bound_globals(outer_env);
     let mut local_env = captured_env_with_live_globals(func, &Env::new());
 
@@ -1207,10 +1226,6 @@ fn exec_function_with_values_and_writeback_inner(
 
     if crate::runtime_profile::is_profiling_active() {
         crate::runtime_profile::record_full_call(&func.name, None, vec![], crate::runtime_profile::CallType::Direct);
-    }
-
-    if let Some(cov) = crate::coverage::get_global_coverage() {
-        cov.lock().unwrap().record_function_call(&func.name);
     }
 
     publish_live_bound_globals(outer_env);
@@ -1300,11 +1315,6 @@ fn exec_function_with_bound_args_inner(
     // Runtime profiler hooks
     if crate::runtime_profile::is_profiling_active() {
         crate::runtime_profile::record_full_call(&func.name, None, vec![], crate::runtime_profile::CallType::Direct);
-    }
-
-    // Coverage tracking - enabled via SIMPLE_COVERAGE env var
-    if let Some(cov) = crate::coverage::get_global_coverage() {
-        cov.lock().unwrap().record_function_call(&func.name);
     }
 
     publish_live_bound_globals(outer_env);

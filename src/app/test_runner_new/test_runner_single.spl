@@ -360,22 +360,44 @@ fn read_test_result_evidence(path: text) -> (i64, i64, i64):
 # Attribution is heuristic (line numbers are conflated across files), but
 # function-call attribution is exact and bounds the error.
 #
-# KNOWN CAP — instance methods always score 0 (open, needs a seed change).
-# The collector's `functions` section only ever contains free functions and
-# `static fn`s: `record_function_call` is reached from the three plain-call
-# paths in src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs
-# and NOT from instance-method dispatch. A `me name()` body therefore fails the
-# called-function gate no matter how thoroughly it is tested, so every one of
-# its recordable lines reports uncovered. Verified 2026-08-04 against
-# dom_identity_index_spec.spl, which demonstrably calls `contains_route`,
-# `path_for_route`, `event_path_for_route`, `form_owner_for_route` and
-# `radio_members`: none of the five appears in the dump, and 107 of that
-# module's 113 uncovered lines are method bodies. This caps
-# dom_identity_index.spl at ~55% and html_tree_builder.spl (the `_TreeStack`
-# methods) at ~80% — those ceilings are a measurement artefact, not missing
-# tests. Do NOT "fix" this by relaxing the gate for `me` bodies: line numbers
-# are conflated across files, so line-hit alone would credit untaken error
-# branches. The fix belongs in the seed, next to the free-function call sites.
+# FIXED 2026-08-04 — instance methods used to always score 0 (was: KNOWN CAP).
+# The collector's `functions` section used to contain only free functions and
+# `static fn`s, because `record_function_call` was reached from just three of
+# the call paths in
+# src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs
+# (`exec_function_inner`, `exec_function_with_values_and_writeback_inner`,
+# `exec_function_with_bound_args_inner`). Five other body-execution paths
+# bypassed it entirely: `exec_function_with_values_inner`,
+# `exec_function_with_values_and_self` (class/enum method dispatch),
+# `exec_function_with_captured_env` (closures/lambdas),
+# interpreter_control::exec_method_body (`with` + `call_method_if_exists`) and
+# interpreter_method::special::execution::exec_function_with_self_return
+# (mutating-self dispatch). A `me name()` body therefore failed the
+# called-function gate no matter how thoroughly it was tested.
+#
+# The seed fix moved the coverage hook DOWN to `execute_function_body`, the one
+# choke point all eight paths funnel through (and deleted the three upstream
+# copies, so counts did not double), plus one extra hook in
+# interpreter_call/core/class_instantiation.rs for `new` bodies, which run via
+# `exec_block_fn` and so miss the choke point. Measured A/B on two seed binaries
+# built from the same tree, same specs, same .spl sources:
+#
+#   html_tree_builder.spl    75% (210/277)  ->  95% (264/277)
+#   dom_identity_index.spl   52% (123/234)  ->  98% (230/234)
+#   html_tokenizer.spl       97% (377/386)  ->  98% (380/386)   (free-fn control)
+#
+# and the previously-absent method names now appear with real call counts
+# (`push_open` 423, `close_through` 74, `foster_push_open` 1, `contains_route`
+# 5, `path_for_route` 3, `radio_members` 2). Free-function call counts are
+# byte-identical across the two arms (`_dom_attr` 333215, `_dom_route_key`
+# 67213), which is the no-double-count proof.
+#
+# The gate is still doing real work — do NOT relax it. A purpose-built probe
+# module with one called method, one uncalled method, one called free fn and
+# one uncalled free fn scores 5/12, not 12/12: the uncalled bodies stay out of
+# the `functions` dump and their lines stay uncovered. Line numbers are still
+# conflated across files, so line-hit alone would credit untaken error
+# branches; the called-function gate is what bounds that error.
 
 fn _cov_enabled() -> bool:
     val v = env_get("SIMPLE_COVERAGE") ?? ""
