@@ -1,5 +1,5 @@
 use compiler.mir.mir_instruction_graph.{MirBlock, MirInst}
-use compiler.mir.mir_instruction_support.{BlockId, SwitchCase, mir_operand_const_int, mir_operand_copy}
+use compiler.mir.mir_instruction_support.{BlockId, SwitchCase, mir_operand_const_int, mir_operand_const_float, mir_operand_const_bool, mir_operand_copy, mir_operand_move}
 use compiler.mir.mir_instruction_kinds.{MirInstKind, MirTerminator}
 use compiler.mir.mir_types.{LocalId}
 
@@ -276,8 +276,11 @@ describe "bootstrap MIR-to-LLVM owner mutation":
         expect(codegen).to_contain("me translate_terminator_at(blocks: [MirBlock], block_index: i64):")
         expect(codegen).to_contain("val term = block.terminator")
         expect(codegen.contains("self.translate_terminator(block.terminator)")).to_equal(false)
-        expect(codegen).to_contain("val ret_operands: [MirOperand] = [ret_operand]")
-        expect(codegen).to_contain("self.translate_operand_at(ret_operands, 0)")
+        expect(codegen).to_contain("val ret_operands = term.bootstrap_ret_operands()")
+        expect(codegen).to_contain("self.translate_ret_operand_at(ret_operands, 0, block_index)")
+        expect(codegen).to_contain("me translate_ret_operand_at(operands: [MirOperand], index: i64, block_index: i64):")
+        expect(codegen.contains("value ?? mir_operand_const_int(0)")).to_equal(false)
+        expect(codegen.contains("val ret_operand: MirOperand")).to_equal(false)
         expect(codegen).to_contain("val target_id = target.bootstrap_value()")
         expect(codegen).to_contain("val then_id = then_.bootstrap_value()")
         expect(codegen).to_contain("val else_id = else_.bootstrap_value()")
@@ -286,11 +289,15 @@ describe "bootstrap MIR-to-LLVM owner mutation":
         expect(codegen).to_contain("val dest_id = if has_dest: (dest ?? LocalId(id: 0)).id else: 0")
         expect(support).to_contain("fn bootstrap_value() -> i64:")
         expect(support).to_contain("fn bootstrap_target_value() -> i64:")
+        expect(support).to_contain("fn bootstrap_ret_operands() -> [MirOperand]:")
 
     it "keeps indexed terminator variants and nonsequential ids intact":
         val ret_nil = MirTerminator.Ret(nil)
         val ret_const = MirTerminator.Ret(Some(mir_operand_const_int(7)))
+        val ret_float = MirTerminator.Ret(Some(mir_operand_const_float(2.5)))
+        val ret_bool = MirTerminator.Ret(Some(mir_operand_const_bool(true)))
         val ret_copy = MirTerminator.Ret(Some(mir_operand_copy(LocalId(id: 4))))
+        val ret_move = MirTerminator.Ret(Some(mir_operand_move(LocalId(id: 5))))
         val goto = MirTerminator.Goto(BlockId(id: 41))
         val if_ = MirTerminator.If(mir_operand_const_int(1), BlockId(id: 53), BlockId(id: 79))
         val switch = MirTerminator.Switch(
@@ -308,18 +315,39 @@ describe "bootstrap MIR-to-LLVM owner mutation":
             [mir_operand_const_int(3)], BlockId(id: 163), Some(BlockId(id: 181))
         )
 
-        match ret_nil:
-            case MirTerminator.Ret(value): expect(value == nil).to_equal(true)
-            case _: expect(false).to_equal(true)
-        match ret_const:
-            case MirTerminator.Ret(value): expect(value != nil).to_equal(true)
-            case _: expect(false).to_equal(true)
-        match ret_copy:
-            case MirTerminator.Ret(value):
-                val operand = value ?? mir_operand_const_int(0)
-                match operand.kind:
-                    case Copy(local): expect(local.id).to_equal(4)
+        expect(ret_nil.bootstrap_ret_operands().len()).to_equal(0)
+        expect(goto.bootstrap_ret_operands().len()).to_equal(0)
+        val const_operands = ret_const.bootstrap_ret_operands()
+        val float_operands = ret_float.bootstrap_ret_operands()
+        val bool_operands = ret_bool.bootstrap_ret_operands()
+        val copy_operands = ret_copy.bootstrap_ret_operands()
+        val move_operands = ret_move.bootstrap_ret_operands()
+        expect(const_operands.len()).to_equal(1)
+        expect(float_operands.len()).to_equal(1)
+        expect(bool_operands.len()).to_equal(1)
+        match const_operands[0].kind:
+            case Const(value, _):
+                match value:
+                    case Int(v): expect(v).to_equal(7)
                     case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+        match float_operands[0].kind:
+            case Const(value, _):
+                match value:
+                    case Float(v): expect(v).to_equal(2.5)
+                    case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+        match bool_operands[0].kind:
+            case Const(value, _):
+                match value:
+                    case Bool(v): expect(v).to_equal(true)
+                    case _: expect(false).to_equal(true)
+            case _: expect(false).to_equal(true)
+        match copy_operands[0].kind:
+            case Copy(local): expect(local.id).to_equal(4)
+            case _: expect(false).to_equal(true)
+        match move_operands[0].kind:
+            case Move(local): expect(local.id).to_equal(5)
             case _: expect(false).to_equal(true)
         match goto:
             case MirTerminator.Goto(target): expect(target.bootstrap_value()).to_equal(41)
@@ -364,6 +392,8 @@ describe "bootstrap MIR-to-LLVM owner mutation":
         expect(codegen).to_contain("[mir-to-llvm] terminator:entry")
         expect(codegen).to_contain("[mir-to-llvm] terminator:kind")
         expect(codegen).to_contain("[mir-to-llvm] terminator:ret")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:ret-operand-entry")
+        expect(codegen).to_contain("[mir-to-llvm] terminator:ret-operand-kind")
         expect(codegen).to_contain("[mir-to-llvm] terminator:goto")
         expect(codegen).to_contain("[mir-to-llvm] terminator:if")
         expect(codegen).to_contain("[mir-to-llvm] terminator:switch")
