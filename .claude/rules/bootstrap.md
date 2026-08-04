@@ -32,6 +32,30 @@ bootstrap). The Rust seed (`src/compiler_rust/target/bootstrap/simple`) is
 - **`bin/release/simple` is fully self-sufficient** — in-process compilation, no subprocess calls
 - External tool calls: `clang`/`clang++`/`cl.exe`, `gcc`, `mold`/`lld`/`link.exe`, `llc`, `uname`/`cmd`, `which`/`where`
 
+## LLVM provider baseline — Clang/LLVM 23.1
+
+**Authoritative external LLVM backend baseline:** a coherent Clang/LLVM **23.1**
+provider. Pure-Simple `--backend=llvm`, hosted native builds, and SimpleOS
+toolchain work must resolve `clang`, `ld.lld`, and `llvm-config` from that one
+provider prefix. Set `LLVM_23_1_PREFIX` for shell helpers and
+`SIMPLE_LLVM_PREFIX` for the pure-Simple compiler; normally they name the same
+installation. A missing, mixed-version, or non-23.1 provider is a direct setup
+failure — the wrapper must **not silently fall back** to Cranelift, a system
+LLVM, or the Rust seed.
+
+The release target is the final LLVM/Clang 23.1 series. Until a final 23.1
+archive is published and accepted by the provider verification gate, the
+current reproducible provider pin is upstream `llvmorg-23.1.0-rc2`; it is an
+RC provider, **not** a claim that the final release is installed. Build and
+verify it with `scripts/setup/build-llvm-23-1-provider.shs`, then retain the
+reported version and provider identity with bootstrap evidence.
+
+LLVM 18 remains an explicit historical/rollback boundary only: the Rust
+in-process `inkwell`/`llvm-sys` feature still uses `llvm18-0` and
+`LLVM_SYS_180_PREFIX`. That legacy feature does not make the external
+pure-Simple 23.1 provider path LLVM-18-based, and selecting it is an explicit
+operator rollback/maintenance action rather than an automatic fallback.
+
 ## Incremental: Rebuild Only Pure-Simple
 Normal bootstrap is pure-Simple-only. It reuses the existing Rust seed/runtime
 and does not run cargo, even when Rust source hashes changed:
