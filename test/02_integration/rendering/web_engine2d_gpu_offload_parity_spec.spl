@@ -223,13 +223,29 @@ fn _source_is_device(source: text) -> bool:
 fn _source_is_cpu(source: text) -> bool:
     source == "cpu_mirror" or source == "cpu_fallback"
 
-# Sources that mean the device produced nothing at all this attempt.
+# Sources that mean the device produced nothing at all this attempt. These carry
+# an EMPTY pixel array. `device_identity_unknown` comes from backend_cuda.spl:1050
+# (the device->host copy SUCCEEDED but cuda_device_identity() returned <= 0);
+# `preflight_rejected` from draw_ir_adv.spl:1970,1974; `unavailable` from
+# simple_web_layout_engine2d_fast.spl:704,720.
 fn _source_is_no_frame(source: text) -> bool:
     source == "completion_unknown" or source == "readback_failed" or
-        source == "not_requested"
+        source == "not_requested" or source == "device_identity_unknown" or
+        source == "preflight_rejected" or source == "unavailable"
+
+# A frame that is real but UNATTRIBUTED. `cache` (simple_web_engine2d_renderer.spl:172,
+# via cached_result_for_html) replays self.last_pixels when the same html +
+# render_mode + content_revision is rendered again. It carries a genuine frame,
+# so it is not a no-frame outcome — but nothing about it attributes the pixels to
+# a device, so it must never count as device-sourced either. This spec imports
+# that renderer, so the label is reachable here and would otherwise fail closed
+# as an UNKNOWN READBACK SOURCE, which is a false red rather than a caught defect.
+fn _source_is_unattributed(source: text) -> bool:
+    source == "cache"
 
 fn _source_is_known(source: text) -> bool:
-    _source_is_device(source) or _source_is_cpu(source) or _source_is_no_frame(source)
+    _source_is_device(source) or _source_is_cpu(source) or
+        _source_is_no_frame(source) or _source_is_unattributed(source)
 
 # Honest-provenance invariants. These hold for EVERY outcome on EVERY lane and
 # are asserted unconditionally — this is where the spec keeps its teeth. A
@@ -279,6 +295,8 @@ fn _report_outcome(label: text, source: text, handle: i64, identity: i64, pixel_
         print "[offload-gpu] {label}: GPU BRANCH SKIPPED — the device was unavailable at use time (source=cpu_fallback); the probe's lane prediction did not survive to the create. This example proves NOTHING about the GPU offload path"
     else if source == "cpu_mirror":
         print "[offload-gpu] {label}: GPU BRANCH SKIPPED — CPU/software lane (source=cpu_mirror); this example proves NOTHING about the GPU offload path"
+    else if _source_is_unattributed(source):
+        print "[offload-gpu] {label}: GPU BRANCH SKIPPED — replayed cached pixels (source={source}); a frame exists but NOTHING attributes it to a device. This example proves NOTHING about the GPU offload path"
     else:
         print "[offload-gpu] {label}: GPU BRANCH SKIPPED — no frame produced (source={source}); this example proves NOTHING about the GPU offload path"
     false
