@@ -1,8 +1,11 @@
 # Trait conformance check is name-only — arity and parameter types are never compared
 
-- **Status:** OPEN — mechanism confirmed; drift census complete and closed to 0
-  known Tier-A pairs. The check itself is still **not armed**; see
+- **Status:** OPEN — mechanism confirmed; census complete, re-run by a pure-Simple
+  checker that scores **3,928 Tier-A method pairs at 0 arity drift**, and the
+  census's residual unknowns (the 20 unscorable pairs and the 40 not-found
+  traits) are now closed. The check itself is still **not armed**; see
   *Before the arity check can be switched on* at the end of this file.
+- **Standing gate:** `scripts/check/check-trait-arity.spl` (pure Simple).
 - **Found:** 2026-08-04, while closing the `MirTextCodegen` / `MirToLlvm` break (`4670db2d31f2`)
 - **Severity:** latent, repo-wide. A trait declaration can disagree with its
   implementer on argument count and the compiler stays silent.
@@ -319,6 +322,11 @@ touched by the proposed arity check, and all but one live in
 
 ### Residual error modes of the census
 
+> **Partly SUPERSEDED.** The first bullet's two unknowns (40 not-found traits,
+> 20 unscorable pairs) are closed in *Steps 3-5 closed* below, and the guess
+> that the 40 are "almost certainly built-in or Rust-side traits" was **wrong** —
+> 37 are ordinary `.spl` declarations the census's regexes could not match.
+
 Stated so the next reader can bound the claim rather than inherit it:
 
 - **123 of 875 impl blocks are not fully scored.** 40 blocks name a trait with
@@ -344,7 +352,201 @@ Stated so the next reader can bound the claim rather than inherit it:
   them is double-counted. Both copies must be fixed; there is one defect.
 
 Scripts: `scratchpad/census2.py` (parser) and `scratchpad/score2.py` (scorer),
-with the control fixture in `scratchpad/ctrl/`.
+with the control fixture in `scratchpad/ctrl/`. **Superseded** — those violate
+the repo's "ALL code in `.spl`/`.shs`" rule and each of the residual unknowns
+above turned out to be an artefact of their parser. Replaced by
+`scripts/check/check-trait-arity.spl`; see the next section.
+
+## Steps 3-5 closed, and the census ported to Simple (2026-08-04)
+
+Verified in a pristine detached worktree at origin tip `34e7d0f303b`.
+
+### The checker
+
+`scripts/check/check-trait-arity.spl` — pure Simple, ~940 lines, one file, no
+dependencies beyond `std.nogc_sync_mut.io_runtime`. It scores **Tier A only**
+(`impl T for Y:` against the trait declaration it resolves to), because Tier A
+is exactly what the live check at `interpreter_eval.rs:985` gates; Tier B is a
+dispatch advisory, not something arming the check would fire on.
+
+    bin/simple run scripts/check/check-trait-arity.spl              # roots src test
+    bin/simple run scripts/check/check-trait-arity.spl --selftest
+    bin/simple run scripts/check/check-trait-arity.spl --list-unscorable
+
+Verdict is the last line of stdout: `PASS`(0) / `FAIL`(1) / `ERROR — nothing was
+scored`(2). Whole-tree run takes ~12s.
+
+The positive control is **embedded in the checker and written to a temp
+directory at run time**, not checked in — a deliberately-drifted `.spl` in the
+repo would otherwise be picked up by lint or a tree sweep, and a checked-in
+fixture can drift away from the checker it guards. It runs **before every scan
+and is fatal**: nine planted cases, six that must fire (over-arity,
+under-arity, `me fn`, bare `me`, `pub trait`, `extends`) and three that must
+stay silent (generic-comma parameter, mixed `self`/`me` receivers, return-type-
+only difference). Six independent sabotages of the implementation were each
+confirmed to fail the control while the clean checker passes.
+
+The control is a unit-level guard, so it was backed by an **end-to-end proof on
+the real tree**: widening `Riscv64VirtioBlkAdapter.read_sector`
+(`src/os/services/vfs/riscv64_virtio_blk_adapter.spl:23`) from one parameter to
+two made the checker exit 1 with
+
+    BlockDevice.read_sector on Riscv64VirtioBlkAdapter: trait=1 impl=2 [import] …:23
+    FAIL -- 1 Tier-A arity drift(s)
+
+and the tree was restored to 0 `src/` diff. The `[import]` resolution mode in
+that line is itself the proof that the `pub use` re-export hop works: the impl
+file names `os.services.block_device`, and only the hop reaches the declaring
+module. The first attempt at this injection **silently did nothing** — the
+`sed` pattern matched `fn read_sector` while the real declaration is `me fn
+read_sector`, and the run came back PASS. A green result from an injection that
+did not land looks exactly like a working checker.
+
+One control case had to be redesigned: the generic-comma guard was originally
+symmetric (`Result<Any, Any>` on both sides), and a sabotage that disabled the
+re-join **still passed**, because both sides then miscounted identically and
+the drift cancelled. The control now puts the generic on the trait side only.
+A symmetric control case cannot detect a symmetric bug.
+
+### Results, and what the Python census had wrong
+
+| | census (`f4a4703f0fb`) | checker (`34e7d0f303b`) |
+|---|---|---|
+| files scanned | 35,253 | 35,254 (`.`) / 34,041 (`src test`) |
+| trait declarations | 589 | 617 |
+| `impl T for Y:` blocks | 875 | 913 |
+| **Tier-A method pairs scored** | 2,300 | **3,928** |
+| **Tier-A arity drift** | 0 (after 2 fixes) | **0** |
+| unscorable | 20 | 4 |
+| methods under a not-found trait | 40 (9 names) | 3 (2 names) |
+
+The +1,628 newly scored pairs and the collapse of both unknown buckets come
+from three declaration forms the census's regexes could not see. Each is now
+covered by its own control case:
+
+1. **`pub trait X:`** — `trait_hdr` was anchored `^(\s*)trait\s+`, with no `pub`
+   alternative. 19 declarations repo-wide were invisible, including both generic
+   `ContextManager<T>` declarations and six of the nine "not-found" trait names.
+2. **`trait X extends A, B:`** — the header regex allowed `<...>` and `(...)`
+   after the name but not `extends`. 1 declaration (`SdnHandler`).
+3. **bare `me name(...)`** — `fn_start` required a literal `fn` keyword, so the
+   receiver-shorthand method form was dropped entirely. ~19.5k such declarations
+   exist in the tree. This is the single largest coverage gain, and it is a
+   *different* bug from the `me fn` one the census already fixed.
+
+Two further resolver defects were found and fixed while porting, both of which
+silently *inflated* the unscorable count rather than hiding drift:
+
+4. **A `./`-prefixed root defeated module-id derivation.** Running against `.`
+   left paths as `./src/lib/...`, so the `src/` strip never fired, no `std.`
+   tier-skipping alias was produced, and every multi-declaration trait fell
+   through to AMBIGUOUS. Fixing it took unscorable from 38 to 12 and resolved
+   the whole `RenderBackend3D` family.
+5. **`pub use` re-exports were followed zero hops, not one.** The census claimed
+   one hop; neither implementation had it. Adding a single hop took unscorable
+   from 12 to 4 and resolved all eight remaining `src/os/**` `BlockDevice`
+   records, which name `os.services.block_device` (a `pub use` shim) rather than
+   the declaring module.
+
+### Step 3 — the 20 unscorable pairs: all clean, 0 drift
+
+Each was pinned by hand; the checker independently agrees.
+
+| family | n | verdict |
+|---|---|---|
+| `Hash.hash` on `SymbolId`, `BinaryRef` | 2 | **clean** — impl arity 0 and *both* candidates arity 0, so the pair is decidable without pinning the declaration at all. (Return types differ, `u64` vs `i64`; not an arity matter.) |
+| `ContextManager.__enter__` on `MmapRegion`/`File` | 5 | **clean** — resolves to `pub trait ContextManager<T>`, arity 0. |
+| `ContextManager.__exit__` on `MmapRegion`/`File` | 5 | **clean** — the impls are `impl ContextManager<T> for …` and resolve to `pub trait ContextManager<T>`, whose `__exit__(exc)` is **arity 1**, matching. The census saw only the two *non-generic* `ContextManager` declarations (Python-style `__exit__(exc_type, exc_value, traceback)`, arity 3) because its regex rejected `pub`, which is what made this family look like a 1-vs-3 drift. Declarations: `src/compiler_rust/lib/std/src/file/context.spl:17` and `.../host/common/io/fs_types.spl:552`. |
+| `Iterator.next` on `DirEntries` | 1 | **clean** — all 12 candidate declarations are arity 0. |
+| `Deserializable.deserialize` on `Point` | 3 | **clean** — both candidates arity 1, matching. |
+| `BlockDevice.read_sector` | 4 | **clean** — all four `use os.services.block_device.{BlockDevice}`, which is a one-hop `pub use` re-export of `src/lib/nogc_sync_mut/fs_driver/block_device.spl:6`, `fn read_sector(lba) -> Result<[u8], text>`. All four impls are arity 1 with that exact return type. |
+
+**20 of 20 clean. No Tier-A drift was hiding in the unscorable set.**
+
+The 4 that remain unscorable in the checker are the `ContextManager.__exit__`
+records above: two arity-1 and two arity-3 declarations of the same trait name
+are all reachable, and the impls' `use host.common.io.*` glob does not separate
+them textually. Every one has impl arity 1, matching the generic declaration
+the `impl ContextManager<T> for …` header names. Reviewed, not unknown.
+
+### Step 4 — the 40 not-found traits: 37 found, 1 generated, 2 genuinely missing
+
+| trait | methods | verdict |
+|---|---|---|
+| `AsyncContextManager` | 8 | **found** — `pub trait AsyncContextManager<T>` ×3 (`file/context.spl:22`, `host/common/io/fs_types.spl:557`, `host/common/net/tcp.spl:286`) |
+| `LanguageProvider` | 7 | **found** — `pub trait`, `mcp/multi_lang/__init__.spl:42` |
+| `Generator` | 7 | **found** — `pub trait Generator<T>`, `spec/property/generators.spl:9` |
+| `LanguageCompiler` | 6 | **found** — `pub trait`, `tooling/compiler/compiler_interface_impl.spl:14` |
+| `SnapshotFormatter` | 5 | **found** — `pub trait`, `spec/snapshot/formats.spl:9` |
+| `ResourceProvider` | 3 | **found** — `pub trait`, `mcp/core/provider.spl:8` |
+| `SdnHandler` | 1 | **found** — `trait SdnHandler extends DataHandler, OpHandler:`, `sdn/handler.spl:32` |
+| `Greeter190` | 1 | **generated** — declared inside an `r"""…"""` fixture string in `test/03_system/compiler/trait_default_cross_module_codegen_regression_spec.spl:88`; the `impl` at `:109` is inside the same raw string. Source of a generated module, not tree source. Correctly unscorable. |
+| `IntoAction` | 2 | **GENUINELY MISSING — new finding.** See below. |
+
+None of the 37 is a compiler built-in; all are ordinary `.spl` declarations the
+census's parser could not match. The doc's earlier guess — "almost certainly
+built-in or Rust-side traits" — was wrong, and would have left the tree looking
+cleaner than it is.
+
+**`IntoAction` is declared nowhere.** `test/01_unit/app/ui/typed_action_spec.spl`
+(and its byte-identical duplicate `test/unit/app/ui/typed_action_spec.spl`) has
+
+    use common.ui.action.{Action, CommonAction, IntoAction}
+    …
+    impl IntoAction for AppAction:
+        fn into_action(self) -> Action: …
+
+but `src/lib/common/ui/action.spl` declares only `class Action:`. Neither
+`IntoAction` nor `CommonAction` exists anywhere in the tree — the only two files
+mentioning either name are the two copies of this spec. Because an unresolved
+`use` is only a warning (exit 0), the spec has been passing while conforming to
+a trait that does not exist. Filed as a separate defect rather than fixed here:
+it is a UI-lane feature gap, not trait-arity work, and it is invisible to the
+arity check either way (a trait with no declaration cannot drift from one).
+
+### Step 5 — `Filesystem.mkdir` on `DbFsDriver`: DECIDED
+
+The trait implementation is correct and the inherent method is **dead code**.
+
+| | site | signature |
+|---|---|---|
+| VFS trait | `src/os/services/vfs/vfs.spl:38` | `fn mkdir(path: text) -> Result<bool, text>` |
+| trait impl | `dbfs_filesystem_ops.spl:246` (in `impl Filesystem for DbFsDriver` at `:112`) | `me fn mkdir(path: text) -> Result<bool, text>` — matches; body calls `self.mkdir_path(path, 0o755)` |
+| inherent | `dbfs_driver.spl:1022` (in `impl DbFsDriver:` at `:398`) | `fn mkdir(path: text, mode: u32) -> Result<(), FsError>`, docstring *"Alias for mkdir_path (direct driver API)"*, body `self.mkdir_path(path, mode)` |
+
+The lane did not need to be exercised, because the ambiguity the census worried
+about does not exist at any call site: **every caller of the two-argument POSIX
+form calls `mkdir_path`, not `mkdir`** — `src/lib/nogc_async_mut/fs_driver/instance.spl:119`
+and `mount_table.spl:94` both do `d.mkdir_path(path, mode)`. A repo-wide sweep
+of `.mkdir(` finds no call on a `DbFsDriver` value at all. The two-argument
+inherent `mkdir` therefore has **zero callers**; it is a pass-through alias
+sitting on a trait method's name, and an identical uncalled alias exists at
+`src/lib/nogc_sync_mut/db/dbfs_engine/fs_driver.spl:365`.
+
+**Recommendation for the DBFS owner (not applied here):** delete both uncalled
+`mkdir(path, mode)` aliases and keep `mkdir_path` as the direct driver API, per
+*NEVER add unused code — delete completely*. It is not a blocker for arming the
+arity check: it is Tier B, and the check never sees inherent `impl Y:` blocks.
+Left to the DBFS lane's own change rather than edited blind from here.
+
+### Residual error modes of the checker
+
+Narrower than the census's, but not empty:
+
+- **Parameter types are still not compared**, only arity. `f(a: u64)` against
+  `f(a: text)` is invisible. Return types are parsed but not gated (the census's
+  9 real return divergences are unchanged and untouched).
+- **4 pairs remain unscorable** (`ContextManager.__exit__`, above) — reviewed and
+  clean, but resolved by hand rather than by the tool.
+- **Import resolution is textual**, one `pub use` hop, and is not the compiler's
+  resolver. A glob (`use host.common.io.*`) is matched as a literal string, so
+  it never separates same-named declarations.
+- **Raw-string fixtures are parsed as source** (`Greeter190`). Harmless while
+  such blocks only ever land in the not-found bucket.
+- **Tier B is not scored at all.** The census's 9 Tier-B records stand as its
+  last word on inherent-method shadowing.
+- **Duplicated test trees still double-count** (`test/01_unit` vs `test/unit`,
+  etc.). Both copies of any finding must be fixed; there is one defect.
 
 ## Before the arity check can be switched on
 
@@ -357,18 +559,19 @@ arm the check. Checklist:
 
 1. ~~Fix `MirTextCodegen.translate_function`~~ — done, `f4a4703f0fb`.
 2. ~~Fix `MockFat32BlockDevice.read_sector` in both duplicate copies~~ — done here.
-3. **Score the 20 unscorable pairs.** They are the only place a Tier-A drift can
-   still be hiding. Each needs its trait declaration pinned by hand
-   (`ContextManager.__enter__`/`__exit__` on `MmapRegion`/`File`, `Hash.hash` on
-   `SymbolId`/`BinaryRef`, `Iterator.next` on `DirEntries`, and the rest listed
-   in `scratchpad/drift2.json`).
-4. **Resolve the 40 not-found traits.** Confirm they are compiler built-ins with
-   no `.spl` declaration; if any is a real trait the census failed to parse, it
-   is unscored, not clean.
-5. **Decide `Filesystem.mkdir` on `DbFsDriver`** (class (c) above).
-6. **Re-run the census and require 0 Tier-A arity drift**, with the positive
-   control passing in the same run. A zero from a scorer whose control was not
-   also exercised proves nothing.
+3. ~~Score the 20 unscorable pairs~~ — done. All 20 clean, 0 drift; 6 of the 9
+   families were artefacts of the census's `pub trait` blind spot. See *Step 3*.
+4. ~~Resolve the 40 not-found traits~~ — done. 37 found (ordinary `.spl`
+   declarations, **not** built-ins), 1 generated fixture, 2 genuinely missing
+   (`IntoAction`, filed separately). See *Step 4*.
+5. ~~Decide `Filesystem.mkdir` on `DbFsDriver`~~ — done. Trait impl correct; the
+   inherent 2-arg `mkdir` has zero callers. Deletion recommended to the DBFS
+   owner; not a blocker (Tier B). See *Step 5*.
+6. ~~Re-run the census and require 0 Tier-A arity drift, with the positive
+   control passing in the same run~~ — done, by
+   `scripts/check/check-trait-arity.spl`: **3,928 Tier-A pairs, 0 arity drift**,
+   control fatal and run before the scan. 6 sabotages of the implementation each
+   confirmed to fail the control.
 7. **Only then** add the comparison, and add it with the receiver normalisation
    the census uses (`self`/`me`/`&self`/`&mut self` dropped from both sides) —
    the two receiver conventions are both live and a naive `params.len()` would
@@ -380,6 +583,16 @@ arm the check. Checklist:
    the JIT hole; the nil-sentinel-`3` silent-wrong-value behaviour under the
    default engine is a separate defect and is not addressed by any of this.
 
-A standing gate is worth more than a one-off census: `scratchpad/census2.py` +
-`score2.py` should become a `scripts/check/` lint that fails on any new Tier-A
-arity drift, so this cannot re-accumulate between campaigns.
+A standing gate is worth more than a one-off census — **done**:
+`scripts/check/check-trait-arity.spl` fails on any new Tier-A arity drift, so
+this cannot re-accumulate between campaigns. It is pure Simple, not the Python
+it replaces; the repo forbids Python and Bash outside the three bootstrap
+scripts, and porting rather than copying is what surfaced the three declaration
+forms the census could not parse.
+
+**Steps 1-6 are closed; 7, 8 and 9 remain before the check is armed.** The two
+that still gate arming are both in step 7 and step 8: receiver normalisation
+must be applied on both sides (the checker's `is_receiver` is the reference
+implementation — `self`, `me`, `&self`, `&mut self`, `mut self`), and the
+first-failure-only `return Err` must become collect-all first, or the first
+arity error will hide the next one exactly as the `MirTextCodegen` break did.
