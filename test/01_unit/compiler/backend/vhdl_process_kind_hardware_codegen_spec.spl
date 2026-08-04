@@ -1,0 +1,46 @@
+use std.spec.{describe, it, expect}
+use compiler.backend.backend.vhdl_backend.{VhdlBackend}
+use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
+use compiler.backend.hardware_codegen_types.{HardwareCodegen, VhdlProcessKind}
+use compiler.mir.mir_data.{VhdlClockDomain, VhdlClockEdge, MirBlock, BlockId, MirTerminator}
+use compiler.common.attributes.{VhdlResetPolarity, VhdlResetSynchrony}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn empty_process_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("process_body"),
+        instructions: [],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+describe "VHDL process kind canonical hardware-codegen ownership":
+    it "passes the MIR payload through the compatibility trait surface":
+        val domain = VhdlClockDomain(
+            name: "core",
+            clock_signal: "clk23",
+            reset_signal: Some("rst23_n"),
+            reset_polarity: VhdlResetPolarity.ActiveLow,
+            reset_synchrony: VhdlResetSynchrony.Async,
+            edge: VhdlClockEdge.Falling
+        )
+        var backend = VhdlBackend.create(CodegenTarget.Riscv32, compileoptions_default_options())
+        val result = backend.compile_process(VhdlProcessKind.AsyncReset(domain), empty_process_block())
+        expect(result.is_ok()).to_be(true)
+        val output = result.unwrap()
+        expect(output).to_contain("label_0: process(clk23, rst23_n)")
+        expect(output).to_contain("if rst23_n = '0' then")
+        expect(output).to_contain("-- async reset branch")
+        expect(output).to_contain("if falling_edge(clk23) then")
+        expect(output).to_contain("end process label_0;")
+
+    it "keeps one enum declaration and compatibility re-exports":
+        val mir_source = rt_file_read_text("src/compiler/50.mir/mir_instruction_support.spl")
+        val common_source = rt_file_read_text("src/compiler/70.backend/backend/common/hardware_codegen.spl")
+        val facade_source = rt_file_read_text("src/compiler/70.backend/backend/hardware_codegen_types.spl")
+        expect(mir_source).to_contain("enum VhdlProcessKind:")
+        expect(common_source.contains("enum VhdlProcessKind:")).to_be(false)
+        expect(facade_source.contains("enum VhdlProcessKind:")).to_be(false)
+        expect(common_source).to_contain("export use compiler.mir.mir_instruction_support.{VhdlProcessKind}")
+        expect(facade_source).to_contain("export use compiler.mir.mir_instruction_support.{VhdlProcessKind}")

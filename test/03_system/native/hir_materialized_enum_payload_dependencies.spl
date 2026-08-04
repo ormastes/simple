@@ -22,8 +22,8 @@ fn named(name: text) -> Type:
 
 fn main() -> i64:
     val log = Logger(level: 0)
-    val support_source = "pub struct GpuBarrierScope:\n    value: i64\npub struct OtherBarrierScope:\n    value: i64\npub struct BoundPayload:\n    value: i64\npub struct DefaultPayload:\n    value: i64\npub trait TraitX:\n    fn trait_value() -> i64\npub trait OtherTraitX:\n    fn other_trait_value() -> i64"
-    val owner_source = "use payload.support.\{GpuBarrierScope, BoundPayload, DefaultPayload, TraitX as AliasT\}\npub enum MirInstKind:\n    Barrier(scope: GpuBarrierScope)\npub enum GenericKind<T>:\n    Item(value: T)\npub enum TraitBoundKind<T>:\n    Item(value: T)"
+    val support_source = "pub struct GpuBarrierScope:\n    value: i64\npub struct OtherBarrierScope:\n    value: i64\npub struct BoundPayload:\n    value: i64\npub struct DefaultPayload:\n    value: i64\npub struct ConflictingPayloadAlias:\n    value: i64\npub trait TraitX:\n    fn trait_value() -> i64\npub trait OtherTraitX:\n    fn other_trait_value() -> i64"
+    val owner_source = "use payload.support.\{GpuBarrierScope, BoundPayload, DefaultPayload, TraitX as AliasT\}\npub struct AliasTarget:\n    value: i64\ntype PayloadAlias = AliasTarget\npub enum AliasPayloadKind:\n    Item(value: PayloadAlias)\npub enum MirInstKind:\n    Barrier(scope: GpuBarrierScope)\npub enum GenericKind<T>:\n    Item(value: T)\npub enum TraitBoundKind<T>:\n    Item(value: T)\nexport AliasTarget, PayloadAlias, AliasPayloadKind"
     val facade_source = "export use exact.owner.\{MirInstKind, GenericKind, TraitBoundKind\}"
     val consumer_source = "use consumer.facade.\{MirInstKind\}\nfn consume(value: MirInstKind) -> MirInstKind:\n    value"
     val support = parse_full_frontend(support_source, "payload.support", "payload.support", log)
@@ -109,6 +109,32 @@ fn main() -> i64:
     if not trait_collision.symbols.symbols.has(trait_collision_raw): rt_exit(66)
     val trait_collision_symbol = trait_collision.symbols.symbols[trait_collision_raw]
     if trait_collision_symbol.name != "OtherTraitX": rt_exit(67)
+
+    # A compatibility alias prebound before its payload enum must retain the
+    # concrete terminal owner and must not collide with its own alias spelling.
+    var alias_exact = hirlowering_for_module("consumer.main", surfaces)
+    alias_exact.register_imported_symbol(owner_surface, "exact.owner", "PayloadAlias", "PayloadAlias", Span.empty(), false)
+    alias_exact.register_imported_symbol(owner_surface, "exact.owner", "AliasPayloadKind", "AliasPayloadKind", Span.empty(), true)
+    if alias_exact.errors.len() != 0: rt_exit(79)
+    val alias_exact_id = alias_exact.symbols.lookup_or_invalid("PayloadAlias")
+    if not alias_exact_id.is_valid(): rt_exit(80)
+    val alias_exact_raw = alias_exact_id.id
+    if not alias_exact.symbols.symbols.has(alias_exact_raw): rt_exit(81)
+    val alias_exact_symbol = alias_exact.symbols.symbols[alias_exact_raw]
+    if alias_exact_symbol.name != "AliasTarget": rt_exit(82)
+
+    # An adjacent, genuinely different struct prebound under the alias name
+    # still fails closed and preserves the first physical binding.
+    var alias_collision = hirlowering_for_module("consumer.main", surfaces)
+    alias_collision.register_imported_symbol(support_surface, "payload.support", "ConflictingPayloadAlias", "PayloadAlias", Span.empty(), false)
+    alias_collision.register_imported_symbol(owner_surface, "exact.owner", "AliasPayloadKind", "AliasPayloadKind", Span.empty(), true)
+    if alias_collision.errors.len() == 0: rt_exit(83)
+    val alias_collision_id = alias_collision.symbols.lookup_or_invalid("PayloadAlias")
+    if not alias_collision_id.is_valid(): rt_exit(84)
+    val alias_collision_raw = alias_collision_id.id
+    if not alias_collision.symbols.symbols.has(alias_collision_raw): rt_exit(85)
+    val alias_collision_symbol = alias_collision.symbols.symbols[alias_collision_raw]
+    if alias_collision_symbol.name != "ConflictingPayloadAlias": rt_exit(86)
 
     # Same physical owner but different item must fail closed and preserve the
     # first lexical binding rather than treating owner equality as sufficient.

@@ -1,6 +1,7 @@
 # Stage 3 HIR `Symbol` alias owner collision
 
-Status: fixed in the pure-Simple HIR ownership boundary; Phase 3 rerun intentionally deferred.
+Status: superseded repair strategy; the terminal-identity fix is tracked in
+`stage3_symbol_alias_payload_identity_conflict_2026-08-04.md`.
 
 ## Failure
 
@@ -25,19 +26,27 @@ preserves aliases during HIR lowering. The Stage 3 dependency collector could
 therefore see the legacy alias and its concrete target as two declaration
 kinds for the same exported dependency identity.
 
-## Fix
+## Superseded fix claim
 
-`HirSymbol` is now the sole symbol-table entry owner and exported name. HIR,
-trait, visibility, MIR, and interpreter consumers use that concrete name.
-Unrelated module-local aliases such as `type Symbol = text` remain intact; the
-fix does not disable or discard type aliases globally.
+This record previously claimed that deleting `type Symbol = HirSymbol` and
+migrating every consumer was the canonical repair. History disproves that
+claim: commit `2043f80114` intentionally renamed the physical structure to
+`HirSymbol` while retaining `Symbol` as a compatibility alias, and the later
+source-reading test that demanded deletion did not change the implementation
+or its consumers.
+
+The current repair preserves `HirSymbol` as the concrete owner and `Symbol` as
+the compatibility surface. HIR materialized-payload identity terminalizes a
+non-generic same-module alias to its concrete target before collision checks,
+so alias spelling cannot create a second declaration identity. Unrelated
+module-local aliases such as `type Symbol = text` remain intact.
 
 ## Regression contract
 
 `test/01_unit/compiler/bootstrap/hir_symbol_alias_owner_collision_spec.spl`
-checks the sole-owner export, concrete consumer annotations, and preservation
-of an adjacent local alias. The existing backend declaration-collision spec was
-updated to reject reintroduction of the legacy HIR alias.
+checks the physical owner plus compatibility export, while
+`test/03_system/native/hir_materialized_enum_payload_dependencies.spl` covers
+the exact alias-to-composite terminalization and a genuine adjacent collision.
 
 ## Deferred evidence
 

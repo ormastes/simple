@@ -196,6 +196,37 @@ fn hir_symbol_terminal_kind(kind: SymbolKind) -> text:
 fn hir_payload_terminal_identity(module_name: text, item_name: text, item_kind: text) -> text:
     "{hir_pkg_canonical_module_name(module_name)}::{item_name}::{item_kind}"
 
+fn hir_materialized_payload_origin_from_surface(m: ModuleSurface, module_key: text, item_name: text) -> HirMaterializedPayloadOrigin:
+    """Resolve a same-module compatibility alias to its concrete terminal.
+
+    Imported type registration already projects a non-generic `type A = B`
+    alias onto the concrete declaration for field and method semantics. Payload
+    collision identity must use that same physical owner instead of comparing
+    the alias spelling/kind with the projected declaration spelling/kind.
+    """
+    val module_name = hir_pkg_canonical_module_name(m.module_name)
+    val item_kind = hir_module_item_terminal_kind(m, item_name)
+    if item_kind == "type_alias":
+        val alias_decl = m.type_aliases[item_name]
+        val targets = parser_type_named_dependencies(alias_decl.type_)
+        if alias_decl.type_params.len() == 0 and targets.len() == 1:
+            val target = targets[0]
+            if target != item_name and not m.type_aliases.contains_key(target) and hir_module_declares_item(m, target):
+                val target_kind = hir_module_item_terminal_kind(m, target)
+                if target_kind != "":
+                    return HirMaterializedPayloadOrigin(
+                        found: true,
+                        module_name: module_name,
+                        item_name: target,
+                        item_kind: target_kind,
+                        module_key: module_key)
+    HirMaterializedPayloadOrigin(
+        found: item_kind != "",
+        module_name: module_name,
+        item_name: item_name,
+        item_kind: item_kind,
+        module_key: module_key)
+
 fn hir_surface_param_to_param(param: ModuleSurfaceParam) -> Param:
     Param(name: param.name, has_type_: param.has_type_, type_: param.type_,
         has_default: false, default: Expr(kind: ExprKind.NilLit, span: param.span),
@@ -719,7 +750,7 @@ impl HirLowering:
     me register_imported_symbol(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
         if imported_mod.composites.contains_key(imported_name):
             val composite = imported_mod.composites[imported_name]
-            val already_bound = self.symbols.lookup(local_name).?
+            val already_bound = self.symbols.lookup_or_invalid(local_name).is_valid()
             val kind = match composite.kind:
                 case "class": SymbolKind.Class
                 case "struct": SymbolKind.Struct
@@ -767,7 +798,7 @@ impl HirLowering:
                     module_key: imported_mod_name)
                 if not self.claim_materialized_payload_binding(local_name, root_origin, import_span):
                     return
-            val already_bound = self.symbols.lookup(local_name).?
+            val already_bound = self.symbols.lookup_or_invalid(local_name).is_valid()
             val imported_type = self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             if not already_bound:
                 self.symbols.rename_symbol(imported_type, imported_name)
@@ -787,7 +818,7 @@ impl HirLowering:
                 self.imported_enum_owners[local_name] = imported_mod.module_name
                 self.register_materialized_enum_payload_dependencies(imported_mod, imported_mod_name, surface_enum, import_span)
         elif imported_mod.traits.contains_key(imported_name):
-            val already_bound = self.symbols.lookup(local_name).?
+            val already_bound = self.symbols.lookup_or_invalid(local_name).is_valid()
             val imported_trait = self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             if not already_bound:
                 # Preserve the physical declaration name in the symbol while
@@ -1134,26 +1165,13 @@ impl HirLowering:
     me resolve_materialized_enum_payload_origin(imported_mod: ModuleSurface, imported_mod_name: text, dependency: text) -> HirMaterializedPayloadOrigin:
         """Resolve a payload spelling to its physical terminal declaration."""
         if hir_module_declares_item(imported_mod, dependency):
-            val kind = hir_module_item_terminal_kind(imported_mod, dependency)
-            return HirMaterializedPayloadOrigin(
-                found: kind != "",
-                module_name: hir_pkg_canonical_module_name(imported_mod.module_name),
-                item_name: dependency,
-                item_kind: kind,
-                module_key: imported_mod_name)
+            return hir_materialized_payload_origin_from_surface(imported_mod, imported_mod_name, dependency)
         val hop = self.find_reexport_source(imported_mod, imported_mod_name, dependency, 0)
         if hop.found:
             val source = hir_module_surface_get(self.module_surfaces, hop.module_name)
             if source != nil:
                 val terminal = source.unwrap()
-                val kind = hir_module_item_terminal_kind(terminal, hop.item_name)
-                if kind != "":
-                    return HirMaterializedPayloadOrigin(
-                        found: true,
-                        module_name: hir_pkg_canonical_module_name(terminal.module_name),
-                        item_name: hop.item_name,
-                        item_kind: kind,
-                        module_key: hop.module_name)
+                return hir_materialized_payload_origin_from_surface(terminal, hop.module_name, hop.item_name)
         HirMaterializedPayloadOrigin(found: false, module_name: "", item_name: "", item_kind: "", module_key: "")
 
     me claim_materialized_payload_binding(local_name: text, origin: HirMaterializedPayloadOrigin, import_span: Span) -> bool:

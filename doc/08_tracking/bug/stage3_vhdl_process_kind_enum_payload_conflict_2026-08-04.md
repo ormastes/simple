@@ -2,8 +2,9 @@
 
 ## Status
 
-Open bootstrap blocker discovered by the Clang 23.1 browser-demo migration
-lane after the final permitted bootstrap cycle. No fourth cycle was run.
+Resolved in source on 2026-08-04. Bootstrap cycles 1 through 3 passed this
+former conflict and advanced to later monomorphization blockers. Full Stage 4
+and QEMU admission remain blocked separately.
 
 ## Exact failure
 
