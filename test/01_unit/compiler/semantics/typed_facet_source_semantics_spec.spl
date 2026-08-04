@@ -19,6 +19,8 @@ fn typed_facet_source(body: text) -> text:
     "    facet interface Debuggable:\n" +
     "        fn snapshot(self) -> i64\n" +
     "        fn merge(self, other: i64) -> i64\n" +
+    # Deliberate same-name declaration: facet signature lowering must bind the
+    # compiler-known canonical context, never this unrelated local type.
     "struct AspectExecutionContext:\n" +
     "    marker: i64\n" +
     "struct Cache:\n" +
@@ -57,6 +59,7 @@ describe "typed facet source and HIR ownership":
         var saw_require = false
         var facet_error_symbol = -1
         var require_error_symbol = -1
+        var acquisition_context_symbol = -1
         for item in hir.functions:
             val function = item[1]
             if function.name != "use_facet": continue
@@ -64,7 +67,16 @@ describe "typed facet source and HIR ownership":
                 match statement.kind:
                     case Let(_, _, init):
                         match init.kind:
-                            case FacetAcquire(_, _, _, mode):
+                            case FacetAcquire(context, _, _, mode):
+                                match context.kind:
+                                    case Var(value_symbol) | NamedVar(value_symbol, _):
+                                        if val value = hir.symbols.get_symbol_raw(value_symbol.id):
+                                            if val value_type = value.type_:
+                                                match value_type.kind:
+                                                    case HirTypeKind.Named(symbol, _):
+                                                        acquisition_context_symbol = symbol.id
+                                                    case _: pass
+                                    case _: pass
                                 if init.type_ == nil:
                                     fail("facet acquisition must retain its HIR wrapper type")
                                 val acquired_type = init.type_ ?? HirType(
@@ -102,6 +114,17 @@ describe "typed facet source and HIR ownership":
                 fail("FacetAcquireError must retain its std.aop owner identity")
         else:
             fail("canonical FacetAcquireError symbol must exist")
+        val context_raw = hir.symbols.lookup_qualified_type_raw(
+            "app.startup.aspect_application_runtime", "AspectExecutionContext")
+        if context_raw < 0:
+            fail("facet source must receive canonical AspectExecutionContext without an app.startup import")
+        if acquisition_context_symbol != context_raw:
+            fail("same-named local type must not replace the canonical facet context")
+        if val context_symbol = hir.symbols.get_symbol_raw(context_raw):
+            if context_symbol.name != "AspectExecutionContext":
+                fail("facet context must retain its canonical source spelling")
+        else:
+            fail("canonical AspectExecutionContext symbol must exist")
 
     it "preserves explicit context, typed base, contract, and member provenance":
         val hir = lower_typed_facet_source(

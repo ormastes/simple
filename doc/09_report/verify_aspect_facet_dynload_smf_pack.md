@@ -221,10 +221,11 @@ and HIR-symbol lambda/async capture rejection. Wrapper-aware adapter provenance
 and reverse-order cleanup now cover every currently modeled lexical exit.
 Exact-route lazy activation and canonical `FacetAcquireError` are now wired;
 unsupported leased nonlocal exits fail closed with E-AF007. Release/merge
-remains blocked by production image/signature port binding, true multithreaded
-single-flight completion, indirect/imported and backend unwind support,
-language-sealed lease opacity, the self-hosted runtime crash,
-missing generated-manual/runtime evidence, prepared-advice backend dispatch,
-user-facing facet-call sugar, and absent NFR measurements. The WIP feature bookmark may
+remains blocked by production image/signature port binding, lifecycle-wide
+concurrency beyond lazy callers, indirect/imported and backend unwind support,
+leaf-level lease visibility, the self-hosted runtime crash,
+missing generated-manual/runtime evidence, executable prepared-advice backend
+evidence, the intentionally unselected lexical-context shorthand, and absent
+NFR measurements. The WIP feature bookmark may
 be committed/rebased/pushed for collaboration; no version bump, main push, tag,
 or release is authorized by this report.

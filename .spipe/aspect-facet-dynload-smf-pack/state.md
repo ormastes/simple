@@ -292,6 +292,9 @@ verification-failed
 - Leased scopes fail E-AF007 for `throw`, `await`, `yield`, and identifiable
   extern calls without a portable unwind contract. The required missing MIR,
   effect, optimizer, and backend primitives are tracked under `doc/08_tracking`.
-- Production image/signature port binding, true multithreaded single-flight
-  completion sharing, imported/indirect unwind metadata, language-sealed lease
-  opacity, and executable evidence remain open. Status remains `STATUS: FAIL`.
+- Lazy callers now share one blocking Mutex/channel flight and typed completion;
+  route keys are canonical and active hits remain no-I/O. Broader concurrency
+  across low-level acquire, unload, advice, and other lifecycle APIs is still
+  unproved. Production image/signature port binding, imported/indirect unwind
+  metadata, leaf-level lease visibility, and executable evidence remain open.
+  Status remains `STATUS: FAIL`.

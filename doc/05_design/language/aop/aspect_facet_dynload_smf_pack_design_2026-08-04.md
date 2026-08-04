@@ -535,6 +535,13 @@ lifecycle state. A future lexical-context feature may permit the shorter
 `cache.facet<Debuggable>()` spelling inside a bound aspect scope, but an
 implicit process-global/current context is forbidden.
 
+`AspectExecutionContext` is a compiler-known nominal source type for facet
+syntax. Application code may use it in signatures without importing
+`app.startup` implementation modules; the compiler binds it to the canonical
+application-owned identity and rejects an unrelated same-named class/struct.
+The embedding entrypoint supplies the value; facet source does not construct
+the application capsule.
+
 Required dynamic APIs:
 
 ```simple
@@ -2383,9 +2390,20 @@ and explicit/generated panic paths. Lazy pack loading is now connected through
 an injected application-owned exact-route I/O port: `try_facet` retains the
 no-I/O published-binding probe, while `facet` and `require_facet` resolve a
 catalogued `lazy_facet` route and return canonical `std.aop.FacetAcquireError`.
-The embedding application still must bind deployed-image and detached-signature
-storage policy; no guessed sidecar convention is permitted. True multithreaded
-single-flight waiting/shared completion, portable callee/foreign unwind,
-language-sealed opacity for the exported lease class, and executable evidence
-remain open. `throw`, `await`, `yield`, and identifiable unspecified-unwind
-extern calls now fail closed with E-AF007 while a lease may be live.
+`AspectPackIoPort` is the canonical injection contract, but no production
+embedding/composition adapter owns it yet: default construction remains
+fail-closed. The embedding application still must bind deployed-image and
+detached-signature storage policy; no guessed sidecar convention is permitted.
+Generated MIR carries leases only as the compiler-private opaque
+`__simple_facet_descriptor_lease_abi` type. The startup implementation still
+exports `PublishedFacetDescriptorLease` from its owner leaf, although the
+top-level startup facade no longer re-exports it. Simple supports private and
+`pub(peer)` visibility, so the owner should narrow that class without changing
+the compiler ABI. Lazy-acquire callers now use a Mutex/channel single-flight:
+one owner performs I/O/activation and same-route followers receive the shared
+typed completion. Broader lifecycle concurrency across low-level `try_facet`,
+unload, advice, and other state owners remains unproven, as do portable
+callee/foreign unwind, production I/O composition, runtime-source lease export
+tightening, and executable evidence. `throw`, `await`, `yield`,
+and identifiable unspecified-unwind extern calls now fail closed with E-AF007
+while a lease may be live.

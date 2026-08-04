@@ -1,0 +1,140 @@
+# Application-owned single-flight gate for lazy aspect activation.
+#
+# Mutex unlock/lock protects active-flight and waiter-list mutation. Completion
+# fields are written before waiter notification; channel send/recv provides the
+# release/acquire publication edge for followers. No loader, cache, or port
+# callback runs while the mutex is held.
+
+use std.nogc_sync_mut.concurrent.mutex.{
+    Mutex, mutex_new, mutex_lock, mutex_unlock
+}
+use std.nogc_sync_mut.concurrent.channel.{Channel, channel_new}
+use std.aop.facet.{FacetAcquireErrorKind, FacetAcquireError}
+
+enum AspectLazyFlightRole:
+    Owner
+    SameRouteFollower
+    SerializedFollower
+
+class AspectLazyFlight:
+    route_key: text
+    request_id: text
+    completed: bool
+    succeeded: bool
+    error_kind: FacetAcquireErrorKind
+    error_facet_id: text
+    error_message: text
+    waiters: [Channel]
+
+struct AspectLazyFlightTicket:
+    role: AspectLazyFlightRole
+    flight: AspectLazyFlight
+    signal: Channel?
+
+struct AspectLazyFlightCompletion:
+    succeeded: bool
+    error: FacetAcquireError?
+
+class AspectLazySingleFlight:
+    gate: Mutex
+    active: AspectLazyFlight?
+    next_request_id: i64
+
+impl AspectLazySingleFlight:
+    static fn create() -> AspectLazySingleFlight:
+        AspectLazySingleFlight(gate: mutex_new(0), active: nil, next_request_id: 1)
+
+    me fn begin(route_key: text, request_prefix: text) -> Result<AspectLazyFlightTicket, text>:
+        if route_key == "" or request_prefix == "":
+            return Err("E-APACK009 lazy activation single-flight identity is empty")
+        _ = mutex_lock(self.gate)
+        if self.active == nil:
+            val request_id = "{request_prefix}:{self.next_request_id}"
+            self.next_request_id = self.next_request_id + 1
+            val flight = AspectLazyFlight(
+                route_key: route_key,
+                request_id: request_id,
+                completed: false,
+                succeeded: false,
+                error_kind: FacetAcquireErrorKind.ActivationFailed,
+                error_facet_id: "",
+                error_message: "",
+                waiters: [])
+            self.active = Some(flight)
+            _ = mutex_unlock(self.gate, 0)
+            return Ok(AspectLazyFlightTicket(
+                role: AspectLazyFlightRole.Owner,
+                flight: flight,
+                signal: nil))
+
+        val flight = self.active.unwrap()
+        val signal = channel_new()
+        flight.waiters.push(signal)
+        val role = if flight.route_key == route_key:
+            AspectLazyFlightRole.SameRouteFollower
+        else:
+            AspectLazyFlightRole.SerializedFollower
+        _ = mutex_unlock(self.gate, 0)
+        Ok(AspectLazyFlightTicket(
+            role: role,
+            flight: flight,
+            signal: Some(signal)))
+
+    me fn complete_success(ticket: AspectLazyFlightTicket) -> Result<(), text>:
+        self.complete(ticket, true, nil)
+
+    me fn complete_failure(
+        ticket: AspectLazyFlightTicket, error: FacetAcquireError
+    ) -> Result<(), text>:
+        self.complete(ticket, false, Some(error))
+
+    me fn complete(
+        ticket: AspectLazyFlightTicket,
+        succeeded: bool,
+        error: FacetAcquireError?
+    ) -> Result<(), text>:
+        if ticket.role != AspectLazyFlightRole.Owner:
+            return Err("E-APACK009 only the lazy activation owner may complete a flight")
+        _ = mutex_lock(self.gate)
+        if self.active == nil or self.active.unwrap().request_id != ticket.flight.request_id:
+            _ = mutex_unlock(self.gate, 0)
+            return Err("E-APACK009 lazy activation completion does not own the active flight")
+        val flight = self.active.unwrap()
+        flight.completed = true
+        flight.succeeded = succeeded
+        if val failure = error:
+            flight.error_kind = failure.kind
+            flight.error_facet_id = failure.facet_id
+            flight.error_message = failure.message
+        val waiters = flight.waiters
+        self.active = nil
+        _ = mutex_unlock(self.gate, 0)
+
+        var notification_failed = false
+        for waiter in waiters:
+            if not waiter.try_send(1):
+                notification_failed = true
+            waiter.close()
+        if notification_failed:
+            return Err("E-APACK009 a lazy activation follower channel closed before completion")
+        Ok(())
+
+    fn wait(ticket: AspectLazyFlightTicket) -> Result<AspectLazyFlightCompletion, text>:
+        if ticket.role == AspectLazyFlightRole.Owner or ticket.signal == nil:
+            return Err("E-APACK009 lazy activation owner cannot wait on itself")
+        val observed = ticket.signal.unwrap().recv()
+        if observed == nil or not ticket.flight.completed:
+            return Err("E-APACK009 lazy activation follower woke without completion")
+        if ticket.role == AspectLazyFlightRole.SerializedFollower:
+            return Ok(AspectLazyFlightCompletion(succeeded: false, error: nil))
+        if ticket.flight.succeeded:
+            return Ok(AspectLazyFlightCompletion(succeeded: true, error: nil))
+        Ok(AspectLazyFlightCompletion(
+            succeeded: false,
+            error: Some(FacetAcquireError(
+                kind: ticket.flight.error_kind,
+                facet_id: ticket.flight.error_facet_id,
+                message: ticket.flight.error_message))))
+
+export AspectLazyFlightRole, AspectLazyFlight, AspectLazyFlightTicket
+export AspectLazyFlightCompletion, AspectLazySingleFlight

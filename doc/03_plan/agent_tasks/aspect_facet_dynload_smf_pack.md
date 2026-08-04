@@ -64,9 +64,10 @@ Current implementation status:
   Wrapper-aware adapter propagation and reverse-order release now cover every
   modeled lexical exit. Exact-route lazy activation and canonical
   `FacetAcquireError` are wired; unsupported leased `throw`/suspension and
-  identifiable extern-unwind paths fail closed. Production I/O-port binding,
-  true multithreaded single-flight completion, indirect/imported unwind
-  metadata, and language-sealed lease opacity remain open.
+  identifiable extern-unwind paths fail closed. Lazy callers now share one
+  blocking single-flight completion. Production I/O-port binding, lifecycle-
+  wide concurrency, indirect/imported unwind metadata, and leaf-level lease
+  visibility remain open.
 
 These lanes retain the five system-manual phrases already frozen in the system
 test plan. Focused setup/checker helpers are

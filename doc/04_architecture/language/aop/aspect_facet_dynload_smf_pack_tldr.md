@@ -41,9 +41,9 @@ flow:
   lease, checked ordinal method lookup, typed-base indirect-call lowering, and
   HIR-symbol capture rejection, wrapper-aware provenance, and reverse-order
   cleanup on every currently modeled lexical exit, exact-route injected lazy
-  I/O, and canonical typed acquisition errors. Production port binding, true
-  concurrent single-flight completion, portable unwind/cancellation cleanup,
-  and executable evidence remain open;
+  I/O, canonical typed acquisition errors, and blocking single-flight sharing
+  for lazy callers. Production port binding, lifecycle-wide concurrency,
+  portable unwind/cancellation cleanup, and executable evidence remain open;
   verification is `STATUS: FAIL`.
 - Resolver startup now crosses `85.mdsoc` through
   `ModuleResolverDiscoveryPort.resolve_inputs`; production composition injects

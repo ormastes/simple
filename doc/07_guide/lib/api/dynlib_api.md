@@ -129,6 +129,17 @@ verifies the selected module SHA-256, and delegates parsing to the existing
 `ObjectProvider.reader_from_bytes`/`SmfReaderMemory` seam. `try_facet<T>` is
 no-I/O; `facet<T>` may request activation only under explicit policy;
 `require_facet<T>` returns a typed error when no binding can be published.
+The explicit `AspectExecutionContext` receiver is a compiler-known nominal
+source type, so callers do not import `app.startup` implementation modules to
+use these three language forms. The embedding entrypoint supplies the context
+value. Runtime descriptor leases are not a source API; generated MIR carries
+them through a compiler-private opaque ABI type.
+
+`AspectPackIoPort` is currently an injection seam, not a completed production
+composition. Its unavailable default fails closed. An embedding application
+must provide the exact catalog-selected pack bytes and detached signature from
+its own deployment/storage policy; this API defines no `.sig` convention,
+fallback directory, or search root.
 
 Activation staging composes the existing dynSMF policy/evidence and SMF
 generation contracts. A catalog, digest, ABI, dependency, relocation, or

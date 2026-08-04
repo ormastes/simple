@@ -1,0 +1,72 @@
+# @req REQ-AF-008 NFR-AF-006
+# @cover src/app/startup/aspect_lazy_singleflight.spl 90%
+
+use std.spec.*
+use std.aop.facet.{FacetAcquireErrorKind, FacetAcquireError}
+use app.startup.aspect_lazy_singleflight.{
+    AspectLazyFlightRole, AspectLazySingleFlight
+}
+
+describe "Aspect lazy activation single-flight":
+    it "shares one successful same-route completion and reopens the gate":
+        val gate = AspectLazySingleFlight.create()
+        val owner = gate.begin("route-a", "request-a").unwrap()
+        val follower = gate.begin("route-a", "request-a").unwrap()
+        if owner.role != AspectLazyFlightRole.Owner:
+            fail("first route caller did not own the flight")
+        if follower.role != AspectLazyFlightRole.SameRouteFollower:
+            fail("same route caller was not joined to the active flight")
+
+        gate.complete_success(owner).unwrap()
+        val completion = gate.wait(follower).unwrap()
+        if not completion.succeeded or completion.error != nil:
+            fail("same-route follower did not observe shared success")
+
+        val next_owner = gate.begin("route-a", "request-a").unwrap()
+        if next_owner.role != AspectLazyFlightRole.Owner:
+            fail("completed flight did not reopen the gate")
+        gate.complete_success(next_owner).unwrap()
+
+    it "shares the exact typed failure with every same-route follower":
+        val gate = AspectLazySingleFlight.create()
+        val owner = gate.begin("route-a", "request-a").unwrap()
+        val first = gate.begin("route-a", "request-a").unwrap()
+        val second = gate.begin("route-a", "request-a").unwrap()
+        val failure = FacetAcquireError(
+            kind: FacetAcquireErrorKind.ActivationDenied,
+            facet_id: "Debuggable",
+            message: "policy denied fixture activation")
+
+        gate.complete_failure(owner, failure).unwrap()
+        val first_error = gate.wait(first).unwrap().error.unwrap()
+        val second_error = gate.wait(second).unwrap().error.unwrap()
+        if first_error.kind != failure.kind or second_error.kind != failure.kind:
+            fail("followers did not observe the shared typed failure kind")
+        expect(first_error.facet_id).to_equal("Debuggable")
+        expect(second_error.message).to_equal("policy denied fixture activation")
+
+    it "blocks a different route behind the active mutation owner":
+        val gate = AspectLazySingleFlight.create()
+        val owner = gate.begin("route-a", "request-a").unwrap()
+        val serialized = gate.begin("route-b", "request-b").unwrap()
+        if serialized.role != AspectLazyFlightRole.SerializedFollower:
+            fail("different route was not serialized behind the active owner")
+
+        gate.complete_success(owner).unwrap()
+        val wake = gate.wait(serialized).unwrap()
+        if wake.succeeded or wake.error != nil:
+            fail("serialized follower received a same-route completion")
+        val next_owner = gate.begin("route-b", "request-b").unwrap()
+        if next_owner.role != AspectLazyFlightRole.Owner:
+            fail("serialized route did not become owner after wake")
+        gate.complete_success(next_owner).unwrap()
+
+    it "rejects completion by a follower without closing the owner flight":
+        val gate = AspectLazySingleFlight.create()
+        val owner = gate.begin("route-a", "request-a").unwrap()
+        val follower = gate.begin("route-a", "request-a").unwrap()
+        if gate.complete_success(follower).is_ok():
+            fail("follower completed an owner flight")
+        gate.complete_success(owner).unwrap()
+        if not gate.wait(follower).unwrap().succeeded:
+            fail("owner could not complete after rejected follower completion")

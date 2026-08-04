@@ -356,13 +356,24 @@ impl HirLowering:
         registered.interfaces = interfaces
         registered
 
-    me register_canonical_facet_acquire_error_symbols(facets: HirFacetModule):
+    me register_canonical_facet_surface_symbols(facets: HirFacetModule):
         # Facet acquisition syntax has a compiler-defined source contract even
         # when the consumer did not explicitly import std.aop.  Materialize the
         # existing std.aop identities under qualified keys; an unrelated local
         # type with the same short name must never become the acquisition error.
         if facets.interfaces.len() == 0:
             return
+        val context_owner = "app.startup.aspect_application_runtime"
+        if self.symbols.lookup_qualified_type_raw(
+                context_owner, "AspectExecutionContext") < 0:
+            val context_symbol = self.symbols.define(
+                "__simple_facet_execution_context",
+                SymbolKind.Class, nil, Span.empty(), Visibility.Public, false,
+                Some(context_owner))
+            self.symbols.rename_symbol(context_symbol, "AspectExecutionContext")
+            self.symbols.bind_qualified_type(
+                context_owner, "AspectExecutionContext", context_symbol)
+
         val owner = "std.nogc_sync_mut.aop.facet"
         var kind_raw = self.symbols.lookup_qualified_type_raw(
             owner, "FacetAcquireErrorKind")
@@ -1869,6 +1880,12 @@ impl HirLowering:
                 eprint("[hir-lower] resolve_import_symbols:done module={module.name}")
             hir_module_phase_probe("phase3:hir:imports:done {module.name}")
 
+        # Facet syntax owns canonical source identities independently of
+        # whether a consumer imports app.startup internals. Register them after
+        # imports (so a real imported identity wins) and before declarations
+        # lower function signatures.
+        self.register_canonical_facet_surface_symbols(static_facets)
+
         # First pass: declare all top-level symbols
         if bootstrap_diag:
             eprint("[hir-lower] declare:start module={module.name}")
@@ -1885,7 +1902,6 @@ impl HirLowering:
             # coverage to types/consts for the closure path.
             self.declare_module_symbols(module)
             hir_module_phase_probe("phase3:hir:declare:done {module.name}")
-        self.register_canonical_facet_acquire_error_symbols(static_facets)
         static_facets = self.register_static_facet_interface_symbols(static_facets)
         if bootstrap_diag:
             eprint("[hir-lower] declare:done module={module.name}")
