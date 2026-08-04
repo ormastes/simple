@@ -4,13 +4,16 @@
 use std.spec.*
 use compiler.loader.loader.aspect_catalog.{AspectAdviceSummary}
 use compiler.loader.loader.advice_binding_registry.{
-    AdviceBindingAdmission, AdviceBindingRegistry,
+    AdviceBindingAdmission, AdviceBindingRegistry, AdviceDispatchPermit,
+    InvocationReceipt,
     advice_binding_stage_validated, advice_publish_generation,
     advice_lookup_slot, advice_unbind_generation,
     advice_disabled_path_footprint, advice_dispatch_projection_empty,
     advice_dispatch_projection_create,
     advice_dispatch_projection_invalidate,
-    advice_dispatch_projection_with_invoker
+    advice_dispatch_projection_with_invoker,
+    advice_prepare_dispatch, advice_invoke_dispatch_permit,
+    advice_finalize_dispatch, advice_merge_counter_delta
 }
 use compiler.loader.loader.module_loader.{ModuleLoader, moduleloader_with_defaults}
 use compiler.loader.{LoadedSymbol, SymbolType}
@@ -303,6 +306,89 @@ describe "Loader advice binding registry":
         expect(callback.tokens_acquired).to_equal(2)
         expect(callback.tokens_released).to_equal(2)
         expect(callback.lifecycle.generation_pin_count_for("pack:a:7", 7)).to_equal(0)
+
+    it "finalizes against current state and merges deltas without stale replacement":
+        var registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
+        registry = publish_advice(registry, "pack:a:7", "audit.aspect", [
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.low", "z_audit", 10, 4),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 101)])
+        val loader = advice_test_loader()
+        val projection = advice_dispatch_projection_create(registry, loader).unwrap()
+        val lifecycle = LifecycleManager.new_manager().register_candidate(
+            "pack:a:7", 7).promote_candidate()
+        val prepared = advice_prepare_dispatch(
+            projection, registry, lifecycle, loader,
+            "orders.submit.prepared", "before")
+        expect(prepared.status).to_equal("prepared")
+        expect(prepared.lifecycle.generation_pin_count_for("pack:a:7", 7)).to_equal(1)
+        val permit = prepared.permit ?? AdviceDispatchPermit(
+            schema_id: "", schema_version: 0, permit_id: "",
+            slot_id: "", form: "", entries: [], tokens: [])
+
+        # Simulate unrelated registry and lifecycle commits during the unlocked
+        # callback interval. Finalize must retain both.
+        val prepared_registry = advice_merge_counter_delta(
+            registry, prepared.counter_delta)
+        val current_registry = advice_lookup_slot(
+            prepared_registry, "orders.submit.prepared").unwrap().registry
+        val unrelated_pin = prepared.lifecycle.acquire_generation_token_for(
+            "pack:a:7", 7).unwrap()
+        val receipt = advice_invoke_dispatch_permit(permit, advice_test_invoke)
+        val outcome = advice_finalize_dispatch(
+            permit, receipt, current_registry, unrelated_pin.0)
+
+        expect(outcome.status).to_equal("dispatched")
+        expect(outcome.return_values).to_equal([1001])
+        expect(outcome.registry.counters.slot_lookups).to_equal(2)
+        expect(outcome.registry.counters.dispatch_invocations).to_equal(1)
+        expect(outcome.lifecycle.generation_pin_count_for("pack:a:7", 7)).to_equal(1)
+
+    it "binds receipts to permits and rejects finalize replay through token authority":
+        var registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
+        registry = publish_advice(registry, "pack:a:7", "audit.aspect", [
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.low", "z_audit", 10, 4),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 101)])
+        val loader = advice_test_loader()
+        val projection = advice_dispatch_projection_create(registry, loader).unwrap()
+        val lifecycle = LifecycleManager.new_manager().register_candidate(
+            "pack:a:7", 7).promote_candidate()
+        val prepared = advice_prepare_dispatch(
+            projection, registry, lifecycle, loader,
+            "orders.submit.prepared", "before")
+        val permit = prepared.permit ?? AdviceDispatchPermit(
+            schema_id: "", schema_version: 0, permit_id: "",
+            slot_id: "", form: "", entries: [], tokens: [])
+        val receipt = advice_invoke_dispatch_permit(permit, advice_test_invoke)
+        val prepared_registry = advice_merge_counter_delta(
+            registry, prepared.counter_delta)
+        val first = advice_finalize_dispatch(
+            permit, receipt, prepared_registry, prepared.lifecycle)
+        expect(first.status).to_equal("dispatched")
+        expect(first.tokens_released).to_equal(1)
+
+        val replay = advice_finalize_dispatch(
+            permit, receipt, first.registry, first.lifecycle)
+        expect(replay.status).to_equal("failed")
+        expect(replay.reason).to_contain("token release failed")
+        expect(replay.tokens_released).to_equal(0)
+
+        val prepared_again = advice_prepare_dispatch(
+            projection, replay.registry, first.lifecycle, loader,
+            "orders.submit.prepared", "before")
+        val permit_again = prepared_again.permit ?? AdviceDispatchPermit(
+            schema_id: "", schema_version: 0, permit_id: "",
+            slot_id: "", form: "", entries: [], tokens: [])
+        val mismatched = InvocationReceipt(
+            permit_id: "other-permit", status: "invoked", reason: "",
+            invoked_count: 1, return_values: [1001])
+        val rejected = advice_finalize_dispatch(
+            permit_again, mismatched, replay.registry, prepared_again.lifecycle)
+        expect(rejected.status).to_equal("failed")
+        expect(rejected.reason).to_contain("does not match its permit")
+        expect(rejected.tokens_released).to_equal(1)
+        expect(rejected.lifecycle.generation_pin_count_for("pack:a:7", 7)).to_equal(0)
 
     it "invalidates exact projection visibility before quiesce and drain":
         var registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
