@@ -99,6 +99,83 @@ fn _vulkan_font_pixels_to_bytes(pixels: [u32]) -> [u8]:
         i = i + 1
     bytes
 
+# Atlas payload identity token for font composite evidence.
+#
+# PERF (2026-08-04): this used to be `sha256_u8_hex(atlas_payload)` over the
+# whole 4 MB atlas. The font atlas is a FIXED 1024x1024 (FONT_ATLAS_WIDTH /
+# FONT_ATLAS_HEIGHT in text_layout/font_renderer.spl) regardless of how many
+# glyphs a batch draws, so even a two-glyph draw hashed 1024*1024*4 =
+# 4,194,304 bytes. The vulkan font lane runs interpreted (the vulkan_sffi_*
+# externs are unresolved in the JIT, which drops the whole module to the
+# interpreter), where sha256_u8_hex measures ~7.2 KB/s -- externally measured
+# 2.29 s for 16 KB and 4.26 s for 32 KB, i.e. linear. That put a single cold
+# atlas upload at ~10 minutes of pure evidence overhead and made every
+# vector-font spec on this lane effectively unverifiable.
+#
+# What the token actually guarantees (audited across every consumer before
+# this change): it is a *change-detection* token with a well-formedness gate,
+# NOT a cryptographic or parity checksum.
+#   - shape: vulkan_font_stage_evidence_ready below requires .len() == 64, and
+#     the live-evidence checker requires 64 lowercase hex chars
+#     (scripts/check/check-macos-gpu-2d-live-evidence.shs sha256_valid).
+#   - change detection: the only value comparisons are warm-vs-cold equality
+#     within one receipt (test/02_integration/rendering/macos_gpu_2d_live_harness.spl,
+#     scripts/check/check-macos-gpu-2d-live-evidence.shs) and stability across
+#     samples (test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl).
+#   - NOT security, NOT cross-process parity: no consumer anywhere recomputes
+#     this digest independently and compares values, and no constant pins it.
+#     (The one recompute-and-compare in the tree,
+#     test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl:415,
+#     belongs to the ENGINE3D adapter's alpha-channel digest in
+#     engine3d/vulkan_font_adapter.spl:174 -- a different writer over different
+#     bytes, deliberately left untouched here.)
+#
+# So the fix keeps a real SHA-256 (identical 64-char lowercase hex shape) but
+# stops feeding it 4 MB: every pixel is folded into a 128-bit four-lane
+# fingerprint, and SHA-256 is then taken over that fingerprint plus the atlas
+# geometry. Coverage is unchanged -- all 1024*1024 pixels still contribute, so
+# any atlas mutation still moves the token -- and the index is mixed into each
+# lane so position matters (a swap of two pixels changes the digest). There is
+# no native byte-buffer SHA-256 extern registered for the interpreter, so
+# routing to native would mean adding one across the Rust seed; that is a
+# separate lane. Externally measured: 4 MB atlas 3.91 s vs ~10 min before.
+fn _vulkan_font_atlas_payload_digest(pixels: [u32], width: i32, height: i32) -> text:
+    val mask32: i64 = 4294967295
+    val prime: i64 = 16777619
+    var l0: i64 = 2166136261
+    var l1: i64 = 2246822519
+    var l2: i64 = 3266489917
+    var l3: i64 = 668265263
+    val n = pixels.len()
+    val quad_end = n - (n % 4)
+    var i: i64 = 0
+    while i < quad_end:
+        val v0 = pixels[i].to_i64() & mask32
+        val v1 = pixels[i + 1].to_i64() & mask32
+        val v2 = pixels[i + 2].to_i64() & mask32
+        val v3 = pixels[i + 3].to_i64() & mask32
+        l0 = ((l0 ^ (v0 + i)) * prime) & mask32
+        l1 = ((l1 ^ (v1 + i)) * prime) & mask32
+        l2 = ((l2 ^ (v2 + i)) * prime) & mask32
+        l3 = ((l3 ^ (v3 + i)) * prime) & mask32
+        i = i + 4
+    while i < n:
+        val v = pixels[i].to_i64() & mask32
+        l0 = ((l0 ^ (v + i)) * prime) & mask32
+        i = i + 1
+    val lanes: [i64] = [l0, l1, l2, l3, n, width.to_i64(), height.to_i64()]
+    var pre: [u8] = [0u8; 56]
+    var k: i64 = 0
+    while k < 7:
+        val w = lanes[k]
+        val base = k * 8
+        var b: i64 = 0
+        while b < 8:
+            pre[base + b] = ((w >> (b * 8)) & 255).to_u8()
+            b = b + 1
+        k = k + 1
+    sha256_u8_hex(pre)
+
 fn _vulkan_font_bytes_to_pixels(bytes: [u8], count: i64) -> [u32]:
     if count <= 0 or bytes.len() != count * 4:
         return []
@@ -357,7 +434,8 @@ impl VulkanBackend:
                 self.font_atlas_payload_sha256 = ""
                 return _vulkan_font_evidence(pipeline, "failed", "atlas-upload-failed", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
             val payload_hash_started = time_now_nanos()
-            self.font_atlas_payload_sha256 = sha256_u8_hex(atlas_payload)
+            self.font_atlas_payload_sha256 = _vulkan_font_atlas_payload_digest(
+                batch.atlas_pixels, batch.atlas_width, batch.atlas_height)
             evidence_overhead_ns = evidence_overhead_ns + vulkan_font_elapsed_ns(payload_hash_started, time_now_nanos())
             self.font_atlas_generation = batch.atlas_generation
             self.font_atlas_owner_identity = owner_identity
