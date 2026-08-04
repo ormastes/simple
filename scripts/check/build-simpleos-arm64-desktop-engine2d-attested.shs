@@ -13,25 +13,31 @@ cd "$ROOT_DIR"
 
 COMPILER=""
 COMPILER_REJECTION_REASON=""
+PINNED_COMPILER="${SIMPLEOS_ARM64_ATTESTED_COMPILER:-}"
+COMPILER_RECEIPT="${SIMPLEOS_ARM64_COMPILER_RECEIPT:-}"
+COMPILER_RECEIPT_SHA256=""
 KERNEL="build/os/simpleos_arm64_desktop_engine2d.elf"
 DISK="build/os/fat32-arm64-desktop.img"
 DISK_PRODUCER="build/os/make_os_disk"
 BUILD_MANIFEST="build/os/simpleos_arm64_desktop_engine2d.build-manifest.env"
 FROZEN_BUILD_MANIFEST="${BUILD_MANIFEST}.frozen-source-admission.env"
 BUILD_STAMP="${KERNEL}.build_stamp"
+BUILD_LOG="build/os/simpleos_arm64_desktop_engine2d.build.log"
+BUILD_STATUS="${BUILD_LOG}.status.$$"
 GENERATED_LOG_CONFIG="build/os/generated/generated/simpleos_log_config.spl"
 BUILD_COMMAND=""
-BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000"
+BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000"
 ENTRY="examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
 MANIFEST_TMP="${BUILD_MANIFEST}.tmp.$$"
 SELF_TEST_DIR=""
 
 cleanup() {
-    rm -f "$MANIFEST_TMP" "$GENERATED_LOG_CONFIG"
+    rm -f "$MANIFEST_TMP" "$GENERATED_LOG_CONFIG" "$BUILD_STATUS"
     if [ -n "$SELF_TEST_DIR" ]; then
         rm -f "$SELF_TEST_DIR/clean-simple" \
             "$SELF_TEST_DIR/seed-simple" \
-            "$SELF_TEST_DIR/debug-simple"
+            "$SELF_TEST_DIR/debug-simple" \
+            "$SELF_TEST_DIR/build.log"
         rmdir "$SELF_TEST_DIR" >/dev/null 2>&1 || true
     fi
 }
@@ -93,23 +99,132 @@ run_compiler_admission_self_test() {
         fail_build "compiler-admission-self-test-clean-rejected"
     [ "$ARM64_GUEST_COMPILER_ADMISSION_REASON" = pass ] ||
         fail_build "compiler-admission-self-test-clean-reason-invalid"
-    if arm64_guest_validate_native_compiler "$seed_fixture"; then
+    arm64_guest_validate_native_compiler "$debug_fixture" ||
+        fail_build "compiler-admission-self-test-debug-help-false-positive"
+    arm64_guest_validate_compiler_version_output "Simple v1.0.0-beta" ||
+        fail_build "compiler-admission-self-test-version-rejected"
+    if arm64_guest_validate_compiler_version_output \
+            "WARNING: this Rust-built Simple binary is a bootstrap seed only"; then
         fail_build "compiler-admission-self-test-seed-accepted"
     fi
     [ "$ARM64_GUEST_COMPILER_ADMISSION_REASON" = \
-        rust-seed-or-debug-forbidden ] ||
+        compiler-version-invalid ] ||
         fail_build "compiler-admission-self-test-seed-reason-invalid"
-    if arm64_guest_validate_native_compiler "$debug_fixture"; then
+    if arm64_guest_validate_compiler_version_output "debug build"; then
         fail_build "compiler-admission-self-test-debug-accepted"
     fi
     [ "$ARM64_GUEST_COMPILER_ADMISSION_REASON" = \
-        rust-seed-or-debug-forbidden ] ||
+        compiler-version-invalid ] ||
         fail_build "compiler-admission-self-test-debug-reason-invalid"
+
+    BUILD_LOG="$SELF_TEST_DIR/build.log"
+    printf '%s\n' 'native build completed without fallback' >"$BUILD_LOG"
+    reject_fabricated_build_receipts ||
+        fail_build "compiler-admission-self-test-clean-build-log-rejected"
+    for rejected_receipt in \
+        'FABRICATED-NEW kernel rt_missing' \
+        'FABRICATED kernel rt_missing' \
+        'WARNING: entry is unbaselined' \
+        'weak bodies that RETURN 0'
+    do
+        printf '%s\n' "$rejected_receipt" >"$BUILD_LOG"
+        if reject_fabricated_build_receipts; then
+            fail_build "compiler-admission-self-test-fabricated-receipt-accepted"
+        fi
+    done
 
     echo "arm64_compiler_admission_clean_status=pass"
     echo "arm64_compiler_admission_seed_rejection_status=pass"
     echo "arm64_compiler_admission_debug_rejection_status=pass"
+    echo "arm64_compiler_admission_fabricated_receipt_rejection_status=pass"
     echo "arm64_compiler_admission_self_test_status=pass"
+}
+
+receipt_field() {
+    receipt_key="$1"
+    receipt_count="$(grep -c "^${receipt_key}=" "$COMPILER_RECEIPT" || true)"
+    [ "$receipt_count" -eq 1 ] || return 1
+    sed -n "s/^${receipt_key}=//p" "$COMPILER_RECEIPT"
+}
+
+validate_pinned_compiler_receipt() {
+    [ -n "$PINNED_COMPILER" ] || return 0
+    [ -n "$COMPILER_RECEIPT" ] || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-missing"
+        return 1
+    }
+    [ -f "$COMPILER_RECEIPT" ] && [ ! -L "$COMPILER_RECEIPT" ] || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-unavailable"
+        return 1
+    }
+    receipt_schema="$(receipt_field schema)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    receipt_path="$(receipt_field compiler_path)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    receipt_sha256="$(receipt_field compiler_sha256)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    receipt_version="$(receipt_field compiler_version)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    receipt_native_smoke="$(receipt_field native_smoke_status)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    receipt_stub_fallback="$(receipt_field stub_fallback)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    receipt_fabricated="$(receipt_field fabricated_stub_status)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    receipt_measurement="$(receipt_field measurement_status)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    [ "$receipt_schema" = "simpleos-arm64-compiler-receipt-v1" ] &&
+        [ "$receipt_path" = "$PINNED_COMPILER" ] &&
+        [ "$receipt_native_smoke" = pass ] &&
+        [ "$receipt_stub_fallback" = forbidden ] &&
+        [ "$receipt_fabricated" = none ] &&
+        [ "$receipt_measurement" = measured ] || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-policy-rejected"
+        return 1
+    }
+    actual_receipt_sha256="$(sha256_file "$PINNED_COMPILER")" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-sha256-failed"
+        return 1
+    }
+    actual_receipt_version="$("$PINNED_COMPILER" --version 2>/dev/null)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-version-command-failed"
+        return 1
+    }
+    [ "$actual_receipt_sha256" = "$receipt_sha256" ] &&
+        [ "$actual_receipt_version" = "$receipt_version" ] || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-identity-mismatch"
+        return 1
+    }
+    COMPILER_RECEIPT_SHA256="$(sha256_file "$COMPILER_RECEIPT")" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-sha256-failed"
+        return 1
+    }
+}
+
+reject_fabricated_build_receipts() {
+    [ -f "$BUILD_LOG" ] || return 1
+    if grep -Eiq \
+        '(^|[[:space:]])FABRICATED(-NEW)?([[:space:]]|$)|Fabricated freestanding stubs:|unbaselined|unmeasured([^[:alnum:]]|$)|weak bodies that RETURN 0|weak[- ](return[- ]?)?zero' \
+        "$BUILD_LOG"; then
+        return 1
+    fi
+    return 0
 }
 
 if [ "${1:-}" = "--self-test" ]; then
@@ -137,6 +252,9 @@ resolve_compiler() {
             return 1
             ;;
     esac
+    if [ -n "$PINNED_COMPILER" ]; then
+        compiler_candidate="$PINNED_COMPILER"
+    fi
     [ -x "$compiler_candidate" ] && [ -f "$compiler_candidate" ] ||
         return 1
     [ ! -L "$compiler_candidate" ] || return 1
@@ -144,6 +262,15 @@ resolve_compiler() {
         COMPILER_REJECTION_REASON="$ARM64_GUEST_COMPILER_ADMISSION_REASON"
         return 1
     fi
+    candidate_version_output="$("$compiler_candidate" --version 2>/dev/null)" || {
+        COMPILER_REJECTION_REASON="compiler-version-command-failed"
+        return 1
+    }
+    if ! arm64_guest_validate_compiler_version_output "$candidate_version_output"; then
+        COMPILER_REJECTION_REASON="$ARM64_GUEST_COMPILER_ADMISSION_REASON"
+        return 1
+    fi
+    validate_pinned_compiler_receipt || return 1
     COMPILER="$compiler_candidate"
     COMPILER_FORMAT="$ARM64_GUEST_COMPILER_FORMAT"
     COMPILER_ARCH="$ARM64_GUEST_COMPILER_ARCH"
@@ -205,15 +332,27 @@ rm -f "$BUILD_MANIFEST" ||
 rm -f "$KERNEL" "$BUILD_STAMP" "$DISK" "$DISK_PRODUCER" ||
     fail_build "persistent-artifact-cache-invalidation-failed"
 
+rm -f "$BUILD_LOG" "$BUILD_STATUS" || fail_build "build-log-reset-failed"
 set +e
-env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE \
-    -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_OS_BUILD_BACKEND=llvm \
-    SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000 \
-    "$COMPILER" os build --scenario=arm64-desktop-engine2d
-BUILD_CODE=$?
+{
+    env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE \
+        -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_NO_STUB_FALLBACK=1 \
+        SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 \
+        SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off \
+        SIMPLE_OS_BUILD_TIMEOUT_MS=900000 \
+        "$COMPILER" os build --scenario=arm64-desktop-engine2d
+    echo "$?" >"$BUILD_STATUS"
+} 2>&1 | tee "$BUILD_LOG"
+TEE_CODE=$?
 set -e
+[ "$TEE_CODE" -eq 0 ] || fail_build "canonical-scenario-build-log-capture-failed"
+[ -f "$BUILD_STATUS" ] || fail_build "canonical-scenario-build-status-missing"
+BUILD_CODE="$(sed -n '1p' "$BUILD_STATUS")"
+rm -f "$BUILD_STATUS"
 [ "$BUILD_CODE" -eq 0 ] ||
     fail_build "canonical-scenario-build-failed"
+reject_fabricated_build_receipts ||
+    fail_build "fabricated-or-unmeasured-stub-receipt-rejected"
 # The runner creates this source before native-build but does not remove it on
 # its success path. Restore the same normalized state used by the pre-snapshot.
 rm -f "$GENERATED_LOG_CONFIG" ||
@@ -289,6 +428,9 @@ umask 077
     echo "compiler_version=$PRE_COMPILER_VERSION"
     echo "compiler_format=$COMPILER_FORMAT"
     echo "compiler_arch=$COMPILER_ARCH"
+    echo "compiler_receipt_path=$COMPILER_RECEIPT"
+    echo "compiler_receipt_sha256=$COMPILER_RECEIPT_SHA256"
+    echo "build_log_path=$BUILD_LOG"
     echo "build_command=$BUILD_COMMAND"
     echo "build_environment=$BUILD_ENVIRONMENT"
 } >"$MANIFEST_TMP"
