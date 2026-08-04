@@ -1,0 +1,152 @@
+use compiler.mir.mir_instructions.*
+
+fn exception_cfg_error(message: text) -> Result<(), text>:
+    Err("E-MIR-UNWIND003 {message}")
+
+fn exception_local_type(body: MirBody, id: i64) -> MirTypeKind?:
+    for local in body.locals:
+        if local.id.id == id:
+            return Some(local.type_.kind)
+    nil
+
+fn exception_operand_local(operand: MirOperand) -> i64:
+    match operand.kind:
+        case Copy(local) | Move(local): local.id
+        case _: -1
+
+fn exception_operand_is_token(operand: MirOperand, tokens: Dict<i64, bool>) -> bool:
+    tokens.has(exception_operand_local(operand))
+
+fn exception_operands_have_token(
+    operands: [MirOperand], tokens: Dict<i64, bool>
+) -> bool:
+    for operand in operands:
+        if exception_operand_is_token(operand, tokens):
+            return true
+    false
+
+fn exception_illegal_inst_use(inst: MirInstKind, tokens: Dict<i64, bool>) -> bool:
+    match inst:
+        case BinOp(_, _, left, right) | CheckedBinOp(_, _, left, right):
+            exception_operand_is_token(left, tokens) or exception_operand_is_token(right, tokens)
+        case UnaryOp(_, _, operand) | Cast(_, operand, _) | Bitcast(_, operand, _):
+            exception_operand_is_token(operand, tokens)
+        case Load(_, ptr) | GetField(_, ptr, _):
+            exception_operand_is_token(ptr, tokens)
+        case Store(ptr, value) | SetField(ptr, _, value):
+            exception_operand_is_token(ptr, tokens) or exception_operand_is_token(value, tokens)
+        case GetElementPtr(_, base, indices):
+            exception_operand_is_token(base, tokens) or exception_operands_have_token(indices, tokens)
+        case Aggregate(_, _, operands):
+            exception_operands_have_token(operands, tokens)
+        case Call(_, func, args) | CallIndirect(_, func, args, _):
+            exception_operand_is_token(func, tokens) or exception_operands_have_token(args, tokens)
+        case Intrinsic(_, _, args):
+            exception_operands_have_token(args, tokens)
+        case PipeForward(_, value, func):
+            exception_operand_is_token(value, tokens) or exception_operand_is_token(func, tokens)
+        case Compose(_, left, right, _):
+            exception_operand_is_token(left, tokens) or exception_operand_is_token(right, tokens)
+        case Parallel(_, funcs):
+            exception_operands_have_token(funcs, tokens)
+        case _: false
+
+fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
+    """Validate unwind-only landing pads and linear exception-token provenance."""
+    var unwind_targets: Dict<i64, bool> = {}
+    var normal_targets: Dict<i64, bool> = {}
+    for block in body.blocks:
+        match block.terminator:
+            case Goto(target): normal_targets[target.id] = true
+            case If(_, then_, else_):
+                normal_targets[then_.id] = true
+                normal_targets[else_.id] = true
+            case Switch(_, targets, default):
+                normal_targets[default.id] = true
+                for target in targets:
+                    normal_targets[target.target.id] = true
+            case CallTerminator(_, _, _, normal, contract, unwind):
+                normal_targets[normal.id] = true
+                if contract == MirCallUnwindContract.MayUnwind:
+                    if unwind == nil:
+                        return exception_cfg_error("MayUnwind call has no unwind successor")
+                    unwind_targets[unwind.unwrap().id] = true
+            case _: ()
+
+    var token_ids: Dict<i64, bool> = {}
+    for block in body.blocks:
+        var pad_count = 0
+        var instruction_index = 0
+        for instruction in block.instructions:
+            match instruction.kind:
+                case LandingPad(dest):
+                    pad_count = pad_count + 1
+                    if instruction_index != 0:
+                        return exception_cfg_error("LandingPad must be the first instruction of unwind block {block.id.id}")
+                    if not unwind_targets.has(block.id.id):
+                        return exception_cfg_error("LandingPad block {block.id.id} is not an unwind successor")
+                    if normal_targets.has(block.id.id):
+                        return exception_cfg_error("LandingPad block {block.id.id} has a normal predecessor")
+                    val local_kind = exception_local_type(body, dest.id)
+                    if local_kind == nil or local_kind.unwrap() != MirTypeKind.ExceptionToken:
+                        return exception_cfg_error("LandingPad destination {dest.id} is not ExceptionToken")
+                    token_ids[dest.id] = true
+                case _: ()
+            instruction_index = instruction_index + 1
+        if unwind_targets.has(block.id.id) and pad_count != 1:
+            return exception_cfg_error("unwind successor {block.id.id} must contain exactly one LandingPad")
+
+    # Copy/Move are the only legal token-forwarding instructions. Iterate to
+    # discover chains before validating their uses.
+    var changed = true
+    while changed:
+        changed = false
+        for block in body.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case Copy(dest, src) | Move(dest, src):
+                        if token_ids.has(src.id) and not token_ids.has(dest.id):
+                            val local_kind = exception_local_type(body, dest.id)
+                            if local_kind == nil or local_kind.unwrap() != MirTypeKind.ExceptionToken:
+                                return exception_cfg_error("exception token forwarded into non-token local {dest.id}")
+                            token_ids[dest.id] = true
+                            changed = true
+                    case _: ()
+
+    var uses: Dict<i64, i64> = {}
+    for token_id in token_ids.keys():
+        uses[token_id] = 0
+    for block in body.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case LandingPad(_): ()
+                case Copy(_, src) | Move(_, src):
+                    if token_ids.has(src.id): uses[src.id] = uses[src.id] + 1
+                case Call(_, func, args) | CallIndirect(_, func, args, _):
+                    if exception_operand_is_token(func, token_ids):
+                        return exception_cfg_error("exception token used as call target")
+                    if exception_operands_have_token(args, token_ids):
+                        return exception_cfg_error("exception token passed to ordinary call")
+                case _:
+                    if exception_illegal_inst_use(instruction.kind, token_ids):
+                        return exception_cfg_error(
+                            "exception token used by ordinary instruction")
+        match block.terminator:
+            case Resume(token):
+                val token_id = exception_operand_local(token)
+                if not token_ids.has(token_id):
+                    return exception_cfg_error("Resume operand is not a LandingPad token")
+                uses[token_id] = uses[token_id] + 1
+            case Ret(value):
+                if value != nil and token_ids.has(exception_operand_local(value.unwrap())):
+                    return exception_cfg_error("exception token returned from function")
+            case Throw(value):
+                if token_ids.has(exception_operand_local(value)):
+                    return exception_cfg_error("exception token used as source Throw payload")
+            case _: ()
+    for token_id in token_ids.keys():
+        if uses[token_id] != 1:
+            return exception_cfg_error("exception token {token_id} must have exactly one linear consumer")
+    Ok(())
+
+export validate_mir_exception_cfg

@@ -367,6 +367,7 @@ struct MirLowering:
     facet_adapter_local_ids: [i64]
     facet_adapter_plans: [TypedFacetAdapterPlan]
     facet_cleanup_scopes: [FacetCleanupScope]
+    pending_may_unwind_call: bool
     # Current-module extern declarations. HIR call operands retain no
     # `may_unwind` contract beyond this statically identifiable set.
     extern_function_symbol_ids: Dict<i64, bool>
@@ -506,6 +507,48 @@ impl MirLowering:
                 entry_index = entry_index - 1
             scope_index = scope_index - 1
         self.builder = b
+
+    me emit_facet_unwind_cleanup_successor(first_scope: i64) -> BlockId:
+        """Build an unwind-only cleanup path without consuming normal ownership."""
+        var b = self.builder
+        val saved_block = b.current_block
+        val saved_instructions = b.instructions
+        val cleanup_block = b.new_block(Some("facet_unwind_cleanup"))
+        b.current_block = cleanup_block
+        b.instructions = []
+        val token = b.emit_landing_pad()
+        self.builder = b
+        self.emit_facet_cleanup_from(first_scope)
+        b = self.builder
+        b.terminate_resume(mir_operand_move(token))
+        b.current_block = saved_block
+        b.instructions = saved_instructions
+        self.builder = b
+        cleanup_block
+
+    me emit_admitted_call(
+        func: MirOperand, args: [MirOperand], return_type: MirType
+    ) -> LocalId?:
+        """Emit the pending typed call as ordinary or cleanup-capable MIR."""
+        if not self.pending_may_unwind_call:
+            var ordinary = self.builder
+            val result = ordinary.emit_call(func, args, return_type)
+            self.builder = ordinary
+            return result
+        self.pending_may_unwind_call = false
+        val cleanup = self.emit_facet_unwind_cleanup_successor(0)
+        var b = self.builder
+        val normal = b.new_block(Some("call_normal"))
+        val dest: LocalId? = if return_type.kind != MirTypeKind.Unit:
+            b.new_temp(return_type)
+        else:
+            nil
+        b.set_terminator(mir_call_terminator_create(
+            dest, func, args, normal, MirCallUnwindContract.MayUnwind,
+            Some(cleanup)).unwrap())
+        b.switch_to_block(normal)
+        self.builder = b
+        dest
 
     me leave_facet_cleanup_scope(normal_fallthrough: bool):
         if self.facet_cleanup_scopes.len() == 0:

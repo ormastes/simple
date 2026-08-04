@@ -643,9 +643,10 @@ impl MirLowering:
         val effective_func = self.direct_call_operand_with_return_type(func, effective_return_type)
         var b = self.builder
         if effective_return_type.kind != MirTypeKind.Unit:
-            val dest = b.new_temp(effective_return_type)
-            b.emit(MirInst(kind: MirInstKind.Call(dest, effective_func, args), span: nil))
             self.builder = b
+            val admitted = self.emit_admitted_call(
+                effective_func, args, effective_return_type)
+            val dest = admitted.unwrap()
             match effective_return_type.kind:
                 case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
                     self.runtime_array_locals[dest.id] = true
@@ -672,7 +673,10 @@ impl MirLowering:
                             self.struct_value_syms[dest.id] = struct_sym.name
                 case _: ()
             return dest
-        b.emit(MirInst(kind: MirInstKind.Call(nil, effective_func, args), span: nil))
+        self.builder = b
+        val _admitted = self.emit_admitted_call(
+            effective_func, args, effective_return_type)
+        b = self.builder
         val temp = b.new_temp(MirType.unit())
         self.builder = b
         temp
@@ -4085,6 +4089,11 @@ impl MirLowering:
                 indirect_effects, "indirect", callee.span):
                 return rejected
 
+        # Argument expressions may contain their own typed calls. Preserve this
+        # call's admission independently so nested lowering cannot consume it.
+        val selected_call_may_unwind = self.pending_may_unwind_call
+        self.pending_may_unwind_call = false
+
         var arg_operands: [MirOperand] = []
         var call_param_types: [HirType] = []
         # A Var/NamedVar callee keeps its resolved symbol even when it names a
@@ -4206,6 +4215,7 @@ impl MirLowering:
                 ))
             else:
                 self.symbol_to_operand(direct_symbol)
+            self.pending_may_unwind_call = selected_call_may_unwind
             val result = self.emit_resolved_direct_call(func_operand, arg_operands, return_type)
             self.remember_call_hir_return(result, direct_symbol)
             return result
@@ -4225,11 +4235,16 @@ impl MirLowering:
             MirConstValue.Str("rt_closure_func_ptr"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ))
+        val indirect_may_unwind = selected_call_may_unwind
+        self.pending_may_unwind_call = false
         var b = self.builder
         val closure_target_result = b.emit_call(closure_target_fn, [mir_operand_copy(callee_local)], MirType.i64())
         if closure_target_result == nil:
-            val fallback = b.emit_call_indirect(mir_operand_copy(callee_local), arg_operands, sig, ret_type)
             self.builder = b
+            self.pending_may_unwind_call = indirect_may_unwind
+            val fallback = self.emit_admitted_call(
+                mir_operand_copy(callee_local), arg_operands, ret_type)
+            b = self.builder
             if fallback != nil:
                 return fallback.unwrap()
             val unit_local = b.new_temp(MirType.unit())
@@ -4253,7 +4268,11 @@ impl MirLowering:
             closure_params = closure_params.push(MirType.i64())
             closure_args = closure_args.push(arg_op)
         val closure_sig = MirSignature(params: closure_params, return_type: ret_type, is_variadic: false)
-        val closure_call_result = closure_b.emit_call_indirect(mir_operand_copy(closure_target), closure_args, closure_sig, ret_type)
+        self.builder = closure_b
+        self.pending_may_unwind_call = indirect_may_unwind
+        val closure_call_result = self.emit_admitted_call(
+            mir_operand_copy(closure_target), closure_args, ret_type)
+        closure_b = self.builder
         if closure_call_result != nil and result_slot != nil:
             closure_b.emit_copy(result_slot.unwrap(), closure_call_result.unwrap())
         closure_b.terminate_goto(merge_block)
@@ -4261,7 +4280,11 @@ impl MirLowering:
 
         var raw_b = self.builder
         raw_b.switch_to_block(raw_block)
-        val raw_call_result = raw_b.emit_call_indirect(mir_operand_copy(callee_local), arg_operands, sig, ret_type)
+        self.builder = raw_b
+        self.pending_may_unwind_call = indirect_may_unwind
+        val raw_call_result = self.emit_admitted_call(
+            mir_operand_copy(callee_local), arg_operands, ret_type)
+        raw_b = self.builder
         if raw_call_result != nil and result_slot != nil:
             raw_b.emit_copy(result_slot.unwrap(), raw_call_result.unwrap())
         raw_b.terminate_goto(merge_block)
