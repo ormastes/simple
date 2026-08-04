@@ -42,6 +42,38 @@ can build the required kernel.
   `c5a1cbd8293a70af3b983e1b608109e1e86427e2d424490e7e08bd7350f45caf`.
 - Phase 3, the ARM64 attested build, and QEMU evidence were not run because no
   Phase 2 compiler passed functional or native admission.
+- A subsequent fresh bounded session also completed its three-cycle cap:
+  1. `0005061fe4` changed instruction translation to indexed owner access
+     (`[MirInst]` plus index), avoiding a `MirInst` method parameter. Its
+     focused regression passed 11/11, but the fresh Phase 2 build stopped
+     before sanity with a `SymbolTable.bind_qualified_function` field-type
+     inference regression for `qualified_functions`; no candidate was admitted.
+     The exact diagnostic was
+     `src/compiler/20.hir/hir_types.spl: hir: Unsupported feature: cannot infer field type while lowering SymbolTable.bind_qualified_function: struct 'SymbolTable' field 'qualified_functions'`.
+  2. `5687d7fc95` initialized and maintained the qualified/exact symbol indexes.
+     Its focused invariant passed 3/3. The broad imported-method spec remains
+     blocked before its assertions by the unrelated async-lowering error
+     `Future type not found - import std.async.future` (exit 1). The resulting
+     compiler passed Phase 2 sanity with SHA-256
+     `c053c5c395c02c9d9f3f24b4c2fca2219fa893c0eeb64bbbc1f70666ee9d1e9c`;
+     admission reached indexed `Call` dispatch, then aborted with a nil receiver
+     (exit 132).
+  3. `0ae43f73ac` translated bootstrap calls through indexed owner/scalar
+     projections. Its focused regression passed 14/14 and Phase 2 sanity was
+     stable before and after admission. Canonical admission ran once and ended
+     with exit 134 immediately after `block:terminator-before bb0`; indexed
+     `Call` translation and `block:instruction-after bb0 index=0` succeeded.
+     The trace tail was `instruction:call` -> `call:entry` -> `call:matched` ->
+     `call:dest present=true` -> `call:callee` -> `call:emit present=true` ->
+     `block:instruction-after bb0 index=0` -> `block:terminator-before bb0` ->
+     `panic`; there was no terminator-after marker.
+- The final artifact is retained at
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-indexed-call-cycle3/stage2/aarch64-apple-darwin/simple`
+  with SHA-256
+  `c6bfe36029b0f9d96055b7e9b0179a9dfd3d2ccfe25f87a67601910b1e39ffd6`.
+  Its exact admission log is
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-indexed-call-cycle3/admission/bootstrap_nonentry_module_global/native-build.log`.
+- Phase 3, the ARM64 attested build, and QEMU evidence still were not run.
 
 ## Current Resume Gate
 
@@ -53,14 +85,15 @@ Owner: compiler-admission lane. Final reviewer: ARM64 integration owner.
    older retained worktree is still current.
 3. Start a fresh bounded session. The completed session exhausted its three
    rebuild/admission cycles, so no fourth cycle may be appended to it.
-4. Inspect the first instruction in block zero before editing. For the canonical
-   fixture (`main -> read_initialized_value()`), it is expected to be `Call`.
-   The next repair must keep instruction dispatch in place or use owner-scalar
-   projections; avoid passing a `MirInst` aggregate across another method
-   boundary. Do not proactively redesign terminators or hardcode the fixture.
-5. Add focused owner/scalar and source-boundary coverage before any fresh
-   Phase 2 build. Preserve debug-gated before/after markers so the first
-   failing instruction sub-boundary is exact.
+4. Continue at the exact `block:terminator-before bb0` boundary. Implement an
+   indexed terminator route using `[MirBlock]` plus block index and owner-local
+   scalar projections. Do not pass `MirTerminator` or `BlockId` by value across
+   method/helper boundaries. A suitable shape is `translate_terminator_at`,
+   which refetches the block and terminator locally and scalarizes target IDs
+   before crossing a boundary.
+5. The fixture's first terminator is likely `Ret`, but preserve exhaustive
+   terminator semantics rather than hardcoding the fixture. Add debug-gated
+   entry/kind, return-payload or target, and emission markers before rebuilding.
 6. Only after the focused regression passes, run one fresh Phase 2 build and
    the canonical non-entry module-global/native admission checks once. Phase 3
    or ARM64 QEMU may start only after both pass.
@@ -78,6 +111,15 @@ Retained evidence:
 - Fresh-session final Cycle 3 block-owner evidence, including the exact
   instruction-boundary admission log:
   `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-block-owner-cycle3/`
+- Indexed-instruction Cycle 1 build (stopped by the SymbolTable regression):
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-indexed-inst-cycle1/`
+- Qualified-symbol Cycle 2 build and retained broad-test blocker:
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-symbol-index-cycle2/`
+  and
+  `/private/tmp/simple-phase2-cycle2-20260804/build/test-evidence/symbol-table-qualified-cycle2/imported-method.log`
+  (`imported-method.status` records exit 1).
+- Final indexed-Call Cycle 3 build and exact terminator-before admission log:
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-indexed-call-cycle3/`
 
 ## Parallel Lanes
 
