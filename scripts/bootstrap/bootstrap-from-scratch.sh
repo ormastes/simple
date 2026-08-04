@@ -1471,12 +1471,10 @@ else
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
-      --entry-closure \
       --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
       --runtime-path "${stage_runtime_absolute}" \
-      --entry src/app/cli/bootstrap_main.spl \
-      -o "${stage3_bin}"
+      -o "${stage3_bin}" src/app/cli/bootstrap_main.spl
   )
   rm -f "${stage2_bin}" "${stage3_bin}"
   bootstrap_stage3_directory_snapshot \
@@ -1578,6 +1576,18 @@ else
     cmp -s "${runtime_admitted_snapshot}" \
       "${stage3_provenance_dir}/runtime-before-stage3.txt" || exit 1
   fi
+  # STAGE 3 MUST USE THE BARE POSITIONAL `.spl` SHAPE. Do NOT add `--entry`,
+  # `--entry-closure`, or `--source` here (see
+  # doc/08_tracking/bug/stage3_entry_flag_delegates_to_rust_seed_2026-08-04.md).
+  # `run_native_build_bootstrap` (src/app/cli/bootstrap_main.spl) routes to the
+  # pure-Simple in-process CompilerDriver ONLY for a single `.spl` positional
+  # with no `--source`. An explicit `--entry` outside the Stage 4 allowlist, or
+  # ANY `--source`, falls through to `run_rt_native_build` -> the Rust seed FFI,
+  # which silently turns the self-host verification into a second seed build.
+  # The positional branch already seeds SIMPLE_NATIVE_BUILD_ENTRY and
+  # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=0, so entry-closure discovery still
+  # happens -- inside the self-hosted driver, which is the point of Stage 3.
+  # Stage 2 above is a seed build by design and keeps its --entry/--source form.
   set +e
   [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ] && \
   bootstrap_stage3_run_transcribed \
@@ -1603,16 +1613,34 @@ else
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    --source src/compiler --source src/app --source src/lib \
-    --entry-closure \
     --threads "${selfhost_jobs}" \
     --cache-dir "${stage3_cache_absolute}" \
     --mode "${bootstrap_mode}" \
     --runtime-path "${stage_runtime_absolute}" \
-    --entry src/app/cli/bootstrap_main.spl \
-    -o "${stage3_bin}"
+    -o "${stage3_bin}" src/app/cli/bootstrap_main.spl
   stage3_status=$?
   set -e
+  # Stage 3 self-host provenance gate (fail-closed).
+  # `Build complete: N compiled, M cached, K failed` and `Linked: ... via
+  # clang++` are emitted ONLY by src/compiler_rust/native_all/src/lib.rs. The
+  # pure-Simple in-process CompilerDriver path prints neither -- it is silent on
+  # success and prints `error: in-process native-build: ...` on failure. So
+  # either marker in the Stage 3 log proves the Rust seed, not the Stage 2
+  # self-hosted compiler, produced the Stage 3 binary. Without this gate the
+  # delegation is completely silent and Stage 3 reads as a successful
+  # self-host while actually being a second seed build.
+  stage3_provenance_log="${log_dir}/stage3-native-build.log"
+  if [ -f "${stage3_provenance_log}" ] && \
+    grep -qE '^(Build complete: [0-9]+ compiled|Linked: .* via clang)' \
+      "${stage3_provenance_log}"; then
+    echo "error: Stage 3 was built by the Rust seed (rt_native_build), not the" >&2
+    echo "       Stage 2 self-hosted compiler -- the self-host verification is" >&2
+    echo "       vacuous. The Stage 3 native-build args must be the bare" >&2
+    echo "       positional .spl form (no --entry / --entry-closure / --source)." >&2
+    echo "       See doc/08_tracking/bug/stage3_entry_flag_delegates_to_rust_seed_2026-08-04.md" >&2
+    echo "       Evidence: ${stage3_provenance_log}" >&2
+    exit 1
+  fi
   if [ "${stage2_admitted_sha_before_stage3}" != absent ]; then
     [ "${stage2_admitted_sha_before_stage3}" = \
       "$(bootstrap_stage3_hash_file "${stage2_admitted_absolute}")" ] || {
