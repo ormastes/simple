@@ -65,6 +65,9 @@ class LlvmIRBuilder:
     # appends in amortized O(1). Consumed exactly once by build()/
     # llvm_ir_builder_build (rt_string_builder_finish releases the handle).
     sb: i64
+    # Layout-reserved legacy field. It has no readers. Do not mutate it in
+    # start/end helpers: compiled Phase 2 write-back erased the opening `define`
+    # line even when the external string-builder push happened first.
     current_function: text?
     local_counter: i64
     debug_counter: i64
@@ -177,8 +180,7 @@ class LlvmIRBuilder:
     me start_function(name: text, params: [text], return_type: text):
         """Start a function definition with nounwind (Simple has no exceptions)."""
         val param_str = params.join(", ")
-        self.emit("define {return_type} @{name}({param_str}) nounwind {{")
-        self.current_function = Some(name)
+        llvm_ir_builder_push_line(self.sb, "define {return_type} @{name}({param_str}) nounwind {{")
 
     me start_function_opt(name: text, params: [text], return_type: text, is_readonly: bool, is_small: bool, dbg_id: i64?):
         """Start a function definition with optimization attributes.
@@ -203,8 +205,7 @@ class LlvmIRBuilder:
                 dbg_suffix = " !dbg !{id}"
             nil:
                 ()
-        self.emit("define {return_type} @{name}({param_str}){attrs}{dbg_suffix} {{")
-        self.current_function = Some(name)
+        llvm_ir_builder_push_line(self.sb, "define {return_type} @{name}({param_str}){attrs}{dbg_suffix} {{")
 
     me start_function_with_attrs(name: text, params: [text], return_type: text, func_attr: FunctionAttr):
         """Start a function definition with attributes."""
@@ -223,14 +224,12 @@ class LlvmIRBuilder:
                 section_str = " section \"{section}\""
             nil:
                 ()
-        self.emit("{prefix} {return_type} @{name}({param_str}){attrs}{section_str} {{")
-        self.current_function = Some(name)
+        llvm_ir_builder_push_line(self.sb, "{prefix} {return_type} @{name}({param_str}){attrs}{section_str} {{")
 
     me end_function():
         """End a function definition."""
-        self.emit("}")
-        self.emit("")
-        self.current_function = nil
+        llvm_ir_builder_push_line(self.sb, "}")
+        llvm_ir_builder_push_line(self.sb, "")
 
     me fresh_local() -> text:
         """Generate a fresh local name.
@@ -644,6 +643,16 @@ class LlvmIRBuilder:
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
+pub fn llvm_ir_builder_push_line(handle: i64, line: text):
+    """Append one LLVM IR line through the scalar builder handle."""
+    if rt_string_builder_len(handle) > 0:
+        rt_string_builder_push(handle, "\n")
+    rt_string_builder_push(handle, line)
+
+pub fn llvm_ir_builder_emit_owned(builder: LlvmIRBuilder, line: text):
+    """Append a line while resolving the builder handle in its owner module."""
+    llvm_ir_builder_push_line(builder.sb, line)
 
 pub fn llvm_ir_builder_build(builder: LlvmIRBuilder) -> text:
     """Build final IR without relying on receiver-method dispatch."""
