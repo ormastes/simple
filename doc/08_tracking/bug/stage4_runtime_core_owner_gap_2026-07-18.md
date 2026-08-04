@@ -29,8 +29,11 @@ forgiveness and direct-link fallback are disabled. Focused source regressions
 pin root-versus-transitive localization, cycle-safe Linux grouping, Mach-O root
 forcing, cleanup ordering, owner resolution, and the Windows fork exclusion.
 
-No Simple, compiler, runtime, C, Cargo, or native execution is claimed under
-this session's static-only restriction.
+A bounded formatter diagnostic passed HIR/code generation, then the strict
+`core-c-bootstrap` link rejected missing `rt_file_atomic_write`. Its provider
+exists in `src/runtime/runtime_native.c`, so capsule selection/owner
+partitioning remains pending. This is not a formatter regression and no
+successful executable is claimed from that diagnostic.
 
 ## Remaining related blockers
 

@@ -2,8 +2,8 @@
 
 ## Status
 
-Open; retained after the third and final bounded x86 Phase 4 cycle on
-2026-08-04.
+Fixed. Exact x86 Phase 4 cycle 1 crossed the formatter with the refreshed
+LLVM 23.1 Stage 3 producer.
 
 ## Symptom
 
@@ -19,10 +19,20 @@ HIR lowering then stopped in `src/compiler/tools/formatter/main.spl` on legacy
 - Stub fallback: disabled
 - LLVM provider: repository-managed 23.1.0-rc2 prefix
 
-## Next action
+## Repair and focused evidence
 
-In a fresh bounded session, inventory the formatter's exact legacy scalar
-declarations, replace only semantic integer/boolean aliases with canonical
-`i64`/`bool`, add a focused formatter construction/formatting native contract,
-then start a new maximum-three-cycle Phase 4 sequence. Do not widen HIR type
-resolution or start a fourth retry in the exhausted session.
+The formatter's 11 semantic integer annotations and six boolean annotations
+now use canonical `i64` and `bool`. The reassigned `print_diff` maximum is now
+mutable. Source-contract expectations were updated to match those declarations.
+
+A temporary focused formatter contract passed HIR/code generation and emitted
+objects, then the strict `core-c-bootstrap` link exited 1 on unresolved
+`rt_file_atomic_write`. The diagnostic is retained in
+`build/focused/stage4-formatter/native-build.log`; it is not an executable PASS
+and the temporary contract was removed rather than making the minimal runtime
+bundle a false formatter requirement. The provider/owner partition remains the
+separate `stage4_runtime_core_owner_gap_2026-07-18.md` concern.
+
+Cycle 1 continued to `compiler.tools.fix.main`, proving the formatter no longer
+blocks HIR. Evidence:
+`build/bootstrap-stage4-x86-phase4-llvm23/logs/x86_64-unknown-linux-gnu/stage4-native-build-formatter-cycle1.log`.
