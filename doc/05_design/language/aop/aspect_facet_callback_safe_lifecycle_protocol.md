@@ -1,7 +1,8 @@
 <!-- codex-design -->
 # Callback-safe aspect lifecycle ownership protocol
 
-Status: design proposal; not implemented or verified.
+Status: implemented; static/source verification complete, threaded and
+executable runtime evidence pending.
 
 This addendum refines REQ-AF-008 for concurrent lazy activation, facet leases,
 prepared advice, and unload. It does not replace the canonical
@@ -11,8 +12,10 @@ prepared advice, and unload. It does not replace the canonical
 
 Use two distinct coordinators with non-overlapping responsibilities:
 
-1. `AspectLazySingleFlight` owns only duplicate lazy-work identity, completion,
-   and follower wakeup. It must not serialize unrelated lifecycle operations.
+1. `AspectLazySingleFlight` owns duplicate lazy-work identity, completion, and
+   follower wakeup. The current implementation permits only one active flight
+   per context, so different routes are conservatively serialized. Per-route
+   parallelism is a performance follow-up, not a correctness claim.
 2. `AspectLifecycleGate` serializes short reads or commits of the canonical
    application context: coordinator, lifecycle, publication registries,
    projection, loader, and provider cache.
@@ -49,7 +52,7 @@ facet or advice re-entry.
   has no catch/unwind boundary; a panic is fail-stop. Callback ports that return
   to the runtime must express failure as `Result`.
 
-## Proposed owners and APIs
+## Implemented owners and APIs
 
 ### Application lifecycle gate
 
@@ -172,11 +175,13 @@ acquire_or_activate_facet_descriptor
   -> lazy_singleflight.complete_success/failure
 ```
 
-Followers wait only on the matching lazy flight. Facet release, unload, and
-advice prepare/finalize are not blocked during pack I/O. Synchronous re-entry
-for the same lazy route must fail with a cycle/re-entry diagnostic or remain a
-documented port violation until a canonical thread/task activation stack
-exists; it must not silently wait on itself.
+Same-route followers receive the matching flight's shared typed completion.
+The current context-wide flight owner also serializes different routes. Facet
+release, unload, and advice prepare/finalize are not blocked during pack I/O.
+Synchronous port-callback re-entry for the same lazy route is prohibited by the
+port contract: no canonical thread/task activation identity exists yet, so the
+runtime cannot reject it deterministically and such re-entry would wait on its
+own flight. Embeddings must not perform it.
 
 ### Already-active facet acquire and release
 
@@ -266,7 +271,7 @@ never copied back by finalization.
 6. Partial prepare failure releases earlier tokens and invokes no callback.
 7. Replay/double finalize fails without changing counters or token maps.
 8. Lazy I/O callback can use unrelated facet APIs because the lifecycle gate is
-   free; same-route recursion is rejected deterministically.
+   free; the port contract prohibits synchronous same-route recursion.
 9. Concurrent lazy callers perform one port read and one activation commit.
 10. Facet acquire cannot observe visibility after unload quiesce commits.
 11. Different contexts never share gates, permits, tokens, or counters.
@@ -276,19 +281,22 @@ barrier-controlled advice/unload and lazy/facet interleavings, with bounded
 completion time and exact pin/cache/dispatch counters. Static state tests alone
 must not be reported as proof of multithreaded safety.
 
-## Implementation sequence
+## Implementation status
 
-1. Introduce the independent `AspectLifecycleGate`; stop using lazy flight state
-   as a global lifecycle gate.
-2. Split advice prepare/invoke/finalize in the loader registry with deterministic
-   unit tests over immutable lifecycle values.
-3. Compose the split API in `AspectExecutionContext` and add the advice/unload
-   interleaving state tests.
-4. Move lazy reservation and commit into separate gated phases around port I/O.
-5. Gate facet lease/descriptor operations and unload with explicit private
-   under-gate helpers.
-6. Add barrier-controlled native thread tests and performance evidence before
-   claiming REQ-AF-008 complete.
+Implemented source slices are:
+
+1. The independent `AspectLifecycleGate`, separate from lazy-flight state.
+2. Advice prepare/invoke/finalize, with native invocation outside the lifecycle
+   gate and canonical token/counter installation in the gated phases.
+3. `AspectExecutionContext` composition for prepared advice and retryable
+   unload/quiesce transitions.
+4. Lazy preflight/reservation and commit/revalidation as separate gated phases
+   around exact-route pack I/O.
+5. Gated facet lease, descriptor, method-address, release, activation, and
+   unload operations through private transition helpers.
+
+Barrier-controlled native thread tests and performance evidence remain required
+before claiming REQ-AF-008 complete.
 
 Do not implement steps 3–5 by holding a mutex or logical owner across a callback.
 Do not add a process-global context, a second generation refcount, busy polling,
@@ -296,9 +304,18 @@ or copied-registry replacement after callback return.
 
 ## Current gaps
 
-The existing loader advice function combines pinning, callback execution, token
-release, and copied-state return, so it cannot safely participate in concurrent
-context mutation. The existing lazy gate also conflates duplicate-work tracking
-with lifecycle exclusion. Until the split APIs and independent gate are
-implemented and threaded evidence passes, lifecycle-wide synchronization and
-REQ-AF-008 remain unproven.
+The gate and split protocol are implemented, but static/source checks are not
+proof of multithreaded behavior. REQ-AF-008 therefore remains unproven until
+barrier-controlled advice/unload and lazy/facet interleavings pass with exact
+pin, cache, and dispatch counters.
+
+Construction, `enter_operational`, and configuration mutation (including loader
+and pack-I/O installation) remain startup-only operations outside the lifecycle
+gate. Policy/catalog reads likewise assume immutable post-construction state.
+The lifecycle gate is not reentrant. Synchronous same-route port re-entry is a
+prohibited embedding behavior and would self-wait because there is no canonical
+task/thread identity detector. Different lazy routes are globally serialized
+per context by the current single-flight owner, which is safe but may constrain
+performance. Native callback panic has no recoverable unwind boundary and is
+process fail-stop; only returned `Result` failures receive guaranteed finalize
+cleanup. Portable unwind/cancellation evidence remains open.

@@ -2365,16 +2365,16 @@ copied coordinator/lifecycle state, backend-specific raw callbacks, existing
 
 ### 31.0 Callback-safe concurrency correction
 
-The present dispatch function still accepts copied registry/lifecycle values
-and returns replacements after invoking callbacks. That is valid only for the
-sequential tests. It does not make `AspectExecutionContext` a synchronized sole
-owner: concurrent dispatch can lose token/counter mutations, and unload can
-observe zero canonical pins while a callback runs on a local lifecycle copy.
-The compatibility methods that assign a caller-provided `ModuleLoader` into
-`self.loader` likewise cannot participate in the concurrent path; a stale
-loader value must never replace the context-owned loader.
+The earlier audit found that dispatch accepted copied registry/lifecycle values
+and returned replacements after callbacks, which was safe only for sequential
+tests. That defect is now closed on the context-owned production path: canonical
+pins and attempt counters are installed before callback invocation, finalize
+merges deltas into current state, and unload observes the committed pins. The
+context-owned path also ignores caller-supplied loader compatibility values and
+uses only its retained canonical loader. Legacy isolated-value compatibility
+composition is not a concurrent application ownership boundary.
 
-Production advice dispatch therefore requires a three-part operation owned by
+Production advice dispatch now uses a three-part operation owned by
 `app/startup`, not by `AdviceBindingRegistry`:
 
 1. **Prepare under the application state mutex:** validate the current
@@ -2386,23 +2386,25 @@ Production advice dispatch therefore requires a three-part operation owned by
 3. **Finish under the same mutex:** release the ticket tokens in reverse order,
    commit outcome counters, and only then return or panic.
 
-Activation publication and unload invalidation/quiesce must use that same state
+Activation publication and unload invalidation/quiesce use that same state
 mutex. Physical loader cleanup remains outside callback execution and may begin
 only after the canonical lifecycle is quiescing and drained; one retirement
 claim prevents duplicate cleanup by concurrent unload retries. The lazy I/O
 single-flight mutex is a separate gate and is not a substitute for this state
 owner.
 
-`advice_binding_registry.spl` must shrink to publication/order/lookup/unbind.
+`advice_binding_registry.spl` is limited to publication/order/lookup/unbind.
 An immutable loader projection module owns row derivation and owner/address
 validation. `os/smf/LifecycleManager` remains the sole token authority.
 `ModuleLoader`/`ResourceLifecycleManager` remain the physical mapping/cache
 owners. `AspectExecutionContext` composes those owners and alone serializes
 their transition order. Publication/lookup counters remain registry-owned;
 dispatch attempt/invocation/failure counters move with the application
-coordinator so updates cannot be lost. Until this split and a guaranteed finish path exist,
-callback-safe concurrent advice dispatch/unload and portable unwind remain
-release-blocking; sequential token accounting is not concurrency evidence.
+coordinator so updates cannot be lost. The split and application lifecycle gate
+are implemented; callback-safe concurrent behavior remains an evidence claim,
+not an implementation gap. Portable unwind and barrier-controlled native thread
+evidence remain release-blocking; sequential or static token accounting is not
+concurrency evidence.
 
 ### 31.1 Implementation checkpoint
 
@@ -2446,11 +2448,25 @@ top-level startup facade no longer re-exports it. Simple supports private and
 `pub(peer)` visibility, but narrowing only the class is unsafe while public
 runtime functions expose it in their signatures. Removing the leaf export
 requires a separate opaque-handle runtime facade migration and no compiler ABI
-change. Lazy-acquire callers now use a Mutex/channel single-flight:
-one owner performs I/O/activation and same-route followers receive the shared
-typed completion. Broader lifecycle concurrency across low-level `try_facet`,
-unload, advice, and other state owners remains unproven, as do portable
+change. Lazy-acquire callers now use a Mutex/channel single-flight: one owner
+performs I/O/activation and same-route followers receive the shared typed
+completion. The application lifecycle gate now serializes prepared-advice
+prepare/finalize, facet lease/descriptor/method operations, activation commits,
+and retryable unload/quiesce transitions. Lazy preflight/reservation and
+commit/revalidation are separate gated phases around exact-route pack I/O;
+native advice invocation runs outside the gate. The current single-flight owner
+permits only one active flight per context, so different routes are globally
+serialized. Synchronous same-route port-callback re-entry is prohibited and
+would wait on itself; no canonical task/thread identity exists to reject it
+deterministically.
+
+Construction, `enter_operational`, and configuration mutation (including
+loader and pack-I/O installation) remain startup-only operations outside the
+lifecycle gate, and policy/catalog reads assume immutable post-construction
+state. Native callback panic remains process fail-stop, not a recoverable unwind
+path. Broader lifecycle concurrency is therefore implemented but remains
+unproven until barrier-controlled threaded evidence passes. Portable
 callee/foreign unwind, deployment-specific I/O binding, opaque runtime lease
-facade migration, and executable evidence. `throw`, `await`, `yield`,
+facade migration, and executable evidence also remain open. `throw`, `await`, `yield`,
 and identifiable unspecified-unwind extern calls now fail closed with E-AF007
 while a lease may be live.
