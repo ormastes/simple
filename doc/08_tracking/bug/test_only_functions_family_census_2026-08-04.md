@@ -155,30 +155,66 @@ be genuine illustrative documentation — but the four `compiler_core` specs abo
 inspected line by line and are the disabled-and-tautological shape exactly. Sizing
 the rest is a separate lane.
 
-(Incidental measurement note for anyone re-running this: `find test -name '*.spl'`
-reports 20,170 files, while a symlink-following walk reports 41,485. `test/` contains
-symlinked directories, so a follow-links walk double-counts. Any per-file rate
-computed over the walked set is roughly half what it should be.)
+## `test/` symlinks `src/` into itself — and it broke this census
+
+`find test -name '*.spl'` reports 20,166 files; a symlink-following walk reports
+41,485. The gap is not incidental double-counting. `test/` contains **14 directory
+symlinks that point back into the production tree**:
+
+```
+test/01_unit/compiler/compiler -> ../../../src/compiler
+test/unit/compiler/compiler    -> src/compiler
+test/01_unit/compiler/std      -> ...
+test/feature/lib/{app,compiler,lib}
+test/03_system/feature/lib/{app,compiler,lib}
+test/01_unit/app/desugar/app,  test/unit/app/desugar/app
+test/01_unit/lib/database/lib, test/unit/lib/database/lib
+```
+
+Consequence for any census: production source files are re-reached through a `test/`
+path and get classified as *tests*. Measured on this tree, a follow-links walk of
+`test/` yields 41,485 `.spl` files, of which **11,392 — 27% — are production files
+under `src/` reached through a symlink**. That is precisely how the `.spl` arm failed
+its own ground-truth check — twice. `eval_get_warnings` was dropped by the
+name-shadowing rule because its **own definition**, reached via
+`test/01_unit/compiler/compiler/10.frontend/core/interpreter/eval.spl`, registered as
+a test-side definition of the same name. The census was measuring `src/compiler`
+against itself.
+
+The fix is to treat the **realpath** as identity: a file whose realpath lives under
+`src/` is production no matter which path reached it. Anyone writing a
+src-versus-test analysis in this repo must do this, and it is the mirror image of the
+already-documented `src/app/t32_cli` symlink trap — that one causes a non-following
+walk to *miss* 39% of `.spl` files; this one causes a following walk to *invent* a
+test tree out of production code.
+
+This is worth a second look beyond censuses: `test/unit/compiler/compiler` being a
+live symlink to `src/compiler` means a directory-mode test run over `test/` walks
+into production sources.
 
 ## Triage
 
 | Class | Count | Meaning |
 |---|---|---|
 | (i) dead code | 141 | unused accessors, `with_*`/`set_*` builders (32 of them), thin delegating wrappers, duplicated convenience layers |
-| (ii) unwired feature | 32 | the function is correct; nothing connects it. The valuable class. |
-| (iii) legitimately test-only | 24 | mock/bench/test-DB helpers — fine, no action |
+| (ii) unwired feature | 31 | the function is correct; nothing connects it. The valuable class. |
+| (iii) legitimately test-only | 25 | mock/bench/test-DB helpers and test observers — fine, no action |
 
 The class boundary was drawn by name/doc shape (predicate, check/filter/validate/warn,
-builder, accessor) and then hand-corrected. 34 landed in class (ii) by shape; two of
-them — `warn_shared_mutation` and `warn_unique_copied` — were demoted to class (i) on
-inspection, because the behaviour they name *is* implemented and live elsewhere (see
-"Fixed in this change"). The 12 highest-consequence class-(ii) items were each traced
-to their intended consumer by hand; the rest are recorded but not individually traced.
+builder, accessor) and then hand-corrected. 34 landed in class (ii) by shape; three
+were demoted on inspection — `warn_shared_mutation` and `warn_unique_copied` to
+class (i), because the behaviour they name *is* implemented and live elsewhere (see
+"Fixed in this change"), and `quarantine_contains` to class (iii), because it observes
+a mechanism that does run. The 12 highest-consequence class-(ii) items were each
+traced to their intended consumer by hand; the rest are recorded but not individually
+traced. Every demotion is stated in the ranked list rather than dropped, so the
+count can be audited against the reasoning.
 
 Class (iii) is `compiler/src/mock.rs`, `wasm-runtime/src/browser_mock.rs`,
 `runtime/src/value/bench_support.rs`, `runtime/src/value/sffi/io_capture.rs`
-(`rt_has_mock_stdin`), `driver/src/test_db/runs.rs`. These are test infrastructure
-by design.
+(`rt_has_mock_stdin`), `driver/src/test_db/runs.rs`, and
+`interpreter_extern/memory.rs` (`quarantine_contains`). These are test
+infrastructure by design.
 
 ## Class (ii), ranked by consequence
 
@@ -289,20 +325,50 @@ same risk — also left alone.
 
 `can_call_unverified` (`hir/types/verification.rs:46` — "only trusted boundaries can
 call unverified code from verified context"; its siblings `is_verified`/`is_trusted`
-are wired, this one is not), `quarantine_contains`
-(`interpreter_extern/memory.rs:112` — use-after-free quarantine ring),
-`statement_needs_await` (`type/src/effects.rs:343`), `can_start_module`
-(`pipeline_parallel.rs:288`), `has_lint_warnings` (`pipeline/core.rs:172`),
-`analyze_divergence` (`gpu/src/optimize.rs:52`), `validate_bug_record`
-(`driver/src/bug_db.rs:516`), `is_actor_builtin` (`compiler/src/compilability.rs:917`).
+are wired, this one is not), `statement_needs_await` (`type/src/effects.rs:343`),
+`has_lint_warnings` (`pipeline/core.rs:172`), `validate_bug_record`
+(`driver/src/bug_db.rs:516`), `is_actor_builtin` (`compiler/src/compilability.rs:917`),
+`check_escape`'s neighbour `enter_ghost` (`hir/types/verification.rs:178`).
 
-Note on `can_start_module`: nothing outside `pipeline_parallel.rs` references
-`PipelineCoordinator` at all, so `max_in_flight` being unenforced is a symptom of a
-**wholly dead module**, not of one unwired predicate. This points at an adjacent and
-larger family — 9,135 owned Rust function names have *zero* references anywhere in
-the tree, including tests. That family is out of scope here and is not the same
-finding: a never-referenced function is honestly dead, whereas a test-only function
-is dead code wearing a green badge.
+Two candidates were demoted out of class (ii) on inspection and are recorded here so
+the demotion is not silently lost:
+
+- `quarantine_contains` (`interpreter_extern/memory.rs:112`) reads the
+  use-after-free quarantine ring. The ring itself *is* maintained in production —
+  `harden_quarantine_free` is called at :649 and the ring is read at :153. This
+  function is a test *observer* of a live mechanism, i.e. class (iii), not an
+  unenforced gate.
+- `can_start_module` (`pipeline_parallel.rs:288`) is real, but `max_in_flight` going
+  unenforced is a symptom of a **wholly dead module**, not of one unwired predicate
+  (see below).
+
+## Cross-cutting: 8 survivor files are wholly dead modules
+
+For each of the 110 files holding a survivor, the file's own `pub struct`/`pub
+enum`/`pub trait` names were checked against every other owned `.rs` file. Eight
+files have public types that **appear nowhere else in owned Rust**, which accounts
+for 22 of the 197 survivors:
+
+| module | public types | note |
+|---|---|---|
+| `compiler/src/pattern_analysis.rs` | `ExhaustivenessCheck`, `PatternAnalysis` | match-exhaustiveness analysis |
+| `compiler/src/effects_cache.rs` | `EffectCache`, `EffectCacheConfig`, `EffectCacheStats` | 8 survivors live here |
+| `compiler/src/pipeline_parallel.rs` | `ParallelPipeline`, `PipelineConfig`, `PipelineCoordinator` | the `max_in_flight` case |
+| `compiler/src/codegen/wasm_bindgen_gen.rs` | `BindgenCodeGenerator`, `BindingExtractor`, `BrowserBinding` | |
+| `simd/src/intrinsics.rs` | `SimdIntrinsics`, `CraneliftSimdType`, `SimdInstruction` | |
+| `runtime/src/value/primitive_sort.rs` | `PrimitiveSortDispatch`, `PrimitiveSortKind` | the specialized sort path |
+| `gpu/src/optimize.rs` | `AccessPattern`, `BankConflict` | |
+| `compiler/src/mock.rs` | `MockBehavior`, `MockConfig` | expected — test infrastructure |
+
+`pattern_analysis.rs` is worth singling out: `ExhaustivenessCheck` is a dead module,
+and `test/unit/compiler_core/exhaustiveness_spec.spl` is one of the four
+`it "skipped"` specs described below. The analysis and its spec were disabled
+independently and neither disablement is visible from a green suite.
+
+This points at an adjacent, larger family: **9,135 owned Rust function names have
+zero references anywhere in the tree, including tests.** That is out of scope here
+and is not the same finding — a never-referenced function is honestly dead, whereas
+a test-only function is dead code wearing a green badge.
 
 ## Fixed in this change
 
