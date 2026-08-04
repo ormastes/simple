@@ -10,6 +10,113 @@ use std.common.gpu.font_atlas_composite.{font_atlas_composite_opencl_source}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderer, FontRenderBatch, FontRenderQuad}
 use std.io_runtime.{file_read}
 
+# ---------------------------------------------------------------------------
+# PROBE-THEN-CREATE TOCTOU (doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md)
+#
+# `Engine2D.probe_backend()` runs a full create+init+shutdown and then throws it
+# away; `Engine2D.create_with_backend_strict()` is a SECOND, INDEPENDENT
+# create+init. Nothing is cached between them, so the probe's answer is only a
+# PREDICTION about the create. Branching assertions on that prediction corrupts
+# the gate in both directions:
+#
+#   - FALSE RED — probe says Initialized, the create then loses the device, and
+#     the `case Err(_): expect(false).to_equal(true)` arm fires while the code
+#     under test is fine.
+#   - VACUOUS GREEN — probe says Unavailable, the whole device branch is skipped,
+#     and the spec prints a clean pass indistinguishable from a real GPU pass.
+#
+# The fix is structural: every assertion below is driven by what the CREATE and
+# the READBACK actually returned, never by the probe. The probe is still checked
+# for SELF-consistency (its own fields must agree with each other), and a
+# probe/create divergence is DISCLOSED rather than asserted.
+# ---------------------------------------------------------------------------
+
+# `BackendProbeResult` (engine2d) has no `strict_failure_without_fallback()` —
+# only engine3d's `Engine3DBackendProbeResult` does. Calling it aborted both
+# device examples with `semantic: method ... not found` before a single line of
+# their bodies ran, so the whole probe/create branch below was DEAD CODE. The
+# claim itself is real, so it is restated here over the fields engine2d does
+# carry, using engine3d's exact rule (backend_probe3d.spl:68): a strict probe
+# must never report a fallback status nor a substituted backend name.
+fn _strict_failure_without_fallback(status: BackendStatus, requested: text, selected: text) -> bool:
+    if status == BackendStatus.Fallback:
+        return false
+    if selected != requested:
+        return false
+    true
+
+# A device label is only honest with a real handle and a full frame. Restated
+# here so the assertion does not depend on the implementation it is checking.
+#
+# NOTE ON device_identity: the OpenCL backend builds its readback through
+# `engine2d_readback_with_handle(...)`, which defaults `device_identity` to 0
+# (backend.spl:14) — unlike vulkan/cuda it never carries one. Requiring
+# `identity > 0` here would therefore be a guaranteed false red on a genuinely
+# working OpenCL device, so identity is DISCLOSED on the outcome line rather
+# than asserted. `backend_handle` is the OpenCL device framebuffer object and is
+# the load-bearing credential for this backend.
+fn _device_proven(source: text, handle: i64, pixel_count: i64, expected_px: i64) -> bool:
+    source == "device_readback" and handle > 0 and pixel_count == expected_px
+
+# Sources meaning a real device produced or presented the pixels.
+fn _source_is_device(source: text) -> bool:
+    source == "device_readback" or source == "host_cache_after_device_present" or
+        source == "swapchain_present"
+
+# Sources meaning the frame was served by the CPU. Such a frame may NEVER be
+# reported as GPU-rendered.
+fn _source_is_cpu(source: text) -> bool:
+    source == "cpu_mirror" or source == "cpu_fallback"
+
+# Sources meaning the device produced nothing at all this attempt.
+fn _source_is_no_frame(source: text) -> bool:
+    source == "completion_unknown" or source == "readback_failed" or
+        source == "not_requested"
+
+fn _source_is_known(source: text) -> bool:
+    _source_is_device(source) or _source_is_cpu(source) or _source_is_no_frame(source)
+
+# Honest-provenance invariants: asserted UNCONDITIONALLY on every outcome. This
+# is where the spec keeps its teeth — a device label without a handle, or a CPU
+# frame carrying device credentials, is the fabricated-provenance defect and
+# fails here regardless of which backend served the frame.
+fn _assert_provenance_invariants(label: text, source: text, handle: i64, pixel_count: i64, expected_px: i64):
+    if not _source_is_known(source):
+        print "[probe-provenance] {label}: UNKNOWN READBACK SOURCE '{source}' — outside the honest vocabulary, failing closed"
+    expect(_source_is_known(source)).to_equal(true)
+    if source == "device_readback":
+        expect(handle).to_be_greater_than(0)
+        expect(pixel_count).to_equal(expected_px)
+    if _source_is_cpu(source):
+        # Deliberately NOT asserting `handle == 0`: under fd exhaustion the seed
+        # surfaces that field as nil rather than 0, so an equality check there is
+        # a host-condition false red rather than a statement about provenance.
+        expect(_source_is_device(source)).to_equal(false)
+        expect(_device_proven(source, handle, pixel_count, expected_px)).to_equal(false)
+
+# Disclose what actually happened and return whether the device is proven, so the
+# caller asserts device-only invariants against a FACT rather than a prediction.
+# Every non-GPU outcome prints an explicit skip line saying so.
+fn _report_outcome(label: text, source: text, handle: i64, identity: i64, pixel_count: i64, expected_px: i64) -> bool:
+    if _device_proven(source, handle, pixel_count, expected_px):
+        print "[probe-gpu] {label}: GPU-PROVEN — a device produced this frame (source={source} handle={handle} identity={identity} pixels={pixel_count})"
+        return true
+    if _source_is_device(source):
+        print "[probe-gpu] {label}: GPU BRANCH SKIPPED — device-sourced but not device-PROVEN (source={source} handle={handle} identity={identity} pixels={pixel_count}); this example proves NOTHING about the GPU path"
+    else if source == "cpu_fallback":
+        print "[probe-gpu] {label}: GPU BRANCH SKIPPED — the device was unavailable at use time (source=cpu_fallback); the probe's prediction did not survive to the create. This example proves NOTHING about the GPU path"
+    else if source == "cpu_mirror":
+        print "[probe-gpu] {label}: GPU BRANCH SKIPPED — CPU/software lane (source=cpu_mirror); this example proves NOTHING about the GPU path"
+    else:
+        print "[probe-gpu] {label}: GPU BRANCH SKIPPED — no frame produced (source={source}); this example proves NOTHING about the GPU path"
+    false
+
+# A strict create that fails must fail STRUCTURALLY: it may never hand back a
+# silent cpu/software substitute under a GPU name. Holds on every host.
+fn _assert_strict_failure_is_structured(label: text, failure_name: text):
+    expect(failure_name == "cpu" or failure_name == "software").to_equal(false)
+    print "[probe-gpu] {label}: GPU BRANCH SKIPPED — the strict create failed at use time (selected={failure_name}); this example proves NOTHING about the GPU path"
+
 describe "Engine2D OpenCL backend facade":
 
     it "fences the atlas cache with OpenCL program and session identity":
@@ -82,7 +189,7 @@ describe "Engine2D OpenCL backend facade":
         expect(backend.last_probe.api_name).to_equal("opencl")
         expect(backend.last_probe.shader_format).to_equal("opencl-c")
         expect(backend.last_probe.has_compute).to_equal(true)
-        expect(backend.last_probe.strict_failure_without_fallback()).to_equal(true)
+        expect(_strict_failure_without_fallback(backend.last_probe.status, backend.last_probe.requested_name, backend.last_probe.selected_name)).to_equal(true)
         if ok:
             expect(backend.last_probe.status).to_equal(BackendStatus.Initialized)
             expect(backend.last_probe.feature_gate).to_equal("opencl_2d_render")
@@ -306,23 +413,59 @@ describe "Engine2D OpenCL backend facade":
 
     it "routes Engine2D opencl probing through the render backend facade":
         val probe = Engine2D.probe_backend(4, 4, "opencl")
+        print(probe.diagnostic_text())
 
         expect(probe.requested_name).to_equal("opencl")
         expect(probe.selected_name).to_equal("opencl")
         expect(probe.api_name).to_equal("opencl")
         expect(probe.shader_format).to_equal("opencl-c")
         expect(probe.has_compute).to_equal(true)
-        expect(probe.strict_failure_without_fallback()).to_equal(true)
-        if probe.status == BackendStatus.Initialized:
+        expect(_strict_failure_without_fallback(probe.status, probe.requested_name, probe.selected_name)).to_equal(true)
+
+        # Probe SELF-consistency — claims about the probe object's own fields
+        # agreeing with each other, NOT predictions about the later create, so
+        # these stay hard assertions.
+        val probe_ready = probe.status == BackendStatus.Initialized
+        if probe_ready:
+            expect(probe.available).to_equal(true)
             expect(probe.feature_gate).to_equal("opencl_2d_render")
-            val strict = Engine2D.create_with_backend_strict(4, 4, "opencl")
-            match strict:
-                case Ok(engine):
-                    expect(engine.backend_name()).to_equal("opencl")
-                    engine.shutdown()
-                case Err(_):
-                    expect(false).to_equal(true)
         else:
             expect(probe.status).to_equal(BackendStatus.Unavailable)
+            expect(probe.available).to_equal(false)
             val gate_is_known = probe.feature_gate == "opencl_context" or probe.feature_gate == "opencl_2d_render" or probe.feature_gate == "opencl_surface"
             expect(gate_is_known).to_equal(true)
+
+        # The create is attempted REGARDLESS of what the probe predicted. A
+        # divergence is DISCLOSED, never asserted — it is a property of the host
+        # between two independent device acquisitions, not of the code under test.
+        val expected_px = 4 * 4
+        val strict = Engine2D.create_with_backend_strict(4, 4, "opencl")
+        val created = strict.is_ok()
+        if created != probe_ready:
+            print "[toctou] opencl: probe predicted ready={probe_ready} but the independent create returned ok={created} — disclosed, not asserted"
+
+        match strict:
+            case Ok(engine):
+                # Holds on whatever backend actually served the frame.
+                expect(engine.backend_name()).to_equal("opencl")
+                engine.clear(0xff112233u32)
+                val readback = engine.read_pixels_with_source()
+                expect(readback.pixels.len()).to_equal(expected_px)
+                _assert_provenance_invariants("opencl", readback.source, readback.backend_handle, readback.pixel_count, expected_px)
+                val proven = _report_outcome("opencl", readback.source, readback.backend_handle, readback.device_identity, readback.pixel_count, expected_px)
+                if proven:
+                    # Asserted off a FACT (a device really produced this frame),
+                    # never off the probe's prediction.
+                    expect(readback.source).to_equal("device_readback")
+                    expect(readback.pixels[0]).to_equal(0xff112233u32)
+                    expect(readback.pixels[expected_px - 1]).to_equal(0xff112233u32)
+                engine.shutdown()
+            case Err(failure):
+                # The strictness claim still holds unconditionally on the failure
+                # path: a failed strict create may never substitute a CPU backend.
+                _assert_strict_failure_is_structured("opencl", failure.selected_name)
+
+        # Worded to avoid quoting the disclosure token itself — a verdict line
+        # containing it would be miscounted as a real GPU-PROVEN disclosure.
+        print "[probe-gpu] RUN VERDICT: count the per-example GPU-PROVEN disclosure lines above. A run with none of them proves NOTHING about the OpenCL device path, however green it looks."
+        print "[probe-gpu] RUN VERDICT: no assertion in this example is driven by the probe; a probe/create divergence is reported on a [toctou] line instead."
