@@ -1,0 +1,60 @@
+# @cover src/compiler/95.interp/mir_interpreter.spl
+# @cover src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl
+# @cover src/compiler/70.backend/backend/llvm_lib_translate.spl
+# @cover src/compiler/70.backend/backend/_CBackendTranslate/instruction_lowering.spl
+# @cover src/compiler/70.backend/backend/cranelift_codegen_adapter.spl
+# @cover src/compiler/70.backend/backend/lua_backend.spl
+# @cover src/compiler/70.backend/backend/lean_mir_translate.spl
+# @cover src/compiler/70.backend/backend/opencl_backend.spl
+# @cover src/compiler/70.backend/backend/vhdl/vhdl_design_catalog.spl
+
+extern fn rt_file_read_text(path: text) -> text
+
+use std.spec.*
+
+fn backend_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "Unsupported MIR unwind terminators fail explicitly":
+    it "rejects Throw and Resume in interpreter and LLVM consumers":
+        val interpreter = backend_source(
+            "src/compiler/95.interp/mir_interpreter.spl")
+        val textual = backend_source(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
+        val capi = backend_source(
+            "src/compiler/70.backend/backend/llvm_lib_translate.spl")
+        expect(interpreter).to_contain("case Throw(_) | Resume(_):")
+        expect(interpreter).to_contain("E-MIR-UNWIND002")
+        expect(textual).to_contain("case Throw(_) | Resume(_):")
+        expect(textual).to_contain("E-MIR-UNWIND002")
+        expect(capi).to_contain("case Throw(_) | Resume(_):")
+        expect(capi).to_contain("E-MIR-UNWIND002")
+
+    it "rejects Throw and Resume in portable backend consumers":
+        val paths = [
+            "src/compiler/70.backend/backend/_CBackendTranslate/instruction_lowering.spl",
+            "src/compiler/70.backend/backend/cranelift_codegen_adapter.spl",
+            "src/compiler/70.backend/backend/lua_backend.spl",
+            "src/compiler/70.backend/backend/lean_mir_translate.spl",
+            "src/compiler/70.backend/backend/opencl_backend.spl",
+            "src/compiler/70.backend/backend/vhdl/vhdl_design_catalog.spl",
+            "src/compiler/70.backend/backend/wasm/wat_codegen.spl",
+            "src/compiler/70.backend/backend/vulkan_backend.spl",
+            "src/compiler/70.backend/backend/cuda_backend.spl"
+        ]
+        for path in paths:
+            val source = backend_source(path)
+            expect(source).to_contain("case Throw(_) | Resume(_):")
+            expect(source).to_contain("E-MIR-UNWIND002")
+
+    it "rejects Throw and Resume in every native instruction selector":
+        val paths = [
+            "src/compiler/70.backend/backend/native/isel_x86_64.spl",
+            "src/compiler/70.backend/backend/native/isel_aarch64.spl",
+            "src/compiler/70.backend/backend/native/isel_riscv32.spl",
+            "src/compiler/70.backend/backend/native/isel_riscv64.spl"
+        ]
+        for path in paths:
+            val source = backend_source(path)
+            expect(source).to_contain("case Throw(_) | Resume(_):")
+            expect(source).to_contain("E-MIR-UNWIND002")
