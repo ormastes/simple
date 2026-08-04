@@ -82,7 +82,7 @@ SIMPLE_TARGET=x86_64-unknown-simpleos \
 With the ToolChain class in place, the resulting
 `build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang` auto-finds the
 staged builtins at
-`build/os/sysroot/lib/clang/20/lib/x86_64-unknown-simpleos/`.
+`build/os/sysroot/lib/clang/23/lib/x86_64-unknown-simpleos/`.
 
 ## Out-of-scope for this directory
 

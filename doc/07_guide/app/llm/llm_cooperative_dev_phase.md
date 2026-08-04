@@ -529,6 +529,7 @@ test/
 
 ## Related Documents
 
+- [Clang 23.1 Bootstrap, Browser, and QEMU Workflow](clang_23_1_bootstrap_browser_qemu_workflow.md) -- signed provider, pure-Simple candidate smoke, browser staging, canonical QEMU evidence, and bounded retry policy
 - [AI CLI Coexistence Research](../01_research/general/ai_cli_coexistence_2026-03-28.md) -- full configuration mapping
 - [Document Relationship Model](../FILE.md) -- PLAN -> REQ -> FEATURE -> TESTS hierarchy
 - [Engineering Rules](../architecture/rule/README.md) -- coding, testing, documentation policies

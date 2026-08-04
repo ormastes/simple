@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+builder="$repo_root/scripts/setup/build-llvm-23-1-provider.shs"
+
+fail() {
+    printf 'FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+[ -f "$builder" ] || fail "missing LLVM 23.1 provider builder"
+sh -n "$builder" || fail "provider builder is not valid POSIX shell"
+
+help=$($builder --help)
+printf '%s\n' "$help" | grep -F -- '--clone' >/dev/null \
+    || fail "help does not expose explicit clone control"
+printf '%s\n' "$help" | grep -F -- '--verify-only' >/dev/null \
+    || fail "help does not expose provider validation"
+
+grep -F 'TAG="llvmorg-23.1.0-rc2"' "$builder" >/dev/null \
+    || fail "builder is not pinned to the researched signed tag"
+grep -F 'git -C "$SOURCE_DIR" verify-tag "$TAG"' "$builder" >/dev/null \
+    || fail "builder does not verify the tag signature"
+grep -F -- "-DLLVM_ENABLE_PROJECTS='clang;lld'" "$builder" >/dev/null \
+    || fail "builder does not limit projects to clang and lld"
+grep -F -- "-DLLVM_DISTRIBUTION_COMPONENTS='clang;lld;llvm-ar;llvm-objcopy;llvm-config'" "$builder" >/dev/null \
+    || fail "builder does not limit the installed provider components"
+grep -F 'TARGETS="X86;AArch64;RISCV;WebAssembly"' "$builder" >/dev/null \
+    || fail "builder does not declare the reviewed target set"
+grep -F 'LLVM_23_1_PREFIX=%s' "$builder" >/dev/null \
+    || fail "builder does not emit provider handoff metadata"
+
+if "$builder" --source-dir "$repo_root/build/definitely-missing-llvm-source" \
+    --prefix "$repo_root/build/definitely-missing-llvm-prefix" --verify-only \
+    > /dev/null 2>&1; then
+    fail "verify-only accepted a missing source/provider"
+fi
+
+printf 'PASS: LLVM 23.1 provider builder is pinned, explicit, and fail-closed\n'

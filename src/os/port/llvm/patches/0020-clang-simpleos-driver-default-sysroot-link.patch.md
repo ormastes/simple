@@ -23,6 +23,6 @@ In `clang/lib/Driver/ToolChains/SimpleOS.cpp`:
 - add `--sysroot`, `-T <sysroot>/share/simpleos/simpleos.ld`, and
   `<sysroot>/lib/crt0.o` to the linker job,
 - add `-L <sysroot>/lib` and
-  `-L <sysroot>/lib/clang/20/lib/<triple>`,
+  `-L <sysroot>/lib/clang/23/lib/<triple>`,
 - link `-lclang_rt.builtins-<arch>` instead of the unsuffixed builtins name,
 - use the same default sysroot for C and C++ system include paths.

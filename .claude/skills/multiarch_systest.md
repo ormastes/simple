@@ -23,7 +23,7 @@ riscv32, riscv64, arm32, arm64, x86_32, x86_64 (bare-metal QEMU) + aarch64-darwi
 ## Procedure
 
 1. **Build** (only if `--build` or the ELF is missing) — see the guide's recipe.
-   - riscv32 **requires** the LLVM driver: `cd src/compiler_rust && LLVM_SYS_180_PREFIX=/usr/lib/llvm-18 cargo build --package driver --features llvm`.
+   - riscv32 **requires** the pure-Simple LLVM backend. Build the admitted provider with `scripts/setup/build-llvm-23-1-provider.shs`, then export both `LLVM_23_1_PREFIX` and `SIMPLE_LLVM_PREFIX` to that prefix. The Rust in-process LLVM feature remains a separately documented upstream binding blocker.
    - Judge unresolved by `nm`, not link success. Build nice'd/background; retry under load.
 2. **Boot** each lane with its `<arch>_qemu_args()` from the contract, serial →
    `build/os/systest/<arch>.serial.log`, per-lane `timeout`. Do NOT trust the test

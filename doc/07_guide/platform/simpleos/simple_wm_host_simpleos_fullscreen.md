@@ -80,6 +80,30 @@ correlated keyboard and pointer input, authority revision, backend, font crop,
 and framebuffer evidence. Source inspection, demo markers, Rust-seed execution,
 fixed QEMU metadata, or unverified screenshots cannot satisfy the scenarios.
 
+For the LLVM 23.1 browser lane, first build and admit the signed current
+provider (`llvmorg-23.1.0-rc2`; stable 23.1.0 is not published as of
+2026-08-04). Then launch the canonical wrapper with explicit coherent tools:
+
+```sh
+export LLVM_23_1_PREFIX="$PWD/build/toolchains/llvm-23.1.0-rc2"
+SIMPLE_BIN=/Users/ormastes/simple/build/native_probe/simple \
+CLANG="$LLVM_23_1_PREFIX/bin/clang" \
+LINKER="$LLVM_23_1_PREFIX/bin/ld.lld" \
+BUILD_DIR="$PWD/build/evidence/clang-23.1-browser-qemu" \
+REPORT_PATH="$PWD/doc/09_report/clang_23_1_browser_qemu_evidence.md" \
+sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+```
+
+The browser builder writes
+`build/os/apps/browser_demo/clang-23.1-evidence.txt`; it records the compiler,
+linker, archiver, versions, and hashes beside the produced browser ELF. The
+wrapper must prove that those exact ELF bytes were staged as
+`/SYS/APPS/BROWSMF.SMF` before framebuffer or input receipts can pass. Inside
+the guest, the filesystem toolchain is launched as `/usr/bin/clang-23.1`, with
+`/usr/bin/clang` as its compatibility alias. The LLVM-18-only Rust
+`inkwell`/`llvm-sys` binding is a declared bootstrap blocker, never an accepted
+provider for this QEMU lane.
+
 For the hosted CSS-override parity lane, run
 `sh scripts/check/check-wm-host-css-override-evidence.shs`. It writes a stable
 six-token glass fixture and executes the canonical production host launcher for

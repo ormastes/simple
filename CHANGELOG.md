@@ -5,6 +5,11 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **LLVM/Clang 23.1 provider and SimpleOS browser path** — add a signed
+  `llvmorg-23.1.0-rc2` provider workflow, exact 23.1 admission in the
+  pure-Simple backend, launchable guest Clang aliases, coherent browser/libc
+  compilation, bootstrap evidence, and cross-LLM operator guidance. The Rust
+  in-process LLVM binding remains blocked upstream at LLVM 22.
 - **Pinned-corpus GSUB/GPOS shaping** — validate and apply the selected
   Latin, Han, Devanagari, Arabic/Urdu, and Cyrillic OpenType layout plans with
   bounded work, feature-mask provenance, atomic failure, and canonical

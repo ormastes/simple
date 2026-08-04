@@ -1,23 +1,76 @@
 # SimpleOS LLVM/Clang Toolchain — Where It Lives & How To Build Hello World
 
-Quick-find guide for the LLVM→SimpleOS port. If you are asked to "build hello
-world with clang for SimpleOS", start here — the toolchain is **already built**,
-just not on the `PATH` and not under the name the disk-bake gate expects.
+Quick-find guide for the LLVM→SimpleOS port. LLVM 23.1 is now the admitted
+toolchain family; old Clang 18/20 artifacts are historical inputs and must not
+be selected silently.
 
-## Locations (the hard-to-find part)
+## LLVM 23.1 migration operator path (2026-08-04)
+
+Stable LLVM 23.1.0 is not published yet. The current provider is the signed
+`llvmorg-23.1.0-rc2` tag. Do not describe it as a final release. The admission
+contract accepts parsed major/minor `23.1`, so the stable 23.1 provider can
+replace rc2 without changing consumers.
+
+Build the isolated provider from an existing signed checkout (network use is
+opt-in through `--clone`):
+
+```sh
+sh scripts/setup/build-llvm-23-1-provider.shs \
+  --source-dir build/toolchains/llvm-project-23.1.0-rc2
+```
+
+The default install prefix is `build/toolchains/llvm-23.1.0-rc2`. The builder
+verifies the tag signature and exact tag commit, installs one coherent
+Clang/LLD/LLVM-ar/LLVM-config family, and prints the environment assignments.
+Export the prefix for every consumer:
+
+```sh
+export LLVM_23_1_PREFIX="$PWD/build/toolchains/llvm-23.1.0-rc2"
+export SIMPLE_LLVM_PREFIX="$LLVM_23_1_PREFIX"
+export CLANG="$LLVM_23_1_PREFIX/bin/clang"
+export LINKER="$LLVM_23_1_PREFIX/bin/ld.lld"
+```
+
+`scripts/check/lib/clang-23-1-toolchain.shs` is the canonical resolver. It
+fails closed if a required tool is absent or reports a version other than
+23.1; mixing a Clang 23.1 frontend with an older linker or archiver is not an
+admitted workaround.
+
+The browser guest is built by `scripts/os/build_browser_demo_client.shs`. Its
+ELF is `build/os/apps/browser_demo/browser_demo.elf`, and its retained provider
+record is `build/os/apps/browser_demo/clang-23.1-evidence.txt`. Both must be
+produced before the fullscreen wrapper stages the exact ELF as
+`/SYS/APPS/BROWSMF.SMF`.
+
+The guest filesystem exposes the versioned executable at
+`/usr/bin/clang-23.1` and the compatibility alias at `/usr/bin/clang`. Both
+resolve through the general filesystem-exec path; neither authorizes a private
+app-registry execution shortcut.
+
+### Rust bootstrap boundary
+
+The vendored Rust bootstrap's `inkwell`/`llvm-sys` integration supports LLVM
+18 only. It cannot be relabeled as a 23.1 backend and must remain an explicit
+bootstrap blocker until upstream bindings support LLVM 23.1 or that binding
+capsule is replaced. Pure-Simple backend and SimpleOS port evidence must not
+fall back to the LLVM-18 Rust feature.
+
+## Historical Clang 20 locations
 
 | What | Path | Notes |
 |------|------|-------|
 | LLVM/Clang **source** | `/home/ormastes/llvm-project` | Host home dir, **outside the repo**. Clang 20. Used as `LLVM_EXTERNAL_CLANG_SOURCE_DIR`. |
-| **Cross clang/lld** (host-run, targets SimpleOS) | `build/os/llvm/cross-x86_64-unknown-simpleos/bin/` | `clang-20` (131 MB), `ld.lld`, `lld`, `llvm-nm`. ~954 MB. This is the compiler you use. |
+| **Historical cross clang/lld** (host-run, targets SimpleOS) | `build/os/llvm/cross-x86_64-unknown-simpleos/bin/` | Obsolete Clang 20 artifacts retained only for historical diagnosis; do not use them as migration evidence. |
 | aarch64 cross variant | `build/os/llvm/cross-aarch64-unknown-simpleos/` | Same layout for arm64. |
 | Host LLVM tblgen tools | `build/os/llvm/host-tools/bin/` | Bootstrap only (tblgen etc.), not clang. |
 | **Sysroot** | `build/os/sysroot/` | `lib/crt0.o`, `lib/libsimpleos_c.a`, `share/simpleos/simpleos.ld`. |
 | Build driver (Simple) | `src/os/port/llvm/build.spl` | Clones/builds LLVM; `--target x86_64-unknown-simpleos`. |
 | Deploy + status | `src/os/port/deploy_toolchains.spl` | `bin/simple run … -- --status` prints the gate report. |
 
-The cross `clang-20` is a **host executable** (Linux ELF) that emits
+The historical cross `clang-20` is a **host executable** (Linux ELF) that emits
 `x86_64-unknown-simpleos` code — a cross-compiler, not a guest-native binary.
+It is retained only for historical evidence and is not an admitted 23.1
+provider.
 
 ## Simple-native toolchain (distinct from clang)
 
@@ -116,7 +169,7 @@ BIN=build/os/llvm/cross-x86_64-unknown-simpleos/bin
 SR=build/os/sysroot
 printf 'int main(void){return 42;}\n' > /tmp/hello.c
 
-$BIN/clang-20 --target=x86_64-unknown-simpleos --sysroot=$SR -c /tmp/hello.c -o /tmp/hello.o
+"$LLVM_23_1_PREFIX/bin/clang" --target=x86_64-unknown-simpleos --sysroot=$SR -c /tmp/hello.c -o /tmp/hello.o
 $BIN/ld.lld -T $SR/share/simpleos/simpleos.ld $SR/lib/crt0.o /tmp/hello.o \
     -L $SR/lib -lsimpleos_c -o /tmp/hello.elf
 

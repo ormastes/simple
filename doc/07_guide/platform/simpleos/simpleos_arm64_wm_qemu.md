@@ -5,20 +5,27 @@ This lane verifies the canonical Simple ARM64 Engine2D desktop entry under
 
 ## Build
 
-Use an LLVM-enabled pure-Simple self-hosted release driver. The Rust driver is
-bootstrap-only and is not a verification fallback. On Apple Silicon, set:
+Use an LLVM-enabled pure-Simple self-hosted release driver plus one verified
+Clang/LLVM 23.1 provider. The Rust driver is bootstrap-only and is not a
+verification fallback. Its optional in-process LLVM feature remains bound to
+LLVM 18 by the current Rust bindings and is not migrated by these settings. On
+Apple Silicon, set:
 
 ```bash
 SIMPLE=bin/release/aarch64-apple-darwin/simple
 test -x "$SIMPLE"
+export LLVM_23_1_PREFIX=/absolute/path/to/llvm-23.1
+export SIMPLE_LLVM_PREFIX="$LLVM_23_1_PREFIX"
+"$LLVM_23_1_PREFIX/bin/clang" --version
+"$LLVM_23_1_PREFIX/bin/ld.lld" --version
 ```
 
 Build the WM kernel:
 
 ```bash
 SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=src SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
-LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18 \
-PATH=/opt/homebrew/opt/llvm@18/bin:$PATH \
+LLVM_23_1_PREFIX="$LLVM_23_1_PREFIX" SIMPLE_LLVM_PREFIX="$SIMPLE_LLVM_PREFIX" \
+PATH="$LLVM_23_1_PREFIX/bin:$PATH" \
 LIBRARY_PATH=/opt/homebrew/opt/zstd/lib:$LIBRARY_PATH \
 "$SIMPLE" native-build \
   --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os \
