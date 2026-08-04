@@ -424,7 +424,7 @@ fn _driver_import_path_is_valid(path_text: text) -> bool:
         i = i + 1
     path_text != ""
 
-fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
+fn _driver_entry_import_module_paths_text_fallback(content: text, include_lazy: bool) -> [text]:
     var result: [text] = []
     var in_doc = false
     for raw_line in content.split("\n"):
@@ -445,7 +445,10 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
         val line = scan_line.trim()
         var tail: text = ""
         if line.starts_with("use lazy "):
-            continue
+            if include_lazy:
+                tail = line.substring(9)
+            else:
+                continue
         elif line.starts_with("pub use "):
             tail = line.substring(8)
         elif line.starts_with("export use "):
@@ -494,7 +497,17 @@ pub fn _driver_entry_import_module_paths(content: text) -> [text]:
     # modules into the closure and HIR-lower them anyway (notably the generic
     # async Future graph in the native full CLI).
     val active_content = _pp_preprocess_conditionals(content)
-    _driver_entry_import_module_paths_text_fallback(active_content)
+    _driver_entry_import_module_paths_text_fallback(active_content, false)
+
+pub fn _driver_stage4_entry_import_module_paths(content: text) -> [text]:
+    """Static one-binary Stage4 dependencies, including command-only lazy owners.
+
+    Ordinary/interpreted entry closure keeps lazy modules deferred. The exact
+    Stage4 CLI lowers and links every command branch, so its declared lazy
+    symbols need surfaces and definitions just like regular imports.
+    """
+    val active_content = _pp_preprocess_conditionals(content)
+    _driver_entry_import_module_paths_text_fallback(active_content, true)
 
 fn _driver_entry_sibling_path(line: text) -> text:
     if line.starts_with("mod "):

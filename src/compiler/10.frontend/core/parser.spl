@@ -281,7 +281,7 @@ fn parser_error(msg: text):
     par_had_error_set(true)
     par_had_error_mirror_set()
 
-fn parser_guarded_int_text(t: text) -> i64:
+fn parser_guarded_decimal_text(t: text, max_text: text, range_name: text) -> i64:
     # Lexer bugs must surface as located parser errors, not location-less
     # interpreter aborts ("cannot parse '\"' as i64", stage4 2026-07-03).
     var ok = t.len() > 0
@@ -294,27 +294,26 @@ fn parser_guarded_int_text(t: text) -> i64:
         parser_error("malformed integer literal token text '" + t + "'")
         return 0
     # Overflow guard: a decimal literal whose magnitude cannot possibly fit in
-    # i64 must be a LOUD parse error, not a silently-wrapped garbage value
+    # the requested range must be a LOUD parse error, not silently-wrapped
+    # garbage
     # (constedge lane numeric-literal sweep 2026-07-14: native-build accepted
     # `99999999999999999999` and silently produced 7766279631452241919, while
     # the oracle correctly rejects it as "Invalid integer"). i64::MAX
     # ("9223372036854775807") has 19 digits, so any 20+-digit literal is
     # unambiguously out of range. At exactly 19 digits, allow up to
-    # "9223372036854775808" (2**63, one past i64::MAX) inclusive — that exact
-    # magnitude is required by the `-9223372036854775808` (i64::MIN) literal
-    # idiom, which relies on this text wrapping to i64::MIN here and then
-    # wrapping back to i64::MIN under negation. Anything larger is rejected.
-    if t.len() > 19:
-        parser_error("integer literal out of range for i64: '" + t + "'")
+    # The caller supplies either the signed-literal ceiling or u64::MAX. Values
+    # above i64::MAX intentionally accumulate into the signed AST bit-pattern;
+    # the literal suffix retains the unsigned interpretation during lowering.
+    if t.len() > max_text.len():
+        parser_error("integer literal out of range for " + range_name + ": '" + t + "'")
         return 0
-    if t.len() == 19:
-        val max19 = "9223372036854775808"
+    if t.len() == max_text.len():
         var ci = 0
         var too_big = false
         var still_equal = true
-        while ci < 19:
+        while ci < max_text.len():
             val tc = char_code(t[ci:ci + 1])
-            val mc = char_code(max19[ci:ci + 1])
+            val mc = char_code(max_text[ci:ci + 1])
             if still_equal:
                 if tc > mc:
                     too_big = true
@@ -323,7 +322,7 @@ fn parser_guarded_int_text(t: text) -> i64:
                     still_equal = false
             ci = ci + 1
         if too_big:
-            parser_error("integer literal out of range for i64: '" + t + "'")
+            parser_error("integer literal out of range for " + range_name + ": '" + t + "'")
             return 0
     # Manual decimal accumulation: the builtin int(text) miscompiles on stage4
     # (returns the FIRST character's char code: int("1")==49, int("12")==49 —
@@ -338,6 +337,13 @@ fn parser_guarded_int_text(t: text) -> i64:
         acc = acc * 10 + (code - 48)
         di = di + 1
     acc
+
+fn parser_guarded_int_text(t: text) -> i64:
+    # Include 2**63 for the `-9223372036854775808` i64::MIN idiom.
+    parser_guarded_decimal_text(t, "9223372036854775808", "i64")
+
+fn parser_guarded_u64_text(t: text) -> i64:
+    parser_guarded_decimal_text(t, "18446744073709551615", "u64")
 
 fn parser_warn(msg: text):
     if par_warnings == nil:

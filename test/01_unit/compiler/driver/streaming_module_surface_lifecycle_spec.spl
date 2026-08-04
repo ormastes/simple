@@ -1,4 +1,5 @@
 use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
 use compiler.common.driver_core_types.{
     SourceFile,
     driver_core_compile_options_default
@@ -24,6 +25,23 @@ fn streaming_driver() -> CompilerDriver:
     driver
 
 describe "streaming module-surface driver lifecycle":
+    it "accepts high decimal u64 literals through the streaming parser":
+        var driver = streaming_driver()
+        val source = "fn fnv_basis() -> u64:\n    14695981039346656037u64\nfn max_u64() -> u64:\n    18446744073709551615u64\n"
+        driver.ctx.sources = [
+            streaming_source(
+                "build/streaming/decimal_u64.spl",
+                source,
+                "fixture.decimal_u64"
+            )
+        ]
+        val (phase2_ctx, phase2_ok) = driver.parse_all_streaming_surfaces_impl()
+        expect(phase2_ok).to_be(true)
+        expect(phase2_ctx.errors.len()).to_equal(0)
+        expect(phase2_ctx.module_surfaces == nil).to_be(false)
+        val surfaces = phase2_ctx.module_surfaces.unwrap()
+        expect(surfaces.surfaces.len()).to_equal(1)
+
     it "preserves physical-source order and aliases through phase 2":
         var driver = streaming_driver()
         val (phase2_ctx, phase2_ok) = driver.parse_all_streaming_surfaces_impl()
@@ -49,3 +67,43 @@ describe "streaming module-surface driver lifecycle":
         expect(driver.ctx.sources.len()).to_equal(3)
         expect(driver.ctx.module_surfaces != nil).to_equal(true)
         expect(driver.ctx.errors[0]).to_contain("fingerprint mismatch")
+
+    it "survives two real CLI source surface releases":
+        var driver = streaming_driver()
+        driver.ctx.sources = [
+            streaming_source(
+                "src/app/cli/main.spl",
+                file_read("src/app/cli/main.spl"),
+                "app.cli.main"
+            ),
+            streaming_source(
+                "src/app/cli/bootstrap_main.spl",
+                file_read("src/app/cli/bootstrap_main.spl"),
+                "app.cli.bootstrap_main"
+            )
+        ]
+        val (phase2_ctx, phase2_ok) = driver.parse_all_streaming_surfaces_impl()
+        expect(phase2_ok).to_be(true)
+        expect(phase2_ctx.errors.len()).to_equal(0)
+        expect(phase2_ctx.modules.len()).to_equal(0)
+        expect(phase2_ctx.module_surfaces == nil).to_be(false)
+        val surfaces = phase2_ctx.module_surfaces.unwrap()
+        expect(surfaces.surfaces.len()).to_equal(2)
+        expect(surfaces.surfaces[0].module_name).to_equal("app.cli.main")
+        expect(surfaces.surfaces[1].module_name).to_equal("app.cli.bootstrap_main")
+
+    it "reuses the released real CLI surface for an immediate alias":
+        var driver = streaming_driver()
+        val content = file_read("src/app/cli/main.spl")
+        driver.ctx.sources = [
+            streaming_source("src/app/cli/main.spl", content, "app.cli.main"),
+            streaming_source(
+                "src/app/cli/main.spl", content, "fixture.cli_main_alias")
+        ]
+        val (phase2_ctx, phase2_ok) = driver.parse_all_streaming_surfaces_impl()
+        expect(phase2_ok).to_be(true)
+        expect(phase2_ctx.errors.len()).to_equal(0)
+        expect(phase2_ctx.module_surfaces == nil).to_be(false)
+        val surfaces = phase2_ctx.module_surfaces.unwrap()
+        expect(surfaces.surfaces.len()).to_equal(1)
+        expect(surfaces.index_by_name["fixture.cli_main_alias"]).to_equal(0)
