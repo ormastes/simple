@@ -2,11 +2,15 @@
 # @cover src/app/startup/aspect_prepared_advice_transition.spl 80%
 
 use std.spec.*
+use compiler.loader.loader.aspect_catalog.{AspectAdviceSummary}
 use compiler.loader.loader.advice_binding_registry.{
-    AdviceBindingRegistry, AdviceDispatchInvocationReceipt,
-    advice_dispatch_projection_empty
+    AdviceBindingAdmission, AdviceBindingRegistry,
+    AdviceDispatchInvocationReceipt,
+    advice_binding_stage_validated, advice_publish_generation,
+    advice_dispatch_projection_empty, advice_dispatch_projection_create
 }
-use compiler.loader.loader.module_loader.{moduleloader_with_defaults}
+use compiler.loader.loader.module_loader.{ModuleLoader, moduleloader_with_defaults}
+use compiler.loader.{LoadedSymbol, SymbolType}
 use os.smf.smf_generation.{LifecycleManager}
 use app.startup.aspect_advice_dispatch_ledger.{AspectAdviceDispatchLedger}
 use app.startup.aspect_prepared_advice_transition.{
@@ -20,6 +24,22 @@ fn prepared_advice_test_state() -> AspectPreparedAdviceState:
         registry: AdviceBindingRegistry.create(
             ["orders.submit.prepared"]).unwrap(),
         lifecycle: LifecycleManager.new_manager())
+
+fn prepared_advice_summary(id: text, witness: text) -> AspectAdviceSummary:
+    AspectAdviceSummary(
+        advice_id: id, joinpoint_slot_id: "orders.submit.prepared",
+        form: "before", priority: 1, specificity: 1,
+        witness_symbol: witness, capabilities: ["orders.observe"])
+
+fn prepared_advice_loader() -> ModuleLoader:
+    var loader = moduleloader_with_defaults()
+    loader.global_symbols["audit_first"] = ("pack:a:7", LoadedSymbol(
+        name: "audit_first", address: 101, size: 8,
+        ty: SymbolType.Function, is_jit: false, file_offset: 0))
+    loader.global_symbols["audit_second"] = ("pack:a:7", LoadedSymbol(
+        name: "audit_second", address: 102, size: 8,
+        ty: SymbolType.Function, is_jit: false, file_offset: 0))
+    loader
 
 describe "Prepared advice state transition leaf":
     it "prepares and terminalizes an empty canonical dispatch":
@@ -71,7 +91,57 @@ describe "Prepared advice state transition leaf":
         expect(prepared.state.registry.counters.dispatch_failures).to_equal(1)
         expect(ledger.in_flight_count()).to_equal(0)
 
-    it "fails closed without terminalizing a mismatched claim":
+    it "releases canonical pins and terminalizes after a partial callback failure receipt":
+        var registry = AdviceBindingRegistry.create(
+            ["orders.submit.prepared"]).unwrap()
+        val candidate = advice_binding_stage_validated(
+            registry, "pack:a:7", 7, "audit.aspect", [
+                AdviceBindingAdmission(
+                    summary: prepared_advice_summary(
+                        "audit.first", "audit_first"),
+                    witness_owner_id: "pack:a:7",
+                    resolved_witness_address: 101),
+                AdviceBindingAdmission(
+                    summary: prepared_advice_summary(
+                        "audit.second", "audit_second"),
+                    witness_owner_id: "pack:a:7",
+                    resolved_witness_address: 102)]).unwrap()
+        registry = advice_publish_generation(
+            registry, candidate, "pack:a:7", 7).unwrap()
+        val loader = prepared_advice_loader()
+        val projection = advice_dispatch_projection_create(
+            registry, loader).unwrap()
+        val state = AspectPreparedAdviceState(
+            registry: registry,
+            lifecycle: LifecycleManager.new_manager().register_candidate(
+                "pack:a:7", 7).promote_candidate())
+        val ledger = AspectAdviceDispatchLedger.create()
+
+        val prepared = aspect_prepared_advice_prepare(
+            projection, state, loader, ledger,
+            "orders.submit.prepared", "before")
+        expect(prepared.status).to_equal("prepared")
+        expect(prepared.state.lifecycle.generation_pin_count_for(
+            "pack:a:7", 7)).to_equal(2)
+        expect(ledger.in_flight_count()).to_equal(1)
+
+        val invocation = prepared.invocation.unwrap()
+        val finished = aspect_prepared_advice_finish(
+            prepared.state, ledger, invocation,
+            AdviceDispatchInvocationReceipt(
+                permit_id: invocation.permit.permit_id,
+                status: "failed", reason: "second callback rejected",
+                invoked_count: 1, return_values: []))
+        expect(finished.status).to_equal("failed")
+        expect(finished.reason).to_contain("second callback rejected")
+        expect(finished.state.lifecycle.generation_pin_count_for(
+            "pack:a:7", 7)).to_equal(0)
+        expect(finished.state.registry.counters.dispatch_attempts).to_equal(1)
+        expect(finished.state.registry.counters.dispatch_invocations).to_equal(1)
+        expect(finished.state.registry.counters.dispatch_failures).to_equal(1)
+        expect(ledger.in_flight_count()).to_equal(0)
+
+    it "strands a mismatched claim for fail-stop diagnosis instead of guessing recovery":
         val ledger = AspectAdviceDispatchLedger.create()
         val prepared = aspect_prepared_advice_prepare(
             advice_dispatch_projection_empty(), prepared_advice_test_state(),
@@ -88,5 +158,8 @@ describe "Prepared advice state transition leaf":
                 invoked_count: 0, return_values: []))
         expect(finished.status).to_equal("failed")
         expect(finished.reason).to_contain("receipt does not match")
+        # A mismatched internal claim is corruption. Finish releases permit
+        # resources but deliberately leaves the real claim as fail-stop evidence;
+        # only this deterministic test removes it to avoid leaking its fixture.
         expect(ledger.in_flight_count()).to_equal(1)
         ledger.terminalize(owned.claim_id, owned.permit.permit_id).unwrap()
