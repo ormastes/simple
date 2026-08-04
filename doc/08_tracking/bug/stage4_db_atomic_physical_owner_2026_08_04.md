@@ -2,8 +2,8 @@
 
 ## Status
 
-Open; retained after the third and final bounded x86 Phase 4 cycle on
-2026-08-04.
+Resolved in source on 2026-08-04; production Phase 4 crossed this module in the
+next bounded session.
 
 ## Symptom
 
@@ -20,10 +20,12 @@ runner, and CLI run/fix command ownership. HIR lowering then stopped in
 - Stub fallback: disabled
 - LLVM provider: repository-managed 23.1.0-rc2 prefix
 
-## Next action
+## Repair and evidence
 
-In a fresh bounded session, identify the physical file-lock/atomic-write and SDN
-parse owners, reproduce the local wildcard binding that yields unresolved `_`,
-and repair only `db_atomic.spl` plus a focused native contract. Do not widen HIR
-resolution, add runtime aliases, or start a fourth production retry in the
-exhausted session.
+The module now imports physical nogc-sync file, sysinfo, and time owners; hoists
+the canonical common-SDN parser/value owners; replaces unsupported point-free
+row mapping with an explicit loop; and consumes the current two-field
+`SdnValue.Table` payload. The focused native contract crossed HIR/object
+generation and stopped only at the narrow core bundle's missing
+`rt_file_atomic_write`. Production cycle 1 crossed the repaired module and
+advanced to `compile_targets.spl`.

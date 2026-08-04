@@ -17,6 +17,9 @@ env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <self-hosted-simple> native-bu
 | `stage4_duplicate_check_hir_contract.spl` | Stage4 duplicate-check threshold parsing/HIR closure | — | **30** | SOURCE FIX / execution pending | legacy `float(text)` remains unresolved or invalid input is accepted |
 | `stage4_test_runner_docgen_hir_contract.spl` | Stage4 test-runner physical IO owners/HIR closure | — | **30** | SOURCE FIX / execution pending | façade imports or daemon-duration scope fail HIR lowering |
 | `stage4_cli_run_commands_hir_contract.spl` | Stage4 CLI run/fix physical-owner/HIR closure | — | **30** | SOURCE FIX / execution pending | raw stdout or lazy fix-rule façade names remain unresolved |
+| `stage4_db_atomic_lock_write_parse_contract.spl` | Stage4 atomic DB physical IO, SDN parse, and row serialization | — | **30** | HIR PASS / narrow-bundle link pending | IO/SDN facades, `_` shorthand, or stale table payload shape fails |
+| `stage4_cli_compile_targets_env_contract.spl` | Stage4 compile-target dirname and environment facades | — | **30** | HIR PASS / execution pending | missing driver helper or raw app-leaf environment read fails HIR |
+| `stage4_easy_fix_types_contract.spl` | Stage4 EasyFix canonical scalars plus static/receiver method ownership | — | **30** | **RED: exit 132** / nil receiver | legacy `Int`/`Bool`, misplaced FixReport methods, or native field corruption fails |
 | `key3_struct_spread_paren.spl` | KEY3 native struct-spread (paren form) | f907796e57e | **103** | PASS | spread base dropped → wrong number |
 | `w2_array_index_rw.spl` | W2 `local_mir_type_of` Option in `lower_array_lit` | e7c445145a7 | **72** | PASS | build-fail `unknown static method ptr on class MirType` |
 | `c5_char_from_code.spl` | C5 integer builtin/owner precedence + Unicode runtime backing | source update | **42** | SOURCE FIX / execution pending | UFCS/custom dispatch, missing symbol, or ASCII-only result |

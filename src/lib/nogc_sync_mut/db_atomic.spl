@@ -22,7 +22,11 @@
 #       content + "\n    new_row"
 #   })
 
-use std.io (file_exists, file_read, file_atomic_write, file_copy, file_lock, file_unlock, getpid, hostname, time_now_unix_micros)
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_atomic_write, file_copy, file_lock, file_unlock}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid, hostname}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.common.sdn.parser.{parse}
+use std.common.sdn.value.{SdnValue}
 
 # =========================================================================
 # Configuration
@@ -330,9 +334,6 @@ impl AtomicTable:
         """
         val content = atomic_read(path, config)?
 
-        # Parse table using std.sdn
-        use std.sdn.{parse, SdnValue}
-
         val sdn_value = match parse(content):
             case Ok(value):
                 value
@@ -365,7 +366,12 @@ impl AtomicTable:
             return Err("Row has {row.len()} values, expected {self.columns.len()}")
 
         # Serialize row
-        val values = row.map(if _.contains(",") or _.contains(" "): "\"{_}\"" else: _)
+        var values: [text] = []
+        for value in row:
+            if value.contains(",") or value.contains(" "):
+                values.push("\"{value}\"")
+            else:
+                values.push(value)
         val row_line = "    {values.join(\", \")}\n"
 
         # Atomic append
@@ -388,8 +394,6 @@ impl AtomicTable:
         val content = atomic_read(self.path, self.config)?
 
         # Parse content and update self.columns, self.rows
-        use std.sdn.{parse, SdnValue}
-
         val sdn_value = match parse(content):
             case Ok(value):
                 value
@@ -421,8 +425,6 @@ fn extract_table_from_sdn(sdn_value: SdnValue, table_name: text) -> Result<([tex
             1, "Task 1", "done"
             2, "Task 2", "pending"
     """
-    use std.sdn.{SdnValue}
-
     # SDN file should be a dict with table_name as key
     match sdn_value:
         case SdnValue.Dict(d):
@@ -431,14 +433,7 @@ fn extract_table_from_sdn(sdn_value: SdnValue, table_name: text) -> Result<([tex
 
             val table_value = d[table_name]
             match table_value:
-                case SdnValue.Table(fields, types, rows):
-                    # Convert fields (Option) to required columns
-                    val columns = match fields:
-                        case Some(value):
-                            value
-                        case nil:
-                            return Err("Table has no column headers")
-
+                case SdnValue.Table(columns, rows):
                     # Convert SdnValue rows to text rows
                     var text_rows: [[text]] = []
                     for row in rows:
@@ -457,8 +452,6 @@ fn extract_table_from_sdn(sdn_value: SdnValue, table_name: text) -> Result<([tex
 
 fn sdn_value_to_text(value: SdnValue) -> text:
     """Convert SdnValue to text representation."""
-    use std.sdn.{SdnValue}
-
     match value:
         case SdnValue.Null: ""
         case SdnValue.Bool(b): if b: "true" else: "false"

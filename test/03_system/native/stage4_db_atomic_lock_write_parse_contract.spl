@@ -1,0 +1,41 @@
+# Stage 4 native regression for atomic DB physical IO and SDN owners.
+
+use std.nogc_sync_mut.db_atomic.{DbConfig, atomic_write, AtomicTable}
+use std.nogc_sync_mut.io.file_ops.{file_delete}
+
+extern fn rt_exit(code: i32)
+
+fn finish(path: text, code: i32):
+    file_delete(path)
+    file_delete("{path}.bak")
+    rt_exit(code)
+
+fn main() -> i64:
+    val path = "/tmp/simple_stage4_db_atomic_contract.sdn"
+    file_delete(path)
+    val config = DbConfig.no_backups()
+
+    match atomic_write(path, "items |id, name|\n    1, one\n", config):
+        case Err(_):
+            finish(path, 31)
+        case Ok(_): ()
+
+    match AtomicTable.load(path, "items", config):
+        case Err(_):
+            finish(path, 32)
+        case Ok(table):
+            if table.columns.len() != 2 or table.rows.len() != 1:
+                finish(path, 33)
+            match table.add_row(["2", "two words"]):
+                case Err(_):
+                    finish(path, 34)
+                case Ok(_): ()
+            match table.reload():
+                case Err(_):
+                    finish(path, 35)
+                case Ok(_): ()
+            if table.columns.len() != 2 or table.rows.len() != 2:
+                finish(path, 36)
+
+    finish(path, 30)
+    0
