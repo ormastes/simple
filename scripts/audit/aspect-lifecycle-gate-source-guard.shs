@@ -71,6 +71,8 @@ if [ "$#" -ne 0 ]; then
 fi
 
 runtime_source="src/app/startup/aspect_application_runtime.spl"
+capture_source="src/app/startup/aspect_lifecycle_capture_contract.spl"
+lazy_source="src/app/startup/aspect_lazy_activation_transition.spl"
 
 if has_locked_method "$runtime_source"; then
     echo "FAIL: lifecycle locked helper remains on the exported context method surface" >&2
@@ -92,7 +94,11 @@ for box_name in \
     AspectActivationInputBox \
     AspectLazyCommitBox
 do
-    if ! rg -q "^class ${box_name}:" "$runtime_source"; then
+    owner_source="$capture_source"
+    if [ "$box_name" = "AspectLazyCommitBox" ]; then
+        owner_source="$lazy_source"
+    fi
+    if ! rg -q "^class ${box_name}:" "$owner_source"; then
         echo "FAIL: missing lifecycle mutex capture box: ${box_name}" >&2
         exit 1
     fi
@@ -114,17 +120,18 @@ if [ "$(rg -c 'capsule\.pack_io\.load_exact_route\(' "$runtime_source")" -ne 1 ]
     echo "FAIL: lazy activation must have one exact-route I/O call site" >&2
     exit 1
 fi
-if ! rg -q 'activation_key: text' "$runtime_source" || \
-    ! rg -q 'in_flight\.has\(activation_key\)' "$runtime_source" || \
-    ! rg -q 'in_flight\[activation_key\] == request\.request_id' "$runtime_source"; then
+if ! rg -q 'activation_key: text' "$lazy_source" || \
+    ! rg -q 'in_flight\.has\(activation_key\)' "$lazy_source" || \
+    ! rg -q 'in_flight\[activation_key\] == request\.request_id' "$lazy_source" || \
+    ! rg -q 'current_activation_key == capsule\.activation_key' "$lazy_source"; then
     echo "FAIL: lazy reservation ownership is not bound to the exact activation key" >&2
     exit 1
 fi
-if rg -q 'for key in context\.coordinator\.in_flight\.keys\(\)' "$runtime_source"; then
+if rg -q 'for key in .*\.in_flight\.keys\(\)' "$lazy_source"; then
     echo "FAIL: lazy reservation ownership/cancel scans request IDs globally" >&2
     exit 1
 fi
-if rg -n '_ = self\.lazy_singleflight\.complete_failure\(' "$runtime_source"; then
+if rg -n '_ = .*\.complete_failure\(' "$runtime_source" "$lazy_source"; then
     echo "FAIL: lazy owner discards failure-completion notification errors" >&2
     exit 1
 fi
