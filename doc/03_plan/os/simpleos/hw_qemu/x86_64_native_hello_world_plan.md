@@ -30,8 +30,8 @@ build/fix/verify cycles.
 
 ## Current evidence
 
-- Complete: Phase 3 Cranelift compiler
-  `/Users/ormastes/simple/build/native_probe/simple` built a fresh focused
+- Complete: Phase 3 host Cranelift compiler
+  `/Users/ormastes/simple/build/native_probe/simple` built the Phase 2 focused
   SimpleOS compiler at `bin/release/x86_64-unknown-simpleos/simple`.
 - Compiler SHA-256:
   `91828e55fac193e6b695cf6f2aac782d6af11889fd1147f25533ab850284273e`.
@@ -41,18 +41,19 @@ build/fix/verify cycles.
   paths. `/HELLO.SPL` contains exact `Hello World` source.
 - Complete: Phase 3 Cranelift built the SSH/fsexec kernel at
   `build/os/simpleos_ssh_ring3_uefi128_laneb.elf`; its final ELF checker passes.
-- Complete: QEMU/OVMF/GRUB boot reached the SimpleOS SSH accept loop and loaded
-  the 2.9 MiB compiler into a private CPL3 address space.
-- Evidence: `build/native_probe/desktop_toolchain_ui/version-gate-cycle3.log`
+- Complete: QEMU/OVMF/GRUB boot reached the SimpleOS SSH accept loop, loaded
+  the 2.9 MiB Phase 2 compiler into a private CPL3 address space, and opened
+  `/HELLO.SPL` from NVMe after the shared-root fix.
+- Evidence: `build/native_probe/desktop_toolchain_ui/object-emit-cycle2-hang.serial.log`
   and `build/os/ssh_simple_hello_uefi.serial.log`.
-- Blocked after the third boot/fix cycle: the remote command used
-  `/usr/bin/simple simple --version`. The loader already prepends argv[0], so
-  the compiler interpreted `simple` as a source filename. The correct command
-  is `/usr/bin/simple --version` with no dummy token.
-- Additional native-link prerequisite: the image has no guest-native
-  `/usr/bin/ld.lld`. The focused compiler also generates its entry wrapper by
-  invoking `clang`; the next lane should use the already-staged
-  `/usr/lib/SIMPLEEN.O` or stage a guest-native clang.
+- Blocked after the third fresh fix/diagnostic cycle: the Phase 2 compiler
+  consumed one vCPU for seven minutes after `post-read`; the equivalent native
+  macOS focused compiler isolated a MIR trap in
+  `plan_synthetic_driver_registration` (`field access on nil receiver`). Two
+  concrete attribute-default fixes did not remove the trap.
+- Additional native-link prerequisite: neither Phase 2 nor Phase 3 contains a
+  guest-native `/usr/bin/ld.lld`. Phase 3 is arm64 Mach-O and cannot execute in
+  SimpleOS. No matching local, release, or GitHub Actions artifact exists.
 
 ## Converged implementation fixes
 
@@ -62,19 +63,26 @@ build/fix/verify cycles.
 - Equal-second payload/stamp mtimes are accepted only when the stamped SHA-256
   still matches the exact ELF.
 - The architecture-owned x86_64 VMM publishes its PML4 root through the shared
-  runtime anchor; the loader then created a real private user address space.
+  runtime anchor. Page-map/read/unmap/translate operations now consume that
+  anchor, and NVMe BAR mapping fails closed instead of logging false success.
+- The focused compiler now links with the staged `/usr/lib/SIMAIN.O`, removing
+  the guest Clang dependency while retaining a real external-link boundary.
 - The SSH evidence wrapper now retains the real SSH exit code and requires the
-  configured marker, so transport failure cannot pass.
+  configured marker, so transport failure cannot pass. It can also reuse a
+  previously verified EFI/kernel artifact on macOS and detects prefixed GRUB.
 
 ## Remaining execution steps
 
-1. Start a fresh capped boot lane and run `/usr/bin/simple --version` without
-   the extra `simple` token. Do not rerun any command from this exhausted lane.
-2. Stage a genuine x86_64 SimpleOS `ld.lld`, and make the focused linker consume
-   `/usr/lib/SIMPLEEN.O` instead of invoking an absent guest clang (or stage a
-   genuine guest-native clang).
-3. Rebuild the focused compiler/image once, then run
-   `/usr/bin/simple compile --native /hello.spl -o /hello-native`.
-4. Execute `/hello-native` once and require exact `Hello World` plus exit 0.
-5. Add the executable SSpec and mirrored operator manual, update the state and
-   guide, perform one final high-capability review, and stop on PASS.
+1. In a fresh capped session, fix the concrete `HirFunction` layout/attribute
+   invariant exposed by `plan_synthetic_driver_registration`; require the host
+   focused diagnostic to emit an x86_64 ET_REL object before another QEMU boot.
+2. Build a genuine x86_64 SimpleOS `lld_static` from the pinned LLVM 20 fork in
+   CI or an isolated build host. The CI lane must also build/reuse libc++abi,
+   libunwind, and compiler-rt; Phase 3 alone is not a guest-linker substitute.
+3. Rebuild the Phase 2 focused compiler, stage `lld_static` as
+   `/usr/bin/ld.lld`, retain `/usr/lib/SIMAIN.O`, and rebuild the strict image.
+4. In one final fail-closed QEMU lane run `/usr/bin/simple --version`, then
+   `/usr/bin/simple compile --native /HELLO.SPL -o /TMP/HELLO.ELF`, then execute
+   `/TMP/HELLO.ELF`; require exact `Hello World` and exit 0.
+5. Add the executable SSpec and mirrored operator manual, update state/guide,
+   perform one final high-capability review, and stop on PASS.
