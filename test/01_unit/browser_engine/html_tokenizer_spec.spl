@@ -346,6 +346,33 @@ describe "HtmlTokenizer script and raw text states":
             "S[title|] C[|<b>x</b>] E[title|] F[|]"
         )
 
+    it "AC-1: decodes references in RCDATA with and without leading text":
+        step("Tokenize title and textarea bodies carrying character references")
+        # RCDATA splits the body at each `&`: the run before the reference is
+        # emitted first, then the decoded reference, then the remainder. The
+        # leading-reference form skips the pre-reference emit entirely.
+        expect(_shapes("<title>ab&amp;c</title>")).to_equal(
+            "S[title|] C[|ab] C[|&] C[|c] E[title|] F[|]"
+        )
+        expect(_shapes("<textarea>&amp;z</textarea>")).to_equal(
+            "S[textarea|] C[|&] C[|z] E[textarea|] F[|]"
+        )
+
+    it "AC-1: accepts whitespace between the raw end tag name and its '>'":
+        step("Close a script element with '</script >'")
+        expect(_shapes("<script>a</script >")).to_equal(
+            "S[script|] C[|a] E[script|] F[|]"
+        )
+
+    it "AC-1: rejects a raw end tag whose run to '>' hits '<' first":
+        step("Tokenize '</script x<b>' inside a script body")
+        # `</script x<b>` looks like an end tag until the scan for `>` meets a
+        # `<`; the scan restarts there and never finds a close, so the whole
+        # remainder stays raw text.
+        expect(_shapes("<script>a</script x<b>y")).to_equal(
+            "S[script|] C[|a</script x<b>y] F[|]"
+        )
+
 # ============================================================================
 # AC-1: WHATWG tokenizer — malformed markup recovery
 # ============================================================================
@@ -385,6 +412,30 @@ describe "HtmlTokenizer malformed markup":
         expect(_attr_value(_first_start_tag("<DIV CLASS='A'>"), "class")).to_equal(
             "A"
         )
+
+    it "AC-1: emits a lone trailing '<' as character data":
+        step("Tokenize input whose final character is '<'")
+        expect(_shapes("a<")).to_equal("C[|a] C[|<] F[|]")
+
+    it "AC-1: emits an empty comment when '>' follows '<!--' directly":
+        step("Tokenize the shortest abrupt comment close")
+        # Distinct from '<!--->': here '>' sits immediately after '<!--'.
+        expect(_shapes("<!-->x")).to_equal("M[|] C[|x] F[|]")
+
+    it "AC-1: closes an unterminated comment at end of input":
+        step("Tokenize a comment that never reaches '-->'")
+        expect(_shapes("<!--ab")).to_equal("M[|ab] F[|]")
+
+    it "AC-1: discards unterminated bang and question constructs":
+        step("Tokenize doctype, bogus bang and processing instruction at EOF")
+        # Each of these scans for a '>' that never arrives and drops the run.
+        expect(_shapes("<!DOCTYPE html")).to_equal("F[|]")
+        expect(_shapes("<!x")).to_equal("F[|]")
+        expect(_shapes("<?php")).to_equal("F[|]")
+
+    it "AC-1: recovers an unterminated end tag as character data":
+        step("Tokenize '</div' with no closing '>'")
+        expect(_shapes("</div")).to_equal("C[|<] C[|/div] F[|]")
 
     it "AC-1: parses quoted, unquoted and valueless attributes together":
         val tok = _first_start_tag("<a b=\"c d\" e=f g>")
@@ -444,6 +495,33 @@ describe "HtmlTokenizer character reference edges":
                 "&#" + code.to_text() + ";"
             )).to_equal(text.from_char_code(code))
             i = i + 1
+
+    it "AC-1: keeps a trailing bare '&' as character data":
+        step("Tokenize input ending in an ampersand with nothing after it")
+        expect(_all_character_data("a&")).to_equal("a&")
+
+    it "AC-1: keeps a numeric reference that carries no digits":
+        step("Tokenize '&#;' and '&#x;' with an empty digit run")
+        expect(_all_character_data("&#;")).to_equal("&#;")
+        expect(_all_character_data("&#x;")).to_equal("&#x;")
+
+    it "AC-1: keeps a numeric reference whose digit is multi-byte":
+        step("Tokenize '&#' followed by a non-ASCII character")
+        # The digit reader works on single bytes, so a multi-byte character
+        # terminates the run and the whole reference stays literal.
+        expect(_all_character_data("&#" + text.from_char_code(20013) + ";")).to_equal(
+            "&#" + text.from_char_code(20013) + ";"
+        )
+
+    it "AC-1: clamps a numeric reference that overflows the code space":
+        step("Tokenize decimal and hex references far past U+10FFFF")
+        val replacement = text.from_char_code(65533)
+        expect(_all_character_data("&#99999999;")).to_equal(replacement)
+        expect(_all_character_data("&#x7FFFFFFFFF;")).to_equal(replacement)
+
+    it "AC-1: decodes lowercase hexadecimal reference digits":
+        step("Tokenize a hex reference written with lowercase a-f")
+        expect(_all_character_data("&#xe9;")).to_equal(text.from_char_code(233))
 
     it "AC-1: decodes references inside attribute values":
         val tok = _first_start_tag("<a href='?x=1&amp;y=2&notit;'>")
