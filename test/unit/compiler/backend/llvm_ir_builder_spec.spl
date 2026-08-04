@@ -63,19 +63,15 @@ describe "LLVM IR Builder":
         expect(lines[2]).to_equal("  store i64 %3, ptr %ptr, align 8")
         expect(lines[3]).to_equal("  %4 = icmp eq i64 %3, %2")
 
-# --- Regression: bootstrap IR buffer must not leak across modules ---
+# --- Regression: builder storage must remain per-instance in bootstrap mode ---
 # doc/08_tracking/bug/llvm_bootstrap_ir_buffer_not_reset_2026-08-01.md
 extern fn rt_env_set(key: text, value_str: text) -> bool
 
-describe "LLVM IR Builder bootstrap buffer isolation":
+describe "LLVM IR Builder bootstrap per-instance parity":
     it "does not prepend a previous module's IR to the next module":
-        # Under SIMPLE_BOOTSTRAP=1, emit() accumulates into the module-level
-        # global _llvm_bootstrap_ir_text instead of the per-instance string
-        # builder. That global is the mirror of `sb`, so LlvmIRBuilder.create()
-        # must clear it when B emits its module header. Before the fix, module
-        # B built as A ++ B, producing a
-        # second `source_filename`/`target triple` mid-file, which llc rejects
-        # with "expected top-level entity".
+        # SIMPLE_BOOTSTRAP must use the same per-instance runtime string
+        # builder as every other mode. Module B therefore cannot inherit any
+        # text from module A.
         rt_env_set("SIMPLE_BOOTSTRAP", "1")
 
         val triple = LlvmTargetTriple.from_target(CodegenTarget.X86_64)
@@ -117,8 +113,8 @@ describe "LLVM IR Builder bootstrap buffer isolation":
         top.emit_ret("i64", "42")
         top.end_function()
 
-        # Construction without a module header has no ownership of the
-        # module-scoped bootstrap accumulator and therefore cannot reset it.
+        # A second builder owns a distinct runtime string-builder handle, so
+        # merely constructing it cannot affect the active top-level builder.
         val incidental = LlvmIRBuilder.create("incidental", triple)
         val _ = incidental.local_counter
 
