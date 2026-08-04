@@ -1,0 +1,79 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types.{Attribute}
+use compiler.hir.{
+    Effect, EffectKind, HirType, HirTypeKind,
+    hir_effects_unwind_kind, hir_effects_with_default_unwind,
+    hir_function_effects_from_attributes
+}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn unwind_attr(name: text) -> Attribute:
+    Attribute(name: name, args: [], span: Span.empty())
+
+fn unwind_effect_name(effects: [Effect]) -> text:
+    val kind = hir_effects_unwind_kind(effects).unwrap()
+    match kind:
+        case NoUnwind: "NoUnwind"
+        case MayUnwind: "MayUnwind"
+        case _: "invalid"
+
+fn has_async_effect(effects: [Effect]) -> bool:
+    for effect in effects:
+        match effect.kind:
+            case Async: return true
+            case _: ()
+    false
+
+describe "HIR source unwind-effect contract":
+    it "defaults an unannotated synchronous declaration to NoUnwind":
+        val effects = hir_function_effects_from_attributes(
+            [], false, Span.empty()).unwrap()
+        expect(unwind_effect_name(effects)).to_equal("NoUnwind")
+        expect(has_async_effect(effects)).to_be(false)
+
+    it "retains Async independently from the default unwind effect":
+        val effects = hir_function_effects_from_attributes(
+            [], true, Span.empty()).unwrap()
+        expect(unwind_effect_name(effects)).to_equal("NoUnwind")
+        expect(has_async_effect(effects)).to_be(true)
+
+    it "maps explicit source attributes to the canonical unwind effect":
+        val may_unwind = hir_function_effects_from_attributes(
+            [unwind_attr("may_unwind")], false, Span.empty()).unwrap()
+        val no_unwind = hir_function_effects_from_attributes(
+            [unwind_attr("no_unwind")], false, Span.empty()).unwrap()
+        expect(unwind_effect_name(may_unwind)).to_equal("MayUnwind")
+        expect(unwind_effect_name(no_unwind)).to_equal("NoUnwind")
+
+    it "rejects missing, duplicate, and conflicting unwind effects":
+        expect(hir_effects_unwind_kind([]).unwrap_err()).to_contain(
+            "E-HIR-UNWIND001")
+        expect(hir_function_effects_from_attributes(
+            [unwind_attr("may_unwind"), unwind_attr("may_unwind")],
+            false, Span.empty()).unwrap_err()).to_contain(
+            "duplicate or conflicting unwind attributes")
+        expect(hir_function_effects_from_attributes(
+            [unwind_attr("may_unwind"), unwind_attr("no_unwind")],
+            false, Span.empty()).unwrap_err()).to_contain(
+            "duplicate or conflicting unwind attributes")
+
+    it "retains effects in the canonical function type metadata":
+        val effects = hir_effects_with_default_unwind(
+            [Effect(kind: EffectKind.MayUnwind, span: Span.empty())],
+            Span.empty()).unwrap()
+        val function_type = HirType(kind: HirTypeKind.Function(
+            [], HirType(kind: HirTypeKind.Unit, span: Span.empty()), effects),
+            span: Span.empty())
+        match function_type.kind:
+            case Function(_, _, retained):
+                expect(unwind_effect_name(retained)).to_equal("MayUnwind")
+            case _:
+                fail("function type discarded its unwind effect metadata")
+
+    it "installs validated declaration effects on HirFunction":
+        val source = rt_file_read_text(
+            "src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl") ?? ""
+        expect(source).to_contain("hir_function_effects_from_attributes(")
+        expect(source).to_contain("effects: initial_effects")
