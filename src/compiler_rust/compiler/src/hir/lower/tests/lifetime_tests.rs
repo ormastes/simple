@@ -868,3 +868,61 @@ fn test_generic_pointer_type_preserves_capability_after_substitution() {
         panic!("Expected Pointer type after substitution");
     }
 }
+
+/// E2001: assigning a block-scoped reference to a function-scoped local is an
+/// escape, and until `check_escape` was wired it went completely undetected.
+///
+/// The E2006 storage check only fires when the assignment target is a field
+/// access, and E2005 only fires in return position, so this shape -- a plain
+/// local-to-local assignment across scopes -- fell between them.
+#[test]
+fn test_e2001_block_scoped_reference_escapes_to_outer_local() {
+    let source = r#"
+struct Node:
+    data: i32
+
+fn escaping_assign() -> i32:
+    var outer: &Node = Node { data: 1 }
+    if true:
+        val inner: &Node = Node { data: 2 }
+        outer = inner
+    outer.data
+"#;
+
+    assert!(
+        has_lifetime_error(source),
+        "assigning a block-local reference to a function-scoped local must be rejected"
+    );
+
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+    let err = Lowerer::with_lenient_mode()
+        .lower_module_with_warnings(&module)
+        .expect_err("must not lower");
+    let rendered = format!("{err:?}");
+    assert!(
+        rendered.contains("EscapingReference"),
+        "expected an EscapingReference violation, got: {rendered}"
+    );
+}
+
+/// The honest direction: a same-scope assignment between references is legal
+/// and must still lower. A check that rejects this would reject every program.
+#[test]
+fn test_e2001_same_scope_reference_assignment_still_lowers() {
+    let source = r#"
+struct Node:
+    data: i32
+
+fn same_scope_assign() -> i32:
+    var outer: &Node = Node { data: 1 }
+    val same: &Node = Node { data: 2 }
+    outer = same
+    outer.data
+"#;
+
+    assert!(
+        !has_lifetime_error(source),
+        "a same-scope reference assignment must still compile"
+    );
+}

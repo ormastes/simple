@@ -25,11 +25,13 @@ pub enum MemoryWarningCode {
     /// Fix: Use `val` instead of `var`, or use unique pointer
     W1003,
 
-    /// W1004: Borrow escapes scope
-    /// Trigger: Returning a borrow/reference that outlives its owner
-    /// Fix: Return owned value or transfer ownership
-    W1004,
-
+    // W1004 (borrow escapes scope) was removed. Its trigger -- "returning a
+    // borrow/reference that outlives its owner" -- is already reported at error
+    // severity by E2004 (BorrowOutlivesOwner), E2005 (ReturnLocalReference) and
+    // E2001 (EscapingReference), all of which are wired into HIR lowering. A
+    // warning that can only fire where an error already aborts can never be
+    // observed, and W1004 accordingly never had a producer: its counter existed
+    // only to print 0.
     /// W1005: Potential reference cycle in RC graph
     /// Trigger: Cyclic reference through `*T` shared pointers
     /// Fix: Use weak pointer (`-T`) to break cycle
@@ -48,7 +50,6 @@ impl MemoryWarningCode {
             MemoryWarningCode::W1001 => 1001,
             MemoryWarningCode::W1002 => 1002,
             MemoryWarningCode::W1003 => 1003,
-            MemoryWarningCode::W1004 => 1004,
             MemoryWarningCode::W1005 => 1005,
             MemoryWarningCode::W1006 => 1006,
         }
@@ -60,7 +61,6 @@ impl MemoryWarningCode {
             MemoryWarningCode::W1001 => "shared pointer mutation",
             MemoryWarningCode::W1002 => "implicit copy of unique pointer",
             MemoryWarningCode::W1003 => "mutable binding with shared type",
-            MemoryWarningCode::W1004 => "borrow escapes scope",
             MemoryWarningCode::W1005 => "potential reference cycle",
             MemoryWarningCode::W1006 => "mutation without mut capability",
         }
@@ -72,7 +72,6 @@ impl MemoryWarningCode {
             MemoryWarningCode::W1001 => "use COW pattern: `val updated = shared.with_field(value)`",
             MemoryWarningCode::W1002 => "use explicit `move x` or `x.clone()`",
             MemoryWarningCode::W1003 => "use `val` instead of `var`, or use unique pointer `&T`",
-            MemoryWarningCode::W1004 => "return owned value or transfer ownership with `move`",
             MemoryWarningCode::W1005 => "use weak pointer `-T` to break cycle",
             MemoryWarningCode::W1006 => "add `mut` capability to parameter or binding",
         }
@@ -200,6 +199,53 @@ impl MemoryWarningCollector {
         self.warnings.push(warning);
     }
 
+    /// Convenience: warn about shared pointer mutation (W1001)
+    pub fn warn_shared_mutation(&mut self, span: Span, type_name: &str, field_name: &str) {
+        self.warn(
+            MemoryWarning::new(MemoryWarningCode::W1001, span)
+                .with_type(type_name)
+                .with_name(field_name)
+                .with_context("shared pointers (*T) are read-only in strict mode"),
+        );
+    }
+
+    /// Convenience: warn about unique pointer copy (W1002)
+    pub fn warn_unique_copied(&mut self, span: Span, var_name: &str) {
+        self.warn(
+            MemoryWarning::new(MemoryWarningCode::W1002, span)
+                .with_name(var_name)
+                .with_context("unique pointers (&T) are move-only"),
+        );
+    }
+
+    /// Convenience: warn about var with shared type (W1003)
+    pub fn warn_mutable_shared(&mut self, span: Span, var_name: &str, type_name: &str) {
+        self.warn(
+            MemoryWarning::new(MemoryWarningCode::W1003, span)
+                .with_name(var_name)
+                .with_type(type_name)
+                .with_context("shared pointers cannot be reassigned"),
+        );
+    }
+
+    /// Convenience: warn about potential cycle (W1005)
+    pub fn warn_potential_cycle(&mut self, span: Span, type_name: &str) {
+        self.warn(
+            MemoryWarning::new(MemoryWarningCode::W1005, span)
+                .with_type(type_name)
+                .with_context("reference cycles cause memory leaks with shared pointers"),
+        );
+    }
+
+    /// Convenience: warn about missing mut (W1006)
+    pub fn warn_missing_mut(&mut self, span: Span, name: &str) {
+        self.warn(
+            MemoryWarning::new(MemoryWarningCode::W1006, span)
+                .with_name(name)
+                .with_context("mutation requires exclusive (mut) access"),
+        );
+    }
+
     /// Get all collected warnings
     pub fn warnings(&self) -> &[MemoryWarning] {
         &self.warnings
@@ -252,9 +298,6 @@ impl MemoryWarningCollector {
             w1003: by_code
                 .get(&MemoryWarningCode::W1003)
                 .map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
-            w1004: by_code
-                .get(&MemoryWarningCode::W1004)
-                .map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
             w1005: by_code
                 .get(&MemoryWarningCode::W1005)
                 .map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
@@ -272,7 +315,6 @@ pub struct WarningSummary {
     pub w1001: usize,
     pub w1002: usize,
     pub w1003: usize,
-    pub w1004: usize,
     pub w1005: usize,
     pub w1006: usize,
 }
@@ -290,9 +332,6 @@ impl std::fmt::Display for WarningSummary {
         }
         if self.w1003 > 0 {
             writeln!(f, "  W1003 (var *T):             {}", self.w1003)?;
-        }
-        if self.w1004 > 0 {
-            writeln!(f, "  W1004 (escaping borrow):    {}", self.w1004)?;
         }
         if self.w1005 > 0 {
             writeln!(f, "  W1005 (potential cycle):    {}", self.w1005)?;
@@ -334,12 +373,8 @@ mod tests {
     fn test_collector_basic() {
         let mut collector = MemoryWarningCollector::new();
 
-        collector.warn(
-            MemoryWarning::new(MemoryWarningCode::W1001, test_span())
-                .with_type("*Config")
-                .with_name("setting"),
-        );
-        collector.warn(MemoryWarning::new(MemoryWarningCode::W1002, test_span()).with_name("box"));
+        collector.warn_shared_mutation(test_span(), "*Config", "setting");
+        collector.warn_unique_copied(test_span(), "box");
 
         assert_eq!(collector.count(), 2);
         assert!(collector.has_warnings());
@@ -349,17 +384,9 @@ mod tests {
     fn test_collector_summary() {
         let mut collector = MemoryWarningCollector::new();
 
-        collector.warn(
-            MemoryWarning::new(MemoryWarningCode::W1001, test_span())
-                .with_type("*A")
-                .with_name("x"),
-        );
-        collector.warn(
-            MemoryWarning::new(MemoryWarningCode::W1001, test_span())
-                .with_type("*B")
-                .with_name("y"),
-        );
-        collector.warn(MemoryWarning::new(MemoryWarningCode::W1002, test_span()).with_name("z"));
+        collector.warn_shared_mutation(test_span(), "*A", "x");
+        collector.warn_shared_mutation(test_span(), "*B", "y");
+        collector.warn_unique_copied(test_span(), "z");
 
         let summary = collector.summary();
         assert_eq!(summary.total, 3);

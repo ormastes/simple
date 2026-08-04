@@ -1003,9 +1003,6 @@ fn generate_memory_safety_lean(args: &[String]) -> i32 {
         if summary.w1003 > 0 {
             eprintln!("  W1003 (Mutable shared): {}", summary.w1003);
         }
-        if summary.w1004 > 0 {
-            eprintln!("  W1004 (Borrow escapes): {}", summary.w1004);
-        }
         if summary.w1005 > 0 {
             eprintln!("  W1005 (Potential cycle): {}", summary.w1005);
         }

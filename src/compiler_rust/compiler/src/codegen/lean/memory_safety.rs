@@ -373,7 +373,6 @@ def uniqueMoveOnly {α : Type} (ptr : TypedPtr α) : Prop :=
 def sharedMutationWarnings : Nat := {w1001}
 def uniqueCopyWarnings : Nat := {w1002}
 def mutableSharedWarnings : Nat := {w1003}
-def escapingBorrowWarnings : Nat := {w1004}
 def potentialCycleWarnings : Nat := {w1005}
 def missingMutWarnings : Nat := {w1006}
 def lifetimeViolations : Nat := {lifetime_violation_count}
@@ -381,7 +380,10 @@ def lifetimeViolations : Nat := {lifetime_violation_count}
 -- Aggregated obligations (aliasing, move-only, and escape)
 def aliasingWarnings : Nat := sharedMutationWarnings + mutableSharedWarnings
 def moveOnlyWarnings : Nat := uniqueCopyWarnings
-def escapeWarnings : Nat := escapingBorrowWarnings + lifetimeViolations
+-- Escapes are counted solely as lifetime violations (E2001/E2005/E2006). The
+-- former `escapingBorrowWarnings` term came from W1004, a warning-severity
+-- duplicate of those errors that never had a producer and so was always 0.
+def escapeWarnings : Nat := lifetimeViolations
 
 theorem aliasing_blocked : aliasingWarnings = 0 := by decide
 theorem move_only_enforced : moveOnlyWarnings = 0 := by decide
@@ -390,7 +392,6 @@ theorem no_lifetime_violations : lifetimeViolations = 0 := by decide
 theorem no_shared_mutation_warnings : sharedMutationWarnings = 0 := by decide
 theorem no_mutable_shared_warnings : mutableSharedWarnings = 0 := by decide
 theorem no_unique_copy_warnings : uniqueCopyWarnings = 0 := by decide
-theorem no_escaping_borrow_warnings : escapingBorrowWarnings = 0 := by decide
 theorem no_missing_mut_warnings : missingMutWarnings = 0 := by decide
 theorem no_cycle_warnings : potentialCycleWarnings = 0 := by decide
 
@@ -416,7 +417,6 @@ axiom unique_move_only {{α : Type}} (ptr : TypedPtr α) :
             w1001 = summary.w1001,
             w1002 = summary.w1002,
             w1003 = summary.w1003,
-            w1004 = summary.w1004,
             w1005 = summary.w1005,
             w1006 = summary.w1006,
             lifetime_violation_count = lifetime_violation_count,
@@ -520,7 +520,6 @@ axiom unique_move_only {{α : Type}} (ptr : TypedPtr α) :
         lean.push_str(&format!("-- W1001 (Shared mutation): {}\n", summary.w1001));
         lean.push_str(&format!("-- W1002 (Unique copy): {}\n", summary.w1002));
         lean.push_str(&format!("-- W1003 (Mutable shared): {}\n", summary.w1003));
-        lean.push_str(&format!("-- W1004 (Borrow escapes): {}\n", summary.w1004));
         lean.push_str(&format!("-- W1005 (Potential cycle): {}\n", summary.w1005));
         lean.push_str(&format!("-- W1006 (Missing mut): {}\n", summary.w1006));
         lean.push('\n');

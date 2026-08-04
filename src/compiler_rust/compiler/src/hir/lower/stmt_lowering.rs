@@ -315,6 +315,34 @@ impl Lowerer {
                             }
                         }
                     }
+                } else if let HirExprKind::Local(target_idx) = &target.kind {
+                    // E2001: Check for escaping reference (assigning a short-lived
+                    // reference to a longer-lived local).
+                    //
+                    // The E2006 check above only fires when the assignment target is a
+                    // field access. A plain `outer = inner` across scopes is the same
+                    // lifetime relation with the same consequence, and nothing caught
+                    // it: `check_escape` had no production caller at all, so
+                    // `LifetimeViolation::EscapingReference` was unconstructible outside
+                    // its own unit test even though every consumer downstream already
+                    // renders it.
+                    if self.is_reference_type(value.ty) {
+                        if let HirExprKind::Local(value_idx) = &value.kind {
+                            let target_origin = ctx
+                                .get_local(*target_idx)
+                                .and_then(|local| self.lifetime_context.get_variable_origin(&local.name).cloned());
+                            let value_origin = ctx
+                                .get_local(*value_idx)
+                                .and_then(|local| self.lifetime_context.get_variable_origin(&local.name).cloned());
+
+                            if let (Some(t_origin), Some(v_origin)) = (target_origin, value_origin) {
+                                let target_lt = t_origin.lifetime();
+                                let value_lt = v_origin.lifetime();
+                                self.lifetime_context
+                                    .check_escape(value_lt, target_lt, v_origin, assign.span);
+                            }
+                        }
+                    }
                 }
 
                 // Augmented assignment (`x += v`, `x -= v`, ...) must be desugared to
