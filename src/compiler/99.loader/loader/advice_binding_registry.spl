@@ -7,6 +7,7 @@ use compiler.loader.loader.aspect_catalog.{AspectAdviceSummary}
 use compiler.common.structural_contracts.facet_artifact.{facet_artifact_text_less}
 use compiler.loader.loader.module_loader.{ModuleLoader}
 use compiler.loader.loader.smf_mmap_native.{native_call_function_0}
+use os.smf.smf_generation.{LifecycleManager, GenerationToken}
 
 struct AdviceBindingAdmission:
     summary: AspectAdviceSummary
@@ -67,13 +68,6 @@ struct AdviceLookupResult:
     registry: AdviceBindingRegistry
     chain: [AdviceBindingRecord]
 
-struct AdviceDispatchOutcome:
-    registry: AdviceBindingRegistry
-    status: text
-    reason: text
-    invoked_count: i64
-    return_values: [i64]
-
 # Immutable backend projection derived from the canonical loader registry.
 # Every row retains exact publication/generation and loader ownership identity;
 # it cannot be independently published or mutated.
@@ -91,6 +85,21 @@ struct AdviceDispatchProjection:
     schema_id: text
     schema_version: i64
     entries: [AdviceDispatchProjectionEntry]
+
+struct AdviceProjectionDispatchOutcome:
+    registry: AdviceBindingRegistry
+    lifecycle: LifecycleManager
+    status: text
+    reason: text
+    invoked_count: i64
+    return_values: [i64]
+    tokens_acquired: i64
+    tokens_released: i64
+
+struct AdviceTokenReleaseOutcome:
+    lifecycle: LifecycleManager
+    released: i64
+    reason: text
 
 fn advice_zero_counters() -> AdviceBindingCounters:
     AdviceBindingCounters(
@@ -205,6 +214,26 @@ fn advice_dispatch_projection_create(
         schema_id: "simple.advice-dispatch-projection",
         schema_version: 1,
         entries: entries))
+
+fn advice_dispatch_projection_empty() -> AdviceDispatchProjection:
+    AdviceDispatchProjection(
+        schema_id: "simple.advice-dispatch-projection",
+        schema_version: 1,
+        entries: [])
+
+fn advice_dispatch_projection_invalidate(
+    projection: AdviceDispatchProjection,
+    activation_key: text,
+    generation: i64
+) -> AdviceDispatchProjection:
+    var entries: [AdviceDispatchProjectionEntry] = []
+    for entry in projection.entries:
+        if entry.activation_key != activation_key or entry.generation != generation:
+            entries.push(entry)
+    AdviceDispatchProjection(
+        schema_id: projection.schema_id,
+        schema_version: projection.schema_version,
+        entries: entries)
 
 impl AdviceBindingRegistry:
     static fn create(prepared_slots: [text]) -> Result<AdviceBindingRegistry, text>:
@@ -340,82 +369,184 @@ fn advice_lookup_slot(registry: AdviceBindingRegistry, slot_id: text) -> Result<
             counters: counters),
         chain: chain))
 
-fn advice_dispatch_failed(
+fn advice_projection_release_tokens(
+    lifecycle: LifecycleManager,
+    tokens: [GenerationToken]
+) -> AdviceTokenReleaseOutcome:
+    var next = lifecycle
+    var released: i64 = 0
+    var reason = ""
+    var i = tokens.len()
+    while i > 0:
+        i = i - 1
+        val release = next.release_generation_token(tokens[i])
+        if release.is_err():
+            if reason == "":
+                reason = release.unwrap_err()
+            else:
+                reason = "{reason}; {release.unwrap_err()}"
+        else:
+            next = release.unwrap()
+            released = released + 1
+    AdviceTokenReleaseOutcome(
+        lifecycle: next, released: released, reason: reason)
+
+fn advice_projection_dispatch_failed(
     registry: AdviceBindingRegistry,
+    lifecycle: LifecycleManager,
+    tokens: [GenerationToken],
+    acquired: i64,
+    invoked: i64,
     reason: text,
-    around_rejected: bool
-) -> AdviceDispatchOutcome:
+    around_rejected: bool,
+    released_before_failure: i64
+) -> AdviceProjectionDispatchOutcome:
+    val release = advice_projection_release_tokens(lifecycle, tokens)
+    var final_reason = reason
+    if release.reason != "":
+        final_reason = "{reason}; exact generation token release failed: {release.reason}"
     var counters = registry.counters
     counters.dispatch_failures = counters.dispatch_failures + 1
     if around_rejected:
         counters.around_rejections = counters.around_rejections + 1
-    AdviceDispatchOutcome(
+    AdviceProjectionDispatchOutcome(
         registry: AdviceBindingRegistry(
             prepared_slots: registry.prepared_slots,
             records: registry.records,
             active_publications: registry.active_publications,
             counters: counters),
+        lifecycle: release.lifecycle,
         status: "failed",
-        reason: reason,
-        invoked_count: 0,
-        return_values: [])
+        reason: final_reason,
+        invoked_count: invoked,
+        return_values: [],
+        tokens_acquired: acquired,
+        tokens_released: released_before_failure + release.released)
 
-# Production dynamic-advice dispatch. The phase caller remains responsible for
-# placing `before` before the business body and exactly one matching `after_*`
-# after it. No runtime pointcut matching or alternate lifecycle is performed.
-fn advice_dispatch_slot(
+fn advice_native_invoke(address: i64) -> Result<i64, text>:
+    if address <= 0:
+        return Err("E-AF010 dynamic advice witness address is invalid")
+    Ok(native_call_function_0(address))
+
+# Exact-generation prepared dispatch. Every projected callback is pinned before
+# validation or invocation, and every acquired opaque token is released on all
+# success and failure paths.
+fn advice_dispatch_projection_with_invoker(
+    projection: AdviceDispatchProjection,
     registry: AdviceBindingRegistry,
+    lifecycle: LifecycleManager,
     loader: ModuleLoader,
     slot_id: text,
-    form: text
-) -> AdviceDispatchOutcome:
+    form: text,
+    invoke: fn(i64) -> Result<i64, text>
+) -> AdviceProjectionDispatchOutcome:
     var attempted = registry
     attempted.counters.dispatch_attempts = attempted.counters.dispatch_attempts + 1
     if form == "around":
-        return advice_dispatch_failed(
-            attempted,
-            "E-AF010 runtime around advice requires an exactly-once proceed path",
-            true)
+        return advice_projection_dispatch_failed(
+            attempted, lifecycle, [], 0, 0,
+            "E-AF010 runtime around advice requires an exactly-once proceed path", true, 0)
     if not (form == "before" or form == "after_success" or form == "after_error"):
-        return advice_dispatch_failed(
-            attempted, "E-AF010 invalid dynamic advice dispatch form", false)
+        return advice_projection_dispatch_failed(
+            attempted, lifecycle, [], 0, 0,
+            "E-AF010 invalid dynamic advice dispatch form", false, 0)
+    if projection.schema_id != "simple.advice-dispatch-projection" or projection.schema_version != 1:
+        return advice_projection_dispatch_failed(
+            attempted, lifecycle, [], 0, 0,
+            "E-AF010 dynamic advice projection schema is invalid", false, 0)
+
+    var projected: [AdviceDispatchProjectionEntry] = []
+    for entry in projection.entries:
+        if entry.slot_id == slot_id and entry.form == form:
+            projected.push(entry)
+
+    var pinned = lifecycle
+    var tokens: [GenerationToken] = []
+    for entry in projected:
+        val acquired = pinned.acquire_generation_token_for(
+            entry.activation_key, entry.generation)
+        if acquired.is_err():
+            return advice_projection_dispatch_failed(
+                attempted, pinned, tokens, tokens.len(), 0,
+                "E-AF010 dynamic advice generation is stale or unpublished: {acquired.unwrap_err()}", false, 0)
+        val pinned_entry = acquired.unwrap()
+        pinned = pinned_entry.0
+        tokens.push(pinned_entry.1)
+
     val lookup = advice_lookup_slot(attempted, slot_id)
     if lookup.is_err():
-        return advice_dispatch_failed(attempted, lookup.unwrap_err(), false)
+        return advice_projection_dispatch_failed(
+            attempted, pinned, tokens, tokens.len(), 0,
+            lookup.unwrap_err(), false, 0)
     val looked_up = lookup.unwrap()
     var visible = looked_up.registry
-    val chain = looked_up.chain
-    # Validate the complete phase chain before invoking its first callback so
-    # an ownership failure cannot leave a partially dispatched phase.
-    for record in chain:
-        if record.form == "around":
-            return advice_dispatch_failed(
-                visible,
-                "E-AF010 runtime around advice requires an exactly-once proceed path",
-                true)
-        if not (record.form == "before" or record.form == "after_success" or
-            record.form == "after_error"):
-            return advice_dispatch_failed(
-                visible, "E-AF010 published dynamic advice form is invalid", false)
-        if record.form != form:
-            continue
+    var canonical: [AdviceBindingRecord] = []
+    for record in looked_up.chain:
+        if record.form == form:
+            canonical.push(record)
+    if canonical.len() != projected.len():
+        return advice_projection_dispatch_failed(
+            visible, pinned, tokens, tokens.len(), 0,
+            "E-AF010 dynamic advice projection does not match canonical publication", false, 0)
+
+    var index: i64 = 0
+    while index < canonical.len():
+        val record = canonical[index]
+        val entry = projected[index]
+        if (entry.publication_id != record.publication_id or
+            entry.activation_key != record.activation_key or
+            entry.generation != record.generation or
+            entry.witness_symbol != record.witness_symbol or
+            entry.witness_owner_id != record.witness_owner_id or
+            entry.resolved_witness_address != record.resolved_witness_address):
+            return advice_projection_dispatch_failed(
+                visible, pinned, tokens, tokens.len(), 0,
+                "E-AF010 dynamic advice projection entry is stale or forged", false, 0)
         if not advice_record_loader_valid(loader, record):
-            return advice_dispatch_failed(
-                visible, "E-AF010 dynamic advice witness is no longer loader-owned: {record.witness_symbol}", false)
+            return advice_projection_dispatch_failed(
+                visible, pinned, tokens, tokens.len(), 0,
+                "E-AF010 dynamic advice witness is no longer loader-owned: {record.witness_symbol}", false, 0)
+        index = index + 1
+
     var results: [i64] = []
     var invoked: i64 = 0
-    for record in chain:
-        if record.form != form:
-            continue
-        results.push(native_call_function_0(record.resolved_witness_address))
+    for entry in projected:
+        val result = invoke(entry.resolved_witness_address)
+        if result.is_err():
+            return advice_projection_dispatch_failed(
+                visible, pinned, tokens, tokens.len(), invoked,
+                "E-AF010 dynamic advice callback failed: {result.unwrap_err()}", false, 0)
+        results.push(result.unwrap())
         invoked = invoked + 1
+
+    val release = advice_projection_release_tokens(pinned, tokens)
+    if release.reason != "":
+        return advice_projection_dispatch_failed(
+            visible, release.lifecycle, [], tokens.len(), invoked,
+            "E-AF010 exact generation token release failed: {release.reason}",
+            false, release.released)
     visible.counters.dispatch_invocations = visible.counters.dispatch_invocations + invoked
-    AdviceDispatchOutcome(
+    AdviceProjectionDispatchOutcome(
         registry: visible,
+        lifecycle: release.lifecycle,
         status: "dispatched",
         reason: "",
         invoked_count: invoked,
-        return_values: results)
+        return_values: results,
+        tokens_acquired: tokens.len(),
+        tokens_released: release.released)
+
+fn advice_dispatch_projection(
+    projection: AdviceDispatchProjection,
+    registry: AdviceBindingRegistry,
+    lifecycle: LifecycleManager,
+    loader: ModuleLoader,
+    slot_id: text,
+    form: text
+) -> AdviceProjectionDispatchOutcome:
+    advice_dispatch_projection_with_invoker(
+        projection, registry, lifecycle, loader, slot_id, form,
+        advice_native_invoke)
 
 # Removes visibility before lifecycle drain; it never owns or waits on pins.
 fn advice_unbind_generation(
@@ -447,10 +578,11 @@ fn advice_unbind_generation(
 export AdviceBindingAdmission, AdviceBindingRecord, AdviceBindingCandidate
 export AdviceBindingCounters, AdviceDisabledPathFootprint
 export AdviceBindingRegistry, AdviceLookupResult
-export AdviceDispatchOutcome
 export AdviceDispatchProjectionEntry, AdviceDispatchProjection
+export AdviceProjectionDispatchOutcome
 export advice_binding_candidate, advice_bind_slot, advice_binding_stage_validated
 export advice_publish_generation, advice_lookup_slot, advice_unbind_generation
-export advice_dispatch_slot
 export advice_dispatch_projection_create
+export advice_dispatch_projection_empty, advice_dispatch_projection_invalidate
+export advice_dispatch_projection, advice_dispatch_projection_with_invoker
 export advice_disabled_path_footprint

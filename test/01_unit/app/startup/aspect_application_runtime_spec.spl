@@ -13,6 +13,10 @@ use compiler.loader.loader.facet_binding_registry.{
     FacetBindingAdmission, facet_binding_stage_validated,
     aspect_publish_generation
 }
+use compiler.common.structural_contracts.facet_artifact.{
+    FACET_WITNESS_DESCRIPTOR_VERSION,
+    FacetWitnessMethodEntry, FacetWitnessDescriptorV1
+}
 use app.startup.aspect_application_runtime.{
     AspectApplicationPhase,
     AspectApplicationOperation,
@@ -20,6 +24,19 @@ use app.startup.aspect_application_runtime.{
 }
 use os.smf.dynsmf_session.{DynSmfSession, DynSmfPolicy, dynsmf_session_new}
 use os.smf.smf_generation.{LifecycleManager}
+
+fn app_resolved_facet_descriptor(
+    summary: AspectBindingSummary, owner_id: text
+) -> FacetWitnessDescriptorV1:
+    FacetWitnessDescriptorV1(
+        descriptor_version: FACET_WITNESS_DESCRIPTOR_VERSION,
+        facet_contract_abi_hash: summary.facet_contract_abi_hash,
+        descriptor_symbol: summary.witness_symbol,
+        owner_id: owner_id,
+        method_entries: [FacetWitnessMethodEntry(
+            method_name: "audit",
+            method_symbol: summary.witness_symbol + "__audit",
+            resolved_address: 4096)])
 
 fn app_aspect_smf() -> [u8]:
     var out: [u8] = [83, 77, 70, 0, 1, 1, 1, 0]
@@ -154,20 +171,18 @@ fn app_aspect_phase_is_operational(phase: AspectApplicationPhase) -> bool:
 describe "Application aspect runtime policy owner":
     it "rejects non-startup dynamic routes in the mission profile":
         val runtime = app_aspect_mission_runtime("lazy_facet")
-        expect(runtime.is_err()).to_equal(true)
         expect(runtime.unwrap_err()).to_contain("only static, startup, or excluded")
 
     it "requires every startup aspect before entering operational state":
         val runtime = app_aspect_mission_runtime("startup").unwrap()
         val transitioned = runtime.enter_operational()
-        expect(transitioned.is_err()).to_equal(true)
         expect(transitioned.unwrap_err()).to_contain("requires active startup aspect")
 
     it "denies lazy IO attach unload and patch after the mission transition":
         val runtime = app_aspect_mission_runtime("excluded").unwrap()
         expect(runtime.pack_path_for("security.audit").unwrap()).to_equal("aspects/mission-pack.sfm")
-        expect(runtime.enter_operational().is_ok()).to_equal(true)
-        expect(app_aspect_phase_is_operational(runtime.phase)).to_equal(true)
+        runtime.enter_operational().unwrap()
+        expect(app_aspect_phase_is_operational(runtime.phase)).to_be(true)
         expect(runtime.authorize(AspectApplicationOperation.LazyIo).unwrap_err()).to_contain("denies lazy")
         expect(runtime.authorize(AspectApplicationOperation.DynamicAttach).unwrap_err()).to_contain("denies dynamic")
         expect(runtime.authorize(AspectApplicationOperation.Unload).unwrap_err()).to_contain("denies aspect unload")
@@ -292,7 +307,9 @@ describe "Application aspect runtime policy owner":
             [FacetBindingAdmission(
                 summary: entry.binding_summaries[0],
                 witness_owner_id: "mission-pack:security.audit:4",
-                resolved_witness_address: 4096)]
+                witness_descriptor: app_resolved_facet_descriptor(
+                    entry.binding_summaries[0],
+                    "mission-pack:security.audit:4"))]
         ).unwrap()
         runtime.coordinator.facet_bindings = aspect_publish_generation(
             runtime.coordinator.facet_bindings, candidate,
@@ -300,7 +317,6 @@ describe "Application aspect runtime policy owner":
 
         val acquired = runtime.acquire_published_facet(
             "security.AuditRecord", [], "Auditable").unwrap()
-        expect(acquired != nil).to_equal(true)
         val pair = acquired.unwrap()
         val binding = pair.0
         val lease = pair.1
@@ -309,9 +325,17 @@ describe "Application aspect runtime policy owner":
         expect(lease.generation_id).to_equal(4)
         expect(lease.token_id).to_be_greater_than(0)
         expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(1)
-        expect(runtime.release_facet_generation_lease(lease).is_ok()).to_equal(true)
+        runtime.release_facet_generation_lease(lease).unwrap()
         expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(0)
-        expect(runtime.release_facet_generation_lease(lease).is_err()).to_equal(true)
+        expect(runtime.release_facet_generation_lease(lease).unwrap_err()).to_contain(
+            "lease")
+
+        val acquired_method = runtime.acquire_published_facet_method(
+            "security.AuditRecord", [], "Auditable", "audit").unwrap().unwrap()
+        expect(acquired_method.0.resolved_address).to_equal(4096)
+        expect(acquired_method.0.method_symbol).to_end_with("__audit")
+        expect(acquired_method.1.generation_id).to_equal(4)
+        runtime.release_facet_generation_lease(acquired_method.1).unwrap()
 
     it "quiesces drains releases cache pins and completes ordinary unload":
         val runtime = AspectApplicationRuntime.create(
@@ -353,7 +377,9 @@ describe "Application aspect runtime policy owner":
             [FacetBindingAdmission(
                 summary: app_aspect_entry("startup").binding_summaries[0],
                 witness_owner_id: "mission-pack:security.audit:4",
-                resolved_witness_address: 4096)]
+                witness_descriptor: app_resolved_facet_descriptor(
+                    app_aspect_entry("startup").binding_summaries[0],
+                    "mission-pack:security.audit:4"))]
         ).unwrap()
         runtime.coordinator.facet_bindings = aspect_publish_generation(
             runtime.coordinator.facet_bindings, candidate,
@@ -365,10 +391,11 @@ describe "Application aspect runtime policy owner":
         expect(runtime.coordinator.published["security.audit"].bindings.len()).to_equal(0)
         expect(runtime.coordinator.published["security.audit"].state).to_equal("quiescing")
         expect(runtime.acquire_published_facet(
-            "security.AuditRecord", [], "Auditable").unwrap() == nil).to_equal(true)
-        expect(runtime.acquire_facet_generation_lease("security.audit").is_err()).to_equal(true)
-        expect(runtime.release_facet_generation_lease(lease).is_ok()).to_equal(true)
+            "security.AuditRecord", [], "Auditable").unwrap()).to_be_nil()
+        expect(runtime.acquire_facet_generation_lease(
+            "security.audit").unwrap_err()).to_contain("not published")
+        runtime.release_facet_generation_lease(lease).unwrap()
         expect(runtime.unload_published_aspect("security.audit", loader).unwrap()).to_equal("unloaded")
-        expect(runtime.coordinator.published.has("security.audit")).to_equal(false)
-        expect(runtime.provider_cache.has_module(module_key)).to_equal(false)
-        expect(runtime.provider_cache.has_provider(provider_key)).to_equal(false)
+        expect(runtime.coordinator.published.has("security.audit")).to_be(false)
+        expect(runtime.provider_cache.has_module(module_key)).to_be(false)
+        expect(runtime.provider_cache.has_provider(provider_key)).to_be(false)

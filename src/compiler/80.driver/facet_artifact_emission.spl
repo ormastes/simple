@@ -5,7 +5,8 @@ use compiler.common.structural_contracts.aop.{FacetBindingPlan, TypePredicateIns
 use compiler.common.structural_contracts.facet_artifact.{
     FACET_ARTIFACT_VERSION, FacetContractMetadata, FacetBindingArtifactSummary,
     encode_facet_binding_summaries, facet_artifact_text_less,
-    facet_witness_symbol, facet_witness_method_symbol
+    facet_witness_symbol, facet_witness_method_symbol,
+    facet_witness_descriptor_from_contract
 }
 use std.common.crypto.sha256.{sha256_text}
 
@@ -41,7 +42,7 @@ fn facet_plan_target(plan: FacetBindingPlan) -> Result<(text, text), text>:
 fn facet_witness_artifact_symbols(
     implementation_id: text, method_names: [text]
 ) -> [text]:
-    var symbols = [facet_witness_symbol(implementation_id)]
+    var symbols: [text] = []
     for method_name in method_names:
         symbols = symbols.push(facet_witness_method_symbol(implementation_id, method_name))
     symbols
@@ -64,12 +65,15 @@ fn facet_binding_artifact_from_plan(
         contracts, plan.aspect_id, plan.facet_interface_id)?
     if contract.parent_facets.len() > 0:
         return Err("E-AF002 inherited facet method-table symbols are not flattened")
-    val required_symbols = facet_witness_artifact_symbols(
-        plan.implementation_id, contract.method_names)
+    val descriptor = facet_witness_descriptor_from_contract(
+        plan.implementation_id, contract)?
+    var required_symbols: [text] = []
+    for method in descriptor.method_entries:
+        required_symbols = required_symbols.push(method.method_symbol)
     for symbol in required_symbols:
         if not emitted_symbols.contains(symbol):
             return Err("E-AF002 facet witness artifact has no emitted ordinary-SMF symbol: {symbol}")
-    val witness = required_symbols[0]
+    val witness = facet_witness_symbol(plan.implementation_id)
     val binding_id = plan.aspect_id + "::" + plan.facet_interface_id + "::" + plan.implementation_id
     Ok(FacetBindingArtifactSummary(
         contract_version: FACET_ARTIFACT_VERSION,
@@ -80,6 +84,7 @@ fn facet_binding_artifact_from_plan(
         facet_interface_id: plan.facet_interface_id,
         facet_contract_abi_hash: contract.abi_hash,
         witness_symbol: witness,
+        witness_descriptor: descriptor,
         capabilities: ["facet.read"])))
 
 fn facet_binding_artifact_sort(records: [FacetBindingArtifactSummary]) -> [FacetBindingArtifactSummary]:
@@ -114,9 +119,9 @@ fn encode_mir_facet_binding_artifacts(
     contracts: [FacetContractMetadata],
     emitted_symbols: [text]
 ) -> Result<[u8], text>:
-    Ok(encode_facet_binding_summaries(
+    encode_facet_binding_summaries(
         facet_binding_artifacts_from_plans(
-            plans, contracts, emitted_symbols)?))
+            plans, contracts, emitted_symbols)?)
 
 export facet_contract_metadata_from_hir, facet_binding_artifact_from_plan
 export facet_binding_artifacts_from_plans, encode_mir_facet_binding_artifacts

@@ -7,11 +7,14 @@ use compiler.loader.loader.advice_binding_registry.{
     AdviceBindingAdmission, AdviceBindingRegistry,
     advice_binding_stage_validated, advice_publish_generation,
     advice_lookup_slot, advice_unbind_generation,
-    advice_disabled_path_footprint, advice_dispatch_slot,
-    advice_dispatch_projection_create
+    advice_disabled_path_footprint, advice_dispatch_projection_empty,
+    advice_dispatch_projection_create,
+    advice_dispatch_projection_invalidate,
+    advice_dispatch_projection_with_invoker
 }
-use compiler.loader.loader.module_loader.{moduleloader_with_defaults}
+use compiler.loader.loader.module_loader.{ModuleLoader, moduleloader_with_defaults}
 use compiler.loader.{LoadedSymbol, SymbolType}
+use os.smf.smf_generation.{LifecycleManager}
 
 fn advice_summary(id: text, witness: text, priority: i64, specificity: i64) -> AspectAdviceSummary:
     AspectAdviceSummary(
@@ -33,6 +36,29 @@ fn publish_advice(
         registry, activation_key, 7, aspect_id, admissions).unwrap()
     advice_publish_generation(
         registry, candidate, activation_key, 7).unwrap()
+
+fn advice_test_invoke(address: i64) -> Result<i64, text>:
+    if address == 103: return Ok(3003)
+    if address == 102: return Ok(2002)
+    if address == 101: return Ok(1001)
+    Err("unexpected callback address")
+
+fn advice_test_invoke_failure(address: i64) -> Result<i64, text>:
+    if address == 102: return Err("callback rejected")
+    advice_test_invoke(address)
+
+fn advice_test_loader() -> ModuleLoader:
+    var loader = moduleloader_with_defaults()
+    loader.global_symbols["z_audit"] = ("pack:a:7", LoadedSymbol(
+        name: "z_audit", address: 101, size: 8,
+        ty: SymbolType.Function, is_jit: false, file_offset: 0))
+    loader.global_symbols["a_audit"] = ("pack:a:7", LoadedSymbol(
+        name: "a_audit", address: 102, size: 8,
+        ty: SymbolType.Function, is_jit: false, file_offset: 0))
+    loader.global_symbols["m_audit"] = ("pack:a:7", LoadedSymbol(
+        name: "m_audit", address: 103, size: 8,
+        ty: SymbolType.Function, is_jit: false, file_offset: 0))
+    loader
 
 describe "Loader advice binding registry":
     it "publishes only prepared slots and preserves canonical AOP order":
@@ -111,9 +137,10 @@ describe "Loader advice binding registry":
 
     it "dispatches an empty supported phase without inventing a callback":
         val registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
-        val outcome = advice_dispatch_slot(
-            registry, moduleloader_with_defaults(),
-            "orders.submit.prepared", "before")
+        val outcome = advice_dispatch_projection_with_invoker(
+            advice_dispatch_projection_empty(), registry,
+            LifecycleManager.new_manager(), moduleloader_with_defaults(),
+            "orders.submit.prepared", "before", advice_test_invoke)
         expect(outcome.status).to_equal("dispatched")
         expect(outcome.invoked_count).to_equal(0)
         expect(outcome.return_values.len()).to_equal(0)
@@ -126,15 +153,25 @@ describe "Loader advice binding registry":
             AdviceBindingAdmission(
                 summary: advice_summary("audit.stale", "audit_stale", 1, 1),
                 witness_owner_id: "pack:a:7", resolved_witness_address: 101)])
-        val other_phase = advice_dispatch_slot(
-            registry, moduleloader_with_defaults(),
-            "orders.submit.prepared", "after_success")
+        var loader = advice_test_loader()
+        loader.global_symbols["audit_stale"] = ("pack:a:7", LoadedSymbol(
+            name: "audit_stale", address: 101, size: 8,
+            ty: SymbolType.Function, is_jit: false, file_offset: 0))
+        val projection = advice_dispatch_projection_create(registry, loader).unwrap()
+        val lifecycle = LifecycleManager.new_manager().register_candidate(
+            "pack:a:7", 7).promote_candidate()
+        val other_phase = advice_dispatch_projection_with_invoker(
+            projection, registry, lifecycle, loader,
+            "orders.submit.prepared", "after_success", advice_test_invoke)
         expect(other_phase.status).to_equal("dispatched")
         expect(other_phase.invoked_count).to_equal(0)
         registry = other_phase.registry
-        val outcome = advice_dispatch_slot(
-            registry, moduleloader_with_defaults(),
-            "orders.submit.prepared", "before")
+        loader.global_symbols["audit_stale"] = ("other-owner", LoadedSymbol(
+            name: "audit_stale", address: 101, size: 8,
+            ty: SymbolType.Function, is_jit: false, file_offset: 0))
+        val outcome = advice_dispatch_projection_with_invoker(
+            projection, registry, other_phase.lifecycle, loader,
+            "orders.submit.prepared", "before", advice_test_invoke)
         expect(outcome.status).to_equal("failed")
         expect(outcome.reason).to_contain("no longer loader-owned")
         expect(outcome.invoked_count).to_equal(0)
@@ -153,9 +190,10 @@ describe "Loader advice binding registry":
                     resolved_witness_address: 101)])
         expect(staged.unwrap_err()).to_contain("exactly-once proceed path")
 
-        val outcome = advice_dispatch_slot(
-            registry, moduleloader_with_defaults(),
-            "orders.submit.prepared", "around")
+        val outcome = advice_dispatch_projection_with_invoker(
+            advice_dispatch_projection_empty(), registry,
+            LifecycleManager.new_manager(), moduleloader_with_defaults(),
+            "orders.submit.prepared", "around", advice_test_invoke)
         expect(outcome.status).to_equal("failed")
         expect(outcome.reason).to_contain("exactly-once proceed path")
         expect(outcome.registry.counters.around_rejections).to_equal(1)
@@ -180,3 +218,107 @@ describe "Loader advice binding registry":
         loader.global_symbols["audit_active"] = ("other-owner", loader.global_symbols["audit_active"][1])
         expect(advice_dispatch_projection_create(registry, loader).unwrap_err()).to_contain(
             "no longer loader-owned")
+
+    it "pins the exact generation, invokes the complete phase chain in order, and releases every token":
+        var registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
+        registry = publish_advice(registry, "pack:a:7", "audit.aspect", [
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.low", "z_audit", 10, 4),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 101),
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.tie", "a_audit", 10, 4),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 102),
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.high", "m_audit", 20, 1),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 103)])
+        val loader = advice_test_loader()
+        val projection = advice_dispatch_projection_create(registry, loader).unwrap()
+        val lifecycle = LifecycleManager.new_manager().register_candidate(
+            "pack:a:7", 7).promote_candidate()
+        val outcome = advice_dispatch_projection_with_invoker(
+            projection, registry, lifecycle, loader,
+            "orders.submit.prepared", "before", advice_test_invoke)
+
+        expect(outcome.status).to_equal("dispatched")
+        expect(outcome.return_values).to_equal([3003, 2002, 1001])
+        expect(outcome.invoked_count).to_equal(3)
+        expect(outcome.tokens_acquired).to_equal(3)
+        expect(outcome.tokens_released).to_equal(3)
+        expect(outcome.lifecycle.generation_pin_count_for("pack:a:7", 7)).to_equal(0)
+
+    it "rejects stale or forged projected generations without leaking a partial pin":
+        var registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
+        registry = publish_advice(registry, "pack:a:7", "audit.aspect", [
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.low", "z_audit", 10, 4),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 101),
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.tie", "a_audit", 10, 4),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 102)])
+        val loader = advice_test_loader()
+        var projection = advice_dispatch_projection_create(registry, loader).unwrap()
+        projection.entries[1].generation = 8
+        val lifecycle = LifecycleManager.new_manager().register_candidate(
+            "pack:a:7", 7).promote_candidate()
+        val outcome = advice_dispatch_projection_with_invoker(
+            projection, registry, lifecycle, loader,
+            "orders.submit.prepared", "before", advice_test_invoke)
+
+        expect(outcome.status).to_equal("failed")
+        expect(outcome.reason).to_contain("stale or unpublished")
+        expect(outcome.tokens_acquired).to_equal(1)
+        expect(outcome.tokens_released).to_equal(1)
+        expect(outcome.lifecycle.generation_pin_count_for("pack:a:7", 7)).to_equal(0)
+
+    it "releases the exact generation tokens after loader validation or callback failure":
+        var registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
+        registry = publish_advice(registry, "pack:a:7", "audit.aspect", [
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.low", "z_audit", 10, 4),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 101),
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.tie", "a_audit", 10, 4),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 102)])
+        var loader = advice_test_loader()
+        val projection = advice_dispatch_projection_create(registry, loader).unwrap()
+        val lifecycle = LifecycleManager.new_manager().register_candidate(
+            "pack:a:7", 7).promote_candidate()
+        loader.global_symbols["z_audit"] = (
+            "forged-owner", loader.global_symbols["z_audit"][1])
+        val invalid = advice_dispatch_projection_with_invoker(
+            projection, registry, lifecycle, loader,
+            "orders.submit.prepared", "before", advice_test_invoke)
+        expect(invalid.status).to_equal("failed")
+        expect(invalid.reason).to_contain("no longer loader-owned")
+        expect(invalid.tokens_acquired).to_equal(2)
+        expect(invalid.tokens_released).to_equal(2)
+        expect(invalid.lifecycle.generation_pin_count_for("pack:a:7", 7)).to_equal(0)
+
+        val callback = advice_dispatch_projection_with_invoker(
+            projection, registry, lifecycle, advice_test_loader(),
+            "orders.submit.prepared", "before", advice_test_invoke_failure)
+        expect(callback.status).to_equal("failed")
+        expect(callback.reason).to_contain("callback rejected")
+        expect(callback.invoked_count).to_equal(0)
+        expect(callback.tokens_acquired).to_equal(2)
+        expect(callback.tokens_released).to_equal(2)
+        expect(callback.lifecycle.generation_pin_count_for("pack:a:7", 7)).to_equal(0)
+
+    it "invalidates exact projection visibility before quiesce and drain":
+        var registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
+        registry = publish_advice(registry, "pack:a:7", "audit.aspect", [
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.low", "z_audit", 10, 4),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 101)])
+        val projection = advice_dispatch_projection_create(
+            registry, advice_test_loader()).unwrap()
+        val hidden = advice_dispatch_projection_invalidate(
+            projection, "pack:a:7", 7)
+        val lifecycle = LifecycleManager.new_manager().register_candidate(
+            "pack:a:7", 7).promote_candidate()
+
+        expect(hidden.entries.len()).to_equal(0)
+        expect(lifecycle.generation_state_for("pack:a:7", 7)).to_equal("active")
+        val quiesced = lifecycle.quiesce_generation_for("pack:a:7", 7).unwrap()
+        expect(quiesced.generation_state_for("pack:a:7", 7)).to_equal("quiescing")
+        expect(quiesced.generation_pin_count_for("pack:a:7", 7)).to_equal(0)

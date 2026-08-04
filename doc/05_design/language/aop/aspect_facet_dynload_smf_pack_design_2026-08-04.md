@@ -158,7 +158,11 @@ facet impl CacheDebug<T: Cache>
         DebugSnapshot(entries: self.base.entry_count())
 ```
 
-Internally this is a **role** or **witness factory**. The term `role` is useful in the compiler/runtime design, but does not need to become an additional public keyword.
+Internally this is a **role adapter** described by a frozen witness descriptor
+whose ordered method entries resolve through the ordinary-SMF symbol table.
+There is no executable witness factory. The term `role` is useful in the
+compiler/runtime design, but does not need to become an additional public
+keyword.
 
 ### 3.4 Facet binding
 
@@ -1187,7 +1191,7 @@ Maps:
 
 ```text
 (concrete_type_id, facet_interface_id, aspect_generation)
-    -> witness factory/vtable
+    -> resolved witness descriptor with ordered method entries
 ```
 
 It also stores open-world rules keyed by implemented business interface IDs.
@@ -1282,6 +1286,17 @@ Steps 1–3 and the deterministic table contract now exist for execution join
 points. Steps 4–6 remain release-blocking: atomic projection install with
 publication, invalidation before drain, exact-generation pinning across each
 callback, and a backend trampoline must be proven together.
+
+The backend bridge cannot be implemented as a slot/phase-only native lookup.
+The emitted operation currently has no loader-owned lifecycle handle or
+generation token, while safe callback execution requires the canonical
+generation lease to remain pinned through the last callback. A separately
+reference-counted runtime snapshot would create a second unload authority and
+is rejected even if its replacement and invalidation were internally atomic.
+The next bridge design must thread an opaque loader-owned dispatch handle (or
+an equivalent canonical token-acquisition operation) through artifact loading
+and intrinsic lowering. Until that contract exists, all code-generation paths
+retain E-AF010 rather than lowering a partial trampoline.
 
 #### Resolver composition boundary
 
@@ -1747,7 +1762,7 @@ struct FacetBindingPlan:
 
 ```text
 facet_lookup(base, facet_id, policy)
-facet_bind_type(type_id, facet_id, witness_factory, generation)
+facet_bind_type(type_id, facet_id, resolved_witness_descriptor, generation)
 facet_unbind_generation(generation)
 advice_bind_slot(slot_id, chain, generation)
 advice_unbind_generation(generation)
@@ -1768,7 +1783,8 @@ New outputs:
 
 Implementation status: SHB v1.1 writes an optional ninth facet-contract
 section and reads both v1.0/eight-section and v1.1 artifacts. The canonical
-factory symbol is `facet_witness_symbol(implementation_id)`. Facet
+`facet_witness_symbol(implementation_id)` is an inert descriptor identity and
+method-symbol prefix; it is not an executable factory export. Facet
 implementation method bodies are retained in `FacetMethodDecl.body_source` and
 `HirFacetMethod.body_source`. Receiver-independent bodies project into ordinary
 compiler input under
@@ -1776,23 +1792,28 @@ compiler input under
 `<implementation>__facet_witness__<method>`, and proceed through ordinary HIR
 and MIR function lowering. The receiver ABI passes the concrete base as
 argument zero; token-aware projection lowers `self.base` to that explicit
-parameter without rewriting strings or comments. Bare `self` fails with
+parameter without rewriting comments. Receiver tokens in strings,
+interpolation, raw strings, or qualified access fail closed. Bare `self` fails with
 E-AF005 because wrapper-value semantics are not defined, while its facet
 AST/HIR metadata remains intact. Interface methods remain declaration-only.
 Receiver-aware resolved calls prepend the base operand and lower through the
 same `CallIndirect` operation, rejecting signature arity mismatches. Artifact
-admission requires the canonical factory plus every contract-ordered canonical
-method symbol. The ordinary-SMF writer now supports deterministic multiple
+admission derives a frozen `FacetWitnessDescriptorV1` from canonical
+`FacetContractMetadata.method_names` and requires every contract-ordered
+canonical method symbol. Only those ordered method symbols are executable. The
+artifact encoder accepts only inert descriptors (`owner_id == ""` and every
+`resolved_address == 0`); serialization of loader-resolved authority fails with
+E-AF002 rather than silently dropping it. The ordinary-SMF writer supports deterministic multiple
 `.text`-relative symbol entries and string offsets, and the AOT path extracts
 those symbols only from one relocatable ELF64 object; multi-object and embedded
-ELF facet modes fail closed. Symbol presence is not factory semantics, however,
-so production facet output currently stops with E-AF005 until a witness
-descriptor/factory layout is defined. The loader checks exact catalog equality
-and witness ownership. Calls lower through existing `CallIndirect` from an
-explicit resolved operand. The descriptor/factory representation, inherited
-method-table flattening, generic implementations, loader method-entry
-resolution, and user-facing type-directed facet-method sugar remain residual;
-no runtime-private invoke path or placeholder witness is implied.
+ELF facet modes fail closed. The loader checks exact catalog equality, exact
+descriptor ABI hash, and same-module ownership for every method symbol, then
+stores ordered resolved method entries in the published binding. Application
+acquisition returns an exact method address with its generation lease; calls
+lower through existing `CallIndirect` from that explicit operand. Inherited
+method-table flattening, generic implementations/methods, and user-facing
+type-directed facet-method sugar remain fail-closed residuals; no native
+factory return ABI, runtime-private invoke path, or placeholder witness exists.
 
 ## 22.7 MDSOC owner map
 
@@ -2258,3 +2279,18 @@ This model gives Simple a stronger capability than conventional static AOP: aspe
 - `src/compiler/99.loader/loader/module_loader.spl`
 - `doc/04_architecture/runtime/jit_index.md`
 - `doc/03_plan/compiler/bootstrap/cross_platform_dynload_remaining_plan_2026-07-10.md`
+## Exact-generation dispatch lifecycle addendum (2026-08-04)
+
+The typed dispatch operation consumes `AdviceDispatchProjection`, canonical
+`AdviceBindingRegistry`, canonical `LifecycleManager`, and `ModuleLoader`, and
+returns their updated registry/lifecycle values plus status, reason, invocation
+receipts, and acquired/released token counts. Tests inject a typed callback to
+observe exact chain order and callback failure without calling fabricated
+native addresses; production supplies the existing native zero-argument call.
+
+Publication ordering is derive/validate projection, register and promote the
+exact lifecycle generation, then install the coordinator value. Retirement
+computes facet/advice removal, exact projection invalidation, the quiescing
+publication, and exact lifecycle quiesce before assigning the next coordinator
+state; only that fully invalidated state may evaluate drain and unload
+resources.

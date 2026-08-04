@@ -117,3 +117,45 @@ verification-failed
   projection publication/generation pinning/backend trampoline are absent, and
   admitted runtime/NFR evidence could not run under the bounded bootstrap cap.
   The authoritative report therefore remains `STATUS: FAIL`.
+- implementation: the production-bridge continuation froze
+  `FacetWitnessDescriptorV1`, ordered `FacetWitnessMethodEntry` resolution, the
+  existing immutable `AdviceDispatchProjection`, and exact `GenerationToken`
+  dispatch pinning before parallel D1/D2/D3 work. The backend intrinsic may
+  become executable only through a real process-visible derived projection;
+  unsupported paths keep E-AF010.
+- architecture: runtime_need for D3 is an atomic process-visible projection
+  snapshot plus indirect callback invocation. Existing pure-Simple loader and
+  lifecycle facades were checked first. chosen_path remains
+  `reuse-facade`/`add-smallest-owner-facade` unless D3 proves that a smallest
+  runtime-owned atomic primitive is unavoidable. rejected_shortcuts are a
+  second authoritative registry, mutable module-global Simple state, fixture
+  bypasses, and silently dropping the MIR intrinsic.
+- architecture: D3 feasibility review checked the loader's
+  `native_call_function_0` callback primitive, the canonical
+  `GenerationToken`/`LifecycleManager` dispatch path, the driver artifact gate,
+  and Cranelift/LLVM/native intrinsic lowering. The emitted
+  `simple.prepared_advice_dispatch.v1` ABI carries only `(slot, phase)` and
+  therefore cannot acquire or prove the canonical loader generation. A native
+  process-global snapshot would become a second lease authority and cannot be
+  made end-to-end lifecycle-safe by a facade alone. chosen_path is consequently
+  `fail-closed-pending-token-bearing-ABI`; rejected_shortcuts additionally
+  include an independently reference-counted C table and callback invocation
+  without a canonical loader pin. No runtime owner edit was made.
+## 2026-08-04 — exact-generation prepared-advice dispatch lifecycle
+
+- Kept `AdviceDispatchProjection` as the frozen loader-derived interface; no
+  second registry, process-global projection, raw runtime boundary, or backend
+  lowering was added.
+- Added typed acquire/validate/invoke/release dispatch over canonical
+  `LifecycleManager` tokens, including exact cleanup receipts for success,
+  partial acquisition failure, loader validation failure, and callback failure.
+- Loader-backed activation now derives projection with canonical publication;
+  unload atomically removes facet/advice/projection visibility while quiescing,
+  before drain evaluation.
+- Added behavioral unit evidence for stale/forged generations, cleanup on
+  validation/callback failures, exact chain order, and invalidation/quiesce
+  ordering. Static direct-env runtime guard: PASS. Compiler/bootstrap not run by
+  explicit lane constraint.
+- Final review removed the legacy exported registry-plus-loader native executor
+  and its outcome type. Public execution now has no bypass around the required
+  projection and canonical lifecycle arguments; registry lookup remains public.

@@ -5,9 +5,11 @@
 use std.spec.*
 use compiler.common.structural_contracts.facet_artifact.{
     FACET_ARTIFACT_VERSION, FacetContractMetadata, FacetBindingArtifactSummary,
+    FacetWitnessDescriptorV1, FacetWitnessMethodEntry,
     encode_facet_contracts, decode_facet_contracts,
     encode_facet_binding_summaries, decode_facet_binding_summaries,
-    facet_artifact_text_less, facet_witness_symbol, facet_witness_method_symbol
+    facet_artifact_text_less, facet_witness_symbol, facet_witness_method_symbol,
+    facet_witness_descriptor_from_contract
 }
 use compiler.common.structural_contracts.aop.{
     TYPE_PREDICATE_BYTECODE_VERSION, TypePredicateInstruction,
@@ -18,6 +20,8 @@ use compiler.driver.facet_artifact_emission.{
     facet_binding_artifact_from_plan, facet_witness_artifact_symbols
 }
 use compiler.frontend.facet_static.{project_static_facet_source}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.driver.smf_writer.{
     SmfBuildOptions, Target, generate_smf_with_options,
     generate_smf_with_raw_code_options, build_smf_with_relocations,
@@ -25,13 +29,19 @@ use compiler.driver.smf_writer.{
 }
 use compiler.driver.smf_elf_parser.{ElfSymEntry, extract_elf_text_symbols}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.loader.loader.module_loader.{
+    LoadResult, moduleloader_with_defaults, moduleloader_load
+}
+use compiler.loader.loader.facet_witness_descriptor.{
+    facet_resolve_witness_descriptor
+}
 use compiler.mir.{
     MirInstKind, MirOperandKind, MirConstValue, MirSignature, MirType,
     mir_operand_const_int, lower_resolved_facet_witness_call,
     lower_resolved_facet_witness_method_call
 }
 use test.fixtures.aspect_facet.runtime_fixture.{
-    facet_runtime_fixture_smf
+    facet_runtime_fixture_binding, facet_runtime_fixture_smf
 }
 
 fn artifact_contract() -> FacetContractMetadata:
@@ -68,7 +78,31 @@ fn artifact_binding() -> FacetBindingArtifactSummary:
         business_interface_id: "", facet_interface_id: "Debuggable",
         facet_contract_abi_hash: "facet-abi-1",
         witness_symbol: facet_witness_symbol("CacheDebug"),
+        witness_descriptor: facet_witness_descriptor_from_contract(
+            "CacheDebug", artifact_contract()).unwrap(),
         capabilities: ["facet.read"])
+
+fn resolved_artifact_binding() -> FacetBindingArtifactSummary:
+    val inert = artifact_binding()
+    FacetBindingArtifactSummary(
+        contract_version: inert.contract_version,
+        binding_id: inert.binding_id, aspect_id: inert.aspect_id,
+        concrete_type_id: inert.concrete_type_id,
+        business_interface_id: inert.business_interface_id,
+        facet_interface_id: inert.facet_interface_id,
+        facet_contract_abi_hash: inert.facet_contract_abi_hash,
+        witness_symbol: inert.witness_symbol,
+        witness_descriptor: FacetWitnessDescriptorV1(
+            descriptor_version: inert.witness_descriptor.descriptor_version,
+            facet_contract_abi_hash: inert.facet_contract_abi_hash,
+            descriptor_symbol: inert.witness_symbol,
+            owner_id: "runtime-owner",
+            method_entries: [FacetWitnessMethodEntry(
+                method_name: "summary",
+                method_symbol: facet_witness_method_symbol(
+                    "CacheDebug", "summary"),
+                resolved_address: 4096)]),
+        capabilities: inert.capabilities)
 
 fn artifact_plan() -> FacetBindingPlan:
     FacetBindingPlan(
@@ -91,7 +125,7 @@ describe "facet artifact emission consumption and call lowering":
         val missing = facet_binding_artifact_from_plan(
             artifact_plan(), [artifact_contract()], [])
         expect(missing.unwrap_err()).to_contain("has no emitted ordinary-SMF symbol")
-        step("Reject a factory without its contract-ordered method symbol")
+        step("Reject unrelated emission without the contract-ordered method symbol")
         val incomplete = facet_binding_artifact_from_plan(
             artifact_plan(), [artifact_contract()], [witness])
         expect(incomplete.unwrap_err()).to_contain(
@@ -102,6 +136,20 @@ describe "facet artifact emission consumption and call lowering":
         val emitted = facet_binding_artifact_from_plan(
             artifact_plan(), [artifact_contract()], emitted_symbols).unwrap()
         expect(emitted.witness_symbol).to_equal(witness)
+        expect(emitted.witness_descriptor.method_entries.len()).to_equal(1)
+        expect(emitted.witness_descriptor.method_entries[0].method_name).to_equal(
+            "summary")
+
+        step("Reject empty and generic descriptor shapes")
+        var empty_contract = artifact_contract()
+        empty_contract.method_names = []
+        empty_contract.method_signatures = []
+        expect(facet_witness_descriptor_from_contract(
+            "CacheDebug", empty_contract).unwrap_err()).to_contain(
+            "no executable methods")
+        expect(facet_witness_descriptor_from_contract(
+            "CacheDebug<T>", artifact_contract()).unwrap_err()).to_contain(
+            "generic facet witness implementations")
 
     it "projects facet implementation signatures as metadata":
         step("Project declared facet implementation metadata")
@@ -116,8 +164,11 @@ describe "facet artifact emission consumption and call lowering":
         expect(projection.facets.implementations.len()).to_equal(1)
         expect(projection.facets.implementations[0].methods[0].signature).to_equal(
             "fn summary(self) -> text")
-        step("Inspect the retained executable source")
-        expect(projection.source).to_contain("pub fn kept()")
+        step("Parse the retained ordinary function behaviorally")
+        val retained = parse_full_frontend(
+            projection.source, "facet_retained.spl", "facet_retained",
+            Logger(level: 0))
+        expect(retained.functions.keys()).to_contain("kept")
 
     it "roundtrips versioned SHB facet contract metadata":
         step("Emit facet contract metadata")
@@ -151,14 +202,15 @@ describe "facet artifact emission consumption and call lowering":
         ]
         expect(decode_facet_contracts(impossible_count).unwrap_err()).to_contain(
             "invalid facet contract artifact count")
-        expect(facet_artifact_text_less("alpha", "beta")).to_equal(true)
-        expect(facet_artifact_text_less("beta", "alpha")).to_equal(false)
-        expect(facet_artifact_text_less("same", "same")).to_equal(false)
+        expect(facet_artifact_text_less("alpha", "beta")).to_be(true)
+        expect(facet_artifact_text_less("beta", "alpha")).to_be(false)
+        expect(facet_artifact_text_less("same", "same")).to_be(false)
 
     it "roundtrips the ordinary SMF facet binding note":
         step("Emit facet binding metadata")
         var options = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
-        options.facet_binding_bytes = encode_facet_binding_summaries([artifact_binding()])
+        options.facet_binding_bytes = encode_facet_binding_summaries(
+            [artifact_binding()]).unwrap()
         val smf = generate_smf_with_raw_code_options([0xC3], options).unwrap()
         step("Consume facet binding metadata")
         val reader = SmfReaderMemory.from_data(smf).unwrap()
@@ -166,26 +218,68 @@ describe "facet artifact emission consumption and call lowering":
             reader.read_named_section(".facet_bindings").unwrap()).unwrap()
         expect(decoded.len()).to_equal(1)
         expect(decoded[0].witness_symbol).to_equal(facet_witness_symbol("CacheDebug"))
+        expect(decoded[0].witness_descriptor.facet_contract_abi_hash).to_equal(
+            "facet-abi-1")
+        expect(decoded[0].witness_descriptor.method_entries[0].method_symbol).to_equal(
+            facet_witness_method_symbol("CacheDebug", "summary"))
+        step("Reject runtime-owned descriptor authority at the wire boundary")
+        expect(encode_facet_binding_summaries(
+            [resolved_artifact_binding()]).unwrap_err()).to_contain(
+            "inert v3 witness descriptor")
 
     it "provides a mapped-witness ordinary-SMF activation fixture":
         step("Open the deterministic facet SMF fixture")
         var reader = SmfReaderMemory.from_data(facet_runtime_fixture_smf()).unwrap()
-        step("Resolve the fixture witness symbol")
-        val witness_symbol = facet_witness_symbol("fixture_debug")
-        val witness = reader.lookup_symbol(witness_symbol).unwrap()
-        expect(witness.name).to_equal(witness_symbol)
+        step("Resolve the fixture method without an executable factory")
+        val method_symbol = facet_witness_method_symbol(
+            "fixture_debug", "summary")
+        val method = reader.lookup_symbol(method_symbol).unwrap()
+        expect(method.name).to_equal(method_symbol)
+        expect(reader.lookup_symbol(
+            facet_witness_symbol("fixture_debug")).unwrap_err()).to_contain(
+            "not found")
         expect(reader.read_named_section(".facet_bindings").unwrap().len()).to_be_greater_than(12)
 
-    it "publishes deterministic factory and method symbol offsets":
+    it "resolves every descriptor method to one loader owner and exact ABI":
+        step("Map the ordinary-SMF fixture through the runtime loader")
+        val owner_id = "fixture:facet-descriptor:1"
+        var loader = moduleloader_with_defaults()
+        loader.provider.register_module_bytes(
+            owner_id, facet_runtime_fixture_smf()).unwrap()
+        match moduleloader_load(loader, owner_id):
+            case LoadResult.Success(_): ()
+            case LoadResult.AlreadyLoaded(_): fail("fixture unexpectedly preloaded")
+            case LoadResult.Error(message): fail(message)
+
+        step("Resolve its ordered method entry without a factory call")
+        val descriptor = facet_runtime_fixture_binding().witness_descriptor
+        val resolved = facet_resolve_witness_descriptor(
+            loader, owner_id, "fixture-facet-abi-v1", descriptor).unwrap()
+        expect(resolved.owner_id).to_equal(owner_id)
+        expect(resolved.method_entries.len()).to_equal(1)
+        expect(resolved.method_entries[0].method_name).to_equal("summary")
+        expect(resolved.method_entries[0].resolved_address).to_be_greater_than(0)
+
+        step("Reject an ABI hash or owner mismatch")
+        expect(facet_resolve_witness_descriptor(
+            loader, owner_id, "wrong-abi", descriptor).unwrap_err()).to_contain(
+            "ABI hash mismatch")
+        expect(facet_resolve_witness_descriptor(
+            loader, "another-owner", "fixture-facet-abi-v1",
+            descriptor).unwrap_err()).to_contain("owner mismatch")
+
+    it "publishes deterministic ordered method symbol offsets":
         step("Build one code section with deterministic export entries")
         var options = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
-        options.export_symbol_name = facet_witness_symbol("CacheDebug")
+        options.export_symbol_name = facet_witness_method_symbol(
+            "CacheDebug", "summary")
         options.export_symbols = [
             ElfSymEntry(
-                name: facet_witness_symbol("CacheDebug"), value: 0, size: 1,
+                name: facet_witness_method_symbol("CacheDebug", "summary"),
+                value: 0, size: 1,
                 info: 0x12, section_idx: 1),
             ElfSymEntry(
-                name: facet_witness_method_symbol("CacheDebug", "summary"),
+                name: facet_witness_method_symbol("CacheDebug", "details"),
                 value: 1, size: 2, info: 0x12, section_idx: 1),
             ElfSymEntry(
                 name: "Débogage__facet_witness__résumé", value: 3, size: 1,
@@ -196,16 +290,16 @@ describe "facet artifact emission consumption and call lowering":
 
         step("Resolve ASCII and UTF-8 names through distinct byte offsets")
         var reader = SmfReaderMemory.from_data(smf).unwrap()
-        val factory = reader.lookup_symbol(
-            facet_witness_symbol("CacheDebug")).unwrap()
-        val method = reader.lookup_symbol(
+        val summary_method = reader.lookup_symbol(
             facet_witness_method_symbol("CacheDebug", "summary")).unwrap()
-        expect(factory.offset).to_equal(0)
-        expect(factory.size).to_equal(1)
-        expect(method.offset).to_equal(1)
-        expect(method.size).to_equal(2)
-        expect(reader.read_code(factory).unwrap()).to_equal([0xc3])
-        expect(reader.read_code(method).unwrap()).to_equal([0x90, 0xc3])
+        val details_method = reader.lookup_symbol(
+            facet_witness_method_symbol("CacheDebug", "details")).unwrap()
+        expect(summary_method.offset).to_equal(0)
+        expect(summary_method.size).to_equal(1)
+        expect(details_method.offset).to_equal(1)
+        expect(details_method.size).to_equal(2)
+        expect(reader.read_code(summary_method).unwrap()).to_equal([0xc3])
+        expect(reader.read_code(details_method).unwrap()).to_equal([0x90, 0xc3])
         val unicode_method = reader.lookup_symbol(
             "Débogage__facet_witness__résumé").unwrap()
         expect(unicode_method.offset).to_equal(3)

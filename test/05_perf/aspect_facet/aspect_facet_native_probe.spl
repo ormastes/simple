@@ -11,7 +11,10 @@ use compiler.loader.loader.aspect_pack_provider.{
 }
 use compiler.loader.loader.aspect_activation.{AspectActivationRequest}
 use compiler.loader.loader.module_loader.{ModuleLoader, moduleloader_with_defaults}
-use compiler.common.structural_contracts.facet_artifact.{facet_witness_symbol}
+use compiler.loader.runtime.{native_call_function_1}
+use compiler.common.structural_contracts.facet_artifact.{
+    facet_witness_symbol, facet_witness_method_symbol
+}
 use app.startup.aspect_application_runtime.{AspectApplicationRuntime}
 use os.smf.dynsmf_session.{DynSmfPolicy, dynsmf_session_new}
 use os.smf.smf_generation.{LifecycleManager}
@@ -118,7 +121,8 @@ fn aspect_perf_catalog(pack_digest: text, module_digest: text) -> AspectCatalog:
                 advice_id: "fixture.debug.before",
                 joinpoint_slot_id: "fixture.disabled.slot", form: "before",
                 priority: 10, specificity: 1,
-                witness_symbol: facet_witness_symbol("fixture_debug"),
+                witness_symbol: facet_witness_method_symbol(
+                    "fixture_debug", "summary"),
                 capabilities: ["facet.read"])],
             capabilities: ["facet.read"])]).unwrap()
 
@@ -244,18 +248,27 @@ fn measure_first_facet_use(pack_bytes: [u8], samples: i64) -> Result<AspectPerfM
         val loader = moduleloader_with_defaults()
         val started = rt_time_now_nanos()
         val activated = aspect_perf_activate(runtime, loader, pack_bytes, "sample-{sample}")?
-        val elapsed_us = (rt_time_now_nanos() - started + 999) / 1000
         runtime = activated.0
         val advice_values = runtime.advice_dispatch_slot(
             activated.1, "fixture.disabled.slot", "before")?
         if advice_values.len() != 1 or advice_values[0] != 73:
             return Err("native advice dispatch did not return fixture value 73")
+        val acquired = runtime.acquire_published_facet_method(
+            "fixture.Cache", [], "Debuggable", "summary")?
+        if acquired == nil:
+            return Err("first facet use returned no published method")
+        val pair = acquired.unwrap()
+        val facet_value = native_call_function_1(pair.0.resolved_address, 0)
+        runtime.release_facet_generation_lease(pair.1)?
+        if facet_value != 73:
+            return Err("native facet method did not return fixture value 73")
+        val elapsed_us = (rt_time_now_nanos() - started + 999) / 1000
         timings = timings.push(elapsed_us)
         last_runtime = runtime
         sample = sample + 1
     Ok(aspect_perf_metrics(
         "first-use", timings, "us", last_runtime, 73,
-        "unsupported-no-receiver-aware-facet-api"))
+        "verified"))
 
 fn measure_repeated_facet_lookup(pack_bytes: [u8], samples: i64) -> Result<AspectPerfMetrics, text>:
     val module_bytes = facet_runtime_fixture_smf()
@@ -273,17 +286,22 @@ fn measure_repeated_facet_lookup(pack_bytes: [u8], samples: i64) -> Result<Aspec
     var sample = 0
     while sample < samples:
         val started = rt_time_now_nanos()
-        val acquired = runtime.acquire_published_facet(
-            "fixture.Cache", [], "Debuggable")?
+        val acquired = runtime.acquire_published_facet_method(
+            "fixture.Cache", [], "Debuggable", "summary")?
         if acquired == nil:
-            return Err("facet lookup returned no published witness")
+            return Err("facet lookup returned no published method")
         val pair = acquired.unwrap()
+        if pair.0.resolved_address <= 0:
+            return Err("facet lookup returned an unresolved method")
+        val facet_value = native_call_function_1(pair.0.resolved_address, 0)
         runtime.release_facet_generation_lease(pair.1)?
+        if facet_value != 73:
+            return Err("native facet method did not return fixture value 73")
         timings = timings.push(rt_time_now_nanos() - started)
         sample = sample + 1
     Ok(aspect_perf_metrics(
         "lookup", timings, "ns", runtime, 73,
-        "unsupported-no-receiver-aware-facet-api"))
+        "verified"))
 
 fn aspect_facet_perf_summary(metrics: AspectPerfMetrics) -> text:
     val percentile_fields = if metrics.unit == "us":

@@ -6,7 +6,12 @@ use compiler.loader.loader.aspect_catalog.{AspectBindingSummary}
 use compiler.loader.loader.facet_binding_registry.{
     FacetBindingAdmission, FacetBindingCandidate, FacetBindingRegistry,
     facet_binding_stage_validated, facet_lookup, facet_unbind_generation,
+    facet_witness_method_entry, facet_witness_method_entry_at,
     aspect_publish_generation
+}
+use compiler.common.structural_contracts.facet_artifact.{
+    FACET_WITNESS_DESCRIPTOR_VERSION,
+    FacetWitnessMethodEntry, FacetWitnessDescriptorV1
 }
 
 fn registry_summary(
@@ -32,11 +37,20 @@ fn registry_candidate(
     summary: AspectBindingSummary,
     owner: text
 ) -> FacetBindingCandidate:
+    val descriptor_symbol = summary.witness_symbol
     facet_binding_stage_validated(
         key, generation, aspect_id,
         [FacetBindingAdmission(
             summary: summary, witness_owner_id: owner,
-            resolved_witness_address: 4096)]
+            witness_descriptor: FacetWitnessDescriptorV1(
+                descriptor_version: FACET_WITNESS_DESCRIPTOR_VERSION,
+                facet_contract_abi_hash: summary.facet_contract_abi_hash,
+                descriptor_symbol: descriptor_symbol,
+                owner_id: owner,
+                method_entries: [FacetWitnessMethodEntry(
+                    method_name: "summary",
+                    method_symbol: descriptor_symbol + "__summary",
+                    resolved_address: 4096)]))]
     ).unwrap()
 
 describe "loader facet binding registry":
@@ -56,12 +70,22 @@ describe "loader facet binding registry":
             registry, open_world, "pack:open:debug:1", 1).unwrap()
 
         val exact = facet_lookup(registry, "storage.Cache", [], "Debuggable").unwrap()
-        expect(exact != nil).to_equal(true)
-        expect(exact.unwrap().witness_symbol).to_equal("cache_debug")
+        val exact_record = exact.unwrap()
+        expect(exact_record.witness_symbol).to_equal("cache_debug")
+        val named_method = facet_witness_method_entry(
+            exact_record, "summary").unwrap()
+        expect(named_method.resolved_address).to_equal(4096)
+        val ordered_method = facet_witness_method_entry_at(
+            exact_record, 0).unwrap()
+        expect(ordered_method.method_symbol).to_equal("cache_debug__summary")
+        expect(facet_witness_method_entry(
+            exact_record, "missing").unwrap_err()).to_contain(
+            "not in the contract")
+        expect(facet_witness_method_entry_at(
+            exact_record, 1).unwrap_err()).to_contain("outside the contract")
         val rule = facet_lookup(
             registry, "storage.RemoteCache", ["storage.CacheApi"],
             "Debuggable").unwrap()
-        expect(rule != nil).to_equal(true)
         expect(rule.unwrap().witness_symbol).to_equal("api_debug")
 
     it "rejects identity mismatch without publishing staged records":
@@ -72,7 +96,6 @@ describe "loader facet binding registry":
         val before = FacetBindingRegistry.create()
         val result = aspect_publish_generation(
             before, candidate, "pack:module:debug:8", 8)
-        expect(result.is_err()).to_equal(true)
         expect(result.unwrap_err()).to_contain("does not match")
         expect(before.active_count()).to_equal(0)
         expect(before.records.len()).to_equal(0)
@@ -90,7 +113,8 @@ describe "loader facet binding registry":
             registry_summary("duplicate", "storage.Cache", "", "duplicate_debug"),
             "pack:duplicate:1")
         expect(aspect_publish_generation(
-            registry, duplicate, "pack:duplicate:debug:1", 1).is_err()).to_equal(true)
+            registry, duplicate, "pack:duplicate:debug:1", 1
+        ).unwrap_err()).to_contain("ambiguous published facet binding")
 
         val rule = registry_candidate(
             "pack:rule:debug:1", 1, "debug.rule",
@@ -100,7 +124,6 @@ describe "loader facet binding registry":
             registry, rule, "pack:rule:debug:1", 1).unwrap()
         val ambiguous = facet_lookup(
             registry, "storage.Cache", ["storage.CacheApi"], "Debuggable")
-        expect(ambiguous.is_err()).to_equal(true)
         expect(ambiguous.unwrap_err()).to_contain("ambiguous")
 
     it "replaces one aspect generation and unbinds exact generations in isolation":
@@ -136,5 +159,4 @@ describe "loader facet binding registry":
         expect(registry.records.len()).to_equal(0)
         expect(registry.active_count()).to_equal(0)
         expect(facet_lookup(
-            registry, "storage.Cache", [], "Debuggable").unwrap() == nil
-        ).to_equal(true)
+            registry, "storage.Cache", [], "Debuggable").unwrap()).to_be_nil()

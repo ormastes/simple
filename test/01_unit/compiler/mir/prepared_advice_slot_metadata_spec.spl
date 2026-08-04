@@ -8,6 +8,12 @@ use compiler.common.structural_contracts.aop.{
     PreparedAdviceSlotPlan, prepared_advice_slot_plan_create
 }
 use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_instructions.{
+    MirBlock, MirFunction, MirInst, MirInstKind, MirSignature, MirTerminator,
+    BlockId
+}
+use compiler.mir.mir_types.{MirType}
+use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_serialization.{
     serialize_mir_module, serialize_mir_prepared_advice_slots
 }
@@ -32,6 +38,25 @@ fn prepared_slot_module(name: text, plans: [PreparedAdviceSlotPlan]) -> MirModul
     MirModule(
         name: name, functions: {}, statics: {}, constants: {}, types: {},
         prepared_advice_slots: plans)
+
+fn prepared_intrinsic_only_module() -> MirModule:
+    val entry = MirBlock(
+        id: BlockId.entry(), label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Intrinsic(
+            nil, "simple.prepared_advice_dispatch.v1", []), span: nil)],
+        terminator: MirTerminator.Ret(nil))
+    val function = MirFunction(
+        symbol: SymbolId.new(0), name: "submit",
+        signature: MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [], blocks: [entry], entry_block: BlockId.entry(), span: nil,
+        generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    MirModule(
+        name: "direct", functions: functions, statics: {},
+        constants: {}, types: {}, prepared_advice_slots: [])
 
 describe "Prepared dynamic advice-slot MIR metadata":
     it "admits only versioned before and after phase plans":
@@ -108,6 +133,18 @@ describe "Prepared dynamic advice-slot MIR metadata":
         expect(prepared_advice_execution_admission(
             options, {"orders": module}, "aot:llvm").unwrap_err()).to_contain(
                 "projection/trampoline is not lifecycle-safe")
+        for backend in [
+            "auto", "llvm", "llvm-lib", "cranelift", "native", "c",
+            "interpreter", "wasm", "lean", "byl", "lua", "vhdl", "irtc",
+            "mllvm-qemu",
+            "cuda", "hip", "opencl", "vulkan"
+        ]:
+            expect(backend_prepared_advice_rejection(
+                module, backend).unwrap()).to_contain(
+                    "cannot execute prepared dynamic advice")
+
+        # A direct backend caller cannot evade the backstop by stripping the
+        # slot table while retaining the side-effecting MIR operation.
         expect(backend_prepared_advice_rejection(
-            module, "llvm").unwrap()).to_contain(
+            prepared_intrinsic_only_module(), "native").unwrap()).to_contain(
                 "cannot execute prepared dynamic advice")

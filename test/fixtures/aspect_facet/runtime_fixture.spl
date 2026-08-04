@@ -1,12 +1,15 @@
 """Deterministic ordinary-SMF fixture for facet activation and perf probes."""
 
 use compiler.common.structural_contracts.facet_artifact.{
-    FACET_ARTIFACT_VERSION, FacetBindingArtifactSummary,
-    encode_facet_binding_summaries, facet_witness_symbol
+    FACET_ARTIFACT_VERSION, FACET_WITNESS_DESCRIPTOR_VERSION,
+    FacetWitnessMethodEntry, FacetWitnessDescriptorV1,
+    FacetBindingArtifactSummary, encode_facet_binding_summaries,
+    facet_witness_symbol, facet_witness_method_symbol
 }
 use compiler.driver.smf_writer.{
     SmfBuildOptions, Target, generate_smf_with_raw_code_options
 }
+use compiler.driver.smf_elf_parser.{ElfSymEntry}
 
 fn facet_runtime_fixture_binding() -> FacetBindingArtifactSummary:
     FacetBindingArtifactSummary(
@@ -16,16 +19,29 @@ fn facet_runtime_fixture_binding() -> FacetBindingArtifactSummary:
         facet_interface_id: "Debuggable",
         facet_contract_abi_hash: "fixture-facet-abi-v1",
         witness_symbol: facet_witness_symbol("fixture_debug"),
+        witness_descriptor: FacetWitnessDescriptorV1(
+            descriptor_version: FACET_WITNESS_DESCRIPTOR_VERSION,
+            facet_contract_abi_hash: "fixture-facet-abi-v1",
+            descriptor_symbol: facet_witness_symbol("fixture_debug"),
+            owner_id: "",
+            method_entries: [FacetWitnessMethodEntry(
+                method_name: "summary",
+                method_symbol: facet_witness_method_symbol(
+                    "fixture_debug", "summary"),
+                resolved_address: 0)]),
         capabilities: ["facet.read"])
 
 fn facet_runtime_fixture_smf() -> [u8]:
     var options = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
-    options.export_symbol_name = facet_witness_symbol("fixture_debug")
+    options.export_symbol_name = facet_witness_method_symbol(
+        "fixture_debug", "summary")
+    options.export_symbols = [ElfSymEntry(
+        name: facet_witness_method_symbol("fixture_debug", "summary"),
+        value: 0, size: 6, info: 0x12, section_idx: 1)]
     options.facet_binding_bytes = encode_facet_binding_summaries(
-        [facet_runtime_fixture_binding()])
-    # x86_64: mov eax, 73; ret. The same loader-owned witness is used by the
-    # native advice probe, which must observe this exact result. It is not a
-    # receiver-aware facet ABI and must never be reported as facet-call proof.
+        [facet_runtime_fixture_binding()]).unwrap()
+    # x86_64: mov eax, 73; ret. This is the descriptor's ordinary method
+    # export; the inert descriptor identity is deliberately not executable.
     generate_smf_with_raw_code_options(
         [0xB8, 0x49, 0x00, 0x00, 0x00, 0xC3], options).unwrap()
 

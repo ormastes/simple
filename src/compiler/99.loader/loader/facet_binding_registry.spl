@@ -5,11 +5,14 @@
 # existing LifecycleManager.
 
 use compiler.loader.loader.aspect_catalog.{AspectBindingSummary}
+use compiler.common.structural_contracts.facet_artifact.{
+    FacetWitnessMethodEntry, FacetWitnessDescriptorV1
+}
 
 struct FacetBindingAdmission:
     summary: AspectBindingSummary
     witness_owner_id: text
-    resolved_witness_address: i64
+    witness_descriptor: FacetWitnessDescriptorV1
 
 struct FacetBindingRecord:
     publication_id: text
@@ -23,7 +26,7 @@ struct FacetBindingRecord:
     facet_contract_abi_hash: text
     witness_symbol: text
     witness_owner_id: text
-    resolved_witness_address: i64
+    witness_descriptor: FacetWitnessDescriptorV1
     capabilities: [text]
 
 struct FacetBindingCandidate:
@@ -55,11 +58,21 @@ fn facet_binding_record_from(
     val summary = admission.summary
     if activation_key == "" or generation <= 0 or aspect_id == "":
         return Err("E-AF002 facet binding publication identity is incomplete")
-    if admission.witness_owner_id == "" or admission.resolved_witness_address <= 0:
+    if (admission.witness_owner_id == "" or
+        admission.witness_descriptor.owner_id != admission.witness_owner_id):
         return Err("E-AF002 facet witness ownership was not validated")
     if (summary.binding_id == "" or summary.facet_interface_id == "" or
         summary.facet_contract_abi_hash == "" or summary.witness_symbol == ""):
         return Err("E-AF002 facet binding summary is incomplete")
+    if (admission.witness_descriptor.facet_contract_abi_hash !=
+        summary.facet_contract_abi_hash or
+        admission.witness_descriptor.descriptor_symbol != summary.witness_symbol):
+        return Err("E-AF002 facet witness descriptor does not match binding summary")
+    if admission.witness_descriptor.method_entries.len() == 0:
+        return Err("E-AF002 facet witness descriptor has no resolved methods")
+    for method in admission.witness_descriptor.method_entries:
+        if method.resolved_address <= 0:
+            return Err("E-AF002 facet witness descriptor contains an unresolved method")
     if not facet_summary_target_valid(summary):
         return Err("E-AF002 facet binding requires exactly one concrete or business-interface target")
     Ok(FacetBindingRecord(
@@ -74,9 +87,31 @@ fn facet_binding_record_from(
         facet_contract_abi_hash: summary.facet_contract_abi_hash,
         witness_symbol: summary.witness_symbol,
         witness_owner_id: admission.witness_owner_id,
-        resolved_witness_address: admission.resolved_witness_address,
+        witness_descriptor: admission.witness_descriptor,
         capabilities: summary.capabilities
     ))
+
+fn facet_witness_method_entry(
+    record: FacetBindingRecord, method_name: text
+) -> Result<FacetWitnessMethodEntry, text>:
+    if method_name == "":
+        return Err("E-AF002 facet witness method lookup name is empty")
+    for method in record.witness_descriptor.method_entries:
+        if method.method_name == method_name:
+            if method.resolved_address <= 0:
+                return Err("E-AF002 facet witness method is not resolved: {method_name}")
+            return Ok(method)
+    Err("E-AF002 facet witness method is not in the contract: {method_name}")
+
+fn facet_witness_method_entry_at(
+    record: FacetBindingRecord, method_index: i64
+) -> Result<FacetWitnessMethodEntry, text>:
+    if method_index < 0 or method_index >= record.witness_descriptor.method_entries.len():
+        return Err("E-AF002 facet witness method index is outside the contract")
+    val method = record.witness_descriptor.method_entries[method_index]
+    if method.resolved_address <= 0:
+        return Err("E-AF002 facet witness method is not resolved: {method.method_name}")
+    Ok(method)
 
 fn facet_binding_same_static_key(a: FacetBindingRecord, b: FacetBindingRecord) -> bool:
     if a.facet_interface_id != b.facet_interface_id:
@@ -235,4 +270,5 @@ export FacetBindingAdmission, FacetBindingRecord, FacetBindingCandidate
 export FacetBindingRegistry
 export facet_binding_candidate, facet_binding_stage_validated
 export facet_lookup, facet_bind_type, facet_unbind_generation
+export facet_witness_method_entry, facet_witness_method_entry_at
 export aspect_publish_generation

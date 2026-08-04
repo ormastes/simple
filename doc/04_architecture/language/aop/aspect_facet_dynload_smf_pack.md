@@ -104,10 +104,10 @@ lowering, AOP/debug reconstruction, MIR optimizers, and VHDL aggregation;
 The driver collects a deterministic schema-v1 table. The loader derives an
 immutable schema-v1 dispatch projection containing exact publication,
 generation, witness-owner, and address identity from its canonical registry.
-All execution/output surfaces fail closed until projection install is atomic
-with publication, invalidation precedes drain, and dispatch pins the exact
-generation. Check/interpreter reject the option directly; JIT and every AOT
-backend reject produced slots before code generation.
+Projection install is atomic with publication, invalidation precedes drain,
+and application-runtime dispatch pins the exact generation. Check/interpreter
+reject the option directly; JIT and every AOT backend reject produced slots
+before code generation until they can reach that canonical dispatch owner.
 
 ## Ownership boundaries
 
@@ -129,10 +129,34 @@ config producer inserts phase-specific prepared-dispatch intrinsics. Catalog
 slot strings and the loader projection consume the same finite slot identity;
 no runtime pointcut evaluator is introduced.
 
-The remaining implementation owner is the loader/backend bridge: atomically
-install the derived projection with canonical publication, invalidate it before
-unload drain, and pin/validate its exact generation while a backend trampoline
-dispatches. The projection is never an independently mutable registry.
+The remaining implementation owner is the loader/backend bridge that gives a
+generated trampoline access to the canonical application-runtime dispatch
+handle. Projection publication, invalidation, and exact-generation pinning are
+already loader/application-runtime responsibilities. The projection is never
+an independently mutable registry.
+
+### Facet witness descriptors
+
+Facet binding artifact v3 carries `FacetWitnessDescriptorV1` as inert wire
+metadata: exact contract ABI hash, inert descriptor identity/method prefix, and
+contract-ordered method names/symbols. The wire encoder rejects any populated
+runtime owner or resolved address, so authority cannot be silently erased by
+serialization. After ordinary-SMF mapping, the existing `ModuleLoader` resolves
+every entry to one exact owner and positive address; the loader registry stores
+that resolved state and the application runtime returns a selected method entry
+only together with its exact generation lease. The descriptor identity is
+never called or required as an exported factory. Inherited table flattening and
+generic descriptor shapes remain fail-closed.
+
+The current intrinsic ABI is intentionally insufficient for that bridge: it
+carries only the stable slot and phase, not a canonical lifecycle handle or
+generation token. A process-global native projection with its own reference
+count would therefore introduce a second lease authority rather than pinning
+the loader's `LifecycleManager` generation. Until lowering can acquire the
+canonical token (or an equivalent loader-owned opaque dispatch handle), no
+backend-visible table/trampoline is installed and the common backend/driver
+E-AF010 rejection is the required behavior. Raw callback-address invocation
+alone does not close the unload race.
 
 ## Cache and invalidation
 
@@ -141,3 +165,24 @@ Validated index keys include catalog generation, pack digest, target, variant fi
 ## Compatibility
 
 Existing `on pc{...} use ...`, ordinary SMF v0.1, current dynSMF controls/evidence, and current variant precedence remain compatible. New syntax and dynamic patching are feature-gated. `AspectPackProvider` is introduced only after the byte-backed loader seam is proven.
+## 2026-08-04 exact-generation prepared-advice dispatch addendum
+
+`AdviceDispatchProjection` remains the immutable loader-derived dispatch
+interface; it is not a second publication or lifecycle registry. Loader-backed
+activation derives the complete projection from the newly computed canonical
+`AdviceBindingRegistry` before `AspectActivationCoordinator` atomically exposes
+the registry, projection, and promoted `LifecycleManager` generation.
+
+Each phase dispatch acquires one opaque `GenerationToken` for every projected
+entry's exact `(activation_key, generation)`, validates that the entry still
+matches both the canonical publication and the `ModuleLoader` owner/address,
+invokes the already ordered phase chain, and releases those exact tokens in
+reverse order on success and every validation/acquisition/callback failure.
+Unload removes facet visibility, advice visibility, and the exact projection
+rows before quiescing and testing drain. No process-global dispatch table,
+runtime pointcut scan, raw runtime boundary, or backend-specific lifecycle path
+is introduced.
+
+The former registry-plus-loader executor is not part of the public surface:
+native execution is reachable only through the projection-plus-lifecycle seam.
+Canonical registry lookup remains separately available for inspection.

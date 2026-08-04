@@ -14,6 +14,9 @@ use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.common.structural_contracts.facet_artifact.{
     FacetBindingArtifactSummary, decode_facet_binding_summaries
 }
+use compiler.loader.loader.facet_witness_descriptor.{
+    facet_resolve_witness_descriptor
+}
 use compiler.loader.loader.smf_cache_manager.{SmfCacheManager}
 use compiler.loader.loader.facet_binding_registry.{
     FacetBindingAdmission, FacetBindingCandidate, FacetBindingRegistry,
@@ -21,7 +24,9 @@ use compiler.loader.loader.facet_binding_registry.{
 }
 use compiler.loader.loader.advice_binding_registry.{
     AdviceBindingAdmission, AdviceBindingCandidate, AdviceBindingRegistry,
-    advice_binding_stage_validated, advice_publish_generation
+    AdviceDispatchProjection, advice_binding_stage_validated,
+    advice_publish_generation, advice_dispatch_projection_create,
+    advice_dispatch_projection_empty
 }
 
 struct AspectActivationRequest:
@@ -67,6 +72,7 @@ struct AspectActivationCoordinator:
     lifecycle: LifecycleManager
     facet_bindings: FacetBindingRegistry
     advice_bindings: AdviceBindingRegistry
+    advice_projection: AdviceDispatchProjection
     # Facet-binding publication table.  Generation/resource ownership remains
     # in DynSmfSession and LifecycleManager; this is not a lifecycle registry.
     published: Dict<text, AspectPublishedActivation>
@@ -129,6 +135,7 @@ fn aspect_activation_without_reservation(coordinator: AspectActivationCoordinato
         lifecycle: coordinator.lifecycle,
         facet_bindings: coordinator.facet_bindings,
         advice_bindings: coordinator.advice_bindings,
+        advice_projection: coordinator.advice_projection,
         published: coordinator.published,
         in_flight: in_flight,
         counters: coordinator.counters
@@ -296,12 +303,16 @@ fn aspect_activation_map_staged(loader: ModuleLoader, staged: [AspectStagedModul
                 return Err("E-AF002 module mapping failed for {module.owner_id}: {message}")
     Ok(executable_mapping_count)
 
-fn aspect_activation_validate_loaded_bindings(loader: ModuleLoader, staged: [AspectStagedModule]) -> Result<(), text>:
+fn aspect_activation_validate_loaded_bindings(
+    loader: ModuleLoader, staged: [AspectStagedModule]
+) -> Result<[FacetBindingAdmission], text>:
+    var admissions: [FacetBindingAdmission] = []
     for module in staged:
         val artifact_reader = SmfReaderMemory.from_data(module.smf_bytes)?
         val artifact_section = artifact_reader.read_named_section(".facet_bindings")
+        var artifact_bindings: [FacetBindingArtifactSummary] = []
         if artifact_section.is_ok():
-            val artifact_bindings = decode_facet_binding_summaries(
+            artifact_bindings = decode_facet_binding_summaries(
                 artifact_section.unwrap())?
             aspect_activation_validate_artifact_bindings(
                 module.bindings, artifact_bindings, module.owner_id)?
@@ -319,11 +330,20 @@ fn aspect_activation_validate_loaded_bindings(loader: ModuleLoader, staged: [Asp
             for capability in binding.capabilities:
                 if capability == "":
                     return Err("E-AF006 loaded facet binding has an empty capability: {binding.binding_id}")
-            if not loader.global_symbols.has(binding.witness_symbol):
-                return Err("E-AF002 loaded witness symbol is missing: {binding.witness_symbol}")
-            val symbol_owner = loader.global_symbols[binding.witness_symbol][0]
-            if symbol_owner != module.owner_id:
-                return Err("E-AF002 loaded witness symbol owner mismatch: {binding.witness_symbol}")
+            var descriptor_found = false
+            for artifact_binding in artifact_bindings:
+                if artifact_binding.binding_id == binding.binding_id:
+                    val resolved = facet_resolve_witness_descriptor(
+                        loader, module.owner_id,
+                        binding.facet_contract_abi_hash,
+                        artifact_binding.witness_descriptor)?
+                    admissions = admissions.push(FacetBindingAdmission(
+                        summary: binding,
+                        witness_owner_id: module.owner_id,
+                        witness_descriptor: resolved))
+                    descriptor_found = true
+            if not descriptor_found:
+                return Err("E-AF002 loaded facet binding has no witness descriptor: {binding.binding_id}")
         for advice in module.advices:
             if advice.advice_id == "" or advice.joinpoint_slot_id == "" or advice.witness_symbol == "":
                 return Err("E-AF010 incomplete loaded dynamic advice for {module.owner_id}")
@@ -332,7 +352,7 @@ fn aspect_activation_validate_loaded_bindings(loader: ModuleLoader, staged: [Asp
             val advice_owner = loader.global_symbols[advice.witness_symbol][0]
             if advice_owner != module.owner_id:
                 return Err("E-AF010 loaded advice witness symbol owner mismatch: {advice.witness_symbol}")
-    Ok(())
+    Ok(admissions)
 
 fn aspect_activation_binding_matches_artifact(
     catalog: AspectBindingSummary,
@@ -344,6 +364,7 @@ fn aspect_activation_binding_matches_artifact(
      catalog.facet_interface_id == artifact.facet_interface_id and
      catalog.facet_contract_abi_hash == artifact.facet_contract_abi_hash and
      catalog.witness_symbol == artifact.witness_symbol and
+     artifact.witness_symbol == artifact.witness_descriptor.descriptor_symbol and
      catalog.capabilities == artifact.capabilities)
 
 fn aspect_activation_validate_artifact_bindings(
@@ -363,25 +384,17 @@ fn aspect_activation_validate_artifact_bindings(
     Ok(())
 
 fn aspect_activation_stage_binding_candidate(
-    loader: ModuleLoader,
-    staged: [AspectStagedModule],
+    admissions: [FacetBindingAdmission],
     activation_key: text,
     generation: i64,
     aspect_id: text
 ) -> Result<FacetBindingCandidate, text>:
-    var admissions: [FacetBindingAdmission] = []
-    for module in staged:
-        for binding in module.bindings:
-            admissions.push(FacetBindingAdmission(
-                summary: binding,
-                witness_owner_id: module.owner_id,
-                resolved_witness_address: loader.global_symbols[binding.witness_symbol][1].address
-            ))
     facet_binding_stage_validated(
         activation_key, generation, aspect_id, admissions)
 
 fn aspect_activation_stage_advice_candidate(
     registry: AdviceBindingRegistry,
+    loader: ModuleLoader,
     staged: [AspectStagedModule],
     activation_key: text,
     generation: i64,
@@ -431,7 +444,8 @@ fn aspect_activation_publish_staged(
     bindings_valid: bool,
     executable_mapping_count: i64,
     binding_candidate: FacetBindingCandidate?,
-    advice_candidate: AdviceBindingCandidate?
+    advice_candidate: AdviceBindingCandidate?,
+    loader: ModuleLoader?
 ) -> AspectActivationResult:
     var candidate = CandidateMapping.create(key)
     if relocation_done:
@@ -467,6 +481,16 @@ fn aspect_activation_publish_staged(
                 advice_publication.unwrap_err())
         advice_bindings = advice_publication.unwrap()
         published_advices = entry.advice_summaries
+
+    var advice_projection = coordinator.advice_projection
+    if val projection_loader = loader:
+        val projection = advice_dispatch_projection_create(
+            advice_bindings, projection_loader)
+        if projection.is_err():
+            return aspect_activation_failure(
+                coordinator, key, request.request_id,
+                projection.unwrap_err())
+        advice_projection = projection.unwrap()
 
     val generation_candidate = GenerationState.candidate(key, coordinator.catalog.generation)
     val generation_state = generation_candidate.promote()
@@ -534,6 +558,7 @@ fn aspect_activation_publish_staged(
         lifecycle: lifecycle,
         facet_bindings: facet_bindings,
         advice_bindings: advice_bindings,
+        advice_projection: advice_projection,
         published: published,
         in_flight: in_flight,
         counters: counters
@@ -563,6 +588,7 @@ impl AspectActivationCoordinator:
             lifecycle: lifecycle,
             facet_bindings: FacetBindingRegistry.create(),
             advice_bindings: advice_bindings,
+            advice_projection: advice_dispatch_projection_empty(),
             published: {},
             in_flight: {},
             counters: aspect_activation_zero_counters()
@@ -585,6 +611,7 @@ impl AspectActivationCoordinator:
             lifecycle: self.lifecycle,
             facet_bindings: self.facet_bindings,
             advice_bindings: self.advice_bindings,
+            advice_projection: self.advice_projection,
             published: self.published,
             in_flight: in_flight,
             counters: self.counters
@@ -627,7 +654,7 @@ impl AspectActivationCoordinator:
 
         aspect_activation_publish_staged(
             reserved, entry, key, request, staged,
-            relocation_done, bindings_valid, 0, nil, nil)
+            relocation_done, bindings_valid, 0, nil, nil, nil)
 
     # Runtime activation path.  Pack selection and validation happen before
     # any executable mapping; ModuleLoader remains the sole mapping,
@@ -677,7 +704,8 @@ impl AspectActivationCoordinator:
             return aspect_activation_failure(reserved, key, request.request_id, binding_result.unwrap_err())
 
         val binding_candidate = aspect_activation_stage_binding_candidate(
-            loader, staged, key, self.catalog.generation, entry.aspect_id)
+            binding_result.unwrap(), key, self.catalog.generation,
+            entry.aspect_id)
         if binding_candidate.is_err():
             var invalid_candidate_owners: [text] = []
             for module in staged:
@@ -689,7 +717,7 @@ impl AspectActivationCoordinator:
                 binding_candidate.unwrap_err())
 
         val advice_candidate = aspect_activation_stage_advice_candidate(
-            reserved.advice_bindings, staged, key,
+            reserved.advice_bindings, loader, staged, key,
             self.catalog.generation, entry.aspect_id)
         if advice_candidate.is_err():
             var invalid_advice_owners: [text] = []
@@ -713,7 +741,7 @@ impl AspectActivationCoordinator:
         val result = aspect_activation_publish_staged(
             reserved, entry, key, request, staged, true, true,
             mapping_result.unwrap(), Some(binding_candidate.unwrap()),
-            Some(advice_candidate.unwrap()))
+            Some(advice_candidate.unwrap()), Some(loader))
         if result.status != "published":
             var cache_keys: [AspectPackModuleKey] = []
             var owners: [text] = []

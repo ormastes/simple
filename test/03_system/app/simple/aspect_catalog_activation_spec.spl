@@ -29,8 +29,25 @@ use compiler.loader.loader.facet_binding_registry.{
     facet_binding_stage_validated, facet_lookup, facet_unbind_generation,
     aspect_publish_generation
 }
+use compiler.common.structural_contracts.facet_artifact.{
+    FACET_WITNESS_DESCRIPTOR_VERSION,
+    FacetWitnessMethodEntry, FacetWitnessDescriptorV1
+}
 use os.smf.dynsmf_session.{DynSmfPolicy, dynsmf_session_new}
 use os.smf.smf_generation.{LifecycleManager}
+
+fn catalog_resolved_facet_descriptor(
+    summary: AspectBindingSummary, owner_id: text
+) -> FacetWitnessDescriptorV1:
+    FacetWitnessDescriptorV1(
+        descriptor_version: FACET_WITNESS_DESCRIPTOR_VERSION,
+        facet_contract_abi_hash: summary.facet_contract_abi_hash,
+        descriptor_symbol: summary.witness_symbol,
+        owner_id: owner_id,
+        method_entries: [FacetWitnessMethodEntry(
+            method_name: "summary",
+            method_symbol: summary.witness_symbol + "__summary",
+            resolved_address: 4096)])
 
 # @inline
 fn catalog_minimal_smf() -> [u8]:
@@ -153,7 +170,8 @@ describe "application Aspect Catalog and atomic activation":
             "debug.aspect", [FacetBindingAdmission(
                 summary: summary,
                 witness_owner_id: "diagnostics-pack:debug.cache:7",
-                resolved_witness_address: 4096)]
+                witness_descriptor: catalog_resolved_facet_descriptor(
+                    summary, "diagnostics-pack:debug.cache:7"))]
         ).unwrap()
         var registry = aspect_publish_generation(
             FacetBindingRegistry.create(), candidate,
@@ -163,7 +181,6 @@ describe "application Aspect Catalog and atomic activation":
         val binding = facet_lookup(
             registry, "storage.RemoteCache", ["storage.CacheApi"],
             "Debuggable").unwrap()
-        expect(binding != nil).to_equal(true)
         expect(binding.unwrap().witness_symbol).to_equal("debug.open_witness")
 
         step("Remove binding visibility before lifecycle drain and unload")
@@ -172,7 +189,7 @@ describe "application Aspect Catalog and atomic activation":
         expect(registry.active_count()).to_equal(0)
         expect(facet_lookup(
             registry, "storage.RemoteCache", ["storage.CacheApi"],
-            "Debuggable").unwrap() == nil).to_equal(true)
+            "Debuggable").unwrap()).to_be_nil()
 
     it "keeps manual and lazy facets cold after catalog inspection":
         step("Inspect the application Aspect Catalog")

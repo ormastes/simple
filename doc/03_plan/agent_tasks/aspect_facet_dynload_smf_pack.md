@@ -36,6 +36,22 @@
 | B2 advice dispatch | Exact-generation owner/address validation and zero-argument before/after dispatch; dynamic `around` denied | Prepared MIR slot producer and automatic business-path caller |
 | B3 architecture | Verified resolver and prepared-slot owner boundaries without unsafe partial extraction | `85.mdsoc` resolver injection and `50.mir` → optimizer → backend → driver slot pipeline |
 
+## Production bridge continuation lanes (2026-08-04)
+
+| Lane | Owned scope | Frozen handoff |
+|---|---|---|
+| D1 facet descriptor | Common descriptor, ordered method entries, ordinary-SMF artifact, loader resolution | `FacetWitnessDescriptorV1`, `FacetWitnessMethodEntry`, `facet_witness_descriptor_from_contract`, `facet_resolve_witness_descriptor` |
+| D2 advice lifecycle | Canonical-registry projection publication, exact `GenerationToken` pin/release, invalidate-before-drain | Existing `AdviceDispatchProjection`; no second registry or raw runtime shortcut |
+| D3 backend trampoline | Backend intrinsic lowering and process-visible immutable projection bridge, only if end-to-end executable | `simple.prepared_advice_dispatch.v1`; unsupported targets remain E-AF010 |
+
+These lanes retain the five system-manual phrases already frozen in the system
+test plan. Focused setup/checker helpers are
+`build_facet_witness_descriptor_fixture`,
+`verify_exact_generation_advice_dispatch`, and
+`verify_prepared_advice_backend_bridge`. Any temporary helper fails with
+`assert(false)` or `fail(...)`; no placeholder factory or silent intrinsic
+lowering is admissible.
+
 The merge owner remains root Codex. C1/C2/C3 run in parallel; C4 integrates
 their public handoffs. Root performs the final normal/highest-capability review
 and the one admissible focused verification sweep.

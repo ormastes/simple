@@ -20,13 +20,15 @@ use compiler.loader.loader.aspect_activation.{
 }
 use compiler.loader.loader.module_loader.{ModuleLoader, moduleloader_unload}
 use compiler.loader.loader.facet_binding_registry.{
-    FacetBindingRecord, facet_lookup, facet_unbind_generation
+    FacetBindingRecord, facet_lookup, facet_unbind_generation,
+    facet_witness_method_entry
 }
+use compiler.common.structural_contracts.facet_artifact.{FacetWitnessMethodEntry}
 use compiler.loader.loader.advice_binding_registry.{
     AdviceBindingRecord, AdviceBindingCounters, AdviceDisabledPathFootprint,
     advice_lookup_slot, advice_unbind_generation,
-    advice_disabled_path_footprint,
-    advice_dispatch_slot as loader_advice_dispatch_slot
+    advice_disabled_path_footprint, advice_dispatch_projection_invalidate,
+    advice_dispatch_projection as loader_advice_dispatch_projection
 }
 use os.smf.dynsmf_session.{DynSmfSession}
 use os.smf.smf_generation.{GenerationToken, LifecycleManager}
@@ -286,17 +288,21 @@ impl AspectApplicationRuntime:
     fn advice_disabled_footprint() -> AdviceDisabledPathFootprint:
         advice_disabled_path_footprint()
 
-    # Synchronous prepared-slot execution boundary. Mutable application-runtime
-    # ownership prevents unload from interleaving between the active-generation
-    # filter and the loader-owned zero-argument witness calls.
+    # Synchronous prepared-slot execution boundary. The loader-owned projection
+    # pins every exact generation until its phase callback completes, so unload
+    # may remove visibility but cannot reclaim an in-flight witness.
     me fn advice_dispatch_slot(
         loader: ModuleLoader,
         slot_id: text,
         form: text
     ) -> Result<[i64], text>:
-        val outcome = loader_advice_dispatch_slot(
-            self.coordinator.advice_bindings, loader, slot_id, form)
+        val outcome = loader_advice_dispatch_projection(
+            self.coordinator.advice_projection,
+            self.coordinator.advice_bindings,
+            self.coordinator.lifecycle,
+            loader, slot_id, form)
         self.coordinator.advice_bindings = outcome.registry
+        self.coordinator.lifecycle = outcome.lifecycle
         if outcome.status != "dispatched":
             return Err(outcome.reason)
         Ok(outcome.return_values)
@@ -316,6 +322,26 @@ impl AspectApplicationRuntime:
         val record = binding.unwrap()
         val lease = self.acquire_facet_generation_lease(record.aspect_id)?
         Ok(Some((record, lease)))
+
+    # Acquires the generation lease and the exact resolved ordinary-SMF method
+    # entry as one operation suitable for MIR CallIndirect lowering.
+    me fn acquire_published_facet_method(
+        concrete_type_id: text,
+        implemented_business_interfaces: [text],
+        facet_interface_id: text,
+        method_name: text
+    ) -> Result<(FacetWitnessMethodEntry, FacetGenerationLease)?, text>:
+        val acquired = self.acquire_published_facet(
+            concrete_type_id, implemented_business_interfaces,
+            facet_interface_id)?
+        if acquired == nil:
+            return Ok(nil)
+        val pair = acquired.unwrap()
+        val method = facet_witness_method_entry(pair.0, method_name)
+        if method.is_err():
+            self.release_facet_generation_lease(pair.1)?
+            return Err(method.unwrap_err())
+        Ok(Some((method.unwrap(), pair.1)))
 
     # Ownership-neutral std.aop lease adapter. The lease carries no app/os
     # object; this boundary reconstructs the canonical lifecycle token.
@@ -349,20 +375,31 @@ impl AspectApplicationRuntime:
             return Err("E-AF004 aspect has no published generation: {aspect_id}")
         var activation = self.coordinator.published[aspect_id]
         val generation = activation.generation
-        val quiesced = self.coordinator.lifecycle.quiesce_generation_for(
-            activation.activation_key, generation)?
-        self.coordinator.lifecycle = quiesced
-        self.coordinator.facet_bindings = facet_unbind_generation(
+        # Compute the complete retirement transition before mutating the
+        # runtime. A quiesce error therefore preserves the active publication;
+        # successful installation removes visibility together with closing
+        # acquisition, before the first drain check.
+        val facet_bindings = facet_unbind_generation(
             self.coordinator.facet_bindings,
             activation.activation_key,
             generation)
-        self.coordinator.advice_bindings = advice_unbind_generation(
+        val advice_bindings = advice_unbind_generation(
             self.coordinator.advice_bindings,
             activation.activation_key,
             generation)
+        val advice_projection = advice_dispatch_projection_invalidate(
+            self.coordinator.advice_projection,
+            activation.activation_key,
+            generation)
+        val quiesced = self.coordinator.lifecycle.quiesce_generation_for(
+            activation.activation_key, generation)?
         activation.bindings = []
         activation.advices = []
         activation.state = "quiescing"
+        self.coordinator.facet_bindings = facet_bindings
+        self.coordinator.advice_bindings = advice_bindings
+        self.coordinator.advice_projection = advice_projection
+        self.coordinator.lifecycle = quiesced
         self.coordinator.published[aspect_id] = activation
         if not self.coordinator.lifecycle.generation_is_drained_for(
             activation.activation_key, generation):
