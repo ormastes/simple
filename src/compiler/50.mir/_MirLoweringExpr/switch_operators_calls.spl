@@ -3975,22 +3975,6 @@ impl MirLowering:
         if is_direct and self.local_map.has(mir_expr_symbol_id_value(direct_symbol)):
             is_direct = false
 
-        if is_direct and self.has_active_facet_cleanup_entries():
-            val direct_id = mir_expr_symbol_id_value(direct_symbol)
-            val is_known_extern = (
-                (direct_id >= 0 and self.extern_function_symbol_ids.has(direct_id)) or
-                (direct_name != "" and self.extern_function_names.has(direct_name)))
-            if is_known_extern:
-                if val rejected = self.reject_unsupported_leased_facet_exit(
-                    "extern call '{direct_name}' with unspecified unwind behavior",
-                    callee.span):
-                    return rejected
-
-        if not is_direct and self.has_active_facet_cleanup_entries():
-            if val rejected = self.reject_unsupported_leased_facet_exit(
-                "indirect call with unspecified unwind behavior", callee.span):
-                return rejected
-
         if is_direct:
             # Inline a val-bound lambda `f(args)` by beta-reduction (lambda-lift).
             val inl = self.try_inline_lambda_call(direct_symbol, args)
@@ -4082,6 +4066,25 @@ impl MirLowering:
         # the call for every iso-typed arg across this call-lowering path's
         # several callee shapes (direct/indirect/lambda/bitfield) -- not
         # attempted in this lane; scoped out per binding-transfer-only.
+        if is_direct:
+            if val rejected = self.reject_unadmitted_resolved_call(
+                direct_symbol, callee.span):
+                return rejected
+        else:
+            var indirect_effects: Result<[Effect], text> = Err(
+                "indirect callee has no typed function effects")
+            if mir_expr_symbol_id_value(direct_symbol) >= 0:
+                indirect_effects = self.resolved_call_hir_effects(direct_symbol)
+            elif callee.has_type_ and callee.type_ != nil:
+                match callee.type_.kind:
+                    case HirTypeKind.Function(_, _, effects):
+                        indirect_effects = Ok(effects)
+                    case _:
+                        ()
+            if val rejected = self.reject_unadmitted_call_effects(
+                indirect_effects, "indirect", callee.span):
+                return rejected
+
         var arg_operands: [MirOperand] = []
         var call_param_types: [HirType] = []
         # A Var/NamedVar callee keeps its resolved symbol even when it names a

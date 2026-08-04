@@ -14,6 +14,7 @@ use compiler.mir.mir_lowering_expr.*
 use compiler.mir.mir_data.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.hir_unwind_effects.{hir_effects_unwind_kind}
 use compiler.hir.facet_static.{HirFacetInterface}
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
@@ -1755,6 +1756,80 @@ impl MirLowering:
                     case _:
                         ()
         []
+
+    me resolved_call_hir_effects(symbol: SymbolId) -> Result<[Effect], text>:
+        val sym = self.symbols.get_symbol_raw(symbol.id)
+        if val found_sym = sym:
+            if val sym_type = found_sym.type_:
+                match sym_type.kind:
+                    case HirTypeKind.Function(_, _, effects):
+                        return Ok(effects)
+                    case _:
+                        ()
+            return Err(
+                "symbol '{found_sym.name}' has no typed function effects")
+        Err("resolved callee symbol {symbol.id} is unavailable")
+
+    me mir_call_unwind_contract_from_effects(
+        effects: [Effect]
+    ) -> Result<MirCallUnwindContract, text>:
+        val unwind_kind = hir_effects_unwind_kind(effects)?
+        match unwind_kind:
+            case EffectKind.NoUnwind:
+                Ok(MirCallUnwindContract.NoUnwind)
+            case EffectKind.MayUnwind:
+                Ok(MirCallUnwindContract.MayUnwind)
+            case _:
+                Err("typed unwind query returned a non-unwind effect")
+
+    me reject_unadmitted_call_effects(
+        effects_result: Result<[Effect], text>,
+        call_label: text,
+        span: Span
+    ) -> LocalId?:
+        var failure = ""
+        var may_unwind = false
+        if effects_result.is_err():
+            failure = effects_result.unwrap_err()
+        else:
+            val unwind_contract = self.mir_call_unwind_contract_from_effects(
+                effects_result.unwrap())
+            if unwind_contract.is_err():
+                failure = unwind_contract.unwrap_err()
+            else:
+                match unwind_contract.unwrap():
+                    case MirCallUnwindContract.NoUnwind:
+                        ()
+                    case MirCallUnwindContract.MayUnwind:
+                        may_unwind = true
+        if failure == "" and not may_unwind:
+            return nil
+        if self.has_active_facet_cleanup_entries():
+            val kind = if may_unwind:
+                "MayUnwind call '{call_label}' without a cleanup successor"
+            else:
+                "call '{call_label}' with missing or conflicting unwind metadata"
+            return self.reject_unsupported_leased_facet_exit(kind, span)
+        val message = if may_unwind:
+            "E-MIR-UNWIND001 MayUnwind call '{call_label}' requires an explicit cleanup successor"
+        else:
+            "E-MIR-UNWIND001 missing or conflicting unwind metadata for call '{call_label}': {failure}"
+        self.error_fatal(message, Some(span))
+        var b = self.builder
+        val rejected = b.new_temp(MirType.unit())
+        self.builder = b
+        Some(rejected)
+
+    me reject_unadmitted_resolved_call(
+        symbol: SymbolId,
+        span: Span
+    ) -> LocalId?:
+        val sym = self.symbols.get_symbol_raw(symbol.id)
+        var label = "symbol:{symbol.id}"
+        if val found_sym = sym:
+            label = found_sym.name
+        self.reject_unadmitted_call_effects(
+            self.resolved_call_hir_effects(symbol), label, span)
 
     me remember_call_hir_return(local: LocalId, symbol: SymbolId):
         val call_symbol = self.symbols.get_symbol_raw(symbol.id)
