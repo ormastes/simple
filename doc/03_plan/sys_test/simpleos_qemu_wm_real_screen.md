@@ -808,17 +808,20 @@ Until selection, this row remains `baseline-only`, not `PASS` or `blocked`.
 
 ### AArch64 compiler admission boundary
 
-The ARM64 attested-build wrapper intentionally requires the canonical current
-self-hosted compiler at
-`bin/release/aarch64-apple-darwin-macho/simple`. The present artifact is
-rejected as `rust-seed-or-debug-forbidden`. An older
-`bin/release/macos-arm64/simple` validates mechanically but is stale and must
-not be copied or renamed to bypass provenance admission. Resume only after a
+The ARM64 attested-build wrapper requires an explicit current self-hosted
+compiler and a matching immutable receipt through
+`SIMPLEOS_ARM64_ATTESTED_COMPILER` and `SIMPLEOS_ARM64_COMPILER_RECEIPT`.
+The receipt pins path, SHA-256 and live version output and records a passing
+native smoke, forbidden stub fallback, no fabricated stubs, and measured
+status. A stale release, Rust seed, renamed binary, or an artifact whose build
+reported fabricated weak-zero bodies must not be admitted. Resume only after a
 new provenance-qualified self-hosted deployment exists, then run once:
 
 ```sh
 sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs --self-test
-sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
+SIMPLEOS_ARM64_ATTESTED_COMPILER=/absolute/path/to/simple \
+SIMPLEOS_ARM64_COMPILER_RECEIPT=/absolute/path/to/compiler-receipt.env \
+    sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
 ```
 
 ### Q-NIL source mitigation (2026-08-01)
@@ -832,3 +835,58 @@ native or guest proof: the public `fonts() -> FontRenderer` return and its
 external callers remain a separately tracked ABI boundary. Keep Q-NIL and
 Q-FONT pending until the exact native regression can be built/run with a
 current admitted compiler.
+
+## 2026-08-04 ARM64-first convergence checkpoint
+
+This checkpoint supersedes bootstrap, argv, and Clang migration work for this
+lane. ARM64 WM/QEMU is the sole priority; the Clang-20 browser-demo lane remains
+owned elsewhere and must not be edited or included in an ARM64 commit.
+
+Integrated `origin/main` revision: `e35bdbbcbfdb`. It includes the strict-stub
+producer/consumer stack and the later sibling WM/VMM changes, including
+`177754a3ee` (WM QEMU gate fixes), `cb1d5d3260` (generational WM registry), and
+`2915bba5ec` (4K TCG bring-up capacity/readiness). The clean integration
+worktree had no unrelated changes after rebase.
+
+Current fail-closed evidence, each checked once:
+
+| Gate | Result | Meaning |
+|---|---|---|
+| Attested ARM64 producer | `canonical-pure-simple-compiler-unavailable` | No compiler+receipt pair satisfies native smoke, strict no-stub, no-fabrication, and measurement policy. |
+| ARM64 QMP evidence consumer | `canonical-kernel-missing` | No canonical ELF/disk/manifest set exists; QEMU was not launched. |
+| Process audit | No `qemu-system-aarch64` process | No stale or synthetic run can be mistaken for live evidence. |
+
+Known candidates are inadmissible. `build/native_probe/simple` previously
+reported 512 fabricated weak-zero stubs. Phase 2 and Phase 3 pure-Simple
+artifacts reach LLVM translation but fail the focused non-entry module-global
+probe with a nil-receiver runtime trap. None may be relabeled, copied, or given
+a hand-written passing receipt.
+
+### Remaining critical path
+
+1. Receive a separately produced pure-Simple compiler plus receipt satisfying
+   `simpleos-arm64-compiler-receipt-v1`. Compiler construction is an external
+   dependency while bootstrap work is explicitly out of this lane.
+2. Verify the receipt identity without rebuilding: exact absolute compiler
+   path, SHA-256, one-line `--version`, `native_smoke_status=pass`,
+   `stub_fallback=forbidden`, `fabricated_stub_status=none`, and
+   `measurement_status=measured`.
+3. In one clean isolated current-`origin/main` worktree, run the attested ARM64
+   producer once with the two explicit environment variables. Reject the run
+   if its captured build log contains `FABRICATED`, `FABRICATED-NEW`,
+   `unmeasured`, `unbaselined`, or weak-zero markers.
+4. Only after producer PASS, run the ARM64 QMP evidence consumer once. Retain
+   the compiler receipt, build/frozen-source manifests, ELF/disk hashes,
+   serial/QMP logs, and before/after framebuffer captures under one evidence
+   root.
+5. Only after diagnostic QMP PASS, launch the single visible Cocoa QEMU window
+   for the physical-input interval. The project owner performs click, title-bar
+   drag, `a`, Ctrl press, and Ctrl release; correlate each input with a later
+   guest frame and then prove process cleanup.
+
+The repair/build loop is capped at three cycles. A missing admitted compiler is
+not a fix cycle and must not be polled indefinitely. Once a producer or QEMU
+attempt fails, preserve its cache/log, repair only the first real failure, and
+retry at most twice. After the third failed cycle, stop with the exact remaining
+failure instead of widening runtime bundles, enabling stub fallback, launching
+against stale artifacts, or rerunning an identical command.
