@@ -1,0 +1,148 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.{
+    BlockId, LocalId, MirBody, MirBuilder, MirCallUnwindContract,
+    MirConstValue, MirInst, MirInstKind, MirOperand, MirOperandKind,
+    MirSignature, MirTerminator, MirType,
+    mir_call_terminator_create, mir_operand_const_int,
+    mir_operand_copy, mir_operand_move, validate_mir_exception_cfg
+}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn exception_cfg_builder(name: text, symbol_id: i64) -> MirBuilder:
+    var builder = MirBuilder.new()
+    builder.begin_function(
+        SymbolId(id: symbol_id), name,
+        MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        Span.empty())
+    builder
+
+fn exception_cfg_body(builder: MirBuilder) -> MirBody:
+    MirBody.from_function(builder.end_function())
+
+fn install_valid_unwind_shape(builder: MirBuilder) -> MirBody:
+    val normal = builder.new_block(Some("normal"))
+    val unwind = builder.new_block(Some("unwind"))
+    builder.set_terminator(mir_call_terminator_create(
+        nil, mir_operand_const_int(1), [], normal,
+        MirCallUnwindContract.MayUnwind, Some(unwind)).unwrap())
+    builder.switch_to_block(unwind)
+    val token = builder.emit_landing_pad()
+    builder.terminate_resume(mir_operand_move(token))
+    builder.switch_to_block(normal)
+    builder.terminate_return(nil)
+    exception_cfg_body(builder)
+
+describe "MIR exception CFG verifier":
+    it "accepts one unwind-only LandingPad and one token Resume":
+        val body = install_valid_unwind_shape(
+            exception_cfg_builder("valid_unwind", 981))
+        expect(validate_mir_exception_cfg(body).is_ok()).to_be(true)
+
+    it "rejects a LandingPad reached by a normal successor":
+        var builder = exception_cfg_builder("normal_pad", 982)
+        val pad = builder.new_block(Some("shared_pad"))
+        builder.set_terminator(mir_call_terminator_create(
+            nil, mir_operand_const_int(1), [], pad,
+            MirCallUnwindContract.MayUnwind, Some(pad)).unwrap())
+        builder.switch_to_block(pad)
+        val token = builder.emit_landing_pad()
+        builder.terminate_resume(mir_operand_move(token))
+        expect(validate_mir_exception_cfg(
+            exception_cfg_body(builder)).unwrap_err()).to_contain(
+            "LandingPad block 1 has a normal predecessor")
+
+    it "requires Resume to consume a LandingPad ExceptionToken":
+        var builder = exception_cfg_builder("bad_resume", 983)
+        val normal = builder.new_block(Some("normal"))
+        val unwind = builder.new_block(Some("unwind"))
+        builder.set_terminator(mir_call_terminator_create(
+            nil, mir_operand_const_int(1), [], normal,
+            MirCallUnwindContract.MayUnwind, Some(unwind)).unwrap())
+        builder.switch_to_block(unwind)
+        val _token = builder.emit_landing_pad()
+        builder.terminate_resume(mir_operand_const_int(9))
+        builder.switch_to_block(normal)
+        builder.terminate_return(nil)
+        expect(validate_mir_exception_cfg(
+            exception_cfg_body(builder)).unwrap_err()).to_contain(
+            "Resume operand is not a LandingPad token")
+
+        var wrong_type = exception_cfg_builder("wrong_token_type", 987)
+        val wrong_normal = wrong_type.new_block(Some("normal"))
+        val wrong_unwind = wrong_type.new_block(Some("unwind"))
+        wrong_type.set_terminator(mir_call_terminator_create(
+            nil, mir_operand_const_int(1), [], wrong_normal,
+            MirCallUnwindContract.MayUnwind, Some(wrong_unwind)).unwrap())
+        wrong_type.switch_to_block(wrong_unwind)
+        val integer_local = wrong_type.new_temp(MirType.i64())
+        wrong_type.emit(MirInst(
+            kind: MirInstKind.LandingPad(integer_local), span: nil))
+        wrong_type.terminate_resume(mir_operand_move(integer_local))
+        wrong_type.switch_to_block(wrong_normal)
+        wrong_type.terminate_return(nil)
+        expect(validate_mir_exception_cfg(
+            exception_cfg_body(wrong_type)).unwrap_err()).to_contain(
+            "is not ExceptionToken")
+
+    it "rejects ordinary token use and duplicate Resume consumption":
+        var ordinary = exception_cfg_builder("ordinary_token_use", 984)
+        val ordinary_normal = ordinary.new_block(Some("normal"))
+        val ordinary_unwind = ordinary.new_block(Some("unwind"))
+        ordinary.set_terminator(mir_call_terminator_create(
+            nil, mir_operand_const_int(1), [], ordinary_normal,
+            MirCallUnwindContract.MayUnwind, Some(ordinary_unwind)).unwrap())
+        ordinary.switch_to_block(ordinary_unwind)
+        val ordinary_token = ordinary.emit_landing_pad()
+        ordinary.emit_call(
+            mir_operand_const_int(2), [mir_operand_copy(ordinary_token)],
+            MirType.unit())
+        ordinary.terminate_resume(mir_operand_move(ordinary_token))
+        ordinary.switch_to_block(ordinary_normal)
+        ordinary.terminate_return(nil)
+        expect(validate_mir_exception_cfg(
+            exception_cfg_body(ordinary)).unwrap_err()).to_contain(
+            "exception token passed to ordinary call")
+
+        var duplicate = exception_cfg_builder("duplicate_resume", 985)
+        val duplicate_normal = duplicate.new_block(Some("normal"))
+        val duplicate_unwind = duplicate.new_block(Some("unwind"))
+        val duplicate_second = duplicate.new_block(Some("second_resume"))
+        duplicate.set_terminator(mir_call_terminator_create(
+            nil, mir_operand_const_int(1), [], duplicate_normal,
+            MirCallUnwindContract.MayUnwind, Some(duplicate_unwind)).unwrap())
+        duplicate.switch_to_block(duplicate_unwind)
+        val duplicate_token = duplicate.emit_landing_pad()
+        duplicate.terminate_resume(mir_operand_move(duplicate_token))
+        duplicate.switch_to_block(duplicate_second)
+        duplicate.terminate_resume(mir_operand_move(duplicate_token))
+        duplicate.switch_to_block(duplicate_normal)
+        duplicate.terminate_return(nil)
+        expect(validate_mir_exception_cfg(
+            exception_cfg_body(duplicate)).unwrap_err()).to_contain(
+            "must have exactly one linear consumer")
+
+    it "keeps NoUnwind on the ordinary instruction path":
+        var builder = exception_cfg_builder("ordinary_call", 986)
+        val _result = builder.emit_call(
+            mir_operand_const_int(1), [], MirType.unit())
+        builder.terminate_return(nil)
+        val body = exception_cfg_body(builder)
+        expect(validate_mir_exception_cfg(body).is_ok()).to_be(true)
+        var saw_call = false
+        for instruction in body.blocks[0].instructions:
+            match instruction.kind:
+                case Call(_, _, _): saw_call = true
+                case _: ()
+        expect(saw_call).to_be(true)
+        match body.blocks[0].terminator:
+            case Ret(_): ()
+            case _: fail("NoUnwind call was not retained as an ordinary instruction")
+
+    it "retains typed backend rejection while native exception CFG is unsupported":
+        val source = rt_file_read_text(
+            "src/compiler/70.backend/backend/llvm_lib_translate_expr.spl") ?? ""
+        expect(source).to_contain("case LandingPad(_):")
+        expect(source).to_contain("E-MIR-UNWIND002")

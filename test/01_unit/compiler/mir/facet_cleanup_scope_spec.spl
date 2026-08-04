@@ -8,10 +8,11 @@ use compiler.common.structural_contracts.facet_artifact.{
 }
 use compiler.hir.hir_types.{SymbolId, SymbolTable}
 use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.hir_types.{Effect, EffectKind}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
 use compiler.mir.{
     LocalId, MirConstValue, MirInstKind, MirOperandKind,
-    MirSignature, MirType, MirTypeKind, MirLowering,
+    MirCallUnwindContract, MirSignature, MirType, MirTypeKind, MirLowering,
     facet_acquisition_context_plan, plan_typed_dynamic_facet_adapter,
     mir_operand_const_bool, mir_operand_const_int
 }
@@ -271,3 +272,52 @@ describe "facet descriptor lexical cleanup scopes":
             fail("expected leased scope to retain E-AF007 precedence")
         if has_fatal_error_containing(lowering, "E-MIR-UNWIND001"):
             fail("generic MIR unwind diagnostic displaced E-AF007")
+
+    it "builds a MayUnwind cleanup successor with nested reverse releases":
+        var lowering = cleanup_lowering()
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(
+            LocalId(id: 86), cleanup_adapter(11, 1101, 11001))
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(
+            LocalId(id: 87), cleanup_adapter(11, 1102, 11002))
+        val admitted = lowering.reject_unadmitted_call_effects(
+            Ok([Effect(kind: EffectKind.MayUnwind, span: Span.empty())]),
+            "leased_throwing_call", Span.empty())
+        expect(admitted).to_be_nil()
+        val _result = lowering.emit_admitted_call(
+            mir_operand_const_int(1), [], MirType.unit())
+        var builder = lowering.builder
+        builder.terminate_return(nil)
+        val function = builder.end_function()
+        var releases: [i64] = []
+        var saw_may_unwind = false
+        var saw_landing_pad = false
+        var saw_resume = false
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case LandingPad(_): saw_landing_pad = true
+                    case Call(_, function_operand, arguments):
+                        match function_operand.kind:
+                            case Const(MirConstValue.Str(name), _):
+                                if (name == "aspect_execution_context_release_facet_descriptor_or_panic" and
+                                    arguments.len() == 2):
+                                    match arguments[1].kind:
+                                        case Const(MirConstValue.Int(id), _): releases.push(id)
+                                        case _: ()
+                            case _: ()
+                    case _: ()
+            match block.terminator:
+                case CallTerminator(_, _, _, _, contract, unwind):
+                    saw_may_unwind = (
+                        contract == MirCallUnwindContract.MayUnwind and
+                        unwind != nil)
+                case Resume(_): saw_resume = true
+                case _: ()
+        expect(releases.len()).to_equal(2)
+        expect(releases[0]).to_equal(11002)
+        expect(releases[1]).to_equal(11001)
+        expect(saw_may_unwind).to_be(true)
+        expect(saw_landing_pad).to_be(true)
+        expect(saw_resume).to_be(true)
