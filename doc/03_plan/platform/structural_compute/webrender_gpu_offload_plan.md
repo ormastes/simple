@@ -146,16 +146,101 @@ held constant, only the hit key varying. **Every module dropped; none rose.**
 
 The first four rows reproduced the previously-published figures exactly
 (96/99/98/100) under the pre-fix key, which is what establishes that the
-instrument matched the original conditions — so their honest values are
-directly comparable and the drop is real. The remaining rows were measured
-against a narrower spec set than the original headline numbers, so **both**
-of their columns sit below the full-corpus value; read those rows as the
-instrument delta, not as the module's true coverage. A full-corpus
-re-measurement with the fixed instrument is still outstanding.
+instrument matched the original conditions. The remaining rows were measured
+against a narrower spec set, so both of their columns sat below the
+full-corpus value.
 
-Only `..._paint_tiles_gpu.spl` and `dom_limits.spl` are presently
-substantiated at ≥90%. **The 90% goal is not met on the parser and style
-modules and must not be reported as met.**
+**That full-corpus re-measurement is now done, and it supersedes the table
+above.**
+
+## Honest full-corpus coverage (2026-08-04, post-A/B/C/D)
+
+365 specs, selected by transitive import closure. **`floor`** is what the tool
+prints; **`ceiling`** adds back lines misfiled under `<entry>` (see defect E).
+Re-measured 3× on two renderer specs — byte-identical, so the wall-clock
+timing noise reported earlier did not reproduce under these conditions.
+
+| module | floor | ceiling | ≥90% |
+|---|---|---|---|
+| `selector_matcher.spl` | **100%** (72/72) | 100% | yes |
+| `style_block_resolve.spl` | **98%** (311/317) | 99% | yes |
+| `html_tokenizer.spl` / `html_tree_builder.spl` | **97%** | 99% | yes |
+| `style_block_parse.spl` | **97%** (478/488) | 99% | yes |
+| `..._paint_tiles_gpu.spl` | **96%** (64/66) | 100% | yes* |
+| `dom_identity_index.spl` | **94%** | 99% | yes |
+| `..._paint_tiles.spl` | **93%** | 100% | yes |
+| `..._core.spl` | 89% | 92% | no |
+| `..._engine2d_presenter.spl` | 87% | 96% | no |
+| `..._foundation.spl` | 83% | 87% | no |
+| `..._layout.spl` | 80% | 84% | no |
+| `..._declarations.spl` | 79% | 91% | no |
+| `dom.spl` | 79% | **100%** | no |
+| `..._renderer.spl` | 78% | 82% | no |
+| `..._decl_apply.spl` | 70% | 76% | no |
+| `..._style.spl` | 65% | 72% | no |
+| `..._paint_layout.spl` | 64% | 68% | no |
+| `..._paint_primitives.spl` | 43% | 51% | no |
+| `dom_limits.spl` | **0%** (0/2) | 100% | unmeasurable |
+
+**Seven modules clear 90%** — the original parser and style targets among
+them. The earlier "not met" verdict was itself measured against a narrower
+spec set and is superseded.
+
+Binary capability was established by **positive probe, not size or banner**:
+the deployed `bin/simple` (02:04) and the main repo's `target/release` seed
+(12:42) both **lack fixes B and D**, so a rebuild from a pristine worktree at
+`origin/main` was mandatory. Probes: `covkey_dead_b` reports **20% (2/10)**
+where the defect said 100% (D fixed); a `me bump` body is fully covered while
+an uncalled `me` body stays 0 (B fixed); a `pub fn` body is attributed to the
+`pub fn` and an `elif` head is absent from a hand-counted denominator of 20
+(A/C fixed). The measuring tool reproduces the real runner byte-for-byte
+(`80% (16/20)`).
+
+### What cannot reach 90%, and why
+
+- **`dom_limits.spl` — 0% forever.** It has only 2 recordable lines, both
+  module-level. Its previously-published "100%" was defect D.
+- **`..._paint_tiles_gpu.spl` 96% is dead code** — **zero callers in `src/`**;
+  a single spec calls it directly. The percentage is real; the relevance is
+  not.
+- **`_paint_primitives` 43% / `_paint_layout` 64% / `_style` 65%** —
+  385/513, 336/481 and 104/135 uncovered lines sit in functions **never
+  called at all** (`fb_background_radial_stack_clip`, `paint_tiled`,
+  `parse_background_layers`, `inherit_style`). Partly genuine dead code, and
+  partly because **14 specs timed out at 900 s**, including
+  `tile_paint_parity_spec` and `simple_web_renderer_spec` — which is exactly
+  why `paint_tiled` shows as uncalled.
+- **`..._engine2d_presenter` 87%** — the remainder is
+  `_sample_web_gpu_paint_choice`, device identity and readback: class (c),
+  requiring a real GPU. Not faked.
+
+### Corpus honesty
+
+3,938 examples ran. **50 specs executed 0 examples** (38 of which declare
+`it` blocks), 14 timed out, and 197 specs carry 1,576 failing examples —
+concentrated in browser_session / webgpu / hosted, largely outside these
+modules. A mutation audit on `style_block_parse` found 9 lines RED and
+**7 covered-but-not-discriminated**; those 7 are reported, not counted as
+coverage.
+
+### Defect E — `<entry>` misfiling is far larger than first bounded
+
+The defect-D lane bounded the residual `<entry>` misfiling at "≤2 lines,
+≤0.9% per module". **That bound is wrong.** It swallows whole *method
+bodies*: 16 lines / 21 points on `dom.spl`, and **119 lines** on
+`..._decl_apply.spl`. Proven on a single-module run, with a mutation test
+killing lines the reporter calls uncovered. This under-reports, so it is the
+conservative direction — but the floor/ceiling split above exists because of
+it, and `dom.spl`'s true figure is 100%, not 79%.
+
+### Defect F — no spec can observe `case Some(...)` at all
+
+The interpreter never `Some`-wraps a bare argument passed to a `T?`
+parameter, so `case Some(x)` matches nothing and the `match` falls through
+silently. The JIT is correct; specs run interpret-only. Consequence:
+**none of 1,762 `case Some(` sites across 423 files is observable by any
+spec in this repo.** It also makes `selector_matches` silently degrade
+`a > b` into descendant matching.
 
 **Most of the original gap was tooling, not untested code.** Four defects
 were found in the coverage tool itself — the first three inflating nothing
