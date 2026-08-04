@@ -89,6 +89,12 @@ bookmark is synchronized with GitHub and is rebased onto the current
 - **PASS — continuation static gates:** shell syntax, changed-file placeholder,
   conflict-marker, and trailing-whitespace scans passed; generated-spec `.spl`
   count is `0`; both final direct-env/runtime guards report `STATUS: PASS`.
+- **PASS — lifecycle/ABI shape (static review):** the application gate,
+  prepared callback-safe split, exact lazy reserve/I/O/commit, facet lifecycle,
+  ordinary unload, embedding pack-I/O port, and facet/prepared compiler ABI
+  leaves are wired without duplicate startup symbols or transition cycles. The
+  runtime owner is 786 lines and its lifecycle source guard passes. This is not
+  executable or concurrency evidence.
 - **PASS — focused maintainability remediation:** type-predicate projection
   moved to `hir_lowering/type_predicate_projection.spl`; the oversized
   pre-existing `module_surface.spl` no longer carries feature additions.
@@ -123,53 +129,23 @@ bookmark is synchronized with GitHub and is rebased onto the current
 - **FAIL — SSpec maintenance:** the deployed full CLI does not expose
   `sspec-maintain`; each required scan returned `ERROR: file not found:
   sspec-maintain`, so seven-component scorecards are unavailable.
-- **FAIL — production language/advice execution remains incomplete:** facet
-  implementation bodies lower as ordinary HIR/MIR functions under
-  `<implementation>__facet_witness__<method>`; `self.base` uses the explicit
-  base-as-argument-zero ABI, while unsupported bare `self` fails with E-AF005.
-  Artifact v3 carries an inert `FacetWitnessDescriptorV1` identity plus ordered
-  method symbols. The loader resolves every method to the exact SMF owner and
-  address, publication stores that resolved descriptor, and application
-  acquisition returns a method entry with its exact generation lease. No
-  executable factory or parallel private invoke ABI remains. The explicit
-  runtime and native probe can invoke this receiver-shaped method path, but
-  user-facing type-directed facet-method sugar, inherited table flattening, and
-  generic facet descriptors still fail closed. Review also proved the current
-  public `FacetRef<T>` stores only diagnostic text, a caller-supplied view, and
-  lease IDs: it is not the documented dynamic typed adapter. Production needs
-  a compiler-generated private `(Base, FacetContract)` adapter with the typed
-  base, complete resolved descriptor, and an affine lease bound to the exact
-  application execution context. Existing `dyn Trait` has no usable native
-  vtable path and raw/`Any` base erasure is unsafe. Dynamic advice has a canonical
-  projection dispatch boundary with exact-generation pin/release and rejects
-  runtime `around`; automatic prepared-slot MIR calls still lack a backend-safe
-  route to that application-owned boundary, so AC-11 remains unmet.
-- **FAIL — prepared join-point backend bridge incomplete:** `MirModule` contains
-  a versioned `PreparedAdviceSlotPlan` table that survives current MIR
-  reconstruction/optimization/VHDL aggregation and has deterministic serializer
-  plus driver collection. `CompileOptions.prepared_dynamic_advice` derives slots from
-  the established weave authority and inserts automatic entry/return/abort MIR
-  phase calls. The loader derives an immutable projection from canonical
-  publication, installs it atomically with lifecycle promotion, invalidates it
-  before quiesce/drain, and pins/releases every exact generation on all dispatch
-  paths. An executable backend trampoline still does not exist. The option participates in cache identity;
-  check/interpreter reject it directly and JIT/all AOT backends reject produced
-  tables centrally with `E-AF010`; the common backend compiler independently
-  rejects either slot metadata or the intrinsic if a caller bypasses the driver.
-  A focused unit gate enumerates every supported backend spelling and also
-  constructs an intrinsic-only module, proving both metadata and direct-call
-  paths reject before backend selection/lowering. The current `(slot, phase)`
-  intrinsic cannot prove the canonical lease, and the reviewed architecture
-  rejects process-global/current-context handles as a second authority. AC-11
-  remains unmet. The reviewed successor is
-  `simple.prepared_advice_dispatch.v2(context, slot, phase)`, accepted only for
-  a target with one exact typed `AspectExecutionContext` parameter. A driver
-  pass must rewrite validated v2 to the ordinary source-owned
-  `prepared_advice_dispatch_context_invoke` call, and every residual v1/v2 must
-  remain a backend error. Before that can execute, one stable reference capsule
-  must solely own the loader, lifecycle, registries, and projection; copied
-  coordinator state is not safe. Hosted CPU AOT entry-closure is the first
-  proposed admission surface; all others remain fail-closed.
+- **FAIL — executable backend/runtime evidence:** typed facet adapters, exact
+  descriptor ABI wrappers, prepared v2 ordinary-call rewriting, and the stable
+  prepared dispatcher ABI are implemented in source. Obsolete claims that
+  these adapters or injection paths are missing are removed. No admitted
+  current-source self-host/backend run proves generated calls, native callback
+  dispatch, ABI linkage, or cleanup behavior, so AC-11 is not executable-
+  verified.
+- **FAIL — lifecycle and lease evidence:** sequential source/unit coverage does
+  not prove concurrent acquire/unload, dispatch/unload, follower coalescing,
+  callback-error cleanup, stale lazy commit rejection, completion-notification
+  failure, or mismatched-claim drain. Leaf-level lease visibility and imported/
+  indirect unwind handling remain unresolved; the required concurrency/resource
+  model evidence is absent.
+- **FAIL — deployment and startup configuration:** the embedding pack-I/O port
+  contract exists, but production image-relative port/signature provisioning,
+  application startup composition, feature/config enablement, and packaged ABI
+  linkage have no retained deployment evidence.
 - **FAIL — missing NFR evidence:** the admitted builder/probe/collector now
   exist, but no retained startup/RSS/page-fault, opened-file, first-use, or
   repeated-lookup baseline has executed. The one-byte disabled-slot value is
@@ -209,23 +185,13 @@ bookmark is synchronized with GitHub and is rebased onto the current
 
 ## Result
 
-**STATUS: FAIL** — the earlier catalog/artifact and D1/D2 source slices,
-automatic registry integration, advice publication, and retained NFR harness
-are substantially complete. D4 now has the stable execution-context owner,
-typed v2 production/validation, fail-stop ordinary-call rewriting, isolation,
-cleanup, entry-closure, residual-intrinsic, and coverage checks. D5 now has
-genuine source/HIR acquisition, application-owned opaque descriptor leases,
-exact nominal context/contract proof, canonical ordinal/signature resolution,
-checked context-first method-address lookup, typed-base indirect-call lowering,
-and HIR-symbol lambda/async capture rejection. Wrapper-aware adapter provenance
-and reverse-order cleanup now cover every currently modeled lexical exit.
-Exact-route lazy activation and canonical `FacetAcquireError` are now wired;
-unsupported leased nonlocal exits fail closed with E-AF007. Release/merge
-remains blocked by production image/signature port binding, lifecycle-wide
-concurrency beyond lazy callers, indirect/imported and backend unwind support,
-leaf-level lease visibility, the self-hosted runtime crash,
-missing generated-manual/runtime evidence, executable prepared-advice backend
-evidence, the intentionally unselected lexical-context shorthand, and absent
-NFR measurements. The WIP feature bookmark may
-be committed/rebased/pushed for collaboration; no version bump, main push, tag,
-or release is authorized by this report.
+**STATUS: FAIL** — catalog/artifact handling, typed facet adapter and ABI,
+prepared v2 rewriting and ABI, the application gate, callback-safe split,
+exact lazy reserve/I/O/commit, facet lifecycle, unload, and the embedding port
+contract are implemented statically. They are not release evidence. Blocking
+gaps are current-source backend/self-host execution and ABI linkage; production
+deployment and startup configuration; lifecycle-wide concurrency, callback-
+error, stale-commit, and lease-drain evidence; imported/indirect unwind and
+leaf-level lease visibility; generated manuals; coverage; and retained NFR
+measurements. The WIP bookmark may be synchronized for collaboration, but no
+version bump, main push, tag, or release is authorized.

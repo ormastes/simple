@@ -32,9 +32,9 @@
 
 | Lane | Result | Residual |
 |---|---|---|
-| B1 facet witness ABI | Canonical symbol naming plus emitted-symbol proof; declaration-only plans fail closed | Executable facet bodies, ABI adapter/export, and frontend call lowering |
-| B2 advice dispatch | Exact-generation owner/address validation and zero-argument before/after dispatch; dynamic `around` denied | Prepared MIR slot producer and automatic business-path caller |
-| B3 architecture | Verified resolver and prepared-slot owner boundaries without unsafe partial extraction | `85.mdsoc` resolver injection and `50.mir` → optimizer → backend → driver slot pipeline |
+| B1 facet witness ABI | Implemented statically: descriptor ABI, typed adapter lowering, exact validation/address/release | Admitted backend/runtime and lease evidence |
+| B2 advice dispatch | Implemented statically: typed v2 producer, stable ABI, exact-generation prepare/native/finalize split | Callback-error and concurrent unload evidence |
+| B3 architecture | Implemented statically: resolver injection, application gate owner, lifecycle transition leaves, startup ABI aggregation | Deployment/startup composition evidence |
 
 ## Production bridge continuation lanes (2026-08-04)
 
@@ -46,7 +46,7 @@
 | D4 execution context | Refactor one stable application reference capsule to own loader, lifecycle, registries, and projection; validate/rewrite explicit-context v2 to an ordinary call | `AspectExecutionContext`, `simple.prepared_advice_dispatch.v2(context, slot, phase)`, `prepared_advice_dispatch_context_invoke` |
 | D5 typed facet adapter | Generate private `(Base, FacetContract)` adapter, acquire the complete descriptor once, select by ordinal, and release the affine lease on all exits | Existing `FacetRef<T>`, `FacetWitnessDescriptorV1`, `lower_resolved_facet_witness_method_call`; no dyn-trait or erased-base ABI |
 
-Current implementation status:
+Current implementation status (static-only):
 
 - D4 implemented pending executable verification: the stable `AspectExecutionContext` class, compatibility type
   alias, context-owned dispatcher, two-context isolation coverage, exact-token
@@ -76,6 +76,20 @@ test plan. Focused setup/checker helpers are
 `verify_prepared_advice_backend_bridge`. Any temporary helper fails with
 `assert(false)` or `fail(...)`; no placeholder factory or silent intrinsic
 lowering is admissible.
+
+## Static implementation checkpoint
+
+- Done in source: lifecycle gate ownership; prepared callback-safe split;
+  exact lazy reserve/I/O/commit; facet acquire/validate/release transitions;
+  ordinary quiesce/drain/unload; stable facet and prepared-advice compiler ABI
+  leaves; and the injected embedding pack-I/O port contract.
+- Superseded: claims that the typed adapter, prepared backend injection, or
+  application dispatcher ABI are missing.
+- Verification remains `STATUS: FAIL`. Open evidence is admitted backend and
+  self-host execution, ABI linkage, deterministic concurrency/callback-error/
+  stale-commit/lease-drain coverage, production port deployment and startup
+  configuration, imported/indirect unwind and leaf-level lease visibility,
+  generated manuals, coverage, and retained NFR measurements.
 
 The merge owner remains root Codex. C1/C2/C3 run in parallel; C4 integrates
 their public handoffs. Root performs the final normal/highest-capability review

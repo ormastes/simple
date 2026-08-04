@@ -298,3 +298,22 @@ verification-failed
   unproved. Production image/signature port binding, imported/indirect unwind
   metadata, leaf-level lease visibility, and executable evidence remain open.
   Status remains `STATUS: FAIL`.
+
+## 2026-08-04 — lifecycle/ABI implementation reconciliation
+
+- Static implementation is complete for the application lifecycle gate,
+  prepared prepare/native/finalize split, exact lazy reserve/I/O/commit, facet
+  lifecycle transitions, ordinary unload, stable facet/prepared compiler ABI
+  leaves, and the injected pack-I/O port contract.
+- The runtime owner is below 800 lines; lifecycle source guards pass. These are
+  static structure checks, not executable evidence.
+- Obsolete blockers claiming a missing typed adapter, prepared backend
+  injection, or application dispatcher ABI are superseded.
+- Verification remains failed. Open evidence is admitted current-source
+  backend/self-host execution and ABI linkage; deterministic concurrency,
+  callback-error, stale-commit, and lease-drain evidence; production image/
+  signature port deployment and startup configuration; imported/indirect
+  unwind plus leaf-level lease visibility; generated manuals, coverage, and
+  retained NFR baselines.
+- Authoritative status remains `verification-failed` / `STATUS: FAIL`; no
+  release, tag, version bump, or main push is authorized.
