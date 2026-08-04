@@ -1682,7 +1682,20 @@ impl MirLowering:
                 case _:
                     ()
         self.builder = b_span_save
-        val span_result = self.lower_expr_impl(expr)
+        var span_result = self.lower_expr_impl(expr)
+        # A nil LocalId is not representable downstream: every consumer
+        # (local_mir_type_of, mir_operand_copy, emit_*) reads `.id` straight
+        # away, so a nil here surfaces as `runtime error: field access on nil
+        # receiver` + ud2 (SIGILL) in a callee, with no hint of which
+        # expression produced it. Catch it at the single choke point every
+        # lowered expression passes through, name it, and substitute a real
+        # temp so the accumulated diagnostics actually get reported.
+        if span_result == nil:
+            self.error("MIR lowering produced no local for this expression", nil)
+            eprint("[mir-lower-expr] nil-local-from-impl method={span_method_name}\n")
+            var b_nil_local = self.builder
+            span_result = b_nil_local.new_temp(MirType.unit())
+            self.builder = b_nil_local
         if span_method_name != "":
             eprint("[mir-lower-expr] impl-return method={span_method_name} id={span_result.id}\n")
         var b_span_restore = self.builder
@@ -3213,9 +3226,28 @@ impl MirLowering:
                 self.lower_match_case(scrutinee, arms, expected_match_type)
 
             case _:
-
-                self.error("unsupported MIR expression: {expr_value.kind}", nil)
-                nil
+                # Loud-fail, but with a REAL local. Returning `nil` here made
+                # the whole failure invisible and unfixable: `self.error()` only
+                # accumulates a diagnostic, lowering keeps going, and the nil
+                # LocalId flows to the first caller that touches it -- e.g.
+                # `local_mir_type_of(local)` (mir_lowering_stmts.spl:69), whose
+                # `local.id` read is a field access on a nil receiver. That
+                # traps `runtime error: field access on nil receiver` + ud2
+                # (SIGILL, exit 132) BEFORE the accumulated errors are ever
+                # flushed, so the operator sees a bare SIGILL and never learns
+                # which expression kind was unsupported. Stage-3 self-host died
+                # exactly this way (2026-08-04).
+                #
+                # Mirror what every other "not yet implemented" rejection in
+                # this file already does (see the B5b Phase 2 pattern arms in
+                # lower_match_case): record the error, hand back a fresh unit
+                # temp, and let the driver report the diagnostic normally.
+                self.error("unsupported MIR expression: {expr_value.kind}", Some(expr_value.span))
+                eprint("[mir-lower-expr] unsupported-expr-kind kind={expr_value.kind}\n")
+                var b_unsupported = self.builder
+                val t_unsupported = b_unsupported.new_temp(MirType.unit())
+                self.builder = b_unsupported
+                t_unsupported
 
     # ========================================================================
     # B5b Phase 1 — MatchCase lowering (integer-literal patterns only)
