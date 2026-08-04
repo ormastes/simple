@@ -43,7 +43,6 @@ runtime_origin_after="$stage3/runtime-origin-after.txt"
 runtime_admitted="$stage3/runtime-admitted.txt"
 lock="$output.lock"
 archive="$stage3/recovery-threads1"
-path=${PATH:?PATH is required}
 
 for required in "$stage2" "$admitted" "$seed" "$stamp" "$native_all" \
   "$stage2_sanity" "$stage2_transcript" "$stage2_log" "$source_before" \
@@ -66,6 +65,7 @@ bootstrap_stage3_verify_sanity_evidence "$stage2_sanity" "$stage2" "$root" \
   cranelift "$(bootstrap_stage3_transcript_host_value "$stage2_transcript" HOME)" \
   "$(bootstrap_stage3_transcript_host_value "$stage2_transcript" TMPDIR)" \
   "$(bootstrap_stage3_transcript_host_value "$stage2_transcript" PATH)"
+path=$(bootstrap_stage3_transcript_host_value "$stage2_transcript" PATH)
 cmp -s "$runtime_origin_before" "$runtime_origin_after"
 cmp -s "$runtime_origin_after" "$runtime_admitted"
 runtime_check="$archive/runtime-preflight.$$"
