@@ -280,6 +280,17 @@ Results: FAIL-silent-partial sw_boxes=504/504/504 vk_boxes=0/0/0 vk_source=devic
 and the 64x48 same-run A/B, also post-fix, reproduces the pre-fix numbers
 *exactly* (`vk_body=2304 vk_h1=742 vk_blue=vk_green=vk_amber=0`).
 
+That 64x48 result was **independently replicated twice** — two separate
+post-fix runs (`vulkan_drop_v2.log`, `vulkan_drop_v3.log`), each with the gate
+re-grepped present in the source immediately before AND after the run
+(`PRECHECK=31 POSTCHECK=31` both times), producing byte-identical counts. The
+falsification is not a single flaky run, and it is not a stale-source artifact:
+the standing hazard in this tree is that a parallel sync silently reverts the
+working copy mid-session (it did so three times while this fix was being
+verified), which is exactly why both runs bracket themselves with a source
+check. Any future attempt on this bug should do the same — an unbracketed run
+here cannot distinguish "the fix didn't work" from "the fix wasn't there".
+
 Therefore:
 
 1. **`vulkan_font_state_unknown` was FALSE.** `_poison_vulkan_font_surface`
@@ -385,7 +396,8 @@ ignores that return. Separate follow-up, not part of this fix.
   See the Correction section for why that verdict refutes the mechanism rather
   than merely reporting a miss.
 - **Regression gate** — `test/03_system/gui/web_showcase_full_gpu_offload_spec.spl`
-  was started three times and never reached a `Results:` line: run 1 was
+  was started three times and never reached a `Results:` line (final status:
+  `grep -c '^Results:' showcase_v3.log` = 0): run 1 was
   invalidated by a working-copy revert mid-run, runs 2 and 3 were killed
   (exit 144 / exit 1) under heavy parallel-session contention (6+ concurrent
   copies of this same spec were running). **Still owed.** The change is
