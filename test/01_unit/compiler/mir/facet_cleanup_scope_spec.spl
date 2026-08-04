@@ -11,10 +11,11 @@ use compiler.hir.hir_types.{HirType, HirTypeKind}
 use compiler.hir.hir_types.{Effect, EffectKind}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
 use compiler.mir.{
-    LocalId, MirConstValue, MirInstKind, MirOperandKind,
+    LocalId, MirBody, MirConstValue, MirInstKind, MirOperandKind,
     MirCallUnwindContract, MirSignature, MirType, MirTypeKind, MirLowering,
     facet_acquisition_context_plan, plan_typed_dynamic_facet_adapter,
-    mir_operand_const_bool, mir_operand_const_int
+    mir_call_terminator_create, mir_operand_const_bool, mir_operand_const_int,
+    mir_operand_copy, validate_mir_exception_cfg
 }
 
 fn cleanup_contract() -> FacetContractMetadata:
@@ -36,6 +37,16 @@ fn cleanup_adapter(context_id: i64, base_id: i64, lease_id: i64):
         MirType(kind: MirTypeKind.Opaque("ConcreteBase")),
         mir_operand_const_int(base_id), cleanup_contract(),
         mir_operand_const_int(lease_id), context).unwrap()
+
+fn cleanup_local_adapter(owner: LocalId, base: LocalId, lease: LocalId):
+    val context = facet_acquisition_context_plan(
+        "AspectExecutionContext", mir_operand_copy(owner),
+        "aspect_execution_context_acquire_facet_descriptor",
+        "aspect_execution_context_release_facet_descriptor_or_panic").unwrap()
+    plan_typed_dynamic_facet_adapter(
+        MirType(kind: MirTypeKind.Opaque("ConcreteBase")),
+        mir_operand_copy(base), cleanup_contract(),
+        mir_operand_copy(lease), context).unwrap()
 
 fn cleanup_lowering() -> MirLowering:
     var lowering = MirLowering.new(SymbolTable.new())
@@ -91,6 +102,46 @@ fn has_guarded_cleanup_branch(lowering: MirLowering) -> bool:
     false
 
 describe "facet descriptor lexical cleanup scopes":
+    it "emits a nested manifest whose opaque owner locals validate":
+        var lowering = cleanup_lowering()
+        var builder = lowering.builder
+        val outer_owner = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
+            "AspectExecutionContext")))
+        val outer_base = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
+            "ConcreteBase")))
+        val outer_lease = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
+            "__simple_facet_descriptor_lease_abi")))
+        val inner_owner = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
+            "AspectExecutionContext")))
+        val inner_base = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
+            "ConcreteBase")))
+        val inner_lease = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
+            "__simple_facet_descriptor_lease_abi")))
+        lowering.builder = builder
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(outer_lease,
+            cleanup_local_adapter(outer_owner, outer_base, outer_lease))
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(inner_lease,
+            cleanup_local_adapter(inner_owner, inner_base, inner_lease))
+        val unwind = lowering.emit_facet_unwind_cleanup_successor(0)
+        builder = lowering.builder
+        val normal = builder.new_block(Some("normal"))
+        builder.set_terminator(mir_call_terminator_create(
+            nil, mir_operand_const_int(1), [], normal,
+            MirCallUnwindContract.MayUnwind, Some(unwind)).unwrap())
+        builder.switch_to_block(normal)
+        builder.terminate_return(nil)
+        val function = builder.end_function()
+        val body = MirBody.from_function(function)
+        expect(function.exception_cleanup_contracts.len()).to_equal(1)
+        expect(function.exception_cleanup_contracts[0].entries.len()).to_equal(2)
+        expect(function.exception_cleanup_contracts[0].entries[0].owner.id).to_equal(
+            inner_owner.id)
+        expect(function.exception_cleanup_contracts[0].entries[1].owner.id).to_equal(
+            outer_owner.id)
+        expect(validate_mir_exception_cfg(body).is_ok()).to_be(true)
+
     it "releases leases in reverse acquisition order on scope fallthrough":
         var lowering = cleanup_lowering()
         lowering.enter_facet_cleanup_scope()
