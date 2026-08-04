@@ -13,29 +13,31 @@ use compiler.hir.hir.*
 use compiler.mir.mir.*
 use compiler.common.diagnostics.span.{Span}
 
-enum BackendKind:
-    Cranelift
-    Llvm
-    LlvmLib
-    Native
-    Wasm
-    Lean
-    Interpreter
-    Cuda
-    Hip
-    OpenCl
-    Vulkan
-    Vhdl
-    CCodegen
-    Byl
-    IrTc
-    Lua
-    Compiler
-    Sdn
-    CraneliftJit
-    LlvmJit
-    AutoJit
-    Custom(name: text)
+# SINGLE TERMINAL DECLARATION (2026-08-04).
+# This module already re-exports ALL of compiler.backend.backend.backend_types
+# (`export use ...backend.backend_types.*` at the bottom). It ALSO used to
+# DECLARE its own `BackendKind`, `CompiledSymbol` and `CompiledSymbolKind`, so a
+# single `use compiler.backend.backend_types.*` delivered each of those three
+# names from TWO different terminal modules at once. That is what broke Stage 3
+# self-host:
+#   HIR lowering error in src/compiler/backend/backend/interpreter.spl:
+#   enum payload dependency `CompiledSymbolKind` conflicts:
+#     `compiler.backend.backend_types::CompiledSymbolKind::enum` vs
+#     `compiler.backend.backend.backend_types::CompiledSymbolKind::enum`
+# (same for `BackendKind`). The `src/compiler/backend -> 70.backend` symlink is
+# NOT involved -- both module paths are derived from real, distinct files.
+#
+# The duplicates were also genuinely DIVERGENT, not just redundant, which is a
+# latent miscompile independent of Stage 3: same-named enums collapse in the
+# global enum registry, so whichever registers first fixes the discriminants for
+# EVERY importer. The local `BackendKind` ordered `Byl` at index 13 while the
+# sibling orders it at index 6, and the local `CompiledSymbol` ordered its fields
+# name/address/size/kind against the sibling's name/kind/address/size. The
+# dropped `Custom(name: text)` variant had ZERO uses anywhere in the tree.
+#
+# Importing the three names here keeps every existing user of this module
+# working while leaving exactly ONE terminal declaration per name.
+use compiler.backend.backend.backend_types.{BackendKind, CompiledSymbol, CompiledSymbolKind}
 
 # ============================================================================
 # Backend Results and Errors
@@ -94,26 +96,11 @@ struct CompiledUnit:
     entry_point: text?
     relocations: [Relocation]
 
-struct CompiledSymbol:
-    """Symbol in compiled unit."""
-    name: text
-    address: i64
-    size: i64
-    kind: CompiledSymbolKind
-
-enum CompiledSymbolKind:
-    Function
-    Data
-    # Kept identical to the sibling definitions in
-    # compiler/70.backend/backend/backend_types.spl and
-    # compiler/10.frontend/core/backend_types.spl. Same-named enums from
-    # different modules collapse in the global registry, so whichever
-    # registers first wins for every importer. When this variant was
-    # `External` (zero users) instead of `Const`, native-build died with
-    # "unknown variant or method 'Const' on enum CompiledSymbolKind" even
-    # for importers that named the correct module. Keep the three in sync
-    # until the duplicate definitions are merged.
-    Const
+# `CompiledSymbol` / `CompiledSymbolKind` are imported at the top of this file
+# from compiler.backend.backend.backend_types -- see the note there. The third
+# copy in compiler/10.frontend/core/backend_types.spl is a separate module that
+# no importer here shares a scope with; it is tracked in
+# doc/08_tracking/bug/duplicate_backend_types_terminal_declarations.md.
 
 struct Relocation:
     """Relocation entry."""
@@ -399,7 +386,11 @@ impl Value:
 
 export use compiler.backend.backend.backend_types.*
 
-export BackendKind, BackendResult, BackendError, BackendErrorKind
-export CompiledUnit, CompiledSymbol, CompiledSymbolKind, Relocation, RelocKind
+# BackendKind / CompiledSymbol / CompiledSymbolKind are NOT listed here: they
+# are no longer declared by this module and already reach every importer through
+# the `export use compiler.backend.backend.backend_types.*` line above. Naming
+# them again would re-introduce the two-terminal collision described at the top.
+export BackendResult, BackendError, BackendErrorKind
+export CompiledUnit, Relocation, RelocKind
 export BackendSdnValue, SdnValueKind
 export Value, EnumPayloadValue, FunctionValue, ClosureValue, ObjectValue
