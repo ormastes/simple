@@ -1,0 +1,46 @@
+# @req REQ-AF-008 NFR-AF-006
+# @cover src/app/startup/aspect_lifecycle_gate.spl 90%
+
+use std.spec.*
+use app.startup.aspect_lifecycle_gate.{AspectLifecycleGate}
+
+class AspectLifecycleGateFixture:
+    value: i64
+    operations: [text]
+
+fn aspect_lifecycle_gate_fixture_advance(
+    fixture: AspectLifecycleGateFixture,
+    operation: text,
+    amount: i64
+) -> i64:
+    fixture.operations.push(operation)
+    fixture.value = fixture.value + amount
+    fixture.value
+
+describe "Aspect lifecycle scoped gate":
+    it "returns the exact generic body result":
+        val gate = AspectLifecycleGate.create()
+        val text_result = gate.with_lock_keeping(
+            "read-canonical-state", \: "published")
+        val number_result = gate.with_lock_keeping(
+            "read-generation", \: 41 + 1)
+        expect(text_result).to_equal("published")
+        expect(number_result).to_equal(42)
+
+    it "applies sequential state transitions through separate scopes":
+        val gate = AspectLifecycleGate.create()
+        val fixture = AspectLifecycleGateFixture(value: 0, operations: [])
+
+        val reserved = gate.with_lock_keeping("lazy-reserve", \:
+            aspect_lifecycle_gate_fixture_advance(
+                fixture, "lazy-reserve", 1)
+        )
+        val committed = gate.with_lock_keeping("lazy-commit", \:
+            aspect_lifecycle_gate_fixture_advance(
+                fixture, "lazy-commit", 2)
+        )
+
+        expect(reserved).to_equal(1)
+        expect(committed).to_equal(3)
+        expect(fixture.value).to_equal(3)
+        expect(fixture.operations).to_equal(["lazy-reserve", "lazy-commit"])
