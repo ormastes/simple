@@ -1,0 +1,34 @@
+use std.spec.*
+use compiler.mir.mir_instruction_support.{
+    BlockId, MirCallUnwindContract, validate_mir_call_unwind_contract
+}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn unwind_contract_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "MIR call unwind contract source ownership":
+    it "requires every call terminator constructor to supply an explicit contract":
+        val source = unwind_contract_source(
+            "src/compiler/50.mir/mir_instruction_support.spl")
+        expect(source).to_contain("enum MirCallUnwindContract:")
+        expect(source).to_contain("NoUnwind")
+        expect(source).to_contain("MayUnwind")
+        expect(source).to_contain("unwind_contract: MirCallUnwindContract")
+
+    it "rejects contract and unwind-edge contradictions":
+        expect(validate_mir_call_unwind_contract(
+            MirCallUnwindContract.NoUnwind,
+            Some(BlockId(id: 9))).unwrap_err()).to_contain(
+            "NoUnwind call terminator cannot carry an unwind edge")
+        expect(validate_mir_call_unwind_contract(
+            MirCallUnwindContract.MayUnwind, nil).unwrap_err()).to_contain(
+            "MayUnwind call terminator requires an unwind edge")
+
+    it "accepts both internally consistent contract forms":
+        expect(validate_mir_call_unwind_contract(
+            MirCallUnwindContract.NoUnwind, nil).is_ok()).to_be(true)
+        expect(validate_mir_call_unwind_contract(
+            MirCallUnwindContract.MayUnwind,
+            Some(BlockId(id: 10))).is_ok()).to_be(true)

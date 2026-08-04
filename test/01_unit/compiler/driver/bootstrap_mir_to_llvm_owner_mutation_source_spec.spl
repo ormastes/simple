@@ -1,5 +1,5 @@
 use compiler.mir.mir_instruction_graph.{MirBlock, MirInst}
-use compiler.mir.mir_instruction_support.{BlockId, SwitchCase, MirOperand, MirOperandKind, mir_operand_const_int, mir_operand_const_float, mir_operand_const_bool, mir_operand_copy, mir_operand_move}
+use compiler.mir.mir_instruction_support.{BlockId, SwitchCase, MirOperand, MirOperandKind, MirCallUnwindContract, mir_operand_const_int, mir_operand_const_float, mir_operand_const_bool, mir_operand_copy, mir_operand_move}
 use compiler.mir.mir_instruction_kinds.{MirInstKind, MirTerminator}
 use compiler.mir.mir_types.{LocalId, MirType, MirTypeKind, MirConstValue}
 
@@ -314,11 +314,13 @@ describe "bootstrap MIR-to-LLVM owner mutation":
         val unreachable = MirTerminator.Unreachable
         val abort = MirTerminator.Abort("stop")
         val call_plain = MirTerminator.CallTerminator(
-            nil, mir_operand_const_int(0), [], BlockId(id: 149), nil
+            nil, mir_operand_const_int(0), [], BlockId(id: 149),
+            MirCallUnwindContract.NoUnwind, nil
         )
         val call_invoke = MirTerminator.CallTerminator(
             Some(LocalId(id: 6)), mir_operand_copy(LocalId(id: 8)),
-            [mir_operand_const_int(3)], BlockId(id: 163), Some(BlockId(id: 181))
+            [mir_operand_const_int(3)], BlockId(id: 163),
+            MirCallUnwindContract.MayUnwind, Some(BlockId(id: 181))
         )
 
         val ret_blocks = [
@@ -378,17 +380,21 @@ describe "bootstrap MIR-to-LLVM owner mutation":
             case MirTerminator.Abort(message): expect(message).to_equal("stop")
             case _: expect(false).to_equal(true)
         match call_plain:
-            case MirTerminator.CallTerminator(dest, _, args, normal, unwind):
+            case MirTerminator.CallTerminator(
+                dest, _, args, normal, unwind_contract, unwind):
                 expect(dest == nil).to_equal(true)
                 expect(args.len()).to_equal(0)
                 expect(normal.bootstrap_value()).to_equal(149)
+                expect(unwind_contract == MirCallUnwindContract.NoUnwind).to_equal(true)
                 expect(unwind == nil).to_equal(true)
             case _: expect(false).to_equal(true)
         match call_invoke:
-            case MirTerminator.CallTerminator(dest, _, args, normal, unwind):
+            case MirTerminator.CallTerminator(
+                dest, _, args, normal, unwind_contract, unwind):
                 expect((dest ?? LocalId(id: 0)).id).to_equal(6)
                 expect(args.len()).to_equal(1)
                 expect(normal.bootstrap_value()).to_equal(163)
+                expect(unwind_contract == MirCallUnwindContract.MayUnwind).to_equal(true)
                 expect((unwind ?? BlockId(id: 0)).bootstrap_value()).to_equal(181)
             case _: expect(false).to_equal(true)
 
