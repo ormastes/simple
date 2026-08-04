@@ -9,6 +9,7 @@ use std.ecs.component_store.{ComponentStore}
 use std.ecs.change_detection.{ChangeTracker}
 use std.ecs.system.{Scheduler}
 use std.ecs.world.{WorldBase}
+use std.mem.gen_arena.{GenArena, GenHandle}
 
 # Maximum windows the WM will track
 val WM_MAX_WINDOWS: i32 = 256
@@ -72,8 +73,19 @@ struct WindowState:
 # ============================================================================
 
 class WmWorld:
-    """ECS-based world owning all window component stores."""
+    """ECS-based world owning all window component stores.
+
+    `win_handles` is the window registry (M6 `std.mem.gen_arena` migration).
+    Every spawned window takes a `GenArena` slot holding its `window_id`; the
+    slot is freed on despawn, which bumps the slot generation. A `GenHandle`
+    is therefore the only window reference that survives being held across a
+    despawn safely: after the slot is recycled by the NEXT window, the old
+    handle is rejected (`window_id_for_handle` -> 0) instead of silently
+    resolving to the new occupant. A bare index or a raw `window_id` cannot
+    do this — a recycled `window_id` or slot index aliases, generations do not.
+    """
     base: WorldBase
+    win_handles: GenArena<u64>
     win_ids: ComponentStore<WinId>
     owner_ports: ComponentStore<OwnerPort>
     owner_processes: ComponentStore<OwnerProcess>
@@ -89,6 +101,7 @@ impl WmWorld:
             # in quick succession. Preallocate entity ids up front so the WM
             # does not have to grow its allocator during that hot path.
             base: WorldBase.with_capacity(WM_MAX_WINDOWS),
+            win_handles: GenArena<u64>.new(),
             win_ids: ComponentStore.new(),
             owner_ports: ComponentStore.new(),
             owner_processes: ComponentStore.new(),
@@ -98,13 +111,69 @@ impl WmWorld:
             states: ComponentStore.new()
         )
 
+    fn entity_at_id(self, ent_id: i32) -> Entity:
+        """Rebuild the live Entity for a raw ECS id with its REAL generation.
+
+        Component stores are keyed by id alone, so recovering an Entity from a
+        dense-column scan used to fabricate `generation: 0`. Generation 0 is
+        reserved for `Entity.null()` and is never handed out, so every such
+        Entity failed `EntityAllocator.free`'s generation check: `despawn`
+        silently returned false and the id was never recycled. Reading the
+        allocator's current generation makes the handle real.
+        """
+        Entity(id: ent_id, generation: self.base.alloc.generation_of(ent_id))
+
+    fn handle_for_window(self, window_id: u64) -> GenHandle:
+        """Generational handle for `window_id`, or idx -1 when unknown.
+
+        Callers that stash a window reference across event dispatch should
+        hold this, not the raw `window_id` (window ids are assigned by the
+        client and may be reused) and not a dense slot index (swap-remove
+        moves slots under you).
+        """
+        var i: i64 = 0
+        while i < self.win_handles.slots.len():
+            if self.win_handles.live[i]:
+                if self.win_handles.slots[i] == window_id:
+                    return GenHandle(idx: i, generation: self.win_handles.gens[i])
+            i = i + 1
+        GenHandle(idx: -1, generation: 0)
+
+    me window_id_for_handle(h: GenHandle) -> u64:
+        """Resolve a window handle to its window id, or 0 when stale.
+
+        This is the whole point of the GenArena migration: a handle minted for
+        a window that has since been despawned is REJECTED even after another
+        window recycles the same arena slot.
+        """
+        self.win_handles.get(h) ?? 0
+
+    me entity_for_handle(h: GenHandle) -> Entity:
+        """Live Entity for a window handle, or `Entity.null()` when stale."""
+        val wid = self.window_id_for_handle(h)
+        if wid == 0:
+            return Entity.null()
+        self.find_entity_for_window(wid)
+
+    fn live_window_count(self) -> i64:
+        """Number of live window slots in the generational registry."""
+        self.win_handles.len()
+
+    fn stale_handle_rejections(self) -> i64:
+        """Count of stale/dead handle accesses the registry has refused."""
+        self.win_handles.stale_count
+
+    fn registry_report() -> text:
+        """TSV registry line for `simple mem` (GEN_ARENA row shape)."""
+        self.win_handles.report("wm.windows")
+
     fn find_owner_port(self, window_id: u64) -> u64:
         """Find owner port for a window_id. Returns 0 if not found."""
         var i: i32 = 0
         while i < self.win_ids.len():
             if self.win_ids.dense[i].value == window_id:
                 val ent_id = self.win_ids.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
+                val e = self.entity_at_id(ent_id)
                 val slot = self.owner_ports.get_slot(e)
                 if slot >= 0:
                     return self.owner_ports.dense[slot].value
@@ -118,7 +187,7 @@ impl WmWorld:
         while i < self.win_ids.len():
             if self.win_ids.dense[i].value == window_id:
                 val ent_id = self.win_ids.entity_at(i)
-                return Entity(id: ent_id, generation: 0)
+                return self.entity_at_id(ent_id)
             i = i + 1
         Entity.null()
 
@@ -126,6 +195,10 @@ impl WmWorld:
         """Spawn a new entity and insert all window components."""
         log_raw_println("[wm-service] spawn-window:start wid={window_id} pid={process_id} app_id={app_id}")
         val e = self.base.spawn()
+        # Take a generational registry slot for this window. Freed (and its
+        # generation bumped) by despawn_window, so handles minted here go
+        # stale rather than aliasing the window that recycles the slot.
+        self.win_handles.alloc(window_id)
         # The WM uses these stores as current-state metadata, not as a
         # change-detection stream, so a stable tick is sufficient here.
         val tick: i64 = 0
@@ -149,6 +222,9 @@ impl WmWorld:
         val e = self.find_entity_for_window(window_id)
         if e.is_null():
             return false
+        val h = self.handle_for_window(window_id)
+        if h.idx >= 0:
+            self.win_handles.free(h)
         self.win_ids.remove(e)
         self.owner_ports.remove(e)
         self.owner_processes.remove(e)
@@ -166,7 +242,7 @@ impl WmWorld:
         while i < self.owner_ports.len():
             if self.owner_ports.dense[i].value == port:
                 val ent_id = self.owner_ports.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
+                val e = self.entity_at_id(ent_id)
                 val wid_slot = self.win_ids.get_slot(e)
                 if wid_slot >= 0:
                     to_destroy = to_destroy.push(self.win_ids.dense[wid_slot].value)
@@ -183,7 +259,7 @@ impl WmWorld:
         while i < self.owner_ports.len():
             if self.owner_ports.dense[i].value == port:
                 val ent_id = self.owner_ports.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
+                val e = self.entity_at_id(ent_id)
                 val wid_slot = self.win_ids.get_slot(e)
                 if wid_slot >= 0:
                     ids = ids.push(self.win_ids.dense[wid_slot].value)
@@ -196,7 +272,7 @@ impl WmWorld:
         while i < self.owner_processes.len():
             if self.owner_processes.dense[i].value == process_id:
                 val ent_id = self.owner_processes.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
+                val e = self.entity_at_id(ent_id)
                 val wid_slot = self.win_ids.get_slot(e)
                 if wid_slot >= 0:
                     ids = ids.push(self.win_ids.dense[wid_slot].value)
@@ -209,7 +285,7 @@ impl WmWorld:
         while i < self.app_ids.len():
             if self.app_ids.dense[i].value == app_id:
                 val ent_id = self.app_ids.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
+                val e = self.entity_at_id(ent_id)
                 val wid_slot = self.win_ids.get_slot(e)
                 if wid_slot >= 0:
                     ids = ids.push(self.win_ids.dense[wid_slot].value)
