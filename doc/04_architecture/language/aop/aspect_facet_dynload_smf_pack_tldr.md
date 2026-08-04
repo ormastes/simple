@@ -1,58 +1,47 @@
-# Aspect Facets + SFM Packs — TL;DR
+<!-- codex-architecture -->
+# Aspect Facets + SFM Packs — TLDR
 
-```sdn
-flow:
-  build: TypePredicateBytecode -> FacetBindingPlan + prepared advice slots -> AspectCatalog
-  package: app.sfm -> aspect/*.sfm -> opaque module.smf
-  load: DynSmfSession -> AspectExecutionContext -> staged generation
-```
+Aspect facets preserve base layout while SFM packs provide catalogued dynamic
+deployment. The implemented runtime is state-serialized and lease-based, but
+production admission still awaits threaded and executable evidence.
 
-- Dynamic facets expose affine `FacetRef<T>` guards and never change base
-  layout/parents. A compiler-generated private typed adapter retains the base
-  operand, resolved contract-ordered method table, and exact generation lease.
-- V1 uses public contracts or owner-exported capability facades only.
-- Existing compile-time AOP remains authoritative and exactly ordered.
-- Loader advice chains bind only catalog-prepared slots and keep canonical
-  priority/specificity/witness ordering; runtime never re-matches pointcuts.
-- `advice_dispatch_slot` revalidates loader owner/address before zero-argument
-  before/after calls; dynamic `around` is denied without a real `proceed` path.
-- Variants resolve at build time; runtime never traverses `variants/`.
-- SFM owns pack/catalog/index/compression/signatures; SMF stays opaque.
-- Existing dynSMF, loader, cache, and resource-lifecycle owners are extended.
-- Activation stages all dependencies then publishes one generation atomically.
-- Facet/advice visibility is removed before lifecycle drain; mission policy
-  rejects runtime advice patching.
-- Disabled prepared slots have an explicit non-zero guard footprint and expose
-  lookup/hit/miss/check/branch counters to the retained NFR harness.
-- `CompileOptions.prepared_dynamic_advice` derives execution slots from the existing
-  weave authority and emits automatic entry/return/abort MIR dispatch intrinsics.
-- `PreparedAdviceSlotPlan` is preserved and deterministically serialized; the
-  loader derives an immutable exact-generation projection from its one registry.
-- `AspectExecutionContext` solely owns loader/lifecycle/registries/projection.
-  The reviewed v2 intrinsic carries that exact typed context and rewrites to a
-  source-owned unit fail-stop call after exact dispatcher/coverage proof.
-  Cleanup completes before panic and arbitrary business returns are preserved.
-- Current advice dispatch is sequential copy-in/copy-out, not callback-safe
-  concurrency: local lifecycle pins are not committed before callbacks and can
-  race unload. The required split is application-mutex prepare/commit, callback
-  with no locks held, then application-mutex release/commit; loader registry,
-  `os/smf` leases, and physical unload remain separate owners.
-- Residual v1/v2 intrinsics and non-admitted targets remain E-AF010. No backend
-  trampoline, process-global handle, or second lease authority is permitted.
-- Check/interpreter reject the option directly; JIT and every AOT backend reject
-  produced slots through the same centralized admission boundary.
-- D4 is implemented pending executable verification. D5 now has genuine
-  source/HIR acquisition, nominal context/contract proof, an opaque descriptor
-  lease, checked ordinal method lookup, typed-base indirect-call lowering, and
-  HIR-symbol capture rejection, wrapper-aware provenance, and reverse-order
-  cleanup on every currently modeled lexical exit, exact-route injected lazy
-  I/O, canonical typed acquisition errors, and blocking single-flight sharing
-  for lazy callers. Production port binding, callback-safe advice/lifecycle
-  concurrency,
-  portable unwind/cancellation cleanup, and executable evidence remain open;
-  verification is `STATUS: FAIL`.
-- Resolver startup now crosses `85.mdsoc` through
-  `ModuleResolverDiscoveryPort.resolve_inputs`; production composition injects
-  the 99-loader adapter, while compatibility/test constructors stay explicitly
-  empty. Layer 80 has no loader implementation import.
-- Cold aspects open/read/decompress/map/allocate/scan nothing before activation.
+## Core Shape
+
+- Build-time AOP remains authoritative: prepared slots are deterministic and
+  runtime dispatch never re-matches pointcuts.
+- `AspectExecutionContext` solely owns the canonical loader, cache,
+  coordinator, registries, projection, and lifecycle state.
+- One lifecycle mutex serializes canonical transitions. Prepared advice commits
+  exact generation leases, releases the mutex for native callbacks, then
+  finalizes against and installs current state. Panic is fail-stop after cleanup.
+- Lazy activation gates preflight and commit while exact-route pack I/O remains
+  outside the lifecycle mutex. Same-route re-entry is prohibited; different
+  lazy routes are globally serialized by one application single-flight.
+- Facet acquire/release and unload are gated. Unload removes visibility before
+  drain, validates all cache pins before physical unload, and installs partial
+  transition state before propagating status or error.
+- Context-free `aspect_*_transition.spl` leaves hold state algorithms without
+  importing `AspectExecutionContext` or owning mutexes. The 786-line
+  `aspect_application_runtime.spl` remains the ownership facade.
+- Compatibility loader parameters never replace the canonical loader. No
+  process-global context, second lease authority, or backend trampoline exists.
+
+## Operational Notes
+
+- startup: mission mode requires every startup aspect active before sealing the
+  application operational.
+- hot path: loader owner/address and exact generation are validated before
+  zero-argument before/after callbacks; dynamic `around` remains denied.
+- invalidation: variants resolve at build time; unload invalidates facet,
+  advice, and projection visibility before quiesce and respects module pins.
+- evidence: transition order, canonical loader use, mutex boundaries, exact
+  reservations, and owner size are statically verified. `REQ-AF-008` is not
+  admitted without threaded dispatch/unload and target runtime evidence;
+  portable unwind/cancellation cleanup remains open.
+
+## Open Next
+
+- [Full architecture](aspect_facet_dynload_smf_pack.md)
+- [Application runtime](../../../../src/app/startup/aspect_application_runtime.spl)
+- [Prepared transition](../../../../src/app/startup/aspect_prepared_advice_transition.spl)
+- [Lifecycle source guard](../../../../scripts/audit/aspect-lifecycle-gate-source-guard.shs)

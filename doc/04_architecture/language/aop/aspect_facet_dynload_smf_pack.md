@@ -1,4 +1,5 @@
 <!-- codex-design -->
+<!-- codex-architecture -->
 # Architecture: Aspect Facets and Demand-Loaded SFM Packs
 
 ## Decision
@@ -76,8 +77,8 @@ architecture:
 | catalog and generation adapter | `compiler/99.loader/loader/aspect_catalog.spl`, `aspect_activation.spl` |
 | dynamic facet publication | `compiler/99.loader/loader/facet_binding_registry.spl` (validated candidates, exact `activation_key@generation` publication, concrete/open-world lookup, exact unbind; no lifecycle ownership) |
 | facet artifact contract | `compiler/00.common/structural_contracts/facet_artifact.spl`; SHB v1.1 optional facet-contract section and ordinary-SMF `.facet_bindings` Note consumed through existing readers |
-| dynamic advice publication | `compiler/99.loader/loader/advice_binding_registry.spl` (catalog-prepared slots, canonical preordered chains, exact-generation publish/unbind, disabled-path counters; no pointcut evaluator). Its current lifecycle/callback executor is the audited cohesion violation described below. |
-| application runtime owner | `app/startup/aspect_application_runtime.spl` (retained trust/cache/coordinator, exact relative routes, mission seal, opaque per-aspect generation leases, quiesce/drain unload) |
+| dynamic advice publication | `compiler/99.loader/loader/advice_binding_registry.spl` (catalog-prepared slots, canonical preordered chains, exact-generation publish/unbind, projection prepare/finalize, disabled-path counters; no pointcut evaluator or application mutex ownership) |
+| application runtime owner | `app/startup/aspect_application_runtime.spl` (786-line serialized owner retaining trust/cache/coordinator/canonical loader, exact relative routes, mission seal, leased callbacks, gated lazy/facet/unload operations) plus context-free `aspect_*_transition.spl` leaves |
 
 The syntax parser is an explicitly feature-scoped frontend surface; it does not
 replace the established advice/CE parsers. The activation adapter composes
@@ -93,11 +94,14 @@ counters and a footprint descriptor. The application runtime removes both
 facet and advice visibility before unload drain. Mission policy rejects runtime
 advice-patch activation.
 
-`advice_dispatch_slot` is the current loader-validated sequential execution seam for
+`advice_dispatch_slot` is the loader-validated leased execution seam for
 zero-argument `before`, `after_success`, and `after_error` witnesses. Admission
 captures the resolved address and owner; dispatch revalidates both against the
 existing `ModuleLoader` before invoking any callback, so an invalid chain fails
-before partial execution. Runtime `around` is rejected because no dynamic
+before partial execution. Prepare commits exact generation pins under the
+application lifecycle mutex, native invocation runs with that mutex released,
+and finish installs then-current registry/lifecycle state under the same mutex.
+Runtime `around` is rejected because no dynamic
 exactly-once `proceed` continuation exists. With
 `CompileOptions.prepared_dynamic_advice`, the established pointcut/weaving authority now
 produces stable execution slots and automatic phase-specific
@@ -113,8 +117,8 @@ The driver collects a deterministic schema-v1 table. The loader derives an
 immutable schema-v1 dispatch projection containing exact publication,
 generation, witness-owner, and address identity from its canonical registry.
 Projection install is atomic with publication and invalidation precedes drain.
-Sequential application-runtime dispatch pins the exact generation; concurrent
-pin visibility requires the audited state-gate split below. Check/interpreter
+Application-runtime dispatch installs exact-generation pins in canonical state
+before callbacks become reachable. Check/interpreter
 reject the option directly; JIT and every AOT backend reject produced slots
 before code generation until they can reach that canonical dispatch owner.
 
@@ -138,15 +142,15 @@ config producer inserts phase-specific prepared-dispatch intrinsics. Catalog
 slot strings and the loader projection consume the same finite slot identity;
 no runtime pointcut evaluator is introduced.
 
-The explicit application execution context bridge is implemented for the
-admitted sequential path. `AspectExecutionContext` is the sole stored owner of the
+The explicit application execution context bridge is implemented.
+`AspectExecutionContext` is the sole stored owner of the
 loader, lifecycle manager, facet/advice registries, and dispatch projection.
 The driver validates the exact context argument and rewrites v2 to an ordinary
 source-owned dispatch call; no generated backend trampoline or process-global
 handle is admitted. Projection publication, invalidation, and exact-generation
 pinning remain context-owned loader/application-runtime responsibilities.
-Concurrent mutation is not safe until the callback-safe application state gate
-below exists. The projection is never an independently mutable registry.
+Canonical mutation is serialized by the callback-safe application state gate
+described below. The projection is never an independently mutable registry.
 
 ### Facet witness descriptors
 
@@ -162,7 +166,7 @@ returns only the compile-time ordinal's checked method address. The descriptor
 identity is never called or required as an exported factory. Inherited table
 flattening and generic descriptor shapes remain fail-closed.
 
-The current intrinsic ABI is intentionally insufficient for that bridge: it
+The v1 intrinsic ABI is intentionally insufficient for that bridge: it
 carries only the stable slot and phase, not a canonical lifecycle handle or
 generation token. A process-global native projection with its own reference
 count would therefore introduce a second lease authority rather than pinning
@@ -181,11 +185,11 @@ source-owned `prepared_advice_dispatch_context_invoke` entry, so existing call
 ABIs—not backend-specific callback code—carry the context. Every residual v1
 or v2 intrinsic remains a backend error.
 
-This ABI becomes executable only after a stable application reference capsule
-is the sole owner of `LifecycleManager`, `AdviceBindingRegistry`,
-`AdviceDispatchProjection`, and the validating `ModuleLoader`; coordinator and
-runtime values must reference that capsule rather than copy its mutable state.
-The dispatcher applies returned registry/lifecycle state synchronously and may
+The stable application reference capsule is now the serialized owner of
+`LifecycleManager`, `AdviceBindingRegistry`, `AdviceDispatchProjection`, and
+the canonical validating `ModuleLoader`. Transition leaves accept explicit
+state and the runtime installs every returned mutation before propagating an
+error. The dispatcher applies returned registry/lifecycle state synchronously and may
 surface failure only after exact-token cleanup. Initial admission is hosted CPU
 AOT entry-closure; interpreter, JIT, SMF-exec, GPU, WASM, VHDL, and unproved
 native paths remain E-AF010. Two-context isolation, held-token unload blocking,
@@ -226,40 +230,9 @@ The former registry-plus-loader executor is not part of the public surface:
 native execution is reachable only through the projection-plus-lifecycle seam.
 Canonical registry lookup remains separately available for inspection.
 
-## 2026-08-04 callback-safe advice concurrency audit
+## 2026-08-04 state-serialized leased-callback implementation
 
-### Current state
-
-The exact-generation algorithm is sequentially correct but is not currently a
-concurrent ownership boundary. `advice_dispatch_projection_with_invoker` in
-`compiler/99.loader/loader/advice_binding_registry.spl` receives value snapshots
-of `AdviceBindingRegistry` and `LifecycleManager`, acquires tokens in the local
-lifecycle value, invokes callbacks, and returns updated values. Only afterward
-does `AspectExecutionContext.invoke_prepared_advice` assign those values back to
-the application context. No mutex covers that copy-in/copy-out interval.
-
-Consequently, concurrent dispatches can start from the same token counter and
-lose pin/counter updates, while `unload_published_aspect` can invalidate,
-quiesce, observe the canonical pin count as zero, and reclaim loader resources
-while a callback is running with pins held only in a local lifecycle copy. The
-existing tests prove ordering, validation, cleanup, and sequential unload retry;
-they do not prove concurrent dispatch/unload safety. `LifecycleManager` remains
-the correct sole generation-lease registry, but its immutable-copy API requires
-one serialized application owner for every mutation.
-
-The context methods `advice_dispatch_slot(loader, ...)` and
-`unload_published_aspect(..., loader)` also overwrite `self.loader` from a
-caller-supplied `ModuleLoader` value. That compatibility shape permits a stale
-loader copy to replace the supposed canonical owner and must not be used by the
-concurrent path; context-owned operations must use only `self.loader`.
-
-The current module also violates its stated cohesion boundary: the loader
-registry owns publication data but imports `LifecycleManager`, `ModuleLoader`,
-and the native callback primitive and performs callback execution. Registry
-publication, generation leasing, physical resource ownership, and application
-synchronization are distinct concerns.
-
-### Required owner split
+### Implemented owner split
 
 | Raw layer | Common/owned node | Public to parent | Public to next-layer sibling |
 |---|---|---|---|
@@ -270,35 +243,31 @@ synchronization are distinct concerns.
 | `app/startup` | advice dispatch coordination | context-first dispatch result | sole serialized mutation of registry/lifecycle/projection |
 | `app/startup` | retirement coordination | visibility invalidation then quiesce/drain/unload | sole ordering bridge between generation and physical owners |
 
-Tree-private implementation should split as follows without new language
-visibility grammar:
+The implementation follows this split without new visibility grammar:
 
-1. Keep candidate staging, deterministic ordering, publication, lookup, and
-   unbind in `advice_binding_registry.spl`. Retain publication/lookup counters
-   there, but move dispatch attempt/invocation/failure counters into the
-   application dispatch coordinator that serializes their mutation.
-2. Move projection derivation/invalidation and loader-owner validation to a
-   loader-private projection module. It returns immutable rows and never owns
-   tokens or invokes callbacks.
-3. Add an application-private dispatch coordinator beside
-   `AspectExecutionContext`. Under one application state mutex it revalidates
-   the current projection/publication, acquires exact lifecycle tokens, commits
-   the updated canonical lifecycle and attempt counters, and returns a
-   tree-private dispatch ticket.
-   The concurrent entrypoint accepts no caller-supplied `ModuleLoader`; it uses
-   the context's retained loader exclusively.
-4. Release the state mutex before invoking any callback. This is mandatory for
-   callback re-entry and for callbacks that request unload; no application or
-   lifecycle lock may be held across foreign/generated code.
-5. In a guaranteed finish path, reacquire the same state mutex, release the
-   ticket's exact tokens in reverse order, commit counters/lifecycle, then
-   expose success or failure. Portable unwind/cancellation remains blocked until
-   the language can guarantee this finish path.
-6. Serialize activation publication and unload invalidation/quiesce through the
-   same application state mutex. Unload commits invisibility and quiescing
-   before checking pins, returns `quiescing` while tickets exist, and claims one
-   retirement completion before performing physical `ModuleLoader` cleanup so
-   concurrent retries cannot unload twice.
+1. `AspectExecutionContext` uses one direct `AspectLifecycleGate` mutex for
+   canonical coordinator, lifecycle, registry, projection, facet lease, and
+   unload mutations. Transition leaves never import the context or own a mutex.
+2. `aspect_prepared_advice_transition.spl` prepares and pins from canonical
+   state. The runtime installs prepare state before unlock, invokes the native
+   permit with no application lock held, then finalizes against then-current
+   state and installs it before exposing success or failure. Application claims
+   prevent empty-permit replay; the panic ABI is fail-stop after cleanup.
+3. Compatibility loader parameters never replace state. Activation, dispatch,
+   and unload use only `context.loader` and the canonical provider cache.
+4. `aspect_lazy_activation_transition.spl` binds reservations to the exact
+   activation key and request. Preflight and commit are gated; exact-route pack
+   I/O is not. Same-route re-entry is prohibited because it would follow its own
+   flight. Different lazy routes are deliberately globally serialized and retry
+   after the active application flight completes.
+5. Facet acquisition/release uses `aspect_facet_lifecycle_transition.spl`.
+   Returned coordinator state is installed before cleanup errors propagate.
+6. `aspect_unload_transition.spl` orders visibility invalidation, quiesce,
+   drain, all-cache-pin validation, physical unload, cache release/invalidation,
+   lifecycle completion, and publication removal. Partial state is returned and
+   installed before status/error propagation.
+7. Policy/catalog/error and pack-activation algorithms are context-free leaves.
+   `aspect_application_runtime.spl` remains the 786-line ownership facade.
 
 The lazy-activation single-flight gate is not this state mutex and must not be
 reused as one: it coordinates one I/O/activation request and intentionally
@@ -309,3 +278,12 @@ This split retains MDSOC direction: loader owns inert validated projection,
 `os/smf` owns leases, and the application capsule composes them. No process-global
 table, second reference count, copied runtime snapshot, or backend-owned pin is
 admitted.
+
+### Verification and admission status
+
+Transition ordering, canonical-loader use, mutex/callback placement, exact-key
+reservation, unconditional state installation, and the runtime owner-size guard
+are statically verified. This is not threaded or executable runtime evidence.
+`REQ-AF-008` therefore remains not admitted, and production prepared advice
+stays fail-closed until threaded dispatch/unload and target runtime evidence
+pass. Portable unwind/cancellation cleanup also remains an admission gate.
