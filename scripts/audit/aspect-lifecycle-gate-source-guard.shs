@@ -77,6 +77,7 @@ facet_lifecycle_source="src/app/startup/aspect_facet_lifecycle_transition.spl"
 unload_source="src/app/startup/aspect_unload_transition.spl"
 prepared_transition_source="src/app/startup/aspect_prepared_advice_transition.spl"
 pack_transition_source="src/app/startup/aspect_pack_activation_transition.spl"
+policy_transition_source="src/app/startup/aspect_application_policy_transition.spl"
 prepared_abi_source="src/app/startup/aspect_prepared_advice_compiler_abi.spl"
 
 if has_locked_method "$runtime_source"; then
@@ -94,7 +95,8 @@ for transition_source in \
     "$facet_lifecycle_source" \
     "$unload_source" \
     "$prepared_transition_source" \
-    "$pack_transition_source"
+    "$pack_transition_source" \
+    "$policy_transition_source"
 do
     if rg -n '^use .*AspectExecutionContext|aspect_application_runtime|mutex_with_lock' \
         "$transition_source"; then
@@ -168,7 +170,7 @@ for transition_call in \
     aspect_unload_transition
 do
     call_line=$(rg -n "val transitioned = ${transition_call}\\(" "$runtime_source" | cut -d: -f1)
-    install_line=$(rg -n 'context\.coordinator = transitioned\.coordinator' "$runtime_source" | \
+    install_line=$(rg -n '(self|context)\.coordinator = transitioned\.coordinator' "$runtime_source" | \
         awk -F: -v call_line="$call_line" '$1 > call_line { print $1; exit }')
     if [ -z "$call_line" ] || [ -z "$install_line" ]; then
         echo "FAIL: mutating transition lacks unconditional coordinator installation: ${transition_call}" >&2
@@ -204,6 +206,12 @@ done
 if ! rg -q 'export use app.startup.aspect_prepared_advice_compiler_abi' \
     src/app/startup/__init__.spl; then
     echo "FAIL: startup facade does not re-export prepared-advice ABI leaf" >&2
+    exit 1
+fi
+
+runtime_lines=$(wc -l < "$runtime_source")
+if [ "$runtime_lines" -gt 795 ]; then
+    echo "FAIL: aspect application runtime exceeds the 795-line owner budget: ${runtime_lines}" >&2
     exit 1
 fi
 

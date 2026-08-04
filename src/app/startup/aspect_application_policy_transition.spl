@@ -1,0 +1,66 @@
+# Pure application policy, catalog, and lazy completion adapters.
+
+use compiler.loader.loader.aspect_catalog.{AspectCatalog}
+use compiler.loader.loader.aspect_pack_provider.{AspectPackTrustPolicy}
+use compiler.loader.loader.aspect_activation.{AspectActivationCoordinator}
+use std.aop.facet.{FacetAcquireError}
+use app.startup.aspect_facet_runtime_contract.{
+    AspectApplicationPhase, AspectApplicationOperation,
+    aspect_application_is_mission, aspect_application_is_operational,
+    aspect_facet_acquire_error_from_runtime_text
+}
+
+fn aspect_application_operation_authorize(
+    policy: AspectPackTrustPolicy,
+    phase: AspectApplicationPhase,
+    operation: AspectApplicationOperation
+) -> Result<(), text>:
+    if not aspect_application_is_mission(policy):
+        return Ok(())
+    match operation:
+        case AspectApplicationOperation.LazyIo:
+            if aspect_application_is_operational(phase):
+                return Err(
+                    "E-APACK008 mission operational state denies lazy aspect-pack I/O")
+        case AspectApplicationOperation.DynamicAttach:
+            return Err(
+                "E-APACK008 mission profile denies dynamic aspect attachment")
+        case AspectApplicationOperation.Unload:
+            return Err("E-APACK008 mission profile denies aspect unload")
+        case AspectApplicationOperation.Patch:
+            return Err(
+                "E-APACK008 mission profile denies runtime advice patching")
+    Ok(())
+
+fn aspect_application_catalog_pack_path(
+    catalog: AspectCatalog, aspect_id: text
+) -> Result<text, text>:
+    Ok(catalog.find(aspect_id)?.pack_path)
+
+fn aspect_application_startup_publications_validate(
+    catalog: AspectCatalog, coordinator: AspectActivationCoordinator
+) -> Result<(), text>:
+    for entry in catalog.entries:
+        if entry.activation_policy == "startup":
+            if (not coordinator.published.has(entry.aspect_id) or
+                coordinator.published[entry.aspect_id].state != "active"):
+                return Err(
+                    "E-APACK008 mission operational transition requires active startup aspect: {entry.aspect_id}")
+    Ok(())
+
+fn aspect_lazy_completion_release_error(
+    facet_interface_id: text,
+    completion_error: text,
+    release_result: Result<(), text>
+) -> FacetAcquireError:
+    if release_result.is_err():
+        return aspect_facet_acquire_error_from_runtime_text(
+            facet_interface_id,
+            "{completion_error}; {release_result.unwrap_err()}")
+    aspect_facet_acquire_error_from_runtime_text(
+        facet_interface_id, completion_error)
+
+export aspect_application_operation_authorize
+export aspect_application_catalog_pack_path
+export aspect_application_startup_publications_validate
+export aspect_lazy_completion_release_error

@@ -1,0 +1,69 @@
+use std.spec.*
+use compiler.loader.loader.aspect_catalog.{AspectCatalog}
+use compiler.loader.loader.aspect_pack_provider.{AspectPackTrustPolicy}
+use compiler.loader.loader.aspect_activation.{AspectActivationCoordinator}
+use os.smf.dynsmf_session.{DynSmfPolicy, dynsmf_session_new}
+use os.smf.smf_generation.{LifecycleManager}
+use std.aop.facet.{FacetAcquireErrorKind}
+use app.startup.aspect_facet_runtime_contract.{
+    AspectApplicationPhase, AspectApplicationOperation
+}
+use app.startup.aspect_application_policy_transition.{
+    aspect_application_operation_authorize,
+    aspect_application_catalog_pack_path,
+    aspect_application_startup_publications_validate,
+    aspect_lazy_completion_release_error
+}
+
+fn policy_transition_catalog() -> AspectCatalog:
+    AspectCatalog(
+        generation: 7,
+        target: "x86_64-unknown-linux-gnu",
+        variant_fingerprint: "variant-a",
+        runtime_abi: "simple-runtime-1",
+        entries: [])
+
+fn policy_transition_coordinator() -> AspectActivationCoordinator:
+    AspectActivationCoordinator.create(
+        policy_transition_catalog(),
+        dynsmf_session_new(
+            "policy-transition-test",
+            DynSmfPolicy(
+                disabled_all: false, disabled_ids: [], source: "test")),
+        LifecycleManager.new_manager()).unwrap()
+
+describe "Pure application policy transitions":
+    it "preserves ordinary and mission operation policy diagnostics":
+        aspect_application_operation_authorize(
+            AspectPackTrustPolicy.ordinary_unsigned(),
+            AspectApplicationPhase.Operational,
+            AspectApplicationOperation.Unload).unwrap()
+        var public_key: [u8] = []
+        while public_key.len() < 32:
+            public_key.push(7)
+        val mission = AspectPackTrustPolicy.mission(public_key).unwrap()
+        expect(aspect_application_operation_authorize(
+            mission, AspectApplicationPhase.Operational,
+            AspectApplicationOperation.LazyIo).unwrap_err()).to_contain(
+            "operational state denies lazy")
+        expect(aspect_application_operation_authorize(
+            mission, AspectApplicationPhase.Startup,
+            AspectApplicationOperation.Unload).unwrap_err()).to_contain(
+            "denies aspect unload")
+
+    it "validates catalog-derived absence without mutating coordinator":
+        val catalog = policy_transition_catalog()
+        val coordinator = policy_transition_coordinator()
+        aspect_application_startup_publications_validate(
+            catalog, coordinator).unwrap()
+        expect(aspect_application_catalog_pack_path(
+            catalog, "missing.aspect").unwrap_err()).to_contain("missing.aspect")
+        expect(coordinator.published.keys().len()).to_equal(0)
+
+    it "combines completion and release failures without changing error kind":
+        val combined = aspect_lazy_completion_release_error(
+            "Debuggable", "completion failed", Err("release failed"))
+        if combined.kind != FacetAcquireErrorKind.ActivationFailed:
+            fail("lazy completion adapter changed the error kind")
+        expect(combined.message).to_equal(
+            "completion failed; release failed")

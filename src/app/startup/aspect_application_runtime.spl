@@ -77,6 +77,12 @@ use app.startup.aspect_facet_lifecycle_transition.{
     aspect_published_facet_method_address
 }
 use app.startup.aspect_unload_transition.{aspect_unload_transition}
+use app.startup.aspect_application_policy_transition.{
+    aspect_application_operation_authorize,
+    aspect_application_catalog_pack_path,
+    aspect_application_startup_publications_validate,
+    aspect_lazy_completion_release_error
+}
 use app.startup.aspect_facet_runtime_contract.{
     AspectApplicationPhase, AspectApplicationOperation,
     PublishedFacetDescriptorLease,
@@ -106,14 +112,6 @@ class AspectExecutionContext:
 # Compatibility facade: existing constructors, methods, and public fields keep
 # the AspectApplicationRuntime spelling while sharing the stable context.
 type AspectApplicationRuntime = AspectExecutionContext
-
-fn aspect_application_startup_complete(runtime: AspectApplicationRuntime) -> Result<(), text>:
-    for entry in runtime.catalog.entries:
-        if entry.activation_policy == "startup":
-            if not runtime.coordinator.published.has(entry.aspect_id) or
-                runtime.coordinator.published[entry.aspect_id].state != "active":
-                return Err("E-APACK008 mission operational transition requires active startup aspect: {entry.aspect_id}")
-    Ok(())
 
 impl AspectExecutionContext:
     static fn create(
@@ -194,25 +192,13 @@ impl AspectExecutionContext:
         Ok(context)
 
     fn authorize(operation: AspectApplicationOperation) -> Result<(), text>:
-        if not aspect_application_is_mission(self.trust_policy):
-            return Ok(())
-        match operation:
-            case AspectApplicationOperation.LazyIo:
-                if aspect_application_is_operational(self.phase):
-                    return Err("E-APACK008 mission operational state denies lazy aspect-pack I/O")
-            case AspectApplicationOperation.DynamicAttach:
-                return Err("E-APACK008 mission profile denies dynamic aspect attachment")
-            case AspectApplicationOperation.Unload:
-                return Err("E-APACK008 mission profile denies aspect unload")
-            case AspectApplicationOperation.Patch:
-                return Err("E-APACK008 mission profile denies runtime advice patching")
-        Ok(())
+        aspect_application_operation_authorize(
+            self.trust_policy, self.phase, operation)
 
     # The application I/O owner opens exactly this deployed-image-relative
     # path. No search roots or fallback directories are exposed here.
     fn pack_path_for(aspect_id: text) -> Result<text, text>:
-        val entry = self.catalog.find(aspect_id)?
-        Ok(entry.pack_path)
+        aspect_application_catalog_pack_path(self.catalog, aspect_id)
 
     # The embedding application supplies bytes through its canonical I/O
     # facade.  Admission always executes the retained trust policy, including
@@ -350,12 +336,8 @@ impl AspectExecutionContext:
         completion_error: text
     ) -> Result<PublishedFacetDescriptorLease?, FacetAcquireError>:
         val released = self.release_published_facet_descriptor(acquired)
-        if released.is_err():
-            return Err(aspect_facet_acquire_error_from_runtime_text(
-                facet_interface_id,
-                "{completion_error}; {released.unwrap_err()}"))
-        Err(aspect_facet_acquire_error_from_runtime_text(
-            facet_interface_id, completion_error))
+        Err(aspect_lazy_completion_release_error(
+            facet_interface_id, completion_error, released))
 
 fn aspect_execution_context_lazy_preflight_locked(
     context: AspectExecutionContext,
@@ -432,7 +414,8 @@ impl AspectExecutionContext:
         if aspect_application_is_operational(self.phase):
             return Ok(())
         if aspect_application_is_mission(self.trust_policy):
-            aspect_application_startup_complete(self)?
+            aspect_application_startup_publications_validate(
+                self.catalog, self.coordinator)?
         self.phase = AspectApplicationPhase.Operational
         Ok(())
 
@@ -457,8 +440,7 @@ impl AspectExecutionContext:
     fn published_generation_pin_count(aspect_id: text) -> Result<i64, text>:
         mutex_with_lock_keeping(
             self.lifecycle_gate.mutex, 0, \:
-                aspect_execution_context_published_generation_pin_count_locked(
-                    self, aspect_id))
+                aspect_generation_pin_count(self.coordinator, aspect_id))
 
 fn aspect_execution_context_acquire_published_generation_locked(
     context: AspectExecutionContext, aspect_id: text
@@ -473,11 +455,6 @@ fn aspect_execution_context_release_published_generation_locked(
     val transitioned = aspect_generation_release(context.coordinator, token)?
     context.coordinator = transitioned.coordinator
     Ok(())
-
-fn aspect_execution_context_published_generation_pin_count_locked(
-    context: AspectExecutionContext, aspect_id: text
-) -> Result<i64, text>:
-    aspect_generation_pin_count(context.coordinator, aspect_id)
 
 impl AspectExecutionContext:
 
@@ -495,20 +472,10 @@ impl AspectExecutionContext:
             facet_interface_id: facet_interface_id)
         mutex_with_lock_keeping(
             self.lifecycle_gate.mutex, 0, \:
-                aspect_execution_context_lookup_published_facet_locked(
-                    self, query.concrete_type_id,
+                aspect_published_facet_lookup(
+                    self.coordinator, query.concrete_type_id,
                     query.implemented_business_interfaces,
                     query.facet_interface_id))
-
-fn aspect_execution_context_lookup_published_facet_locked(
-    context: AspectExecutionContext,
-    concrete_type_id: text,
-    implemented_business_interfaces: [text],
-    facet_interface_id: text
-) -> Result<FacetBindingRecord?, text>:
-    aspect_published_facet_lookup(
-        context.coordinator, concrete_type_id,
-        implemented_business_interfaces, facet_interface_id)
 
 impl AspectExecutionContext:
 
@@ -518,16 +485,10 @@ impl AspectExecutionContext:
     me fn lookup_published_advice(slot_id: text) -> Result<[AdviceBindingRecord], text>:
         mutex_with_lock_keeping(
             self.lifecycle_gate.mutex, 0, \:
-                aspect_execution_context_lookup_published_advice_locked(
-                    self, slot_id))
-
-fn aspect_execution_context_lookup_published_advice_locked(
-    context: AspectExecutionContext, slot_id: text
-) -> Result<[AdviceBindingRecord], text>:
-    val transitioned = aspect_published_advice_lookup(
-        context.coordinator, slot_id)?
-    context.coordinator = transitioned.coordinator
-    Ok(transitioned.chain)
+                val transitioned = aspect_published_advice_lookup(
+                    self.coordinator, slot_id)?
+                self.coordinator = transitioned.coordinator
+                Ok(transitioned.chain))
 
 impl AspectExecutionContext:
 
@@ -714,25 +675,13 @@ impl AspectExecutionContext:
         val boxed = AspectFacetDescriptorBox(value: acquired)
         mutex_with_lock_keeping(
             self.lifecycle_gate.mutex, 0, \:
-                aspect_execution_context_release_published_facet_descriptor_locked(
-                    self, boxed.value))
-
-fn aspect_execution_context_release_published_facet_descriptor_locked(
-    context: AspectExecutionContext,
-    acquired: PublishedFacetDescriptorLease
-) -> Result<(), text>:
-    val transitioned = aspect_published_facet_descriptor_release(
-        context.coordinator, acquired)
-    context.coordinator = transitioned.coordinator
-    if val reason = transitioned.error:
-        return Err(reason)
-    Ok(())
-
-fn aspect_execution_context_published_facet_descriptor_handle_validate_locked(
-    context: AspectExecutionContext,
-    acquired: PublishedFacetDescriptorLease
-) -> Result<(), text>:
-    aspect_published_facet_handle_validate(context.coordinator, acquired)
+                val transitioned = aspect_published_facet_descriptor_release(
+                    self.coordinator, boxed.value)
+                self.coordinator = transitioned.coordinator
+                if val reason = transitioned.error:
+                    Err(reason)
+                else:
+                    Ok(()))
 
 impl AspectExecutionContext:
 
@@ -753,20 +702,10 @@ impl AspectExecutionContext:
             expected_method_names: expected_method_names)
         mutex_with_lock_keeping(
             self.lifecycle_gate.mutex, 0, \:
-                aspect_execution_context_validate_published_facet_descriptor_contract_locked(
-                    self, query.acquired, query.expected_facet_interface_id,
+                aspect_published_facet_contract_validate(
+                    self.coordinator, query.acquired,
+                    query.expected_facet_interface_id,
                     query.expected_abi_hash, query.expected_method_names))
-
-fn aspect_execution_context_validate_published_facet_descriptor_contract_locked(
-    context: AspectExecutionContext,
-    acquired: PublishedFacetDescriptorLease,
-    expected_facet_interface_id: text,
-    expected_abi_hash: text,
-    expected_method_names: [text]
-) -> Result<(), text>:
-    aspect_published_facet_contract_validate(
-        context.coordinator, acquired, expected_facet_interface_id,
-        expected_abi_hash, expected_method_names)
 
 impl AspectExecutionContext:
 
@@ -781,17 +720,8 @@ impl AspectExecutionContext:
         val boxed = AspectFacetDescriptorBox(value: acquired)
         mutex_with_lock_keeping(
             self.lifecycle_gate.mutex, 0, \:
-                aspect_execution_context_published_facet_descriptor_method_address_locked(
-                    self, boxed.value, ordinal, expected_name))
-
-fn aspect_execution_context_published_facet_descriptor_method_address_locked(
-    context: AspectExecutionContext,
-    acquired: PublishedFacetDescriptorLease,
-    ordinal: i64,
-    expected_name: text
-) -> Result<i64, text>:
-    aspect_published_facet_method_address(
-        context.coordinator, acquired, ordinal, expected_name)
+                aspect_published_facet_method_address(
+                    self.coordinator, boxed.value, ordinal, expected_name))
 
 impl AspectExecutionContext:
 
@@ -839,20 +769,14 @@ impl AspectExecutionContext:
         _ = loader
         mutex_with_lock_keeping(
             self.lifecycle_gate.mutex, 0, \:
-                aspect_execution_context_unload_published_aspect_locked(
-                    self, aspect_id))
-
-fn aspect_execution_context_unload_published_aspect_locked(
-    context: AspectExecutionContext, aspect_id: text
-) -> Result<text, text>:
-    val transitioned = aspect_unload_transition(
-        context.authorize(AspectApplicationOperation.Unload),
-        context.coordinator, context.loader, context.provider_cache, aspect_id)
-    context.coordinator = transitioned.coordinator
-    if transitioned.status == "failed":
-        return Err(transitioned.reason)
-    Ok(transitioned.status)
-
+                val transitioned = aspect_unload_transition(
+                    self.authorize(AspectApplicationOperation.Unload),
+                    self.coordinator, self.loader, self.provider_cache, aspect_id)
+                self.coordinator = transitioned.coordinator
+                if transitioned.status == "failed":
+                    Err(transitioned.reason)
+                else:
+                    Ok(transitioned.status))
 
 export AspectApplicationPhase
 export AspectApplicationOperation
