@@ -17,9 +17,12 @@
 use compiler.mir.mir_data.{MirInst, MirInstKind, MirOperand, MirOperandKind,
     MirBinOp, MirTerminator, LocalId, BlockId}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir.mir_types.{MirSignature, MirType}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
 use compiler.mir_opt.mir_opt.predicate_promote.{
     run_predicate_promote,
-    promote_block_predicate,
+    promote_function_predicate,
     operand_is_local,
     try_fuse_binary,
     try_fuse_ternary
@@ -40,6 +43,16 @@ fn make_copy_op(local_id: i64) -> MirOperand:
 
 fn make_jump_terminator() -> MirTerminator:
     MirTerminator.Goto(make_block_id(0))
+
+fn promote_test_block(block: MirBlock) -> MirBlock:
+    val func = MirFunction(
+        symbol: SymbolId(id: 1), name: "predicate_test",
+        signature: MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [], blocks: [block], entry_block: block.id, span: Span.empty(),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {})
+    promote_function_predicate(func).blocks[0]
 
 fn make_mask_from_cmp_inst(dest_id: i64, a_id: i64, b_id: i64) -> MirInst:
     MirInst(kind: MirInstKind.MaskFromCmp(
@@ -122,7 +135,7 @@ describe "predicate_promote — MaskFromCmp+MaskedAdd fuses to PredicatedAdd":
             make_masked_add_inst(20, 10, 3, 4)
         ]
         val blk = make_test_block(1, insts)
-        val result = promote_block_predicate(blk)
+        val result = promote_test_block(blk)
         expect(result.instructions.len()).to_equal(1)
         expect(inst_is_predicated_add(result.instructions[0])).to_equal(true)
 
@@ -133,7 +146,7 @@ describe "predicate_promote — MaskFromCmp+MaskedMul fuses to PredicatedMul":
             make_masked_mul_inst(20, 10, 3, 4)
         ]
         val blk = make_test_block(1, insts)
-        val result = promote_block_predicate(blk)
+        val result = promote_test_block(blk)
         expect(result.instructions.len()).to_equal(1)
         expect(inst_is_predicated_mul(result.instructions[0])).to_equal(true)
 
@@ -144,7 +157,7 @@ describe "predicate_promote — MaskFromCmp+MaskedFma fuses to PredicatedFma":
             make_masked_fma_inst(20, 10, 3, 4, 5)
         ]
         val blk = make_test_block(1, insts)
-        val result = promote_block_predicate(blk)
+        val result = promote_test_block(blk)
         expect(result.instructions.len()).to_equal(1)
         expect(inst_is_predicated_fma(result.instructions[0])).to_equal(true)
 
@@ -157,7 +170,7 @@ describe "predicate_promote — fuses second pair in block independently":
             make_masked_add_inst(21, 11, 7, 8)
         ]
         val blk = make_test_block(1, insts)
-        val result = promote_block_predicate(blk)
+        val result = promote_test_block(blk)
         expect(result.instructions.len()).to_equal(2)
         expect(inst_is_predicated_add(result.instructions[0])).to_equal(true)
         expect(inst_is_predicated_add(result.instructions[1])).to_equal(true)
@@ -184,7 +197,7 @@ describe "predicate_promote — wrong mask local: both instructions preserved":
             make_masked_add_inst(20, 11, 3, 4)
         ]
         val blk = make_test_block(1, insts)
-        val result = promote_block_predicate(blk)
+        val result = promote_test_block(blk)
         expect(result.instructions.len()).to_equal(2)
         expect(inst_is_mask_from_cmp(result.instructions[0])).to_equal(true)
         expect(inst_is_masked_add(result.instructions[1])).to_equal(true)
@@ -197,7 +210,7 @@ describe "predicate_promote — non-adjacent: intervening instruction blocks fus
             make_masked_add_inst(20, 10, 3, 4)
         ]
         val blk = make_test_block(1, insts)
-        val result = promote_block_predicate(blk)
+        val result = promote_test_block(blk)
         expect(result.instructions.len()).to_equal(3)
         expect(inst_is_mask_from_cmp(result.instructions[0])).to_equal(true)
 
@@ -207,7 +220,7 @@ describe "predicate_promote — standalone MaskedAdd without prior MaskFromCmp":
             make_masked_add_inst(20, 10, 3, 4)
         ]
         val blk = make_test_block(1, insts)
-        val result = promote_block_predicate(blk)
+        val result = promote_test_block(blk)
         expect(result.instructions.len()).to_equal(1)
         expect(inst_is_masked_add(result.instructions[0])).to_equal(true)
 
@@ -226,6 +239,6 @@ describe "predicate_promote — trailing MaskFromCmp with no following Masked* i
             make_mask_from_cmp_inst(10, 1, 2)
         ]
         val blk = make_test_block(1, insts)
-        val result = promote_block_predicate(blk)
+        val result = promote_test_block(blk)
         expect(result.instructions.len()).to_equal(1)
         expect(inst_is_mask_from_cmp(result.instructions[0])).to_equal(true)

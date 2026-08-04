@@ -102,8 +102,10 @@ bookmark is synchronized with GitHub and is rebased onto the current
   produced by the canonical context bitcast. The module gate also resolves the
   source Struct symbol to nominal `AspectExecutionContext`; arbitrary or absent
   module type identity fails closed. Shared-target `MayUnwind` calls are all
-  included in dominance, while a legitimate zero-release landing pad uses an
-  empty manifest. All optimizer entrypoints identity-preserve manifested functions.
+  included in dominance. Facet cleanup contracts require at least one release;
+  only explicitly ordinary unwind contracts may use an empty manifest. Public
+  optimizer entrypoints identity-preserve manifested functions, while raw
+  block-only mutators remain private behind provenance-aware function wrappers.
   Exact static release count and reverse registration order are therefore
   closed. The verifier still does not prove that a lease definition came from
   the matching real acquisition call/base/contract/generation. That provenance,

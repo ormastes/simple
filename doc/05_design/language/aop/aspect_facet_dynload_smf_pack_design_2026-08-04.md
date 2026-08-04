@@ -2566,10 +2566,16 @@ struct MirFacetCleanupEntryContract:
     release_symbol: text
 
 struct MirExceptionCleanupContract:
+    kind: MirExceptionCleanupContractKind
     unwind_entry: BlockId
     token: LocalId
     entries: [MirFacetCleanupEntryContract]
 ```
+
+`kind` distinguishes facet cleanup from an ordinary unwind contract. A facet
+cleanup contract requires at least one release entry; only an explicitly
+ordinary unwind contract may be empty. This prevents a transform from deleting
+all releases and laundering the cleanup pad as a valid empty facet manifest.
 
 `entries` is the required execution order, already reversed across lexical
 scope and acquisition order by `emit_facet_cleanup_from`. An unconditional

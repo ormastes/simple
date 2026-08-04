@@ -3,7 +3,8 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.{
     BlockId, LocalId, MirBody, MirBuilder, MirCallUnwindContract,
-    MirConstValue, MirExceptionCleanupContract, MirFacetCleanupEntryContract,
+    MirConstValue, MirExceptionCleanupContractKind,
+    MirExceptionCleanupContract, MirFacetCleanupEntryContract,
     MirFunction, MirInst, MirInstKind, MirInstructionSite, MirModule,
     MirOperand, MirOperandKind,
     MirSignature, MirTerminator, MirType, MirTypeDef, MirTypeDefKind, MirTypeKind,
@@ -141,7 +142,7 @@ describe "MIR cleanup manifest exact acceptance":
         expect(validate_mir_exception_cfg(deleted).unwrap_err()).to_contain(
             "facet cleanup landing pad has no manifest")
 
-    it "accepts a mandatory empty manifest for a zero-release landing pad":
+    it "accepts an explicitly ordinary empty unwind manifest":
         var builder = cleanup_manifest_builder("empty_cleanup", 1116)
         val normal = builder.new_block(Some("normal"))
         val unwind = builder.new_block(Some("unwind"))
@@ -155,8 +156,15 @@ describe "MIR cleanup manifest exact acceptance":
         builder.terminate_return(nil)
         var body = MirBody.from_function(builder.end_function())
         body.exception_cleanup_contracts = [MirExceptionCleanupContract(
+            kind: MirExceptionCleanupContractKind.OrdinaryUnwind,
             unwind_entry: unwind, token: token, entries: [])]
         expect(validate_mir_exception_cfg(body).is_ok()).to_be(true)
+
+        body.exception_cleanup_contracts = [MirExceptionCleanupContract(
+            kind: MirExceptionCleanupContractKind.FacetCleanup,
+            unwind_entry: unwind, token: token, entries: [])]
+        expect(validate_mir_exception_cfg(body).unwrap_err()).to_contain(
+            "facet cleanup manifest must contain at least one release")
 
     it "rejects fabricated, missing, repeated, and post-call local definitions":
         var fabricated = reverse_cleanup_body("fabricated_owner", 1112)
