@@ -51,6 +51,50 @@ the `comprehensive/*` failures.
 > The `stdlib` (51 of 63) and `compiler` (50) figures above are from the same
 > unpinned environment and are likewise unverified.
 
+## MEASURED delta (2026-08-04, pinned worktrees at `b0f305f1ae6`)
+
+The first properly-controlled A/B. Arms established **behaviorally**, not by
+label: OLD has 0 occurrences of `present_value_as_bool_arg`, NEW has 3, the two
+binaries differ by md5, and every reported run has `code 127 == 0`.
+
+| cluster | files | examples | fail OLD | fail NEW | delta |
+|---|---|---|---|---|---|
+| `test/01_unit/std` `auto_comprehensive_*` (+3 `deep` samples) | 33 | 1029 | 28 | **0** | −28 |
+| `test/01_unit/app/branch_coverage_*` | 25 | 1950 | 72 | **0** | −72 |
+
+**100 examples closed, and every failure in both OLD arms was this defect** —
+nothing else regressed or remained. Failure text, captured from a single-spec
+run: `expected 42 to equal true` (`auto_comprehensive_10_spec.spl`).
+
+### The idiom census overstates the blast radius by ~an order of magnitude
+
+`check(<expr>.?)` against a `bool`-typed parameter appears in **660** files under
+`test/01_unit/std` alone — yet the `deep/` (200) and `improved/` (432) families
+are **green on OLD**. This is not vacuity: sabotaging one `check(true)` to
+`check(false)` in `deep/array_deep_10_spec.spl` turned it red (`43 total, 42
+passed, 1 failed`), so those specs do assert.
+
+They pass because they use `check(Some(1).?)`. The unwrapped payload `1`
+**compares equal to `true`**, so the assertion succeeds by accident. The red
+specs are the ones whose payload is anything else — `Some(42)`, `Some(Some(10))`,
+`d.get("key")`.
+
+**Consequence: site counts must not be converted into failure counts.** Any
+estimate of this defect's reach derived from grepping `.?` is wrong by the
+fraction of sites whose payload happens to be `1`. The earlier corpus-wide
+figure of ~1,200 was exactly such an extrapolation and is withdrawn.
+
+(That `1 == true` succeeds at all is a separate latent defect — it silently
+converts a real type error into a passing assertion. Filed separately as
+`int_payload_compares_equal_to_bool_true_2026-08-04.md`.)
+
+### Not measured
+- legacy duplicates `test/unit/std`, `test/unit/app` (byte-identical but for 4
+  files; 69 + 29 idiom sites) — the reports' "138" adds these to the 72 above;
+- `test/01_unit/app/interpreter/refc_binary_spec.spl` (4 sites),
+  `mcp_unit/prompts_spec.spl` (16 sites);
+- the remaining 629 `deep`/`improved` std files (3 sampled, all green on OLD).
+
 Binary under test: `bin/release/x86_64-unknown-linux-gnu/simple` (on this tree
 that is the **Rust seed** — `bin/simple --version` prints the seed banner).
 `bin/simple test` executes specs on the interpreter.
