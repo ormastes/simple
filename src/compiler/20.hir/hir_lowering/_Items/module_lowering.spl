@@ -154,7 +154,29 @@ fn hir_module_item_terminal_kind(m: ModuleSurface, name: text) -> text:
     if m.composites.contains_key(name): return m.composites[name].kind
     if m.enums.contains_key(name): return "enum"
     if m.traits.contains_key(name): return "trait"
-    if m.type_aliases.contains_key(name): return "type_alias"
+    if m.type_aliases.contains_key(name):
+        # Follow the alias with EXACTLY the predicate register_imported_symbol
+        # uses (see the TAL3 comment beside `alias_targets`): no type params, a
+        # single named target, and that target declared as a NON-alias by this
+        # same module. The two sides MUST agree, because
+        # claim_materialized_payload_binding compares this answer against
+        # hir_symbol_terminal_kind. TAL3 binds `type Symbol = HirSymbol` under
+        # the TARGET's kind (`struct`) while this function used to report
+        # `type_alias` unconditionally, so the same entity got two identities
+        # and Stage 3 died on a phantom `Symbol` conflict against itself.
+        # Fixing the comparison instead of the rule would only hide it.
+        #
+        # Terminates for the same reason TAL3 does: the target is known not to
+        # be an alias, so the re-entry can only reach a composite / enum /
+        # trait / callable / const branch, never back here. `type A = B` /
+        # `type B = A` fails the non-alias test and stays "type_alias".
+        val alias_decl = m.type_aliases[name]
+        val alias_targets = parser_type_named_dependencies(alias_decl.type_)
+        if alias_decl.type_params.len() == 0 and alias_targets.len() == 1:
+            val alias_target = alias_targets[0]
+            if alias_target != name and not m.type_aliases.contains_key(alias_target) and hir_module_declares_item(m, alias_target):
+                return hir_module_item_terminal_kind(m, alias_target)
+        return "type_alias"
     if m.callables.contains_key(name): return "callable"
     if m.constants.contains_key(name): return "const"
     ""
