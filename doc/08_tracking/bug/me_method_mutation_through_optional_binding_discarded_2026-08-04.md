@@ -3,8 +3,10 @@
 **Date:** 2026-08-04
 **Status:** OPEN (language/runtime defect). Callers must work around it by
 destructuring; the workaround is applied in `engine2d/engine.spl`.
-**Severity:** High — silent, exit 0, no warning, no lint. Every state change a
-mutating method makes is thrown away.
+**Severity:** High — silent, exit 0, no warning from the compiler or runtime.
+Every state change a mutating method makes is thrown away. Since 2026-08-04 a
+lint rule (`OPTME001`, WARNING) flags the shape at authoring time; the
+language/runtime defect itself is unchanged and still OPEN.
 
 ## Symptom
 
@@ -50,8 +52,9 @@ B n=2
 C n=2     (C = same as B with a nested `me` call; nesting is fine)
 ```
 
-Expected `A n=2`. The call is accepted with no error and no warning; nothing in
-`lint` flags it.
+Expected `A n=2`. The call is accepted by the compiler with no error and no
+warning. (`lint` flagged nothing either until `OPTME001` landed on 2026-08-04 —
+see the lint-backstop section below.)
 
 ## Why it matters
 
@@ -247,11 +250,85 @@ unverified edit to a GPU dispatch path is worse than a filed defect.
    optional-typed receiver at type-check time (forcing `.?` or a destructure),
    or make the implicit unwrap write the mutated value back through the
    binding. Silent acceptance is the defect.
-2. **Lint backstop (cheap, do this regardless).** A rule that flags a mutating
+2. **Lint backstop (cheap, do this regardless).** DONE — landed as `OPTME001`,
+   see the section above. A rule that flags a mutating
    method call whose receiver's static type is `T?` would have caught every row
    in the table above at authoring time.
 
-## Lint recommendation (evidence-backed)
+## Lint backstop — LANDED as OPTME001 (2026-08-04)
+
+**This class is now guarded by a lint rule.** The language/runtime defect itself
+is still OPEN (fix direction 1 below is unchanged); what closed is the "silent,
+no lint" half of the severity line — an author who writes the losing idiom now
+gets a warning at the call site.
+
+| | |
+|---|---|
+| rule id | `OPTME001` (WARNING, category Correctness) |
+| rule | `src/compiler/35.semantics/lint/option_me_call.spl` |
+| spec | `test/01_unit/compiler/lint/option_me_call_spec.spl` — `Results: 15 total, 15 passed, 0 failed` |
+| per-file lint | wired into `lint_cli_source`, so `bin/simple lint <file>` emits it |
+| repo-wide census | `src/app/optme_lint/optme_scan.spl` (same rule fn, cross-file index) |
+
+Message: ``` `<m>` is a `me` (mutating) method but `<recv>` is `<C>?`; the
+mutation is applied to a discarded temporary and is lost ``` — hint spells out
+the destructure, and states that a plain alias, a `!= nil` test and a `.?`
+existence test are NOT unwraps.
+
+WARNING and not DENY on purpose: the 14 engine2d backend sites below are
+deliberately unfixed, so a deny-level rule would fail the build on day one.
+
+### What the rule needed, and what `lint` actually had
+
+The recommendation below assumed `lint` knows the receiver's static type. **It
+does not, for this type shape.** The arena AST's flat type-tag lane cannot
+represent `Optional<NamedClass>`: `parser_absorb_optional_suffix`
+(`src/compiler/10.frontend/core/parser.spl`) collapses `CudaBackend?` to bare
+`TYPE_OPTION` (14) and there is no `TYPE_OPTION_<named>` encoding, so
+`decl_get_field_types` can say *optional* but never *optional of what* — which
+is the half the rule turns on. The other half **is** in the AST
+(`decl_get_is_async` doubles as the method mode: 0=fn, 1=static, 2=me), but the
+`me` method is usually declared in a DIFFERENT file from the call and `lint` is
+single-file. So the rule reads the declaration TEXT (which spells the class out)
+and takes its index as a parameter. No type-inference pass was added; the rule
+is still one call site, one receiver type, one declaration lookup.
+
+### Measured yield: 36 warnings / 8 files
+
+Repo-wide run over 14,027 owned `.spl` files (16,214 `me` methods and 297
+option-typed fields indexed):
+
+| count | file |
+|-------|------|
+| 14 | `src/lib/gc_async_mut/gpu/engine2d/engine.spl` |
+| 6 | `src/os/services/display/display_service.spl` |
+| 5 | `src/os/services/vfs/vfs_service.spl` |
+| 4 | `src/app/play/wm_access_cli.spl` |
+| 2 | `src/compiler/40.mono/monomorphize/hot_reload.spl` |
+| 2 | `src/lib/nogc_sync_mut/database/test_extended/runs.spl` |
+| 2 | `src/lib/nogc_sync_mut/text_layout/font_renderer.spl` |
+| 1 | `src/lib/gc_async_mut/gpu/browser_engine/js/interpreter.spl` |
+
+Reconciled against the enumeration above: the **10** class-(a) rows this sweep
+already fixed are correctly ABSENT (they now read `if val Some(x) =`); all
+**14** class-(a) rows left for the backend owners are present; all **10**
+class-(c) rows are present (`display_service` line 222 in the table above is the
+binding — the rule reports the call, at 225). The remaining **12** are sites the
+scratchpad scanner MISSED: `vfs_service` ×5, `hot_reload` ×2, `runs.spl` ×2,
+`font_renderer` ×2, `browser_engine/js/interpreter` ×1. 14 + 10 + 12 = 36.
+
+None of the 36 were fixed by this change — the rule reports, it does not edit.
+
+### Known gaps in the rule (stated, not hidden)
+
+- Multi-line bindings, tuple/`match` destructures, generic and trait-returning
+  receivers, and type-alias fields are not resolved (false negatives).
+- A direct `self.<optional field>.mutate()` with no intermediate local is not
+  flagged; only bindings are tracked.
+- `OPTME001` is not registered in `all_lint_names()`, so it is not suppressible
+  from `simple.sdn` (unknown codes are kept and default to Warn).
+
+## Lint recommendation (evidence-backed, written before the rule landed)
 
 **Recommendation: yes, add a rule — and it is cheap.** The scratchpad scanner
 that produced the enumeration above is the detector, and it needed only three

@@ -28,6 +28,7 @@ use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
 use compiler.semantics.lint.star_import.{check_star_export_file}
 use compiler.semantics.lint.stub_impl.{check_stub_impl}
 use compiler.semantics.lint.wide_public.{check_wide_public_file}
+use compiler.semantics.lint.option_me_call.{check_option_me_call_source}
 
 # File I/O wrapper
 
@@ -145,6 +146,20 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
         val message = "{warning.message} ({warning.export_count} symbols, threshold {warning.threshold})"
         val lint = Lint.new(warning.code, level, LintCategory.Warning, message)
         results.push(LintResult.new(path, warning.line, 0, lint))
+    # OPTME001 — a `me` (mutating) method called through a `T?` receiver
+    # silently discards the write. Single-file index: this path only resolves
+    # classes declared in the SAME file. The cross-file census (most real sites
+    # call a backend class declared elsewhere) is
+    # `src/app/optme_lint/optme_scan.spl`, which calls the same rule function
+    # with a repo-wide index. See doc/08_tracking/bug/
+    # me_method_mutation_through_optional_binding_discarded_2026-08-04.md.
+    for warning in check_option_me_call_source(path, content):
+        if not should_keep_lint_result(config, warning.code):
+            continue
+        val level = apply_config_level(config, warning.code, LintLevel.Warn)
+        val message = "{warning.message} — {warning.hint}"
+        val lint = Lint.new(warning.code, level, LintCategory.Correctness, message)
+        results.push(LintResult.new(path, warning.line_num, 0, lint))
     results
 
 fn lint_cli_find_decl_line(lines: [text], prefix: text, module_path: text) -> i64:

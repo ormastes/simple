@@ -1,0 +1,124 @@
+# optme_scan — repo-wide runner for the OPTME001 lint rule.
+#
+# The rule itself lives in src/compiler/35.semantics/lint/option_me_call.spl
+# and is wired into `bin/simple lint <file>`, but lint is single-file and the
+# `me` method of an option-typed field is usually declared in a DIFFERENT file
+# from the call (e.g. `self.cuda_backend: CudaBackend?` in engine2d/engine.spl,
+# `me draw_font_batch` in the cuda backend module). This runner builds the
+# cross-file index once and then applies the very same
+# `check_option_me_call` function to every owned source, so the repo-wide
+# census and the per-file lint can never disagree about what the rule means.
+#
+# Precedent: src/app/gpu_lint/gpu_runnable_scan.spl.
+#
+# Run: SIMPLE_TIMEOUT_SECONDS=0 bin/simple run src/app/optme_lint/optme_scan.spl
+# Flags: --strict   exit 1 when any warning is found (for CI)
+#        --list     print every warning, not just the per-file breakdown
+
+use app.io.mod (dir_walk, file_read, get_args)
+use compiler.semantics.lint.option_me_call.{
+    check_option_me_call,
+    optme_collect_me_methods, optme_collect_opt_fields, optme_collect_ret_optionals
+}
+
+fn optme_is_owned(path: text) -> bool:
+    """Owned Simple source: `.spl`, excluding vendored / third-party trees."""
+    if not path.ends_with(".spl"):
+        return false
+    if path.contains("/vendor/"):
+        return false
+    if path.contains("node_modules"):
+        return false
+    true
+
+fn main() -> i64:
+    var strict_mode = false
+    var list_mode = false
+    for a in get_args():
+        if a == "--strict":
+            strict_mode = true
+        if a == "--list":
+            list_mode = true
+
+    var files: [text] = []
+    for f in dir_walk("src"):
+        if optme_is_owned(f):
+            files.push(f)
+
+    # ---- pass 1: cross-file index --------------------------------------
+    var me_keys: Dict<text, i64> = {}
+    var opt_fields: Dict<text, text> = {}
+    var field_owner: Dict<text, text> = {}
+    var ret_opt: Dict<text, text> = {}
+    var me_count = 0
+    var field_count = 0
+
+    for path in files:
+        val source = file_read(path)
+        for key in optme_collect_me_methods(source):
+            if not me_keys.contains_key(key):
+                me_count = me_count + 1
+            me_keys[key] = 1
+        for entry in optme_collect_opt_fields(source):
+            val first = entry.find("::")
+            if first > 0:
+                val cls = entry.substring(0, first)
+                val tail = entry.substring(first + 2, entry.len())
+                val second = tail.find("::")
+                if second > 0:
+                    val fld = tail.substring(0, second)
+                    val ty = tail.substring(second + 2, tail.len())
+                    val fkey = cls + "::" + fld
+                    if not opt_fields.contains_key(fkey):
+                        field_count = field_count + 1
+                    opt_fields[fkey] = ty
+                    if field_owner.contains_key(fld):
+                        if field_owner[fld] != ty:
+                            field_owner[fld] = ""
+                    else:
+                        field_owner[fld] = ty
+        for entry in optme_collect_ret_optionals(source):
+            val sep = entry.find("::")
+            if sep > 0:
+                val fname = entry.substring(0, sep)
+                val ty = entry.substring(sep + 2, entry.len())
+                if ret_opt.contains_key(fname):
+                    if ret_opt[fname] != ty:
+                        ret_opt[fname] = ""
+                else:
+                    ret_opt[fname] = ty
+
+    # ---- pass 2: run the rule ------------------------------------------
+    var hit_files: [text] = []
+    var hit_counts: [i64] = []
+    var total = 0
+    for path in files:
+        val source = file_read(path)
+        val warnings = check_option_me_call(path, source, me_keys, opt_fields, field_owner, ret_opt)
+        if warnings.len() == 0:
+            continue
+        hit_files.push(path)
+        hit_counts.push(warnings.len())
+        total = total + warnings.len()
+        if list_mode:
+            for w in warnings:
+                print "{w.file_path}:{w.line_num}  {w.binding}: {w.class_name}?  ->  me {w.method}()"
+
+    print ""
+    print "OPTME001 repo-wide scan"
+    print "  files scanned      : {files.len()}"
+    print "  me methods indexed : {me_count}"
+    print "  option fields      : {field_count}"
+    print "  warnings           : {total}"
+    print "  files with warnings: {hit_files.len()}"
+    print ""
+    print "per-file breakdown:"
+    var i = 0
+    while i < hit_files.len():
+        print "  {hit_counts[i]}  {hit_files[i]}"
+        i = i + 1
+    print ""
+    print "OPTME-SCAN-DONE total={total}"
+    if strict_mode and total > 0:
+        return 1
+    0
