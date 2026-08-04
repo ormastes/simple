@@ -1,0 +1,81 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.{
+    BlockId, LocalId, MirBuilder, MirExceptionCleanupContract, MirFunction,
+    MirInstKind, MirOperand, MirOperandKind, MirSignature, MirType,
+    MirTypeKind, MirConstValue, mir_operand_copy
+}
+use compiler.mir_opt.mir_opt.mod.{run_pass_on_module}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn isolation_function(symbol_id: i64, name: text, callee: text?) -> MirFunction:
+    var builder = MirBuilder.new()
+    builder.begin_function(
+        SymbolId(id: symbol_id), name,
+        MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        Span.empty())
+    if callee == nil:
+        val value = builder.emit_const_int(41)
+        builder.terminate_return(Some(mir_operand_copy(value)))
+    else:
+        val function = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str(callee.unwrap()),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [], return_type: MirType.unit(), is_variadic: false)))))
+        builder.emit_call(function, [], MirType.unit())
+        builder.terminate_return(nil)
+    builder.end_function()
+
+fn mark_manifested(function: MirFunction) -> MirFunction:
+    var result = function
+    result.exception_cleanup_contracts = [MirExceptionCleanupContract(
+        unwind_entry: BlockId(id: 70),
+        token: LocalId(id: 71),
+        entries: [])]
+    result
+
+fn isolation_module(first: MirFunction, second: MirFunction):
+    var builder = MirBuilder.new()
+    builder.add_function(first)
+    builder.add_function(second)
+    builder.module
+
+fn function_call_count(function: MirFunction) -> i64:
+    var count = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case Call(_, _, _): count = count + 1
+                case _: ()
+    count
+
+describe "manifested MIR cross-function optimizer isolation":
+    it "does not copy a manifested callee into an unmanifested caller":
+        val callee = mark_manifested(isolation_function(701, "sealed", nil))
+        val caller = isolation_function(702, "caller", Some("sealed"))
+        val optimized = run_pass_on_module(
+            "inline_functions", isolation_module(callee, caller))
+        expect(function_call_count(optimized.functions[caller.symbol])).to_equal(1)
+        expect(optimized.functions[callee.symbol].exception_cleanup_contracts.len()).to_equal(1)
+
+    it "does not copy an unmanifested callee into a manifested caller":
+        val callee = isolation_function(703, "ordinary", nil)
+        val caller = mark_manifested(
+            isolation_function(704, "sealed_caller", Some("ordinary")))
+        val optimized = run_pass_on_module(
+            "inline_aggressive", isolation_module(callee, caller))
+        expect(function_call_count(optimized.functions[caller.symbol])).to_equal(1)
+        expect(optimized.functions[caller.symbol].exception_cleanup_contracts.len()).to_equal(1)
+
+    it "filters manifested owners before inlining and outlining":
+        val source = rt_file_read_text(
+            "src/compiler/60.mir_opt/mir_opt/mod.spl") ?? ""
+        expect(source).to_contain("mir_opt_unmanifested_function_slice")
+        expect(source).to_contain(
+            "outline_run_on_module(ol, filtered)")
+        val inline_source = rt_file_read_text(
+            "src/compiler/60.mir_opt/mir_opt/_Inline/driver.spl") ?? ""
+        expect(inline_source).to_contain(
+            "if func.exception_cleanup_contracts.len() > 0:")

@@ -940,6 +940,27 @@ fn run_pass_on_module(pass_name: text, module: MirModule) -> MirModule:
         return module
     run_typed_pass_on_module(descriptor.unwrap().kind, module)
 
+fn mir_opt_unmanifested_function_slice(module: MirModule) -> MirModule:
+    """Exclude exact-identity cleanup owners before cross-function transforms."""
+    var filtered = module
+    var functions: Dict<SymbolId, MirFunction> = {}
+    for symbol in module.functions.keys():
+        val function = module.functions[symbol]
+        if function.exception_cleanup_contracts.len() == 0:
+            functions[symbol] = function
+    filtered.functions = functions
+    filtered
+
+fn mir_opt_reinsert_manifested_functions(
+    original: MirModule, transformed: MirModule
+) -> MirModule:
+    var result = transformed
+    for symbol in original.functions.keys():
+        val function = original.functions[symbol]
+        if function.exception_cleanup_contracts.len() > 0:
+            result.functions[symbol] = function
+    result
+
 fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
     """Typed module-level pass runner.  Dispatches on PassKind, not strings."""
     var result_module = module
@@ -973,13 +994,19 @@ fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
                 result_module.functions[updated.symbol] = updated
         case InlineSmallFunctions:
             var p = create_inline_small_pass()
-            result_module = inline_run_on_module(p, result_module)
+            val filtered = mir_opt_unmanifested_function_slice(result_module)
+            result_module = mir_opt_reinsert_manifested_functions(
+                result_module, inline_run_on_module(p, filtered))
         case InlineFunctions:
             var p = create_inline_pass()
-            result_module = inline_run_on_module(p, result_module)
+            val filtered = mir_opt_unmanifested_function_slice(result_module)
+            result_module = mir_opt_reinsert_manifested_functions(
+                result_module, inline_run_on_module(p, filtered))
         case InlineAggressive:
             var p = create_inline_aggressive_pass()
-            result_module = inline_run_on_module(p, result_module)
+            val filtered = mir_opt_unmanifested_function_slice(result_module)
+            result_module = mir_opt_reinsert_manifested_functions(
+                result_module, inline_run_on_module(p, filtered))
         case LoopInvariantMotion:
             for func in functions:
                 var p = create_loop_opt_conservative()
@@ -1013,7 +1040,9 @@ fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
         case BodyOutlining:
             # Module-level pass: outlining creates new functions
             var ol = create_outline_pass()
-            result_module = outline_run_on_module(ol, result_module)
+            val filtered = mir_opt_unmanifested_function_slice(result_module)
+            result_module = mir_opt_reinsert_manifested_functions(
+                result_module, outline_run_on_module(ol, filtered))
         case GeneratorStateMachine:
             for func in functions:
                 var p = create_generator_sm_pass()
