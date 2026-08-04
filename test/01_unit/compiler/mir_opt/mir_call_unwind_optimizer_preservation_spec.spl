@@ -1,0 +1,48 @@
+use std.spec.*
+use compiler.mir.mir_instructions.{
+    BlockId, MirCallUnwindContract, MirOperand, MirOperandKind, MirTerminator
+}
+use compiler.mir.mir_types.{MirConstValue, MirType}
+use compiler.mir_opt.mir_opt.copy_prop.{
+    copypropagation_new, copypropagation_propagate_terminator
+}
+
+fn unwind_optimizer_callee() -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str("known_callee"), MirType.unit()))
+
+fn unwind_contract_name(term: MirTerminator) -> text:
+    match term:
+        case CallTerminator(_, _, _, _, contract, _):
+            match contract:
+                case NoUnwind: "NoUnwind"
+                case MayUnwind: "MayUnwind"
+        case _: "not-call"
+
+fn unwind_edge_id(term: MirTerminator) -> i64:
+    match term:
+        case CallTerminator(_, _, _, _, _, unwind):
+            if val target = unwind:
+                target.id
+            else:
+                -1
+        case _: -2
+
+describe "MIR optimizer call unwind preservation":
+    it "preserves NoUnwind exactly through copy propagation":
+        val original = MirTerminator.CallTerminator(
+            nil, unwind_optimizer_callee(), [], BlockId(id: 1),
+            MirCallUnwindContract.NoUnwind, nil)
+        val rewritten = copypropagation_propagate_terminator(
+            copypropagation_new(), original)
+        expect(unwind_contract_name(rewritten)).to_equal("NoUnwind")
+        expect(unwind_edge_id(rewritten)).to_equal(-1)
+
+    it "preserves MayUnwind and its edge exactly through copy propagation":
+        val original = MirTerminator.CallTerminator(
+            nil, unwind_optimizer_callee(), [], BlockId(id: 1),
+            MirCallUnwindContract.MayUnwind, Some(BlockId(id: 7)))
+        val rewritten = copypropagation_propagate_terminator(
+            copypropagation_new(), original)
+        expect(unwind_contract_name(rewritten)).to_equal("MayUnwind")
+        expect(unwind_edge_id(rewritten)).to_equal(7)

@@ -282,6 +282,11 @@ struct MirAsmOperand:
     location: AsmLocation        # reg, mem, imm, specific register
     operand: MirOperand         # MIR operand for the value
 
+"""Explicit unwind behavior carried by every MIR call terminator."""
+enum MirCallUnwindContract:
+    NoUnwind
+    MayUnwind
+
 """Block terminator."""
 enum MirTerminator:
     # Unconditional
@@ -302,8 +307,36 @@ enum MirTerminator:
         func: MirOperand,
         args: [MirOperand],
         normal: BlockId,
+        unwind_contract: MirCallUnwindContract,
         unwind: BlockId?
     )
+
+fn validate_mir_call_unwind_contract(
+    unwind_contract: MirCallUnwindContract,
+    unwind: BlockId?
+) -> Result<(), text>:
+    match unwind_contract:
+        case NoUnwind:
+            if unwind != nil:
+                return Err(
+                    "NoUnwind call terminator cannot carry an unwind edge")
+        case MayUnwind:
+            if unwind == nil:
+                return Err(
+                    "MayUnwind call terminator requires an unwind edge")
+    Ok(())
+
+fn mir_call_terminator_create(
+    dest: LocalId?,
+    func: MirOperand,
+    args: [MirOperand],
+    normal: BlockId,
+    unwind_contract: MirCallUnwindContract,
+    unwind: BlockId?
+) -> Result<MirTerminator, text>:
+    validate_mir_call_unwind_contract(unwind_contract, unwind)?
+    Ok(MirTerminator.CallTerminator(
+        dest, func, args, normal, unwind_contract, unwind))
 
 # Compatibility exports are explicit so this owner can also be imported
 # directly without relying on wildcard visibility.
@@ -316,4 +349,5 @@ export MirBorrowKind, MirProjection, MirPlace
 export MirBinOp, MirUnaryOp, AggregateKind
 export MirOperand, MirOperandKind
 export mir_operand_copy, mir_operand_move, mir_operand_const_int, mir_operand_const_float, mir_operand_const_bool
-export SwitchCase, MirAsmOperand, MirTerminator
+export SwitchCase, MirAsmOperand, MirCallUnwindContract, MirTerminator
+export validate_mir_call_unwind_contract, mir_call_terminator_create
