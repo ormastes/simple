@@ -2249,6 +2249,55 @@ pub fn simple_web_layout_render_html_software_pixels_traced(html: text, width: i
 class SimpleWebLayoutPixelResult:
     pixels: [u32]
     material_fallback: WebRenderMaterialFallbackProvenance
+    # Budget-exhaustion verdict, captured at the moment this result was built.
+    #
+    # `pixels` alone cannot express exhaustion: the framebuffer is allocated at
+    # width*height BEFORE paint, so a render that trips its deadline during the
+    # style cascade returns a correctly-sized, entirely uniform buffer that is
+    # shaped exactly like a successful render of a blank page. That made a
+    # comparison against this oracle pass by both sides being empty.
+    #
+    # The module-global `simple_web_layout_last_render_degraded()` is NOT a
+    # substitute: it is cleared by the next `_web_budget_begin`, so a caller
+    # that renders the oracle, then renders the lane, then compares, reads the
+    # LANE's status. These two fields travel with the result and stay valid for
+    # its whole lifetime.
+    render_degraded: bool
+    # "" when complete; otherwise the WEB_BUDGET_SITE_* name of the first
+    # exhaustion exit taken (e.g. "style-cascade", "paint-text").
+    degrade_reason: text
+
+# Presentability gate for the CPU software oracle, the analogue of
+# `_web_gpu_readback_device_proven` for the GPU lane: a page truncated by
+# budget exhaustion is NOT a rendered page and must never be published as one.
+# Callers that present, compare, or capture evidence from these pixels test
+# this first; a false answer means "the pixels are whatever got done before the
+# clock ran out", not "the page is blank".
+pub fn simple_web_layout_software_pixels_presentable(
+    result: SimpleWebLayoutPixelResult
+) -> bool:
+    not result.render_degraded
+
+# Per-render decision string in the campaign's established shape (compare
+# `simple_web_layout_render_html_gpu_first_decision`): every decline names a
+# concrete reason, so a blank page from exhaustion reads as an explicit
+# refusal rather than a successful render of nothing.
+pub fn simple_web_layout_software_present_decision(
+    result: SimpleWebLayoutPixelResult
+) -> text:
+    if result.render_degraded:
+        return "software-oracle:declined:presented=none:reason=budget-exhausted:" + result.degrade_reason
+    "software-oracle:presented:full-frame:reason=budget-complete"
+
+# Probe entry: run the CPU software oracle once and return its decision string.
+# Mirrors simple_web_layout_render_html_gpu_first_decision so a spec can assert
+# the honest verdict of a single render without threading the result struct.
+pub fn simple_web_layout_render_html_software_decision(
+    html: text, width: i32, height: i32, budget_ms: i64
+) -> text:
+    simple_web_layout_software_present_decision(
+        simple_web_layout_render_html_software_result(html, width, height, budget_ms)
+    )
 
 pub fn simple_web_layout_render_html_software_result(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> SimpleWebLayoutPixelResult:
     # Stage-local budget allocation: a single wall-clock budget is partitioned
@@ -2326,10 +2375,14 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
         material_entries, cpu_material_nodes, solid_material_nodes,
         _html_draw_ir_visible_nodes(nodes, styles, boxes, width, height)
     )
+    # Capture the budget verdict HERE, while it still describes THIS render.
+    # Reading the global later would report whichever render ran most recently.
     SimpleWebLayoutPixelResult(
         pixels: painted,
         material_fallback: simple_web_layout_material_provenance_after_execution(
-            material_witness, 0, painted.len(), width * height, 0)
+            material_witness, 0, painted.len(), width * height, 0),
+        render_degraded: simple_web_layout_last_render_degraded(),
+        degrade_reason: simple_web_layout_last_render_degrade_reason()
     )
 
 # Spec/benchmark entry for the CPU tile-render-culling lane: renders `html`

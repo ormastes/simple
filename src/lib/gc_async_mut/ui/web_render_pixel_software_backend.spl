@@ -13,7 +13,9 @@ use std.common.ui.web_render_api.{
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     SimpleWebLayoutPixelResult,
     simple_web_layout_render_html_software_pixels,
-    simple_web_layout_render_html_software_result
+    simple_web_layout_render_html_software_result,
+    simple_web_layout_software_pixels_presentable,
+    simple_web_layout_software_present_decision
 }
 use std.common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
 
@@ -104,6 +106,27 @@ fn _software_result(req: WebRenderRequest, full_html: text) -> SimpleWebLayoutPi
 fn _native_safe_fallback_provenance(base: WebRenderArtifact) -> WebRenderArtifact:
     web_render_engine2d_compatibility_artifact(base, "native-safe-fallback", "tag-strip bitmap-glyph fallback renderer (crash-recovery path, not the full HTML layout engine)")
 
+# A software render that ran out of wall-clock budget returns a correctly-sized
+# framebuffer holding only whatever finished before the deadline — commonly the
+# canvas background and nothing else. Byte-shaped like a real frame, it used to
+# leave this backend as an ordinary, authentic-looking artifact, so evidence
+# capture and pixel-diff tooling could accept an empty page as a rendered one.
+#
+# Stamp it with the SAME compatibility provenance the crash-recovery
+# tag-strip path uses, carrying the exhaustion site in the reason
+# ("software-oracle:declined:...:reason=budget-exhausted:paint-text"), so a
+# truncated frame is rejected by exactly the checks that already reject a
+# fallback frame. A completed render is returned untouched.
+fn _budget_exhaustion_provenance(
+    base: WebRenderArtifact, result: SimpleWebLayoutPixelResult
+) -> WebRenderArtifact:
+    if simple_web_layout_software_pixels_presentable(result):
+        return base
+    web_render_engine2d_compatibility_artifact(
+        base, "software-budget-exhausted",
+        simple_web_layout_software_present_decision(result)
+    )
+
 class WebRenderPixelArtifactCache:
     width: i32
     height: i32
@@ -111,6 +134,13 @@ class WebRenderPixelArtifactCache:
     last_html: text
     cached_pixels: [u32]
     cached_material_fallback: WebRenderMaterialFallbackProvenance
+    # Presentability verdict of the render that produced `cached_pixels`.
+    # Cached alongside the pixels because a cache HIT re-serves those exact
+    # pixels: without this, a frame truncated by budget exhaustion would be
+    # stamped honestly on the store and then served clean on every subsequent
+    # hit — the same silent failure one layer up.
+    cached_presentable: bool
+    cached_present_decision: text
     hit_count: i32
     store_count: i32
 
@@ -123,6 +153,8 @@ impl WebRenderPixelArtifactCache:
             last_html: "",
             cached_pixels: [],
             cached_material_fallback: WebRenderMaterialFallbackProvenance.none(),
+            cached_presentable: true,
+            cached_present_decision: "software-oracle:presented:full-frame:reason=budget-complete",
             hit_count: 0,
             store_count: 0
         )
@@ -137,10 +169,17 @@ impl WebRenderPixelArtifactCache:
             val result = _software_result(req, full_html)
             self.cached_pixels = result.pixels
             self.cached_material_fallback = result.material_fallback
+            self.cached_presentable = simple_web_layout_software_pixels_presentable(result)
+            self.cached_present_decision = simple_web_layout_software_present_decision(result)
             self.store_count = self.store_count + 1
-        web_render_artifact_with_material_fallback(
+        val base = web_render_artifact_with_material_fallback(
             web_render_pixel_artifact(req.with_pixel_output(), self.cached_pixels),
             self.cached_material_fallback
+        )
+        if self.cached_presentable:
+            return base
+        web_render_engine2d_compatibility_artifact(
+            base, "software-budget-exhausted", self.cached_present_decision
         )
 
     me request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
@@ -183,9 +222,12 @@ fn web_render_html_request_to_pixels_with_backend(req: WebRenderRequest, full_ht
 
 fn web_render_request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
     val result = _software_result(req, web_render_full_html(req))
-    web_render_artifact_with_material_fallback(
-        web_render_pixel_artifact(req.with_pixel_output(), result.pixels),
-        result.material_fallback
+    _budget_exhaustion_provenance(
+        web_render_artifact_with_material_fallback(
+            web_render_pixel_artifact(req.with_pixel_output(), result.pixels),
+            result.material_fallback
+        ),
+        result
     )
 
 fn web_render_request_to_native_safe_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
@@ -193,9 +235,12 @@ fn web_render_request_to_native_safe_pixel_artifact(req: WebRenderRequest) -> We
 
 fn web_render_html_request_to_pixel_artifact(req: WebRenderRequest, full_html: text) -> WebRenderArtifact:
     val result = _software_result(req, full_html)
-    web_render_artifact_with_material_fallback(
-        web_render_pixel_artifact(req.with_pixel_output(), result.pixels),
-        result.material_fallback
+    _budget_exhaustion_provenance(
+        web_render_artifact_with_material_fallback(
+            web_render_pixel_artifact(req.with_pixel_output(), result.pixels),
+            result.material_fallback
+        ),
+        result
     )
 
 fn web_render_html_request_to_pixel_artifact_with_backend(req: WebRenderRequest, full_html: text, backend_name: text) -> WebRenderArtifact:
