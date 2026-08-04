@@ -23,6 +23,14 @@
   contract passed.
 - Concrete `SoftwareBackend` routing replaced the native duck-dispatch trap
   across the browser Draw IR offscreen path; its focused contract passed 3/3.
+- The final provenance diagnosis traced the missing receipt to a tree restore
+  that dropped typed Aetheric background shorthand normalization. The restored
+  producer path preserves the base color, full gradient stops and angle, and
+  retains unsupported layers as a fail-closed raw witness.
+- QEMU and hosted evidence predicates now admit only their legal strong
+  material receipts while preserving rendered-backend, 64-hex digest,
+  theme/source, and rejection-marker checks. The migration contract passed 5/5
+  and both wrappers passed shell syntax.
 
 ## Blocking evidence
 
@@ -43,11 +51,21 @@
      and marked them degraded before readiness/capture.
 - Therefore framebuffer/font/input/browser-content rendering evidence is not
   complete, and compiler/core/MCP aggregate checks were not all green.
+- The focused renderer regression spec could not reach assertions because the
+  current pure-Simple runner fails parsing the existing multiline import in
+  `src/lib/common/web/browser_renderer_protocol.spl`. No seed fallback was used.
+- The focused QEMU wrapper contract reached 5 passing cases before existing
+  string-interpolation semantic errors (`font_guest_path`, `handled_text`)
+  prevented a complete verdict.
+- The producer and checker repairs have not received a fourth QEMU run because
+  the mandated three-cycle cap is already exhausted; the live evidence remains
+  the concrete release blocker.
 
 ## Result
 
 `STATUS: FAIL`
 
-The migration and bootstrap lanes are suitable for review, but the rendering
-gate remains release-blocking. The next scoped session must repair the missing
-software content-material provenance before another QEMU attempt.
+The migration and bootstrap lanes are suitable for review, and the exact
+producer/checker defects exposed by the third QEMU cycle are repaired. The
+rendering gate remains release-blocking until a fresh bounded session can run
+the unchanged final inputs once and retain the required evidence bundle.
