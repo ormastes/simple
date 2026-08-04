@@ -14145,7 +14145,64 @@ RuntimeValue rt_array_remove(RuntimeValue arr, RuntimeValue idx)
 
 S3(rt_array_insert)
 S1(rt_array_reverse)
-S1(rt_array_sort)
+
+/* rt_array_sort: freestanding provider for the array sort ABI.
+ *
+ * The hosted runtime and src/runtime/simple_core/core_array_query.spl both
+ * provide this operation, but the x86_64-unknown-none kernel link deliberately
+ * uses this architecture runtime instead of either hosted runtime bundle.  The
+ * old generated fail-stop provider therefore halted the desktop as soon as module
+ * initialization sorted a registry.  Keep the comparison contract aligned
+ * with simple-core: decode tagged integers numerically and compare all other
+ * values by their raw tagged representation. */
+static int rt_array_sort_compare(RuntimeValue a, RuntimeValue b)
+{
+    if (IS_INT(a) && IS_INT(b)) {
+        int64_t ia = DECODE_INT(a);
+        int64_t ib = DECODE_INT(b);
+        if (ia < ib) return -1;
+        if (ia > ib) return 1;
+        return 0;
+    }
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
+
+int8_t rt_array_sort(RuntimeValue arr)
+{
+    RuntimeArray *a = runtime_array_from_abi(arr);
+    if (!a) return 0;
+    if (a->len <= 1) return 1;
+
+    /* Native [u8] arrays store packed bytes, not RuntimeValue slots. */
+    if (a->hdr.gc_flags & BYTE_PACKED) {
+        uint8_t *bytes = (uint8_t *)(void *)runtime_array_items(a);
+        for (uint64_t i = 1; i < a->len; i++) {
+            uint8_t key = bytes[i];
+            uint64_t j = i;
+            while (j > 0 && bytes[j - 1] > key) {
+                bytes[j] = bytes[j - 1];
+                j--;
+            }
+            bytes[j] = key;
+        }
+        return 1;
+    }
+
+    RuntimeValue *items = runtime_array_items(a);
+    for (uint64_t i = 1; i < a->len; i++) {
+        RuntimeValue key = items[i];
+        uint64_t j = i;
+        while (j > 0 && rt_array_sort_compare(items[j - 1], key) > 0) {
+            items[j] = items[j - 1];
+            j--;
+        }
+        items[j] = key;
+    }
+    return 1;
+}
+
 S2(rt_array_sort_by)
 S2(rt_array_map)
 S2(rt_array_filter)

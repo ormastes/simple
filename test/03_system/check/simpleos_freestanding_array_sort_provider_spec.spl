@@ -1,0 +1,32 @@
+# Regression: x86_64 SimpleOS must link a real rt_array_sort provider.
+
+extern fn rt_file_read_text(path: text) -> text
+
+use std.spec.{describe, it, expect}
+
+val BOOT_RUNTIME: text = "examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c"
+val LINK_OWNER: text = "src/compiler/70.backend/backend/llvm_native_link.spl"
+val SIMPLE_CORE_OWNER: text = "src/runtime/simple_core/core_array_query.spl"
+val FABRICATION_BASELINE: text = "config/simpleos_fabricated_rt_baseline.sdn"
+
+describe "SimpleOS freestanding array sort provider":
+    it "uses the architecture runtime on the x86_64-unknown-none link path":
+        val linker = rt_file_read_text(LINK_OWNER)
+        expect(linker.contains("compile_simpleos_x86_64_c(\"examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c\"")).to_equal(true)
+        expect(linker.contains("simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, [crt_o, stubs_o, type_o, init_o])")).to_equal(true)
+
+    it "implements insertion sort instead of selecting the fail-stop stub":
+        val runtime = rt_file_read_text(BOOT_RUNTIME)
+        val simple_core = rt_file_read_text(SIMPLE_CORE_OWNER)
+        expect(runtime.contains("S1(rt_array_sort)")).to_equal(false)
+        expect(runtime.contains("int8_t rt_array_sort(RuntimeValue arr)")).to_equal(true)
+        expect(runtime.contains("rt_array_sort_compare(items[j - 1], key) > 0")).to_equal(true)
+        expect(runtime.contains("a->hdr.gc_flags & BYTE_PACKED")).to_equal(true)
+        expect(simple_core.contains("pub fn rt_array_sort(array: i64) -> i8:")).to_equal(true)
+        expect(simple_core.contains("while j >= 0 and sort_compare")).to_equal(true)
+
+    it "does not ratchet rt_array_sort into fabricated runtime debt":
+        val linker = rt_file_read_text(LINK_OWNER)
+        val baseline = rt_file_read_text(FABRICATION_BASELINE)
+        expect(linker.contains("name == \"rt_array_sort\"")).to_equal(false)
+        expect(baseline.contains(" rt_array_sort")).to_equal(false)

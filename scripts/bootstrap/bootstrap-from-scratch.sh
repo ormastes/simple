@@ -26,7 +26,9 @@ SimpleOS / --target=simpleos-x86_64:
 Output: <output>/stage{1,2,3}/<arch>-<vendor>-<os>-<abi>/simple
 
 Options:
-  --backend=<name>   Backend for stage2/stage3/stage4 (default: llvm; cranelift also supported)
+  --backend=<name>   Backend for stage2/stage3/stage4 (default: cranelift)
+                     Rust LLVM is legacy-only and cannot bootstrap LLVM 23.1;
+                     use the resulting pure-Simple compiler for LLVM builds.
   --output=<dir>     Output directory for bootstrap artifacts (default: build/bootstrap)
   --full-bootstrap   Rebuild the Rust seed/runtime when missing or stale, then
                      rebuild the pure-Simple stages. Without this flag bootstrap
@@ -52,7 +54,7 @@ Options:
 EOF
 }
 
-backend="llvm"
+backend="cranelift"
 output_dir="build/bootstrap"
 deploy=0
 build_mcp=1
@@ -140,9 +142,14 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "${backend}" in
-  llvm|llvm-lib|cranelift) ;;
+  cranelift) ;;
+  llvm|llvm-lib)
+    echo "error: Rust bootstrap backend '${backend}' is unavailable: vendored inkwell/llvm-sys stops at LLVM 18" >&2
+    echo "error: bootstrap with --backend=cranelift, then use the pure-Simple LLVM backend with an admitted Clang/LLVM 23.1 provider" >&2
+    exit 1
+    ;;
   *)
-    echo "error: unsupported bootstrap backend '${backend}' (expected llvm, llvm-lib, or cranelift)" >&2
+    echo "error: unsupported bootstrap backend '${backend}' (expected cranelift)" >&2
     exit 1
     ;;
 esac
@@ -652,30 +659,11 @@ rust_rebuilt=0
 compiler_backfill_rebuilt=0
 # (content-hash staleness gate runs below, after backend/llvm_features settle)
 
-# Detect LLVM 18 availability for LLVM backends.
+# The Rust seed is deliberately LLVM-free. The optional inkwell/llvm-sys
+# source is pinned to LLVM 18 and is not a valid implementation of the
+# repository's Clang/LLVM 23.1 provider contract. LLVM native builds begin only
+# after the pure-Simple compiler exists.
 llvm_features=""
-if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
-  # LLVM is resolved once by the shared platform interface
-  # (scripts/setup/platform-detect.shs, sourced above), which also exports the
-  # LLVM_SYS_<major>0_PREFIX used by the Rust build and the runtime's LLVM path.
-  if [ "${LLVM_FOUND:-0}" = "1" ]; then
-    echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (lib: ${LLVM_LIB})"
-    llvm_features="--features llvm"
-    # macOS needs LIBRARY_PATH for zstd and other Homebrew libs
-    if [ "${host_os}" = "Darwin" ]; then
-      brew_prefix="$(brew --prefix 2>/dev/null || true)"
-      if [ -n "${brew_prefix}" ]; then
-        export HOMEBREW_PREFIX="${brew_prefix}"
-        export LIBRARY_PATH="${LIBRARY_PATH:+${LIBRARY_PATH}:}${brew_prefix}/lib"
-      fi
-      export SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || true)}"
-    fi
-  else
-    echo "error: LLVM not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-18})" >&2
-    echo "error: install LLVM or select --backend=cranelift explicitly" >&2
-    exit 1
-  fi
-fi
 
 # Content-hash staleness gate (see seed_inputs_hash above). Runs here so the
 # backend/features are final before they enter the fingerprint. If the seed or

@@ -25,6 +25,8 @@ for script in \
   scripts/setup/setup.shs; do
   sh -n "${script}" || fail "shell syntax: ${script}"
 done
+sh scripts/check/check-rust-bootstrap-llvm-isolation.shs ||
+  fail "Rust bootstrap LLVM isolation contract"
 bash -n scripts/bootstrap/bootstrap-windows.sh || fail "shell syntax: bootstrap-windows.sh"
 sh test/02_integration/bootstrap_stage3_source_snapshot_test.shs ||
   fail "Stage 3 source snapshot symlinks"
@@ -36,15 +38,20 @@ fi
 help=$(sh scripts/bootstrap/bootstrap-from-scratch.sh --help)
 printf '%s\n' "${help}" | grep -q -- '--full-cli' || fail "missing --full-cli help"
 printf '%s\n' "${help}" | grep -q -- '--full-bootstrap' || fail "missing --full-bootstrap help"
-printf '%s\n' "${help}" | grep -q -- 'default: llvm; cranelift also supported' || fail "LLVM default/backend support missing from help"
+printf '%s\n' "${help}" | grep -q -- 'default: cranelift' || fail "Cranelift bootstrap default missing from help"
+printf '%s\n' "${help}" | grep -q -- 'Rust LLVM is legacy-only and cannot bootstrap LLVM 23.1' || fail "legacy Rust LLVM boundary missing from help"
 
 grep -q 'command -v shasum' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing macOS SHA-256 fallback"
 grep -q 'command -v gtimeout' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing macOS timeout fallback"
 grep -Fq 'brew install coreutils freetype' .github/workflows/rust-bootstrap-multiplatform.yml || fail "macOS candidate timeout prerequisite missing"
 grep -Fq 'brew install coreutils freetype zstd' .github/workflows/rust-bootstrap-multiplatform.yml || fail "macOS zstd linker dependency missing"
 grep -Fq 'LIBRARY_PATH=$(brew --prefix freetype)/lib:$(brew --prefix zstd)/lib:' .github/workflows/rust-bootstrap-multiplatform.yml || fail "macOS Homebrew library path missing"
-grep -Fq 'clang-18 lld-18 llvm-18-dev libfreetype6-dev libunwind-dev' .github/workflows/rust-bootstrap-multiplatform.yml || fail "Linux bootstrap linker dependency missing"
-grep -q '^backend="llvm"$' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap default backend is not LLVM"
+grep -Fq 'clang lld llvm libfreetype6-dev libunwind-dev' .github/workflows/rust-bootstrap-multiplatform.yml || fail "Linux bootstrap linker dependency missing"
+grep -q '^backend="cranelift"$' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap default backend is not Cranelift"
+grep -Fq "Rust bootstrap backend '\${backend}' is unavailable" scripts/bootstrap/bootstrap-from-scratch.sh || fail "legacy Rust LLVM selection does not fail closed"
+if grep -Eq 'cargo build .*--features([ =]|.*,)llvm|LLVM_SYS_180_PREFIX|llvm@18|clang-18|lld-18|llvm-18-dev' .github/workflows/rust-bootstrap-multiplatform.yml; then
+  fail "multiplatform Rust bootstrap still provisions or enables LLVM 18"
+fi
 grep -Fq 'simple-runtime = { path = "../runtime", features = ["runtime-symbol-table", "native-all-provider", "runtime-tls"] }' src/compiler_rust/native_all/Cargo.toml || fail "native-all runtime symbol table or browser TLS is disabled"
 grep -Fq 'runtime-tls = ["dep:rustls", "dep:rustls-platform-verifier", "dep:rustls-pemfile"]' src/compiler_rust/runtime/Cargo.toml || fail "browser TLS does not use platform trust"
 grep -Fq '.with_platform_verifier()' src/compiler_rust/runtime/src/value/net_tls.rs || fail "browser TLS platform verifier wiring missing"
@@ -197,8 +204,8 @@ matrix_backends_for() {
   ' "${multiplatform}" | LC_ALL=C sort | tr '\n' ' '
 }
 for platform_name in "Linux x86_64" "macOS aarch64" "macOS x86_64"; do
-  [ "$(matrix_backends_for "${platform_name}")" = "cranelift llvm " ] ||
-    fail "multiplatform backend pair missing: ${platform_name}"
+  [ "$(matrix_backends_for "${platform_name}")" = "cranelift " ] ||
+    fail "multiplatform Cranelift bootstrap lane missing: ${platform_name}"
 done
 [ "$(matrix_backends_for "Windows x86_64")" = "cranelift " ] ||
   fail "Windows multiplatform lane must use supported Cranelift only"
@@ -223,9 +230,9 @@ grep -q 'os: macos-15-intel' "${multiplatform}" || fail "active macOS Intel runn
 [ "$(grep -Fc "scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD candidate admission trigger missing"
 [ "$(grep -Fc "test/fixtures/compiler/native_option_try_*_loud.spl" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Option fixture trigger missing"
 [ "$(grep -Fc "test/fixtures/native_crossmodule_result_u8/**" "${freebsd_workflow}")" -eq 2 ] || fail "FreeBSD Result try fixture trigger missing"
-grep -Fq 'mcp_flag=--full-cli' "${multiplatform}" || fail "Linux LLVM fresh MCP bootstrap lane missing"
+grep -Fq 'mcp_flag=--full-cli' "${multiplatform}" || fail "Linux fresh MCP bootstrap lane missing"
 grep -Fq 'mcp_flag=--no-mcp' "${multiplatform}" || fail "non-proof bootstrap lanes do not skip duplicate MCP builds"
-grep -Fq 'if [ "$RUNNER_OS" = "Linux" ] && [ "${{ matrix.backend }}" = "llvm" ]; then' "${multiplatform}" || fail "fresh MCP proof is not scoped to Linux LLVM"
+grep -Fq 'if [ "$RUNNER_OS" = "Linux" ]; then' "${multiplatform}" || fail "fresh MCP proof is not scoped to Linux"
 grep -Fq '"$mcp_flag" \' "${multiplatform}" || fail "bootstrap does not receive the selected MCP mode"
 [ "$(grep -c "scripts/check/check-mcp-native-smoke.shs" "${multiplatform}")" -eq 2 ] || fail "fresh MCP smoke workflow triggers missing"
 [ "$(grep -c "src/app/mcp/\\*\\*" "${multiplatform}")" -eq 2 ] || fail "MCP source workflow triggers missing"
@@ -236,7 +243,9 @@ grep -Fq 'MCP_NATIVE_BOOTSTRAP_FRESH=1 \' scripts/bootstrap/bootstrap-from-scrat
 grep -Fq 'sh scripts/check/check-mcp-native-smoke.shs' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 5 MCP smoke wiring missing"
 grep -Fq 'NATIVE_SMOKE_BACKEND=${{ matrix.backend }} \' "${multiplatform}" || fail "native smoke does not receive the matrix backend"
 grep -Fq 'sh scripts/check/native-smoke-matrix.shs' "${multiplatform}" || fail "native smoke execution wiring missing"
-grep -Fq 'sh scripts/check/check-llvm-simd-row-native-arch.shs' "${multiplatform}" || fail "native architecture execution wiring missing"
+if grep -Fq 'sh scripts/check/check-llvm-simd-row-native-arch.shs' "${multiplatform}"; then
+  fail "Rust bootstrap workflow substitutes an unadmitted host LLVM for the distinct 23.1 provider lane"
+fi
 grep -Fq 'CRANELIFT_CROSS_EXECUTE=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BIN="$compiler"' "${multiplatform}" || fail "Cranelift cross-execution wiring missing"
 grep -Fq 'sh scripts/check/check-cranelift-aot-aggregate-cross.shs' "${multiplatform}" || fail "Cranelift cross-execution gate missing"
 if grep -Eq 'choco install llvm|Get-ChildItem .*llvm-config' "${multiplatform}"; then
@@ -253,7 +262,7 @@ inside && /^      - (name:|uses:)/ { exit }
 inside { print }
 ' "${multiplatform}")
 for required in \
-  "if: (runner.os == 'Linux' || runner.os == 'macOS') && matrix.backend == 'llvm'" \
+  "if: runner.os == 'Linux' || runner.os == 'macOS'" \
   'stage3="$(find build/bootstrap/stage3 -type f \( -name simple -o -name simple.exe \) -print -quit)"' \
   'test -n "$stage3"' \
   'SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BINARY="$stage3" sh scripts/check/check-stage4-hosted-dynload-provider-archive.shs'; do
@@ -339,7 +348,7 @@ inside { print }
 ' "${multiplatform}")
 for required in \
   'needs: native' \
-  'name: bootstrap-Linux x86_64-llvm-${{ github.sha }}' \
+  'name: bootstrap-Linux x86_64-cranelift-${{ github.sha }}' \
   'path: build/bootstrap-linux'; do
   printf '%s\n' "${native_architectures_body}" | grep -Fq -- "${required}" || fail "MinGW Stage4 dynload archive proof lacks the same-run Linux Stage3 artifact: ${required}"
 done
@@ -354,15 +363,15 @@ for required in \
   'test -x "$compiler"' \
   'command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1' \
   'command -v x86_64-w64-mingw32-ar >/dev/null 2>&1' \
-  'command -v llvm-nm-18 >/dev/null 2>&1' \
-  'command -v llvm-objdump-18 >/dev/null 2>&1' \
+  'command -v llvm-nm >/dev/null 2>&1' \
+  'command -v llvm-objdump >/dev/null 2>&1' \
   'compiler_target=$(x86_64-w64-mingw32-gcc -dumpmachine)' \
   'test "$compiler_target" = "x86_64-w64-mingw32"' \
   'SIMPLE_STAGE4_DYNLOAD_ARCHIVE_CROSS_TARGET=x86_64-w64-mingw32 \' \
   'CC=x86_64-w64-mingw32-gcc \' \
   'AR=x86_64-w64-mingw32-ar \' \
-  'SIMPLE_NM=llvm-nm-18 \' \
-  'SIMPLE_OBJDUMP=llvm-objdump-18 \' \
+  'SIMPLE_NM=llvm-nm \' \
+  'SIMPLE_OBJDUMP=llvm-objdump \' \
   'SIMPLE_NO_STUB_FALLBACK=1 \' \
   'SIMPLE_BINARY="$compiler" \' \
   'BUILD_DIR=build/check/stage4-mingw-dynload-provider \' \
@@ -436,7 +445,7 @@ grep -Fq 'FREEBSD_VERSION="14.4"' "${freebsd_qemu}" || fail "FreeBSD QEMU image 
 grep -Fq '#cloud-config' "${freebsd_qemu}" || fail "FreeBSD firstboot seed is not cloud-config"
 grep -Fq '/etc/rc.conf.d/firstboot_freebsd_update' "${freebsd_qemu}" || fail "FreeBSD update is not disabled before LOGIN"
 grep -Fq '/etc/rc.conf.d/firstboot_pkgs' "${freebsd_qemu}" || fail "FreeBSD package bootstrap is not disabled before LOGIN"
-grep -Fq 'pkg install -y rsync curl rust llvm18 git gmake pkgconf libffi zstd perl5' "${freebsd_qemu}" || fail "FreeBSD full bootstrap dependencies are incomplete"
+grep -Fq 'pkg install -y rsync curl rust llvm git gmake pkgconf libffi zstd perl5' "${freebsd_qemu}" || fail "FreeBSD full bootstrap dependencies are incomplete"
 grep -Fq 'command -v perl' "${freebsd_qemu}" || fail "FreeBSD bootstrap does not verify the provenance helper runtime"
 write_files_line=$(grep -n '^write_files:' "${freebsd_qemu}" | cut -d: -f1)
 runcmd_line=$(grep -n '^runcmd:' "${freebsd_qemu}" | cut -d: -f1)
@@ -536,7 +545,7 @@ if grep -R -E --include='*.spl' '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+(r
 fi
 grep -q 'bootstrap-from-scratch.sh' "${multiplatform}" || fail "multiplatform workflow bypasses canonical bootstrap"
 grep -q '^  native-architectures:' "${multiplatform}" || fail "pure-Simple native architecture job missing"
-grep -q 'name: bootstrap-Linux x86_64-llvm-' "${multiplatform}" || fail "native architecture job does not consume Linux LLVM pure stage"
+grep -q 'name: bootstrap-Linux x86_64-cranelift-' "${multiplatform}" || fail "native architecture job does not consume Linux Cranelift pure stage"
 grep -q 'chmod +x "$compiler"' "${multiplatform}" || fail "downloaded pure-Simple compiler executable mode is not restored"
 grep -q 'SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BIN="$compiler"' "${multiplatform}" || fail "native architecture gate permits stub fallback"
 grep -Fq 'binutils-arm-linux-gnueabihf' "${multiplatform}" || fail "ARM32 object inspection toolchain missing"
@@ -662,22 +671,7 @@ fi
 printf '%s\n' "${parity_native_authoritative}" | grep -Fq 'if [ "$NATIVE_PARITY_BACKEND" = cranelift ]; then' || fail "native-authoritative parity backend selection missing"
 printf '%s\n' "${parity_native_authoritative}" | grep -Fq 'build_native "$src" "$bin" "$build_log" cranelift' || fail "native-authoritative parity does not select Cranelift explicitly"
 printf '%s\n' "${parity_native_authoritative}" | grep -Fq 'elif build_native "$src" "$bin" "$build_log"; then' || fail "native-authoritative parity does not preserve flagless LLVM"
-seed_enum_parity_body=$(sed -n '/- name: Run Rust-seed custom enum identity parity/,/- name: Test/p' "${multiplatform}")
-for required in \
-  "if: matrix.backend == 'llvm'" \
-  'seed="src/compiler_rust/target/bootstrap/simple"' \
-  'test -x "$seed"' \
-  'SIMPLE_BINARY="$seed"' \
-  'NATIVE_PARITY_CASES=crossmodule_result_u8' \
-  'NATIVE_PARITY_FAIL_ON_XFAIL=1' \
-  'PARITY_WORK_DIR="build/check/rust-seed-enum-identity"' \
-  'sh scripts/check/check-native-seed-parity.shs'; do
-  printf '%s\n' "${seed_enum_parity_body}" | grep -Fq -- "${required}" || fail "hosted Rust-seed enum identity gate missing: ${required}"
-done
-if printf '%s\n' "${seed_enum_parity_body}" | grep -Eq 'continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true'; then
-  fail "hosted Rust-seed enum identity gate is optional"
-fi
-option_parity_body=$(sed -n '/- name: Run strict Option and Cranelift Result parity/,/- name: Run full native seed parity gate/p' "${multiplatform}")
+option_parity_body=$(sed -n '/- name: Run strict Option and Cranelift Result parity/,/- name: Run Windows ARM64 Cranelift COFF object gate/p' "${multiplatform}")
 option_parity_case_block=$(printf '%s\n' "${option_parity_body}" | sed -n '/^          cases="option_try_annotated_loud/,/^          fi$/p')
 expected_option_parity_case_block='          cases="option_try_annotated_loud option_try_direct_loud option_try_unresolved_method_loud exists_struct_payload_field"
           if [ "${{ matrix.backend }}" = cranelift ]; then
@@ -697,43 +691,6 @@ for required in \
 done
 if printf '%s\n' "${option_parity_body}" | grep -Eq '^[[:space:]]*if:|continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true'; then
   fail "hosted Option parity gate is optional"
-fi
-selected_parity_body=$(sed -n '/- name: Run strict selected native parity/,/- name: Run Windows ARM64 Cranelift COFF object gate/p' "${multiplatform}")
-for required in \
-  "if: runner.os == 'macOS' && matrix.backend == 'llvm'" \
-  'SIMPLE_BINARY="$stage3"' \
-  'NATIVE_PARITY_CASES="bare_main class_array_field_mutation class_array_param_field_mutation nested_struct_value_copy exists_struct_payload_field result_unwrap text_ordering text_bracket_index text_for_iteration raw_string_interpolation_contract new_keyword_identifier bool_array_element_interp mixed_numeric_comparison mixed_unsigned_float_comparison mixed_signed_unsigned_ordering unsigned_div_rem_shift method_owner_dispatch option_is_none_map array_map_text crossmodule_result_u8"' \
-  'NATIVE_PARITY_FAIL_ON_XFAIL=1' \
-  'sh scripts/check/check-native-seed-parity.shs'; do
-  printf '%s\n' "${selected_parity_body}" | grep -Fq -- "${required}" || fail "hosted selected parity gate missing: ${required}"
-done
-if printf '%s\n' "${selected_parity_body}" | grep -Eq 'continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true'; then
-  fail "hosted selected parity gate is optional"
-fi
-full_parity_body=$(sed -n '/- name: Run full native seed parity gate/,/- name: Run non-Linux strict dynload parity/p' "${multiplatform}")
-for required in \
-  "if: runner.os == 'Linux' && matrix.backend == 'llvm'" \
-  'SIMPLE_BINARY="$stage3"' \
-  'NATIVE_PARITY_FAIL_ON_XFAIL=1' \
-  'PARITY_WORK_DIR="build/check/native-parity-full"' \
-  'sh scripts/check/check-native-seed-parity.shs'; do
-  printf '%s\n' "${full_parity_body}" | grep -Fq -- "${required}" || fail "full native parity gate missing: ${required}"
-done
-if printf '%s\n' "${full_parity_body}" | grep -Eq 'NATIVE_PARITY_CASES|continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true'; then
-  fail "full native parity gate is filtered or optional"
-fi
-dynload_parity_body=$(sed -n '/- name: Run non-Linux strict dynload parity/,/- name: Run strict selected native parity/p' "${multiplatform}")
-for required in \
-  "if: runner.os == 'macOS' && matrix.backend == 'llvm'" \
-  'SIMPLE_BINARY="$stage3"' \
-  'NATIVE_PARITY_CASES=dynload_tagged_text' \
-  'NATIVE_PARITY_FAIL_ON_XFAIL=1' \
-  'PARITY_WORK_DIR="build/check/native-parity-${{ matrix.backend }}"' \
-  'sh scripts/check/check-native-seed-parity.shs'; do
-  printf '%s\n' "${dynload_parity_body}" | grep -Fq -- "${required}" || fail "hosted dynload parity gate missing: ${required}"
-done
-if printf '%s\n' "${dynload_parity_body}" | grep -Eq 'continue-on-error:[[:space:]]*true|\|\|[[:space:]]*true|NATIVE_OPEN_BUG_REPROS'; then
-  fail "hosted dynload parity gate is optional or enables known-red reproductions"
 fi
 if grep -Fq 'NATIVE_OPEN_BUG_REPROS=1' "${multiplatform}" scripts/check/check-freebsd-bootstrap-qemu.shs; then
   fail "hosted CI enables known-red native reproductions"
