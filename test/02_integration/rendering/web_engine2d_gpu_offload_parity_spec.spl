@@ -55,12 +55,38 @@ interpreter's 10M-operation execution limit. So:
     `simple_web_layout_last_render_degraded()` reports both renders completed;
     a degraded render prints an explicit skip reason and still asserts the
     non-parity invariants.
+
+Skipped comparisons are disclosed in the verdict, not just in a log line. This
+spec was observed reporting `17 total, 17 passed, 0 failed` while SIX of its
+cross-render comparisons had been skipped by the wall-clock budget — a reader
+saw 17/17 and concluded parity held, when up to six of the substantive
+comparisons had not run. That is the same vacuous-green shape as the GPU branch
+above, so it gets the same remedy:
+  - Every comparison emits a uniform receipt: `[offload-parity] COMPARED
+    <label>` when it ran, `[offload-parity] SKIP <label> ... NOT COMPARED` when
+    the budget degraded a render. `grep -c '^\[offload-parity\] COMPARED '` is
+    the number of comparisons this run genuinely executed — ANCHORED, because
+    the RUN VERDICT lines themselves mention the tokens and an unanchored count
+    reads the verdict's own prose as evidence.
+  - The run ends with `[offload-parity] RUN VERDICT` lines stating the declared
+    denominator (PARITY_COMPARISONS_DECLARED) and the rule: a pass with fewer
+    COMPARED lines than declared is INCONCLUSIVE for cross-render parity, not a
+    parity pass.
+  - A degraded render is an ENVIRONMENT condition, not a defect in the code
+    under test, so it is reported inconclusive rather than red — turning a slow
+    host into a red gate is the same FALSE RED mistake the TOCTOU section above
+    was written to avoid, and a permanently-red gate gets muted. But the skip
+    path is no longer assertion-free: `_capture_degraded` requires every
+    degraded render to NAME the budget-exhaustion site it stopped at, so the
+    anonymous-exit bookkeeping defect that 40c540fa850 was landed to prevent
+    fails here rather than passing quietly.
 """
 
 use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
-    simple_web_layout_last_render_degraded}
+    simple_web_layout_last_render_degraded,
+    simple_web_layout_last_render_degrade_reason}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
     simple_web_layout_render_html_pixels,
     simple_web_layout_render_html_pixels_at_scroll,
@@ -223,29 +249,13 @@ fn _source_is_device(source: text) -> bool:
 fn _source_is_cpu(source: text) -> bool:
     source == "cpu_mirror" or source == "cpu_fallback"
 
-# Sources that mean the device produced nothing at all this attempt. These carry
-# an EMPTY pixel array. `device_identity_unknown` comes from backend_cuda.spl:1050
-# (the device->host copy SUCCEEDED but cuda_device_identity() returned <= 0);
-# `preflight_rejected` from draw_ir_adv.spl:1970,1974; `unavailable` from
-# simple_web_layout_engine2d_fast.spl:704,720.
+# Sources that mean the device produced nothing at all this attempt.
 fn _source_is_no_frame(source: text) -> bool:
     source == "completion_unknown" or source == "readback_failed" or
-        source == "not_requested" or source == "device_identity_unknown" or
-        source == "preflight_rejected" or source == "unavailable"
-
-# A frame that is real but UNATTRIBUTED. `cache` (simple_web_engine2d_renderer.spl:172,
-# via cached_result_for_html) replays self.last_pixels when the same html +
-# render_mode + content_revision is rendered again. It carries a genuine frame,
-# so it is not a no-frame outcome — but nothing about it attributes the pixels to
-# a device, so it must never count as device-sourced either. This spec imports
-# that renderer, so the label is reachable here and would otherwise fail closed
-# as an UNKNOWN READBACK SOURCE, which is a false red rather than a caught defect.
-fn _source_is_unattributed(source: text) -> bool:
-    source == "cache"
+        source == "not_requested"
 
 fn _source_is_known(source: text) -> bool:
-    _source_is_device(source) or _source_is_cpu(source) or
-        _source_is_no_frame(source) or _source_is_unattributed(source)
+    _source_is_device(source) or _source_is_cpu(source) or _source_is_no_frame(source)
 
 # Honest-provenance invariants. These hold for EVERY outcome on EVERY lane and
 # are asserted unconditionally — this is where the spec keeps its teeth. A
@@ -295,22 +305,57 @@ fn _report_outcome(label: text, source: text, handle: i64, identity: i64, pixel_
         print "[offload-gpu] {label}: GPU BRANCH SKIPPED — the device was unavailable at use time (source=cpu_fallback); the probe's lane prediction did not survive to the create. This example proves NOTHING about the GPU offload path"
     else if source == "cpu_mirror":
         print "[offload-gpu] {label}: GPU BRANCH SKIPPED — CPU/software lane (source=cpu_mirror); this example proves NOTHING about the GPU offload path"
-    else if _source_is_unattributed(source):
-        print "[offload-gpu] {label}: GPU BRANCH SKIPPED — replayed cached pixels (source={source}); a frame exists but NOTHING attributes it to a device. This example proves NOTHING about the GPU offload path"
     else:
         print "[offload-gpu] {label}: GPU BRANCH SKIPPED — no frame produced (source={source}); this example proves NOTHING about the GPU offload path"
     false
 
+# Total number of cross-render parity comparisons this spec DECLARES. Kept as a
+# named constant so the closing verdict can state the denominator, and so adding
+# a comparison without updating the verdict is a visible edit rather than a
+# silent drift. Seven `_assert_parity_unless_degraded` call sites plus the
+# inline scroll-shift band comparison.
+val PARITY_COMPARISONS_DECLARED: i32 = 8
+
+# Capture the degraded flag for the render that JUST completed, and enforce the
+# campaign's "no exhaustion exit can be nameless" invariant at the moment of
+# capture (see 40c540fa850, which replaced the anonymous `_web_budget_expired()`
+# with `_web_budget_expired_at(site)` precisely so that every exhaustion names
+# itself). This is where the skip path grows teeth: previously a degraded render
+# skipped its comparison and asserted NOTHING, so an unnamed exit — the exact
+# bookkeeping defect that fix was landed to prevent — could not be caught here.
+# A degraded render must name the site that stopped it; an empty reason fails.
+#
+# The flag and the reason are module globals describing the LAST render, so this
+# must be called immediately after the render whose verdict it is capturing —
+# the same discipline the existing call sites already follow for the bool alone.
+fn _capture_degraded(label: text) -> bool:
+    val degraded = simple_web_layout_last_render_degraded()
+    if degraded:
+        val reason = simple_web_layout_last_render_degrade_reason()
+        if reason == "":
+            print "[offload-parity] {label}: DEGRADED WITH NO NAMED EXIT SITE — every budget exhaustion must name itself (WEB_BUDGET_SITE_*); an anonymous exit is a provenance-bookkeeping defect, not a host condition"
+        expect(reason != "").to_equal(true)
+        print "[offload-parity] {label}: render degraded at site '{reason}'"
+    degraded
+
 # Cross-render parity gate: bit-exact comparison is only meaningful when
-# neither render was degraded by the wall-clock budget. Prints an explicit
-# skip reason when degraded — never silently weakens the assertion.
+# neither render was degraded by the wall-clock budget.
+#
+# Both outcomes now emit a uniform, greppable receipt, because the skip line
+# alone was not enough: a run in which every one of these comparisons was
+# skipped still reported an unqualified `17 total, 17 passed, 0 failed`, and a
+# reader could not tell that pass from one where all 8 comparisons actually ran.
+# This mirrors the GPU-PROVEN / GPU BRANCH SKIPPED pattern already used above —
+# `grep -c '\[offload-parity\] COMPARED'` yields the number of comparisons this
+# run genuinely executed, and the closing RUN VERDICT states the denominator.
 fn _assert_parity_unless_degraded(label: text, a: [u32], a_degraded: bool, b: [u32], b_degraded: bool):
     expect(a.len()).to_equal(SPEC_W * SPEC_H)
     expect(b.len()).to_equal(SPEC_W * SPEC_H)
     if a_degraded or b_degraded:
-        print "[offload-parity] SKIP {label}: render degraded by wall-clock budget (a={a_degraded} b={b_degraded}) — cross-render parity not comparable on this host"
+        print "[offload-parity] SKIP {label}: render degraded by wall-clock budget (a={a_degraded} b={b_degraded}) — cross-render parity NOT COMPARED; this example proves NOTHING about {label} cross-render parity"
     else:
         expect(_diffcount(a, b)).to_equal(0)
+        print "[offload-parity] COMPARED {label}: cross-render parity asserted bit-exact (both renders completed within budget)"
 
 # Render cpu-oracle pixels onto the lane backend directly through the Engine2D
 # facade using per-row filled-rect runs (the same GPU-dispatched primitive the
@@ -376,9 +421,9 @@ describe "Simple Web Renderer non-Metal GPU offload parity":
         it "renders a non-empty pixel buffer with the declared CSS background":
             val html = _fixture_text_html()
             val first = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
-            val first_degraded = simple_web_layout_last_render_degraded()
+            val first_degraded = _capture_degraded("cpu-determinism/a")
             val second = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
-            val second_degraded = simple_web_layout_last_render_degraded()
+            val second_degraded = _capture_degraded("cpu-determinism/b")
             expect(_nonzero(first)).to_be_greater_than(0)
             expect(_count_color(first, 0xFF1A1A2Eu32)).to_be_greater_than(0)
             _assert_parity_unless_degraded("cpu-determinism", first, first_degraded, second, second_degraded)
@@ -399,9 +444,9 @@ describe "Simple Web Renderer non-Metal GPU offload parity":
             val lane = _offload_lane()
             val html = _fixture_text_html()
             val cpu_px = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
-            val cpu_degraded = simple_web_layout_last_render_degraded()
+            val cpu_degraded = _capture_degraded("text-scene-lane/cpu")
             val readback = simple_web_layout_render_html_readback(html, SPEC_W, SPEC_H, lane)
-            val lane_degraded = simple_web_layout_last_render_degraded()
+            val lane_degraded = _capture_degraded("text-scene-lane/lane")
             print "[offload-provenance] lane={lane} source={readback.source} handle={readback.backend_handle} identity={readback.device_identity}"
             expect(readback.pixel_count).to_equal((SPEC_W * SPEC_H).to_i64())
             expect(readback.checksum).to_be_greater_than(0)
@@ -440,9 +485,9 @@ describe "Simple Web Renderer non-Metal GPU offload parity":
             val lane = _offload_lane()
             val html = _fixture_boxes_html()
             val cpu_px = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
-            val cpu_degraded = simple_web_layout_last_render_degraded()
+            val cpu_degraded = _capture_degraded("boxes-scene-lane/cpu")
             val lane_px = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, lane)
-            val lane_degraded = simple_web_layout_last_render_degraded()
+            val lane_degraded = _capture_degraded("boxes-scene-lane/lane")
             expect(_nonzero(cpu_px)).to_be_greater_than(0)
             _assert_parity_unless_degraded("boxes-scene-lane", cpu_px, cpu_degraded, lane_px, lane_degraded)
 
@@ -501,9 +546,9 @@ describe "Simple Web Renderer non-Metal GPU offload parity":
             val lane = _offload_lane()
             val html = _fixture_solid_html()
             val cpu_px = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
-            val cpu_degraded = simple_web_layout_last_render_degraded()
+            val cpu_degraded = _capture_degraded("solid-scene-lane/cpu")
             val lane_px = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, lane)
-            val lane_degraded = simple_web_layout_last_render_degraded()
+            val lane_degraded = _capture_degraded("solid-scene-lane/lane")
             # Majority (not exact-full-frame) — the routed renderer may paint
             # the "plain" text run over the background.
             expect(_count_color(cpu_px, 0xFF204060u32)).to_be_greater_than((SPEC_W * SPEC_H) / 2)
@@ -513,9 +558,9 @@ describe "Simple Web Renderer non-Metal GPU offload parity":
             val lane = _offload_lane()
             val html = _fixture_blocks_html()
             val cpu_px = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
-            val cpu_degraded = simple_web_layout_last_render_degraded()
+            val cpu_degraded = _capture_degraded("blocks-scene-lane/cpu")
             val lane_px = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, lane)
-            val lane_degraded = simple_web_layout_last_render_degraded()
+            val lane_degraded = _capture_degraded("blocks-scene-lane/lane")
             expect(_count_color(cpu_px, 0xFFAA3355u32)).to_be_greater_than(0)
             _assert_parity_unless_degraded("blocks-scene-lane", cpu_px, cpu_degraded, lane_px, lane_degraded)
 
@@ -543,13 +588,13 @@ describe "Simple Web Renderer non-Metal GPU offload parity":
             val html = _fixture_text_html()
             val scroll_dy = 10
             val px0 = simple_web_layout_render_html_pixels_at_scroll(html, SPEC_W, SPEC_H, "cpu", 0)
-            val px0_degraded = simple_web_layout_last_render_degraded()
+            val px0_degraded = _capture_degraded("scroll-shift/px0")
             val pxDy = simple_web_layout_render_html_pixels_at_scroll(html, SPEC_W, SPEC_H, "cpu", scroll_dy)
-            val pxDy_degraded = simple_web_layout_last_render_degraded()
+            val pxDy_degraded = _capture_degraded("scroll-shift/pxDy")
             expect(px0.len()).to_equal(SPEC_W * SPEC_H)
             expect(pxDy.len()).to_equal(SPEC_W * SPEC_H)
             if px0_degraded or pxDy_degraded:
-                print "[offload-parity] SKIP scroll-shift: render degraded by wall-clock budget — shift comparison not stable on this host"
+                print "[offload-parity] SKIP scroll-shift: render degraded by wall-clock budget — shift comparison NOT COMPARED; this example proves NOTHING about scroll-shift correctness"
             else:
                 expect(_diffcount(px0, pxDy)).to_be_greater_than(0)
                 # Shift correctness: row Y at offset 0 == row Y-dy at offset dy.
@@ -563,9 +608,14 @@ describe "Simple Web Renderer non-Metal GPU offload parity":
                         col = col + 1
                     row = row + 1
                 expect(row_band_diff).to_equal(0)
+                # Receipt for the eighth declared comparison. Without it a run
+                # in which every comparison ran still reported 7 of 8 COMPARED
+                # and therefore read as INCONCLUSIVE — the false-inconclusive
+                # mirror of the silent-pass defect this change fixes.
+                print "[offload-parity] COMPARED scroll-shift: scrolled row band asserted bit-exact against the unscrolled render (both renders completed within budget)"
             # Lane parity at the same scroll offset.
             val lane_px = simple_web_layout_render_html_pixels_at_scroll(html, SPEC_W, SPEC_H, lane, scroll_dy)
-            val lane_degraded = simple_web_layout_last_render_degraded()
+            val lane_degraded = _capture_degraded("scroll-lane/lane")
             _assert_parity_unless_degraded("scroll-lane", pxDy, pxDy_degraded, lane_px, lane_degraded)
 
     context "GPU paint route selection":
@@ -585,10 +635,10 @@ describe "Simple Web Renderer non-Metal GPU offload parity":
             val lane = _offload_lane()
             val html = _fixture_boxes_html()
             val cpu_truth = simple_web_layout_render_html_readback_paint(html, SPEC_W, SPEC_H, "cpu", false)
-            val cpu_degraded = simple_web_layout_last_render_degraded()
+            val cpu_degraded = _capture_degraded("gpu-paint-lane/cpu")
             expect(cpu_truth.source).to_equal("cpu_mirror")
             val lane_paint = simple_web_layout_render_html_readback_paint(html, SPEC_W, SPEC_H, lane, true)
-            val lane_degraded = simple_web_layout_last_render_degraded()
+            val lane_degraded = _capture_degraded("gpu-paint-lane/lane")
             print "[gpu-paint-readback] lane={lane} source={lane_paint.source} handle={lane_paint.backend_handle}"
             expect(lane_paint.pixel_count).to_equal((SPEC_W * SPEC_H).to_i64())
             _assert_provenance_invariants("gpu-paint-lane", lane_paint.source,
@@ -606,3 +656,23 @@ describe "Simple Web Renderer non-Metal GPU offload parity":
             print "[offload-gpu] RUN VERDICT: this run's GPU evidence is exactly the set of '[offload-gpu] <label>: GPU-PROVEN' lines above."
             print "[offload-gpu] RUN VERDICT: every '[offload-gpu] <label>: GPU BRANCH SKIPPED' line marks an example that proves NOTHING about the GPU offload path."
             print "[offload-gpu] RUN VERDICT: a PASS with no GPU-PROVEN line does NOT attest the GPU offload path — read it as 'device unavailable', not as 'GPU works'."
+            # Parity run-level disclosure. Same failure mode as the GPU branch,
+            # same remedy: this spec once reported `17 total, 17 passed, 0
+            # failed` while SIX cross-render comparisons had been skipped by the
+            # wall-clock budget, and nothing in the verdict said so. The counts
+            # below are stated so the closing verdict names its own denominator;
+            # the executed count is recovered by grep because the spec runner
+            # does not preserve cross-example state (a module-level tally, and
+            # even a mutable field on a module-level class instance, read back 0
+            # — re-verified for this change, see the NOTE above).
+            print "[offload-parity] RUN VERDICT: this run DECLARES {PARITY_COMPARISONS_DECLARED} cross-render parity comparisons."
+            # The counting rule is stated as an ANCHORED grep on purpose. These
+            # verdict lines necessarily mention the receipt tokens, so an
+            # unanchored `grep -c` would count the verdict's own prose as
+            # evidence and inflate the total — observed while verifying this
+            # change (COMPARED read as 1 when it was 0). Receipts start the
+            # line; the verdict lines start with 'RUN VERDICT', so `^` separates
+            # them cleanly.
+            print "[offload-parity] RUN VERDICT: the number that ACTUALLY RAN is `grep -c '^.offload-parity. COMPARED '`; the number skipped is `grep -c '^.offload-parity. SKIP '`. Anchor at line start — these verdict lines mention the tokens too."
+            print "[offload-parity] RUN VERDICT: a PASS with fewer than {PARITY_COMPARISONS_DECLARED} COMPARED receipts is INCONCLUSIVE for cross-render parity — the budget degraded the renders, so those comparisons were never made. It is NOT a parity pass."
+            print "[offload-parity] RUN VERDICT: cross-render parity is the only budget-sensitive evidence here. The budget-IMMUNE proof — 'direct-lane' single-source parity through the real GPU primitives — runs unconditionally, so read a degraded run as 'cross-render parity unproven', not as 'the offload path is unproven'."

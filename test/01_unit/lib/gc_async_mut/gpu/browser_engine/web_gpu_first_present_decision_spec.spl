@@ -98,6 +98,13 @@ describe "gpu-first present decision honesty":
         # claim and must agree.
         val names = ["vulkan", "metal", "cuda", "opencl", "webgpu", "rocm"]
         var i = 0
+        # Anti-vacuity counter. Both arms below are conditional, so a sweep in
+        # which no decision matched EITHER arm would assert nothing at all and
+        # still pass — the same silent-skip shape fixed in
+        # web_engine2d_gpu_offload_parity_spec. Count the backends that actually
+        # exercised an arm and require at least one, matching the `declines`
+        # guard already used in web_gpu_present_paint_coverage_spec.
+        var examined = 0
         while i < names.len():
             val name = names[i]
             val decision = simple_web_layout_render_html_gpu_first_decision(
@@ -109,12 +116,17 @@ describe "gpu-first present decision honesty":
             if claims_gpu:
                 expect(decision).to_contain("source=device_readback")
                 expect(decision).to_contain(":offloaded=rect_fill:")
+                examined = examined + 1
 
             step("A CPU-sourced readback must never be labelled gpu-* nor claim an offload")
             if decision.contains("source=cpu_mirror") or decision.contains("source=cpu_fallback"):
                 expect(claims_gpu).to_be(false)
                 expect(decision).to_contain(":offloaded=none")
+                examined = examined + 1
             i = i + 1
+        print "[gpu-first-decision] label-vs-readback sweep: {examined} of {names.len()} backends exercised an assertion arm"
+        step("The sweep must have asserted something — a run where no backend matched either arm proves nothing")
+        expect(examined).to_be_greater_than(0)
 
     it "never reports gpu_backend_used unless the dispatch readback proves a device":
         simple_web_layout_set_render_budget_floor_ms(900000)
@@ -129,6 +141,10 @@ describe "gpu-first present decision honesty":
         # The claim and the readback are one claim and must agree.
         val names = ["vulkan", "metal", "cuda", "opencl", "webgpu", "rocm", "cpu_simd"]
         var i = 0
+        # Anti-vacuity counter: if EVERY backend returned an empty receipt this
+        # example would pass having asserted nothing and printed nothing. At
+        # least one backend must reach dispatch for the sweep to mean anything.
+        var dispatched = 0
         while i < names.len():
             val name = names[i]
             web_gpu_paint_last_dispatch_receipt_reset()
@@ -138,6 +154,7 @@ describe "gpu-first present decision honesty":
             # An empty receipt means the backend never reached dispatch
             # (Engine2D declined to construct); nothing to assert for it.
             if receipt != "":
+                dispatched = dispatched + 1
                 step("A GPU claim must be backed by a device_readback source")
                 if receipt.contains("gpu_backend_used=true"):
                     expect(receipt).to_contain("readback_source=device_readback")
@@ -147,6 +164,9 @@ describe "gpu-first present decision honesty":
                     or receipt.contains("readback_source=cpu_fallback")):
                     expect(receipt).to_contain("gpu_backend_used=false")
             i = i + 1
+        print "[gpu-first-decision] dispatch-receipt sweep: {dispatched} of {names.len()} backends reached dispatch"
+        step("The sweep must have inspected a real receipt — all-empty receipts prove nothing")
+        expect(dispatched).to_be_greater_than(0)
 
     it "maps the SIMPLE_WEB_GPU_PAINT routing env to exactly one of the three modes":
         val mode = web_gpu_paint_mode()
