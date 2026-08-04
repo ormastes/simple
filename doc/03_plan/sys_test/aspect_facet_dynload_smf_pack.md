@@ -43,3 +43,93 @@ Each executable spec mirrors to `doc/06_spec` after stripping `test/`. Fixture c
 - Run `sspec-maintain scan` once per final spec and review all seven scores.
 - Keep manifest counts dynamic; never pin the current dynSMF entry count or absolute evidence indexes.
 - Fail closed on an unavailable required capability; do not use `skip()` or placeholder passes.
+
+## Callback-safe advice and lifecycle concurrency
+
+### Deterministic unit acceptance
+
+These scenarios require no threads or native callback execution and already
+have real API seams:
+
+| Scenario | Owner/API | Executable oracle |
+|---|---|---|
+| Complete phase chain pins exact generations before invocation and releases all tokens afterward | `advice_binding_registry.spl:advice_dispatch_projection_with_invoker` | `advice_binding_registry_spec.spl` asserts ordered values `[3003, 2002, 1001]`, three acquisitions, three releases, and final pin count zero |
+| Stale second projection entry releases the successfully acquired first token | Same | Fatal outcome identifies stale/unpublished generation; acquired and released counts are both one; pin count is zero |
+| Loader-owner validation and callback failure release every acquired token | Same | Both failure paths report two acquired/two released and exact-generation pin count zero |
+| Visibility disappears before lifecycle quiesce | `advice_dispatch_projection_invalidate`, `LifecycleManager.quiesce_generation_for` | Projection has zero entries while generation remains active, then transitions to `quiescing` |
+| A held canonical lease prevents ordinary unload completion | `AspectApplicationRuntime.unload_published_aspect` | `aspect_application_runtime_spec.spl` observes first result `quiescing`, no new acquisition, then `unloaded` only after exact lease release |
+| Same-route activation shares one result; different routes serialize | `AspectLazySingleFlight` | `aspect_lazy_singleflight_spec.spl` asserts owner/follower roles, shared typed failure, wake semantics, and rejected follower completion |
+
+Do not duplicate these with source-text assertions. Their current unit specs call
+the real registry, lifecycle, runtime, and single-flight APIs.
+
+### Callback overlap system acceptance
+
+Actual callback-vs-unload overlap is not deterministic through the current test
+invoker: `advice_dispatch_projection_with_invoker` accepts only
+`fn(i64) -> Result<i64, text>`, so the callback cannot observe the pinned
+`LifecycleManager`, announce that invocation began, or wait on a test barrier.
+A global fake lifecycle would inspect a different immutable snapshot and is not
+valid evidence.
+
+Owner: `src/compiler/99.loader/loader/advice_binding_registry.spl` together
+with the application capsule in
+`src/app/startup/aspect_application_runtime.spl`. The production callback ABI
+must remain unchanged. Add a test observer/barrier seam around the production
+pin/invoke/release phases, not inside the native witness ABI.
+
+Required system spec:
+`test/03_system/app/simple/aspect_advice_lifecycle_concurrency_spec.spl`.
+It must use these visible steps:
+
+1. `step("Publish one exact advice generation")`
+2. `step("Pause an admitted callback after its generation pin")`
+3. `step("Request unload while the callback remains pinned")`
+4. `step("Release the callback and drain the generation")`
+5. `step("Reject dispatch through the retired projection")`
+
+Exact oracles:
+
+- callback entry is observed once and exact-generation pin count is one;
+- unload removes projection/facet visibility and returns `quiescing` without
+  reclaiming the loader-owned witness;
+- a new dispatch is rejected while the already-entered callback remains valid;
+- callback completion releases exactly one token, after which unload returns
+  `unloaded` and cache/provider ownership disappears;
+- callback error follows the same drain sequence and returns its typed E-AF010
+  failure without leaking a token;
+- two application capsules with equal slot IDs never share projections, tokens,
+  barriers, lifecycle counters, or unload state.
+
+This scenario requires real scheduler/barrier execution. A sequential mock,
+sleep-based race, or manually acquired token cannot satisfy callback-overlap
+acceptance.
+
+## Portable unwind metadata acceptance
+
+No executable spec may claim this contract until the common metadata API exists.
+The authoritative gap and owner matrix is
+`doc/08_tracking/bug/facet_descriptor_cleanup_unwind_primitives_2026-08-04.md`.
+
+### Deterministic unit specs after the API lands
+
+| Planned spec | Real API exercised | Required oracle |
+|---|---|---|
+| `test/01_unit/compiler/mir/mir_call_unwind_contract_roundtrip_spec.spl` | `MirInstKind.Call`, `MirTerminator.CallTerminator`, MIR JSON/serialization | Direct and indirect `NoUnwind`/`MayUnwind` survive exact deterministic round-trip; missing contract is rejected |
+| `test/01_unit/compiler/mir/mir_call_unwind_optimizer_preservation_spec.spl` | SSA, DCE, copy propagation, LICM, inlining, outlining, auto-vectorization | Contract and normal/unwind successors remain identical after each pass |
+| `test/01_unit/compiler/mir/facet_member_unwind_contract_spec.spl` | Typed facet witness planning and MIR member-call lowering | Declared facet method effect reaches the emitted indirect call; absent/ambiguous effect is fatal |
+| `test/01_unit/compiler/mir/facet_cleanup_unwind_edge_spec.spl` | Canonical cleanup-target builder | Real unwind successor releases nested leases once in reverse order; normal successor retains leases until its own exits |
+| `test/01_unit/compiler/backend/backend_unwind_contract_spec.spl` | Backend admission | Unsupported native target rejects `MayUnwind` before instruction selection; `NoUnwind` remains ordinary call |
+| `test/01_unit/compiler/backend/llvm_unwind_contract_spec.spl` | LLVM lowering | `MayUnwind` produces `invoke`, valid landing pad/resume, and no contradictory function `nounwind` |
+| `test/01_unit/compiler/semantics/foreign_unwind_source_contract_spec.spl` | Source/HIR function effects | Extern with no explicit contract is rejected in a leased scope; explicit `NoUnwind` is admitted; `MayUnwind` requires cleanup capability |
+
+### Runtime-required system acceptance
+
+`test/03_system/compiler/facet_unwind_cleanup_spec.spl` must run only on a
+backend admitted for canonical unwind cleanup. It must call a real foreign or
+language callee that unwinds after two nested facet acquisitions, observe
+reverse releases for the exact descriptor generations, enter the handler once,
+and prove the normal-return sibling path also releases once. Native targets that
+still reject unwind edges remain a tested fatal matrix row, not skipped cases.
+An aborting `panic` is a separate scenario and must never be presented as
+resumable-unwind evidence.
