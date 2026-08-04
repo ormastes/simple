@@ -1,0 +1,110 @@
+# State-parameterized aspect-pack activation transition.
+#
+# The application runtime owns lifecycle exclusion and installs the returned
+# coordinator. This leaf performs no application I/O, imports no execution
+# context, and always uses the canonical loader/cache values supplied by that
+# owner.
+
+use compiler.loader.loader.aspect_catalog.{AspectCatalog}
+use compiler.loader.loader.aspect_pack_provider.{
+    AspectPackProviderKey, AspectPackProvider, AspectPackTrustPolicy,
+    AspectPackProviderCache
+}
+use compiler.loader.loader.aspect_activation.{
+    AspectActivationRequest, AspectActivationCoordinator,
+    AspectActivationResult
+}
+use compiler.loader.loader.module_loader.{ModuleLoader}
+use app.startup.aspect_facet_runtime_contract.{
+    AspectApplicationPhase,
+    aspect_application_is_mission, aspect_application_is_operational
+}
+
+fn aspect_pack_activation_failure(
+    catalog: AspectCatalog,
+    coordinator: AspectActivationCoordinator,
+    reason: text
+) -> AspectActivationResult:
+    AspectActivationResult(
+        coordinator: coordinator,
+        status: "failed",
+        reason: reason,
+        generation: catalog.generation,
+        staged_count: 0,
+        counters: coordinator.counters)
+
+fn aspect_pack_activation_lazy_authorize(
+    trust_policy: AspectPackTrustPolicy,
+    phase: AspectApplicationPhase
+) -> Result<(), text>:
+    if (aspect_application_is_mission(trust_policy) and
+        aspect_application_is_operational(phase)):
+        return Err(
+            "E-APACK008 mission operational state denies lazy aspect-pack I/O")
+    Ok(())
+
+fn aspect_pack_activation_patch_authorize(
+    trust_policy: AspectPackTrustPolicy
+) -> Result<(), text>:
+    if aspect_application_is_mission(trust_policy):
+        return Err(
+            "E-APACK008 mission profile denies runtime advice patching")
+    Ok(())
+
+fn aspect_pack_activation_transition(
+    catalog: AspectCatalog,
+    trust_policy: AspectPackTrustPolicy,
+    phase: AspectApplicationPhase,
+    coordinator: AspectActivationCoordinator,
+    canonical_loader: ModuleLoader,
+    provider_cache: AspectPackProviderCache,
+    provider_key: AspectPackProviderKey,
+    pack_bytes: [u8],
+    signature: [u8],
+    request: AspectActivationRequest
+) -> AspectActivationResult:
+    val entry_result = catalog.find(request.aspect_id)
+    if entry_result.is_err():
+        return aspect_pack_activation_failure(
+            catalog, coordinator, entry_result.unwrap_err())
+    if (coordinator.published.has(request.aspect_id) and
+        coordinator.published[request.aspect_id].state != "active"):
+        return aspect_pack_activation_failure(
+            catalog, coordinator, "E-AF004 aspect generation is quiescing")
+    val authorization = aspect_pack_activation_lazy_authorize(
+        trust_policy, phase)
+    if authorization.is_err():
+        return aspect_pack_activation_failure(
+            catalog, coordinator, authorization.unwrap_err())
+    val entry = entry_result.unwrap()
+    if entry.advice_summaries.len() > 0:
+        val patch_authorization = aspect_pack_activation_patch_authorize(
+            trust_policy)
+        if patch_authorization.is_err():
+            return aspect_pack_activation_failure(
+                catalog, coordinator, patch_authorization.unwrap_err())
+    if (aspect_application_is_mission(trust_policy) and
+        entry.activation_policy != "startup"):
+        return aspect_pack_activation_failure(
+            catalog, coordinator,
+            "E-APACK008 mission profile permits activation only during startup")
+    if (provider_key.pack_id != entry.pack_id or
+        provider_key.pack_digest != entry.pack_digest or
+        provider_key.catalog_generation != catalog.generation or
+        provider_key.target != entry.target or
+        provider_key.variant_fingerprint != entry.variant_fingerprint or
+        provider_key.runtime_abi != entry.runtime_abi or
+        provider_key.core_public_abi_hash != entry.core_public_abi_hash or
+        provider_key.core_layout_abi_hash != entry.core_layout_abi_hash):
+        return aspect_pack_activation_failure(
+            catalog, coordinator,
+            "E-APACK003 provider identity does not match the exact application catalog route")
+    val provider_result = AspectPackProvider.from_trusted_bytes(
+        provider_key, pack_bytes, trust_policy, signature)
+    if provider_result.is_err():
+        return aspect_pack_activation_failure(
+            catalog, coordinator, provider_result.unwrap_err())
+    coordinator.activate_with_loader(
+        provider_result.unwrap(), request, canonical_loader, provider_cache)
+
+export aspect_pack_activation_transition
