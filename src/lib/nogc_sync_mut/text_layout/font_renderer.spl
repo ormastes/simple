@@ -108,7 +108,8 @@ export use std.nogc_sync_mut.text_layout.font_types.{
     CachedGlyph, FontCacheStats, FontGlyphRun, FontTextPayload, FontRenderQuad, FontRenderBatch,
     FontRenderConfig, FontExecutionPolicy, font_execution_plan, font_render_category_name,
     font_render_config_normalize, font_render_config_default_for_size,
-    font_render_config_identity, font_render_config_valid,
+    font_render_config_identity, font_render_config_atlas_identity,
+    font_render_config_valid,
     font_render_batch_atlas_owner_identity, font_render_batch_atlas_cache_identity
 }
 
@@ -272,10 +273,12 @@ fn _resolved_font_metric_store(key: text, metrics: ResolvedFontMetrics):
 # this is a call-site workaround, not a compiler fix). Do NOT re-nest a
 # FontRenderer/FontRasterizer into a module-global array; cache only flat
 # scalars/text (family key, resolved font path) and reconstruct a fresh
-# FontRenderer from the already-in-memory registered blob on every cache hit
-# via `_browser_default_font_rebuild_from_path`.
+# FontRenderer from the already-in-memory registered blob when metrics are not
+# already cached. Keep the validated identity beside the path so an exact warm
+# metrics lookup can return before rebuilding/parsing that blob.
 var _browser_default_font_families: [text] = []
 var _browser_default_font_paths: [text] = []
+var _browser_default_font_identities: [text] = []
 var _registered_selected_font_paths: [text] = []
 var _registered_selected_font_blobs: [[u8]] = []
 var _browser_default_font_lock: Mutex? = nil
@@ -295,6 +298,22 @@ fn _browser_default_font_cache_key(family: text) -> text:
     if candidates.len() == 0:
         return ""
     candidates[0]
+
+fn _browser_default_font_cached_identity(family: text) -> text:
+    val cache_key = _browser_default_font_cache_key(family)
+    if cache_key == "":
+        return ""
+    val active_lock = _browser_default_font_lock_acquire()
+    var index: i64 = 0
+    while (index < _browser_default_font_families.len() and
+           index < _browser_default_font_identities.len()):
+        if _browser_default_font_families[index] == cache_key:
+            val identity = _browser_default_font_identities[index]
+            _browser_default_font_lock_release(active_lock)
+            return identity
+        index = index + 1
+    _browser_default_font_lock_release(active_lock)
+    ""
 
 fn _registered_selected_font_bytes(path: text) -> ([u8], bool):
     val active_lock = _browser_default_font_lock_acquire()
@@ -323,10 +342,11 @@ fn font_renderer_use_registered_selected_bytes_only():
     _registered_selected_fonts_only = true
     val browser_lock = _browser_default_font_lock_acquire()
     # No cached FontRenderer instances to clear_ttf() any more — the cache is
-    # flat (family, path) text pairs (see the FLATTENED comment above), so
-    # resetting it is just dropping the two arrays.
+    # flat (family, path, identity) text rows (see the FLATTENED comment
+    # above), so resetting it is just dropping the three arrays.
     _browser_default_font_families = []
     _browser_default_font_paths = []
+    _browser_default_font_identities = []
     _browser_default_font_lock_release(browser_lock)
     val metric_lock = _resolved_font_metric_lock_acquire()
     _resolved_font_metric_keys = []
@@ -428,9 +448,11 @@ fn _browser_default_for_family_cached(family: text) -> (FontRenderer, bool):
     val renderer = loaded.0
     val resolved_path = loaded.1
     if cache_key != "" and resolved_path != "" and renderer.has_sffi_ttf():
+        val resolved_identity = renderer.current_font_identity()
         val store_lock = _browser_default_font_lock_acquire()
         _browser_default_font_families = _browser_default_font_families.push(cache_key)
         _browser_default_font_paths = _browser_default_font_paths.push(resolved_path)
+        _browser_default_font_identities = _browser_default_font_identities.push(resolved_identity)
         _browser_default_font_lock_release(store_lock)
     (renderer, false)
 
@@ -667,6 +689,7 @@ class FontRenderer:
     atlas_face_generation: i64
     atlas_font_identity: text
     active_render_config_identity: text = ""
+    active_atlas_config_identity: text = ""
     # ---- Staged FontRenderBatch payload -----------------------------------
     # The prepared batch is written HERE instead of being returned. A
     # FontRenderBatch returned across a call kept its scalars/identity/atlas
@@ -737,7 +760,8 @@ class FontRenderer:
             atlas_pixels: [], atlas_codepoints: [], atlas_face_ids: [], atlas_face_generations: [], atlas_glyph_indices: [], atlas_font_sizes: [],
             atlas_xs: [], atlas_ys: [], atlas_widths: [], atlas_heights: [],
             atlas_cursor_x: 0, atlas_cursor_y: 0, atlas_row_height: 0,
-            atlas_generation: 0, atlas_face_generation: -1, atlas_font_identity: ""
+            atlas_generation: 0, atlas_face_generation: -1, atlas_font_identity: "",
+            active_render_config_identity: "", active_atlas_config_identity: ""
         )
         renderer
 
@@ -753,7 +777,8 @@ class FontRenderer:
             atlas_pixels: [], atlas_codepoints: [], atlas_face_ids: [], atlas_face_generations: [], atlas_glyph_indices: [], atlas_font_sizes: [],
             atlas_xs: [], atlas_ys: [], atlas_widths: [], atlas_heights: [],
             atlas_cursor_x: 0, atlas_cursor_y: 0, atlas_row_height: 0,
-            atlas_generation: 0, atlas_face_generation: -1, atlas_font_identity: ""
+            atlas_generation: 0, atlas_face_generation: -1, atlas_font_identity: "",
+            active_render_config_identity: "", active_atlas_config_identity: ""
         )
         renderer
 
@@ -777,7 +802,8 @@ class FontRenderer:
             atlas_pixels: [], atlas_codepoints: [], atlas_face_ids: [], atlas_face_generations: [], atlas_glyph_indices: [], atlas_font_sizes: [],
             atlas_xs: [], atlas_ys: [], atlas_widths: [], atlas_heights: [],
             atlas_cursor_x: 0, atlas_cursor_y: 0, atlas_row_height: 0,
-            atlas_generation: 0, atlas_face_generation: -1, atlas_font_identity: ""
+            atlas_generation: 0, atlas_face_generation: -1, atlas_font_identity: "",
+            active_render_config_identity: "", active_atlas_config_identity: ""
         )
         renderer
 
@@ -917,13 +943,16 @@ class FontRenderer:
 
     me _activate_render_config(config: FontRenderConfig):
         val identity = font_render_config_identity(config)
+        val atlas_identity = font_render_config_atlas_identity(config)
         if identity != self.active_render_config_identity:
             var cache = self.cache
             cache.sync_render_config_identity(identity)
             self.cache = cache
-            if self.active_render_config_identity != "":
+            if (self.active_atlas_config_identity != "" and
+                atlas_identity != self.active_atlas_config_identity):
                 self._reset_font_atlas(self.atlas_face_generation, self.atlas_font_identity)
             self.active_render_config_identity = identity
+            self.active_atlas_config_identity = atlas_identity
 
     # Copy an inbound batch into the staged slot and answer with the quad
     # count. The aggregate crosses only as an INBOUND parameter and the answer
@@ -2279,6 +2308,15 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
         )
         if val cached = _resolved_font_metric_cached(expected_key):
             return cached
+    if cacheable and expected_identity == "":
+        val cached_identity = _browser_default_font_cached_identity(resolved_family)
+        if cached_identity != "":
+            val warm_key = _resolved_font_metric_language_config_key(
+                resolved_family, content, font_size, cached_identity,
+                normalized_language, render_config_identity
+            )
+            if val cached = _resolved_font_metric_cached(warm_key):
+                return cached
     # Shape first. Hosted producers use a short-lived font_sffi face; registered-
     # only producers bind the already-validated OpenType blob without a host ABI.
     val shaped = if complex_script != 0 and selected_candidate != nil:
