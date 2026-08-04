@@ -33,6 +33,26 @@ extern fn rt_env_get(key: text) -> text
 fn backend_helper_trace_enabled() -> bool:
     (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
+# Final backend backstop: even a caller that bypasses the driver admission gate
+# cannot silently lower or discard the prepared-dispatch intrinsic.
+fn backend_prepared_advice_rejection(module: MirModule, backend_name: text) -> text?:
+    if module.prepared_advice_slots.len() > 0:
+        return Some(
+            "E-AF010 backend {backend_name} cannot execute prepared dynamic advice")
+    for function in module.functions.values():
+        for block in function.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Intrinsic(_, name, _):
+                        if name == "simple.prepared_advice_dispatch.v1":
+                            return Some(
+                                "E-AF010 backend {backend_name} cannot execute prepared dynamic advice")
+                    case _:
+                        ()
+    nil
+
+export backend_prepared_advice_rejection
+
 # DS3: `--debug-info=none|line-tables|full` (see compile_opt_and_driver.spl)
 # is threaded down to here via SIMPLE_DEBUG_INFO_LEVEL rather than a new
 # CompileOptions field, matching this file's existing env-var-knob pattern
@@ -341,6 +361,10 @@ fn compile_module_with_backend(
             kind = BackendKind.Cranelift
     if trace:
         print "[backend-helper] kind resolved"
+    val prepared_rejection = backend_prepared_advice_rejection(module, backend_name)
+    if prepared_rejection != nil:
+        return Err(compileerror_backend_error(
+            kind, prepared_rejection.unwrap()))
 
     # Preserve the driver's explicit optimization level instead of collapsing to build mode defaults.
     val opt = if opt_level_i64 <= 0:

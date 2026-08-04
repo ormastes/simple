@@ -22,12 +22,15 @@ flow:
   rejects runtime advice patching.
 - Disabled prepared slots have an explicit non-zero guard footprint and expose
   lookup/hit/miss/check/branch counters to the retained NFR harness.
-- Automatic MIR prepared-slot callers remain open; explicit app-runtime dispatch
-  does not by itself prove business-path patchpoint integration.
-- `PreparedAdviceSlotPlan` is preserved and deterministically serialized in MIR,
-  but non-empty driver emission fails closed until a real backend table/caller exists.
-- Prepared-slot metadata/guards are not yet emitted by MIR: `50.mir` is the
-  next producer owner, `70.backend` lowers them, and loader/app remain consumers.
+- `CompileOptions.prepared_dynamic_advice` derives execution slots from the existing
+  weave authority and emits automatic entry/return/abort MIR dispatch intrinsics.
+- `PreparedAdviceSlotPlan` is preserved and deterministically serialized; the
+  loader derives an immutable exact-generation projection from its one registry.
+- Non-empty native/SMF emission remains fail-closed until projection install and
+  invalidation are atomic with lifecycle transitions and dispatch pins its
+  generation through the backend trampoline.
+- Check/interpreter reject the option directly; JIT and every AOT backend reject
+  produced slots through the same centralized admission boundary.
 - Resolver startup now crosses `85.mdsoc` through
   `ModuleResolverDiscoveryPort.resolve_inputs`; production composition injects
   the 99-loader adapter, while compatibility/test constructors stay explicitly

@@ -6,6 +6,7 @@
 # - Map ELF relocation types to SMF wire values
 
 use compiler.driver.smf_binary_helpers.{_read_u16_le, _read_u32_le, _read_u64_le}
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 # Relocation entry extracted from ELF .rela.text section
 struct ElfRelocEntry:
@@ -21,6 +22,123 @@ struct ElfSymEntry:
     size: i64
     info: i64
     section_idx: i64
+
+fn smf_elf_string_at(bytes: [u8], offset: i64, end: i64) -> text:
+    if offset < 0 or offset >= end or end > bytes.len(): return ""
+    var value: [u8] = []
+    var index = offset
+    while index < end and bytes[index] != 0:
+        value = value.push(bytes[index])
+        index = index + 1
+    rt_bytes_to_text(value)
+
+fn smf_elf_text_less(left: text, right: text) -> bool:
+    var index = 0
+    while index < left.len() and index < right.len():
+        val a = left.char_code_at(index)
+        val b = right.char_code_at(index)
+        if a != b: return a < b
+        index = index + 1
+    left.len() < right.len()
+
+fn smf_sort_elf_text_symbols(symbols: [ElfSymEntry]) -> [ElfSymEntry]:
+    var sorted: [ElfSymEntry] = []
+    for symbol in symbols:
+        var inserted = false
+        var next: [ElfSymEntry] = []
+        for existing in sorted:
+            if (not inserted and (symbol.value < existing.value or
+                (symbol.value == existing.value and
+                    smf_elf_text_less(symbol.name, existing.name)))):
+                next = next.push(symbol)
+                inserted = true
+            next = next.push(existing)
+        if not inserted: next = next.push(symbol)
+        sorted = next
+    sorted
+
+fn extract_elf_text_symbols(object_code: [u8]) -> Result<[ElfSymEntry], text>:
+    if object_code.len() < 64 or object_code[0] != 0x7f or
+        object_code[1] != 0x45 or object_code[2] != 0x4c or object_code[3] != 0x46:
+        return Err("E-AF002 facet symbol export requires one ELF64 object")
+    if object_code[4] != 2 or _read_u16_le(object_code, 16) != 1:
+        return Err("E-AF002 facet symbol export requires one relocatable ELF64 object")
+    val section_offset = _read_u64_le(object_code, 40)
+    val section_entry_size = _read_u16_le(object_code, 58)
+    val section_count = _read_u16_le(object_code, 60)
+    val section_names_index = _read_u16_le(object_code, 62)
+    if section_offset <= 0 or section_entry_size < 64 or section_count <= 0:
+        return Err("E-AF002 facet symbol export requires a valid ELF section table")
+    if section_names_index < 0 or section_names_index >= section_count:
+        return Err("E-AF002 invalid ELF section-name table index")
+    if section_offset + section_count * section_entry_size > object_code.len():
+        return Err("E-AF002 ELF section table exceeds the facet object")
+    val section_names_header = section_offset + section_names_index * section_entry_size
+    val section_names_offset = _read_u64_le(object_code, section_names_header + 24)
+    val section_names_size = _read_u64_le(object_code, section_names_header + 32)
+    val section_names_end = section_names_offset + section_names_size
+    if section_names_end > object_code.len():
+        return Err("E-AF002 ELF section-name table exceeds the facet object")
+
+    var text_section_index = 0 - 1
+    var text_size = 0
+    var symbol_header = 0 - 1
+    var index = 0
+    while index < section_count:
+        val header = section_offset + index * section_entry_size
+        val name = smf_elf_string_at(
+            object_code,
+            section_names_offset + _read_u32_le(object_code, header),
+            section_names_end)
+        val section_type = _read_u32_le(object_code, header + 4)
+        if name == ".text" and section_type == 1:
+            text_section_index = index
+            text_size = _read_u64_le(object_code, header + 32)
+        if section_type == 2: symbol_header = header
+        index = index + 1
+    if text_section_index < 0 or symbol_header < 0:
+        return Err("E-AF002 facet object lacks .text or .symtab")
+
+    val symbol_offset = _read_u64_le(object_code, symbol_header + 24)
+    val symbol_size = _read_u64_le(object_code, symbol_header + 32)
+    val linked_string_index = _read_u32_le(object_code, symbol_header + 40)
+    var symbol_entry_size = _read_u64_le(object_code, symbol_header + 56)
+    if symbol_entry_size == 0: symbol_entry_size = 24
+    if symbol_entry_size < 24 or symbol_offset + symbol_size > object_code.len():
+        return Err("E-AF002 invalid ELF symbol table for facet export")
+    if linked_string_index < 0 or linked_string_index >= section_count:
+        return Err("E-AF002 invalid ELF symbol string-table index")
+    val string_header = section_offset + linked_string_index * section_entry_size
+    val string_offset = _read_u64_le(object_code, string_header + 24)
+    val string_size = _read_u64_le(object_code, string_header + 32)
+    val string_end = string_offset + string_size
+    if string_end > object_code.len():
+        return Err("E-AF002 ELF symbol string table exceeds the facet object")
+
+    var symbols: [ElfSymEntry] = []
+    index = 0
+    while index < symbol_size / symbol_entry_size:
+        val entry = symbol_offset + index * symbol_entry_size
+        val info = object_code[entry + 4] as i64
+        val binding = (info >> 4) & 0xf
+        val symbol_type = info & 0xf
+        val defined_section = _read_u16_le(object_code, entry + 6)
+        val value = _read_u64_le(object_code, entry + 8)
+        val size = _read_u64_le(object_code, entry + 16)
+        val name = smf_elf_string_at(
+            object_code,
+            string_offset + _read_u32_le(object_code, entry), string_end)
+        if ((binding == 1 or binding == 2) and symbol_type == 2 and
+            defined_section == text_section_index and name != ""):
+            if value < 0 or value >= text_size or value + size > text_size:
+                return Err("E-AF002 ELF function symbol exceeds .text: {name}")
+            symbols = symbols.push(ElfSymEntry(
+                name: name, value: value, size: size, info: info,
+                section_idx: defined_section))
+        index = index + 1
+    if symbols.len() == 0:
+        return Err("E-AF002 facet object has no exported .text function symbols")
+    Ok(smf_sort_elf_text_symbols(symbols))
 
 # Extract code section (.text) from ELF object file.
 # Parses the ELF64 header, finds .text section via section header string table,

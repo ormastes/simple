@@ -14,6 +14,7 @@ use compiler.common.driver_core_types.{
     driver_output_format_is_both,
     driver_output_format_is_self_contained
 }
+use compiler.driver.prepared_advice_slot_handoff.{prepared_advice_execution_admission}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_hash_text(s: text) -> i64
@@ -51,6 +52,9 @@ impl CompilerDriver:
             self.ctx.evict_hir()
 
         val bootstrap_flat_aot = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
+        if bootstrap_flat_aot and self.ctx.options.prepared_dynamic_advice:
+            return CompileResult.CodegenError(
+                "E-AF010 prepared dynamic advice is unsupported on flat bootstrap AOT")
         if bootstrap_flat_aot:
             log_phase("aot:flat_mir_passes:skipped")
         else:
@@ -81,6 +85,11 @@ impl CompilerDriver:
             log_phase("aot:debug_trace:start")
             self.apply_debug_trace()
             log_phase("aot:debug_trace:done")
+
+        val prepared_admission = prepared_advice_execution_admission(
+            self.ctx.options, self.ctx.mir_modules, "aot:{self.ctx.options.backend}")
+        if prepared_admission.is_err():
+            return CompileResult.CodegenError(prepared_admission.unwrap_err())
 
         log_phase("aot:output:start")
         val output = self.ctx.options.output_file ?? "a.out"

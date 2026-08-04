@@ -1,6 +1,6 @@
 # Verification Report: Aspect Facets and Demand-Loaded SFM Packs
 
-**Date:** 2026-08-04  
+**Date:** 2026-08-04
 **Workspace:** `/home/ormastes/dev/pub/simple-aspect-facet`; the feature
 bookmark is synchronized with GitHub and is rebased onto the current
 `main@origin` before push.
@@ -75,13 +75,16 @@ bookmark is synchronized with GitHub and is rebased onto the current
   disabled-path counters through the application owner. Its explicit
   `advice_dispatch_slot` seam validates the complete matching phase against the
   loader before zero-argument before/after invocation and rejects dynamic
-  `around`; no automatic MIR/backend business-path caller is claimed.
+  `around`. The config-gated producer now emits automatic phase-specific MIR
+  dispatch intrinsics; executable backend dispatch is still unclaimed.
 - **PASS — retained NFR harness shape (static review):** a real SFM2/ordinary-SMF
   fixture builder and native probe cover cold construction, first activation,
-  published-facet lease lookup/release, cache/advice counters (including
-  dispatch attempts, invocations, failures, and rejected `around` advice), and
-  per-mode opened files. The build/collector require exact compiler-to-probe
-  provenance and mark the first record `collected-not-thresholded`.
+  published-facet lease lookup/release, and real loader-owned advice dispatch
+  whose native witness must return exactly `73`. The build/collector require
+  exact compiler-to-probe plus v2 probe-contract provenance. Because no
+  receiver-aware facet invocation API exists, the probe reports
+  `unsupported-no-receiver-aware-facet-api` and the collector rejects it; no
+  lookup-only run can masquerade as facet-call evidence.
 - **PASS — continuation static gates:** shell syntax, changed-file placeholder,
   conflict-marker, and trailing-whitespace scans passed; generated-spec `.spl`
   count is `0`; both final direct-env/runtime guards report `STATUS: PASS`.
@@ -116,33 +119,45 @@ bookmark is synchronized with GitHub and is rebased onto the current
   `sspec-maintain`; each required scan returned `ERROR: file not found:
   sspec-maintain`, so seven-component scorecards are unavailable.
 - **FAIL — production witness/advice execution:** metadata emission and loader
-  publication exist. Receiver-independent facet implementation bodies now
-  retain AST/HIR metadata and lower as ordinary HIR/MIR functions under
-  `<implementation>__facet_witness__<method>`; receiver-dependent `self` and
-  `self.base` bodies fail closed with E-AF005 rather than being rewritten.
+  publication exist. Facet implementation bodies retain AST/HIR metadata and
+  lower as ordinary HIR/MIR functions under
+  `<implementation>__facet_witness__<method>`; `self.base` uses the explicit
+  base-as-argument-zero ABI, while unsupported bare `self` fails with E-AF005.
+  Receiver-aware calls prepend the base and lower through `CallIndirect`.
   Lowering still does not produce the emitted `<implementation>__facet_witness`
   factory symbol or export a method table, and no production caller
   invokes `lower_resolved_facet_witness_call`. Facet artifact production now
-  fails closed with `E-AF002` unless that canonical symbol is proven present in
-  the emitted ordinary-SMF symbol set; emitted witness-method functions do not
-  masquerade as that missing factory. Dynamic advice now has an explicit
+  requires the canonical factory and every contract-ordered method symbol in
+  the emitted ordinary-SMF symbol set. The writer can now publish deterministic
+  multiple `.text`-relative entries from one ELF64 object, but no canonical
+  factory descriptor layout exists; production therefore stops with E-AF005
+  even if a same-named source function is present. Emitted witness-method
+  functions do not masquerade as the missing factory.
+  Dynamic advice now has an explicit
   `advice_dispatch_slot` boundary that revalidates loader owner/address and can
   invoke zero-argument before/after witnesses; runtime `around` is rejected
-  without a real proceed continuation. No production prepared-slot MIR caller
-  or safe executable callback evidence exists, so AC-11 remains unmet.
-- **FAIL — no production prepared join-point producer:** `MirModule` contains
+  without a real proceed continuation. An automatic prepared-slot MIR caller
+  exists, but no safe executable callback path exists, so AC-11 remains unmet.
+- **FAIL — prepared join-point backend bridge incomplete:** `MirModule` contains
   a versioned `PreparedAdviceSlotPlan` table that survives current MIR
   reconstruction/optimization/VHDL aggregation and has deterministic serializer
-  plus driver collection. No syntax/config producer, backend table encoding, or
-  business-path caller exists; native/SMF emission therefore rejects non-empty
-  tables with `E-AF010`. `mir_aop_injection.spl` still emits direct static advice
-  calls only. AC-11 remains unmet.
+  plus driver collection. `CompileOptions.prepared_dynamic_advice` derives slots from
+  the established weave authority and inserts automatic entry/return/abort MIR
+  phase calls. The loader exposes an exact-generation immutable projection
+  contract, but atomic install/invalidate, generation pinning, and an executable
+  backend trampoline do not exist. The option participates in cache identity;
+  check/interpreter reject it directly and JIT/all AOT backends reject produced
+  tables centrally with `E-AF010`; the common backend compiler independently
+  rejects either slot metadata or the intrinsic if a caller bypasses the driver.
+  AC-11 remains unmet.
 - **FAIL — missing NFR evidence:** the admitted builder/probe/collector now
   exist, but no retained startup/RSS/page-fault, opened-file, first-use, or
   repeated-lookup baseline has executed. The one-byte disabled-slot value is
   explicitly a contract minimum, not the NFR-AF-003 backend footprint
-  measurement. NFR-AF-003, NFR-AF-005, NFR-AF-006, and NFR-AF-007 remain
-  incomplete.
+  measurement. The fixture can now prove an exact native advice result, but
+  NFR-AF-005 remains deliberately blocked until a receiver-aware facet call
+  boundary exists and the probe reports `verified`. NFR-AF-003, NFR-AF-005,
+  NFR-AF-006, and NFR-AF-007 remain incomplete.
 - **FAIL — coverage/build proof:** the declared 70–80% coverage annotations are
   not backed by a successful coverage run. The focused `module_surface.spl`
   regression was fixed, but touched legacy `module_loader.spl`,

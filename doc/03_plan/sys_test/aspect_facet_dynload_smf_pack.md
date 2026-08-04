@@ -19,7 +19,7 @@ Reusable hidden setup/check helpers are `build_aspect_pack_fixture`, `verify_col
 | `test/03_system/compiler/module_resolver/relative_aspect_roots_spec.spl` | REQ-AF-004, 007 | Manifest-relative resolution independent of CWD; collision/path/symlink escape; build-time variants only |
 | `test/03_system/stdlib/dynload/aspect_pack_selective_loading_spec.spl` | REQ-AF-005, 007; NFR-AF-004, 008 | Real SFM directory + opaque SMF chunks; only selected closure decoded; corrupt/bounds/hash/ABI/config failures |
 | `test/03_system/app/simple/aspect_catalog_activation_spec.spl` | REQ-AF-003, 006..008; NFR-AF-001, 002, partial 006 | Catalog routing, base/aspect load order, cold counters, cache invalidation, shared concurrent transaction, atomic generation; no backend footprint or retained-performance claim |
-| `test/01_unit/scripts/aspect_facet_nfr_evidence_contract_spec.spl` | NFR-AF-005 | Exact admitted compiler/probe/fixture provenance, cold-isolation counters, distinct opened files, latency percentiles, cache/advice accounting, and no invented thresholds |
+| `test/01_unit/scripts/aspect_facet_nfr_evidence_contract_spec.spl` | NFR-AF-005 | Exact admitted compiler/probe/fixture/protocol provenance, deterministic native advice outcome, receiver-aware facet-call fail-closed gate, cold-isolation counters, distinct opened files, latency percentiles, cache/advice accounting, and no invented thresholds |
 
 ## Retained NFR evidence
 

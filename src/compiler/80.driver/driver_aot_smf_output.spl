@@ -12,12 +12,14 @@ use compiler.backend.linker.linker_wrapper.{
 use compiler.driver.smf_writer.{
     generate_smf_with_options,
     generate_smf_with_raw_code_options,
+    validate_smf_export_symbols,
     Target,
     build_smf_with_relocations,
     SmfBuildOptions,
     SmfDependencyEntry
 }
 use compiler.driver.smf_binary_helpers.{u32_to_bytes}
+use compiler.driver.smf_elf_parser.{ElfSymEntry, extract_elf_text_symbols}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{
     CompileResult,
@@ -115,6 +117,8 @@ impl CompilerDriver:
         val backend_name = ctx.options.backend
         val opt_level = compileoptions_effective_mir_opt_level(ctx.options)
         var all_object_bytes: [u8] = []
+        var single_object_bytes: [u8] = []
+        var object_count = 0
 
         for name in ctx.mir_modules.keys():
             smf_log_trace(log, "compiling module for SMF: {name}")
@@ -130,6 +134,8 @@ impl CompilerDriver:
                         "AOT compile error in {name}: {err.to_text()}")
                 case Ok(module):
                     if val obj_bytes = module.object_code:
+                        object_count = object_count + 1
+                        single_object_bytes = obj_bytes
                         all_object_bytes = all_object_bytes.concat(obj_bytes)
                 case _:
                     return CompileResult.CodegenError(
@@ -141,7 +147,33 @@ impl CompilerDriver:
         val prepared_slot_gate = prepared_advice_slot_artifact_gate(ctx.mir_modules)
         if prepared_slot_gate.is_err():
             return CompileResult.CodegenError(prepared_slot_gate.unwrap_err())
-        val facet_binding_result = smf_collect_facet_binding_bytes(ctx)
+        var facet_export_symbols: [ElfSymEntry] = []
+        var facet_emitted_symbol_names: [text] = []
+        if smf_has_facet_plans(ctx):
+            if object_count != 1:
+                return CompileResult.CodegenError(
+                    "E-AF002 facet SMF export requires exactly one backend object; multi-object offsets are unsupported")
+            if ctx.options.smf_output_mode == "elf_embedded":
+                return CompileResult.CodegenError(
+                    "E-AF002 facet multi-symbol export is unsupported for elf_embedded mode")
+            val extracted = extract_elf_text_symbols(single_object_bytes)
+            if extracted.is_err():
+                return CompileResult.CodegenError(extracted.unwrap_err())
+            facet_export_symbols = extracted.unwrap()
+            val validated_exports = validate_smf_export_symbols(
+                facet_export_symbols, all_object_bytes.len())
+            if validated_exports.is_err():
+                return CompileResult.CodegenError(validated_exports.unwrap_err())
+            facet_export_symbols = validated_exports.unwrap()
+            for symbol in facet_export_symbols:
+                facet_emitted_symbol_names = facet_emitted_symbol_names.push(symbol.name)
+            # Name/offset proof is necessary but not sufficient: no canonical
+            # factory descriptor layout exists yet, so an arbitrary same-named
+            # source function must never be admitted as a facet factory.
+            return CompileResult.CodegenError(
+                "E-AF005 facet witness factory descriptor ABI is not defined")
+        val facet_binding_result = smf_collect_facet_binding_bytes(
+            ctx, facet_emitted_symbol_names)
         if facet_binding_result.is_err():
             return CompileResult.CodegenError(facet_binding_result.unwrap_err())
         val facet_binding_bytes = facet_binding_result.unwrap()
@@ -153,24 +185,44 @@ impl CompilerDriver:
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
             opts.facet_binding_bytes = facet_binding_bytes
-            generate_smf_with_raw_code_options(all_object_bytes, opts)
+            opts.export_symbols = facet_export_symbols
+            val generated = generate_smf_with_raw_code_options(all_object_bytes, opts)
+            if generated.is_err():
+                return CompileResult.CodegenError(generated.unwrap_err())
+            generated.unwrap()
         elif mode == "reloc_sections":
             var opts = SmfBuildOptions.create(target)
             opts.deps = deps
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
             opts.facet_binding_bytes = facet_binding_bytes
-            build_smf_with_relocations(all_object_bytes, opts)
+            opts.export_symbols = facet_export_symbols
+            val generated = build_smf_with_relocations(all_object_bytes, opts)
+            if generated.is_err():
+                return CompileResult.CodegenError(generated.unwrap_err())
+            generated.unwrap()
         else:
             var opts = SmfBuildOptions.create(target)
             opts.deps = deps
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
             opts.facet_binding_bytes = facet_binding_bytes
-            generate_smf_with_options(all_object_bytes, opts)
+            opts.export_symbols = facet_export_symbols
+            val generated = generate_smf_with_options(all_object_bytes, opts)
+            if generated.is_err():
+                return CompileResult.CodegenError(generated.unwrap_err())
+            generated.unwrap()
         CompileResult.Success(smf_bytes)
 
-fn smf_collect_facet_binding_bytes(ctx: CompileContext) -> Result<[u8], text>:
+fn smf_has_facet_plans(ctx: CompileContext) -> bool:
+    for module_name in ctx.mir_modules.keys():
+        if ctx.mir_modules[module_name].facet_binding_plans.len() > 0:
+            return true
+    false
+
+fn smf_collect_facet_binding_bytes(
+    ctx: CompileContext, emitted_symbols: [text]
+) -> Result<[u8], text>:
     var contracts: [FacetContractMetadata] = []
     for module_name in ctx.hir_modules.keys():
         contracts = contracts.concat(facet_contract_metadata_from_hir(
@@ -180,11 +232,7 @@ fn smf_collect_facet_binding_bytes(ctx: CompileContext) -> Result<[u8], text>:
         plans = plans.concat(ctx.mir_modules[module_name].facet_binding_plans)
     if plans.len() == 0:
         return Ok([])
-    # The current ordinary-SMF wrapper exposes only its primary `main` symbol;
-    # object-file symbols are not copied into the SMF symbol table. Facet
-    # plans therefore fail closed until executable witness bodies are lowered
-    # and their canonical symbols are genuinely exported.
-    encode_mir_facet_binding_artifacts(plans, contracts, ["main"])
+    encode_mir_facet_binding_artifacts(plans, contracts, emitted_symbols)
 
 fn smf_collect_driver_manifest_bytes(modules: Dict<text, MirModule>) -> [u8]:
     var payload: [u8] = []

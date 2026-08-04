@@ -1,13 +1,15 @@
 # Driver-owned handoff for prepared dynamic advice-slot metadata.
 #
 # Collection and validation are production-ready. Artifact/backend consumption
-# is deliberately fail-closed until a real table and prepared caller exist.
+# is deliberately fail-closed until the canonical loader projection can be
+# atomically installed/invalidated and dispatch pins its exact generation.
 
 use compiler.mir.mir_data.{MirModule}
 use compiler.common.structural_contracts.aop.{
     PreparedAdviceSlotPlan, prepared_advice_slot_plan_create
 }
 use compiler.mir.mir_serialization.{serialize_mir_prepared_advice_slots}
+use compiler.common.driver_core_types.{CompileOptions}
 
 fn collect_prepared_advice_slot_table_bytes(
     modules: Dict<text, MirModule>
@@ -32,8 +34,27 @@ fn prepared_advice_slot_artifact_gate(
 ) -> Result<(), text>:
     val table = collect_prepared_advice_slot_table_bytes(modules)?
     if table.len() > 0:
-        return Err("E-AF010 prepared advice slot backend/table emission is not implemented")
+        return Err("E-AF010 prepared advice dispatch projection/trampoline is not lifecycle-safe")
+    Ok(())
+
+# One admission boundary shared by check/interpreter/JIT/AOT dispatch. Modes
+# that cannot even materialize the prepared MIR reject the semantic option
+# directly; MIR-capable paths reject any produced slot before backend codegen.
+fn prepared_advice_execution_admission(
+    options: CompileOptions,
+    modules: Dict<text, MirModule>,
+    surface: text
+) -> Result<(), text>:
+    if options.prepared_dynamic_advice and
+        (surface == "check" or surface == "interpret" or surface == "smf_exec"):
+        return Err(
+            "E-AF010 prepared dynamic advice is unsupported on {surface}; no MIR dispatch may be ignored")
+    val table = collect_prepared_advice_slot_table_bytes(modules)?
+    if table.len() > 0:
+        return Err(
+            "E-AF010 prepared dynamic advice is unsupported on {surface}; projection/trampoline is not lifecycle-safe")
     Ok(())
 
 export collect_prepared_advice_slot_table_bytes
 export prepared_advice_slot_artifact_gate
+export prepared_advice_execution_admission

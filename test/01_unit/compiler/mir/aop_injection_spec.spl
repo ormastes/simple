@@ -1,9 +1,23 @@
 # @cover src/compiler/50.mir/mir_aop_injection.spl 80%
 use std.spec
-use compiler.frontend.core.aop.{MirBlockInfo, InstructionInfo, WeavingResult, AdviceCallInfo, JoinPointKind, WeavingDiagnostic}
-use compiler.mir.mir_aop_injection.{extract_mir_block_info, classify_mir_inst_kind, make_advice_call_inst}
+use compiler.frontend.core.aop.{MirBlockInfo, InstructionInfo, WeavingResult, AdviceCallInfo, AdviceForm, JoinPointKind, WeavingDiagnostic}
+use compiler.mir.mir_aop_injection.{extract_mir_block_info, classify_mir_inst_kind, make_advice_call_inst, apply_prepared_advice_result}
 use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirFunction, MirSignature, BlockId, LocalId}
 use compiler.mir.mir_types.{MirType, MirTypeKind, MirConstValue}
+use compiler.hir.hir_types.{SymbolId}
+
+fn prepared_test_function_identity(symbol_id: i64, params: [MirType]) -> MirFunction:
+    val ok = MirBlock(id: BlockId(7), label: nil, instructions: [], terminator: MirTerminator.Ret(nil))
+    val err = MirBlock(id: BlockId(1), label: nil, instructions: [], terminator: MirTerminator.Abort("failed"))
+    MirFunction(
+        symbol: SymbolId.new(symbol_id), name: "submit",
+        signature: MirSignature(params: params, return_type: MirType.unit(), is_variadic: false),
+        locals: [], blocks: [err, ok], entry_block: BlockId(7), span: nil,
+        generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {})
+
+fn prepared_test_function() -> MirFunction:
+    prepared_test_function_identity(4, [])
 
 describe "MIR AOP Injection":
     describe "classify_mir_inst_kind":
@@ -55,3 +69,72 @@ describe "MIR AOP Injection":
             expect(infos.len()).to_equal(1)
             expect(infos[0].instruction_kinds.len()).to_equal(1)
             expect(infos[0].instruction_kinds[0].kind_tag).to_equal("call")
+
+    describe "prepared dynamic advice injection":
+        it "creates one stable execution slot and automatic phase calls":
+            val result = WeavingResult(
+                join_points_woven: 1, advices_inserted: 4,
+                advice_calls: [
+                    AdviceCallInfo(join_point_kind: JoinPointKind.Execution, advice_function: "audit_a", form: AdviceForm.Before, block_id: 0, instruction_index: 0),
+                    AdviceCallInfo(join_point_kind: JoinPointKind.Execution, advice_function: "audit_b", form: AdviceForm.Before, block_id: 0, instruction_index: 0),
+                    AdviceCallInfo(join_point_kind: JoinPointKind.Execution, advice_function: "success", form: AdviceForm.AfterSuccess, block_id: 0, instruction_index: 0),
+                    AdviceCallInfo(join_point_kind: JoinPointKind.Execution, advice_function: "failure", form: AdviceForm.AfterError, block_id: 0, instruction_index: 0)],
+                diagnostics: [])
+            val prepared = apply_prepared_advice_result(
+                prepared_test_function(), "orders", result).unwrap()
+            expect(prepared.slot.unwrap().slot_id).to_start_with("orders::submit:")
+            expect(prepared.slot.unwrap().slot_id).to_contain("#symbol=4.prepared")
+            expect(prepared.slot.unwrap().admitted_forms.len()).to_equal(3)
+            expect(prepared.function.blocks[0].id.id).to_equal(1)
+            expect(prepared.function.blocks[0].instructions.len()).to_equal(1)
+            expect(prepared.function.blocks[1].id.id).to_equal(7)
+            expect(prepared.function.blocks[1].instructions.len()).to_equal(2)
+            match prepared.function.blocks[1].instructions[0].kind:
+                case Intrinsic(_, name, args):
+                    expect(name).to_equal("simple.prepared_advice_dispatch.v1")
+                    expect(args.len()).to_equal(2)
+                    match args[1].kind:
+                        case Const(Str(phase), _): expect(phase).to_equal("before")
+                        case _: fail("expected exact before phase")
+                case _: fail("expected prepared before dispatch")
+            match prepared.function.blocks[1].instructions[1].kind:
+                case Intrinsic(_, _, args):
+                    match args[1].kind:
+                        case Const(Str(phase), _): expect(phase).to_equal("after_success")
+                        case _: fail("expected exact after_success phase")
+                case _: fail("expected prepared success dispatch before return")
+            match prepared.function.blocks[0].instructions[0].kind:
+                case Intrinsic(_, _, args):
+                    match args[1].kind:
+                        case Const(Str(phase), _): expect(phase).to_equal("after_error")
+                        case _: fail("expected exact after_error phase")
+                case _: fail("expected prepared error dispatch before abort")
+
+        it "uses signature and symbol identity to distinguish overload slots":
+            val result = WeavingResult(
+                join_points_woven: 1, advices_inserted: 1,
+                advice_calls: [AdviceCallInfo(
+                    join_point_kind: JoinPointKind.Execution,
+                    advice_function: "audit", form: AdviceForm.Before,
+                    block_id: 7, instruction_index: 0)],
+                diagnostics: [])
+            val integer_slot = apply_prepared_advice_result(
+                prepared_test_function_identity(10, [MirType.i64()]),
+                "orders", result).unwrap().slot.unwrap().slot_id
+            val float_slot = apply_prepared_advice_result(
+                prepared_test_function_identity(11, [MirType.f64()]),
+                "orders", result).unwrap().slot.unwrap().slot_id
+            expect(integer_slot).to_contain("#symbol=10.prepared")
+            expect(float_slot).to_contain("#symbol=11.prepared")
+
+        it "rejects around without an exactly-once proceed path":
+            val result = WeavingResult(
+                join_points_woven: 1, advices_inserted: 1,
+                advice_calls: [AdviceCallInfo(
+                    join_point_kind: JoinPointKind.Execution,
+                    advice_function: "wrap", form: AdviceForm.Around,
+                    block_id: 0, instruction_index: 0)],
+                diagnostics: [])
+            expect(apply_prepared_advice_result(
+                prepared_test_function(), "orders", result).unwrap_err()).to_contain(
+                    "exactly-once proceed")

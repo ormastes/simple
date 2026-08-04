@@ -4,7 +4,7 @@ use std.cli.cli_util.{get_cli_args}
 use std.io_runtime.{file_read_bytes}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use compiler.loader.loader.aspect_catalog.{
-    AspectBindingSummary, AspectCatalogEntry, AspectCatalog
+    AspectBindingSummary, AspectAdviceSummary, AspectCatalogEntry, AspectCatalog
 }
 use compiler.loader.loader.aspect_pack_provider.{
     AspectPackProviderKey, AspectPackTrustPolicy
@@ -59,6 +59,9 @@ struct AspectPerfMetrics:
     disabled_slot_branches: i64
     disabled_footprint_bytes: i64
     disabled_footprint_source: text
+    advice_outcome_verified: i64
+    advice_return_value: i64
+    facet_receiver_dispatch_status: text
 
 fn parse_aspect_perf_args(args: [text]) -> AspectPerfArgs:
     var mode = ""
@@ -110,7 +113,13 @@ fn aspect_perf_catalog(pack_digest: text, module_digest: text) -> AspectCatalog:
             target: "x86_64-unknown-linux-gnu", variant_fingerprint: "aspect-perf-v1",
             runtime_abi: "simple-runtime-1", dependencies: [],
             activation_policy: "lazy_facet", binding_summaries: [aspect_perf_binding()],
-            prepared_joinpoint_slots: ["fixture.disabled.slot"], advice_summaries: [],
+            prepared_joinpoint_slots: ["fixture.disabled.slot"],
+            advice_summaries: [AspectAdviceSummary(
+                advice_id: "fixture.debug.before",
+                joinpoint_slot_id: "fixture.disabled.slot", form: "before",
+                priority: 10, specificity: 1,
+                witness_symbol: facet_witness_symbol("fixture_debug"),
+                capabilities: ["facet.read"])],
             capabilities: ["facet.read"])]).unwrap()
 
 fn aspect_perf_runtime(catalog: AspectCatalog) -> AspectApplicationRuntime:
@@ -179,7 +188,9 @@ fn aspect_perf_metrics(
     mode: text,
     timings: [i64],
     unit: text,
-    runtime: AspectApplicationRuntime
+    runtime: AspectApplicationRuntime,
+    advice_return_value: i64,
+    facet_receiver_dispatch_status: text
 ) -> AspectPerfMetrics:
     val sorted = aspect_perf_sorted(timings)
     val counters = runtime.coordinator.counters
@@ -210,12 +221,16 @@ fn aspect_perf_metrics(
         disabled_slot_checks: advice.disabled_slot_checks,
         disabled_slot_branches: advice.disabled_slot_branches,
         disabled_footprint_bytes: footprint.disabled_footprint_bytes,
-        disabled_footprint_source: footprint.disabled_footprint_source)
+        disabled_footprint_source: footprint.disabled_footprint_source,
+        advice_outcome_verified: if advice.dispatch_invocations > 0 and
+            advice.dispatch_failures == 0 and advice_return_value == 73: 1 else: 0,
+        advice_return_value: advice_return_value,
+        facet_receiver_dispatch_status: facet_receiver_dispatch_status)
 
 fn measure_cold_aspect_startup() -> AspectPerfMetrics:
     val zero_digest = "0000000000000000000000000000000000000000000000000000000000000000"
     val runtime = aspect_perf_runtime(aspect_perf_catalog(zero_digest, zero_digest))
-    aspect_perf_metrics("cold", [0], "ns", runtime)
+    aspect_perf_metrics("cold", [0], "ns", runtime, 0, "not-exercised")
 
 fn measure_first_facet_use(pack_bytes: [u8], samples: i64) -> Result<AspectPerfMetrics, text>:
     val module_bytes = facet_runtime_fixture_smf()
@@ -231,11 +246,16 @@ fn measure_first_facet_use(pack_bytes: [u8], samples: i64) -> Result<AspectPerfM
         val activated = aspect_perf_activate(runtime, loader, pack_bytes, "sample-{sample}")?
         val elapsed_us = (rt_time_now_nanos() - started + 999) / 1000
         runtime = activated.0
-        val _ = runtime.lookup_published_advice("fixture.disabled.slot")?
+        val advice_values = runtime.advice_dispatch_slot(
+            activated.1, "fixture.disabled.slot", "before")?
+        if advice_values.len() != 1 or advice_values[0] != 73:
+            return Err("native advice dispatch did not return fixture value 73")
         timings = timings.push(elapsed_us)
         last_runtime = runtime
         sample = sample + 1
-    Ok(aspect_perf_metrics("first-use", timings, "us", last_runtime))
+    Ok(aspect_perf_metrics(
+        "first-use", timings, "us", last_runtime, 73,
+        "unsupported-no-receiver-aware-facet-api"))
 
 fn measure_repeated_facet_lookup(pack_bytes: [u8], samples: i64) -> Result<AspectPerfMetrics, text>:
     val module_bytes = facet_runtime_fixture_smf()
@@ -245,6 +265,10 @@ fn measure_repeated_facet_lookup(pack_bytes: [u8], samples: i64) -> Result<Aspec
     val loader = moduleloader_with_defaults()
     val activated = aspect_perf_activate(runtime, loader, pack_bytes, "lookup-owner")?
     runtime = activated.0
+    val advice_values = runtime.advice_dispatch_slot(
+        activated.1, "fixture.disabled.slot", "before")?
+    if advice_values.len() != 1 or advice_values[0] != 73:
+        return Err("native advice dispatch did not return fixture value 73")
     var timings: [i64] = []
     var sample = 0
     while sample < samples:
@@ -257,8 +281,9 @@ fn measure_repeated_facet_lookup(pack_bytes: [u8], samples: i64) -> Result<Aspec
         runtime.release_facet_generation_lease(pair.1)?
         timings = timings.push(rt_time_now_nanos() - started)
         sample = sample + 1
-    val _ = runtime.lookup_published_advice("fixture.disabled.slot")?
-    Ok(aspect_perf_metrics("lookup", timings, "ns", runtime))
+    Ok(aspect_perf_metrics(
+        "lookup", timings, "ns", runtime, 73,
+        "unsupported-no-receiver-aware-facet-api"))
 
 fn aspect_facet_perf_summary(metrics: AspectPerfMetrics) -> text:
     val percentile_fields = if metrics.unit == "us":
@@ -276,7 +301,9 @@ fn aspect_facet_perf_summary(metrics: AspectPerfMetrics) -> text:
         "dispatch_attempts={metrics.dispatch_attempts} dispatch_invocations={metrics.dispatch_invocations} " +
         "dispatch_failures={metrics.dispatch_failures} around_rejections={metrics.around_rejections} " +
         "disabled_slot_checks={metrics.disabled_slot_checks} disabled_slot_branches={metrics.disabled_slot_branches} " +
-        "disabled_footprint_bytes={metrics.disabled_footprint_bytes} disabled_footprint_source={metrics.disabled_footprint_source}"
+        "disabled_footprint_bytes={metrics.disabled_footprint_bytes} disabled_footprint_source={metrics.disabled_footprint_source} " +
+        "advice_outcome_verified={metrics.advice_outcome_verified} advice_return_value={metrics.advice_return_value} " +
+        "facet_receiver_dispatch_status={metrics.facet_receiver_dispatch_status}"
 
 fn main() -> i64:
     val args = parse_aspect_perf_args(get_cli_args())

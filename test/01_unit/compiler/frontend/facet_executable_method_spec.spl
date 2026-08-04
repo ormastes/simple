@@ -57,20 +57,85 @@ describe "executable facet method projection", tag: ["only-compiled"]:
         var mir_lowering = MirLowering.new(hir.symbols)
         expect(serialize_mir_module(mir_lowering.lower_module(hir))).to_contain(symbol)
 
-    it "retains self.base source and fails closed before ordinary parsing":
-        step("Retain the unsupported receiver-dependent implementation body")
-        val ast = parse_static_facet_declarations(base_adapting_facet_source()).unwrap()
-        expect(ast.implementations[0].methods[0].body_source).to_equal(
+    it "adapts self.base to the explicit base ABI and retains source metadata":
+        step("Retain the receiver-dependent implementation body")
+        val projection = project_static_facet_source(
+            base_adapting_facet_source()).unwrap()
+        expect(projection.facets.implementations[0].methods[0].body_source).to_equal(
             "self.base + 1")
-        val hir = lower_static_facets(ast).unwrap()
-        expect(hir.implementations[0].methods[0].body_source).to_equal(
+        val facet_hir = lower_static_facets(projection.facets).unwrap()
+        expect(facet_hir.implementations[0].methods[0].body_source).to_equal(
             "self.base + 1")
 
-        step("Reject projection until a real receiver ABI is available")
-        val diagnostic = project_static_facet_source(
-            base_adapting_facet_source()).unwrap_err()
+        step("Parse the receiver-aware method with the explicit ABI argument")
+        val symbol = facet_witness_method_symbol("Increment", "increment")
+        val parsed = parse_full_frontend(
+            base_adapting_facet_source(), "facet_base_method.spl",
+            "facet_base_method", Logger(level: 0))
+        expect(parsed.functions.keys()).to_contain(symbol)
+        val parsed_method = parsed.functions[symbol]
+        expect(parsed_method.params.len()).to_equal(1)
+        expect(parsed_method.params[0].name).to_equal("facet_base")
+
+        step("Lower the receiver-aware method through ordinary HIR and MIR")
+        var hir_lowering = HirLowering.with_filename("facet_base_method.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        expect(serialize_mir_module(mir_lowering.lower_module(hir))).to_contain(symbol)
+
+    it "fails closed for bare self semantics without erasing the body":
+        step("Retain a body whose facet wrapper identity would escape")
+        val source = (
+            "aspect debug:\n" +
+            "    facet interface Identity:\n" +
+            "        fn identity(self) -> i64\n" +
+            "    facet impl IdentityImpl for i64 implements Identity public readonly:\n" +
+            "        fn identity(self) -> i64:\n" +
+            "            self\n")
+        val ast = parse_static_facet_declarations(source).unwrap()
+        expect(ast.implementations[0].methods[0].body_source).to_equal("self")
+        step("Reject projection because bare self has no agreed value semantics")
+        val diagnostic = project_static_facet_source(source).unwrap_err()
         expect(diagnostic).to_contain("E-AF005")
-        expect(diagnostic).to_contain("unsupported self.base receiver adaptation")
+        expect(diagnostic).to_contain("unsupported bare self receiver semantics")
+
+    it "rejects receiver tokens in nested interpolation and qualified access":
+        step("Reject a receiver token nested inside an interpolated expression")
+        val interpolated = (
+            "aspect debug:\n" +
+            "    facet interface Debuggable:\n" +
+            "        fn summary(self) -> text\n" +
+            "    facet impl DebugImpl for i64 implements Debuggable public readonly:\n" +
+            "        fn summary(self) -> text:\n" +
+            "            \"outer {format({self.base})}\"\n")
+        val interpolation_error = project_static_facet_source(interpolated).unwrap_err()
+        expect(interpolation_error).to_contain("E-AF005")
+        expect(interpolation_error).to_contain("interpolated self receiver context")
+
+        step("Reject an unproved raw-string receiver context")
+        val raw_string = (
+            "aspect debug:\n" +
+            "    facet interface Debuggable:\n" +
+            "        fn summary(self) -> text\n" +
+            "    facet impl DebugImpl for i64 implements Debuggable public readonly:\n" +
+            "        fn summary(self) -> text:\n" +
+            "            r\"self.base\"\n")
+        val raw_error = project_static_facet_source(raw_string).unwrap_err()
+        expect(raw_error).to_contain("E-AF005")
+        expect(raw_error).to_contain("string or interpolated self receiver context")
+
+        step("Reject a receiver token qualified through another value")
+        val qualified = (
+            "aspect debug:\n" +
+            "    facet interface Debuggable:\n" +
+            "        fn value(self) -> i64\n" +
+            "    facet impl DebugImpl for i64 implements Debuggable public readonly:\n" +
+            "        fn value(self) -> i64:\n" +
+            "            other.self.base\n")
+        val qualified_error = project_static_facet_source(qualified).unwrap_err()
+        expect(qualified_error).to_contain("E-AF005")
+        expect(qualified_error).to_contain("qualified self receiver semantics")
 
     it "keeps facet interfaces declaration-only":
         step("Reject an interface method body with a typed diagnostic")

@@ -107,3 +107,13 @@ verification-failed
   executable witness bodies/call lowering and no generated business-path caller
   invokes `advice_dispatch_slot`. Runtime, docgen, NFR, and coverage blockers
   remain unchanged; authoritative status remains `STATUS: FAIL`.
+- implementation: the August 4 continuation closed the resolver layering
+  inversion, added receiver-aware facet method MIR lowering and deterministic
+  multi-symbol SMF validation, and produced overload-safe prepared-advice MIR
+  phase calls plus loader-derived dispatch projections. Backend admission now
+  fails closed across check/interpreter/JIT/AOT and at the common backend edge.
+- verification: production remains deliberately blocked: the canonical facet
+  factory/descriptor ABI and generated caller are undefined, prepared-advice
+  projection publication/generation pinning/backend trampoline are absent, and
+  admitted runtime/NFR evidence could not run under the bounded bootstrap cap.
+  The authoritative report therefore remains `STATUS: FAIL`.

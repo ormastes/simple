@@ -6,6 +6,15 @@
 use compiler.mir.mir_instructions.*
 use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind, MirSignature}
 use compiler.frontend.core.aop.{MirBlockInfo, InstructionInfo, WeavingResult, AdviceCallInfo, JoinPointKind}
+use compiler.mir.mir_json.{serialize_mir_signature}
+use compiler.common.structural_contracts.aop.{
+    PREPARED_ADVICE_SLOT_SCHEMA_ID, PREPARED_ADVICE_SLOT_SCHEMA_VERSION,
+    PreparedAdviceSlotPlan, prepared_advice_slot_plan_create
+}
+
+struct PreparedAdviceInjection:
+    function: MirFunction
+    slot: PreparedAdviceSlotPlan?
 
 # ============================================================================
 # AOP Weave Accounting (W2-B)
@@ -229,6 +238,102 @@ fn apply_weaving_result(func: MirFunction, result: WeavingResult) -> MirFunction
                 # Decision, Condition — inject at entry for now
                 woven = inject_before_advice(woven, call_info.advice_function)
     woven
+
+# Builds one execution-slot guard per admitted phase. The runtime chain is
+# already preordered, so multiple matching rules of one form still require
+# exactly one phase dispatch at the business call site.
+fn apply_prepared_advice_result(
+    func: MirFunction,
+    module_path: text,
+    result: WeavingResult
+) -> Result<PreparedAdviceInjection, text>:
+    var forms: [text] = []
+    for call_info in result.advice_calls:
+        match call_info.join_point_kind:
+            case Execution:
+                var form = ""
+                match call_info.form:
+                    case Before: form = "before"
+                    case AfterSuccess: form = "after_success"
+                    case AfterError: form = "after_error"
+                    case Around:
+                        return Err("E-AF010 runtime around advice requires an exactly-once proceed path")
+                if not forms.contains(form):
+                    forms.push(form)
+            case _:
+                ()
+    if forms.len() == 0:
+        if result.advice_calls.len() > 0:
+            return Err("E-AF010 prepared dynamic advice currently supports execution join points only")
+        return Ok(PreparedAdviceInjection(function: func, slot: nil))
+
+    # Name alone aliases overloads. Signature JSON plus the lowering-owned
+    # symbol ID is canonical for one compilation and distinguishes every body.
+    val target_id = "{module_path}::{func.name}:{serialize_mir_signature(func.signature)}#symbol={func.symbol.id}"
+    val slot_id = "{target_id}.prepared"
+    val slot = prepared_advice_slot_plan_create(
+        PREPARED_ADVICE_SLOT_SCHEMA_ID,
+        PREPARED_ADVICE_SLOT_SCHEMA_VERSION,
+        slot_id, target_id, forms)?
+    var prepared = func
+    for form in forms:
+        if form == "before":
+            prepared = inject_prepared_before(prepared, slot_id, form)?
+        elif form == "after_success":
+            prepared = inject_prepared_after_success(prepared, slot_id, form)
+        elif form == "after_error":
+            prepared = inject_prepared_after_error(prepared, slot_id, form)
+    Ok(PreparedAdviceInjection(function: prepared, slot: Some(slot)))
+
+fn make_prepared_advice_dispatch_inst(slot_id: text, form: text) -> MirInst:
+    val slot = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(slot_id), MirType(kind: MirTypeKind.Opaque("str"))))
+    val phase = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(form), MirType(kind: MirTypeKind.Opaque("str"))))
+    MirInst(
+        kind: MirInstKind.Intrinsic(
+            nil, "simple.prepared_advice_dispatch.v1", [slot, phase]),
+        span: nil)
+
+fn inject_prepared_before(func: MirFunction, slot_id: text, form: text) -> Result<MirFunction, text>:
+    if func.blocks.len() == 0:
+        return Err("E-AF010 prepared advice target has no entry block")
+    var blocks: [MirBlock] = []
+    var found_entry = false
+    for block in func.blocks:
+        if block.id.id == func.entry_block.id:
+            found_entry = true
+            var instructions: [MirInst] = [make_prepared_advice_dispatch_inst(slot_id, form)]
+            for inst in block.instructions:
+                instructions.push(inst)
+            blocks.push(MirBlock(..block, instructions: instructions))
+        else:
+            blocks.push(block)
+    if not found_entry:
+        return Err("E-AF010 prepared advice target entry block is missing")
+    Ok(MirFunction(..func, blocks: blocks))
+
+fn inject_prepared_after_success(func: MirFunction, slot_id: text, form: text) -> MirFunction:
+    var blocks: [MirBlock] = []
+    for block in func.blocks:
+        match block.terminator:
+            case Ret(_):
+                var instructions = block.instructions
+                instructions.push(make_prepared_advice_dispatch_inst(slot_id, form))
+                blocks.push(MirBlock(..block, instructions: instructions))
+            case _: blocks.push(block)
+    MirFunction(..func, blocks: blocks)
+
+fn inject_prepared_after_error(func: MirFunction, slot_id: text, form: text) -> MirFunction:
+    var blocks: [MirBlock] = []
+    for block in func.blocks:
+        match block.terminator:
+            case MirTerminator.Abort(_):
+                var instructions = block.instructions
+                instructions.push(make_prepared_advice_dispatch_inst(slot_id, form))
+                blocks.push(MirBlock(..block, instructions: instructions))
+            case _: blocks.push(block)
+    MirFunction(..func, blocks: blocks)
 
 # ============================================================================
 # Helpers

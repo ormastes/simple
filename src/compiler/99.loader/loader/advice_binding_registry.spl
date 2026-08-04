@@ -74,6 +74,24 @@ struct AdviceDispatchOutcome:
     invoked_count: i64
     return_values: [i64]
 
+# Immutable backend projection derived from the canonical loader registry.
+# Every row retains exact publication/generation and loader ownership identity;
+# it cannot be independently published or mutated.
+struct AdviceDispatchProjectionEntry:
+    slot_id: text
+    form: text
+    publication_id: text
+    activation_key: text
+    generation: i64
+    witness_symbol: text
+    witness_owner_id: text
+    resolved_witness_address: i64
+
+struct AdviceDispatchProjection:
+    schema_id: text
+    schema_version: i64
+    entries: [AdviceDispatchProjectionEntry]
+
 fn advice_zero_counters() -> AdviceBindingCounters:
     AdviceBindingCounters(
         slot_lookups: 0, slot_hits: 0, slot_misses: 0,
@@ -127,6 +145,66 @@ fn advice_sort_chain(records: [AdviceBindingRecord]) -> [AdviceBindingRecord]:
             j = j + 1
         remaining = next
     ordered
+
+fn advice_sort_slot_ids(slot_ids: [text]) -> [text]:
+    var remaining = slot_ids
+    var ordered: [text] = []
+    while remaining.len() > 0:
+        var best: i64 = 0
+        var i: i64 = 1
+        while i < remaining.len():
+            if facet_artifact_text_less(remaining[i], remaining[best]):
+                best = i
+            i = i + 1
+        ordered.push(remaining[best])
+        var next: [text] = []
+        var j: i64 = 0
+        while j < remaining.len():
+            if j != best:
+                next.push(remaining[j])
+            j = j + 1
+        remaining = next
+    ordered
+
+fn advice_record_loader_valid(loader: ModuleLoader, record: AdviceBindingRecord) -> bool:
+    if (record.witness_owner_id == "" or record.resolved_witness_address <= 0 or
+        not loader.global_symbols.has(record.witness_symbol)):
+        return false
+    val resolved = loader.global_symbols[record.witness_symbol]
+    resolved[0] == record.witness_owner_id and
+        resolved[1].address == record.resolved_witness_address
+
+# Typed port contract for the future native table/trampoline. Installation must
+# be atomic with canonical publication and invalidation must precede drain.
+fn advice_dispatch_projection_create(
+    registry: AdviceBindingRegistry,
+    loader: ModuleLoader
+) -> Result<AdviceDispatchProjection, text>:
+    var entries: [AdviceDispatchProjectionEntry] = []
+    for slot_id in advice_sort_slot_ids(registry.prepared_slots):
+        var chain: [AdviceBindingRecord] = []
+        for record in registry.records:
+            if advice_record_active(registry, record) and record.joinpoint_slot_id == slot_id:
+                chain.push(record)
+        chain = advice_sort_chain(chain)
+        for record in chain:
+            if record.form == "around":
+                return Err("E-AF010 runtime around advice requires an exactly-once proceed path")
+            if not advice_record_loader_valid(loader, record):
+                return Err("E-AF010 dynamic advice projection witness is no longer loader-owned: {record.witness_symbol}")
+            entries.push(AdviceDispatchProjectionEntry(
+                slot_id: record.joinpoint_slot_id,
+                form: record.form,
+                publication_id: record.publication_id,
+                activation_key: record.activation_key,
+                generation: record.generation,
+                witness_symbol: record.witness_symbol,
+                witness_owner_id: record.witness_owner_id,
+                resolved_witness_address: record.resolved_witness_address))
+    Ok(AdviceDispatchProjection(
+        schema_id: "simple.advice-dispatch-projection",
+        schema_version: 1,
+        entries: entries))
 
 impl AdviceBindingRegistry:
     static fn create(prepared_slots: [text]) -> Result<AdviceBindingRegistry, text>:
@@ -321,15 +399,9 @@ fn advice_dispatch_slot(
                 visible, "E-AF010 published dynamic advice form is invalid", false)
         if record.form != form:
             continue
-        if (record.witness_owner_id == "" or record.resolved_witness_address <= 0 or
-            not loader.global_symbols.has(record.witness_symbol)):
+        if not advice_record_loader_valid(loader, record):
             return advice_dispatch_failed(
                 visible, "E-AF010 dynamic advice witness is no longer loader-owned: {record.witness_symbol}", false)
-        val resolved = loader.global_symbols[record.witness_symbol]
-        if (resolved[0] != record.witness_owner_id or
-            resolved[1].address != record.resolved_witness_address):
-            return advice_dispatch_failed(
-                visible, "E-AF010 dynamic advice witness owner/address changed: {record.witness_symbol}", false)
     var results: [i64] = []
     var invoked: i64 = 0
     for record in chain:
@@ -376,7 +448,9 @@ export AdviceBindingAdmission, AdviceBindingRecord, AdviceBindingCandidate
 export AdviceBindingCounters, AdviceDisabledPathFootprint
 export AdviceBindingRegistry, AdviceLookupResult
 export AdviceDispatchOutcome
+export AdviceDispatchProjectionEntry, AdviceDispatchProjection
 export advice_binding_candidate, advice_bind_slot, advice_binding_stage_validated
 export advice_publish_generation, advice_lookup_slot, advice_unbind_generation
 export advice_dispatch_slot
+export advice_dispatch_projection_create
 export advice_disabled_path_footprint

@@ -305,15 +305,75 @@ fn facet_projected_method_signature(
     Ok("fn " + facet_witness_method_symbol(implementation.name, method.name) +
         "(" + projected_parameters + ")" + suffix + ":")
 
+fn facet_receiver_token_boundary(value: text) -> bool:
+    value == "" or not (value.is_alpha() or value.is_digit() or value == "_")
+
+fn facet_receiver_token_at(line: text, index: i64, token: text) -> bool:
+    val end = index + token.len()
+    if end > line.len() or line[index:end] != token: return false
+    val before = if index == 0: "" else: line[index - 1:index]
+    val after = if end == line.len(): "" else: line[end:end + 1]
+    facet_receiver_token_boundary(before) and facet_receiver_token_boundary(after)
+
+fn facet_rewrite_receiver_line(
+    implementation: FacetImplDecl, method: FacetMethodDecl, line: text
+) -> Result<text, text>:
+    var result = ""
+    var index = 0
+    var in_string = false
+    var quote = ""
+    var escaped = false
+    while index < line.len():
+        val current = line[index:index + 1]
+        if in_string:
+            if facet_receiver_token_at(line, index, "self"):
+                return Err("E-AF005 executable facet method '{implementation.name}.{method.name}' uses unsupported string or interpolated self receiver context")
+            result = result + current
+            if escaped:
+                escaped = false
+            elif current == "\\":
+                escaped = true
+            elif current == quote:
+                in_string = false
+            index = index + 1
+            continue
+        if current == "#":
+            return Ok(result + line[index:])
+        if current == "\"" or current == "'":
+            in_string = true
+            quote = current
+            result = result + current
+            index = index + 1
+            continue
+        if facet_receiver_token_at(line, index, "self.base"):
+            if index > 0 and (line[index - 1:index] == "." or
+                line[index - 1:index] == ":"):
+                return Err("E-AF005 executable facet method '{implementation.name}.{method.name}' uses unsupported qualified self receiver semantics")
+            result = result + "facet_base"
+            index = index + "self.base".len()
+            continue
+        if facet_receiver_token_at(line, index, "self"):
+            return Err("E-AF005 executable facet method '{implementation.name}.{method.name}' uses unsupported bare self receiver semantics")
+        result = result + current
+        index = index + 1
+    Ok(result)
+
+fn facet_rewrite_receiver_body(
+    implementation: FacetImplDecl, method: FacetMethodDecl
+) -> Result<text, text>:
+    if method.body_source.contains("\"\"\"") or method.body_source.contains("'''"):
+        return Err("E-AF005 executable facet method '{implementation.name}.{method.name}' uses unsupported multiline string receiver context")
+    var lines: [text] = []
+    for line in method.body_source.split("\n"):
+        lines = lines.push(facet_rewrite_receiver_line(implementation, method, line)?)
+    Ok(lines.join("\n"))
+
 fn facet_projected_method_source(
     implementation: FacetImplDecl, method: FacetMethodDecl
 ) -> Result<text, text>:
-    if method.body_source.contains("self.base"):
-        return Err("E-AF005 executable facet method '{implementation.name}.{method.name}' requires unsupported self.base receiver adaptation")
-    if method.body_source.contains("self"):
-        return Err("E-AF005 executable facet method '{implementation.name}.{method.name}' requires unsupported self receiver adaptation")
+    val rewritten_body = facet_rewrite_receiver_body(implementation, method)?
     var body_lines: [text] = []
-    for line in method.body_source.split("\n"):
+    for line in rewritten_body.split("\n"):
         body_lines = body_lines.push(if line == "": "" else: "    " + line)
     Ok(facet_projected_method_signature(implementation, method)? + "\n" +
         body_lines.join("\n"))

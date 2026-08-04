@@ -1,6 +1,6 @@
 """Versioned facet metadata shared by artifact producers and loaders."""
 
-val FACET_ARTIFACT_VERSION: i64 = 1
+val FACET_ARTIFACT_VERSION: i64 = 2
 extern fn rt_bytes_to_text(data: [u8]) -> text
 
 fn facet_witness_symbol(implementation_id: text) -> text:
@@ -14,6 +14,7 @@ struct FacetContractMetadata:
     aspect_id: text
     facet_interface_id: text
     parent_facets: [text]
+    method_names: [text]
     method_signatures: [text]
     abi_hash: text
 
@@ -52,6 +53,37 @@ fn facet_artifact_texts(values: [text]) -> [u8]:
     for value in values:
         out = out.concat(facet_artifact_text(value))
     out
+
+fn facet_artifact_legacy_method_name(signature: text) -> Result<text, text>:
+    val trimmed = signature.trim()
+    if not trimmed.starts_with("fn "):
+        return Err("E-AF002 v1 facet method signature must begin with `fn `")
+    val parts = trimmed[3:].split("(")
+    if parts.len() < 2 or parts[0].trim() == "":
+        return Err("E-AF002 v1 facet method signature has no method name")
+    Ok(parts[0].trim())
+
+fn facet_artifact_validate_method_names(
+    names: [text], signatures: [text]
+) -> Result<[text], text>:
+    if names.len() != signatures.len():
+        return Err("E-AF002 facet method name/signature count mismatch")
+    var seen: [text] = []
+    for name in names:
+        if name.trim() == "":
+            return Err("E-AF002 facet method name must not be empty")
+        var character_index = 0
+        while character_index < name.len():
+            val character = name[character_index:character_index + 1]
+            val valid = character.is_alpha() or character == "_" or (
+                character_index > 0 and character.is_digit())
+            if not valid:
+                return Err("E-AF002 invalid canonical facet method name: {name}")
+            character_index = character_index + 1
+        if seen.contains(name):
+            return Err("E-AF002 duplicate facet method name: {name}")
+        seen = seen.push(name)
+    Ok(names)
 
 class FacetArtifactCursor:
     data: [u8]
@@ -94,6 +126,7 @@ fn encode_facet_contracts(contracts: [FacetContractMetadata]) -> [u8]:
         out = out.concat(facet_artifact_text(contract.aspect_id))
         out = out.concat(facet_artifact_text(contract.facet_interface_id))
         out = out.concat(facet_artifact_texts(contract.parent_facets))
+        out = out.concat(facet_artifact_texts(contract.method_names))
         out = out.concat(facet_artifact_texts(contract.method_signatures))
         out = out.concat(facet_artifact_text(contract.abi_hash))
     out
@@ -103,7 +136,7 @@ fn decode_facet_contracts(data: [u8]) -> Result<[FacetContractMetadata], text>:
         return Err("E-AF002 invalid facet contract artifact")
     var cursor = FacetArtifactCursor(data: data, offset: 4)
     val version = cursor.read_u32()?
-    if version != FACET_ARTIFACT_VERSION:
+    if version != 1 and version != FACET_ARTIFACT_VERSION:
         return Err("E-AF002 unsupported facet contract artifact version")
     val count = cursor.read_u32()?
     if count > (data.len() - cursor.offset) / 20:
@@ -111,10 +144,26 @@ fn decode_facet_contracts(data: [u8]) -> Result<[FacetContractMetadata], text>:
     var contracts: [FacetContractMetadata] = []
     var index = 0
     while index < count:
+        val aspect_id = cursor.read_text()?
+        val facet_interface_id = cursor.read_text()?
+        val parent_facets = cursor.read_texts()?
+        var method_names: [text] = []
+        var method_signatures: [text] = []
+        if version == 1:
+            method_signatures = cursor.read_texts()?
+            for signature in method_signatures:
+                method_names = method_names.push(
+                    facet_artifact_legacy_method_name(signature)?)
+        else:
+            method_names = cursor.read_texts()?
+            method_signatures = cursor.read_texts()?
+        method_names = facet_artifact_validate_method_names(
+            method_names, method_signatures)?
         contracts = contracts.push(FacetContractMetadata(
-            contract_version: version, aspect_id: cursor.read_text()?,
-            facet_interface_id: cursor.read_text()?, parent_facets: cursor.read_texts()?,
-            method_signatures: cursor.read_texts()?, abi_hash: cursor.read_text()?))
+            contract_version: version, aspect_id: aspect_id,
+            facet_interface_id: facet_interface_id, parent_facets: parent_facets,
+            method_names: method_names,
+            method_signatures: method_signatures, abi_hash: cursor.read_text()?))
         index = index + 1
     if cursor.offset != data.len():
         return Err("E-AF002 trailing facet contract artifact bytes")
@@ -140,7 +189,7 @@ fn decode_facet_binding_summaries(data: [u8]) -> Result<[FacetBindingArtifactSum
         return Err("E-AF002 invalid facet binding artifact")
     var cursor = FacetArtifactCursor(data: data, offset: 4)
     val version = cursor.read_u32()?
-    if version != FACET_ARTIFACT_VERSION:
+    if version != 1 and version != FACET_ARTIFACT_VERSION:
         return Err("E-AF002 unsupported facet binding artifact version")
     val count = cursor.read_u32()?
     if count > (data.len() - cursor.offset) / 32:

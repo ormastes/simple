@@ -7,22 +7,28 @@ use compiler.common.structural_contracts.facet_artifact.{
     FACET_ARTIFACT_VERSION, FacetContractMetadata, FacetBindingArtifactSummary,
     encode_facet_contracts, decode_facet_contracts,
     encode_facet_binding_summaries, decode_facet_binding_summaries,
-    facet_artifact_text_less, facet_witness_symbol
+    facet_artifact_text_less, facet_witness_symbol, facet_witness_method_symbol
 }
 use compiler.common.structural_contracts.aop.{
     TYPE_PREDICATE_BYTECODE_VERSION, TypePredicateInstruction,
     TypePredicateBytecode, FacetBindingPlan, FacetRepresentation,
     FacetMultiplicity, FacetAccess
 }
-use compiler.driver.facet_artifact_emission.{facet_binding_artifact_from_plan}
+use compiler.driver.facet_artifact_emission.{
+    facet_binding_artifact_from_plan, facet_witness_artifact_symbols
+}
 use compiler.frontend.facet_static.{project_static_facet_source}
 use compiler.driver.smf_writer.{
-    SmfBuildOptions, Target, generate_smf_with_raw_code_options
+    SmfBuildOptions, Target, generate_smf_with_options,
+    generate_smf_with_raw_code_options, build_smf_with_relocations,
+    validate_smf_export_symbols
 }
+use compiler.driver.smf_elf_parser.{ElfSymEntry, extract_elf_text_symbols}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.mir.{
     MirInstKind, MirOperandKind, MirConstValue, MirSignature, MirType,
-    mir_operand_const_int, lower_resolved_facet_witness_call
+    mir_operand_const_int, lower_resolved_facet_witness_call,
+    lower_resolved_facet_witness_method_call
 }
 use test.fixtures.aspect_facet.runtime_fixture.{
     facet_runtime_fixture_smf
@@ -32,8 +38,27 @@ fn artifact_contract() -> FacetContractMetadata:
     FacetContractMetadata(
         contract_version: FACET_ARTIFACT_VERSION,
         aspect_id: "debug", facet_interface_id: "Debuggable",
-        parent_facets: [], method_signatures: ["fn summary() -> text"],
+        parent_facets: [], method_names: ["summary"],
+        method_signatures: ["fn summary() -> text"],
         abi_hash: "facet-abi-1")
+
+fn legacy_artifact_u32(value: i64) -> [u8]:
+    [(value & 0xff).to_u8(), ((value >> 8) & 0xff).to_u8(),
+     ((value >> 16) & 0xff).to_u8(), ((value >> 24) & 0xff).to_u8()]
+
+fn legacy_artifact_text(value: text) -> [u8]:
+    legacy_artifact_u32(value.to_bytes().len()).concat(value.to_bytes())
+
+fn legacy_v1_contract_bytes() -> [u8]:
+    var bytes: [u8] = [0x46, 0x43, 0x54, 0x43]
+    bytes = bytes.concat(legacy_artifact_u32(1))
+    bytes = bytes.concat(legacy_artifact_u32(1))
+    bytes = bytes.concat(legacy_artifact_text("debug"))
+    bytes = bytes.concat(legacy_artifact_text("Debuggable"))
+    bytes = bytes.concat(legacy_artifact_u32(0))
+    bytes = bytes.concat(legacy_artifact_u32(1))
+    bytes = bytes.concat(legacy_artifact_text("fn summary() -> text"))
+    bytes.concat(legacy_artifact_text("facet-abi-v1"))
 
 fn artifact_binding() -> FacetBindingArtifactSummary:
     FacetBindingArtifactSummary(
@@ -66,9 +91,16 @@ describe "facet artifact emission consumption and call lowering":
         val missing = facet_binding_artifact_from_plan(
             artifact_plan(), [artifact_contract()], [])
         expect(missing.unwrap_err()).to_contain("has no emitted ordinary-SMF symbol")
+        step("Reject a factory without its contract-ordered method symbol")
+        val incomplete = facet_binding_artifact_from_plan(
+            artifact_plan(), [artifact_contract()], [witness])
+        expect(incomplete.unwrap_err()).to_contain(
+            facet_witness_method_symbol("CacheDebug", "summary"))
         step("Admit an actually emitted witness symbol")
+        val emitted_symbols = facet_witness_artifact_symbols(
+            "CacheDebug", artifact_contract().method_names)
         val emitted = facet_binding_artifact_from_plan(
-            artifact_plan(), [artifact_contract()], [witness]).unwrap()
+            artifact_plan(), [artifact_contract()], emitted_symbols).unwrap()
         expect(emitted.witness_symbol).to_equal(witness)
 
     it "projects facet implementation signatures as metadata":
@@ -95,11 +127,18 @@ describe "facet artifact emission consumption and call lowering":
         expect(decoded.len()).to_equal(1)
         expect(decoded[0].facet_interface_id).to_equal("Debuggable")
         expect(decoded[0].method_signatures).to_contain("fn summary() -> text")
+        expect(decoded[0].method_names).to_contain("summary")
+
+        step("Decode the prior v1 layout and recover its canonical method name")
+        val legacy = decode_facet_contracts(legacy_v1_contract_bytes()).unwrap()
+        expect(legacy[0].contract_version).to_equal(1)
+        expect(legacy[0].method_names).to_contain("summary")
 
     it "uses UTF-8 byte lengths and rejects impossible record counts":
         var unicode_contract = artifact_contract()
         unicode_contract.facet_interface_id = "Débogable"
         unicode_contract.method_signatures = ["fn résumé() -> text"]
+        unicode_contract.method_names = ["résumé"]
         val decoded = decode_facet_contracts(
             encode_facet_contracts([unicode_contract])).unwrap()
         expect(decoded[0].facet_interface_id).to_equal("Débogable")
@@ -120,7 +159,7 @@ describe "facet artifact emission consumption and call lowering":
         step("Emit facet binding metadata")
         var options = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
         options.facet_binding_bytes = encode_facet_binding_summaries([artifact_binding()])
-        val smf = generate_smf_with_raw_code_options([0xC3], options)
+        val smf = generate_smf_with_raw_code_options([0xC3], options).unwrap()
         step("Consume facet binding metadata")
         val reader = SmfReaderMemory.from_data(smf).unwrap()
         val decoded = decode_facet_binding_summaries(
@@ -137,6 +176,95 @@ describe "facet artifact emission consumption and call lowering":
         expect(witness.name).to_equal(witness_symbol)
         expect(reader.read_named_section(".facet_bindings").unwrap().len()).to_be_greater_than(12)
 
+    it "publishes deterministic factory and method symbol offsets":
+        step("Build one code section with deterministic export entries")
+        var options = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+        options.export_symbol_name = facet_witness_symbol("CacheDebug")
+        options.export_symbols = [
+            ElfSymEntry(
+                name: facet_witness_symbol("CacheDebug"), value: 0, size: 1,
+                info: 0x12, section_idx: 1),
+            ElfSymEntry(
+                name: facet_witness_method_symbol("CacheDebug", "summary"),
+                value: 1, size: 2, info: 0x12, section_idx: 1),
+            ElfSymEntry(
+                name: "Débogage__facet_witness__résumé", value: 3, size: 1,
+                info: 0x12, section_idx: 1)
+        ]
+        val smf = generate_smf_with_raw_code_options(
+            [0xc3, 0x90, 0xc3, 0xcc], options).unwrap()
+
+        step("Resolve ASCII and UTF-8 names through distinct byte offsets")
+        var reader = SmfReaderMemory.from_data(smf).unwrap()
+        val factory = reader.lookup_symbol(
+            facet_witness_symbol("CacheDebug")).unwrap()
+        val method = reader.lookup_symbol(
+            facet_witness_method_symbol("CacheDebug", "summary")).unwrap()
+        expect(factory.offset).to_equal(0)
+        expect(factory.size).to_equal(1)
+        expect(method.offset).to_equal(1)
+        expect(method.size).to_equal(2)
+        expect(reader.read_code(factory).unwrap()).to_equal([0xc3])
+        expect(reader.read_code(method).unwrap()).to_equal([0x90, 0xc3])
+        val unicode_method = reader.lookup_symbol(
+            "Débogage__facet_witness__résumé").unwrap()
+        expect(unicode_method.offset).to_equal(3)
+        expect(reader.read_code(unicode_method).unwrap()).to_equal([0xcc])
+        expect(reader.exported_symbols().len()).to_equal(3)
+
+    it "rejects invalid public SMF export symbol tables":
+        step("Reject empty and duplicate public names")
+        val empty_name = validate_smf_export_symbols([
+            ElfSymEntry(name: "", value: 0, size: 1, info: 0x12, section_idx: 1)
+        ], 4)
+        expect(empty_name.unwrap_err()).to_contain("name must not be empty")
+        val duplicate = validate_smf_export_symbols([
+            ElfSymEntry(name: "same", value: 0, size: 1, info: 0x12, section_idx: 1),
+            ElfSymEntry(name: "same", value: 1, size: 1, info: 0x12, section_idx: 1)
+        ], 4)
+        expect(duplicate.unwrap_err()).to_contain("duplicate export symbol name")
+
+        step("Reject negative, out-of-range, zero-size, and overlapping ranges")
+        val negative = validate_smf_export_symbols([
+            ElfSymEntry(name: "negative", value: -1, size: 1, info: 0x12, section_idx: 1)
+        ], 4)
+        expect(negative.unwrap_err()).to_contain("outside the code section")
+        val outside = validate_smf_export_symbols([
+            ElfSymEntry(name: "outside", value: 3, size: 2, info: 0x12, section_idx: 1)
+        ], 4)
+        expect(outside.unwrap_err()).to_contain("outside the code section")
+        val alias = validate_smf_export_symbols([
+            ElfSymEntry(name: "alias", value: 1, size: 0, info: 0x12, section_idx: 1)
+        ], 4)
+        expect(alias.unwrap_err()).to_contain("not loader-safe")
+        val overlap = validate_smf_export_symbols([
+            ElfSymEntry(name: "left", value: 0, size: 3, info: 0x12, section_idx: 1),
+            ElfSymEntry(name: "right", value: 2, size: 2, info: 0x12, section_idx: 1)
+        ], 4)
+        expect(overlap.unwrap_err()).to_contain("overlapping export symbol range")
+
+        step("Reject the invalid table at the public writer boundary")
+        var invalid_options = SmfBuildOptions.create(
+            Target.x86_64_unknown_linux_gnu())
+        invalid_options.export_symbols = [
+            ElfSymEntry(name: "left", value: 0, size: 3, info: 0x12, section_idx: 1),
+            ElfSymEntry(name: "right", value: 2, size: 2, info: 0x12, section_idx: 1)
+        ]
+        expect(generate_smf_with_raw_code_options(
+            [0x90, 0x90, 0x90, 0xc3], invalid_options).unwrap_err()).to_contain(
+            "overlapping export symbol range")
+        expect(generate_smf_with_options(
+            [0x90, 0x90, 0x90, 0xc3], invalid_options).unwrap_err()).to_contain(
+            "overlapping export symbol range")
+        expect(build_smf_with_relocations(
+            [0x90, 0x90, 0x90, 0xc3], invalid_options).unwrap_err()).to_contain(
+            "overlapping export symbol range")
+
+    it "rejects non-ELF backend bytes as facet symbol evidence":
+        step("Require a relocatable ELF object before deriving export offsets")
+        val error = extract_elf_text_symbols([0xc3]).unwrap_err()
+        expect(error).to_contain("requires one ELF64 object")
+
     it "lowers a resolved witness through existing indirect call MIR":
         step("Resolve the published witness operand")
         val address = mir_operand_const_int(4096)
@@ -150,3 +278,28 @@ describe "facet artifact emission consumption and call lowering":
                     case Const(MirConstValue.Int(value), _): expect(value).to_equal(4096)
                     case _: fail("resolved witness operand was not preserved")
             case _: fail("facet witness call did not lower through CallIndirect")
+
+    it "prepends the base operand for the receiver-aware method ABI":
+        step("Lower a resolved method with the base as ABI argument zero")
+        val method_address = mir_operand_const_int(8192)
+        val base = mir_operand_const_int(41)
+        val signature = MirSignature(
+            params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)
+        val kind = lower_resolved_facet_witness_method_call(
+            nil, method_address, base, [], signature).unwrap()
+        match kind:
+            case CallIndirect(_, pointer, arguments, _):
+                match pointer.kind:
+                    case Const(MirConstValue.Int(value), _): expect(value).to_equal(8192)
+                    case _: fail("resolved method operand was not preserved")
+                expect(arguments.len()).to_equal(1)
+                match arguments[0].kind:
+                    case Const(MirConstValue.Int(value), _): expect(value).to_equal(41)
+                    case _: fail("base operand was not ABI argument zero")
+            case _: fail("receiver-aware facet call did not lower through CallIndirect")
+
+        step("Reject a signature that has no receiver parameter")
+        val invalid = lower_resolved_facet_witness_method_call(
+            nil, method_address, base, [], MirSignature(
+                params: [], return_type: MirType.i64(), is_variadic: false))
+        expect(invalid.unwrap_err()).to_contain("base as the first argument")

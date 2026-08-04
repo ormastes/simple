@@ -17,6 +17,7 @@ use compiler.frontend.core.aop_log_policy.{
 use compiler.mir.mir_aop_injection.{
     extract_mir_block_info,
     apply_weaving_result,
+    apply_prepared_advice_result,
     aop_weave_accounting_reset,
     aop_weave_accounting_add
 }
@@ -82,6 +83,7 @@ impl CompilerDriver:
             return
 
         val all_rules = weavingconfig_all_rules(config)
+        val prepare_dynamic = self.ctx.options.prepared_dynamic_advice
         log_debug("AOP weaving")
         val conflicts = detect_advice_conflicts(all_rules)
         for conflict in conflicts:
@@ -93,14 +95,36 @@ impl CompilerDriver:
         for mod_name in self.ctx.mir_modules.keys():
             val mir_module = self.ctx.mir_modules[mod_name]
             var woven_functions: Dict<SymbolId, MirFunction> = {}
+            var prepared_slots = mir_module.prepared_advice_slots
             for func in mir_module.functions.values():
                 val blocks = extract_mir_block_info(func.blocks)
                 val result = weave_function(
                     config, func.name, mod_name, [], [], blocks)
                 if result.advices_inserted > 0:
-                    val woven_func = apply_weaving_result(func, result)
-                    woven_functions[func.symbol] = woven_func
-                    aop_weave_accounting_add(result.advices_inserted)
+                    if prepare_dynamic:
+                        val prepared = apply_prepared_advice_result(
+                            func, mod_name, result)
+                        if prepared.is_err():
+                            self.ctx.errors.push("[AOP] {prepared.unwrap_err()}")
+                            woven_functions[func.symbol] = func
+                        else:
+                            val injection = prepared.unwrap()
+                            woven_functions[func.symbol] = injection.function
+                            if injection.slot != nil:
+                                val slot = injection.slot.unwrap()
+                                var duplicate = false
+                                for existing in prepared_slots:
+                                    if existing.slot_id == slot.slot_id:
+                                        duplicate = true
+                                if duplicate:
+                                    self.ctx.errors.push(
+                                        "[AOP] E-AF010 duplicate prepared advice slot ID: {slot.slot_id}")
+                                else:
+                                    prepared_slots.push(slot)
+                    else:
+                        val woven_func = apply_weaving_result(func, result)
+                        woven_functions[func.symbol] = woven_func
+                        aop_weave_accounting_add(result.advices_inserted)
                 else:
                     woven_functions[func.symbol] = func
                 for diag in result.diagnostics:
@@ -115,7 +139,7 @@ impl CompilerDriver:
                 constants: mir_module.constants,
                 types: mir_module.types,
                 facet_binding_plans: mir_module.facet_binding_plans,
-                prepared_advice_slots: mir_module.prepared_advice_slots
+                prepared_advice_slots: prepared_slots
             )
 
     me apply_debug_trace():

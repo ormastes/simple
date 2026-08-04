@@ -22,14 +22,23 @@ ordinary SMF, the loader, and native performance fixtures.
 11. **Admit an actually emitted witness symbol**
 12. **Project declared facet implementation metadata**
 13. **Inspect the retained executable source**
+14. **Reject a factory without its contract-ordered method symbol**
+15. **Lower a resolved method with the base as ABI argument zero**
+16. **Reject a signature that has no receiver parameter**
+17. **Build one code section with deterministic export entries**
+18. **Resolve ASCII and UTF-8 names through distinct byte offsets**
 
 PASS requires deterministic codec round trips, discovery of the named
 `.facet_bindings` ordinary-SMF section and its exported witness, and a
 `CallIndirect` retaining the explicit resolved address. Generic facet-method
 syntax is outside this artifact/runtime boundary. Artifact emission must fail
-when the canonical witness exists only as declaration metadata; the projection
-scenario separately proves that facet method signatures remain available as
-metadata while ordinary executable source is retained.
+when the canonical factory or any contract-ordered witness-method symbol exists
+only as declaration metadata. Receiver-aware method invocation prepends the
+base operand and then uses the same `CallIndirect` instruction; an incompatible
+signature fails with `E-AF005`.
+Multi-symbol SMF coverage verifies `.text`-relative offsets, per-symbol code
+slices, symbol counts, and UTF-8 byte-based string-table offsets through the
+real in-memory loader.
 
 ## Probe fixture
 

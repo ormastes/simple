@@ -17,20 +17,26 @@ exists.
 6. Confirm that the authoritative frontend, HIR lowering, and MIR lowering all
    contain the canonical function.
 
-## Reject unsupported receiver adaptation without erasing metadata
+## Adapt `self.base` through the explicit receiver ABI
 
 1. Parse a method whose body evaluates `self.base + 1`.
 2. Confirm that both facet AST and facet HIR retain the original body.
-3. Reject executable-source projection with typed diagnostic `E-AF005` because
-   no production receiver adaptation ABI exists yet.
-4. Do not replace the body with a placeholder, fake vtable, or source-text
+3. Project an ordinary function whose first parameter is the concrete base
+   value and rewrite the receiver token to that parameter.
+4. Confirm that the receiver-aware function reaches ordinary HIR and MIR.
+5. Do not replace the body with a placeholder, fake vtable, or source-text
    runtime assertion.
+
+String literals and comments are not rewritten. Bare `self` remains a typed
+`E-AF005` failure because the value semantics of a facet wrapper have not been
+defined; its original body remains available in facet metadata.
 
 ## Keep interfaces declaration-only
 
 1. Parse an interface method that incorrectly supplies a body.
 2. Reject it with `E-AF005` and the declaration-only diagnostic.
 
-The executable scenario is intentionally receiver-independent. The canonical
-factory ABI remains `<implementation>__facet_witness`; constructing that
-factory and adapting `self.base` are separate residual work.
+The witness-method ABI passes the concrete base as argument zero. The canonical
+factory ABI remains `<implementation>__facet_witness`; constructing and
+publishing that factory and its relocation-aware method table remain separate
+residual work.

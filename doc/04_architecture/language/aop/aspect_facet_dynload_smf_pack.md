@@ -90,18 +90,24 @@ zero-argument `before`, `after_success`, and `after_error` witnesses. Admission
 captures the resolved address and owner; dispatch revalidates both against the
 existing `ModuleLoader` before invoking any callback, so an invalid chain fails
 before partial execution. Runtime `around` is rejected because no dynamic
-exactly-once `proceed` continuation exists. A production MIR prepared-slot call
-site is still absent, so this seam is reachable through the application runtime
-but is not claimed as automatically emitted business-path dispatch.
+exactly-once `proceed` continuation exists. With
+`CompileOptions.prepared_dynamic_advice`, the established pointcut/weaving authority now
+produces stable execution slots and automatic phase-specific
+`simple.prepared_advice_dispatch.v1` MIR intrinsics. They remain non-executable
+until the lifecycle-safe backend bridge below is complete.
 
 The shared `PreparedAdviceSlotPlan` contract carries schema ID/version, stable
 slot ID, target function identity, and admitted before/after forms.
 `MirModule.prepared_advice_slots` preserves this table through normal/bootstrap
 lowering, AOP/debug reconstruction, MIR optimizers, and VHDL aggregation;
 `serialize_mir_prepared_advice_slots` provides deterministic handoff bytes.
-There is currently no syntax/config producer. Directly supplied plans pass a
-driver validation/collection boundary, then native and SMF emission fail closed
-because no backend table or prepared business-path caller exists.
+The driver collects a deterministic schema-v1 table. The loader derives an
+immutable schema-v1 dispatch projection containing exact publication,
+generation, witness-owner, and address identity from its canonical registry.
+All execution/output surfaces fail closed until projection install is atomic
+with publication, invalidation precedes drain, and dispatch pins the exact
+generation. Check/interpreter reject the option directly; JIT and every AOT
+backend reject produced slots before code generation.
 
 ## Ownership boundaries
 
@@ -118,18 +124,15 @@ Compatibility constructors intentionally inject the empty discovery port.
 
 ### Prepared dynamic join points
 
-There is no production prepared dynamic join-point slot or table today.
-`MirModule` carries only `facet_binding_plans`; existing
-`mir_aop_injection.spl` emits direct static advice calls. Catalog slot strings,
-loader validation, lookup counters, and application lookup are consumers and
-test seams, not evidence that a business call site contains a prepared guard.
+`MirModule` carries deterministic prepared-slot metadata and the explicit
+config producer inserts phase-specific prepared-dispatch intrinsics. Catalog
+slot strings and the loader projection consume the same finite slot identity;
+no runtime pointcut evaluator is introduced.
 
-The next implementation owner is `compiler/50.mir`: introduce canonical slot
-metadata and a prepared-dispatch MIR operation, preserve it through MIR
-serialization/optimization, and lower it in `compiler/70.backend`. Layer 80
-then serializes the finite slot table. Layer 99 continues to own validated
-generation bind/unbind only; it must not synthesize slots or add a pointcut
-evaluator.
+The remaining implementation owner is the loader/backend bridge: atomically
+install the derived projection with canonical publication, invalidate it before
+unload drain, and pin/validate its exact generation while a backend trampoline
+dispatches. The projection is never an independently mutable registry.
 
 ## Cache and invalidation
 

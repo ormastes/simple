@@ -61,8 +61,13 @@ fixture_sha256="$(hash_file "$FIXTURE")"
 provenance_compiler_sha256="$(sed -n 's/^compiler_sha256=//p' "$PROBE_PROVENANCE")"
 provenance_probe_sha256="$(sed -n 's/^probe_sha256=//p' "$PROBE_PROVENANCE")"
 provenance_compiler_kind="$(sed -n 's/^compiler_kind=//p' "$PROBE_PROVENANCE")"
+provenance_probe_contract="$(sed -n 's/^probe_contract=//p' "$PROBE_PROVENANCE")"
 [ "$provenance_compiler_kind" = pure-simple-self-hosted ] || {
     echo "aspect_facet_nfr_error=probe_compiler_kind_not_admissible"
+    exit 1
+}
+[ "$provenance_probe_contract" = advice-return-73+receiver-facet-required-v2 ] || {
+    echo "aspect_facet_nfr_error=probe_contract_not_admissible"
     exit 1
 }
 [ "$provenance_compiler_sha256" = "$compiler_sha256" ] || {
@@ -136,6 +141,21 @@ disabled_footprint_source="$(field disabled_footprint_source "$first_use")"
     echo "aspect_facet_nfr_error=invalid_disabled_footprint_source"
     exit 1
 }
+for evidence_file in "$first_use" "$lookup"; do
+    [ "$(require_uint_field advice_outcome_verified "$evidence_file")" -eq 1 ] || {
+        echo "aspect_facet_nfr_error=native_advice_outcome_not_verified"
+        exit 1
+    }
+    [ "$(require_uint_field advice_return_value "$evidence_file")" -eq 73 ] || {
+        echo "aspect_facet_nfr_error=native_advice_return_value_mismatch"
+        exit 1
+    }
+done
+facet_receiver_dispatch_status="$(field facet_receiver_dispatch_status "$lookup")"
+[ "$facet_receiver_dispatch_status" = verified ] || {
+    echo "aspect_facet_nfr_error=facet_receiver_dispatch_not_verified_${facet_receiver_dispatch_status}"
+    exit 1
+}
 
 case "$startup_wall_seconds" in ''|*[!0-9.]*) echo "aspect_facet_nfr_error=invalid_startup_time"; exit 1 ;; esac
 for value in "$max_rss_kib" "$major_page_faults" "$minor_page_faults" "$cold_opened_files" "$first_use_opened_files" "$lookup_opened_files"; do
@@ -147,7 +167,7 @@ output_dir=${OUTPUT%/*}
 record="$tmp/baseline.sdn"
 {
     echo 'aspect_facet_nfr_evidence:'
-    echo '  schema_version: 1'
+    echo '  schema_version: 2'
     echo '  status: collected-not-thresholded'
     echo "  compiler_path: \"$COMPILER\""
     echo "  compiler_sha256: \"$compiler_sha256\""
@@ -175,6 +195,9 @@ record="$tmp/baseline.sdn"
     done
     echo "  disabled_contract_footprint_bytes: $disabled_contract_footprint_bytes"
     echo "  disabled_footprint_source: $disabled_footprint_source"
+    echo "  advice_outcome_verified: 1"
+    echo "  advice_return_value: 73"
+    echo "  facet_receiver_dispatch_status: $facet_receiver_dispatch_status"
 } >"$record"
 mv "$record" "$OUTPUT"
 

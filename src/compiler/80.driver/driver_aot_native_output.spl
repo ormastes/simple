@@ -72,8 +72,21 @@ fn driver_native_build_cache_path(cache_dir: text) -> text:
     rt_path_join(cache_dir, "build_cache.sdn")
 
 fn driver_native_build_cache_scope(backend: text, cache_dir: text, target_cpu: text, opt_level: i64, symbol_mode: text) -> (text, text):
+    driver_native_build_cache_scope_with_prepared(
+        backend, cache_dir, target_cpu, opt_level, symbol_mode, false)
+
+fn driver_native_build_cache_scope_with_prepared(
+    backend: text,
+    cache_dir: text,
+    target_cpu: text,
+    opt_level: i64,
+    symbol_mode: text,
+    prepared_dynamic_advice: bool
+) -> (text, text):
     val raw_target = if target_cpu == "": nil else: Some(target_cpu)
-    val compiler_id = native_build_compiler_identity() + if symbol_mode == "": "" else: "-" + symbol_mode
+    var compiler_id = native_build_compiler_identity() + if symbol_mode == "": "" else: "-" + symbol_mode
+    val prepared_identity = if prepared_dynamic_advice: "-prepared-advice-1" else: "-prepared-advice-0"
+    compiler_id = compiler_id + prepared_identity
     val scope = native_build_cache_scope_key(Some(backend), raw_target, [], opt_level as i32, compiler_id)
     val cache_scope_root = rt_path_join(cache_dir, scope)
     (cache_scope_root, scope)
@@ -274,7 +287,15 @@ impl CompilerDriver:
         rt_dir_create(cache_dir, true)
         val native_target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
         val symbol_mode = if no_mangle_requested: "no-mangle" else: ""
-        val (base_cache_scope_root, _) = driver_native_build_cache_scope(effective_backend, cache_dir, native_target, driver_opt_level, symbol_mode)
+        val cache_scope = if ctx.options.prepared_dynamic_advice:
+            driver_native_build_cache_scope_with_prepared(
+                effective_backend, cache_dir, native_target, driver_opt_level,
+                symbol_mode, true)
+        else:
+            driver_native_build_cache_scope(
+                effective_backend, cache_dir, native_target, driver_opt_level,
+                symbol_mode)
+        val (base_cache_scope_root, _) = cache_scope
         if ctx.native_sources_fingerprint == "":
             return CompileResult.CodegenError(
                 "native build source fingerprint missing before cache setup")

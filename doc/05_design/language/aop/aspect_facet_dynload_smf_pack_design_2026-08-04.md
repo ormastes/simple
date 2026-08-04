@@ -1237,10 +1237,14 @@ cover attempts, successful callback invocations, failures, and rejected around
 requests. `around` admission and dispatch both fail closed until an actual
 exactly-once proceed continuation is designed and lowered.
 
-This does not close the prepared-call-site lane: current MIR/backend output does
-not emit a business-path caller of `advice_dispatch_slot`. Application code can
-invoke the seam explicitly, while automatic prepared-slot lowering remains a
-release-blocking integration residual rather than inferred evidence.
+`CompileOptions.prepared_dynamic_advice` now selects a real producer from the existing
+`WeavingConfig`/`weave_function` authority. It emits one stable execution slot
+per matched function and automatic `simple.prepared_advice_dispatch.v1(slot,
+phase)` MIR intrinsics at entry, successful returns, and abort exits. Duplicate
+rules of one phase share one call because the loader dispatches the whole chain.
+Slot identity includes module, function name, canonical MIR signature, and
+lowering-owned symbol identity so overloads cannot alias. Entry injection uses
+`MirFunction.entry_block`, not block-array position.
 
 `PreparedAdviceSlotPlan` is the frozen common contract for that future lane. Its
 fields are `schema_id`, `schema_version`, `slot_id`, `target_function_id`, and
@@ -1249,16 +1253,19 @@ fields are `schema_id`, `schema_version`, `slot_id`, `target_function_id`, and
 forms fail closed. `MirModule.prepared_advice_slots` is preserved by every
 current module reconstruction and VHDL aggregation. Deterministic JSON uses
 `serialize_mir_prepared_advice_slots`; the driver collects and validates the
-table, rejects duplicate global slot IDs, and refuses non-empty native/SMF
-emission until backend table encoding and a real business-path caller exist.
+table and rejects duplicate global slot IDs. Native/SMF emission still refuses
+non-empty tables until a lifecycle-safe backend trampoline exists. The option
+participates in compile/cache identity; check/interpreter reject it directly,
+and JIT/all AOT backends reject produced slots centrally before code generation.
+The common backend entry additionally rejects slot metadata or the prepared
+intrinsic itself, preventing direct backend callers from silently dropping it.
 
 #### Production prepared-slot ownership status
 
-The registry is currently only the publication consumer. No source annotation
-or pointcut pass materializes a prepared dynamic slot, `MirModule` has no slot
-table, and `mir_aop_injection.spl` emits only direct static advice calls.
-Catalog `prepared_joinpoint_slots`, registry lookup/counters, and the
-application lookup facade therefore do not complete dynamic dispatch.
+The loader registry remains the sole publication authority. A typed immutable
+dispatch projection is derived only after loader owner/address validation and
+carries exact publication and generation identity. It is a port contract, not
+a second registry; no native table is installed yet.
 
 The required producer sequence is:
 
@@ -1271,8 +1278,10 @@ The required producer sequence is:
 6. the loader registry binds an exact generation, and runtime dispatch invokes
    the preordered chain under its matching generation lease.
 
-Until steps 1–5 exist with backend evidence, dynamic advice is a validated
-registry seam rather than a production prepared join point.
+Steps 1–3 and the deterministic table contract now exist for execution join
+points. Steps 4–6 remain release-blocking: atomic projection install with
+publication, invalidation before drain, exact-generation pinning across each
+callback, and a backend trampoline must be proven together.
 
 #### Resolver composition boundary
 
@@ -1765,18 +1774,25 @@ implementation method bodies are retained in `FacetMethodDecl.body_source` and
 compiler input under
 `facet_witness_method_symbol(implementation_id, method_name)`, currently
 `<implementation>__facet_witness__<method>`, and proceed through ordinary HIR
-and MIR function lowering. Interface methods remain declaration-only. A body
-that references `self` or `self.base` fails projection with E-AF005 while its
-facet AST/HIR metadata remains intact; no textual substitution is treated as a
-receiver ABI. The AOT driver emits FBND v1 only when the canonical factory
-witness is proven present in the ordinary-SMF symbol table, so current
-production facet plans still fail closed with E-AF002 instead of publishing a
-declared-only factory. The loader checks exact catalog equality and witness
-ownership. Calls lower through existing `CallIndirect` from an explicit
-resolved operand. A real receiver adapter/factory, generic implementations,
-backend export of witness-method symbols, and user-facing type-directed
-facet-method sugar remain residual; no runtime-private invoke path or
-placeholder witness is implied.
+and MIR function lowering. The receiver ABI passes the concrete base as
+argument zero; token-aware projection lowers `self.base` to that explicit
+parameter without rewriting strings or comments. Bare `self` fails with
+E-AF005 because wrapper-value semantics are not defined, while its facet
+AST/HIR metadata remains intact. Interface methods remain declaration-only.
+Receiver-aware resolved calls prepend the base operand and lower through the
+same `CallIndirect` operation, rejecting signature arity mismatches. Artifact
+admission requires the canonical factory plus every contract-ordered canonical
+method symbol. The ordinary-SMF writer now supports deterministic multiple
+`.text`-relative symbol entries and string offsets, and the AOT path extracts
+those symbols only from one relocatable ELF64 object; multi-object and embedded
+ELF facet modes fail closed. Symbol presence is not factory semantics, however,
+so production facet output currently stops with E-AF005 until a witness
+descriptor/factory layout is defined. The loader checks exact catalog equality
+and witness ownership. Calls lower through existing `CallIndirect` from an
+explicit resolved operand. The descriptor/factory representation, inherited
+method-table flattening, generic implementations, loader method-entry
+resolution, and user-facing type-directed facet-method sugar remain residual;
+no runtime-private invoke path or placeholder witness is implied.
 
 ## 22.7 MDSOC owner map
 

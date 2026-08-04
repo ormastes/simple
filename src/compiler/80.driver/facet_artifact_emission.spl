@@ -5,24 +5,27 @@ use compiler.common.structural_contracts.aop.{FacetBindingPlan, TypePredicateIns
 use compiler.common.structural_contracts.facet_artifact.{
     FACET_ARTIFACT_VERSION, FacetContractMetadata, FacetBindingArtifactSummary,
     encode_facet_binding_summaries, facet_artifact_text_less,
-    facet_witness_symbol
+    facet_witness_symbol, facet_witness_method_symbol
 }
 use std.common.crypto.sha256.{sha256_text}
 
 fn facet_contract_metadata_from_hir(facets: HirFacetModule) -> [FacetContractMetadata]:
     var records: [FacetContractMetadata] = []
     for interface_ in facets.interfaces:
+        var names: [text] = []
         var signatures: [text] = []
         for method in interface_.methods:
+            names = names.push(method.name)
             signatures = signatures.push(method.signature)
-        val canonical = "facet-contract-v1\n" + interface_.aspect_id + "\n" +
+        val canonical = "facet-contract-v2\n" + interface_.aspect_id + "\n" +
             interface_.name + "\n" + interface_.parent_facets.join("\n") +
-            "\n" + signatures.join("\n")
+            "\n" + names.join("\n") + "\n" + signatures.join("\n")
         records = records.push(FacetContractMetadata(
             contract_version: FACET_ARTIFACT_VERSION,
             aspect_id: interface_.aspect_id,
             facet_interface_id: interface_.name,
             parent_facets: interface_.parent_facets,
+            method_names: names,
             method_signatures: signatures,
             abi_hash: sha256_text(canonical)))
     records
@@ -35,14 +38,20 @@ fn facet_plan_target(plan: FacetBindingPlan) -> Result<(text, text), text>:
         case MatchImplements(interface_id): Ok(("", interface_id))
         case _: Err("E-AF002 dynamic facet artifact target is not publishable")
 
-fn facet_contract_hash(
-    contracts: [FacetContractMetadata],
-    aspect_id: text,
-    facet_interface_id: text
-) -> Result<text, text>:
+fn facet_witness_artifact_symbols(
+    implementation_id: text, method_names: [text]
+) -> [text]:
+    var symbols = [facet_witness_symbol(implementation_id)]
+    for method_name in method_names:
+        symbols = symbols.push(facet_witness_method_symbol(implementation_id, method_name))
+    symbols
+
+fn facet_contract_metadata(
+    contracts: [FacetContractMetadata], aspect_id: text, facet_interface_id: text
+) -> Result<FacetContractMetadata, text>:
     for contract in contracts:
         if contract.aspect_id == aspect_id and contract.facet_interface_id == facet_interface_id:
-            return Ok(contract.abi_hash)
+            return Ok(contract)
     Err("E-AF002 facet binding has no SHB contract metadata: {aspect_id}::{facet_interface_id}")
 
 fn facet_binding_artifact_from_plan(
@@ -51,9 +60,16 @@ fn facet_binding_artifact_from_plan(
     emitted_symbols: [text]
 ) -> Result<FacetBindingArtifactSummary, text>:
     val target = facet_plan_target(plan)?
-    val witness = facet_witness_symbol(plan.implementation_id)
-    if not emitted_symbols.contains(witness):
-        return Err("E-AF002 declared facet witness has no emitted ordinary-SMF symbol: {witness}")
+    val contract = facet_contract_metadata(
+        contracts, plan.aspect_id, plan.facet_interface_id)?
+    if contract.parent_facets.len() > 0:
+        return Err("E-AF002 inherited facet method-table symbols are not flattened")
+    val required_symbols = facet_witness_artifact_symbols(
+        plan.implementation_id, contract.method_names)
+    for symbol in required_symbols:
+        if not emitted_symbols.contains(symbol):
+            return Err("E-AF002 facet witness artifact has no emitted ordinary-SMF symbol: {symbol}")
+    val witness = required_symbols[0]
     val binding_id = plan.aspect_id + "::" + plan.facet_interface_id + "::" + plan.implementation_id
     Ok(FacetBindingArtifactSummary(
         contract_version: FACET_ARTIFACT_VERSION,
@@ -62,8 +78,7 @@ fn facet_binding_artifact_from_plan(
         concrete_type_id: target.0,
         business_interface_id: target.1,
         facet_interface_id: plan.facet_interface_id,
-        facet_contract_abi_hash: facet_contract_hash(
-            contracts, plan.aspect_id, plan.facet_interface_id)?,
+        facet_contract_abi_hash: contract.abi_hash,
         witness_symbol: witness,
         capabilities: ["facet.read"])))
 
@@ -105,3 +120,4 @@ fn encode_mir_facet_binding_artifacts(
 
 export facet_contract_metadata_from_hir, facet_binding_artifact_from_plan
 export facet_binding_artifacts_from_plans, encode_mir_facet_binding_artifacts
+export facet_witness_artifact_symbols

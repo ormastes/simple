@@ -7,9 +7,11 @@ use compiler.loader.loader.advice_binding_registry.{
     AdviceBindingAdmission, AdviceBindingRegistry,
     advice_binding_stage_validated, advice_publish_generation,
     advice_lookup_slot, advice_unbind_generation,
-    advice_disabled_path_footprint, advice_dispatch_slot
+    advice_disabled_path_footprint, advice_dispatch_slot,
+    advice_dispatch_projection_create
 }
 use compiler.loader.loader.module_loader.{moduleloader_with_defaults}
+use compiler.loader.{LoadedSymbol, SymbolType}
 
 fn advice_summary(id: text, witness: text, priority: i64, specificity: i64) -> AspectAdviceSummary:
     AspectAdviceSummary(
@@ -157,3 +159,24 @@ describe "Loader advice binding registry":
         expect(outcome.status).to_equal("failed")
         expect(outcome.reason).to_contain("exactly-once proceed path")
         expect(outcome.registry.counters.around_rejections).to_equal(1)
+
+    it "derives an exact-generation projection only from loader-owned records":
+        var registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
+        registry = publish_advice(registry, "pack:a:7", "audit.aspect", [
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.active", "audit_active", 1, 1),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 101)])
+        var loader = moduleloader_with_defaults()
+        loader.global_symbols["audit_active"] = ("pack:a:7", LoadedSymbol(
+            name: "audit_active", address: 101, size: 8,
+            ty: SymbolType.Function, is_jit: false, file_offset: 0))
+        val projection = advice_dispatch_projection_create(registry, loader).unwrap()
+        expect(projection.schema_id).to_equal("simple.advice-dispatch-projection")
+        expect(projection.entries.len()).to_equal(1)
+        expect(projection.entries[0].publication_id).to_equal("pack:a:7@7")
+        expect(projection.entries[0].generation).to_equal(7)
+        expect(projection.entries[0].resolved_witness_address).to_equal(101)
+
+        loader.global_symbols["audit_active"] = ("other-owner", loader.global_symbols["audit_active"][1])
+        expect(advice_dispatch_projection_create(registry, loader).unwrap_err()).to_contain(
+            "no longer loader-owned")

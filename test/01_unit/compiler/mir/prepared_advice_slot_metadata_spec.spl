@@ -16,8 +16,11 @@ use compiler.mir_opt.mir_opt.{
 }
 use compiler.driver.prepared_advice_slot_handoff.{
     collect_prepared_advice_slot_table_bytes,
-    prepared_advice_slot_artifact_gate
+    prepared_advice_slot_artifact_gate,
+    prepared_advice_execution_admission
 }
+use compiler.common.driver_core_types.{CompileOptions}
+use compiler.backend.backend.backend_helpers.{backend_prepared_advice_rejection}
 
 fn prepared_slot(id: text, target: text, forms: [text]) -> PreparedAdviceSlotPlan:
     prepared_advice_slot_plan_create(
@@ -80,9 +83,31 @@ describe "Prepared dynamic advice-slot MIR metadata":
         val bytes = collect_prepared_advice_slot_table_bytes({"orders": module}).unwrap()
         expect(bytes.len()).to_be_greater_than(0)
         expect(prepared_advice_slot_artifact_gate({"orders": module}).unwrap_err()).to_contain(
-            "backend/table emission is not implemented")
+            "projection/trampoline is not lifecycle-safe")
 
         expect(prepared_advice_slot_artifact_gate({
             "orders": module,
             "other": prepared_slot_module("other", [plan])}).unwrap_err()).to_contain(
                 "duplicate prepared advice slot ID")
+
+    it "centrally rejects unsupported check interpreter jit and aot surfaces":
+        var options = CompileOptions.default()
+        options.prepared_dynamic_advice = true
+        expect(prepared_advice_execution_admission(
+            options, {}, "check").unwrap_err()).to_contain(
+                "no MIR dispatch may be ignored")
+        expect(prepared_advice_execution_admission(
+            options, {}, "interpret").unwrap_err()).to_contain(
+                "no MIR dispatch may be ignored")
+
+        val module = prepared_slot_module("orders", [prepared_slot(
+            "orders.submit.prepared", "orders::submit", ["before"])])
+        expect(prepared_advice_execution_admission(
+            options, {"orders": module}, "jit").unwrap_err()).to_contain(
+                "projection/trampoline is not lifecycle-safe")
+        expect(prepared_advice_execution_admission(
+            options, {"orders": module}, "aot:llvm").unwrap_err()).to_contain(
+                "projection/trampoline is not lifecycle-safe")
+        expect(backend_prepared_advice_rejection(
+            module, "llvm").unwrap()).to_contain(
+                "cannot execute prepared dynamic advice")

@@ -28,7 +28,7 @@ aop_injection_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -173,6 +173,27 @@ expect(infos[0].instruction_kinds[0].kind_tag).to_equal("call")
 
 </details>
 
+### prepared dynamic advice injection
+
+#### creates one stable execution slot and automatic phase calls
+
+- Two matching `before` rules share one entry dispatch.
+- `after_success` dispatch appears before each return.
+- `after_error` dispatch appears before each abort.
+- Slot identity includes canonical signature and symbol identity; the MIR ABI is
+  `simple.prepared_advice_dispatch.v1(slot, phase)`.
+- The entry block has ID 7 and is intentionally second in storage order; the
+  `before` call is placed there, while exact `after_success` and `after_error`
+  phase values are placed on return and abort blocks respectively.
+
+#### uses signature and symbol identity to distinguish overload slots
+
+- Same-named overloads with distinct signatures/symbols produce distinct slots.
+
+#### rejects around without an exactly-once proceed path
+
+- Expected: preparation returns `E-AF010` containing `exactly-once proceed`.
+
 ## At a Glance
 
 | Field | Value |
@@ -190,13 +211,14 @@ Tests covering:
 - classify_mir_inst_kind
 - make_advice_call_inst
 - extract_mir_block_info
+- prepared dynamic advice injection
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

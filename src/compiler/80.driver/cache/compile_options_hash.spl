@@ -3,7 +3,8 @@
 # Stored in SMF header reserved[0..16] bytes (backward-compatible).
 # Old readers ignore reserved bytes; new readers validate backend match.
 #
-# Hash includes: backend, opt_level, target_arch, debug_info, gc_off, release, profile, allowed_families
+# Hash includes: backend, opt_level, target_arch, debug_info, gc_off, release,
+# profile, allowed_families, and prepared dynamic-advice selection.
 # Combined hash = first 8 bytes of sha256 over a canonical, sorted,
 # length-prefixed encoding (see _coh_component). Old-format hashes
 # (rt_hash_text era) and the legacy all-zero hash simply mismatch and
@@ -101,6 +102,20 @@ fn _coh_sha256_prefix_i64(canonical: text) -> i64:
     hash
 
 fn compile_options_hash_compute(backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text]) -> CompileOptionsHash:
+    compile_options_hash_compute_with_prepared(
+        backend, opt_level, release, debug_info, gc_off, profile,
+        allowed_families, false)
+
+fn compile_options_hash_compute_with_prepared(
+    backend: text,
+    opt_level: i64,
+    release: bool,
+    debug_info: bool,
+    gc_off: bool,
+    profile: text,
+    allowed_families: [text],
+    prepared_dynamic_advice: bool
+) -> CompileOptionsHash:
     # Build canonical string for hashing: fixed component order, each component
     # length-prefixed, set-valued inputs sorted lexicographically first.
     val bk = backend_text_to_kind(backend)
@@ -120,6 +135,9 @@ fn compile_options_hash_compute(backend: text, opt_level: i64, release: bool, de
     canonical = canonical + _coh_component("gc", gc_str)
     canonical = canonical + _coh_component("profile", profile)
     canonical = canonical + _coh_component("families", families_str)
+    canonical = canonical + _coh_component(
+        "prepared_dynamic_advice",
+        if prepared_dynamic_advice: "1" else: "0")
     val hash = _coh_sha256_prefix_i64(canonical)
 
     # Build flags bitfield
@@ -130,6 +148,8 @@ fn compile_options_hash_compute(backend: text, opt_level: i64, release: bool, de
         flags = flags | 0x02
     if release:
         flags = flags | 0x04
+    if prepared_dynamic_advice:
+        flags = flags | 0x08
 
     CompileOptionsHash(
         hash: hash,
