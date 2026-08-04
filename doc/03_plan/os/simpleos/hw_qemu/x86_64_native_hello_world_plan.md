@@ -30,53 +30,51 @@ build/fix/verify cycles.
 
 ## Current evidence
 
-- Complete: fresh native ELF at
-  `build/native_probe/desktop_hello/hello.elf`.
-- Complete: compiler evidence at
-  `build/native_probe/desktop_hello/compile.log`.
-- Complete: staged FAT disk containing `/HELLO.ELF` at
-  `build/native_probe/desktop_hello/qemu/disk.img`.
-- Complete: isolated VMM root-anchor workaround in `vmm_core.spl` and
-  `baremetal_stubs.c`.
-- Complete: UEFI/GRUB packaging skeleton under
-  `build/native_probe/hello_qemu/ssh/`.
-- Blocked: cycle 3 reached its 45-minute external timeout without producing
-  `build/os/simpleos_ssh_hello_native.elf` or a compiler diagnostic.
-- Verified unusable for this lane: the phase-2 and phase-3 bootstrap bridge
-  artifacts are 123 KB seed wrappers whose `native-build` command reports that
-  full Simple lowering/codegen is unavailable.
+- Complete: Phase 3 Cranelift compiler
+  `/Users/ormastes/simple/build/native_probe/simple` built a fresh focused
+  SimpleOS compiler at `bin/release/x86_64-unknown-simpleos/simple`.
+- Compiler SHA-256:
+  `91828e55fac193e6b695cf6f2aac782d6af11889fd1147f25533ab850284273e`.
+- Complete: the strict FAT image at
+  `build/os/elfexec_simple/fat32-simple.img` contains byte-identical compiler
+  aliases at `/usr/bin/simple`, `/bin/simple`, and all four `/sys/apps/simple*`
+  paths. `/HELLO.SPL` contains exact `Hello World` source.
+- Complete: Phase 3 Cranelift built the SSH/fsexec kernel at
+  `build/os/simpleos_ssh_ring3_uefi128_laneb.elf`; its final ELF checker passes.
+- Complete: QEMU/OVMF/GRUB boot reached the SimpleOS SSH accept loop and loaded
+  the 2.9 MiB compiler into a private CPL3 address space.
+- Evidence: `build/native_probe/desktop_toolchain_ui/version-gate-cycle3.log`
+  and `build/os/ssh_simple_hello_uefi.serial.log`.
+- Blocked after the third boot/fix cycle: the remote command used
+  `/usr/bin/simple simple --version`. The loader already prepends argv[0], so
+  the compiler interpreted `simple` as a source filename. The correct command
+  is `/usr/bin/simple --version` with no dummy token.
+- Additional native-link prerequisite: the image has no guest-native
+  `/usr/bin/ld.lld`. The focused compiler also generates its entry wrapper by
+  invoking `clang`; the next lane should use the already-staged
+  `/usr/lib/SIMPLEEN.O` or stage a guest-native clang.
 
-## Fix cycles
+## Converged implementation fixes
 
-### Cycle 1 — complete, failed with actionable parser error
-
-The kernel closure reached `rsa_pubkey.spl` and rejected an enum destructuring
-`if val` pattern. The isolated source now uses the established exhaustive
-`match` form. No canonical file was edited.
-
-### Cycle 2 — complete, failed with architecture-variant parser errors
-
-The deployed compiler parsed the first architecture variants in
-`process_image.spl`, then rejected later repeated multiline definitions. The
-isolated x86_64 build copy now retains only the x86_64 implementation of that
-private helper; canonical multi-architecture source is unchanged.
-
-### Cycle 3 — complete, timed out
-
-The final cache-preserving build remained CPU-active but reached the 45-minute
-external guard (`RC=124`). It produced neither a kernel ELF nor a diagnostic;
-the captured log is empty. The three-cycle cap is exhausted, so no fourth build
-or QEMU attempt is permitted in this lane.
+- The archive helper now selects `llvm-ar` on macOS for Phase 3 SysV archives.
+- A separate SimpleOS compiler-runtime object owns the target-only ABI bridges
+  without displacing the pure-Simple runtime.
+- Equal-second payload/stamp mtimes are accepted only when the stamped SHA-256
+  still matches the exact ELF.
+- The architecture-owned x86_64 VMM publishes its PML4 root through the shared
+  runtime anchor; the loader then created a real private user address space.
+- The SSH evidence wrapper now retains the real SSH exit code and requires the
+  configured marker, so transport failure cannot pass.
 
 ## Remaining execution steps
 
-1. Obtain a full-driver phase-4/self-hosted compiler that completes the x86_64
-   LLVM kernel closure within the guard, or fix/measure the compiler timeout in
-   a fresh scoped lane.
-2. Produce and validate `build/os/simpleos_ssh_hello_native.elf` once.
-3. Copy the kernel to the prepared UEFI ESP as `/boot/kernel.elf`.
-4. Boot QEMU with the staged FAT disk, NVMe device, serial capture, and SSH
-   forwarding on host port 42322.
-5. Wait for the guest SSH accept loop, then execute `/HELLO.ELF` once.
-6. Capture SSH output and the serial log, verify exact `Hello World` and exit
-   success, stop QEMU, report convergence, and stop work.
+1. Start a fresh capped boot lane and run `/usr/bin/simple --version` without
+   the extra `simple` token. Do not rerun any command from this exhausted lane.
+2. Stage a genuine x86_64 SimpleOS `ld.lld`, and make the focused linker consume
+   `/usr/lib/SIMPLEEN.O` instead of invoking an absent guest clang (or stage a
+   genuine guest-native clang).
+3. Rebuild the focused compiler/image once, then run
+   `/usr/bin/simple compile --native /hello.spl -o /hello-native`.
+4. Execute `/hello-native` once and require exact `Hello World` plus exit 0.
+5. Add the executable SSpec and mirrored operator manual, update the state and
+   guide, perform one final high-capability review, and stop on PASS.
