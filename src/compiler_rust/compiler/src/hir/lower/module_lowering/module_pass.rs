@@ -13,6 +13,41 @@ use crate::hir::types::{
     VerificationMode,
 };
 
+fn stable_module_name_hash(value: &str) -> i64 {
+    let mut hash = 5381u64;
+    for byte in value.as_bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(u64::from(*byte));
+    }
+    let signed = hash as i64;
+    if signed < 0 {
+        0 - signed.saturating_add(1)
+    } else {
+        signed
+    }
+}
+
+pub(crate) fn dynamic_module_initializer_name(module_path: &str) -> String {
+    let mut sanitized = String::with_capacity(module_path.len());
+    let mut has_identity_char = false;
+    for ch in module_path.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            sanitized.push(ch);
+            has_identity_char = true;
+        } else {
+            sanitized.push('_');
+        }
+    }
+    if !has_identity_char {
+        sanitized = format!("mod_{}", stable_module_name_hash(module_path));
+    }
+    let name = format!("__module_init_{sanitized}_dynamic");
+    assert_ne!(
+        name, "__module_init_dynamic",
+        "dynamic module initializer must have a stable module identity"
+    );
+    name
+}
+
 fn try_const_eval(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Integer(val) => Some(*val),
@@ -1592,8 +1627,10 @@ impl Lowerer {
             }
             if !dyn_body.is_empty() {
                 dyn_body.push(HirStmt::Return(None));
+                let dynamic_init_name =
+                    dynamic_module_initializer_name(self.module.name.as_deref().unwrap_or_default());
                 self.module.functions.push(HirFunction {
-                    name: "__module_init_dynamic".to_string(),
+                    name: dynamic_init_name,
                     span: None,
                     params: Vec::new(),
                     locals: dyn_ctx.locals,
@@ -1924,8 +1961,10 @@ impl Lowerer {
             }
             if !dyn_body.is_empty() {
                 dyn_body.push(HirStmt::Return(None));
+                let dynamic_init_name =
+                    dynamic_module_initializer_name(self.module.name.as_deref().unwrap_or_default());
                 self.module.functions.push(HirFunction {
-                    name: "__module_init_dynamic".to_string(),
+                    name: dynamic_init_name,
                     span: None,
                     params: Vec::new(),
                     locals: dyn_ctx.locals,
@@ -2087,5 +2126,29 @@ mod scalar_const_eval_tests {
     #[test]
     fn nil_global_scalar_uses_tagged_nil_sentinel() {
         assert_eq!(try_const_eval(&Expr::Nil), Some(3));
+    }
+
+    #[test]
+    fn dynamic_initializers_are_stable_unique_and_never_bare() {
+        let first = dynamic_module_initializer_name("alpha.one");
+        let second = dynamic_module_initializer_name("beta/two");
+        let empty_a = dynamic_module_initializer_name("");
+        let empty_b = dynamic_module_initializer_name("");
+
+        assert_eq!(first, "__module_init_alpha_one_dynamic");
+        assert_eq!(second, "__module_init_beta_two_dynamic");
+        assert_ne!(first, second);
+        assert_eq!(empty_a, empty_b);
+        assert_ne!(empty_a, "__module_init_dynamic");
+
+        let source = include_str!("module_pass.rs");
+        let production = source.split("#[cfg(test)]").next().expect("production source");
+        assert_eq!(
+            production
+                .matches("dynamic_module_initializer_name(self.module.name")
+                .count(),
+            2
+        );
+        assert!(!production.contains("name: \"__module_init_dynamic\".to_string()"));
     }
 }
