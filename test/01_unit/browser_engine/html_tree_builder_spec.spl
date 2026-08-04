@@ -306,3 +306,72 @@ describe "HtmlTreeBuilder projections and limits":
         expect(be_dom_serialize_html(limited.doc)).to_equal(
             "<html><head></head><body></body></html>"
         )
+
+    it "still applies html and body attributes at an exhausted node limit":
+        # <html>/<head>/<body> start tags create no node, so the limit check
+        # lets them through and their attributes reach the synthesized
+        # elements; the <p> that follows is what trips truncation.
+        val body_attr = html_tree_builder_build_with_parse_limits(
+            "<body class='x'><p>y</p>", 4, 1000, 10
+        )
+        expect(body_attr.truncated).to_equal(true)
+        expect(be_dom_serialize_html(body_attr.doc)).to_equal(
+            "<html><head></head><body class=\"x\"></body></html>"
+        )
+
+        val html_attr = html_tree_builder_build_with_parse_limits(
+            "<html lang='en'><p>y</p>", 4, 1000, 10
+        )
+        expect(html_attr.truncated).to_equal(true)
+        expect(be_dom_serialize_html(html_attr.doc)).to_equal(
+            "<html lang=\"en\"><head></head><body></body></html>"
+        )
+
+    it "never truncates on tokens that would create no node":
+        # An end tag for a non-script element, and raw text skipped inside
+        # <style>, both create nothing — a document made only of those plus a
+        # <body> start tag parses to completion at the minimum node limit.
+        val end_tag = html_tree_builder_build_with_parse_limits(
+            "</p><body class='x'>", 4, 1000, 10
+        )
+        expect(end_tag.truncated).to_equal(false)
+        expect(be_dom_serialize_html(end_tag.doc)).to_equal(
+            "<html><head></head><body class=\"x\"></body></html>"
+        )
+
+        val skipped_raw = html_tree_builder_build_with_parse_limits(
+            "<style>a</style><body class='x'>", 4, 1000, 10
+        )
+        expect(skipped_raw.truncated).to_equal(false)
+        expect(be_dom_serialize_html(skipped_raw.doc)).to_equal(
+            "<html><head></head><body class=\"x\"></body></html>"
+        )
+
+    it "separates whitespace from text when the node limit is reached":
+        # Before the body opens, whitespace-only character data creates no
+        # node and so does not truncate; any non-whitespace does.
+        val whitespace = html_tree_builder_build_with_parse_limits(
+            "   ", 4, 1000, 10
+        )
+        expect(whitespace.truncated).to_equal(false)
+        expect(be_dom_serialize_html(whitespace.doc)).to_equal(
+            "<html><head></head><body></body></html>"
+        )
+
+        val text_data = html_tree_builder_build_with_parse_limits(
+            "hi", 4, 1000, 10
+        )
+        expect(text_data.truncated).to_equal(true)
+        expect(be_dom_serialize_html(text_data.doc)).to_equal(
+            "<html><head></head><body></body></html>"
+        )
+
+    it "opens the body on the first non-whitespace text with no tags at all":
+        # Leading whitespace rides along in the same character token, so it is
+        # kept rather than trimmed away.
+        expect(_serialized("hello")).to_equal(
+            "<html><head></head><body>hello</body></html>"
+        )
+        expect(_serialized("  hi")).to_equal(
+            "<html><head></head><body>  hi</body></html>"
+        )
