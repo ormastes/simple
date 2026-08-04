@@ -1,10 +1,10 @@
 # GPU backend probe-then-create TOCTOU makes offload gates flaky and vacuous
 
 - **Date:** 2026-08-04
-- **Status:** parity spec FIXED; sibling sweep IN PROGRESS (see Campaign below).
-  The family is **larger than the seven** originally listed — a second sweep found
-  5 more instances, the biggest of which (`cuda_strict_spec.spl`) has ~19
-  prediction-gated examples.
+- **Status:** parity spec FIXED. **All 7 originally-listed siblings are now FIXED**
+  and landed, together with both legacy mirrors (see Campaign below). The family is
+  **larger than the seven** — a second sweep found 5 more instances, still OPEN, the
+  biggest of which (`cuda_strict_spec.spl`) has ~19 prediction-gated examples.
 - **Area:** rendering / engine2d GPU offload
 - **Fixed here:** `test/02_integration/rendering/web_engine2d_gpu_offload_parity_spec.spl`
 
@@ -136,10 +136,47 @@ sabotage-verified to still go red.
 
 | `c099703b607` | `02_integration/rendering/vulkan_strict_spec.spl` + legacy twin | **The starkest vacuous green in the family: the fd-starved run was GREENER than the healthy one.** Unconstrained `20 total, 19 passed, 1 failed` in 18.7 s; at `ulimit -n 44` `19 total, 19 passed, 0 failed`, exit 0, in 7.1 s — every device branch skipped on the probe's say-so, ~11.7 s of real GPU work silently absent, and it reads as a cleaner pass than the real one. Post-fix: 17/17 with **8 GPU-PROVEN** unconstrained, and 17/17 with **0 GPU-PROVEN / 10 SKIPPED** at fd44. Both sabotages give `17 total, 9 passed, 8 failed`, exit 1. Legacy twin was one whole example weaker (it lacked the direct `VulkanBackend` checked-clear-and-rect example); both now byte-identical. |
 
+| `1b3ce9a9356` | `03_system/gui/draw_backend_matrix/draw_backend_matrix_spec.spl` + `proc_draw_combo_spec.spl` | matrix: 8/8 unconstrained, **6/6 red** at `ulimit -n 44` — `✗ vulkan: real device draw-apply…` / `semantic: called unwrap on Err: backend unavailable: vulkan`. That message is a second defect the TOCTOU exposed: `assert_true(created.is_ok())` does NOT abort the example body, so the unconditional `created.unwrap()` on the next line hard-errored instead of failing cleanly. combo does not reproduce at fd 44 at all — the spec cannot even LOAD (`1 total, 0 passed, 1 failed`, no examples executed, confirmed identical on the pre-fix base, so it is the harness not the spec); sweeping 64/96/128/192/256 found **fd 96** is the limit that reaches the lane, reproducing 6/6. Post-fix 8/8 and 12/12, with 0 GPU-PROVEN and explicit skips. |
+| `32b9593a6cf` | revert of `7251dde66f0` | See "A false broken-landing call" below. |
+
 Independently re-verified in a separate worktree at the landed tip, rather than
 taken on report: `engine2d_backend_matrix` 16/16 (1 GPU-PROVEN),
 `backend_opencl_facade` 12/12 (0 GPU-PROVEN, OpenCL genuinely unavailable),
 `vulkan_strict` and its legacy twin 17/17 (8 GPU-PROVEN each, byte-identical).
+
+### A false broken-landing call — sync EVERY path a commit touched
+
+Worth recording because the failure mode is convincing and cost a revert.
+
+After `1b3ce9a9356` landed, a reviewer (me) copied the two SPEC files out of the
+tip into a working tree and ran them. They failed with
+`semantic: function assert_provenance_invariants not found`, on 6 call sites, in
+both specs — which reads exactly like a landing that shipped calls to undefined
+functions. A grep of the shared helper appeared to confirm it. `7251dde66f0` was
+then landed to "repair main" by adding ~140 lines of spec-local definitions.
+
+The premise was wrong. `1b3ce9a9356` touched **three** paths, not two — both
+specs AND `test/helpers/gpu_draw_event_shared.spl` — and defined all four helpers
+in that shared file. Only the two specs had been synced, so the helper was still
+at its base revision (`02dc7774aba` in the working tree vs `b0cf937ebc4` at tip,
+which defines all four). The failure was an artifact of a partially synced tree
+and described a state that never existed on main. The confirming grep was run
+against the same stale file, so it agreed with the error rather than checking it.
+
+Established on a fully synced tree before reverting: true main WITH the
+duplicates 8/8 and 12/12; specs restored to `1b3ce9a9356` with the shared helper
+at tip, also 8/8 and 12/12 — so the helper alone suffices and the additions were
+pure redundancy. Reverted in `32b9593a6cf`; the shared helper is untouched by
+that revert.
+
+Rules that would have caught it:
+- When judging whether a landed commit is self-consistent, sync **every path that
+  commit touched** (`git diff-tree --no-commit-id --name-only -r <sha>`), not just
+  the ones under investigation.
+- A "function not found" error is exactly the shape a stale sibling file produces.
+  Before concluding a landing is broken, check the symbol at the TIP
+  (`git show <tip>:<path>`), never in the working tree.
+- Two pieces of evidence drawn from the same stale file are one piece of evidence.
 
 ### Separate defect found in passing — per-process Vulkan resource leak
 
