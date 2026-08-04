@@ -935,3 +935,61 @@ compared scalar against scalar and proved nothing about the kernel.
 3. The backend matrix spec still emits no `Results:` line even after the fixture
    restore, so the spec that pins the backend-id encoding provides no coverage
    of it yet.
+
+### Independent oracle verdict on the AVX2 NTT kernel (closes the gap left at push)
+
+`0aac0a06d23` landed before its independent verification returned. That gap is
+now closed, and the result is PASS.
+
+The oracle was built by a lane that never read the kernel, from FIPS 203 first
+principles: gamma_i = 17^(2*BitRev7(i)+1) computed at run time, forward
+transform evaluated directly as `NTT(f)[2i] = sum_m f[2m]*gamma_i^m`, inverse
+from the derived orthogonality relation with 128^-1 obtained by Fermat
+exponentiation. No constant hand-entered.
+
+**The scalar reference itself was validated first — the check only this lane
+could make.** The implementing lane compared its kernel *against* scalar
+`ntt`/`intt`, so had the scalar been wrong, "0 failures" would have certified a
+shared error rather than correctness.
+
+  fwd_vs_direct_bad=0        217/217 vectors vs direct O(n^2)
+  intt_vs_direct_bad=0       27 vectors (all edges + every 20th)
+  roundtrip_bad=0            217/217; out_of_range_coeffs=0 over 55,552
+  linearity_bad=0 of 50      convolution_bad=0 of 3 (negacyclic vs base-mul)
+  zeta_table_mismatches=0    in-tree table == computed 17^BitRev7(i)
+  zeta17_pow128=3328 (=q-1), zeta17_pow256=1, computed_128inv=3303
+
+Kernel verdict, against the landed file:
+
+  ORACLE_KERNEL verdict=PASS backend=1 corpus=217 total=502 mismatches=0
+  kernel_fwd_bad=0 kernel_inv_bad=0 scalar_vs_truth_bad=0
+  kernel_vs_truth_bad=0 out_of_range=0 first_bad=none
+
+Provenance verified: the `simd.spl` that run loaded is md5
+`13fd103b9a6b903096e1f1bcb7e418fc`, byte-identical to
+`git show 0aac0a06d23:src/lib/nogc_sync_mut/simd.spl`. No claim by the
+implementing lane was refuted.
+
+Conventions confirmed for `src/os/crypto/ml_kem_ntt.spl`: representative range
+`[0,q)` non-negative (`modq` :95-101, every `ntt` write via :167-168, empirically
+0 out-of-range); `intt` DOES fold the scaling at :211-214 as `* 3303 % q`, where
+3303 = 128^-1 (seven butterfly layers, NOT 256^-1), reproduced independently as
+`opow(128, q-2)`; no Montgomery, no Barrett, no lazy reduction — plain `%`
+(grep for montgomery/barrett/qinv/2285/1441 = 0 hits).
+
+**Coverage gaps, on the record rather than implied covered:**
+
+1. **Only length 256 was exercised.** The kernel was widened mid-run to any
+   positive multiple of 256, and `ml_kem_kpke.spl:501-507` passes **768** and
+   converts a length mismatch into `Err`, not a fallback. That path is
+   independently unverified. This is the most valuable remaining check.
+2. `chunk_hits` (80 at 256, 240 at 768) and the AVX2 execution receipt were not
+   independently verified; the oracle observed `backend=1` and correct values only.
+3. Constant-time / timing behaviour not examined by the oracle.
+4. Everything ran on the Rust **seed** interpreter, never the self-hosted binary
+   and never native codegen.
+5. The consolidated driver `mlkem_ntt_oracle.spl` never emitted its own verdict
+   line — run 1 hit `execution limit exceeded: 10000000 operations` at phase 6
+   (phases 0-5 all clean); the rerun was still mid-phase-3 at cutoff. The kernel
+   results above come from the separate `mlkem_ntt_oracle` kernel driver, which
+   did complete.
