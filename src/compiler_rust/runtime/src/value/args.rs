@@ -138,6 +138,55 @@ pub extern "C" fn rt_set_args(argc: i32, argv: *const *const u8) {
     ARGS_INITIALIZED.store(true, Ordering::Release);
 }
 
+/// Set program arguments from Windows UTF-16 `wchar_t` strings.
+///
+/// Native Windows entry shims should call this from `wmain` instead of passing
+/// the active-code-page `char **argv` to [`rt_set_args`]. This preserves the
+/// exact Unicode command line exposed by Windows, including characters that
+/// cannot be represented in the process ANSI code page.
+///
+/// # Safety
+///
+/// - `argv` must point to a valid array of at least `argc` pointers.
+/// - Every non-null pointer must reference a null-terminated UTF-16 string.
+/// - The pointer array and strings must remain valid for this call.
+#[no_mangle]
+pub extern "C" fn rt_set_args_wide(argc: i32, argv: *const *const u16) {
+    install_parent_death_watchdog();
+    let mut args = Vec::new();
+
+    if argc <= 0 || argv.is_null() {
+        *PROGRAM_ARGS.lock() = args;
+        ARGS_INITIALIZED.store(true, Ordering::Release);
+        return;
+    }
+
+    unsafe {
+        for i in 0..argc {
+            let arg_ptr = *argv.offset(i as isize);
+            if !arg_ptr.is_null() {
+                args.push(wide_c_string_to_string(arg_ptr));
+            }
+        }
+    }
+
+    *PROGRAM_ARGS.lock() = args;
+    ARGS_INITIALIZED.store(true, Ordering::Release);
+}
+
+/// Decode one null-terminated Windows UTF-16 argument.
+///
+/// Invalid surrogate sequences are replaced with U+FFFD. This mirrors the
+/// runtime's non-panicking boundary behavior and, unlike the narrow setter,
+/// never silently drops an entire argument.
+unsafe fn wide_c_string_to_string(ptr: *const u16) -> String {
+    let mut len = 0usize;
+    while *ptr.add(len) != 0 {
+        len += 1;
+    }
+    String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
+}
+
 /// Set program arguments from Vec<String> (convenience for driver).
 ///
 /// This is a Rust-friendly version of `rt_set_args()` for use by the
@@ -313,6 +362,42 @@ mod tests {
         rt_set_args(argv.len() as i32, argv.as_ptr());
 
         assert_eq!(rt_get_argc(), 3);
+    }
+
+    #[test]
+    fn test_set_args_from_windows_utf16_strings() {
+        rt_clear_args();
+
+        let wide_args: Vec<Vec<u16>> = ["simple.exe", "two words", "한글", "🚀"]
+            .iter()
+            .map(|arg| arg.encode_utf16().chain(std::iter::once(0)).collect())
+            .collect();
+        let argv: Vec<*const u16> = wide_args.iter().map(|arg| arg.as_ptr()).collect();
+
+        rt_set_args_wide(argv.len() as i32, argv.as_ptr());
+
+        assert_eq!(rt_get_argc(), 4);
+        assert_eq!(cli_arg_at(0), "simple.exe");
+        assert_eq!(cli_arg_at(1), "two words");
+        assert_eq!(cli_arg_at(2), "한글");
+        assert_eq!(cli_arg_at(3), "🚀");
+    }
+
+    #[test]
+    fn test_windows_utf16_args_handle_empty_null_and_invalid_values() {
+        rt_clear_args();
+
+        let empty = [0u16];
+        let invalid = [0xd800u16, 0];
+        let argv = [empty.as_ptr(), std::ptr::null(), invalid.as_ptr()];
+        rt_set_args_wide(argv.len() as i32, argv.as_ptr());
+
+        assert_eq!(rt_get_argc(), 2);
+        assert_eq!(cli_arg_at(0), "");
+        assert_eq!(cli_arg_at(1), "�");
+
+        rt_set_args_wide(0, std::ptr::null());
+        assert_eq!(rt_get_argc(), 0);
     }
 
     #[test]

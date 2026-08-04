@@ -5441,17 +5441,48 @@ fn empty_module_init_set_still_emits_main_stub_owner() {
     assert!(String::from_utf8_lossy(&symbols.stdout).contains("__simple_call_module_inits"));
 
     let main_object = builder.compile_main_stub(temp.path()).unwrap();
+    let args_provider = temp.path().join("args-provider.cpp");
+    let args_provider_object = temp.path().join("args-provider.o");
+    std::fs::write(
+        &args_provider,
+        "extern \"C\" void rt_set_args(int, char**) {}\n",
+    )
+    .unwrap();
+    assert!(std::process::Command::new("c++")
+        .args(["-c"])
+        .arg(&args_provider)
+        .arg("-o")
+        .arg(&args_provider_object)
+        .status()
+        .unwrap()
+        .success());
+
+    #[cfg(target_os = "macos")]
+    {
+        let symbols = std::process::Command::new("nm")
+            .arg("-g")
+            .arg(&main_object)
+            .output()
+            .unwrap();
+        let symbols = String::from_utf8_lossy(&symbols.stdout);
+        assert!(symbols.lines().any(|line| line.contains(" U _rt_set_args")));
+        assert!(!symbols.lines().any(|line| {
+            line.contains(" _rt_set_args") && !line.contains(" U _rt_set_args")
+        }));
+    }
+
     let linked_probe = temp.path().join("linked-probe");
     let link_status = std::process::Command::new("c++")
         .arg(&main_object)
         .arg(&init_object)
+        .arg(&args_provider_object)
         .arg("-o")
         .arg(&linked_probe)
         .status()
         .unwrap();
     assert!(
         link_status.success(),
-        "optional main-stub hooks must link without providers"
+        "main-stub optional hooks must link with the required argv provider"
     );
 }
 

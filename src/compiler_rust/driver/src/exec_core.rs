@@ -729,8 +729,14 @@ impl ExecCore {
     pub fn run_file_with_args(&self, path: &Path, args: Vec<String>) -> Result<i32, String> {
         let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
+        // JIT and compiled-module execution resolve sys_get_args/rt_get_args
+        // through the hosted runtime, rather than the interpreter argument
+        // store. Initialize that runtime boundary before choosing a lane so
+        // every execution mode observes the same supplied argv.
+        simple_runtime::value::rt_set_args_vec(&args);
+
         match extension {
-            "smf" => self.run_smf(path),
+            "smf" => self.run_smf_with_args(path, args),
             "spl" | "simple" | "sscript" | "shs" | "" => {
                 if self.execution_mode.is_jit() && should_prefer_interpreter_for_source(path, extension) {
                     return self.run_file_interpreted_with_args(path, args);
@@ -1089,7 +1095,11 @@ fn source_uses_cli_args(path: &Path) -> bool {
     let Ok(source) = std::fs::read_to_string(path) else {
         return false;
     };
-    source.contains("get_cli_args") || source.contains("rt_cli_get_args") || source.contains("std.cli")
+    source.contains("get_cli_args")
+        || source.contains("rt_cli_get_args")
+        || source.contains("sys_get_args")
+        || source.contains("rt_get_args")
+        || source.contains("std.cli")
 }
 
 fn source_uses_jit_unsafe_graphics_runtime(path: &Path) -> bool {
@@ -1176,6 +1186,20 @@ mod tests {
         fs::write(
             &script,
             "use std.cli.cli_util (get_cli_args)\nfn main():\n    val args = get_cli_args()\n",
+        )
+        .unwrap();
+
+        assert!(source_uses_cli_args(&script));
+        assert!(should_prefer_interpreter_for_source(&script, "spl"));
+    }
+
+    #[test]
+    fn detects_direct_sys_get_args_for_argument_preserving_path() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("sys_args.spl");
+        fs::write(
+            &script,
+            "extern fn sys_get_args() -> [text]\nfn main():\n    val args = sys_get_args()\n",
         )
         .unwrap();
 

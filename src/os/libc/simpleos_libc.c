@@ -369,9 +369,12 @@ FILE *stdin  = &_stdin_f;
 FILE *stdout = &_stdout_f;
 FILE *stderr = &_stderr_f;
 
-/* SimpleCore's current AOT path cannot retain mutable module globals. */
-static int64_t simpleos_runtime_argc_value;
-static int64_t simpleos_runtime_argv_value;
+/* Canonical argv fallback for SimpleOS C-only programs.  Every symbol is weak:
+ * when SimpleCore is linked its strong provider owns the same ABI and storage.
+ * Keeping the aliases together prevents crt0 publication through rt_set_args
+ * from being read back through an unrelated sys_get_args/rt_get_args store. */
+static int64_t simpleos_cli_argc;
+static int64_t simpleos_cli_argv;
 extern int64_t rt_array_new(int64_t cap);
 extern int8_t rt_array_push(int64_t array, int64_t value);
 extern int64_t rt_array_len(int64_t array);
@@ -382,23 +385,45 @@ int64_t rt_array_len_safe(int64_t value) {
     return rt_array_len(value);
 }
 
-void simpleos_runtime_set_args(int64_t argc, int64_t argv) {
-    simpleos_runtime_argc_value = argc;
-    simpleos_runtime_argv_value = argv;
+__attribute__((weak)) void rt_set_args(int64_t argc, int64_t argv) {
+    simpleos_cli_argc = argc;
+    simpleos_cli_argv = argv;
 }
 
-int64_t simpleos_runtime_argc(void) { return simpleos_runtime_argc_value; }
-int64_t simpleos_runtime_argv(void) { return simpleos_runtime_argv_value; }
+__attribute__((weak)) void spl_init_args(int argc, char **argv) {
+    rt_set_args((int64_t)argc, (int64_t)(uintptr_t)argv);
+}
 
-int64_t simpleos_runtime_cli_get_args(void) {
-    char **argv = (char **)(uintptr_t)simpleos_runtime_argv_value;
-    int64_t args = rt_array_new(simpleos_runtime_argc_value);
-    for (int64_t i = 0; i < simpleos_runtime_argc_value; i++) {
+__attribute__((weak)) int64_t rt_cli_arg_count(void) {
+    return simpleos_cli_argc;
+}
+
+__attribute__((weak)) int64_t rt_cli_arg_at(int64_t index) {
+    char **argv = (char **)(uintptr_t)simpleos_cli_argv;
+    if (index < 0 || index >= simpleos_cli_argc) {
+        return rt_string_new(0, 0);
+    }
+    const char *arg = argv && argv[index] ? argv[index] : "";
+    return rt_string_new((int64_t)(uintptr_t)arg, (int64_t)strlen(arg));
+}
+
+__attribute__((weak)) int64_t rt_cli_get_args(void) {
+    char **argv = (char **)(uintptr_t)simpleos_cli_argv;
+    int64_t args = rt_array_new(simpleos_cli_argc);
+    for (int64_t i = 0; i < simpleos_cli_argc; i++) {
         const char *arg = argv && argv[i] ? argv[i] : "";
         rt_array_push(args, rt_string_new((int64_t)(uintptr_t)arg,
                                           (int64_t)strlen(arg)));
     }
     return args;
+}
+
+__attribute__((weak)) int64_t rt_get_args(void) {
+    return rt_cli_get_args();
+}
+
+__attribute__((weak)) int64_t sys_get_args(void) {
+    return rt_cli_get_args();
 }
 
 ssize_t write(int fd, const void *buf, size_t count) {

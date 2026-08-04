@@ -736,21 +736,19 @@ impl NativeProjectBuilder {
             r#"
 extern "C" {
     int spl_main(void);
-    void rt_set_args(int argc, char** argv);
+    void rt_set_args_wide(int argc, const wchar_t** argv);
     void __simple_runtime_init(void);
     void __simple_runtime_shutdown(void);
 }
 #pragma comment(linker, "/ALTERNATENAME:spl_main=_spl_main_stub")
-#pragma comment(linker, "/ALTERNATENAME:rt_set_args=_rt_set_args_stub")
 #pragma comment(linker, "/ALTERNATENAME:__simple_runtime_init=___simple_runtime_init_stub")
 #pragma comment(linker, "/ALTERNATENAME:__simple_runtime_shutdown=___simple_runtime_shutdown_stub")
 extern "C" int _spl_main_stub(void) { return 0; }
-extern "C" void _rt_set_args_stub(int, char**) {}
 extern "C" void ___simple_runtime_init_stub(void) {}
 extern "C" void ___simple_runtime_shutdown_stub(void) {}
-int main(int argc, char** argv) {
+int wmain(int argc, wchar_t** argv) {
     __simple_runtime_init();
-    rt_set_args(argc, argv);
+    rt_set_args_wide(argc, const_cast<const wchar_t**>(argv));
     int r = spl_main();
     __simple_runtime_shutdown();
     return r;
@@ -761,7 +759,7 @@ int main(int argc, char** argv) {
 #if defined(__APPLE__)
 extern "C" {
     int __attribute__((weak)) spl_main(void) { return 0; }
-    void __attribute__((weak)) rt_set_args(int, char**) {}
+    void rt_set_args(int, char**);
     void __attribute__((weak)) __simple_runtime_init(void) {}
     void __attribute__((weak)) __simple_runtime_shutdown(void) {}
     void __attribute__((weak)) __simple_call_module_inits(void) {}
@@ -769,7 +767,7 @@ extern "C" {
 #else
 extern "C" {
     int __attribute__((weak)) spl_main(void);
-    void __attribute__((weak)) rt_set_args(int argc, char** argv);
+    void rt_set_args(int argc, char** argv);
     void __attribute__((weak)) __simple_runtime_init(void);
     void __attribute__((weak)) __simple_runtime_shutdown(void);
     void __attribute__((weak)) __simple_call_module_inits(void);
@@ -778,7 +776,7 @@ extern "C" {
 int main(int argc, char** argv) {
     if (__simple_runtime_init) __simple_runtime_init();
     if (__simple_call_module_inits) __simple_call_module_inits();
-    if (rt_set_args) rt_set_args(argc, argv);
+    rt_set_args(argc, argv);
     int r = spl_main ? spl_main() : 0;
     if (__simple_runtime_shutdown) __simple_runtime_shutdown();
     return r;
