@@ -1,9 +1,12 @@
 # Call-site argument count is never checked before codegen (2026-08-04)
 
-**Status:** OPEN (detection not armed). Seven real in-tree call sites found; the
-two unambiguous ones were fixed in `af0fdf192d8`, and the remaining five
-(`awk_tool.spl`) are **now fixed too** — see §7. All seven known call sites are
-therefore repaired; what remains open is only the *detection*, per §5.
+**Status:** OPEN (detection not armed; real call sites remain). §3's same-file
+census found 7 real sites, all repaired (`af0fdf192d8`, `7788bdf1d56`, §7). §8
+then measured the **cross-module** population §3 had declared unmeasured and
+found **154 real sites**; §9 repairs 26 more of them across three modules, and
+lists what stays open — a 96-site `wine_vm_commit/4` cluster and a 9-site
+`dyn_torch_tensor_*` cluster, neither of which can be proved by value in a
+call-site lane. Detection itself remains open per §5.
 **Class:** silent corruption — wrong value, exit 0, no diagnostic.
 **Related:** `trait_conformance_check_ignores_arity_2026-08-04.md` (`f4a4703f0fb`,
 `34e7d0f303b`) closed the *trait/impl name* half. This doc is the *call site*
@@ -286,3 +289,164 @@ the operative signal here; the interpreter's hard arity error is, and it is what
 both the baseline and sabotage A show. Static confirmation that no bad site
 remains: all five `_exec_action` calls now pass 8 arguments and no 7-argument
 call remains in the file.
+
+## 8. Cross-module census — §3's "unmeasured" population, measured
+
+§3 measured only *same-file* free-function calls and said explicitly that
+cross-module calls were unmeasured. They are measured here. The census was
+validated against ground truth **before** any of its other output was believed:
+run against `64319777883` (the parent of `7788bdf1d56`) it independently
+rediscovers exactly the six sites that commit repaired — five `_exec_action`
+calls in `awk_tool.spl` and the `tool_awk` call at `run_loop.spl:376` — and
+nothing else from those two files.
+
+### Method
+
+Two stages, both re-runnable (`.shs` driver + `.spl` argument counter):
+
+1. **Index** every module-level `fn name(` / `fn name<` declaration in owned
+   `src/` and `test/` (`vendor/` excluded per CLAUDE.md Owned-Code Scope).
+2. **Resolve.** A bare `name(...)` is only attributed to a declaration when the
+   name is declared exactly **once** corpus-wide *and* collides with no method
+   name (`me` / `static fn`), no nested `fn`, and no class/struct/enum/trait/
+   actor/mixin name — a constructor call is syntactically identical to a free
+   call. Then, per call site, the declaration must be either in the **same
+   file** or named in a `use`/`import` line **whose module token is the
+   declaring file's own module**. Anything else is `UNBOUND` and dropped.
+3. **Count** arguments with a balanced scanner that honours string literals,
+   `#` comments, char literals, trailing commas, `\p:` inline-lambda parameter
+   commas, `x |> f(a)` pipe desugaring, and — on the declaration side —
+   defaulted parameters, varargs, generic `<…>` commas, and `->` arrows.
+
+### Numbers
+
+| stage | count |
+|---|---|
+| module-level `fn` declarations indexed | 119,244 |
+| names declared exactly once | 58,972 |
+| names surviving collision + parse filters | 56,073 |
+| bare call sites arity-checked | 237,215 |
+| multi-line calls, **not** measured | 5,911 |
+| raw mismatch candidates | 1,012 |
+| → dropped `UNBOUND` (callee not visible at the call site) | 555 |
+| → dropped `DOCSTRING` (inside a `"""…"""` prose block) | 294 |
+| **resolved candidates** (`IMPORTED` 154 + `SAMEFILE` 9) | **163** |
+
+**False-positive rate 83.9%** at the raw stage (849 of 1,012), which is why the
+raw number must never be quoted. Of the surviving 163, nine more are known
+false positives on inspection — five intentional `test/fixtures/
+concurrency_api_misuse/*_wrong_arity.spl` negative fixtures, two AOP pointcuts
+(`on pc{ execution(* hart64_step_body(..)) }`), and two `>>>` doc examples in
+`threads.spl`. **154 are real.**
+
+The single largest filter was requiring the caller to actually import the
+callee's *module*, not merely a symbol of that name. A name-only import check
+admitted, for example, `muldiv_execute` in `rv32_muldiv_spec.spl` (imported from
+`hardware.rv32imac.ext.rv32_muldiv`, matched against a declaration in
+`rv64gc_rtl/mul_div.spl`) and `detect_content_type` in `resource_loader_spec.spl`
+(imported from `browser_engine.resource_loader`, matched against
+`web_framework/form_parser.spl`) — 98 and 28 phantom sites respectively.
+Requiring the module token to match drops both. This is the same collision
+mechanism that reduced the earlier "30 drifted trait pairs" census to 0.
+
+### Ranked real mismatches
+
+Blast radius is *interpreter* when the containing module drops out of the JIT —
+those are already-broken code, since the interpreter enforces arity — and *JIT*
+when it does not, where the missing argument is nil sentinel 3 and nothing is
+reported at all.
+
+| callee | sites | file(s) | radius | status |
+|---|---|---|---|---|
+| `_exec_action/8`, `tool_awk/5` | 6 | `awk_tool.spl`, `run_loop.spl` | interpreter | fixed `7788bdf1d56` |
+| `be_dom_set_style/2` | 6 + 4 spec | `engine_merge.spl` | interpreter | fixed, see §9 |
+| `glass_tokens_to_css/2` | 18 | `glass_css_output_spec.spl` | interpreter | fixed, see §9 |
+| `build_tree_with_title/3` | 2 | `windows_compat_spec.spl` | interpreter | fixed, see §9 |
+| `wine_vm_commit/4` | 96 | `wine_vm_adapter.spl` + 47 specs | interpreter | **real, NOT fixed** |
+| `dyn_torch_tensor_{slice,sum_dim,mean_dim,min_dim,max_dim,argmin,argmax}` | 9 | `torch_ndarray.spl` | JIT | **real, NOT fixed** |
+| `ifconfig/1` | 3 | `ifconfig_tool.spl`, `devinfo_tool.spl` | JIT | real, NOT fixed |
+| `pbkdf2_sha256/4` | 4 | `crypto_reference_spec.spl` | blocked | real, NOT fixed |
+| `compile_options_hash_compute/7` | 2 | `object_provider_spec.spl` | blocked | real, NOT fixed |
+| `generate_csrf_token/2` | 2 | `csrf_spec.spl` | interpreter | real, NOT fixed |
+| `verify_rv64_qemu_user_proof_contract/2` | 2 | `os_build_run.spl`, `qemu_runner_part2.spl` | JIT | real, NOT fixed |
+| `read_log/3`, `gui_adapter_new/1`, `scv_export_git_fast_import/4`, `terminal_execute/2` | 4 | assorted `src/` | JIT | real, NOT fixed |
+
+### Why the unfixed ones are unfixed
+
+- **`wine_vm_commit/4` (96 sites, the largest cluster).** Every caller passes
+  three arguments, putting the protection string where `size` belongs and
+  leaving `protection` unset. It is real. But no spec in the family can be
+  turned green by fixing arity alone: `wine_vm_adapter_spec.spl` is
+  `11 total, 0 passed, 11 failed` on `semantic: function wine_vm_space_new not
+  found`, and `wine_process_session_vma_thunk_write_spec.spl` is
+  `5 total, 0 passed, 5 failed` on `class WineVmOpResult has no field named
+  region` plus two more missing functions. Repairing arity there would be an
+  unproven edit on top of a feature that is broken for three other reasons —
+  it needs its own lane, not a call-site sweep.
+- **`dyn_torch_tensor_*` (9 sites).** The callers pass a PyTorch-shaped
+  `keepdim` flag (`sum_dim(h, dim, 0)`) and a slice `step`
+  (`slice(h, 0, start, stop, step)`) that the SFFI signatures do not have. The
+  `step` is silently discarded, so a strided slice quietly becomes contiguous.
+  There is no spec for `torch_ndarray.spl` and the path needs a live torch
+  runtime, so no value-level proof is available; deciding whether to widen the
+  SFFI ops or narrow the callers is a torch-lane call.
+- **The remaining `src/`-only singletons** have no spec that reaches them, so a
+  fix could not be proved by value. They are listed above rather than edited on
+  a guess.
+
+### Coverage limits of this census (a floor, not the answer)
+
+Still unmeasured: **multi-line calls** (5,911 sites skipped), **method calls**
+(`me` / `static fn`, excluded wholesale because a bare-name census cannot
+resolve a receiver), **named-argument calls**, and every call whose callee name
+is declared more than once (58,972 of 119,244 declarations are *not*
+unique-by-name, so roughly half the free-function population is outside the
+resolvable set). An AST-level check inside the compiler — i.e. re-arming
+`fill_call_defaults` once `_FlatAstBridge` stops hardcoding `has_default:
+false`, per §5 — remains the only way to cover those.
+
+## 9. Three further instances repaired from the §8 census
+
+All three failed the same way as `awk_tool.spl`: the containing module reaches
+the interpreter, which *does* enforce arity (§2d), so the code was not silently
+corrupt — it was dead. Each was verified red→green by value and sabotage-
+verified back to red with the original message, in a pristine worktree.
+
+**`be_dom_set_style/2` — `src/app/ui.chromium/engine_merge.spl` (`9a7812edd8d`).**
+Called as a CSS property setter, `be_dom_set_style(node, "width", "256px")`, at
+six sites in the module and four more in the spec; `dom_accessors.spl` has no
+such `(node, prop, value)` accessor. Repaired onto the canonical
+read-modify-write idiom `widget_to_dom.spl` already uses. `StyleProps.width`/
+`height` are f64 px, so the `"320px"` texts the builders accept are now parsed
+by `engine_merge_css_px` instead of being handed to a text field.
+
+    before  Results: 7 total, 1 passed, 6 failed
+    after   Results: 7 total, 7 passed, 0 failed
+    sabotage (one 3-arg call restored)
+            Results: 7 total, 2 passed, 5 failed
+            semantic: function expects 2 argument(s), but more were provided
+
+**`glass_tokens_to_css/2` — `test/{unit,01_unit}/lib/common/glass_css_output_spec.spl`
+(`9afe3c28c06`).** Called with one argument at all 18 sites; the one production
+caller (`glass_css.spl:129`) already passes both. `StitchMetadata.glass()` is
+what `glass_css.spl`'s own dispatch pairs with the default glass theme.
+
+    before  Results: 29 total, 11 passed, 18 failed
+    after   Results: 29 total, 29 passed, 0 failed
+    sabotage (second argument dropped at line 54)
+            Results: 29 total, 28 passed, 1 failed
+            semantic: function expects argument for parameter 'sds', but none was provided
+
+**`build_tree_with_title/3` — `test/{unit,01_unit}/app/ui/windows_compat_spec.spl`
+(`2a4236e13d4`).** Called with two arguments; all five production callers in
+`src/os/desktop/shell_ui_builders.spl` already pass `"dark"`.
+
+    before  Results: 34 total, 33 passed, 1 failed
+    after   Results: 34 total, 34 passed, 0 failed
+    sabotage (theme argument dropped)
+            Results: 34 total, 33 passed, 1 failed
+            semantic: function expects argument for parameter 'theme', but none was provided
+
+Command form for all of the above:
+`bin/simple test <spec> --no-cache --no-cover-check`, verdict read from the
+`^Results:` line of a captured log (it is otherwise buried under lint output).
