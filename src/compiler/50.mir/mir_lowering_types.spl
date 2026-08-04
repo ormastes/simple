@@ -468,6 +468,12 @@ impl MirLowering:
                 return true
         false
 
+    fn facet_cleanup_required_local(operand: MirOperand, role: text) -> LocalId:
+        match operand.kind:
+            case Copy(local) | Move(local): local
+            case _:
+                panic("E-MIR-UNWIND003 facet cleanup {role} must be a local operand")
+
     me emit_facet_cleanup_from(first_scope: i64):
         if first_scope < 0 or first_scope >= self.facet_cleanup_scopes.len():
             return
@@ -517,10 +523,72 @@ impl MirLowering:
         b.current_block = cleanup_block
         b.instructions = []
         val token = b.emit_landing_pad()
-        self.builder = b
-        self.emit_facet_cleanup_from(first_scope)
-        b = self.builder
+        var entries: [MirFacetCleanupEntryContract] = []
+        var scope_index = self.facet_cleanup_scopes.len() - 1
+        while scope_index >= first_scope:
+            val scope = self.facet_cleanup_scopes[scope_index]
+            var entry_index = scope.entries.len() - 1
+            while entry_index >= 0:
+                val entry = scope.entries[entry_index]
+                val adapter = entry.adapter
+                val owner = self.facet_cleanup_required_local(
+                    adapter.context.runtime_owner, "owner")
+                val lease = self.facet_cleanup_required_local(
+                    adapter.descriptor_lease, "lease")
+                val release = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str(adapter.context.release_symbol),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [
+                            MirType(kind: MirTypeKind.Opaque(
+                                adapter.context.owner_type_id)),
+                            facet_descriptor_lease_abi_type()],
+                        return_type: MirType.unit(), is_variadic: false)))))
+                var present: LocalId? = nil
+                var guard_block: BlockId? = nil
+                var continue_block: BlockId? = nil
+                var release_block = b.current_block
+                match entry.present:
+                    case Some(guard):
+                        present = Some(self.facet_cleanup_required_local(
+                            guard, "presence guard"))
+                        guard_block = Some(b.current_block)
+                        release_block = b.new_block(Some("facet_cleanup_release"))
+                        val continuation = b.new_block(Some("facet_cleanup_continue"))
+                        continue_block = Some(continuation)
+                        b.terminate_if(guard, release_block, continuation)
+                        b.switch_to_block(release_block)
+                        val release_index = b.instructions.len()
+                        b.emit_call(release,
+                            [adapter.context.runtime_owner, adapter.descriptor_lease],
+                            MirType.unit())
+                        entries.push(MirFacetCleanupEntryContract(
+                            owner: owner, lease: lease, present: present,
+                            guard_block: guard_block,
+                            release_site: MirInstructionSite(
+                                block: release_block,
+                                instruction_index: release_index),
+                            continue_block: continue_block,
+                            release_symbol: adapter.context.release_symbol))
+                        b.terminate_goto(continuation)
+                        b.switch_to_block(continuation)
+                    case nil:
+                        val release_index = b.instructions.len()
+                        b.emit_call(release,
+                            [adapter.context.runtime_owner, adapter.descriptor_lease],
+                            MirType.unit())
+                        entries.push(MirFacetCleanupEntryContract(
+                            owner: owner, lease: lease, present: nil,
+                            guard_block: nil,
+                            release_site: MirInstructionSite(
+                                block: release_block,
+                                instruction_index: release_index),
+                            continue_block: nil,
+                            release_symbol: adapter.context.release_symbol))
+                entry_index = entry_index - 1
+            scope_index = scope_index - 1
         b.terminate_resume(mir_operand_move(token))
+        b.exception_cleanup_contracts.push(MirExceptionCleanupContract(
+            unwind_entry: cleanup_block, token: token, entries: entries))
         b.current_block = saved_block
         b.instructions = saved_instructions
         self.builder = b

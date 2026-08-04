@@ -1,0 +1,103 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.{
+    BlockId, LocalId, MirBlock, MirBody, MirExceptionCleanupContract,
+    MirFacetCleanupEntryContract, MirFunction, MirInstructionSite, MirModule,
+    MirSignature, MirTerminator, MirType, serialize_mir_function,
+    serialize_mir_module
+}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn manifest_contract() -> MirExceptionCleanupContract:
+    MirExceptionCleanupContract(
+        unwind_entry: BlockId(id: 7),
+        token: LocalId(id: 11),
+        entries: [
+            MirFacetCleanupEntryContract(
+                owner: LocalId(id: 2),
+                lease: LocalId(id: 3),
+                present: Some(LocalId(id: 4)),
+                guard_block: Some(BlockId(id: 7)),
+                release_site: MirInstructionSite(
+                    block: BlockId(id: 8), instruction_index: 0),
+                continue_block: Some(BlockId(id: 9)),
+                release_symbol:
+                    "aspect_execution_context_release_facet_descriptor_or_panic"),
+            MirFacetCleanupEntryContract(
+                owner: LocalId(id: 5),
+                lease: LocalId(id: 6),
+                present: nil,
+                guard_block: nil,
+                release_site: MirInstructionSite(
+                    block: BlockId(id: 9), instruction_index: 0),
+                continue_block: nil,
+                release_symbol:
+                    "aspect_execution_context_release_facet_descriptor_or_panic")])
+
+fn manifested_function() -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 901),
+        name: "manifested_cleanup",
+        signature: MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [],
+        blocks: [MirBlock(
+            id: BlockId.entry(), label: Some("entry"), instructions: [],
+            terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        exception_cleanup_contracts: [manifest_contract()])
+
+describe "MIR exception cleanup manifest":
+    it "propagates canonically through MirBody and function cloning":
+        val function = manifested_function()
+        val body = MirBody.from_function(function)
+        val cloned = MirFunction.with_blocks(function, function.blocks)
+        expect(body.exception_cleanup_contracts.len()).to_equal(1)
+        expect(body.exception_cleanup_contracts[0].entries.len()).to_equal(2)
+        expect(cloned.exception_cleanup_contracts.len()).to_equal(1)
+        expect(cloned.exception_cleanup_contracts[0].token.id).to_equal(11)
+
+    it "serializes stable sites, ABI locals, guards, and execution order":
+        val function = manifested_function()
+        val json = serialize_mir_function(function)
+        expect(json).to_contain("\"exceptionCleanupContracts\"")
+        expect(json).to_contain("\"unwindEntry\":7")
+        expect(json).to_contain("\"token\":11")
+        expect(json).to_contain("\"owner\":2,\"lease\":3")
+        expect(json).to_contain(
+            "\"guardBlock\":7,\"releaseSite\":{\"block\":8,\"instructionIndex\":0}")
+        expect(json).to_contain("\"continueBlock\":9")
+        expect(json).to_contain("\"owner\":5,\"lease\":6")
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[function.symbol] = function
+        val module_json = serialize_mir_module(MirModule(
+            name: "manifested_module",
+            functions: functions,
+            statics: {}, constants: {}, types: {},
+            facet_binding_plans: [], prepared_advice_slots: []))
+        expect(module_json).to_contain("\"exceptionCleanupContracts\"")
+
+    it "records producer sites while walking scopes and entries in reverse":
+        val source = rt_file_read_text(
+            "src/compiler/50.mir/mir_lowering_types.spl") ?? ""
+        expect(source).to_contain(
+            "var scope_index = self.facet_cleanup_scopes.len() - 1")
+        expect(source).to_contain("var entry_index = scope.entries.len() - 1")
+        expect(source).to_contain("val release_index = b.instructions.len()")
+        expect(source).to_contain("MirExceptionCleanupContract(")
+        expect(source).to_contain("unwind_entry: cleanup_block, token: token")
+
+    it "protects manifested functions across optimizer passes":
+        val source = rt_file_read_text(
+            "src/compiler/60.mir_opt/mir_opt/mod.spl") ?? ""
+        expect(source).to_contain(
+            "if original.exception_cleanup_contracts.len() > 0:")
+        expect(source).to_contain(
+            "optimized_module.functions[symbol] = original")

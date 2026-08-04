@@ -784,6 +784,8 @@ fn optimize_function(func: MirFunction, passes: [text]) -> MirFunction:
     Example:
         val optimized = optimize_function(func, ["dead_code_elimination", "constant_folding"])
     """
+    if func.exception_cleanup_contracts.len() > 0:
+        return func
     var result = func
 
     for pass_name in passes:
@@ -807,6 +809,8 @@ fn run_typed_pass_on_function(kind: PassKind, func: MirFunction) -> MirFunction:
     Module-scope passes (PatternIdiom, AutoVectorize, etc.) are no-ops here;
     callers must use run_typed_pass_on_module for those.
     """
+    if func.exception_cleanup_contracts.len() > 0:
+        return func
     match kind:
         case DeadCodeElimination:
             var dce = create_dce_pass()
@@ -900,6 +904,7 @@ fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirMo
             continue
         if mir_opt_trace_enabled():
             print "[mir-opt] pass:start {pass_name}"
+        val before_pass = optimized_module
         if pass_name == "pattern_idiom":
             match ctx.caps_kind:
                 case None_:
@@ -910,6 +915,13 @@ fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirMo
             optimized_module = run_narrow_form_pass(optimized_module, ctx.caps_kind)
         else:
             optimized_module = run_pass_on_module(pass_name, optimized_module)
+        # Cleanup manifests name exact local/block/instruction identities.
+        # Until individual transforms own a remapper, preserve every manifested
+        # function byte-for-byte across both function- and module-scope passes.
+        for symbol in before_pass.functions.keys():
+            val original = before_pass.functions[symbol]
+            if original.exception_cleanup_contracts.len() > 0:
+                optimized_module.functions[symbol] = original
         if mir_opt_trace_enabled():
             print "[mir-opt] pass:done {pass_name}"
     validate_mir_exception_module_or_panic(optimized_module, "after optimization")
