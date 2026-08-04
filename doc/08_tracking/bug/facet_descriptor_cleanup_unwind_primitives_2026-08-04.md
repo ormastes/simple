@@ -173,6 +173,78 @@ Current implementation against the minimum truthful model is:
    valid landing-pad personality/resume contract. The LLVM C API still needs an
    invoke binding.
 
+### Canonical cleanup landing-pad contract
+
+The missing payload is not the source-language value carried by
+`MirTerminator.Throw`. LLVM transfers an implementation unwind record to a
+landing pad (on the supported Itanium-style textual path, `{ptr, i32}`), while
+the MIR interpreter currently represents all runtime values as scalar `i64`.
+Reusing an arbitrary `MirOperand` as both values would silently conflate two
+different ABIs.
+
+The minimal portable MIR addition is therefore:
+
+```text
+MirTypeKind.ExceptionToken
+MirInstKind.LandingPad(dest: LocalId)
+MirTerminator.Resume(token: MirOperand)  # operand type must be ExceptionToken
+```
+
+The builder surface is `emit_landing_pad() -> LocalId` (allocating an
+`ExceptionToken` temp) and the existing `terminate_resume(token)`. The MIR
+validation owner is `validate_mir_exception_cfg(body) -> Result<(), text>`.
+Facet lowering owns
+`emit_facet_unwind_cleanup_successor(first_scope: i64) -> BlockId`; it snapshots
+cleanup entries, builds the unwind-only blocks, restores the caller's current
+block, and does not mutate `facet_cleanup_scopes`. A `CatchException` instruction
+is deliberately excluded: cleanup-only unwinding never decodes or handles the
+language payload, and catch semantics require the separate runtime packet ABI.
+
+`ExceptionToken` is compiler-owned and cannot be named, constructed, copied
+into user storage, returned, or passed to an ordinary call. `LandingPad` is
+valid only as the first non-phi instruction of an unwind-successor block and
+defines exactly one `ExceptionToken`. `Resume` is valid only with that token or
+a token forwarded through cleanup-only CFG blocks. MIR validation must reject
+landing pads reached by normal edges, unwind targets without a landing pad,
+tokens consumed by ordinary instructions, and cleanup blocks that return or
+fall through instead of resuming.
+
+For one `MayUnwind` call with live facet scopes, lowering must build this CFG:
+
+```text
+call_block:
+  CallTerminator(..., normal=normal_block, MayUnwind, unwind=cleanup_entry)
+cleanup_entry:
+  token = LandingPad
+  release innermost entries in reverse acquisition order
+  release enclosing entries in reverse acquisition order
+  Resume(move token)
+normal_block:
+  continue source evaluation; perform the same lexical cleanup only at its
+  ordinary return/break/continue/fallthrough exits
+```
+
+Guarded facet entries may split the cleanup path, but the token must dominate
+every branch and be resumed exactly once. Emitting the unwind cleanup must not
+pop or consume the normal-path cleanup-scope metadata.
+
+Textual LLVM may map `ExceptionToken` to `{ptr, i32}`, emit
+`landingpad {ptr, i32} cleanup`, and emit `resume {ptr, i32} %token` only after
+the enclosing function declares one canonical runtime-owned personality.
+Until that personality and the source-value-to-runtime-exception packet ABI are
+specified, textual LLVM must retain E-MIR-UNWIND002 for `Throw`/`Resume` and MIR
+lowering must retain E-MIR-UNWIND001 for `MayUnwind` calls without a real cleanup
+successor. The interpreter and every non-LLVM backend likewise reject the new
+instruction/token until they own a genuine exception representation; no zero,
+nil, abort, return, or ordinary branch is a valid substitute.
+
+Ownership is explicit: MIR construction/validation owns landing-pad placement
+and token linearity; borrow analysis treats the token as compiler-owned and
+non-borrowable; SSA/copy propagation may rename it but not duplicate or erase
+it; CFG/DCE/LICM/outlining must preserve the unwind edge, landing pad, cleanup
+order, and Resume; backends either implement the entire contract or reject it
+before emission.
+
 ### Required acceptance specs
 
 - `mir_call_unwind_contract_roundtrip_spec.spl`: direct and indirect calls keep
@@ -188,6 +260,16 @@ Current implementation against the minimum truthful model is:
   `MayUnwind` before instruction selection; `NoUnwind` remains an ordinary call.
 - `llvm_unwind_contract_spec.spl`: a `MayUnwind` call emits `invoke`, a valid
   landing pad and resume edge, and no contradictory function-level `nounwind`.
+- `mir_landing_pad_contract_spec.spl`: an unwind target begins with exactly one
+  `LandingPad(ExceptionToken)` and ends in `Resume` of the same token; normal
+  predecessors, user-visible token uses, missing pads, duplicate pads, and
+  return/fallthrough cleanup exits are rejected.
+- `facet_cleanup_unwind_edge_spec.spl`: in addition to reverse-order release,
+  guarded cleanup branches preserve one dominating token and converge on one
+  `Resume`; the normal successor retains independent lexical cleanup metadata.
+- `mir_exception_token_optimizer_preservation_spec.spl`: borrow, SSA, copy
+  propagation, DCE, LICM, and outlining preserve token definition/use and never
+  turn an unwind successor into a normal edge.
 - `foreign_unwind_source_contract_spec.spl`: an extern declaration without an
   explicit contract is rejected inside a leased scope; explicit `NoUnwind` is
   admitted and `MayUnwind` requires the cleanup-edge capability.

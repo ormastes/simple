@@ -2494,3 +2494,47 @@ callee/foreign unwind, deployment-specific I/O binding, opaque runtime lease
 facade migration, and executable evidence also remain open. `throw`, `await`, `yield`,
 unsupported `MayUnwind`/unknown calls, and `throw`/`await`/`yield` fail closed
 with E-AF007 while a lease may be live.
+
+#### Typed landing-pad payload and cleanup CFG
+
+The cleanup successor must carry an implementation exception token, not a
+source-language thrown value. The canonical core extension is
+`MirTypeKind.ExceptionToken` plus
+`MirInstKind.LandingPad(dest: LocalId)`. `LandingPad` defines the token as the
+first non-phi instruction of an unwind-only block; `MirTerminator.Resume` must
+consume an operand of that type. The token is compiler-private, linear across
+cleanup-only CFG, and unavailable to ordinary calls, returns, aggregates, or
+user storage.
+
+The exact construction API is `MirBuilder.emit_landing_pad() -> LocalId`,
+`MirBuilder.terminate_resume(token)`, and
+`validate_mir_exception_cfg(body) -> Result<(), text>`. Facet lowering exposes
+`emit_facet_unwind_cleanup_successor(first_scope: i64) -> BlockId`; it snapshots
+the selected entries, emits the unwind path, restores the current normal block,
+and leaves `facet_cleanup_scopes` unchanged. There is no `CatchException` in
+this cleanup-only phase because decoding/handling the language payload depends
+on the still-missing runtime exception-packet ABI.
+
+A typed `MayUnwind` call lowers to a `CallTerminator` whose unwind successor
+starts with `LandingPad`, releases every live facet descriptor exactly once in
+reverse scope/acquisition order, and terminates in `Resume(move token)`. Guarded
+releases may branch after the landing pad, provided the token dominates both
+paths and they converge on one Resume. The normal successor retains the cleanup
+scope metadata and releases only at its ordinary lexical exits; constructing
+the unwind path never consumes normal-path ownership.
+
+MIR validation owns unwind-only predecessor checks, first-instruction placement,
+one-definition/one-resume token linearity, and rejection of cleanup fallthrough.
+Borrow checking treats the token as compiler-owned/non-borrowable. SSA and copy
+propagation may rename it without duplication; DCE, LICM, outlining, and CFG
+rewrites preserve the invoke edge, landing pad, cleanup calls, and resume.
+
+For the textual LLVM implementation, `ExceptionToken` maps to `{ptr, i32}`, the
+pad emits `landingpad {ptr, i32} cleanup`, and Resume emits the same aggregate.
+This is enabled only when the function declares the single runtime-owned
+personality selected by the exception ABI. The repository currently has no such
+personality or source-value-to-runtime-exception packet owner, and its MIR
+interpreter stores scalar `i64` values only. Therefore no backend may map the
+token to `ptr`, zero, nil, abort, return, or a normal branch as a placeholder;
+unsupported consumers retain E-MIR-UNWIND002, while lowering retains
+E-MIR-UNWIND001 until the complete cleanup successor can be constructed.
