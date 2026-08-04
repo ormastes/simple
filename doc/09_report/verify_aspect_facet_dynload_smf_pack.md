@@ -73,6 +73,13 @@ bookmark is synchronized with GitHub and is rebased onto the current
   `NoUnwind` and rejects `MayUnwind`, missing, or conflicting metadata before
   call emission when no cleanup successor exists. Live facet scopes retain
   `E-AF007` precedence. This is static acceptance, not executable evidence.
+- **PASS — explicit Throw/Resume groundwork (static review):** MIR owns
+  payload-carrying `Throw` and `Resume` terminators with canonical builder and
+  deterministic JSON forms. HIR `throw` no longer takes the unsupported-expression
+  fatal path; with nested live facet leases it emits reverse-order, exactly-once
+  releases before `Throw`. Unsupported backend/interpreter consumers reject the
+  new terminators with typed `E-MIR-UNWIND002`. This does not prove a call
+  unwind successor, landing-pad payload flow, or executable backend semantics.
 - **PASS — automatic registry source path (static review):** real compile inputs
   discover and install the resolver-owned aspect registry; its fingerprint is
   carried into object/closure cache identity. Importer-scoped resolution keys,
@@ -203,11 +210,13 @@ bookmark is synchronized with GitHub and is rebased onto the current
 prepared v2 rewriting and ABI, the application gate, callback-safe split,
 exact lazy reserve/I/O/commit, facet lifecycle, unload, and the embedding port
 contract are implemented statically. Explicit MIR call-unwind metadata,
-validation, serialization, representative optimizer preservation, and backend
-consumption are also implemented statically; they are not release evidence.
+validation, serialization, representative optimizer preservation, backend
+consumption, and payload-carrying Throw/Resume with direct leased-throw cleanup
+are also implemented statically; they are not release evidence.
 Blocking gaps are current-source compiler/backend execution and ABI linkage;
-executable parser/import/method effect propagation; real `MayUnwind` cleanup
-successors with throw/resume semantics; async cancellation and cross-thread
+executable parser/import/method effect propagation; real call-site `MayUnwind`
+cleanup successors; landing-pad exception-payload preservation through
+`Resume`; async cancellation and cross-thread
 unwinding; LLVM C API `invoke`,
 landing-pad, and `resume` integration; production
 deployment and startup configuration; lifecycle-wide concurrency, callback-

@@ -124,9 +124,11 @@ executed in the static-only pass. The authoritative remaining gap and owner matr
 | `test/01_unit/compiler/hir/hir_unwind_effect_contract_spec.spl` plus type/semantics source specs | Source attributes, `HirFunction.effects`, function-type effects, callable registration/resolution | **Static implemented:** declarations default to `NoUnwind`; explicit effects are typed and preserved through imports, methods, and call inference; executable parser/import/method tests remain pending |
 | `test/01_unit/compiler/mir/facet_member_unwind_contract_spec.spl` | Typed facet witness planning and MIR member-call lowering | Declared facet method effect reaches the emitted indirect call; absent/ambiguous effect is fatal |
 | `test/01_unit/compiler/mir/hir_mir_unwind_admission_spec.spl` | HIR-effect to MIR-call admission | **Static implemented:** `NoUnwind` maps to the MIR contract and is admitted; `MayUnwind`, missing, and conflicting metadata are rejected before direct/indirect/method call emission when no cleanup successor exists; a live facet scope retains `E-AF007` precedence |
-| `test/01_unit/compiler/mir/facet_cleanup_unwind_edge_spec.spl` | Canonical cleanup-target builder | Real unwind successor releases nested leases once in reverse order; normal successor retains leases until its own exits |
-| backend unwind specs and backend consumer source | Backend admission | **Static implemented:** backend consumers distinguish/preserve the explicit contract and unsupported paths fail closed; executable backend admission evidence remains pending |
-| `test/01_unit/compiler/backend/llvm_unwind_contract_spec.spl` | LLVM lowering | `MayUnwind` produces `invoke`, valid landing pad/resume, and no contradictory function `nounwind` |
+| `test/01_unit/compiler/mir/facet_cleanup_scope_spec.spl`, `mir_throw_resume_acceptance_spec.spl` | HIR `throw`, `MirTerminator.Throw`/`Resume`, lexical facet cleanup | **Static implemented:** a direct leased `throw` emits each nested release once in reverse order before `Throw`; builder/JSON shape is deterministic |
+| `test/01_unit/compiler/mir/mir_call_cleanup_successor_spec.spl` | Future `MayUnwind` call cleanup-successor builder | A call with two live leases creates one unwind successor, releases inner then outer exactly once, preserves the normal successor without early release, and rejects missing/conflicting payload ownership |
+| `test/01_unit/compiler/mir/mir_exception_payload_resume_spec.spl` | Future landing-pad payload and `Resume` lowering | The exact thrown exception payload enters the cleanup pad, survives both releases unchanged, and is the operand of exactly one `Resume`; cleanup values cannot replace or alias it |
+| backend unwind rejection specs and backend consumer source | Backend admission | **Static implemented:** unsupported Throw/Resume paths reject with `E-MIR-UNWIND002`; executable backend admission evidence remains pending |
+| `test/01_unit/compiler/backend/llvm_unwind_contract_spec.spl` | LLVM lowering | `MayUnwind` produces `invoke`; unwind destination owns a valid personality/landing pad, cleanup releases precede `resume` of the original payload, normal destination stays ordinary, and the function has no contradictory `nounwind` |
 | `test/01_unit/compiler/semantics/foreign_unwind_source_contract_spec.spl` | Source/HIR function effects | Extern with no explicit contract is rejected in a leased scope; explicit `NoUnwind` is admitted; `MayUnwind` requires cleanup capability |
 
 ### Runtime-required system acceptance
@@ -139,3 +141,10 @@ and prove the normal-return sibling path also releases once. Native targets that
 still reject unwind edges remain a tested fatal matrix row, not skipped cases.
 An aborting `panic` is a separate scenario and must never be presented as
 resumable-unwind evidence.
+
+The system spec must include four explicit scenarios: successful normal return;
+foreign/language `MayUnwind` with two nested leases and exact payload caught by
+the handler; rethrow/resume preserving that payload after reverse cleanup; and
+the backend matrix where unsupported targets fail with `E-MIR-UNWIND002`
+before code generation. Each scenario must assert exact release counts and
+generation identities, not only control-flow completion.
