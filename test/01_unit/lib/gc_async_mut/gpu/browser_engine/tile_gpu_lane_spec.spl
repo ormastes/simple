@@ -19,7 +19,10 @@ Plan: doc/03_plan/ui/rendering/tile_render_culling_plan.md (T4)
 """
 
 use std.spec.{describe, it, expect}
-use std.common.ui.draw_ir.{DrawIrCommand, draw_ir_rect}
+use std.common.ui.draw_ir.{
+    DrawIrCommand, draw_ir_box_with_style, draw_ir_no_rect, draw_ir_rect,
+    draw_ir_style_prop
+}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles_gpu.{
     TileLaneRender, tile_gpu_backend_name, tile_gpu_flag_enabled,
     tile_lane_render_commands
@@ -52,6 +55,41 @@ fn _fixture_commands() -> [DrawIrCommand]:
     cmds.push(draw_ir_rect("mid", 300, 300, 120, 60, 0xFF4466EEu32))
     # offscreen op: y=1000 lies in culled tile rows 3-4 only
     cmds.push(draw_ir_rect("culled", 50, 1000, 200, 100, 0xFFEEDD00u32))
+    cmds
+
+# A window-surface-glass rect: it samples the parent surface, so it cannot be
+# replayed tile-by-tile with the scissor pinned to one tile. This is the only
+# thing that differs from _fixture_commands, and it is what must flip the lane
+# onto the ordered composition path.
+fn _glass_command() -> DrawIrCommand:
+    draw_ir_box_with_style(
+        "glass", 200, 100, 160, 120, 0x80FFFFFFu32,
+        draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
+        draw_ir_no_rect(),
+        [
+            draw_ir_style_prop("wm-material-request", "window-surface-glass"),
+            draw_ir_style_prop(
+                "backdrop-filter-capability",
+                "engine2d-cpu-composited-material-v1")
+        ])
+
+# Routing fixtures on a small surface. The routing decision does not depend on
+# surface size, and an ordered replay of the 600x400 fixture costs a full CPU
+# glass composition — enough on its own to blow this file's execution budget.
+# Same two lists, differing only by the glass rect.
+val RDOC_W: i32 = 128
+val RDOC_H: i32 = 256
+val RVIEW_W: i32 = 128
+val RVIEW_H: i32 = 128
+
+fn _routing_commands() -> [DrawIrCommand]:
+    var cmds: [DrawIrCommand] = []
+    cmds.push(draw_ir_rect("rbg", 0, 0, 128, 128, 0xFF223344u32))
+    cmds
+
+fn _routing_commands_with_effect() -> [DrawIrCommand]:
+    var cmds = _routing_commands()
+    cmds.push(_glass_command())
     cmds
 
 fn _cpu_lane() -> TileLaneRender:
@@ -133,6 +171,23 @@ describe "tile gpu lane (T4)":
                 gpu.readback_device_identity == 0
             )
         expect(honest).to_equal(true)
+
+    it "routes a parent-sampling command onto the ordered replay path and leaves plain rects tiled":
+        # Plain rects carry no parent-sampling effect: the lane stays tiled.
+        val plain = tile_lane_render_commands(
+            _routing_commands(), RDOC_W, RDOC_H, RVIEW_W, RVIEW_H, 0, CLEAR,
+            "software")
+        expect(plain.ordered_replay).to_equal(false)
+        # The same list plus one window-surface-glass rect must forfeit tile
+        # culling and replay the whole display list in one global order.
+        val effect = tile_lane_render_commands(
+            _routing_commands_with_effect(), RDOC_W, RDOC_H, RVIEW_W, RVIEW_H,
+            0, CLEAR, "software")
+        expect(effect.ordered_replay).to_equal(true)
+        # The ordered path still reports the same grid and a full readback.
+        expect(effect.tiles_total).to_equal(plain.tiles_total)
+        expect(effect.readback_pixel_count).to_equal(16384)
+        expect(effect.pixels.len()).to_equal(16384)
 
     it "renders nothing and skips every tile on an empty command list":
         var empty: [DrawIrCommand] = []
