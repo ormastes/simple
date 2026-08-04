@@ -26,7 +26,8 @@
 mod os.crypto.ml_kem_kpke
 
 use lib.common.crypto.sha3.{keccak_f1600, sha3_256_bytes, sha3_512_bytes}
-use os.crypto.ml_kem_ntt.{ntt, intt, ntt_multiply, poly_add, poly_sub,
+use os.crypto.ml_kem_ntt.{ntt, intt, ntt_simd, intt_simd,
+    ntt_multiply, poly_add, poly_sub,
     compress_poly, decompress_poly, byte_encode, byte_decode,
     ml_kem_n, ml_kem_q,
     ml_kem_k_512, ml_kem_eta1_512, ml_kem_eta2_512,
@@ -35,6 +36,11 @@ use os.crypto.ml_kem_ntt.{ntt, intt, ntt_multiply, poly_add, poly_sub,
     ml_kem_du_768, ml_kem_dv_768,
     ml_kem_k_1024, ml_kem_eta1_1024, ml_kem_eta2_1024,
     ml_kem_du_1024, ml_kem_dv_1024}
+use std.simd.{mlkem_ntt_simd_batch, mlkem_ntt_simd_backend}
+
+trait MlKemNttBatchProvider:
+    fn forward(polynomials: list) -> Result<list, text>
+    fn inverse(polynomials: list) -> Result<list, text>
 
 # ============================================================================
 # SHAKE-128 / SHAKE-256 — FIPS 202 §6.2 / §6.3
@@ -402,61 +408,172 @@ fn _matvec_mul_add(a_hat: list, s_hat: list, e_hat: list, k: i64) -> list:
         i = i + 1
     out
 
-# Forward NTT applied coefficient-wise to a vector of polynomials.
+fn _vec_ntt_mode(v: list, use_simd: bool) -> list:
+    var out = []
+    var i = 0
+    while i < v.len():
+        if use_simd:
+            out.push(ntt_simd(v.get(i)))
+        else:
+            out.push(ntt(v.get(i)))
+        i = i + 1
+    out
+
 fn _vec_ntt(v: list) -> list:
+    _vec_ntt_mode(v, false)
+
+fn _vec_intt_mode(v: list, use_simd: bool) -> list:
     var out = []
     var i = 0
     while i < v.len():
-        out.push(ntt(v.get(i)))
+        if use_simd:
+            out.push(intt_simd(v.get(i)))
+        else:
+            out.push(intt(v.get(i)))
         i = i + 1
     out
 
-# Inverse NTT applied coefficient-wise to a vector of polynomials.
 fn _vec_intt(v: list) -> list:
+    _vec_intt_mode(v, false)
+
+fn _flatten_poly_vec(v: list) -> list:
     var out = []
-    var i = 0
+    var i: i64 = 0
     while i < v.len():
-        out.push(intt(v.get(i)))
+        var j: i64 = 0
+        val poly = v.get(i)
+        while j < 256:
+            out.push(poly.get(j))
+            j = j + 1
         i = i + 1
     out
 
-# K-PKE.KeyGen (parameterized) — input 32-byte seed d, module rank k, CBD width eta1.
-# Returns (ek, dk, rho, t_hat, s_hat).
-# The auxiliary outputs (rho, t_hat, s_hat) are convenient for the wrapper
-# layer which avoids re-decoding bytes for follow-up operations during tests.
+fn _split_poly_vec(values: list, count: i64) -> Result<list, text>:
+    if count <= 0 or values.len() != count * 256:
+        return Err("ml-kem-accelerator-output-size-invalid")
+    var out = []
+    var i: i64 = 0
+    while i < count:
+        var poly = []
+        var j: i64 = 0
+        while j < 256:
+            poly.push(values.get(i * 256 + j))
+            j = j + 1
+        out.push(poly)
+        i = i + 1
+    Ok(out)
+
+fn _poly_vec_slice(values: list, start: i64, count: i64) -> list:
+    var out = []
+    var i: i64 = 0
+    while i < count:
+        out.push(values.get(start + i))
+        i = i + 1
+    out
+
+fn _vec_ntt_provider(v: list,
+        provider: MlKemNttBatchProvider) -> Result<list, text>:
+    val transformed = match provider.forward(_flatten_poly_vec(v)):
+        case Ok(values): values
+        case Err(reason): return Err(reason)
+    _split_poly_vec(transformed, v.len())
+
+fn _vec_intt_provider(v: list,
+        provider: MlKemNttBatchProvider) -> Result<list, text>:
+    val transformed = match provider.inverse(_flatten_poly_vec(v)):
+        case Ok(values): values
+        case Err(reason): return Err(reason)
+    _split_poly_vec(transformed, v.len())
+
+class CpuMlKemNttBatchProvider:
+    use_simd: bool
+
+    static fn create(use_simd: bool) -> CpuMlKemNttBatchProvider:
+        CpuMlKemNttBatchProvider(use_simd: use_simd)
+
+impl MlKemNttBatchProvider for CpuMlKemNttBatchProvider:
+
+    fn forward(polynomials: list) -> Result<list, text>:
+        if polynomials.len() == 0 or polynomials.len() % 256 != 0:
+            return Err("ml-kem-cpu-ntt-input-size-invalid")
+        if self.use_simd and mlkem_ntt_simd_backend() > 0:
+            var native_input: [i64] = []
+            var native_idx: i64 = 0
+            while native_idx < polynomials.len():
+                native_input.push(polynomials.get(native_idx).to_i64())
+                native_idx = native_idx + 1
+            val native_output = mlkem_ntt_simd_batch(native_input, false)
+            if native_output.len() != polynomials.len():
+                return Err("ml-kem-cpu-native-ntt-output-size-invalid")
+            return Ok(native_output)
+        val split = match _split_poly_vec(
+                polynomials, polynomials.len() / 256):
+            case Ok(value): value
+            case Err(reason): return Err(reason)
+        Ok(_flatten_poly_vec(_vec_ntt_mode(split, self.use_simd)))
+
+    fn inverse(polynomials: list) -> Result<list, text>:
+        if polynomials.len() == 0 or polynomials.len() % 256 != 0:
+            return Err("ml-kem-cpu-intt-input-size-invalid")
+        if self.use_simd and mlkem_ntt_simd_backend() > 0:
+            var native_input: [i64] = []
+            var native_idx: i64 = 0
+            while native_idx < polynomials.len():
+                native_input.push(polynomials.get(native_idx).to_i64())
+                native_idx = native_idx + 1
+            val native_output = mlkem_ntt_simd_batch(native_input, true)
+            if native_output.len() != polynomials.len():
+                return Err("ml-kem-cpu-native-intt-output-size-invalid")
+            return Ok(native_output)
+        val split = match _split_poly_vec(
+                polynomials, polynomials.len() / 256):
+            case Ok(value): value
+            case Err(reason): return Err(reason)
+        Ok(_flatten_poly_vec(_vec_intt_mode(split, self.use_simd)))
+
+# Provider path keeps one K-PKE algorithm body across CPU, SIMD, and GPU.
 fn kpke_keygen_params(d: list, k: i64, eta1: i64) -> tuple:
-    # (rho, sigma) = G(d || k), where the byte k is appended per FIPS 203
-    # Algorithm 13 step 1 (FIPS 203 update — d is 32 bytes followed by 1 byte k).
+    val provider = CpuMlKemNttBatchProvider.create(false)
+    match kpke_keygen_params_provider(d, k, eta1, provider):
+        case Ok(value): value
+        case Err(_): ([], [], [], [], [])
+
+fn kpke_keygen_params_simd(d: list, k: i64, eta1: i64) -> tuple:
+    val provider = CpuMlKemNttBatchProvider.create(true)
+    match kpke_keygen_params_provider(d, k, eta1, provider):
+        case Ok(value): value
+        case Err(_): ([], [], [], [], [])
+
+fn kpke_keygen_params_provider(d: list, k: i64, eta1: i64,
+        provider: MlKemNttBatchProvider) -> Result<tuple, text>:
     var seed_in = []
-    var i = 0
+    var i: i64 = 0
     while i < d.len():
         seed_in.push(d.get(i))
         i = i + 1
     seed_in.push(k & 0xFF)
-    val rho_sigma = ml_kem_g(seed_in)
-    val rho = rho_sigma[0]
-    val sigma = rho_sigma[1]
-
-    # Sample matrix A_hat from rho.
+    val (rho, sigma) = ml_kem_g(seed_in)
     val a_hat = _gen_matrix_a(rho, k)
-
-    # Sample s, e via CBD_eta1 with PRF(sigma, 0..2k-1).
-    val s_pair = _sample_cbd_vec(sigma, eta1, k, 0)
-    val s = s_pair[0]
-    val n_after_s = s_pair[1]
-    val e_pair = _sample_cbd_vec(sigma, eta1, k, n_after_s)
-    val e = e_pair[0]
-
-    # NTT(s), NTT(e); compute t̂ = Â · ŝ + ê.
-    val s_hat = _vec_ntt(s)
-    val e_hat = _vec_ntt(e)
+    val (s, next_nonce) = _sample_cbd_vec(sigma, eta1, k, 0)
+    val (e, _) = _sample_cbd_vec(sigma, eta1, k, next_nonce)
+    var sampled = []
+    i = 0
+    while i < k:
+        sampled.push(s.get(i))
+        i = i + 1
+    i = 0
+    while i < k:
+        sampled.push(e.get(i))
+        i = i + 1
+    val transformed = match _vec_ntt_provider(sampled, provider):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    val s_hat = _poly_vec_slice(transformed, 0, k)
+    val e_hat = _poly_vec_slice(transformed, k, k)
     val t_hat = _matvec_mul_add(a_hat, s_hat, e_hat, k)
-
-    # ek = ByteEncode_12(t̂) || rho, dk = ByteEncode_12(ŝ).
-    val ek_t = _encode_vec_12(t_hat)
-    val ek = _bytes_concat(ek_t, rho)
+    val ek = _bytes_concat(_encode_vec_12(t_hat), rho)
     val dk = _encode_vec_12(s_hat)
-    (ek, dk, rho, t_hat, s_hat)
+    Ok((ek, dk, rho, t_hat, s_hat))
 
 # 768 thin wrapper (preserved API).
 fn kpke_keygen(d: list) -> tuple:
@@ -518,11 +635,26 @@ fn _transpose(a_hat: list, k: i64) -> list:
 
 fn kpke_encrypt_params(ek: list, m: list, r: list,
         k: i64, eta1: i64, eta2: i64, du: i64, dv: i64) -> list:
-    val ek_polys_len = 384 * k
+    val provider = CpuMlKemNttBatchProvider.create(false)
+    match kpke_encrypt_params_provider(
+            ek, m, r, k, eta1, eta2, du, dv, provider):
+        case Ok(value): value
+        case Err(_): []
 
-    # Decode t̂ and rho from ek.
+fn kpke_encrypt_params_simd(ek: list, m: list, r: list,
+        k: i64, eta1: i64, eta2: i64, du: i64, dv: i64) -> list:
+    val provider = CpuMlKemNttBatchProvider.create(true)
+    match kpke_encrypt_params_provider(
+            ek, m, r, k, eta1, eta2, du, dv, provider):
+        case Ok(value): value
+        case Err(_): []
+
+fn kpke_encrypt_params_provider(ek: list, m: list, r: list,
+        k: i64, eta1: i64, eta2: i64, du: i64, dv: i64,
+        provider: MlKemNttBatchProvider) -> Result<list, text>:
+    val ek_polys_len = 384 * k
     var t_bytes = []
-    var i = 0
+    var i: i64 = 0
     while i < ek_polys_len:
         t_bytes.push(ek.get(i))
         i = i + 1
@@ -531,76 +663,60 @@ fn kpke_encrypt_params(ek: list, m: list, r: list,
         rho.push(ek.get(i))
         i = i + 1
     val t_hat = _decode_vec_12(t_bytes, k)
-
-    # Regenerate Â.
     val a_hat = _gen_matrix_a(rho, k)
-
-    # Sample r_vec, e1, e2.
-    val r_pair = _sample_cbd_vec(r, eta1, k, 0)
-    val r_vec = r_pair[0]
-    val n_after_r = r_pair[1]
-    val e1_pair = _sample_cbd_vec(r, eta2, k, n_after_r)
-    val e1 = e1_pair[0]
-    val n_after_e1 = e1_pair[1]
-    # e2 is a single polynomial.
-    val e2_bytes = ml_kem_prf(eta2, r, n_after_e1)
-    val e2 = _sample_poly_cbd(e2_bytes, eta2)
-
-    # u = NTT⁻¹(Âᵀ · r̂) + e1
-    val r_hat = _vec_ntt(r_vec)
+    val (r_vec, next_nonce) = _sample_cbd_vec(r, eta1, k, 0)
+    val (e1, final_nonce) = _sample_cbd_vec(r, eta2, k, next_nonce)
+    val e2 = _sample_poly_cbd(ml_kem_prf(eta2, r, final_nonce), eta2)
+    val r_hat = match _vec_ntt_provider(r_vec, provider):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
     val a_t = _transpose(a_hat, k)
-    var u_hat = []
-    var ii = 0
+    var inverse_batch = []
+    var ii: i64 = 0
     while ii < k:
         var acc = []
-        var z = 0
+        var z: i64 = 0
         while z < 256:
             acc.push(0)
             z = z + 1
-        var jj = 0
+        var jj: i64 = 0
         while jj < k:
-            val prod = ntt_multiply(a_t.get(ii * k + jj), r_hat.get(jj))
-            acc = poly_add(acc, prod)
+            acc = poly_add(acc,
+                ntt_multiply(a_t.get(ii * k + jj), r_hat.get(jj)))
             jj = jj + 1
-        u_hat.push(acc)
+        inverse_batch.push(acc)
         ii = ii + 1
-    val u_pre = _vec_intt(u_hat)
-    var u = []
-    ii = 0
-    while ii < k:
-        u.push(poly_add(u_pre.get(ii), e1.get(ii)))
-        ii = ii + 1
-
-    # v = NTT⁻¹(t̂ᵀ · r̂) + e2 + Decompress_1(m)
     var v_hat = []
-    var z = 0
+    var z: i64 = 0
     while z < 256:
         v_hat.push(0)
         z = z + 1
-    var jj = 0
+    var jj: i64 = 0
     while jj < k:
-        val prod = ntt_multiply(t_hat.get(jj), r_hat.get(jj))
-        v_hat = poly_add(v_hat, prod)
+        v_hat = poly_add(v_hat,
+            ntt_multiply(t_hat.get(jj), r_hat.get(jj)))
         jj = jj + 1
-    val v_pre = intt(v_hat)
-    val mu = _msg_to_poly(m)
-    val v_no_mu = poly_add(v_pre, e2)
-    val v = poly_add(v_no_mu, mu)
-
-    # c1 = ByteEncode_du(Compress_du(u)); c2 = ByteEncode_dv(Compress_dv(v))
+    inverse_batch.push(v_hat)
+    val inverse = match _vec_intt_provider(inverse_batch, provider):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    var u = []
+    ii = 0
+    while ii < k:
+        u.push(poly_add(inverse.get(ii), e1.get(ii)))
+        ii = ii + 1
+    val v = poly_add(poly_add(inverse.get(k), e2), _msg_to_poly(m))
     var c1 = []
-    var idx = 0
+    var idx: i64 = 0
     while idx < k:
-        val cu = compress_poly(u.get(idx), du)
-        val ec = byte_encode(cu, du)
-        var w = 0
-        while w < ec.len():
-            c1.push(ec.get(w))
+        val encoded = byte_encode(compress_poly(u.get(idx), du), du)
+        var w: i64 = 0
+        while w < encoded.len():
+            c1.push(encoded.get(w))
             w = w + 1
         idx = idx + 1
-    val c2_compressed = compress_poly(v, dv)
-    val c2 = byte_encode(c2_compressed, dv)
-    _bytes_concat(c1, c2)
+    val c2 = byte_encode(compress_poly(v, dv), dv)
+    Ok(_bytes_concat(c1, c2))
 
 # 768 thin wrapper (preserved API).
 fn kpke_encrypt(ek: list, m: list, r: list) -> list:
@@ -627,50 +743,57 @@ fn kpke_encrypt_1024(ek: list, m: list, r: list) -> list:
 # Output: m' (32 bytes) = ByteEncode_1(Compress_1(v - sᵀ·u)).
 
 fn kpke_decrypt_params(dk: list, c: list, k: i64, du: i64, dv: i64) -> list:
-    val c1_len = 32 * du * k     # 640/960/1408 for ML-KEM-512/768/1024
-    val c2_len = 32 * dv         # 128/128/160 for ML-KEM-512/768/1024
+    val provider = CpuMlKemNttBatchProvider.create(false)
+    match kpke_decrypt_params_provider(dk, c, k, du, dv, provider):
+        case Ok(value): value
+        case Err(_): []
 
-    # Decode u (k polys at du-bit) and v (1 poly at dv-bit).
+fn kpke_decrypt_params_simd(dk: list, c: list, k: i64,
+        du: i64, dv: i64) -> list:
+    val provider = CpuMlKemNttBatchProvider.create(true)
+    match kpke_decrypt_params_provider(dk, c, k, du, dv, provider):
+        case Ok(value): value
+        case Err(_): []
+
+fn kpke_decrypt_params_provider(dk: list, c: list, k: i64,
+        du: i64, dv: i64,
+        provider: MlKemNttBatchProvider) -> Result<list, text>:
+    val c1_len = 32 * du * k
+    val c2_len = 32 * dv
     var u = []
-    var i = 0
+    var i: i64 = 0
     while i < k:
         var slice = []
-        var j = 0
+        var j: i64 = 0
         while j < 32 * du:
             slice.push(c.get(i * 32 * du + j))
             j = j + 1
-        val coeffs = byte_decode(slice, du)
-        u.push(decompress_poly(coeffs, du))
+        u.push(decompress_poly(byte_decode(slice, du), du))
         i = i + 1
-
     var v_slice = []
-    var w = 0
+    var w: i64 = 0
     while w < c2_len:
         v_slice.push(c.get(c1_len + w))
         w = w + 1
-    val v_compressed = byte_decode(v_slice, dv)
-    val v = decompress_poly(v_compressed, dv)
-
-    # Decode ŝ.
+    val v = decompress_poly(byte_decode(v_slice, dv), dv)
     val s_hat = _decode_vec_12(dk, k)
-
-    # w = v - NTT⁻¹(ŝᵀ · NTT(u))
-    val u_hat = _vec_ntt(u)
+    val u_hat = match _vec_ntt_provider(u, provider):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
     var su_hat = []
-    var zz = 0
-    while zz < 256:
+    var z: i64 = 0
+    while z < 256:
         su_hat.push(0)
-        zz = zz + 1
-    var jj = 0
+        z = z + 1
+    var jj: i64 = 0
     while jj < k:
-        val prod = ntt_multiply(s_hat.get(jj), u_hat.get(jj))
-        su_hat = poly_add(su_hat, prod)
+        su_hat = poly_add(su_hat,
+            ntt_multiply(s_hat.get(jj), u_hat.get(jj)))
         jj = jj + 1
-    val su = intt(su_hat)
-    val w_poly = poly_sub(v, su)
-
-    # Compress_1(w) → 256 bits → ByteEncode_1 → 32 bytes.
-    _poly_to_msg(w_poly)
+    val su_vec = match _vec_intt_provider([su_hat], provider):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    Ok(_poly_to_msg(poly_sub(v, su_vec.get(0))))
 
 # 768 thin wrapper (preserved API).
 fn kpke_decrypt(dk: list, c: list) -> list:
@@ -685,3 +808,7 @@ fn kpke_decrypt_512(dk: list, c: list) -> list:
 fn kpke_decrypt_1024(dk: list, c: list) -> list:
     kpke_decrypt_params(dk, c,
         ml_kem_k_1024(), ml_kem_du_1024(), ml_kem_dv_1024())
+
+export MlKemNttBatchProvider
+export kpke_keygen_params_provider, kpke_encrypt_params_provider
+export kpke_decrypt_params_provider

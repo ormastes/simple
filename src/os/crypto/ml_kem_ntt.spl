@@ -22,6 +22,11 @@
 
 mod os.crypto.ml_kem_ntt
 
+use std.simd.{Vec4i, Vec8i, has_avx2,
+    simd_add_i32x4, simd_sub_i32x4, simd_mul_i32x4,
+    simd_add_i32x8, simd_sub_i32x8, simd_mul_i32x8,
+    mlkem_ntt_simd_batch, mlkem_ntt_simd_backend}
+
 # ============================================================================
 # Parameters (FIPS 203 §2.3 Table 1)
 # ============================================================================
@@ -124,6 +129,10 @@ fn _ntt_zetas() -> list:
         1722, 1212, 1874, 1029, 2110, 2935,  885, 2154
     ]
 
+fn ml_kem_ntt_zetas() -> list:
+    """Return a fresh canonical FIPS 203 NTT zeta table for backend adapters."""
+    _ntt_zetas()
+
 # ============================================================================
 # Forward NTT — FIPS 203 Algorithm 9 (NTT)
 # ============================================================================
@@ -203,6 +212,184 @@ fn intt(f_in: list) -> list:
     while idx < 256:
         f[idx] = (f.get(idx) * 3303) % q
         idx = idx + 1
+    f
+
+# Four/eight-butterfly candidate expressed through std.simd. This is not by
+# itself native-ISA evidence: promotion also requires an admitted compiler
+# backend that lowers these operations and an instruction/execution receipt.
+# The final two-coefficient layer remains scalar because it cannot fill four
+# independent lanes within one butterfly group.
+fn ntt_simd(f_in: list) -> list:
+    if f_in.len() == 256 and mlkem_ntt_simd_backend() > 0:
+        var native_input: [i64] = []
+        var native_idx = 0
+        while native_idx < 256:
+            native_input.push(f_in.get(native_idx).to_i64())
+            native_idx = native_idx + 1
+        val native_output = mlkem_ntt_simd_batch(native_input, false)
+        if native_output.len() == 256:
+            return native_output
+    val q = ml_kem_q()
+    val zetas = _ntt_zetas()
+    val wide = has_avx2()
+    var f = []
+    var i = 0
+    while i < 256:
+        f.push(f_in.get(i))
+        i = i + 1
+    var k = 1
+    var len = 128
+    while len >= 2:
+        var start = 0
+        while start < 256:
+            val zeta = zetas.get(k)
+            k = k + 1
+            var j = start
+            while wide and len >= 8 and j + 7 < start + len:
+                val lower = Vec8i(
+                    e0: f.get(j).to_i32(), e1: f.get(j + 1).to_i32(),
+                    e2: f.get(j + 2).to_i32(), e3: f.get(j + 3).to_i32(),
+                    e4: f.get(j + 4).to_i32(), e5: f.get(j + 5).to_i32(),
+                    e6: f.get(j + 6).to_i32(), e7: f.get(j + 7).to_i32())
+                val upper = Vec8i(
+                    e0: f.get(j + len).to_i32(),
+                    e1: f.get(j + len + 1).to_i32(),
+                    e2: f.get(j + len + 2).to_i32(),
+                    e3: f.get(j + len + 3).to_i32(),
+                    e4: f.get(j + len + 4).to_i32(),
+                    e5: f.get(j + len + 5).to_i32(),
+                    e6: f.get(j + len + 6).to_i32(),
+                    e7: f.get(j + len + 7).to_i32())
+                val product = simd_mul_i32x8(upper, Vec8i.splat(zeta.to_i32()))
+                val sums = simd_add_i32x8(lower, product).to_array()
+                val differences = simd_sub_i32x8(lower, product).to_array()
+                var lane = 0
+                while lane < 8:
+                    f[j + lane] = modq(sums[lane].to_i64())
+                    f[j + len + lane] = modq(differences[lane].to_i64())
+                    lane = lane + 1
+                j = j + 8
+            while len >= 4 and j + 3 < start + len:
+                val lower = Vec4i(f.get(j).to_i32(), f.get(j + 1).to_i32(),
+                    f.get(j + 2).to_i32(), f.get(j + 3).to_i32())
+                val upper = Vec4i(f.get(j + len).to_i32(),
+                    f.get(j + len + 1).to_i32(), f.get(j + len + 2).to_i32(),
+                    f.get(j + len + 3).to_i32())
+                val product = simd_mul_i32x4(upper, Vec4i.splat(zeta.to_i32()))
+                val sums = simd_add_i32x4(lower, product).to_array()
+                val differences = simd_sub_i32x4(lower, product).to_array()
+                var lane = 0
+                while lane < 4:
+                    f[j + lane] = modq(sums[lane].to_i64())
+                    f[j + len + lane] = modq(differences[lane].to_i64())
+                    lane = lane + 1
+                j = j + 4
+            while j < start + len:
+                val t = (zeta * f.get(j + len)) % q
+                val fj = f.get(j)
+                f[j + len] = modq(fj - t)
+                f[j] = modq(fj + t)
+                j = j + 1
+            start = start + 2 * len
+        len = len / 2
+    f
+
+fn intt_simd(f_in: list) -> list:
+    if f_in.len() == 256 and mlkem_ntt_simd_backend() > 0:
+        var native_input: [i64] = []
+        var native_idx = 0
+        while native_idx < 256:
+            native_input.push(f_in.get(native_idx).to_i64())
+            native_idx = native_idx + 1
+        val native_output = mlkem_ntt_simd_batch(native_input, true)
+        if native_output.len() == 256:
+            return native_output
+    val zetas = _ntt_zetas()
+    val wide = has_avx2()
+    var f = []
+    var i = 0
+    while i < 256:
+        f.push(f_in.get(i))
+        i = i + 1
+    var k = 127
+    var len = 2
+    while len <= 128:
+        var start = 0
+        while start < 256:
+            val zeta = zetas.get(k)
+            k = k - 1
+            var j = start
+            while wide and len >= 8 and j + 7 < start + len:
+                val lower = Vec8i(
+                    e0: f.get(j).to_i32(), e1: f.get(j + 1).to_i32(),
+                    e2: f.get(j + 2).to_i32(), e3: f.get(j + 3).to_i32(),
+                    e4: f.get(j + 4).to_i32(), e5: f.get(j + 5).to_i32(),
+                    e6: f.get(j + 6).to_i32(), e7: f.get(j + 7).to_i32())
+                val upper = Vec8i(
+                    e0: f.get(j + len).to_i32(),
+                    e1: f.get(j + len + 1).to_i32(),
+                    e2: f.get(j + len + 2).to_i32(),
+                    e3: f.get(j + len + 3).to_i32(),
+                    e4: f.get(j + len + 4).to_i32(),
+                    e5: f.get(j + len + 5).to_i32(),
+                    e6: f.get(j + len + 6).to_i32(),
+                    e7: f.get(j + len + 7).to_i32())
+                val sums = simd_add_i32x8(lower, upper).to_array()
+                val differences = simd_sub_i32x8(upper, lower)
+                val products = simd_mul_i32x8(
+                    differences, Vec8i.splat(zeta.to_i32())).to_array()
+                var lane = 0
+                while lane < 8:
+                    f[j + lane] = modq(sums[lane].to_i64())
+                    f[j + len + lane] = modq(products[lane].to_i64())
+                    lane = lane + 1
+                j = j + 8
+            while len >= 4 and j + 3 < start + len:
+                val lower = Vec4i(f.get(j).to_i32(), f.get(j + 1).to_i32(),
+                    f.get(j + 2).to_i32(), f.get(j + 3).to_i32())
+                val upper = Vec4i(f.get(j + len).to_i32(),
+                    f.get(j + len + 1).to_i32(), f.get(j + len + 2).to_i32(),
+                    f.get(j + len + 3).to_i32())
+                val sums = simd_add_i32x4(lower, upper).to_array()
+                val differences = simd_sub_i32x4(upper, lower)
+                val products = simd_mul_i32x4(
+                    differences, Vec4i.splat(zeta.to_i32())).to_array()
+                var lane = 0
+                while lane < 4:
+                    f[j + lane] = modq(sums[lane].to_i64())
+                    f[j + len + lane] = modq(products[lane].to_i64())
+                    lane = lane + 1
+                j = j + 4
+            while j < start + len:
+                val t = f.get(j)
+                val fjl = f.get(j + len)
+                f[j] = modq(t + fjl)
+                f[j + len] = modq(zeta * modq(fjl - t))
+                j = j + 1
+            start = start + 2 * len
+        len = len * 2
+    var idx = 0
+    while wide and idx < 256:
+        val values = Vec8i(
+            e0: f.get(idx).to_i32(), e1: f.get(idx + 1).to_i32(),
+            e2: f.get(idx + 2).to_i32(), e3: f.get(idx + 3).to_i32(),
+            e4: f.get(idx + 4).to_i32(), e5: f.get(idx + 5).to_i32(),
+            e6: f.get(idx + 6).to_i32(), e7: f.get(idx + 7).to_i32())
+        val scaled = simd_mul_i32x8(values, Vec8i.splat(3303)).to_array()
+        var lane = 0
+        while lane < 8:
+            f[idx + lane] = modq(scaled[lane].to_i64())
+            lane = lane + 1
+        idx = idx + 8
+    while idx < 256:
+        val values = Vec4i(f.get(idx).to_i32(), f.get(idx + 1).to_i32(),
+            f.get(idx + 2).to_i32(), f.get(idx + 3).to_i32())
+        val scaled = simd_mul_i32x4(values, Vec4i.splat(3303)).to_array()
+        var lane = 0
+        while lane < 4:
+            f[idx + lane] = modq(scaled[lane].to_i64())
+            lane = lane + 1
+        idx = idx + 4
     f
 
 # ============================================================================
