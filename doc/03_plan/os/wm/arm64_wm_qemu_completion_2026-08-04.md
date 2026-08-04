@@ -20,21 +20,26 @@ can build the required kernel.
   nil receiver.
 - `clang-20`/browser-demo work is owned by a separate lane and does not block
   ARM64-first progress.
-- The compiler-admission lane completed its three-cycle bound. Every Phase 2
-  compiler passed bootstrap sanity but failed canonical admission and retained
-  703 Rust provenance paths:
-  1. Cycle 1 artifact `c7924818...2db1f6` exited 132 after
-     `function:start`, before local discovery.
-  2. The owner-defined function-state reset fix was pushed in `039cad933a`.
-     Cycle 2 artifact `30e98899...193b37` advanced through `function:params`
-     and then exited 139.
-  3. The owner-defined return-type setter fix was pushed in `9b25558e`.
-     Final Cycle 3 artifact `aa6a764a...ac4899` advanced through
-     `function:params`, then exited 132 before `function:return`.
+- A fresh compiler-admission session completed its three-cycle hard cap after
+  the earlier owner-state lane. Each current-main Phase 2 compiler passed
+  bootstrap sanity, but the canonical non-entry module-global/native admission
+  exited 132 on a progressively later aggregate boundary:
+  1. `6471bf9a57` routed flattened `MirBody` construction through its owner.
+     Artifact `c09caca6...c13cede2a` still stopped after `function:params` with
+     `field access on nil receiver`.
+  2. `0e052e5f5f` replaced the flattened `MirType` crossing with scalar LLVM
+     return text and unsigned metadata. Artifact `4f9a1373...c13cede2a`
+     reached `function:return`, `function:scan`, and `function:started`, then
+     stopped before block-label completion.
+  3. `b0ea54dc52` projected the nested block ID through the `MirBlock` owner
+     and added bootstrap-debug boundary markers. The final artifact reached
+     `block:label-after bb0` and `block:instruction-before bb0 index=0`, then
+     stopped with `field access on nil receiver` before the first instruction
+     completed.
 - The final artifact is retained at
-  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-return-owner-cycle3/stage2/aarch64-apple-darwin/simple`.
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-block-owner-cycle3/stage2/aarch64-apple-darwin/simple`.
   Its full SHA-256 is
-  `aa6a764ac33542593cb87f341efe89a20bdcb03031e766edcac6f55a22ac4899`.
+  `c5a1cbd8293a70af3b983e1b608109e1e86427e2d424490e7e08bd7350f45caf`.
 - Phase 3, the ARM64 attested build, and QEMU evidence were not run because no
   Phase 2 compiler passed functional or native admission.
 
@@ -44,18 +49,19 @@ Owner: compiler-admission lane. Final reviewer: ARM64 integration owner.
 
 1. Begin with at least 12 GiB free so the 2.6 GiB runtime authority can be
    materialized while retaining the 7 GiB safety floor.
-2. Use the clean current-main worktree at
-   `.claude/worktrees/agent-aaf2c9946eded166b`.
-3. Start a fresh bounded session; this lane's three-cycle budget is exhausted.
-   Diagnose the access immediately after `function:params`. With the return
-   type assignment already owner-routed, the next failing expression is
-   `self.llvm_type_text(body.return_ty)` in
-   `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`. Treat this as
-   a cross-module `MirBody` field/layout problem; do not repeat the completed
-   owner-setter fixes.
-4. Add a focused pure-Simple regression for owner-safe `MirBody.return_ty`
-   access before building another Phase 2 compiler.
-5. Only after the focused regression passes, run one fresh Phase 2 build and
+2. Start from a clean, freshly synchronized `origin/main`; do not assume an
+   older retained worktree is still current.
+3. Start a fresh bounded session. The completed session exhausted its three
+   rebuild/admission cycles, so no fourth cycle may be appended to it.
+4. Inspect the first instruction in block zero before editing. For the canonical
+   fixture (`main -> read_initialized_value()`), it is expected to be `Call`.
+   The next repair must keep instruction dispatch in place or use owner-scalar
+   projections; avoid passing a `MirInst` aggregate across another method
+   boundary. Do not proactively redesign terminators or hardcode the fixture.
+5. Add focused owner/scalar and source-boundary coverage before any fresh
+   Phase 2 build. Preserve debug-gated before/after markers so the first
+   failing instruction sub-boundary is exact.
+6. Only after the focused regression passes, run one fresh Phase 2 build and
    the canonical non-entry module-global/native admission checks once. Phase 3
    or ARM64 QEMU may start only after both pass.
 
@@ -65,6 +71,13 @@ Retained evidence:
   `/private/tmp/simple-phase2-cycle2-evidence-20260804/`
 - Final Cycle 3 build, progress, and admission logs:
   `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-return-owner-cycle3/`
+- Fresh-session Cycle 1 owner-constructor evidence:
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-owner-constructor-cycle1/`
+- Fresh-session Cycle 2 scalar-return evidence:
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-scalar-return-cycle2/`
+- Fresh-session final Cycle 3 block-owner evidence, including the exact
+  instruction-boundary admission log:
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-block-owner-cycle3/`
 
 ## Parallel Lanes
 
