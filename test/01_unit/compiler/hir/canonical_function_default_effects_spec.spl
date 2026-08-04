@@ -1,0 +1,60 @@
+# @cover src/compiler/20.hir/hir_unwind_effects.spl
+# @cover src/compiler/20.hir/hir_lowering/types.spl
+# @cover src/compiler/20.hir/hir_lowering/expressions.spl
+# @cover src/compiler/30.types/type_infer/context.spl
+# @cover src/compiler/30.types/type_infer/inference_control.spl
+# @cover src/compiler/30.types/type_infer/inference_expr.spl
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{EffectKind}
+use compiler.hir.hir_unwind_effects.{
+    hir_default_no_unwind_effects,
+    hir_effects_unwind_kind
+}
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn canonical_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "Canonical HIR function default effects":
+    it "constructs one valid NoUnwind effect":
+        val span = Span.empty()
+        val effects = hir_default_no_unwind_effects(span)
+        expect(effects.len()).to_equal(1)
+        val unwind = hir_effects_unwind_kind(effects)
+        expect(unwind.is_ok()).to_be(true)
+        expect(unwind.unwrap() == EffectKind.NoUnwind).to_be(true)
+
+    it "uses the canonical default in every synthetic function owner":
+        val type_lowering = canonical_source(
+            "src/compiler/20.hir/hir_lowering/types.spl")
+        val expressions = canonical_source(
+            "src/compiler/20.hir/hir_lowering/expressions.spl")
+        val context = canonical_source(
+            "src/compiler/30.types/type_infer/context.spl")
+        val control = canonical_source(
+            "src/compiler/30.types/type_infer/inference_control.spl")
+        val inference = canonical_source(
+            "src/compiler/30.types/type_infer/inference_expr.spl")
+        expect(type_lowering).to_contain("hir_default_no_unwind_effects(ty.span)")
+        expect(expressions).to_contain("hir_default_no_unwind_effects(span)")
+        expect(context).to_contain("hir_default_no_unwind_effects(dummy_span)")
+        expect(control).to_contain("hir_default_no_unwind_effects(span)")
+        expect(inference).to_contain("hir_default_no_unwind_effects(span)")
+
+    it "contains no one-line canonical Function constructor with an empty effect row":
+        val sources = [
+            canonical_source("src/compiler/20.hir/hir_lowering/types.spl"),
+            canonical_source("src/compiler/20.hir/hir_lowering/expressions.spl"),
+            canonical_source("src/compiler/30.types/type_infer/context.spl"),
+            canonical_source("src/compiler/30.types/type_infer/inference_control.spl"),
+            canonical_source("src/compiler/30.types/type_infer/inference_expr.spl")
+        ]
+        for source in sources:
+            expect(source.contains("HirTypeKind.Function([], HirType(kind: HirTypeKind.Unit, span: span), [])")).to_equal(false)
+            expect(source.contains(",\n                []\n")).to_equal(false)
+            for line in source.split("\n"):
+                if line.contains("HirTypeKind.Function"):
+                    expect(line.contains(", [])")).to_equal(false)
