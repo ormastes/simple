@@ -374,6 +374,144 @@ fn should_keep_selective_export(item: &Node, requested_names: &[String]) -> bool
     }
 }
 
+// ===== Use-list name checking (`use mod.{a, b}`) =====
+//
+// The braced name list in a `use` declaration is NOT used to restrict what the
+// loader registers: `load_and_merge_module` deliberately keeps the whole module
+// (see the `filtered_items` comment below, and the now-orphaned
+// [`should_keep_selective_export`]). That means a name in the braces which the
+// module does not actually provide is silently accepted — the symbol resolves
+// anyway if some OTHER module registered it, and nothing resolves it at all if
+// nobody did, but either way the `use` line itself never complains.
+//
+// This check restores the braced list as a *diagnostic*. It reports, it does
+// not restrict: narrowing the registered surface would change symbol resolution
+// repo-wide and must be staged separately.
+//
+// Warning only, never fatal. Silenced by `SIMPLE_NO_DEPRECATED_WARNINGS`, the
+// same switch the sibling `[gc-warning]` check honours.
+
+/// Names a resolved module was observed to provide, keyed by resolved path, so
+/// the check also runs on module-cache hits (where the AST is long gone).
+/// `None` means "surface is opaque — do not check this module" (it re-exports
+/// through a glob or bare `export use`, so its true surface is unknowable here).
+type ProvidedNames = Option<Arc<std::collections::HashSet<String>>>;
+
+fn provided_names_registry() -> &'static std::sync::Mutex<HashMap<std::path::PathBuf, ProvidedNames>> {
+    static REGISTRY: OnceLock<std::sync::Mutex<HashMap<std::path::PathBuf, ProvidedNames>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn record_provided_names(module_path: &Path, provided: ProvidedNames) {
+    if let Ok(mut registry) = provided_names_registry().lock() {
+        registry.insert(module_path.to_path_buf(), provided);
+    }
+}
+
+fn lookup_provided_names(module_path: &Path) -> Option<ProvidedNames> {
+    provided_names_registry().lock().ok()?.get(module_path).cloned()
+}
+
+/// Dedupe key set so a name imported from the same module by 40 files warns once.
+fn use_warning_seen(key: String) -> bool {
+    static SEEN: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    match seen.lock() {
+        Ok(mut set) => !set.insert(key),
+        Err(_) => false,
+    }
+}
+
+fn use_list_warnings_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SIMPLE_NO_DEPRECATED_WARNINGS").is_none())
+}
+
+/// A module whose surface cannot be enumerated statically: it re-exports via a
+/// glob (`export use x.*`) or a bare `export use {..}` that pulls from siblings.
+/// Checking such a module would produce false positives, so we skip it.
+fn module_surface_is_opaque(items: &[Node]) -> bool {
+    items.iter().any(|item| match item {
+        Node::ExportUseStmt(export_stmt) => {
+            matches!(export_stmt.target, ImportTarget::Glob) || export_stmt.path.segments.is_empty()
+        }
+        _ => false,
+    })
+}
+
+/// Collect every name the freshly loaded module makes available to importers.
+fn collect_provided_names(
+    items: &[Node],
+    exports: &HashMap<String, Value>,
+    module_functions: &HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
+    module_classes: &HashMap<String, Arc<ClassDef>>,
+    module_enums: &Enums,
+) -> ProvidedNames {
+    if module_surface_is_opaque(items) {
+        return None;
+    }
+    let mut provided: std::collections::HashSet<String> = std::collections::HashSet::new();
+    provided.extend(exports.keys().cloned());
+    provided.extend(module_functions.keys().cloned());
+    provided.extend(module_classes.keys().cloned());
+    for (name, enum_def) in module_enums {
+        provided.insert(name.clone());
+        for variant in &enum_def.variants {
+            provided.insert(variant.name.clone());
+        }
+        for method in &enum_def.methods {
+            provided.insert(method.name.clone());
+        }
+    }
+    for name in locally_defined_names(items) {
+        provided.insert(name);
+    }
+    // Explicit re-export lists (`export use other.{A, B}`) name real surface even
+    // when the re-exported target failed to evaluate into `exports`.
+    for item in items {
+        if let Node::ExportUseStmt(export_stmt) = item {
+            for name in export_target_names(&export_stmt.target) {
+                provided.insert(name);
+            }
+        }
+    }
+    Some(Arc::new(provided))
+}
+
+/// Report braced `use` names the resolved module does not provide.
+///
+/// Reports only; the loader still registers the module's whole surface.
+fn warn_unprovided_use_names(
+    use_stmt: &UseStmt,
+    current_file: Option<&Path>,
+    module_path: &Path,
+    module_label: &str,
+    provided: &ProvidedNames,
+) {
+    if !use_list_warnings_enabled() {
+        return;
+    }
+    let Some(provided) = provided.as_ref() else {
+        return; // opaque surface — not checkable
+    };
+    let Some(requested) = requested_group_import_names(use_stmt) else {
+        return; // not a `{...}` group import
+    };
+    for name in requested {
+        if provided.contains(&name) {
+            continue;
+        }
+        let importer = current_file.map(|p| p.display().to_string()).unwrap_or_else(|| "<unknown>".to_string());
+        if use_warning_seen(format!("{}\u{1}{}\u{1}{}", module_path.display(), name, importer)) {
+            continue;
+        }
+        eprintln!(
+            "[use-warning] '{name}' is named in `use {module_label}.{{...}}` but module '{}' does not provide it (imported from {importer})",
+            module_path.display()
+        );
+    }
+}
+
 /// Loose text probe: does `path`'s source plausibly provide any of `names` —
 /// either as a definition (`fn name(`, `class name`, ..., matched by
 /// [`sibling_might_define_requested_names`]) or as a member of an
@@ -742,6 +880,12 @@ pub fn load_and_merge_module(
         // the interpreter's working set, but the Arc clone from cache is cheap.
         merge_cached_module_definitions(&module_path, classes, functions, enums);
 
+        // Use-list check on the cache path: the AST is gone, so consult the
+        // surface recorded when this module was first loaded.
+        if let Some(provided) = lookup_provided_names(&module_path) {
+            warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided);
+        }
+
         decrement_load_depth();
         // If importing a specific item, extract it from cached exports
         if let Some(item_name) = import_item_name {
@@ -1044,6 +1188,20 @@ pub fn load_and_merge_module(
     for (name, value) in module_exports {
         exports.insert(name, value);
     }
+
+    // Use-list check: the braced names in `use mod.{a, b}` are otherwise never
+    // compared against what `mod` actually provides. Record the surface so
+    // later cache hits can run the same check, then report any name the module
+    // does not provide. Reporting only — registration below is unchanged.
+    let provided_names = collect_provided_names(
+        &filtered_items,
+        &exports,
+        &module_functions,
+        &module_classes,
+        &module_enums,
+    );
+    record_provided_names(&module_path, provided_names.clone());
+    warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided_names);
 
     // Cache the full module exports for future use
     let exports_value = Value::Dict(Arc::new(exports.clone()));
