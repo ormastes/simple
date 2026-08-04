@@ -5,6 +5,7 @@ use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_types.{LocalId}
 
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_value_as_int(value: i64) -> i64
 
 describe "bootstrap indexed global dispatch":
     it "projects the exact initializer order and global payloads to scalars":
@@ -49,7 +50,9 @@ describe "bootstrap indexed global dispatch":
         expect(codegen).to_contain("val load_payload = rt_enum_payload(inst_kind)")
         expect(codegen).to_contain("val load_dest: LocalId = rt_tuple_get(load_payload, 0)")
         expect(codegen).to_contain("val load_dest_id = load_dest.id")
-        expect(codegen).to_contain("val load_symbol_id: i64 = rt_tuple_get(load_payload, 1)")
+        expect(codegen).to_contain("extern fn rt_value_as_int(value: i64) -> i64")
+        expect(codegen).to_contain("val load_symbol_slot: i64 = rt_tuple_get(load_payload, 1)")
+        expect(codegen).to_contain("val load_symbol_id = rt_value_as_int(load_symbol_slot >> 32)")
         expect(codegen.contains("val load_symbol: SymbolId = rt_tuple_get(load_payload, 1)")).to_equal(false)
         expect(codegen.contains("load_symbol.id")).to_equal(false)
         expect(codegen).to_contain("self.translate_load_global_ids(load_dest_id, load_symbol_id)")
@@ -65,7 +68,7 @@ describe "bootstrap indexed global dispatch":
         expect(codegen).to_contain("[mir-to-llvm] load-global:payload")
         expect(codegen).to_contain("[mir-to-llvm] load-global:dest-slot")
         expect(codegen).to_contain("[mir-to-llvm] load-global:dest-id")
-        expect(codegen).to_contain("[mir-to-llvm] load-global:symbol-raw")
+        expect(codegen).to_contain("[mir-to-llvm] load-global:symbol-decoded")
         expect(codegen.contains("bootstrap_load_global_dest_id" )).to_equal(false)
         expect(codegen.contains("bootstrap_load_global_symbol_id" )).to_equal(false)
         expect(owner.contains("bootstrap_load_global_dest_id" )).to_equal(false)
@@ -73,3 +76,9 @@ describe "bootstrap indexed global dispatch":
         expect(lowering).to_contain("val dest = b_glob.new_temp(static_.type_)")
         expect(lowering).to_contain("MirInstKind.LoadGlobal(dest, static_.symbol)")
         expect(owner).to_contain("fn bootstrap_store_global_const_scalar_text() -> text:")
+
+    it "decodes representative packed bootstrap symbol ids":
+        val expected_ids: [i64] = [0, 1, 3, 42]
+        for expected in expected_ids:
+            val packed = ((expected << 3) << 32) + 7
+            expect(rt_value_as_int(packed >> 32)).to_equal(expected)
