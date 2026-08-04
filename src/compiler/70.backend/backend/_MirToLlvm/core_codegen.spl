@@ -10,8 +10,12 @@ use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirInst}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at,
+    bootstrap_mir_function_module_at, bootstrap_mir_function_return_type_tag_at,
+    bootstrap_mir_function_return_unsigned_at, bootstrap_mir_function_param_count_at,
+    bootstrap_mir_function_param_type_tag_at,
     bootstrap_mir_static_count, bootstrap_mir_static_module_at, bootstrap_mir_static_symbol_id_at,
-    bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at}
+    bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at,
+    bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at}
 use compiler.mir_opt.{ssa_var_transform_blocks, ssa_alloca_transform_blocks}
 use compiler.backend.backend_api.*
 use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
@@ -342,23 +346,64 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.emit_tbaa_hierarchy()
         return llvm_ir_builder_build(self.builder)
 
-    me translate_bootstrap_function(
-        name: text,
-        body: MirBody,
-        return_type: text,
-        return_unsigned: bool,
-        module_index: i64,
-        ir_handle: i64
-    ):
-        """Translate a flat-bootstrap body through its scalar ABI projection.
+    me register_bootstrap_signatures():
+        var index = 0
+        while index < bootstrap_mir_function_count():
+            val name = bootstrap_mir_function_name_at(index)
+            val emitted_name = if name == "main": "__simple_main" else: name
+            val return_type = bootstrap_llvm_static_type_text(bootstrap_mir_function_return_type_tag_at(index), self.native_int_type)
+            self.remember_function_return_type(name, return_type)
+            self.remember_function_return_type(emitted_name, return_type)
+            val return_unsigned = bootstrap_mir_function_return_unsigned_at(index)
+            self.remember_function_return_unsigned(name, return_unsigned)
+            self.remember_function_return_unsigned(emitted_name, return_unsigned)
+            var param_types: [text] = []
+            var param_index = 0
+            while param_index < bootstrap_mir_function_param_count_at(index):
+                param_types = param_types.push(bootstrap_llvm_static_type_text(bootstrap_mir_function_param_type_tag_at(index, param_index), self.native_int_type))
+                param_index = param_index + 1
+            self.remember_function_param_types(name, param_types)
+            self.remember_function_param_types(emitted_name, param_types)
+            index = index + 1
 
-        Flat-bootstrap bodies are rebuilt from `MirBody.from_bootstrap_parts`,
-        which carries no function-level span, so an empty span is passed.
-        translate_function only reads it when self.debug_info is true, and an
-        empty span (line 0) yields the same dbg_line 1 as a nil span.
-        """
-        self.select_bootstrap_return_abi(return_type, return_unsigned)
-        self.translate_function_with_ir_handle(name, body, Span.empty(), module_index, ir_handle)
+    me emit_bootstrap_statics(ir_handle: i64):
+        val static_count = bootstrap_mir_static_count()
+        print "[bootstrap-real-llvm] statics {static_count}"
+        var emitted_names: Dict<text, bool> = {}
+        var index = 0
+        while index < static_count:
+            val g_name = "@g_{bootstrap_mir_static_name_at(index)}"
+            val g_ty = bootstrap_llvm_static_type_text(bootstrap_mir_static_type_tag_at(index), self.native_int_type)
+            var g_init = "zeroinitializer"
+            val init_kind = bootstrap_mir_static_init_kind_at(index)
+            val init_payload = bootstrap_mir_static_init_payload_at(index)
+            if init_kind == 1:
+                g_init = init_payload
+            elif init_kind == 2:
+                g_init = self.translate_const_value(MirConstValue.Str(init_payload))
+                if g_ty == "i64":
+                    g_init = "ptrtoint (ptr {g_init} to i64)"
+            if not emitted_names.contains(g_name):
+                val line = "{g_name} = global {g_ty} {g_init}"
+                val newline = "\n"
+                rt_string_builder_push(ir_handle, newline)
+                rt_string_builder_push(ir_handle, line)
+                emitted_names[g_name] = true
+            index = index + 1
+
+    me translate_bootstrap_function_at(index: i64, ir_handle: i64):
+        val name = bootstrap_mir_function_name_at(index)
+        val emitted_name = if name == "main": "__simple_main" else: name
+        val fn_ = bootstrap_mir_function_at(index)
+        val body = MirBody.from_bootstrap_parts(
+            name: name,
+            blocks: fn_.blocks,
+            locals: fn_.locals,
+            arg_count: bootstrap_mir_function_param_count_at(index)
+        )
+        val return_type = bootstrap_llvm_static_type_text(bootstrap_mir_function_return_type_tag_at(index), self.native_int_type)
+        self.select_bootstrap_return_abi(return_type, bootstrap_mir_function_return_unsigned_at(index))
+        self.translate_function_with_ir_handle(emitted_name, body, Span.empty(), bootstrap_mir_function_module_at(index), ir_handle)
 
     me translate_function(name: text, body: MirBody, span: Span):
         self.translate_function_with_ir_handle(name, body, span, -1, -1)
@@ -539,9 +584,11 @@ impl MirTextCodegen for MirToLlvm:
             match dbg_id:
                 Some(id): dbg_suffix = " !dbg !{id}"
                 nil: ()
+            val opening = "define {effective_ret_ty} @{fn_name}({param_str}){attrs}{dbg_suffix} {{"
             if rt_string_builder_len(ir_handle) > 0:
-                rt_string_builder_push(ir_handle, "\n")
-            rt_string_builder_push(ir_handle, "define {effective_ret_ty} @{fn_name}({param_str}){attrs}{dbg_suffix} {{")
+                val newline = "\n"
+                rt_string_builder_push(ir_handle, newline)
+            rt_string_builder_push(ir_handle, opening)
         else:
             self.builder.start_function_opt(fn_name, params, effective_ret_ty, is_readonly, is_small, dbg_id)
         if bootstrap_debug:
@@ -554,7 +601,8 @@ impl MirTextCodegen for MirToLlvm:
             block_i = block_i + 1
 
         if ir_handle >= 0:
-            rt_string_builder_push(ir_handle, "\n}\n")
+            val closing = "\n}\n"
+            rt_string_builder_push(ir_handle, closing)
         else:
             self.builder.end_function()
         if bootstrap_debug:
@@ -1639,13 +1687,15 @@ impl MirTextCodegen for MirToLlvm:
                 self.unsigned_locals[dest_id] = self.lookup_function_return_unsigned(call_func_name)
                 val call_line = "  {name} = call {ret_ty} {call_sig}{call_func_name}({args_str})"
                 if ir_handle >= 0:
-                    rt_string_builder_push(ir_handle, "\n{call_line}")
+                    val emitted_call = "\n{call_line}"
+                    rt_string_builder_push(ir_handle, emitted_call)
                 else:
                     self.builder.emit(call_line)
         else:
             val call_line = "  call void {call_sig}{call_func_name}({args_str})"
             if ir_handle >= 0:
-                rt_string_builder_push(ir_handle, "\n{call_line}")
+                val emitted_call = "\n{call_line}"
+                rt_string_builder_push(ir_handle, emitted_call)
             else:
                 self.builder.emit(call_line)
         if bootstrap_debug:
@@ -2059,7 +2109,8 @@ impl MirTextCodegen for MirToLlvm:
         if g_ty == "ptr":
             self.ptr_locals[dest_id] = true
         if ir_handle >= 0:
-            rt_string_builder_push(ir_handle, "\n  {dest_name} = load {g_ty}, ptr {g_name}, align 8")
+            val load_line = "\n  {dest_name} = load {g_ty}, ptr {g_name}, align 8"
+            rt_string_builder_push(ir_handle, load_line)
         else:
             self.builder.emit_load(dest_name, g_ty, g_name)
         if bootstrap_debug:
@@ -2114,7 +2165,8 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] store-global:value index={index} type={g_ty} value={value_text}"
         if ir_handle >= 0:
-            rt_string_builder_push(ir_handle, "\n  store {g_ty} {value_text}, ptr {g_name}, align 8")
+            val store_line = "\n  store {g_ty} {value_text}, ptr {g_name}, align 8"
+            rt_string_builder_push(ir_handle, store_line)
         else:
             self.builder.emit_store(g_ty, value_text, g_name)
         if bootstrap_debug:

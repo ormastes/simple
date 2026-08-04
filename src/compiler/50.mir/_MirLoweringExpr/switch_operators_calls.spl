@@ -19,7 +19,7 @@ use compiler.blocks.value.BlockValue
 use compiler.mir.mir_instructions.{MirPlace}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
-use compiler.mir.text_extern_abi.{text_arg_indices}
+use compiler.mir.text_extern_abi.{text_arg_indices, boxed_text_arg_indices}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
@@ -559,6 +559,36 @@ impl MirLowering:
             i = i + 1
         result
 
+    me box_text_abi_args(func: MirOperand, args: [MirOperand]) -> [MirOperand]:
+        val callee_name = self.direct_call_extern_name(func)
+        val maybe_indices = boxed_text_arg_indices(callee_name)
+        if not maybe_indices.?:
+            return args
+        val indices = maybe_indices ?? []
+        var result: [MirOperand] = []
+        var i = 0
+        while i < args.len():
+            if int_list_contains(indices, i):
+                val split = self.emit_text_ptr_len_pair(args[i])
+                if val pair = split:
+                    var b = self.builder
+                    val boxed = b.emit_call(
+                        self.text_extern_abi_helper_operand("rt_string_new"),
+                        [mir_operand_copy(pair.0), mir_operand_copy(pair.1)],
+                        MirType.i64()
+                    )
+                    self.builder = b
+                    if val boxed_local = boxed:
+                        result = result.push(mir_operand_copy(boxed_local))
+                    else:
+                        result = result.push(args[i])
+                else:
+                    result = result.push(args[i])
+            else:
+                result = result.push(args[i])
+            i = i + 1
+        result
+
     me direct_call_struct_return_shape(func: MirOperand) -> text:
         val call_name = self.direct_call_extern_name(func)
         if call_name == "":
@@ -607,7 +637,8 @@ impl MirLowering:
         func
 
     me emit_resolved_direct_call(func: MirOperand, args_in: [MirOperand], return_type: MirType) -> LocalId:
-        val args = self.expand_text_abi_args(func, args_in)
+        val boxed_args = self.box_text_abi_args(func, args_in)
+        val args = self.expand_text_abi_args(func, boxed_args)
         val effective_return_type = self.repair_direct_struct_return_type(func, return_type)
         val effective_func = self.direct_call_operand_with_return_type(func, effective_return_type)
         var b = self.builder
