@@ -13,6 +13,50 @@ use crate::hir::types::{
     VerificationMode,
 };
 
+fn stable_module_name_hash(value: &str) -> i64 {
+    let mut hash = 5381u64;
+    for byte in value.as_bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(u64::from(*byte));
+    }
+    let signed = hash as i64;
+    if signed < 0 {
+        0 - signed.saturating_add(1)
+    } else {
+        signed
+    }
+}
+
+/// Build the stable, module-unique name for a dynamic module initializer.
+///
+/// `d5db947f611` removed this helper (and `stable_module_name_hash`) along with
+/// the last caller *inside this file*, but `pipeline::native_project::compiler`
+/// had begun importing it from `crate::hir` in a parallel change. Neither side
+/// saw the other, so `simple-compiler` stopped compiling entirely — the import
+/// survived with nothing to resolve to. Restored here rather than deleting the
+/// consumer, because the consumer is the live one: it stamps initializer
+/// identity for native project builds.
+pub(crate) fn dynamic_module_initializer_name(module_path: &str) -> String {
+    let mut sanitized = String::with_capacity(module_path.len());
+    let mut has_identity_char = false;
+    for ch in module_path.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            sanitized.push(ch);
+            has_identity_char = true;
+        } else {
+            sanitized.push('_');
+        }
+    }
+    if !has_identity_char {
+        sanitized = format!("mod_{}", stable_module_name_hash(module_path));
+    }
+    let name = format!("__module_init_{sanitized}_dynamic");
+    assert_ne!(
+        name, "__module_init_dynamic",
+        "dynamic module initializer must have a stable module identity"
+    );
+    name
+}
+
 fn try_const_eval(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Integer(val) => Some(*val),
