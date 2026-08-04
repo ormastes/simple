@@ -26,10 +26,6 @@ use std.gc_async_mut.processing.metal_fill_u32.{
 }
 use std.nogc_sync_mut.io.metal_sffi.{metal_device_info}
 
-class SimpleOsGpuHostMacPlatform:
-    static fn create() -> SimpleOsGpuHostMacPlatform:
-        SimpleOsGpuHostMacPlatform()
-
 fn _macos_processing_result(ir: ProcessingIr) -> SimpleOsGpuHostProcessingResult:
     val result = processing_ir_execute_metal(ir)
     simpleos_gpu_host_processing_result(
@@ -38,6 +34,34 @@ fn _macos_processing_result(ir: ProcessingIr) -> SimpleOsGpuHostProcessingResult
         result.values,
         result.backend_handle,
         result.device_identity)
+
+fn _macos_processing_probe_available() -> bool:
+    val probe_ir = processing_ir_fill_u32(1, 1u32)
+    val oracle = processing_ir_cpu_execute(probe_ir)
+    val probe = _macos_processing_result(probe_ir)
+    (probe.completed and probe.reason == "ok" and probe.backend_handle > 0 and
+     probe.device_identity > 0 and
+     processing_ir_outputs_equal(probe.values, oracle))
+
+class SimpleOsGpuHostMacPlatform:
+    render_available: bool
+    render_unavailable_reason: text
+    processing_available: bool
+
+    static fn create() -> SimpleOsGpuHostMacPlatform:
+        var render_available = false
+        var render_unavailable_reason = "metal-render-probe-unavailable"
+        match metal_draw_ir_render_target_probe():
+            Err(reason): render_unavailable_reason = reason
+            Ok(available):
+                render_available = available
+                if available:
+                    render_unavailable_reason = ""
+        SimpleOsGpuHostMacPlatform(
+            render_available: render_available,
+            render_unavailable_reason: render_unavailable_reason,
+            processing_available: _macos_processing_probe_available()
+        )
 
 impl SimpleOsGpuHostPlatform for SimpleOsGpuHostMacPlatform:
     fn create_render_target(width: i32, height: i32, backend: text) -> Result<DrawIrRenderTarget, text>:
@@ -48,7 +72,9 @@ impl SimpleOsGpuHostPlatform for SimpleOsGpuHostMacPlatform:
     fn probe_render_backend(backend: text) -> Result<bool, text>:
         if backend != "metal":
             return Err("macos-host-daemon-requires-metal")
-        metal_draw_ir_render_target_probe()
+        if self.render_available:
+            return Ok(true)
+        Err(self.render_unavailable_reason)
 
     fn render_device_identity(backend: text) -> i64:
         if backend != "metal":
@@ -64,12 +90,7 @@ impl SimpleOsGpuHostPlatform for SimpleOsGpuHostMacPlatform:
         val selected = requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
         if selected == 0:
             return 0
-        val probe_ir = processing_ir_fill_u32(1, 1u32)
-        val oracle = processing_ir_cpu_execute(probe_ir)
-        val probe = _macos_processing_result(probe_ir)
-        if (probe.completed and probe.reason == "ok" and probe.backend_handle > 0 and
-            probe.device_identity > 0 and
-            processing_ir_outputs_equal(probe.values, oracle)):
+        if self.processing_available:
             return SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
         0
 
