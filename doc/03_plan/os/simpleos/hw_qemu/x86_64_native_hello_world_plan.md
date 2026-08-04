@@ -40,8 +40,11 @@ build/fix/verify cycles.
   `baremetal_stubs.c`.
 - Complete: UEFI/GRUB packaging skeleton under
   `build/native_probe/hello_qemu/ssh/`.
-- In progress: cycle 3 kernel build producing
-  `build/os/simpleos_ssh_hello_native.elf`.
+- Blocked: cycle 3 reached its 45-minute external timeout without producing
+  `build/os/simpleos_ssh_hello_native.elf` or a compiler diagnostic.
+- Verified unusable for this lane: the phase-2 and phase-3 bootstrap bridge
+  artifacts are 123 KB seed wrappers whose `native-build` command reports that
+  full Simple lowering/codegen is unavailable.
 
 ## Fix cycles
 
@@ -58,18 +61,22 @@ The deployed compiler parsed the first architecture variants in
 isolated x86_64 build copy now retains only the x86_64 implementation of that
 private helper; canonical multi-architecture source is unchanged.
 
-### Cycle 3 — in progress
+### Cycle 3 — complete, timed out
 
-Run one final cache-preserving, externally guarded build/boot attempt. If it
-does not converge, stop and report the exact remaining failure without another
-retry.
+The final cache-preserving build remained CPU-active but reached the 45-minute
+external guard (`RC=124`). It produced neither a kernel ELF nor a diagnostic;
+the captured log is empty. The three-cycle cap is exhausted, so no fourth build
+or QEMU attempt is permitted in this lane.
 
 ## Remaining execution steps
 
-1. Finish cycle 2 and validate the emitted kernel ELF once.
-2. Copy the kernel to the prepared UEFI ESP as `/boot/kernel.elf`.
-3. Boot QEMU with the staged FAT disk, NVMe device, serial capture, and SSH
+1. Obtain a full-driver phase-4/self-hosted compiler that completes the x86_64
+   LLVM kernel closure within the guard, or fix/measure the compiler timeout in
+   a fresh scoped lane.
+2. Produce and validate `build/os/simpleos_ssh_hello_native.elf` once.
+3. Copy the kernel to the prepared UEFI ESP as `/boot/kernel.elf`.
+4. Boot QEMU with the staged FAT disk, NVMe device, serial capture, and SSH
    forwarding on host port 42322.
-4. Wait for the guest SSH accept loop, then execute `/HELLO.ELF` once.
-5. Capture SSH output and the serial log, verify exact `Hello World` and exit
+5. Wait for the guest SSH accept loop, then execute `/HELLO.ELF` once.
+6. Capture SSH output and the serial log, verify exact `Hello World` and exit
    success, stop QEMU, report convergence, and stop work.
