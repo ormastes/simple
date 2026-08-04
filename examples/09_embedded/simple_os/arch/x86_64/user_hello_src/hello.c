@@ -14,10 +14,10 @@
  *   rax = syscall number; rdi,rsi,rdx,r10,r8,r9 = args 0..5.
  * Syscall numbers (see src/os/kernel/ipc/syscall.spl dispatch): 32=Write, 0=Exit.
  *
- * Build (HOST clang-20, the cross clang-20 has broken codegen):
+ * Build (admitted host Clang 23.1 provider):
  *   scripts/os/build_user_hello_elf.shs
  * which runs:
- *   clang-20 --target=x86_64-unknown-simpleos --sysroot=build/os/sysroot \
+ *   "$LLVM_23_1_PREFIX/bin/clang" --target=x86_64-unknown-simpleos --sysroot=build/os/sysroot \
  *     -ffreestanding -nostdlib -static -fno-stack-protector -no-pie \
  *     -Wl,-e,_start -o build/os/user_hello/hello.elf hello.c
  *

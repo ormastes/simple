@@ -86,6 +86,30 @@ debug-mode output alone as Stage 4 admission or release evidence. Bind an
 isolated sweep with `--diagnostic-child-compiler=<absolute admitted CLI>` and
 record both driver and child identities.
 
+For LLVM 23.1 migration/bootstrap lanes, build the coherent provider with
+`scripts/setup/build-llvm-23-1-provider.shs` from the signed current
+`llvmorg-23.1.0-rc2` tag (stable 23.1.0 is not published as of 2026-08-04).
+Export its installed prefix as both `LLVM_23_1_PREFIX` for shell consumers and
+`SIMPLE_LLVM_PREFIX` for the pure-Simple backend; never mix a 23.1 frontend with
+an older linker, archiver, optimizer, or code generator. A user-authorized
+fresh artifact such as `build/native_probe/simple` may provide ad-hoc bootstrap
+evidence only after its path, version, and SHA-256 are recorded and its native
+smoke passes with stub fallback disabled. It is not Stage 4 unless the bounded
+essential-tools smoke above also passes against that exact artifact.
+
+After the backend and SimpleOS port admit the same provider, build the browser
+guest with `scripts/os/build_browser_demo_client.shs`, retain
+`build/os/apps/browser_demo/clang-23.1-evidence.txt`, and run the canonical
+`scripts/check/check-simpleos-wm-fullscreen-evidence.shs` QEMU gate once with
+explicit `SIMPLE_BIN`, `CLANG`, and `LINKER`. Require byte-identical
+`BROWSMF.SMF` staging plus correlated framebuffer/input evidence; source checks
+or serial markers are not rendering proof. The guest filesystem must expose
+`/usr/bin/clang-23.1` and the `/usr/bin/clang` alias through general FS exec.
+The vendored Rust `inkwell`/`llvm-sys` capsule is LLVM-18-only and remains an
+explicit LLVM-23 blocker; do not relabel it, silently fall back to it, or mark
+the full migration complete. Apply the normal three verify/fix-cycle cap to
+provider, bootstrap, and QEMU failures and report the first retained blocker.
+
 Use `bin/simple lint <changed .spl files>` and
 `bin/simple duplicate-check <owned-dir> --mode token --min-lines 5` for those
 pure-Simple gates. `bin/simple build lint` and `build check` are Rust workspace
@@ -823,11 +847,11 @@ and `doc/08_tracking/feature/` before reporting the handoff state.
 
 ## Reference: SimpleOS LLVM/Clang toolchain
 
-Building a C/C++ "hello world" for SimpleOS with clang? The LLVM→SimpleOS port
-is already built (easy to lose): cross clang/lld at
-`build/os/llvm/cross-x86_64-unknown-simpleos/bin/`, source at
-`/home/ormastes/llvm-project`, sysroot at `build/os/sysroot/`. Compile+link
-works; in-guest exec is blocked. Full guide + verified commands:
+Building a C/C++ "hello world" for SimpleOS with clang? LLVM 23.1 is the
+admitted family. Build/verify the signed current provider with
+`scripts/setup/build-llvm-23-1-provider.shs`, export `LLVM_23_1_PREFIX` and
+`SIMPLE_LLVM_PREFIX`, and use `build/os/sysroot/`. Historical Clang 18/20
+artifacts are not migration evidence. Full guide and current commands:
 `doc/07_guide/os/simpleos_llvm_toolchain.md`.
 
 ## Session update 2026-07-18

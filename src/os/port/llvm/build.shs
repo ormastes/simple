@@ -12,6 +12,7 @@
 #   SIMPLEOS_TARGET_TRIPLE  Target triple (default x86_64-unknown-simpleos)
 #   SIMPLE_TARGET           Alias honoured by build.spl — if set and
 #                           SIMPLEOS_TARGET_TRIPLE is unset, it is used.
+#   SIMPLEOS_LLVM_VERSION   Required LLVM source major.minor (default 23.1)
 #
 # Usage:
 #   sh src/os/port/llvm/build.shs              # all stages (single triple)
@@ -34,6 +35,7 @@ BUILD_DIR="$REPO_ROOT/build/os/llvm"
 SYSROOT="$REPO_ROOT/build/os/sysroot"
 LIBC_DIR="$REPO_ROOT/src/os/libc"
 TOOLCHAIN="$REPO_ROOT/src/os/toolchain/llvm/simpleos_cross_toolchain.cmake"
+SIMPLEOS_LLVM_VERSION="${SIMPLEOS_LLVM_VERSION:-23.1}"
 
 # Target triple — SIMPLEOS_TARGET_TRIPLE wins, SIMPLE_TARGET is an alias,
 # default is the original x86_64 value so single-target invocations keep
@@ -66,8 +68,14 @@ CROSS_DIR="$BUILD_DIR/cross-$TRIPLE"
 RT_DIR="$BUILD_DIR/compiler-rt-$TRIPLE"
 RT_CMAKE="$SCRIPT_DIR/compiler_rt_cmake.cmake"
 # Clang resource dir layout: lib/clang/<major>/lib/<triple>/
-CLANG_RES_VERSION="${CLANG_RES_VERSION:-20}"
+CLANG_RES_VERSION="${CLANG_RES_VERSION:-23}"
 RES_LIB_DIR="$SYSROOT/lib/clang/$CLANG_RES_VERSION/lib/$TRIPLE"
+
+llvm_source_version() {
+    major="$(sed -n 's/^set(LLVM_VERSION_MAJOR \([0-9][0-9]*\)).*/\1/p' "$LLVM_SRC/cmake/Modules/LLVMVersion.cmake" | head -1)"
+    minor="$(sed -n 's/^set(LLVM_VERSION_MINOR \([0-9][0-9]*\)).*/\1/p' "$LLVM_SRC/cmake/Modules/LLVMVersion.cmake" | head -1)"
+    [ -n "$major" ] && [ -n "$minor" ] && printf '%s.%s\n' "$major" "$minor"
+}
 
 # Validate prerequisites
 check_prereqs() {
@@ -81,6 +89,16 @@ check_prereqs() {
         echo "[llvm] ERROR: LLVM source not found at $LLVM_SRC"
         echo "[llvm] Set LLVM_SRC to point to your llvm-project checkout."
         echo "[llvm] Example: LLVM_SRC=~/llvm-project sh $0"
+        exit 1
+    fi
+    actual_version="$(llvm_source_version)"
+    if [ "$actual_version" != "$SIMPLEOS_LLVM_VERSION" ]; then
+        echo "[llvm] ERROR: LLVM source must be $SIMPLEOS_LLVM_VERSION (found ${actual_version:-unknown} at $LLVM_SRC)"
+        echo "[llvm] Use a signed llvmorg-23.1.0 release/RC checkout; older LLVM sources are not admitted."
+        exit 1
+    fi
+    if [ "$CLANG_RES_VERSION" != "${SIMPLEOS_LLVM_VERSION%%.*}" ]; then
+        echo "[llvm] ERROR: CLANG_RES_VERSION=$CLANG_RES_VERSION conflicts with LLVM $SIMPLEOS_LLVM_VERSION"
         exit 1
     fi
 }

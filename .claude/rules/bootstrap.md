@@ -147,6 +147,13 @@ has soaked. Reaching the <20s kernel-rebuild goal additionally needs incremental
 object cache does not touch (they dominate kernel build wall time).
 
 ## Bootstrap Commands
+
+For a reproducible Clang 23.1 pure-Simple/SimpleOS migration, follow the
+[bounded provider → ad-hoc no-stub native smoke → browser payload → canonical
+QEMU evidence workflow](../../doc/07_guide/app/llm/clang_23_1_bootstrap_browser_qemu_workflow.md).
+It keeps the Rust LLVM 18 binding boundary explicit and applies the three-cycle
+and no-repeat guard to expensive bootstrap and rendering gates.
+
 ```bash
 # Normal pure-Simple bootstrap:
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy

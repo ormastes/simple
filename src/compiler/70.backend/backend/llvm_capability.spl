@@ -13,9 +13,7 @@ use std.platform.{get_host_os}
 use std.io_runtime.{host_arch}
 use compiler.backend.llvm_version.{
     LlvmVersionInfo, LlvmVersionStatus,
-    detect_llc_version, detect_opt_version, detect_clang_version, detect_libllvm_version,
-    check_version_compatibility, version_diagnostic, check_version_mismatch,
-    LLVM_VERSION_MIN, LLVM_VERSION_MAX
+    parse_llvm_version, check_version_compatibility, version_diagnostic, check_version_mismatch
 }
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget}
 
@@ -143,14 +141,14 @@ impl LlvmCapabilityReport:
 
         val os = self.host_os
         if os == "linux":
-            diag = diag + "  Ubuntu/Debian: sudo apt install llvm-18 libllvm-18-dev lld-18\n"
+            diag = diag + "  Ubuntu/Debian: install LLVM 23.1 under a dedicated prefix\n"
             diag = diag + "  Arch Linux:    sudo pacman -S llvm lld\n"
             diag = diag + "  Fedora:        sudo dnf install llvm-devel lld\n"
         elif os == "macos":
             diag = diag + "  Homebrew:      brew install llvm\n"
             diag = diag + "  Then add:      export PATH=\"$(brew --prefix llvm)/bin:$PATH\"\n"
         elif os == "freebsd":
-            diag = diag + "  pkg:           sudo pkg install llvm18\n"
+            diag = diag + "  pkg:           install the LLVM 23.1 package or official source build\n"
         elif os == "windows":
             diag = diag + "  Chocolatey:    choco install llvm\n"
             diag = diag + "  Scoop:         scoop install llvm\n"
@@ -185,6 +183,15 @@ fn find_tool_portable(candidates: [text]) -> text:
     val os = get_host_os()
     val is_windows = os == "windows"
 
+    # Official LLVM archives install unversioned tools under a dedicated
+    # prefix. Probe that deterministic location before PATH-based names.
+    val configured_prefix = env_get("SIMPLE_LLVM_PREFIX") ?? ""
+    if configured_prefix != "" and candidates.len() > 0:
+        val configured = "{configured_prefix}/bin/{candidates[candidates.len() - 1]}"
+        val (prefix_out, prefix_err, prefix_code) = backend_shell_tuple("test -x '{configured}'")
+        if prefix_code == 0:
+            return configured
+
     for candidate in candidates:
         if is_windows:
             val (out, err, code) = backend_shell_tuple("where {candidate} 2>NUL")
@@ -201,17 +208,24 @@ fn find_tool_portable(candidates: [text]) -> text:
                     return path
     ""
 
+fn parse_tool_version(path: text) -> LlvmVersionInfo:
+    """Parse the version reported by the exact executable that discovery selected."""
+    val (out, err, code) = backend_shell_tuple("'{path}' --version 2>&1")
+    if code != 0:
+        return LlvmVersionInfo.unknown()
+    parse_llvm_version(out)
+
 fn find_llc_portable() -> text:
-    find_tool_portable(["llc-19", "llc-18", "llc-17", "llc-16", "llc"])
+    find_tool_portable(["llc-23", "llc"])
 
 fn find_opt_portable() -> text:
-    find_tool_portable(["opt-19", "opt-18", "opt-17", "opt-16", "opt"])
+    find_tool_portable(["opt-23", "opt"])
 
 fn find_clang_portable() -> text:
-    find_tool_portable(["clang-19", "clang-18", "clang-17", "clang-16", "clang"])
+    find_tool_portable(["clang-23", "clang"])
 
 fn find_wasm_ld_portable() -> text:
-    find_tool_portable(["wasm-ld-19", "wasm-ld-18", "wasm-ld-17", "wasm-ld-16", "wasm-ld"])
+    find_tool_portable(["wasm-ld-23", "wasm-ld"])
 
 pub fn find_nm_portable() -> text:
     val configured = env_get("SIMPLE_NM") ?? ""
@@ -220,8 +234,7 @@ pub fn find_nm_portable() -> text:
     # llvm-nm handles ELF, Mach-O, COFF objects, and Unix/MSVC archives with
     # one argument contract. Keep platform nm as the final hosted fallback.
     find_tool_portable([
-        "llvm-nm-22", "llvm-nm-21", "llvm-nm-20", "llvm-nm-19",
-        "llvm-nm-18", "llvm-nm-17", "llvm-nm-16", "llvm-nm", "nm"
+        "llvm-nm-23", "llvm-nm", "nm"
     ])
 
 pub fn find_archive_portable() -> text:
@@ -233,17 +246,14 @@ pub fn find_archive_portable() -> text:
         return find_tool_portable([
             "/opt/homebrew/opt/llvm/bin/llvm-ar",
             "/usr/local/opt/llvm/bin/llvm-ar",
-            "llvm-ar-22", "llvm-ar-21", "llvm-ar-20", "llvm-ar-19",
-            "llvm-ar-18", "llvm-ar-17", "llvm-ar-16", "llvm-ar", "ar"
+            "llvm-ar-23", "llvm-ar", "ar"
         ])
     if os == "windows":
         return find_tool_portable([
-            "llvm-ar-22", "llvm-ar-21", "llvm-ar-20", "llvm-ar-19",
-            "llvm-ar-18", "llvm-ar-17", "llvm-ar-16", "llvm-ar", "ar", "lib.exe", "lib"
+            "llvm-ar-23", "llvm-ar", "ar", "lib.exe", "lib"
         ])
     find_tool_portable([
-        "llvm-ar-22", "llvm-ar-21", "llvm-ar-20", "llvm-ar-19",
-        "llvm-ar-18", "llvm-ar-17", "llvm-ar-16", "llvm-ar", "ar"
+        "llvm-ar-23", "llvm-ar", "ar"
     ])
 
 pub fn find_objdump_portable() -> text:
@@ -255,20 +265,14 @@ pub fn find_objdump_portable() -> text:
         return find_tool_portable([
             "/opt/homebrew/opt/llvm/bin/llvm-objdump",
             "/usr/local/opt/llvm/bin/llvm-objdump",
-            "llvm-objdump-22", "llvm-objdump-21", "llvm-objdump-20",
-            "llvm-objdump-19", "llvm-objdump-18", "llvm-objdump-17",
-            "llvm-objdump-16", "llvm-objdump"
+            "llvm-objdump-23", "llvm-objdump"
         ])
     if os == "windows":
         return find_tool_portable([
-            "llvm-objdump-22", "llvm-objdump-21", "llvm-objdump-20",
-            "llvm-objdump-19", "llvm-objdump-18", "llvm-objdump-17",
-            "llvm-objdump-16", "llvm-objdump", "objdump"
+            "llvm-objdump-23", "llvm-objdump", "objdump"
         ])
     find_tool_portable([
-        "llvm-objdump-22", "llvm-objdump-21", "llvm-objdump-20",
-        "llvm-objdump-19", "llvm-objdump-18", "llvm-objdump-17",
-        "llvm-objdump-16", "llvm-objdump", "readelf", "objdump"
+        "llvm-objdump-23", "llvm-objdump", "readelf", "objdump"
     ])
 
 pub fn find_objcopy_portable() -> text:
@@ -278,35 +282,30 @@ pub fn find_objcopy_portable() -> text:
     val os = get_host_os()
     if os == "macos":
         return find_tool_portable([
-            "/opt/homebrew/opt/llvm@18/bin/llvm-objcopy",
+            "/opt/homebrew/opt/llvm@23/bin/llvm-objcopy",
             "/opt/homebrew/opt/llvm/bin/llvm-objcopy",
-            "/usr/local/opt/llvm@18/bin/llvm-objcopy",
+            "/usr/local/opt/llvm@23/bin/llvm-objcopy",
             "/usr/local/opt/llvm/bin/llvm-objcopy",
-            "llvm-objcopy-22", "llvm-objcopy-21", "llvm-objcopy-20",
-            "llvm-objcopy-19", "llvm-objcopy-18", "llvm-objcopy-17",
-            "llvm-objcopy-16", "llvm-objcopy", "objcopy"
+            "llvm-objcopy-23", "llvm-objcopy", "objcopy"
         ])
     find_tool_portable([
-        "llvm-objcopy-22", "llvm-objcopy-21", "llvm-objcopy-20",
-        "llvm-objcopy-19", "llvm-objcopy-18", "llvm-objcopy-17",
-        "llvm-objcopy-16", "llvm-objcopy", "objcopy"
+        "llvm-objcopy-23", "llvm-objcopy", "objcopy"
     ])
 
 # ============================================================================
 # Detect libLLVM availability
 # ============================================================================
 
-fn detect_libllvm_available() -> bool:
+fn detect_libllvm_available(config_path: text) -> bool:
     """Check if libLLVM is available for dynamic loading.
 
     Uses llvm-config to check, or probes common library paths.
     """
     val os = get_host_os()
 
-    # Method 1: llvm-config --libdir
-    val config_candidates = ["llvm-config-18", "llvm-config-17", "llvm-config-16", "llvm-config-19", "llvm-config"]
-    for candidate in config_candidates:
-        val (out, err, code) = backend_shell_tuple("{candidate} --libdir 2>/dev/null")
+    # Method 1: query the exact llvm-config selected by the canonical finder.
+    if config_path != "":
+        val (out, err, code) = backend_shell_tuple("'{config_path}' --libdir 2>/dev/null")
         if code == 0:
             val libdir = out.trim()
             if libdir != "":
@@ -327,9 +326,7 @@ fn detect_libllvm_available() -> bool:
     # Method 2: Probe common paths
     if os == "linux":
         val probes = [
-            "/usr/lib/llvm-18/lib/libLLVM.so",
-            "/usr/lib/llvm-17/lib/libLLVM.so",
-            "/usr/lib/llvm-16/lib/libLLVM.so",
+            "/usr/lib/llvm-23/lib/libLLVM.so",
             "/usr/lib/x86_64-linux-gnu/libLLVM.so",
             "/usr/lib64/libLLVM.so"
         ]
@@ -366,29 +363,34 @@ fn detect_llvm_capabilities() -> LlvmCapabilityReport:
 
     # Detect individual tools
     val llc_path = find_llc_portable()
-    val llc_ver = if llc_path != "": detect_llc_version() else: LlvmVersionInfo.unknown()
-    val llc_status = if llc_path != "":
+    val llc_ver = if llc_path != "": parse_tool_version(llc_path) else: LlvmVersionInfo.unknown()
+    val llc_admitted = check_version_compatibility(llc_ver) == LlvmVersionStatus.Supported
+    val llc_status = if llc_path != "" and llc_admitted:
         LlvmToolStatus.found("llc", llc_path, llc_ver)
     else:
         LlvmToolStatus.not_found("llc")
 
     val opt_path = find_opt_portable()
-    val opt_ver = if opt_path != "": detect_opt_version() else: LlvmVersionInfo.unknown()
-    val opt_status = if opt_path != "":
+    val opt_ver = if opt_path != "": parse_tool_version(opt_path) else: LlvmVersionInfo.unknown()
+    val opt_admitted = check_version_compatibility(opt_ver) == LlvmVersionStatus.Supported
+    val opt_status = if opt_path != "" and opt_admitted:
         LlvmToolStatus.found("opt", opt_path, opt_ver)
     else:
         LlvmToolStatus.not_found("opt")
 
     val clang_path = find_clang_portable()
-    val clang_ver = if clang_path != "": detect_clang_version() else: LlvmVersionInfo.unknown()
-    val clang_status = if clang_path != "":
+    val clang_ver = if clang_path != "": parse_tool_version(clang_path) else: LlvmVersionInfo.unknown()
+    val clang_admitted = check_version_compatibility(clang_ver) == LlvmVersionStatus.Supported
+    val clang_status = if clang_path != "" and clang_admitted:
         LlvmToolStatus.found("clang", clang_path, clang_ver)
     else:
         LlvmToolStatus.not_found("clang")
 
     val wasm_ld_path = find_wasm_ld_portable()
-    val wasm_ld_status = if wasm_ld_path != "":
-        LlvmToolStatus.found("wasm-ld", wasm_ld_path, LlvmVersionInfo.unknown())
+    val wasm_ld_ver = if wasm_ld_path != "": parse_tool_version(wasm_ld_path) else: LlvmVersionInfo.unknown()
+    val wasm_ld_admitted = check_version_compatibility(wasm_ld_ver) == LlvmVersionStatus.Supported
+    val wasm_ld_status = if wasm_ld_path != "" and wasm_ld_admitted:
+        LlvmToolStatus.found("wasm-ld", wasm_ld_path, wasm_ld_ver)
     else:
         LlvmToolStatus.not_found("wasm-ld")
 
@@ -399,9 +401,11 @@ fn detect_llvm_capabilities() -> LlvmCapabilityReport:
         LlvmToolStatus.not_found("nm")
 
     # Detect libLLVM
-    val lib_ver = detect_libllvm_version()
-    val lib_available = detect_libllvm_available()
-    val libllvm_status = if lib_available:
+    val lib_config_path = find_tool_portable(["llvm-config-23", "llvm-config"])
+    val lib_ver = if lib_config_path != "": parse_tool_version(lib_config_path) else: LlvmVersionInfo.unknown()
+    val lib_available = detect_libllvm_available(lib_config_path)
+    val lib_admitted = lib_available and check_version_compatibility(lib_ver) == LlvmVersionStatus.Supported
+    val libllvm_status = if lib_admitted:
         LlvmToolStatus.found("libLLVM", "system", lib_ver)
     else:
         LlvmToolStatus.not_found("libLLVM")
@@ -413,6 +417,16 @@ fn detect_llvm_capabilities() -> LlvmCapabilityReport:
             errors.push(version_diagnostic(llc_ver, "llc"))
         elif llc_compat == LlvmVersionStatus.TooNew:
             warnings.push(version_diagnostic(llc_ver, "llc"))
+    if llc_path != "" and not llc_admitted:
+        errors.push("Selected llc is not LLVM 23.1: {llc_path} ({llc_ver.to_text()})")
+    if opt_path != "" and not opt_admitted:
+        errors.push("Selected opt is not LLVM 23.1: {opt_path} ({opt_ver.to_text()})")
+    if clang_path != "" and not clang_admitted:
+        errors.push("Selected clang is not LLVM 23.1: {clang_path} ({clang_ver.to_text()})")
+    if wasm_ld_path != "" and not wasm_ld_admitted:
+        errors.push("Selected wasm-ld is not LLVM 23.1: {wasm_ld_path} ({wasm_ld_ver.to_text()})")
+    if lib_available and not lib_admitted:
+        errors.push("Detected libLLVM is not LLVM 23.1 ({lib_ver.to_text()})")
 
     # Check for version mismatch between CLI and lib
     val mismatch = check_version_mismatch(llc_ver, lib_ver)
@@ -423,10 +437,10 @@ fn detect_llvm_capabilities() -> LlvmCapabilityReport:
             ()
 
     # Determine derived capabilities
-    val llvm_backend = llc_path != ""
-    val llvm_lib_backend = lib_available
-    val wasm_link = wasm_ld_path != ""
-    val can_opt = opt_path != ""
+    val llvm_backend = llc_path != "" and llc_admitted
+    val llvm_lib_backend = lib_admitted
+    val wasm_link = wasm_ld_path != "" and wasm_ld_admitted
+    val can_opt = opt_path != "" and opt_admitted
 
     # Determine supported targets
     var targets: [text] = []
@@ -582,8 +596,9 @@ fn detect_cross_linker(target_prefix: text) -> text:
             return path
 
     # Fallback: try LLD with target flag (lld can cross-link)
-    val lld_path = find_tool_portable(["ld.lld-19", "ld.lld-18", "ld.lld-17", "ld.lld-16", "ld.lld"])
-    if lld_path != "":
+    val lld_path = find_tool_portable(["ld.lld-23", "ld.lld"])
+    if (lld_path != "" and
+        check_version_compatibility(parse_tool_version(lld_path)) == LlvmVersionStatus.Supported):
         return lld_path
 
     ""

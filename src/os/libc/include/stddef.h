@@ -33,4 +33,11 @@ typedef struct {
 
 #endif /* __has_include_next */
 
+/* Clang 23's freestanding built-in stddef does not expose wchar_t through the
+ * include-next path unless a component request macro is set.  The C ABI type
+ * is compiler-defined; in C++ wchar_t remains a language keyword. */
+#ifndef __cplusplus
+typedef __WCHAR_TYPE__ wchar_t;
+#endif
+
 #endif /* _SIMPLEOS_STDDEF_H */

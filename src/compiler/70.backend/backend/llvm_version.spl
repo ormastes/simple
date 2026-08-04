@@ -3,8 +3,8 @@
 # Centralized version parsing, supported range policy, and diagnostics.
 # Single source of truth for LLVM version handling across all backends.
 #
-# Supported range: LLVM 16-19
-# Policy: warn on too-new, error on too-old, error on mismatch
+# Supported toolchain: LLVM 23.1
+# Policy: fail closed outside 23.1 and on mixed tool families
 
 use compiler.backend.backend.io_compat.{backend_shell_tuple}
 
@@ -12,9 +12,10 @@ use compiler.backend.backend.io_compat.{backend_shell_tuple}
 # Version Constants
 # ============================================================================
 
-val LLVM_VERSION_MIN = 16
-val LLVM_VERSION_MAX = 19
-val LLVM_VERSION_PRIMARY = 18
+val LLVM_VERSION_MIN = 23
+val LLVM_VERSION_MAX = 23
+val LLVM_VERSION_PRIMARY = 23
+val LLVM_VERSION_REQUIRED_MINOR = 1
 
 # ============================================================================
 # Version Info
@@ -147,7 +148,7 @@ fn _digit_value(ch: text) -> i64:
 fn detect_llc_version() -> LlvmVersionInfo:
     """Detect LLVM version from llc --version output."""
     # Try versioned binaries first (match tool discovery order)
-    val candidates = ["llc-19", "llc-18", "llc-17", "llc-16", "llc"]
+    val candidates = ["llc-23", "llc"]
     for candidate in candidates:
         val (out, err, code) = backend_shell_tuple("{candidate} --version 2>&1")
         if code == 0:
@@ -156,7 +157,7 @@ fn detect_llc_version() -> LlvmVersionInfo:
 
 fn detect_opt_version() -> LlvmVersionInfo:
     """Detect LLVM version from opt --version output."""
-    val candidates = ["opt-19", "opt-18", "opt-17", "opt-16", "opt"]
+    val candidates = ["opt-23", "opt"]
     for candidate in candidates:
         val (out, err, code) = backend_shell_tuple("{candidate} --version 2>&1")
         if code == 0:
@@ -165,7 +166,7 @@ fn detect_opt_version() -> LlvmVersionInfo:
 
 fn detect_clang_version() -> LlvmVersionInfo:
     """Detect clang version from clang --version output."""
-    val candidates = ["clang-19", "clang-18", "clang-17", "clang-16", "clang"]
+    val candidates = ["clang-23", "clang"]
     for candidate in candidates:
         val (out, err, code) = backend_shell_tuple("{candidate} --version 2>&1")
         if code == 0:
@@ -178,7 +179,7 @@ fn detect_libllvm_version() -> LlvmVersionInfo:
     Uses llvm-config or probes shared library naming.
     """
     # Try llvm-config variants
-    val candidates = ["llvm-config-19", "llvm-config-18", "llvm-config-17", "llvm-config-16", "llvm-config"]
+    val candidates = ["llvm-config-23", "llvm-config"]
     for candidate in candidates:
         val (out, err, code) = backend_shell_tuple("{candidate} --version 2>&1")
         if code == 0:
@@ -191,9 +192,9 @@ fn detect_libllvm_version() -> LlvmVersionInfo:
 
 enum LlvmVersionStatus:
     """Compatibility status for a detected LLVM version."""
-    Supported        # Within supported range (16-19)
-    TooOld           # Below minimum (< 16)
-    TooNew           # Above maximum (> 19), best-effort
+    Supported        # Exactly LLVM 23.1
+    TooOld           # Older than LLVM 23.1
+    TooNew           # Newer than LLVM 23.1
     Unknown          # Could not detect version
 
 fn check_version_compatibility(version: LlvmVersionInfo) -> LlvmVersionStatus:
@@ -205,9 +206,11 @@ fn check_version_compatibility(version: LlvmVersionInfo) -> LlvmVersionStatus:
     """
     if not version.is_known():
         return LlvmVersionStatus.Unknown
-    if version.major < LLVM_VERSION_MIN:
+    if (version.major < LLVM_VERSION_MIN or
+        (version.major == LLVM_VERSION_PRIMARY and version.minor < LLVM_VERSION_REQUIRED_MINOR)):
         return LlvmVersionStatus.TooOld
-    if version.major > LLVM_VERSION_MAX:
+    if (version.major > LLVM_VERSION_MAX or
+        (version.major == LLVM_VERSION_PRIMARY and version.minor > LLVM_VERSION_REQUIRED_MINOR)):
         return LlvmVersionStatus.TooNew
     LlvmVersionStatus.Supported
 
@@ -224,10 +227,10 @@ fn version_diagnostic(version: LlvmVersionInfo, tool_name: text) -> text:
             "{tool_name} {version.to_text()}: supported"
         case TooOld:
             "{tool_name} {version.to_text()}: too old (minimum LLVM {LLVM_VERSION_MIN} required). " +
-            "Upgrade: apt install llvm-{LLVM_VERSION_PRIMARY} (Ubuntu) or brew install llvm (macOS)"
+            "Install the LLVM {LLVM_VERSION_PRIMARY}.{LLVM_VERSION_REQUIRED_MINOR} toolchain and configure its bin prefix."
         case TooNew:
-            "{tool_name} {version.to_text()}: newer than tested range (LLVM {LLVM_VERSION_MIN}-{LLVM_VERSION_MAX}). " +
-            "May work but not officially supported. Report issues if you encounter problems."
+            "{tool_name} {version.to_text()}: newer than the admitted LLVM " +
+            "{LLVM_VERSION_PRIMARY}.{LLVM_VERSION_REQUIRED_MINOR} family."
         case Unknown:
             "{tool_name}: version unknown"
 
@@ -239,7 +242,7 @@ fn check_version_mismatch(llc_ver: LlvmVersionInfo, lib_ver: LlvmVersionInfo) ->
     """
     if not llc_ver.is_known() or not lib_ver.is_known():
         return nil
-    if llc_ver.major != lib_ver.major:
+    if llc_ver.major != lib_ver.major or llc_ver.minor != lib_ver.minor:
         return Some(
             "WARNING: LLVM version mismatch detected!\n" +
             "  llc version:     {llc_ver.to_text()}\n" +
@@ -253,7 +256,7 @@ fn check_version_mismatch(llc_ver: LlvmVersionInfo, lib_ver: LlvmVersionInfo) ->
 # Exports
 # ============================================================================
 
-export LLVM_VERSION_MIN, LLVM_VERSION_MAX, LLVM_VERSION_PRIMARY
+export LLVM_VERSION_MIN, LLVM_VERSION_MAX, LLVM_VERSION_PRIMARY, LLVM_VERSION_REQUIRED_MINOR
 export LlvmVersionInfo, LlvmVersionStatus
 export parse_llvm_version, detect_llc_version, detect_opt_version
 export detect_clang_version, detect_libllvm_version

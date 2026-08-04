@@ -1,0 +1,33 @@
+use std.spec
+use os.packages.os_packages.{list_all_packages}
+use os.tools.pkg.pkg_format.{PkgArch}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "SimpleOS Clang 23.1 guest toolchain contract":
+    it "packages the canonical and versioned guest launch paths":
+        val files = list_all_packages(PkgArch.X86_64)[4].base.files
+
+        expect(files).to_contain("/usr/bin/clang")
+        expect(files).to_contain("/usr/bin/clang-23.1")
+        expect(files.index_of("/usr/bin/clang-20")).to_equal(-1)
+
+    it "stages the real payload at the versioned path and advertises 23.1":
+        val builder = rt_file_read_text("src/os/installer/image_builder.spl")
+
+        expect(builder).to_contain("\"/usr/bin/clang-23.1\"")
+        expect(builder).to_contain("clang version 23.1.0")
+        expect(builder.index_of("clang version 20.0.0")).to_equal(-1)
+
+    it "pins the port build and static relinker to the 23.1 ABI family":
+        val build = rt_file_read_text("src/os/port/llvm/build.shs")
+        val relink = rt_file_read_text("src/os/port/llvm/clang_static.shs")
+
+        expect(build).to_contain("SIMPLEOS_LLVM_VERSION=")
+        expect(build).to_contain("SIMPLEOS_LLVM_VERSION:-23.1")
+        expect(build).to_contain("CLANG_RES_VERSION=")
+        expect(build).to_contain("CLANG_RES_VERSION:-23")
+        expect(build).to_contain("older LLVM sources are not admitted")
+        expect(relink).to_contain("NINJA_BIN=\"bin/clang-23\"")
+        expect(relink).to_contain("lib/clang/23/lib/$TRIPLE")
+        expect(relink).to_contain("must report Clang 23.1")

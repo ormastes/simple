@@ -20,18 +20,25 @@ cd "$ROOT_DIR"
 
 BIN=build/os/llvm/cross-x86_64-unknown-simpleos/bin
 SR=build/os/sysroot
-CLANG="$BIN/clang-20"
+CLANG="${CLANG:-$BIN/clang-23}"
+LINKER="${LINKER:-$BIN/ld.lld}"
 
-for f in "$CLANG" "$BIN/ld.lld" "$SR/lib/crt0.o" "$SR/lib/libsimpleos_c.a" "$SR/share/simpleos/simpleos.ld"; do
+for f in "$CLANG" "$LINKER" "$SR/lib/crt0.o" "$SR/lib/libsimpleos_c.a" "$SR/share/simpleos/simpleos.ld"; do
     [ -e "$f" ] || { echo "[build-image] ERROR: missing toolchain input: $f" >&2; exit 1; }
 done
+
+CLANG_VERSION="$($CLANG --version 2>/dev/null | head -1)"
+case "$CLANG_VERSION" in
+    *" 23.1."*|*" version 23.1."*) : ;;
+    *) echo "[build-image] ERROR: CLANG must report 23.1 (got: $CLANG_VERSION)" >&2; exit 1 ;;
+esac
 
 # --- 1. Build hello world with the ported LLVM clang ---
 mkdir -p build/os/hello
 printf 'int main(void){return 42;}\n' > build/os/hello/hello.c
 echo "[build-image] compiling hello.c with ported clang (x86_64-unknown-simpleos)..."
 "$CLANG" --target=x86_64-unknown-simpleos --sysroot="$SR" -c build/os/hello/hello.c -o build/os/hello/hello.o
-"$BIN/ld.lld" -T "$SR/share/simpleos/simpleos.ld" "$SR/lib/crt0.o" build/os/hello/hello.o \
+"$LINKER" -T "$SR/share/simpleos/simpleos.ld" "$SR/lib/crt0.o" build/os/hello/hello.o \
     -L "$SR/lib" -lsimpleos_c -o build/os/hello/hello.elf
 echo "[build-image] linked: $(file build/os/hello/hello.elf)"
 

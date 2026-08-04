@@ -13,7 +13,7 @@
 #
 # WHAT THIS DOES
 #   The stage-2 cross build (src/os/port/llvm/build.shs 'cross') compiles all of
-#   clang/LLVM as x86_64-unknown-simpleos *objects* but its final `bin/clang-20`
+#   clang/LLVM as x86_64-unknown-simpleos *objects* but its final `bin/clang-23`
 #   comes out a *Linux dynamic* ELF (interpreter /lib64/ld-linux-x86-64.so.2) — it
 #   cannot run on SimpleOS. This script re-links those already-compiled simpleos
 #   objects + archives into a genuine *statically linked* SimpleOS executable using
@@ -47,13 +47,14 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 LLVM_SRC="${LLVM_SRC:-$HOME/llvm-project}"
+SIMPLEOS_LLVM_VERSION="${SIMPLEOS_LLVM_VERSION:-23.1}"
 TRIPLE="${SIMPLEOS_TARGET_TRIPLE:-${SIMPLE_TARGET:-x86_64-unknown-simpleos}}"
 TOOL="${SIMPLEOS_LLVM_TOOL:-clang}"
 
 SYSROOT="$REPO_ROOT/build/os/sysroot"
 CROSS_DIR="$REPO_ROOT/build/os/llvm/cross-$TRIPLE"
 case "$TOOL" in
-    clang) NINJA_BIN="bin/clang-20"; OUT_NAME="clang_static" ;;
+    clang) NINJA_BIN="bin/clang-23"; OUT_NAME="clang_static" ;;
     llc)   NINJA_BIN="bin/llc";      OUT_NAME="llc_static" ;;
     lld)   NINJA_BIN="bin/lld";      OUT_NAME="lld_static" ;;
     *) echo "[clang_static] ERROR: unsupported tool: $TOOL"; exit 1 ;;
@@ -62,16 +63,28 @@ OUT_DIR="$REPO_ROOT/build/os/${TOOL}_static"
 OUT_BIN="$OUT_DIR/bin/$OUT_NAME"
 WORK="$REPO_ROOT/build/os/clang_static/work"
 
-CXX="${CXX:-clang++-20}"
-NM="${NM:-llvm-nm-20}"
-AR="${AR:-llvm-ar-20}"
+CXX="${CXX:-clang++-23}"
+NM="${NM:-llvm-nm-23}"
+AR="${AR:-llvm-ar-23}"
 
 case "$TRIPLE" in
     x86_64-*) ARCH=x86_64 ;;
     *) echo "[clang_static] ERROR: only x86_64-*-simpleos wired here (got $TRIPLE)"; exit 1 ;;
 esac
-BUILTINS="$SYSROOT/lib/clang/20/lib/$TRIPLE/libclang_rt.builtins-$ARCH.a"
+BUILTINS="$SYSROOT/lib/clang/23/lib/$TRIPLE/libclang_rt.builtins-$ARCH.a"
 LDSCRIPT="$SYSROOT/share/simpleos/simpleos.ld"
+
+for tool in "$CXX" "$NM" "$AR"; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "[clang_static] ERROR: required LLVM 23.1 tool not found: $tool"
+        exit 1
+    }
+done
+CXX_VERSION="$($CXX --version 2>/dev/null | head -1)"
+case "$CXX_VERSION" in
+    *" 23.1."*|*" version 23.1."*) : ;;
+    *) echo "[clang_static] ERROR: $CXX must report Clang 23.1 (got: $CXX_VERSION)"; exit 1 ;;
+esac
 
 # --- Prerequisites -----------------------------------------------------------
 for f in "$CROSS_DIR/build.ninja" "$SYSROOT/lib/crt0.o" "$LDSCRIPT" "$BUILTINS" \
@@ -87,7 +100,7 @@ done
 mkdir -p "$OUT_DIR/bin" "$WORK"
 
 # --- Extract the clang driver objects + archive list from the cross build ----
-# The ninja rule for bin/clang-20 lists: <5 driver .o> | <~110 LLVM/clang .a> || ...
+# The ninja rule for bin/clang-23 lists: <5 driver .o> | <~110 LLVM/clang .a> || ...
 LINE="$(grep -E "^build ${NINJA_BIN}:" "$CROSS_DIR/build.ninja" | head -1)"
 REST="${LINE#*CXX_EXECUTABLE_LINKER__clang_Release }"
 OBJS_STR="${REST%% | *}"

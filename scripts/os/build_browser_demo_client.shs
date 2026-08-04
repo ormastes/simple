@@ -41,25 +41,6 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-# clang: versioned name on Linux (clang-20); homebrew llvm is keg-only on
-# macOS, so fall back to its unversioned clang when no clang-NN is on PATH.
-CLANG="${CLANG:-}"
-if [ -z "$CLANG" ]; then
-    if command -v clang-20 >/dev/null 2>&1; then
-        CLANG=clang-20
-    else
-        for clang_candidate in \
-            /opt/homebrew/opt/llvm/bin/clang \
-            /usr/local/opt/llvm/bin/clang \
-            /usr/lib/llvm-20/bin/clang; do
-            if [ -x "$clang_candidate" ]; then
-                CLANG=$clang_candidate
-                break
-            fi
-        done
-    fi
-    [ -n "$CLANG" ] || CLANG=clang-20
-fi
 SYSROOT="${SIMPLEOS_SYSROOT:-$ROOT/build/os/sysroot}"
 LINKER_SCRIPT="$SYSROOT/share/simpleos/simpleos.ld"
 CRT0="$SYSROOT/lib/crt0.o"
@@ -68,19 +49,11 @@ SRC="$ROOT/examples/09_embedded/simpleos_remote_gui/browser_demo_gui.c"
 OUT_DIR="$ROOT/build/os/apps/browser_demo"
 OUT="$OUT_DIR/browser_demo.elf"
 
-command -v "$CLANG" >/dev/null 2>&1 || {
-    echo "missing browser-demo compiler: $CLANG" >&2
-    exit 1
-}
-
-LINKER="${LINKER:-$ROOT/build/os/llvm/cross-x86_64-unknown-simpleos/bin/ld.lld}"
-if [ ! -x "$LINKER" ]; then
-    LINKER="$(command -v ld.lld-20 || command -v ld.lld || true)"
-fi
-[ -n "$LINKER" ] && [ -x "$LINKER" ] || {
-    echo "missing browser-demo linker (ld.lld-20 or ld.lld)" >&2
-    exit 1
-}
+. "$ROOT/scripts/check/lib/clang-23-1-toolchain.shs"
+validate_clang_23_1_toolchain
+CLANG="$CLANG_23_1"
+LINKER="$LLD_23_1"
+AR="$LLVM_AR_23_1"
 
 # The sysroot (crt0.o, libsimpleos_c.a, headers, simpleos.ld) is a BUILD PRODUCT,
 # not a tracked file, so a freshly created worktree has none and the link below
@@ -99,7 +72,7 @@ if [ -z "${SIMPLEOS_SYSROOT:-}" ]; then
     done
     if [ -n "$sysroot_missing" ]; then
         echo "browser-demo: provisioning SimpleOS sysroot (missing $sysroot_missing)" >&2
-        sh "$ROOT/src/os/port/llvm/sysroot.shs" >&2 || {
+        CC="$CLANG" AR="$AR" sh "$ROOT/src/os/port/llvm/sysroot.shs" >&2 || {
             echo "browser-demo sysroot provisioning failed: $SYSROOT" >&2
             exit 1
         }
@@ -131,7 +104,7 @@ cp -R "$LIBC_SRC_DIR/." "$LIBC_GC_DIR/"
 (
     cd "$LIBC_GC_DIR" &&
     make clean >/dev/null 2>&1 &&
-    make CFLAGS="-target x86_64-unknown-none-elf -ffreestanding -nostdlib \
+    make CC="$CLANG" AR="$AR" CFLAGS="-target x86_64-unknown-none-elf -ffreestanding -nostdlib \
 -fno-builtin -mno-red-zone -fno-stack-protector -fno-exceptions \
 -fno-unwind-tables -fno-asynchronous-unwind-tables -O2 -Wall -Wextra \
 -Wno-unused-parameter -ffunction-sections -fdata-sections -I include" >/dev/null
@@ -151,9 +124,7 @@ cp -R "$LIBC_SRC_DIR/." "$LIBC_GC_DIR/"
 
 # Fail loudly if the toolchain produced something the guest loader cannot run.
 elf_magic="$(od -An -tx1 -N 4 "$OUT" | tr -d ' \n')"
-# NR==1: macOS od appends a trailing address-only line, which awk would
-# otherwise turn into a spurious second "0" record.
-machine="$(od -An -tu1 -j 18 -N 2 "$OUT" | awk 'NR == 1 {print $1 + 256 * $2}')"
+machine="$(od -An -tu1 -j 18 -N 2 "$OUT" | awk 'NF >= 2 { print $1 + 256 * $2; exit }')"
 [ "$elf_magic" = "7f454c46" ] && [ "$machine" = "62" ] || {
     echo "invalid browser-demo ELF: $OUT" >&2
     exit 1
@@ -165,5 +136,22 @@ if nm "$OUT" 2>/dev/null | grep -qE '^ +U getpid$'; then
     echo "browser-demo ELF has unresolved getpid: $OUT" >&2
     exit 1
 fi
+
+EVIDENCE="$OUT_DIR/clang-23.1-evidence.txt"
+{
+    echo "schema=simpleos-browser-demo-clang-23.1-v1"
+    echo "target=x86_64-unknown-simpleos"
+    echo "clang=$CLANG"
+    echo "clang_version=$($CLANG --version | head -n 1)"
+    echo "lld=$LINKER"
+    echo "lld_version=$($LINKER --version | head -n 1)"
+    echo "llvm_ar=$AR"
+    echo "llvm_ar_version=$($AR --version | head -n 1)"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$CLANG" "$LINKER" "$AR" "$OUT"
+    else
+        shasum -a 256 "$CLANG" "$LINKER" "$AR" "$OUT"
+    fi
+} >"$EVIDENCE"
 
 echo "$OUT"

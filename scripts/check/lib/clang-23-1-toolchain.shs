@@ -1,0 +1,70 @@
+#!/bin/sh
+# Resolve and validate one coherent LLVM/Clang 23.1 provider.
+
+clang_23_1_version() {
+    "$1" --version 2>/dev/null | sed -n 's/[^0-9]*\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1.\2/p' | head -n 1
+}
+
+clang_23_1_require() {
+    tool_path="$1"
+    tool_role="$2"
+    [ -x "$tool_path" ] || {
+        echo "Clang 23.1 toolchain: missing $tool_role executable: $tool_path" >&2
+        return 1
+    }
+    observed_version="$(clang_23_1_version "$tool_path")"
+    [ "$observed_version" = "23.1" ] || {
+        echo "Clang 23.1 toolchain: rejected $tool_role $tool_path (reported ${observed_version:-unparseable}; expected 23.1.x)" >&2
+        return 1
+    }
+}
+
+clang_23_1_find() {
+    for candidate in "$@"; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            command -v "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+resolve_clang_23_1_toolchain() {
+    prefix="${LLVM_23_1_PREFIX:-}"
+    if [ -n "${CLANG:-}" ]; then
+        CLANG_23_1="$(command -v "$CLANG" 2>/dev/null || true)"
+    elif [ -n "$prefix" ]; then
+        CLANG_23_1="$prefix/bin/clang"
+    else
+        CLANG_23_1="$(clang_23_1_find clang-23.1 clang-23 clang || true)"
+    fi
+    [ -n "$CLANG_23_1" ] || {
+        echo "Clang 23.1 toolchain: compiler not found; set LLVM_23_1_PREFIX or CLANG to an llvmorg-23.1 provider" >&2
+        return 1
+    }
+
+    inferred_bin="$(CDPATH= cd -- "$(dirname -- "$CLANG_23_1")" && pwd)"
+    if [ -n "${LINKER:-}" ]; then
+        LLD_23_1="$(command -v "$LINKER" 2>/dev/null || true)"
+    elif [ -n "$prefix" ]; then
+        LLD_23_1="$prefix/bin/ld.lld"
+    else
+        LLD_23_1="$(clang_23_1_find "$inferred_bin/ld.lld" ld.lld-23.1 ld.lld-23 ld.lld || true)"
+    fi
+    if [ -n "${LLVM_AR:-}" ]; then
+        LLVM_AR_23_1="$(command -v "$LLVM_AR" 2>/dev/null || true)"
+    elif [ -n "$prefix" ]; then
+        LLVM_AR_23_1="$prefix/bin/llvm-ar"
+    else
+        LLVM_AR_23_1="$(clang_23_1_find "$inferred_bin/llvm-ar" llvm-ar-23.1 llvm-ar-23 llvm-ar || true)"
+    fi
+
+    clang_23_1_require "$CLANG_23_1" clang || return 1
+    clang_23_1_require "$LLD_23_1" lld || return 1
+    clang_23_1_require "$LLVM_AR_23_1" llvm-ar || return 1
+    export CLANG_23_1 LLD_23_1 LLVM_AR_23_1
+}
+
+validate_clang_23_1_toolchain() {
+    resolve_clang_23_1_toolchain
+}

@@ -127,15 +127,38 @@ The compiler supports multiple code generation backends:
 | Compiler (`build`, `native-build`) | LLVM | Optimized native binary output |
 | Explicit (`--backend=X`) | User choice | No auto-selection |
 
-Bootstrap defaults to `llvm`. `llvm-lib` and `cranelift` remain explicit
-supported selections. A missing LLVM installation fails with a direct setup
-error; the wrapper never silently changes the requested backend.
+Bootstrap defaults to `llvm`. The pure-Simple `llvm` path uses one coherent
+external Clang/LLVM 23.1 provider. Set `LLVM_23_1_PREFIX` for shell build
+helpers and `SIMPLE_LLVM_PREFIX` for the pure-Simple compiler; both variables
+normally name the same installation prefix. A missing or non-23.1 provider
+fails with a direct setup error; the wrapper never silently changes the
+requested backend.
+
+Until a stable 23.1 archive is published, build the signed upstream
+`llvmorg-23.1.0-rc2` provider with the repository helper:
+
+```bash
+sh scripts/setup/build-llvm-23-1-provider.shs \
+  --source-dir build/toolchains/llvm-project-23.1.0-rc2 --clone --jobs 8
+export LLVM_23_1_PREFIX="$PWD/build/toolchains/llvm-23.1.0-rc2"
+export SIMPLE_LLVM_PREFIX="$LLVM_23_1_PREFIX"
+sh scripts/setup/build-llvm-23-1-provider.shs \
+  --source-dir build/toolchains/llvm-project-23.1.0-rc2 --verify-only
+```
+
+The Rust in-process `llvm` Cargo feature is a separate legacy boundary:
+vendored `inkwell`/`llvm-sys` currently exposes LLVM 18 only. It is not the
+migrated provider path and `LLVM_23_1_PREFIX` must not be presented as making
+that feature LLVM 23.1-capable. Stage 1 normally uses hardcoded Cranelift. If
+an operator explicitly rebuilds the Rust driver with `--features llvm`, it
+still requires `LLVM_SYS_180_PREFIX` and remains upstream-blocked legacy
+functionality until bindings with LLVM 23 support are available.
 
 ### Platform Notes
 
-- **Linux:** LLVM most commonly available. Install `libllvm-18-dev` for `llvm-lib` backend. Preferred linker: `mold`.
-- **macOS:** Needs Homebrew LLVM (`brew install llvm`) for the default LLVM backend. Select `--backend=cranelift` explicitly when desired. Linker: system `ld` (ld64).
-- **Windows:** Install LLVM for the default backend or select `--backend=cranelift` explicitly. Both MSVC and MinGW toolchains remain supported.
+- **Linux:** Use the verified 23.1 provider prefix above for pure-Simple and SimpleOS builds. Preferred hosted linker: `mold`.
+- **macOS:** Use the verified 23.1 provider prefix above; the unversioned Homebrew `llvm` formula is not sufficient unless it reports 23.1. Select `--backend=cranelift` explicitly when desired. Hosted linker: system `ld` (ld64).
+- **Windows:** Install a coherent Clang/LLVM 23.1 provider for the default external LLVM backend or select `--backend=cranelift` explicitly. Both MSVC and MinGW toolchains remain supported.
 
 ### SimpleOS Multi-Platform Binaries
 
@@ -150,7 +173,13 @@ bin/simple run examples/09_embedded/simple_os/build.spl -- --arch=x86_32
 bin/simple run examples/09_embedded/simple_os/build.spl -- --arch=i686
 ```
 
-The 32-bit x86 lane is `i686-simpleos`: C boot support is compiled with `--target=i686-unknown-none-elf -m32`, assembly boot support uses the same i686 freestanding target, QEMU runs with `qemu-system-i386`, and the SimpleOS runner defaults that lane to LLVM because Cranelift does not expose an i686 freestanding target here. Build the selected compiler binary with the Rust `llvm` feature and LLVM 18 available through `LLVM_SYS_180_PREFIX` or system discovery before using this lane.
+The 32-bit x86 lane is `i686-simpleos`: C boot support is compiled with
+`--target=i686-unknown-none-elf -m32`, assembly boot support uses the same i686
+freestanding target, QEMU runs with `qemu-system-i386`, and the SimpleOS runner
+defaults that lane to LLVM because Cranelift does not expose an i686
+freestanding target here. Use a pure-Simple self-hosted compiler with
+`LLVM_23_1_PREFIX` and `SIMPLE_LLVM_PREFIX` set to the verified provider. Do
+not rebuild or substitute the Rust LLVM 18 driver for this production lane.
 
 ---
 
@@ -391,7 +420,7 @@ build/bootstrap/full/<triple>/simple
 ### Required Tools
 
 - **Rust** 1.75+ (for Stage 1 seed) -- install from [rustup.rs](https://rustup.rs)
-- **clang** 14+ (C11 support)
+- **Clang/LLVM** 23.1 provider for pure-Simple LLVM and SimpleOS builds
 - **cmake** 3.20+
 - **Git**
 
@@ -403,7 +432,9 @@ Platform-specific build tools:
 ### Verify Tools
 
 ```bash
-clang --version     # 14+
+"$LLVM_23_1_PREFIX/bin/clang" --version       # 23.1.x
+"$LLVM_23_1_PREFIX/bin/ld.lld" --version      # 23.1.x
+"$LLVM_23_1_PREFIX/bin/llvm-config" --version # 23.1.x
 cmake --version     # 3.20+
 rustc --version     # 1.75+
 ```

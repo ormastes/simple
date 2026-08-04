@@ -27,7 +27,9 @@ Per-lane specs: `test/03_system/os/qemu/sys_qemu_<arch>_fs_exec_spec.spl`.
 
 ```bash
 unset SIMPLE_ALLOW_FREESTANDING_STUBS
-env SIMPLE_BOOT_MINIMAL=1 src/compiler_rust/target/debug/simple native-build \
+export LLVM_23_1_PREFIX=/absolute/path/to/llvm-23.1
+export SIMPLE_LLVM_PREFIX="$LLVM_23_1_PREFIX"
+env SIMPLE_BOOT_MINIMAL=1 bin/simple native-build \
   --source build/os/generated --source src/os --source examples/09_embedded/simple_os \
   --backend <cranelift|llvm> --opt-level=aggressive --entry-closure \
   --entry examples/09_embedded/simple_os/arch/<arch>/<entry>.spl \
@@ -35,8 +37,12 @@ env SIMPLE_BOOT_MINIMAL=1 src/compiler_rust/target/debug/simple native-build \
   --linker-script examples/09_embedded/simple_os/arch/<arch>/<linker>.ld
 ```
 
-- **riscv32 requires the LLVM driver** (cranelift refuses rv32):
-  `cd src/compiler_rust && LLVM_SYS_180_PREFIX=/usr/lib/llvm-18 cargo build --package driver --features llvm`
+- **riscv32 requires the pure-Simple LLVM backend** (Cranelift refuses rv32).
+  Build or verify the provider with
+  `scripts/setup/build-llvm-23-1-provider.shs`, then set both
+  `LLVM_23_1_PREFIX` and `SIMPLE_LLVM_PREFIX` to it. The Rust in-process LLVM
+  feature remains bound to LLVM 18 and is not a production fallback for this
+  lane.
 - Judge unresolved symbols by `nm <objects-kept>/*.o`, not link success (weak no-op
   defsyms are injected unconditionally).
 - Builds get killed under heavy machine load — run nice'd/background with retries.
