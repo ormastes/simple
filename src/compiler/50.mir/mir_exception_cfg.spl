@@ -137,10 +137,181 @@ fn exception_is_exact_facet_release(
     val lease_exact = match lease_type.unwrap():
         case Opaque(name): name == "__simple_facet_descriptor_lease_abi"
         case _: false
-    # The MIR body carries no cleanup-entry manifest, so exact release count
-    # cannot be proven here. Symbol, signature, nil destination, and the two
-    # body-local ABI arguments in owner/lease order are nevertheless exact.
+    # The manifest verifier adds exact site, identity, count, and order checks.
     owner_exact and lease_exact
+
+fn exception_release_matches_entry(
+    body: MirBody, inst: MirInstKind, entry: MirFacetCleanupEntryContract
+) -> bool:
+    if (entry.release_symbol !=
+        "aspect_execution_context_release_facet_descriptor_or_panic"):
+        return false
+    match inst:
+        case Call(dest, func, args):
+            if not exception_is_exact_facet_release(body, dest, func, args):
+                return false
+            if args.len() != 2:
+                return false
+            exception_operand_local(args[0]) == entry.owner.id and
+                exception_operand_local(args[1]) == entry.lease.id
+        case _: false
+
+fn exception_validate_cleanup_manifest(
+    body: MirBody,
+    contract: MirExceptionCleanupContract,
+    region: Dict<i64, bool>
+) -> Result<(), text>:
+    val entry_block = exception_block_by_id(body, contract.unwind_entry.id)
+    if entry_block == nil or not region.has(contract.unwind_entry.id):
+        return exception_cfg_error("facet cleanup manifest has stale unwind entry")
+    if entry_block.unwrap().instructions.len() == 0:
+        return exception_cfg_error("facet cleanup manifest entry has no LandingPad")
+    match entry_block.unwrap().instructions[0].kind:
+        case LandingPad(token):
+            if token.id != contract.token.id:
+                return exception_cfg_error("facet cleanup manifest token does not match LandingPad")
+        case _:
+            return exception_cfg_error("facet cleanup manifest entry does not begin with LandingPad")
+
+    var leases: Dict<i64, bool> = {}
+    for entry in contract.entries:
+        val owner_type = exception_local_type(body, entry.owner.id)
+        val lease_type = exception_local_type(body, entry.lease.id)
+        if owner_type == nil or lease_type == nil:
+            return exception_cfg_error("facet cleanup manifest references a stale local")
+        val owner_ok = match owner_type.unwrap():
+            case Opaque(name): name == "AspectExecutionContext"
+            case _: false
+        val lease_ok = match lease_type.unwrap():
+            case Opaque(name): name == "__simple_facet_descriptor_lease_abi"
+            case _: false
+        if not owner_ok or not lease_ok:
+            return exception_cfg_error("facet cleanup manifest owner or lease type is not exact")
+        if leases.has(entry.lease.id):
+            return exception_cfg_error("facet cleanup manifest repeats a lease local")
+        leases[entry.lease.id] = true
+
+        val site_block = exception_block_by_id(body, entry.release_site.block.id)
+        if site_block == nil or not region.has(entry.release_site.block.id):
+            return exception_cfg_error("facet cleanup manifest has a stale release block")
+        if (entry.release_site.instruction_index < 0 or
+            entry.release_site.instruction_index >= site_block.unwrap().instructions.len()):
+            return exception_cfg_error("facet cleanup manifest has a stale release instruction index")
+        val site_inst = site_block.unwrap().instructions[
+            entry.release_site.instruction_index]
+        if not exception_release_matches_entry(body, site_inst.kind, entry):
+            return exception_cfg_error("facet cleanup manifest release site does not match exact ABI arguments")
+
+        if entry.present == nil:
+            if entry.guard_block != nil or entry.continue_block != nil:
+                return exception_cfg_error("unconditional cleanup manifest entry carries guard metadata")
+        else:
+            val present = entry.present.unwrap()
+            val present_type = exception_local_type(body, present.id)
+            if present_type == nil or present_type.unwrap() != MirTypeKind.Bool:
+                return exception_cfg_error("facet cleanup manifest presence guard is not Bool")
+            if entry.guard_block == nil or entry.continue_block == nil:
+                return exception_cfg_error("guarded cleanup manifest entry lacks CFG metadata")
+            val guard_id = entry.guard_block.unwrap().id
+            val continue_id = entry.continue_block.unwrap().id
+            val guard = exception_block_by_id(body, guard_id)
+            val release = exception_block_by_id(body, entry.release_site.block.id)
+            if (guard == nil or release == nil or not region.has(guard_id) or
+                not region.has(continue_id)):
+                return exception_cfg_error("guarded cleanup manifest references a stale CFG block")
+            match guard.unwrap().terminator:
+                case If(cond, then_, else_):
+                    if (exception_operand_local(cond) != present.id or
+                        then_.id != entry.release_site.block.id or
+                        else_.id != continue_id):
+                        return exception_cfg_error("guarded cleanup manifest does not match true-release false-bypass CFG")
+                case _:
+                    return exception_cfg_error("guarded cleanup manifest guard block is not If")
+            match release.unwrap().terminator:
+                case Goto(target):
+                    if target.id != continue_id:
+                        return exception_cfg_error("guarded cleanup release does not reach its continuation")
+                case _:
+                    return exception_cfg_error("guarded cleanup release block is not a single continuation edge")
+            for candidate in body.blocks:
+                if not region.has(candidate.id.id) or candidate.id.id == guard_id:
+                    continue
+                for successor in exception_successors(candidate.terminator):
+                    if successor == entry.release_site.block.id:
+                        return exception_cfg_error("guarded cleanup release block has an extra predecessor")
+
+    var cursors: Dict<i64, i64> = {}
+    var worklist: [i64] = [contract.unwind_entry.id]
+    cursors[contract.unwind_entry.id] = 0
+    while worklist.len() > 0:
+        val block_id = worklist.pop()
+        val block = exception_block_by_id(body, block_id).unwrap()
+        var cursor = cursors[block_id]
+        var instruction_index = 0
+        for instruction in block.instructions:
+            match instruction.kind:
+                case Call(_, _, _):
+                    if cursor >= contract.entries.len():
+                        return exception_cfg_error("facet cleanup path contains an extra release")
+                    val expected = contract.entries[cursor]
+                    if (expected.release_site.block.id != block_id or
+                        expected.release_site.instruction_index != instruction_index):
+                        return exception_cfg_error("facet cleanup releases are missing or reordered")
+                    if not exception_release_matches_entry(body, instruction.kind, expected):
+                        return exception_cfg_error("facet cleanup release does not match manifest")
+                    cursor = cursor + 1
+                case _:
+                    ()
+            instruction_index = instruction_index + 1
+
+        match block.terminator:
+            case Resume(token):
+                if (exception_operand_local(token) != contract.token.id or
+                    cursor != contract.entries.len()):
+                    return exception_cfg_error("facet cleanup Resume occurs before all manifest entries are consumed")
+            case If(_, then_, else_):
+                var guarded = false
+                var false_cursor = cursor
+                if cursor < contract.entries.len():
+                    val expected = contract.entries[cursor]
+                    if (expected.present != nil and expected.guard_block != nil and
+                        expected.guard_block.unwrap().id == block_id):
+                        guarded = true
+                        false_cursor = cursor + 1
+                val successor_ids = [then_.id, else_.id]
+                val successor_cursors = [cursor, if guarded: false_cursor else: cursor]
+                var successor_index = 0
+                while successor_index < successor_ids.len():
+                    val successor = successor_ids[successor_index]
+                    val next_cursor = successor_cursors[successor_index]
+                    if cursors.has(successor):
+                        if cursors[successor] != next_cursor:
+                            return exception_cfg_error("facet cleanup join has inconsistent manifest order")
+                    else:
+                        cursors[successor] = next_cursor
+                        worklist.push(successor)
+                    successor_index = successor_index + 1
+            case Goto(target):
+                if cursors.has(target.id):
+                    if cursors[target.id] != cursor:
+                        return exception_cfg_error("facet cleanup join has inconsistent manifest order")
+                else:
+                    cursors[target.id] = cursor
+                    worklist.push(target.id)
+            case Switch(_, targets, default):
+                var successors: [i64] = [default.id]
+                for target in targets:
+                    successors.push(target.target.id)
+                for successor in successors:
+                    if cursors.has(successor):
+                        if cursors[successor] != cursor:
+                            return exception_cfg_error("facet cleanup join has inconsistent manifest order")
+                    else:
+                        cursors[successor] = cursor
+                        worklist.push(successor)
+            case _:
+                return exception_cfg_error("facet cleanup manifest reaches a non-Resume terminal")
+    Ok(())
 
 fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
     """Validate unwind-only landing pads and linear exception-token provenance."""
@@ -213,6 +384,15 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
             return exception_cfg_error(
                 "ExceptionToken local {token_id} must have exactly one LandingPad definition")
 
+    var manifest_entries: Dict<i64, bool> = {}
+    for contract in body.exception_cleanup_contracts:
+        val unwind_id = contract.unwind_entry.id
+        if manifest_entries.has(unwind_id):
+            return exception_cfg_error("facet cleanup landing pad has multiple manifests")
+        if not unwind_targets.has(unwind_id):
+            return exception_cfg_error("orphan facet cleanup manifest has no unwind entry")
+        manifest_entries[unwind_id] = true
+
     for block in body.blocks:
         for instruction in block.instructions:
             val instruction_dest = exception_inst_dest_id(instruction.kind)
@@ -269,6 +449,7 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
             case LandingPad(dest): dest.id
             case _: -1
         var region: Dict<i64, bool> = {}
+        var has_facet_release = false
         var worklist: [i64] = [unwind_id]
         while worklist.len() > 0:
             val current = worklist.pop()
@@ -285,6 +466,7 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
                         if not exception_is_exact_facet_release(body, dest, func, args):
                             return exception_cfg_error(
                                 "cleanup region call is not the exact NoUnwind facet release ABI")
+                        has_facet_release = true
                     case _:
                         return exception_cfg_error(
                             "cleanup region contains a non-cleanup instruction")
@@ -298,6 +480,20 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
                 case _:
                     return exception_cfg_error(
                         "unwind cleanup path must terminate in Resume")
+
+        var matching_contract: MirExceptionCleanupContract? = nil
+        for contract in body.exception_cleanup_contracts:
+            if contract.unwind_entry.id == unwind_id:
+                matching_contract = Some(contract)
+        if has_facet_release and matching_contract == nil:
+            return exception_cfg_error("facet cleanup landing pad has no manifest")
+        if not has_facet_release and matching_contract != nil:
+            return exception_cfg_error("orphan facet cleanup manifest has no release calls")
+        if matching_contract != nil:
+            val manifest_validation = exception_validate_cleanup_manifest(
+                body, matching_contract.unwrap(), region)
+            if manifest_validation.is_err():
+                return manifest_validation
 
         for block in body.blocks:
             if region.has(block.id.id):
