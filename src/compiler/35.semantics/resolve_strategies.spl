@@ -23,41 +23,29 @@ impl MethodResolver:
         2. Trait method implemented by receiver's type
         3. Free function where receiver becomes first argument
         """
-        val receiver_type = receiver.type_
-
-        # If no type information, cannot resolve
-        if not receiver_type.?:
+        if receiver.type_ == nil:
             self.add_error(
                 ("cannot resolve method '{method}': receiver type is unknown. " +
                 "Ensure the receiver expression has a valid type."),
                 receiver.span
             )
             return MethodResolution.Unresolved
-
-        val ty = match receiver_type:
-            case Some(value): value
-            case nil:
-                self.add_error(
-                    ("cannot resolve method '{method}': receiver type is unknown. " +
-                    "Ensure the receiver expression has a valid type."),
-                    receiver.span
-                )
-                return MethodResolution.Unresolved
+        val ty = receiver.type_ ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
         val type_name = self.format_type(ty)
 
         # Priority 1: Instance method on receiver's type
         val instance_result = self.try_instance_method(ty, method)
-        if val Some(result) = instance_result:
+        if val result = instance_result:
             return result
 
         # Priority 2: Trait method
         val trait_result = self.try_trait_method(ty, method)
-        if val Some(result) = trait_result:
+        if val result = trait_result:
             return result
 
         # Priority 3: UFCS - Free function
         val ufcs_result = self.try_ufcs(ty, method, args)
-        if val Some(result) = ufcs_result:
+        if val result = ufcs_result:
             return result
 
         # No resolution found - provide helpful error message
@@ -106,8 +94,8 @@ impl MethodResolver:
         var suggestions: [text] = []
 
         # Get type symbol if named type
-        val type_sym = self.type_checker.get_type_symbol(ty)
-        if val Some(type_id) = type_sym:
+        val type_sym = TypeChecker.get_type_symbol(ty)
+        if val type_id = type_sym:
             # Look for similar method names in the type
             val methods = self.symbols.get_methods_for_type(type_id)
             for m in methods:
@@ -144,18 +132,10 @@ impl MethodResolver:
 
     me try_instance_method(receiver_type: HirType, method: text) -> MethodResolution?:
         """Try to find an instance method on the receiver's type."""
-        val type_sym = self.type_checker.get_type_symbol(receiver_type)
-        if not type_sym.?:
-            return nil
-
-        val type_id = match type_sym:
-            case Some(symbol): symbol
-            case nil: return nil
-        val method_sym = self.symbols.lookup_method_in_type(type_id, method)
-
-        match method_sym:
-            case Some(symbol): Some(MethodResolution.InstanceMethod(type_id, symbol))
-            case nil: nil
+        if val type_id = TypeChecker.get_type_symbol(receiver_type):
+            if val method_id = self.symbols.lookup_method_in_type_raw(type_id.id, method):
+                return MethodResolution.InstanceMethod(type_id, method_id)
+        nil
 
     me try_trait_method(receiver_type: HirType, method: text) -> MethodResolution?:
         """Try to find a trait method implemented by the receiver's type.
@@ -165,29 +145,24 @@ impl MethodResolver:
         - Supertrait resolution (Ord requires Eq)
         - Coherence checking (no overlapping impls)
         """
-        val type_sym = self.type_checker.get_type_symbol(receiver_type)
-        if not type_sym.?:
+        var type_id = SymbolId(id: -1)
+        if val found_type_id = TypeChecker.get_type_symbol(receiver_type):
+            type_id = found_type_id
+        if not type_id.is_valid():
             return nil
-
-        val resolved_type_id = match type_sym:
-            case Some(type_id):
-                if type_id == nil:
-                    return nil
-                type_id.id
-            case nil:
-                return nil
+        val resolved_type_id = type_id.id
 
         # LEGACY PATH: Use simple trait_impls map as fallback
         # This handles impls that were registered before TraitSolver integration
-        if not self.trait_impls[resolved_type_id].?:
+        if not self.trait_impls.contains_key(resolved_type_id):
             # Try enhanced TraitSolver path for generic impls
             return self.try_trait_method_with_solver(receiver_type, method)
 
         val traits = self.trait_impls[resolved_type_id]
         for trait_id in traits:
-            val method_sym = self.symbols.lookup_trait_method(trait_id, method)
-            if val Some(symbol) = method_sym:
-                return Some(MethodResolution.TraitMethod(trait_id, symbol))
+            val method_sym = self.symbols.lookup_trait_method_raw(trait_id.id, method)
+            if val symbol = method_sym:
+                return MethodResolution.TraitMethod(trait_id, symbol)
 
         # If legacy lookup failed, try enhanced solver
         self.try_trait_method_with_solver(receiver_type, method)
@@ -335,7 +310,7 @@ impl MethodResolver:
         val type_id = type_sym_id
 
         # Look for static method in the type's definition
-        val method_sym = self.symbols.lookup_static_method(type_id, method)
+        val method_sym = self.symbols.lookup_static_method_raw(type_id.id, method)
 
         if val Some(symbol) = method_sym:
             MethodResolution.StaticMethod(type_id, symbol)

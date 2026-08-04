@@ -2,7 +2,7 @@
 #
 # codex-impl: Stage4 module retention is reduced by keeping declaration
 # surfaces.  The surface deliberately omits ordinary executable bodies,
-# parameter default expressions, composite fields, and constant values.
+# parameter default expressions, composite field defaults, and constant values.
 
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.parser_types.*
@@ -15,6 +15,11 @@ struct ModuleSurfaceParam:
     name: text
     has_type_: bool
     type_: Type
+    # Native-safe scalar projections.  A parser Type contains an enum payload;
+    # copying it through a nested surface collection can corrupt that payload
+    # on the staged native ABI, while text fields remain stable.
+    type_name: text
+    array_element_name: text
     has_default: bool
     is_mutable: bool
     span: Span
@@ -25,6 +30,8 @@ struct ModuleSurfaceCallable:
     params: [ModuleSurfaceParam]
     has_return_type: bool
     return_type: Type
+    return_type_name: text
+    return_array_element_name: text
     visibility: Visibility
     is_async: bool
     is_static: bool
@@ -36,10 +43,17 @@ struct ModuleSurfaceCallable:
     is_extern: bool
     span: Span
 
+struct ModuleSurfaceField:
+    name: text
+    type_: Type
+    type_name: text
+    array_element_name: text
+
 struct ModuleSurfaceComposite:
     name: text
     kind: text
     type_params: [ParserTypeParam]
+    fields: [ModuleSurfaceField]
     visibility: Visibility
     is_public: bool
     span: Span
@@ -738,6 +752,8 @@ fn module_surface_callable_from_function(function_: ParserFunction) -> ModuleSur
             name: param.name,
             has_type_: param.has_type_,
             type_: param.type_,
+            type_name: parser_type_kind_named_name(param.type_.kind),
+            array_element_name: parser_type_kind_array_element_name(param.type_.kind),
             has_default: false,
             is_mutable: param.is_mutable,
             span: param.span
@@ -748,6 +764,8 @@ fn module_surface_callable_from_function(function_: ParserFunction) -> ModuleSur
         params: params,
         has_return_type: function_.has_return_type,
         return_type: function_.return_type,
+        return_type_name: parser_type_kind_named_name(function_.return_type.kind),
+        return_array_element_name: parser_type_kind_array_element_name(function_.return_type.kind),
         visibility: function_.visibility,
         is_async: function_.is_async,
         is_static: function_.is_static,
@@ -839,13 +857,34 @@ fn module_surface_from_module(module: ParserModule, source: SourceFile, source_i
     var composites: Dict<text, ModuleSurfaceComposite> = {}
     for name in module.classes.keys():
         val class_ = module.classes[name]
-        composites[name] = ModuleSurfaceComposite(name: class_.name, kind: "class", type_params: class_.type_params, visibility: class_.visibility, is_public: class_.is_public, span: class_.span)
+        var fields: [ModuleSurfaceField] = []
+        for field in class_.fields:
+            fields = fields.push(ModuleSurfaceField(
+                name: field.name,
+                type_: field.type_,
+                type_name: parser_type_kind_named_name(field.type_.kind),
+                array_element_name: parser_type_kind_array_element_name(field.type_.kind)))
+        composites[name] = ModuleSurfaceComposite(name: class_.name, kind: "class", type_params: class_.type_params, fields: fields, visibility: class_.visibility, is_public: class_.is_public, span: class_.span)
     for name in module.actors.keys():
         val actor = module.actors[name]
-        composites[name] = ModuleSurfaceComposite(name: actor.name, kind: "actor", type_params: actor.type_params, visibility: actor.visibility, is_public: actor.is_public, span: actor.span)
+        var fields: [ModuleSurfaceField] = []
+        for field in actor.fields:
+            fields = fields.push(ModuleSurfaceField(
+                name: field.name,
+                type_: field.type_,
+                type_name: parser_type_kind_named_name(field.type_.kind),
+                array_element_name: parser_type_kind_array_element_name(field.type_.kind)))
+        composites[name] = ModuleSurfaceComposite(name: actor.name, kind: "actor", type_params: actor.type_params, fields: fields, visibility: actor.visibility, is_public: actor.is_public, span: actor.span)
     for name in module.structs.keys():
         val struct_ = module.structs[name]
-        composites[name] = ModuleSurfaceComposite(name: struct_.name, kind: "struct", type_params: struct_.type_params, visibility: struct_.visibility, is_public: struct_.is_public, span: struct_.span)
+        var fields: [ModuleSurfaceField] = []
+        for field in struct_.fields:
+            fields = fields.push(ModuleSurfaceField(
+                name: field.name,
+                type_: field.type_,
+                type_name: parser_type_kind_named_name(field.type_.kind),
+                array_element_name: parser_type_kind_array_element_name(field.type_.kind)))
+        composites[name] = ModuleSurfaceComposite(name: struct_.name, kind: "struct", type_params: struct_.type_params, fields: fields, visibility: struct_.visibility, is_public: struct_.is_public, span: struct_.span)
 
     var enums: Dict<text, ModuleSurfaceEnum> = {}
     for name in module.enums.keys():

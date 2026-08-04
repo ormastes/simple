@@ -139,6 +139,9 @@ fn _hir_named_type_symbol(type_: HirType) -> SymbolId?:
         case HirTypeKind.Named(symbol, _): symbol
         case _: nil
 
+fn _hir_missing_field_type() -> HirType:
+    HirType(kind: HirTypeKind.Error, span: Span.empty())
+
 # Expression Lowering
 # ============================================================================
 
@@ -186,31 +189,49 @@ impl HirLowering:
         nil
 
     me field_type_for_owner(owner_symbol_id: SymbolId, field_name: text) -> HirType?:
-        if val owner_symbol = self.symbols.get_symbol_raw(owner_symbol_id.id):
+        val found = self.field_type_for_owner_raw(owner_symbol_id.id, field_name)
+        match found.kind:
+            case HirTypeKind.Error: nil
+            case _: found
+
+    me field_type_for_owner_raw(raw_owner_symbol_id: i64, field_name: text) -> HirType:
+        if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
+            if val owner_module = owner_symbol.defining_module:
+                val canonical_name = owner_module + "." + owner_symbol.name
+                if rt_dict_contains(self.struct_field_types_by_name, canonical_name):
+                    val canonical_fields = self.struct_field_types_by_name[canonical_name]
+                    if rt_dict_contains(canonical_fields, field_name):
+                        return canonical_fields[field_name]
             if rt_dict_contains(self.struct_field_types_by_name, owner_symbol.name):
                 val owner_fields = self.struct_field_types_by_name[owner_symbol.name]
                 if rt_dict_contains(owner_fields, field_name):
                     return owner_fields[field_name]
-        nil
+        _hir_missing_field_type()
 
     me field_type_for_base(base_symbol: SymbolId, field_name: text) -> HirType?:
-        if rt_dict_contains(self.local_struct_types, base_symbol.id):
-            val struct_name = self.local_struct_types[base_symbol.id]
+        val found = self.field_type_for_base_raw(base_symbol.id, field_name)
+        match found.kind:
+            case HirTypeKind.Error: nil
+            case _: found
+
+    me field_type_for_base_raw(raw_base_symbol_id: i64, field_name: text) -> HirType:
+        if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
+            val struct_name = self.local_struct_types[raw_base_symbol_id]
             if rt_dict_contains(self.struct_field_types_by_name, struct_name):
                 val struct_fields = self.struct_field_types_by_name[struct_name]
                 if rt_dict_contains(struct_fields, field_name):
                     return struct_fields[field_name]
 
-        if val base_type = self.symbols.get_symbol_type_raw(base_symbol.id):
-            if val owner_symbol = _hir_named_type_symbol(base_type):
-                return self.field_type_for_owner(owner_symbol, field_name)
+        val raw_owner_symbol_id = self.symbols.get_symbol_named_type_raw(raw_base_symbol_id)
+        if raw_owner_symbol_id >= 0:
+            return self.field_type_for_owner_raw(raw_owner_symbol_id, field_name)
 
         if val self_type = self.current_method_self_type:
-            if val base_definition = self.symbols.get_symbol_raw(base_symbol.id):
+            if val base_definition = self.symbols.get_symbol_raw(raw_base_symbol_id):
                 if base_definition.name == "self" or base_definition.name == "me":
                     if val owner_symbol = _hir_named_type_symbol(self_type):
-                        return self.field_type_for_owner(owner_symbol, field_name)
-        nil
+                        return self.field_type_for_owner_raw(owner_symbol.id, field_name)
+        _hir_missing_field_type()
 
     me combine_pattern_conditions(conditions: [HirExpr], count: i64, op: HirBinOp, span: Span) -> HirExpr:
         if count == 1:
@@ -609,11 +630,16 @@ impl HirLowering:
                     # falls through to the pre-existing nil/i64-default
                     # behavior unchanged.
                     val fld_base_sym = _hir_expr_symbol_or_invalid(fld_lowered_base.kind)
-                    val fld_field_type: HirType? = if fld_base_sym.is_valid():
-                        self.field_type_for_base(fld_base_sym, fld_name_t)
-                    else:
-                        nil
-                    return HirExpr(kind: HirExprKind.Field(fld_lowered_base, fld_name_t, nil), type_: fld_field_type, span: e.span)
+                    if fld_base_sym.is_valid():
+                        val fld_field_type = self.field_type_for_base_raw(fld_base_sym.id, fld_name_t)
+                        match fld_field_type.kind:
+                            case HirTypeKind.Error: ()
+                            case _:
+                                return HirExpr(
+                                    kind: HirExprKind.Field(fld_lowered_base, fld_name_t, nil),
+                                    type_: fld_field_type,
+                                    span: e.span)
+                    return HirExpr(kind: HirExprKind.Field(fld_lowered_base, fld_name_t, nil), type_: nil, span: e.span)
                 case _:
                     pass
         if kind_disc_v == 1138084884:  # hash("Block")
@@ -738,17 +764,39 @@ impl HirLowering:
             case ExprKind.Index(base, index):
                 val index_base_t: Expr = base
                 val index_t: Expr = index
+                val lowered_index = self.lower_hir_expr(index_t)
                 match index_base_t.kind:
                     case ExprKind.ExistsCheck(exists_base):
                         val exists_base_t: Expr = exists_base
                         val indexed = HirExpr(
-                            kind: HirExprKind.Index(self.lower_hir_expr(exists_base_t), self.lower_hir_expr(index_t)),
+                            kind: HirExprKind.Index(self.lower_hir_expr(exists_base_t), lowered_index),
                             type_: nil,
                             span: e.span
                         )
                         HirExprKind.ExistsCheck(indexed)
                     case _:
-                        HirExprKind.Index(self.lower_hir_expr(index_base_t), self.lower_hir_expr(index_t))
+                        val lowered_base = self.lower_hir_expr(index_base_t)
+                        # Preserve an element type while the freshly lowered
+                        # base is still local.  Reconstructing it later in the
+                        # semantic pass requires extracting nested HirType enum
+                        # payloads after collection transfer, which is unsafe on
+                        # the staged native ABI and left `row.values[0]`
+                        # untyped even though `row.values` was `[Cell]`.
+                        if lowered_base.type_ != nil:
+                            val base_type = lowered_base.type_ ?? HirType(kind: HirTypeKind.Error, span: e.span)
+                            match base_type.kind:
+                                case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                                    return HirExpr(
+                                        kind: HirExprKind.Index(lowered_base, lowered_index),
+                                        type_: element,
+                                        span: e.span)
+                                case HirTypeKind.Dict(_, value):
+                                    return HirExpr(
+                                        kind: HirExprKind.Index(lowered_base, lowered_index),
+                                        type_: value,
+                                        span: e.span)
+                                case _: ()
+                        HirExprKind.Index(lowered_base, lowered_index)
 
             case ExprKind.OptionalChain(base, field):
                 HirExprKind.OptionalChain(self.lower_hir_expr(base), field)

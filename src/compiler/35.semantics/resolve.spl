@@ -86,10 +86,10 @@ struct TypeChecker:
             # Default: not compatible
             case _: false
 
-    fn get_type_symbol(ty: HirType) -> SymbolId?:
+    static fn get_type_symbol(ty: HirType) -> SymbolId?:
         """Get the symbol ID for a named type."""
         match ty.kind:
-            case Named(sym, _): Some(sym)
+            case Named(sym, _): sym
             case _: nil
 
 # ============================================================================
@@ -237,13 +237,13 @@ impl MethodResolver:
         for impl_ in impls:
             match impl_.trait_:
                 case Some(trait_type):
-                    match self.type_checker.get_type_symbol(impl_.type_):
+                    match TypeChecker.get_type_symbol(impl_.type_):
                         case Some(type_symbol):
                             if type_symbol == nil:
                                 pass
                             else:
                                 val type_id = type_symbol.id
-                                match self.type_checker.get_type_symbol(trait_type):
+                                match TypeChecker.get_type_symbol(trait_type):
                                     case Some(trait_symbol):
                                         if trait_symbol == nil:
                                             pass
@@ -612,6 +612,54 @@ impl MethodResolver:
             case Error: expr.kind
 
         HirExpr(kind: kind, has_type_: expr.has_type_, type_: resolved_type, span: expr.span)
+
+    me attach_inferred_type(expr: HirExpr) -> HirExpr:
+        if expr.type_ != nil:
+            return expr
+        if val inferred = self.infer_expr_type(expr):
+            return HirExpr(kind: expr.kind, has_type_: true, type_: inferred, span: expr.span)
+        expr
+
+    me infer_symbol_value_type(raw_symbol_id: i64, span: Span) -> HirType?:
+        # Keep the resolver's native boundary scalar. Passing a value-type
+        # SymbolId into a helper is miscompiled on the staged native lane; the
+        # SymbolTable owner exposes get_symbol_raw for the same reason.
+        if val symbol = self.symbols.get_symbol_raw(raw_symbol_id):
+            if symbol.type_ != nil:
+                val symbol_type = symbol.type_ ?? HirType(kind: HirTypeKind.Error, span: span)
+                return symbol_type
+            match symbol.kind:
+                case Class | Struct | Enum:
+                    return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: span)
+                case _: ()
+        nil
+
+    me infer_expr_type(expr: HirExpr) -> HirType?:
+        if expr.type_ != nil:
+            val known_type = expr.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
+            match known_type.kind:
+                case Error | Infer(_, _): ()
+                case _: return known_type
+        match expr.kind:
+            case Var(symbol): self.infer_symbol_value_type(symbol.id, expr.span)
+            case NamedVar(symbol, _): self.infer_symbol_value_type(symbol.id, expr.span)
+            case Call(callee, _, _):
+                val callee_type = self.infer_expr_type(callee)
+                if val found_type = callee_type:
+                    match found_type.kind:
+                        case Function(_, return_type, _): return return_type
+                        case Named(_, _): return found_type
+                        case _: ()
+                nil
+            case StructLit(type_, _): type_
+            case Index(base, _):
+                if val base_type = self.infer_expr_type(base):
+                    match base_type.kind:
+                        case Array(element, _) | Slice(element): return element
+                        case Dict(_, value): return value
+                        case _: ()
+                nil
+            case _: nil
 
     me resolve_call_result_type(resolution: MethodResolution, fallback: HirType?) -> HirType?:
         """Use the resolved callee's return type when available."""

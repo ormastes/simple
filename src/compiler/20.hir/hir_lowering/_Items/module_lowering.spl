@@ -413,8 +413,66 @@ impl HirLowering:
                 return nil
             param_types = param_types.push(self.lower_type(callable.params[param_idx].type_))
             param_idx = param_idx + 1
-        Some(HirType(kind: HirTypeKind.Function(param_types, self.lower_type(callable.return_type), []), span: callable.span))
+        HirType(kind: HirTypeKind.Function(param_types, self.lower_type(callable.return_type), []), span: callable.span)
 
+    me imported_surface_type(type_: Type, imported_mod: ModuleSurface) -> HirType:
+        val source_name = parser_type_kind_named_name(type_.kind)
+        if source_name != "":
+            val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
+                imported_mod.module_name, source_name)
+            if raw_symbol_id >= 0:
+                return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: type_.span)
+        self.lower_type(type_)
+
+    me imported_surface_type_projected(type_: Type, type_name: text, array_element_name: text, imported_mod: ModuleSurface) -> HirType:
+        # Prefer scalar projections captured before the parser Type crossed a
+        # nested Dict/array boundary.  The retained Type remains the complete
+        # fallback for shapes not yet affected by the staged-native ABI bug.
+        if type_name != "":
+            val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
+                imported_mod.module_name, type_name)
+            if raw_symbol_id >= 0:
+                return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: type_.span)
+            return HirType(kind: self.lower_named_kind(type_name, [], type_.span), span: type_.span)
+        if array_element_name != "":
+            val raw_element_id = self.symbols.lookup_qualified_type_raw(
+                imported_mod.module_name, array_element_name)
+            val element = if raw_element_id >= 0:
+                HirType(kind: HirTypeKind.Named(SymbolId(id: raw_element_id), []), span: type_.span)
+            else:
+                HirType(kind: self.lower_named_kind(array_element_name, [], type_.span), span: type_.span)
+            return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
+        self.imported_surface_type(type_, imported_mod)
+
+    me declared_imported_surface_callable_type(callable: ModuleSurfaceCallable, imported_mod: ModuleSurface, owner_symbol: SymbolId?) -> HirType?:
+        if callable.type_params.len() > 0 or not callable.has_return_type:
+            return nil
+        var param_types: [HirType] = []
+        var param_idx = 0
+        if val owner_id = owner_symbol:
+            if not callable.is_static:
+                param_types = param_types.push(HirType(kind: HirTypeKind.Named(owner_id, []), span: callable.span))
+                if callable.params.len() > 0:
+                    val receiver = callable.params[0]
+                    if receiver.name == "self" or receiver.name == "me":
+                        param_idx = 1
+        while param_idx < callable.params.len():
+            if not callable.params[param_idx].has_type_:
+                return nil
+            val param = callable.params[param_idx]
+            param_types = param_types.push(self.imported_surface_type_projected(
+                param.type_, param.type_name, param.array_element_name, imported_mod))
+            param_idx = param_idx + 1
+        HirType(
+            kind: HirTypeKind.Function(
+                param_types,
+                self.imported_surface_type_projected(
+                    callable.return_type,
+                    callable.return_type_name,
+                    callable.return_array_element_name,
+                    imported_mod),
+                []),
+            span: callable.span)
     me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
         match e.kind:
             case ExprKind.IntLit(_):
@@ -652,7 +710,31 @@ impl HirLowering:
             val imported_type = self.symbols.define(local_name, kind, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             if not already_bound:
                 self.symbols.rename_symbol(imported_type, imported_name)
-                self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
+                self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_type)
+            else:
+                return
+            # A public composite field can name another type from the same
+            # defining module inside a container (`[Cell]`, `Cell?`, ...).
+            # Materialize those identities before lowering the field type so
+            # resolution is independent of the consumer's import item order.
+            for field in composite.fields:
+                for dependency in parser_type_named_dependencies(field.type_):
+                    if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
+                        self.register_imported_symbol(imported_mod, imported_mod_name, dependency, dependency, import_span, materialize_enum)
+                if field.array_element_name != "" and self.symbols.lookup_qualified_type_raw(
+                        imported_mod.module_name, field.array_element_name) < 0:
+                    self.register_imported_symbol(
+                        imported_mod, imported_mod_name, field.array_element_name,
+                        field.array_element_name, import_span, materialize_enum)
+            var imported_field_types: Dict<text, HirType> = {}
+            for field in composite.fields:
+                imported_field_types[field.name] = self.imported_surface_type_projected(
+                    field.type_, field.type_name, field.array_element_name, imported_mod)
+            val canonical_composite_name = imported_mod.module_name + "." + imported_name
+            self.struct_field_types_by_name[canonical_composite_name] = imported_field_types
+            if not self.struct_field_types_by_name.has(imported_name):
+                self.struct_field_types_by_name[imported_name] = imported_field_types
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
         elif imported_mod.enums.contains_key(imported_name):
             if materialize_enum:
                 val root_origin = HirMaterializedPayloadOrigin(
@@ -667,7 +749,13 @@ impl HirLowering:
             val imported_type = self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             if not already_bound:
                 self.symbols.rename_symbol(imported_type, imported_name)
-                self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
+                self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_type)
+            # Directory-sibling prebinding can create the enum symbol before
+            # an explicit import reaches this branch.  Methods are a separate
+            # idempotent surface and must be registered on both paths; keeping
+            # this inside `not already_bound` silently routed calls such as
+            # imported `DbValue.to_text()` to generic enum stringification.
+            self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
             # A directory-sibling declaration-only prebind may already own the
             # symbol. A later explicit import must still transition the enum
             # into materialized state and close over its payload dependencies.
