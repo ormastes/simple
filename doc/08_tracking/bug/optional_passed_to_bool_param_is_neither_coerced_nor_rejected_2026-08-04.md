@@ -140,3 +140,76 @@ Recommended shape of the real fix, in order of preference:
    compile error it should always have been.
 2. Apply it in ONE shared place per engine, alongside the existing
    `Some(x) -> x` unwrap, so the three engines cannot drift.
+
+---
+
+# CORRECTION 2026-08-04 (later the same day) — coercion FIXED; the failure attribution above is WRONG
+
+## The coercion half is fixed
+
+`present_value_as_bool_arg()` in
+`src/compiler_rust/compiler/src/interpreter_call/core/arg_binding.rs` now
+coerces a non-`bool` argument landing on a `bool` parameter to a PRESENCE bool:
+`Value::Nil -> false`, a real `Value::Bool` passes through untouched, any other
+present value `-> true`. It is called from BOTH `coerce_param` closures
+(`bind_args_with_injected` and `bind_args_with_values`) — there are two, and
+fixing only one would have left the sibling broken.
+
+**Correction to this report's own mechanism section.** The argument never
+arrives as an `Option`. `Expr::ExistsCheck` (`interpreter/expr.rs:503`) unwraps
+Some/Ok, decides presence (nil, and empty array/dict/str, are absent), then
+returns the **bare payload** or `Value::Nil`. So the value hitting the binder is
+e.g. `Value::Int(42)`, and a first fix that pattern-matched on
+`Value::Enum{Option}` did nothing at all. `.?` returning the payload is CORRECT
+per `doc/07_guide/quick_reference/syntax_quick_reference.md` ("Existence Check
+(`.?`) — Returns `T?`"), which is why the coercion belongs at the parameter
+boundary and not in `.?`.
+
+Measured before/after on the same command, `SIMPLE_EXECUTION_MODE=interpret`:
+
+| expression bound to `condition: bool` | before | after |
+|---|---|---|
+| `Some(0).?` | **false** | **true** |
+| `Some(42).?`, `Some(Some(Some(10))).?`, `d.get("a").?` | true | true |
+| `nil.?` | false | false |
+| plain `true` / `false`, `1 == 1`, `1 == 2` | unchanged | unchanged |
+
+Only the present-but-falsy-payload row moves. Presence is the correct answer:
+`verify(d.get(k).?)` on a stored `0` asks whether the key is present.
+
+## The failure attribution in this report does NOT reproduce
+
+This report claims `test/03_system/core` — **249 of 249** failing examples are
+this defect, and ~1,200 corpus-wide. That is not reproducible on this tree:
+
+- The cited repro `core/edge_case/edge_case_11_system_spec.spl:41`
+  (`verify(opt2.?)`, "expected 42 to equal true") **passes 28/28 run alone on
+  the UNMODIFIED binary**.
+- `test/03_system/core/edge_case`: **1400 total, 149 failed BEFORE the fix and
+  149 failed AFTER** — bit-identical.
+- `test/03_system/stdlib`: **1503 total, 63 failed before and 63 after.**
+- The `edge_case` failures contain **zero `expected ... to equal ...` lines**.
+  Every one is `Error: Process exited with code N`.
+
+The attribution appears to have been derived by grepping failing files for the
+`verify(x.?)` idiom, not by confirming the idiom caused the failure. The idiom
+count (2,174 sites / 1,676 files) is real; the causal link to the failures is
+not established.
+
+## What those failures actually are — a DIFFERENT defect
+
+`edge_case_11_system_spec.spl` reports **25 passed / 3 failed inside a directory
+run** but **28 passed / 0 failed run alone**, same binary, same flags. The
+failures are context-dependent across specs in one run and surface as
+`Process exited with code N`, not as assertion mismatches. Filed separately as
+`directory_run_context_makes_specs_fail_that_pass_alone_2026-08-04.md`. Anyone
+attributing system-tier failure counts should measure per-spec first — this
+artifact inflates directory-run counts by an unknown amount.
+
+## Regression evidence
+
+2,903 examples across the two directories above show zero drift beyond the
+intended row. This is a correctness fix, not a failure-count fix.
+
+**Deployment note:** Rust seed code. Built clean, but the deployed
+`bin/release/<triple>/simple` keeps the old behaviour until the next redeploy.

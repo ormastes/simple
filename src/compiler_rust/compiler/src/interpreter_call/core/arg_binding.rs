@@ -28,6 +28,52 @@ fn copy_value_type_parameter(value: Value, value_type_names: &HashSet<String>) -
 /// Static empty map to avoid allocation on every `bind_args` call.
 static EMPTY_INJECTED: std::sync::LazyLock<HashMap<String, Value>> = std::sync::LazyLock::new(HashMap::new);
 
+/// Coerce a non-`bool` argument landing on a `bool` parameter to a PRESENCE bool.
+///
+/// `.?` returns `T?` by design — "Existence Check (`.?`) — Returns `T?` ... the
+/// value itself if present, `nil` if absent" — so that `if val` can bind it
+/// (doc/07_guide/quick_reference/syntax_quick_reference.md). Crucially it yields
+/// the PAYLOAD, not an `Option` wrapper: `Expr::ExistsCheck` in
+/// interpreter/expr.rs unwraps Some/Ok, decides presence (nil, and empty
+/// array/dict/str, are absent), then returns the bare value or `Value::Nil`.
+///
+/// The same guide steers callers to `.?` over `is_*` predicates, so the corpus is
+/// full of `verify(x.?)` against `fn verify(condition: bool)` — 2,174 sites in
+/// 1,676 spec files. Because the payload is bare, such a call bound e.g.
+/// `Value::Int(42)` straight into a `bool` parameter: no coercion, and no
+/// diagnostic at parse, resolve, or call time. The specs then reported
+/// `expected 42 to equal true`.
+///
+/// Presence is the only coercion consistent with `.?`'s contract, and it is
+/// applied HERE rather than in `.?` itself because `.?` must keep returning the
+/// payload for `if val` binding and `??`:
+///   * `Value::Nil` (absent, including the emptied collections above) -> `false`
+///   * a real `Value::Bool` -> passed through unchanged, so `verify(a == b)` and
+///     `verify(flag)` keep exact value semantics
+///   * any other present value -> `true`
+/// Truthiness would be wrong here: `verify(d.get(k).?)` on a stored `0` asks
+/// whether the key is present, and must not answer `false`.
+///
+/// This coerces rather than rejects. Rejecting a non-`bool` argument is the
+/// stricter reading of the same defect, but it would turn thousands of existing
+/// call sites into hard errors at once; that belongs in its own change.
+///
+/// Returns `None` when the rule does not apply, so callers fall through.
+fn present_value_as_bool_arg(value: &Value, ty: Option<&Type>) -> Option<Value> {
+    if !matches!(ty, Some(Type::Simple(n)) if n == "bool") {
+        return None;
+    }
+    match value {
+        // Already the declared type — never reinterpret a real bool.
+        Value::Bool(_) => None,
+        Value::Nil => Some(Value::Bool(false)),
+        // An explicit Option wrapper can still reach a bool param on paths that
+        // do not route through `.?`; presence is the same answer there.
+        Value::Enum { enum_name, variant, .. } if enum_name == "Option" => Some(Value::Bool(variant == "Some")),
+        _ => Some(Value::Bool(true)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn bind_args(
     params: &[Parameter],
@@ -109,6 +155,12 @@ pub(crate) fn bind_args_with_injected(
             }
             _ => value,
         };
+        // A non-bool landing on a `bool` parameter is a PRESENCE test, not an
+        // unwrap. Must run BEFORE the generic Some(x) -> x below, which would
+        // otherwise deliver the raw payload. See present_value_as_bool_arg.
+        if let Some(b) = present_value_as_bool_arg(&value, ty) {
+            return b;
+        }
         // Unwrap Some(x) -> x when binding into a CONCRETE non-Optional parameter.
         // Mirrors the return-value unwrap in function_exec: `-> T?` functions
         // Some-wrap their plain returns, so passing such a value to a `param: T`
@@ -419,6 +471,12 @@ pub(crate) fn bind_args_with_values(
             }
             _ => value,
         };
+        // A non-bool landing on a `bool` parameter is a PRESENCE test, not an
+        // unwrap. Must run BEFORE the generic Some(x) -> x below, which would
+        // otherwise deliver the raw payload. See present_value_as_bool_arg.
+        if let Some(b) = present_value_as_bool_arg(&value, ty) {
+            return b;
+        }
         // Unwrap Some(x) -> x when binding into a CONCRETE non-Optional parameter.
         // Mirrors the return-value unwrap in function_exec: `-> T?` functions
         // Some-wrap their plain returns, so passing such a value to a `param: T`

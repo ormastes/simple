@@ -139,3 +139,32 @@ Either way the implementation lives only in the Rust seed
 compiler has no lowering for it yet), and the deployed `bin/simple` is that
 seed, so no `.spl`-side change can move this. Needs an owner decision on the
 operator's contract before any code moves.
+
+---
+
+# CORRECTION 2026-08-04 (later the same day) — MISFILED: this is not a defect
+
+`.?` returning the payload is **correct by specification**, not a bug.
+`doc/07_guide/quick_reference/syntax_quick_reference.md` states it explicitly:
+
+> ### Existence Check (`.?`) — Returns `T?`
+> The `.?` operator checks if a value is **present** (not nil AND not empty).
+> It returns `T?` — the value itself if present, `nil` if absent. This enables
+> pattern binding with `if val`.
+
+Returning a bare `bool` would break `if val x = y.?` binding and `??`, both of
+which need the value through. The implementation matches the contract:
+`Expr::ExistsCheck` (`interpreter/expr.rs:503`) unwraps Some/Ok, decides
+presence (nil, and empty array/dict/str count as absent), and yields the payload
+or `Value::Nil`.
+
+**The real defect** was one layer down: nothing coerced or rejected that payload
+when it landed on a `bool` parameter, so `verify(x.?)` bound e.g.
+`Value::Int(42)` into `condition: bool`. Fixed at the parameter boundary — see
+`optional_passed_to_bool_param_is_neither_coerced_nor_rejected_2026-08-04.md`,
+which also carries the before/after table and a correction to the failure-count
+attribution shared by this report.
+
+**Status: CLOSED — not a defect.** Do not "fix" `.?` to return a bool.
+Cross-references from sibling reports citing this file as the root cause should
+be repointed at the parameter-binding report above.
