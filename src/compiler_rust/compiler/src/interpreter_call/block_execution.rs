@@ -638,17 +638,32 @@ pub(super) fn exec_block_closure_into(
                                 continue;
                             }
                         }
+                        // Scope arm bindings to the arm body; restore what
+                        // they shadowed afterwards (match-arm binding leak fix).
+                        let mut shadowed: Vec<(String, Option<Value>)> = Vec::with_capacity(bindings.len());
                         for (name, value) in bindings {
-                            local_env.insert(name, value);
+                            let prev = local_env.insert(name.clone(), value);
+                            shadowed.push((name, prev));
                         }
-                        last_value = exec_block_closure_mut(
+                        let arm_result = exec_block_closure_mut(
                             &arm.body.statements,
                             &mut local_env,
                             functions,
                             classes,
                             enums,
                             impl_methods,
-                        )?;
+                        );
+                        for (name, prev) in shadowed.into_iter().rev() {
+                            match prev {
+                                Some(v) => {
+                                    local_env.insert(name, v);
+                                }
+                                None => {
+                                    local_env.remove(&name);
+                                }
+                            }
+                        }
+                        last_value = arm_result?;
                         matched = true;
                         break;
                     }
@@ -1358,17 +1373,32 @@ fn exec_block_closure_mut_inner(
                                 continue;
                             }
                         }
+                        // Scope arm bindings to the arm body; restore what
+                        // they shadowed afterwards (match-arm binding leak fix).
+                        let mut shadowed: Vec<(String, Option<Value>)> = Vec::with_capacity(bindings.len());
                         for (name, value) in bindings {
-                            local_env.insert(name, value);
+                            let prev = local_env.insert(name.clone(), value);
+                            shadowed.push((name, prev));
                         }
-                        last_value = exec_block_closure_mut(
+                        let arm_result = exec_block_closure_mut(
                             &arm.body.statements,
                             local_env,
                             functions,
                             classes,
                             enums,
                             impl_methods,
-                        )?;
+                        );
+                        for (name, prev) in shadowed.into_iter().rev() {
+                            match prev {
+                                Some(v) => {
+                                    local_env.insert(name, v);
+                                }
+                                None => {
+                                    local_env.remove(&name);
+                                }
+                            }
+                        }
+                        last_value = arm_result?;
                         matched = true;
                         break;
                     }

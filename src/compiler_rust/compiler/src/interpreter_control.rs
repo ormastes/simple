@@ -4745,12 +4745,32 @@ pub(crate) fn exec_match_core(
                 true, // We matched an arm
             );
 
+            // Scope arm bindings to the arm body: remember what each binding
+            // name shadowed so it can be restored after the arm runs. Without
+            // this, a `case Ctor(x)` binding leaked into (and corrupted) a
+            // same-named function parameter or outer variable after the match.
+            let mut shadowed: Vec<(String, Option<Value>)> = Vec::with_capacity(bindings.len());
             for (name, value) in bindings {
-                env.insert(name, value);
+                let prev = env.insert(name.clone(), value);
+                shadowed.push((name, prev));
             }
 
             // Execute the match arm body and capture both flow and value
-            let (flow, last_val) = exec_block_fn(&arm.body, env, functions, classes, enums, impl_methods)?;
+            let result = exec_block_fn(&arm.body, env, functions, classes, enums, impl_methods);
+
+            // Restore shadowed values (or remove arm-only bindings) even on error
+            for (name, prev) in shadowed.into_iter().rev() {
+                match prev {
+                    Some(v) => {
+                        env.insert(name, v);
+                    }
+                    None => {
+                        env.remove(&name);
+                    }
+                }
+            }
+
+            let (flow, last_val) = result?;
             return Ok((flow, last_val));
         }
     }
