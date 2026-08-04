@@ -128,12 +128,39 @@ Examples:
     x.map()  ->  TraitMethod if x implements trait with map()
     x.map()  ->  FreeFunction(map) if map(x) exists and first param matches
 """
+"""Dispatch category carried by a stable callable identity."""
+enum CallableDispatchKind:
+    Instance
+    Trait
+    Static
+
+"""Module-stable identity for a resolved callable.
+
+Local SymbolIds are compilation-table coordinates and can change when modules
+are imported in a different order.  This identity crosses that boundary using
+the defining module plus the symbol's already-qualified declaration name.
+"""
+struct CallableIdentity:
+    canonical_name: text
+    dispatch_kind: CallableDispatchKind
+
+fn callable_identity_from_symbol(symbol: Symbol, dispatch_kind: CallableDispatchKind) -> CallableIdentity:
+    val defining_module = _hir_symbol_owner_module(symbol.defining_module ?? "")
+    val name_is_module_qualified = (
+        defining_module != "" and
+        (symbol.name == defining_module or
+         symbol.name.starts_with("{defining_module}.") or
+         symbol.name.starts_with("{defining_module}::"))
+    )
+    val canonical_name = if defining_module == "" or name_is_module_qualified: symbol.name else: "{defining_module}::{symbol.name}"
+    CallableIdentity(canonical_name: canonical_name, dispatch_kind: dispatch_kind)
+
 enum MethodResolution:
     # Direct method on the receiver's type
-    InstanceMethod(type_id: SymbolId, method_id: SymbolId)
+    InstanceMethod(type_id: SymbolId, method_id: SymbolId, identity: CallableIdentity)
 
     # Method from an implemented trait
-    TraitMethod(trait_id: SymbolId, method_id: SymbolId)
+    TraitMethod(trait_id: SymbolId, method_id: SymbolId, identity: CallableIdentity)
 
     # UFCS: Free function where receiver becomes first argument
     # x.method(a, b) -> method(x, a, b)
@@ -141,7 +168,7 @@ enum MethodResolution:
 
     # Static method on a type (no receiver)
     # Type.method(a, b) - no self parameter
-    StaticMethod(type_id: SymbolId, method_id: SymbolId)
+    StaticMethod(type_id: SymbolId, method_id: SymbolId, identity: CallableIdentity)
 
     # Not yet resolved (before resolution pass)
     Unresolved
@@ -166,10 +193,10 @@ impl MethodResolution:
         the stage4 native lane and if-val at the caller binds the BOX
         un-unwrapped (bug doc 2026-07-23 family)."""
         match self:
-            case InstanceMethod(_, method_id): method_id
-            case TraitMethod(_, method_id): method_id
+            case InstanceMethod(_, method_id, _): method_id
+            case TraitMethod(_, method_id, _): method_id
             case FreeFunction(func_id): func_id
-            case StaticMethod(_, method_id): method_id
+            case StaticMethod(_, method_id, _): method_id
             case Unresolved: nil
 
 struct ScopeId:
@@ -844,7 +871,7 @@ enum EffectKind:
 # ============================================================================
 
 export HirModule, HirImport, HirImportItem, HirDomainBlock
-export SymbolId, HirSymbol, Symbol, SymbolKind, MethodResolution
+export SymbolId, HirSymbol, Symbol, SymbolKind, CallableDispatchKind, CallableIdentity, callable_identity_from_symbol, MethodResolution
 export ScopeId, Scope, ScopeKind, SymbolTable
 export HirType, HirTypeKind
 export DimExpr, DimExprKind

@@ -12,9 +12,15 @@ use compiler.hir.hir.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.traits.traits.*
 use compiler.semantics.resolve.{MethodResolver, ResolveError}
-use compiler.hir.{MethodResolution}
+use compiler.hir.{CallableDispatchKind, CallableIdentity, callable_identity_from_symbol, MethodResolution}
 
 impl MethodResolver:
+    me resolved_callable_identity(method_id: SymbolId, dispatch_kind: CallableDispatchKind) -> CallableIdentity?:
+        """Build the stable identity only from the resolved declaration symbol."""
+        match self.symbols.get_symbol(method_id):
+            case Some(symbol): callable_identity_from_symbol(symbol, dispatch_kind)
+            case nil: nil
+
     me resolve_method(receiver: HirExpr, method: text, args: [HirCallArg]) -> MethodResolution:
         """Resolve a method call using UFCS priority rules.
 
@@ -154,7 +160,11 @@ impl MethodResolver:
         val method_sym = self.symbols.lookup_method_in_type(type_id, method)
 
         match method_sym:
-            case Some(symbol): Some(MethodResolution.InstanceMethod(type_id, symbol))
+            case Some(symbol):
+                if val identity = self.resolved_callable_identity(symbol, CallableDispatchKind.Instance):
+                    Some(MethodResolution.InstanceMethod(type_id, symbol, identity))
+                else:
+                    nil
             case nil: nil
 
     me try_trait_method(receiver_type: HirType, method: text) -> MethodResolution?:
@@ -187,7 +197,8 @@ impl MethodResolver:
         for trait_id in traits:
             val method_sym = self.symbols.lookup_trait_method(trait_id, method)
             if val Some(symbol) = method_sym:
-                return Some(MethodResolution.TraitMethod(trait_id, symbol))
+                if val identity = self.resolved_callable_identity(symbol, CallableDispatchKind.Trait):
+                    return Some(MethodResolution.TraitMethod(trait_id, symbol, identity))
 
         # If legacy lookup failed, try enhanced solver
         self.try_trait_method_with_solver(receiver_type, method)
@@ -338,7 +349,10 @@ impl MethodResolver:
         val method_sym = self.symbols.lookup_static_method(type_id, method)
 
         if val Some(symbol) = method_sym:
-            MethodResolution.StaticMethod(type_id, symbol)
+            if val identity = self.resolved_callable_identity(symbol, CallableDispatchKind.Static):
+                MethodResolution.StaticMethod(type_id, symbol, identity)
+            else:
+                MethodResolution.Unresolved
         else:
             # No static method found - provide helpful error
             val type_sym = self.symbols.get_symbol(type_id)
