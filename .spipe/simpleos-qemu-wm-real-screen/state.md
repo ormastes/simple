@@ -45,3 +45,11 @@ dev-done
 - audit: The separately owned 7200-second Stage 4 producer ended after entering
   the 1030-file driver and emitted no compiler. No receipt or ARM64 QEMU process
   appeared; unchanged Stage 2/3 admission failures were not repeated.
+- admission: Current `origin/main` supplied the owner-reset repair at
+  `039cad933a`. Its separately built 22 MiB Phase 2 compiler passed bootstrap
+  sanity and identified as `simple-bootstrap 1.0.0-beta` with SHA-256
+  `30e9889950e6ed620fcaea51fcb1fb472be200679d4c8cb12bf633c339193b37`.
+  The one canonical strict non-entry module-global admission still failed
+  closed with signal 11 after `function:locals` and `function:params`. The
+  three-cycle compiler cap is exhausted; no receipt, ARM64 build, or QEMU
+  launch is permitted from this candidate.

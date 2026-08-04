@@ -944,3 +944,33 @@ admission was not rerun. The ARM64 producer, QMP consumer, and physical-input
 interval therefore remain gated by the same missing receipt-qualified compiler.
 Do not retry the two-hour Stage 4 command from this lane; resume only with a new
 producer artifact or a separately reviewed compiler-production repair.
+
+## 2026-08-04 Phase 2 owner-reset admission result
+
+GitHub `main` supplied `039cad933a` (`fix(compiler): reset LLVM function state
+through owner`). A separately owned clean rebuild from that revision emitted a
+22 MiB AArch64 Mach-O Phase 2 compiler and advanced beyond Phase 2 bootstrap
+sanity. Its measured identity is:
+
+- version: `simple-bootstrap 1.0.0-beta`
+- SHA-256: `30e9889950e6ed620fcaea51fcb1fb472be200679d4c8cb12bf633c339193b37`
+
+The attestation wrapper's fail-closed self-test passed once on current main,
+including Rust-seed/debug and fabricated-receipt rejection. The one canonical
+strict module-global admission for the new compiler then exited with signal 11.
+Its final trace advanced beyond the earlier nil-field boundary and stopped
+after:
+
+```text
+[mir-to-llvm] function:start __simple_main
+[mir-to-llvm] function:locals __simple_main
+[mir-to-llvm] function:params __simple_main
+```
+
+This is not admissible native-smoke evidence, so no
+`simpleos-arm64-compiler-receipt-v1` receipt was created. The three-cycle
+compiler fix/verify cap is exhausted. Stage 3 may not be opportunistically
+relabeled or checked as a fourth cycle, and the ARM64 producer, QMP consumer,
+and visible Cocoa interval remain unlaunched. Resume in a fresh scoped compiler
+lane only after repairing the post-parameter LLVM translation crash; then run
+the module-global and native compiler admissions once before returning here.
