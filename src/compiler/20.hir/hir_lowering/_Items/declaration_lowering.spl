@@ -6,6 +6,7 @@ use compiler.hir.hir_lowering.items.*
 
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.hir_unwind_effects.{hir_function_effects_from_attributes}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
@@ -112,7 +113,7 @@ impl HirLowering:
             params: params,
             return_type: self.bootstrap_hir_type_from_tag(decl_get_ret_type(decl_idx)),
             body: body,
-            effects: [],
+            effects: [Effect(kind: EffectKind.NoUnwind, span: span)],
             visibility: Visibility.Public,
             is_async: false,
             is_static: false,
@@ -450,12 +451,23 @@ impl HirLowering:
         val has_parsed_export_attr = hir_optional_export_attr_exists(parsed_export_attr)
         val has_parsed_driver_manifest = hir_optional_driver_manifest_exists(driver_manifest)
 
-        # Seed effects from is_async annotation. This is the FINAL value, not a
-        # seed to be refined: effect_pass.spl was deleted on 2026-08-02 as
-        # unreachable dead code, so nothing refines HirFunction.effects later.
+        # Seed the complete typed effect set. Every function owns exactly one
+        # unwind effect; extern alone never implies MayUnwind. Async remains an
+        # independent effect alongside the unwind contract. This is the FINAL
+        # value: effect_pass.spl was deleted on 2026-08-02 as unreachable dead
+        # code, so nothing refines HirFunction.effects later.
         var initial_effects: [Effect] = []
         if fn_.is_async:
-            initial_effects = initial_effects.push(Effect(kind: EffectKind.Async, span: fn_.span))
+            initial_effects = initial_effects.push(Effect(
+                kind: EffectKind.Async, span: fn_.span))
+        initial_effects = initial_effects.push(Effect(
+            kind: EffectKind.NoUnwind, span: fn_.span))
+        val declared_effects = hir_function_effects_from_attributes(
+            fn_.attributes, fn_.is_async, fn_.span)
+        if declared_effects.is_err():
+            self.error(declared_effects.unwrap_err(), fn_.span)
+        else:
+            initial_effects = declared_effects.unwrap()
 
         val hir_func = HirFunction(
             symbol: fn_symbol_id,

@@ -1,0 +1,79 @@
+# Typed source/HIR unwind-effect ownership.
+#
+# Every function owns exactly one unwind effect. Existing declarations default
+# to NoUnwind for C ABI compatibility; MayUnwind is explicit and never inferred
+# from is_extern alone.
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types.{Attribute}
+use compiler.hir.hir_types.{Effect, EffectKind}
+
+fn hir_effect_kind_is_unwind(kind: EffectKind) -> bool:
+    match kind:
+        case NoUnwind: true
+        case MayUnwind: true
+        case _: false
+
+fn hir_effects_unwind_kind(effects: [Effect]) -> Result<EffectKind, text>:
+    var count: i64 = 0
+    var selected = EffectKind.NoUnwind
+    for effect in effects:
+        match effect.kind:
+            case NoUnwind:
+                selected = EffectKind.NoUnwind
+                count = count + 1
+            case MayUnwind:
+                selected = EffectKind.MayUnwind
+                count = count + 1
+            case _:
+                ()
+    if count == 0:
+        return Err("E-HIR-UNWIND001 function effects require exactly one unwind effect; found 0")
+    if count != 1:
+        return Err(
+            "E-HIR-UNWIND001 function effects require exactly one unwind effect; found {count}")
+    Ok(selected)
+
+fn hir_effects_with_default_unwind(
+    effects: [Effect],
+    span: Span
+) -> Result<[Effect], text>:
+    var unwind_count: i64 = 0
+    for effect in effects:
+        if hir_effect_kind_is_unwind(effect.kind):
+            unwind_count = unwind_count + 1
+    if unwind_count > 1:
+        return Err(
+            "E-HIR-UNWIND001 duplicate or conflicting unwind effects; found {unwind_count}")
+    if unwind_count == 1:
+        return Ok(effects)
+    Ok(effects.push(Effect(kind: EffectKind.NoUnwind, span: span)))
+
+fn hir_function_effects_from_attributes(
+    attrs: [Attribute],
+    is_async: bool,
+    span: Span
+) -> Result<[Effect], text>:
+    var effects: [Effect] = []
+    if is_async:
+        effects = effects.push(Effect(kind: EffectKind.Async, span: span))
+    var unwind_count: i64 = 0
+    for attr in attrs:
+        if attr.name == "may_unwind" or attr.name == "no_unwind":
+            if attr.args.len() != 0:
+                return Err(
+                    "E-HIR-UNWIND001 unwind attribute @{attr.name} accepts no arguments")
+            unwind_count = unwind_count + 1
+            if attr.name == "may_unwind":
+                effects = effects.push(Effect(
+                    kind: EffectKind.MayUnwind, span: attr.span))
+            else:
+                effects = effects.push(Effect(
+                    kind: EffectKind.NoUnwind, span: attr.span))
+    if unwind_count > 1:
+        return Err(
+            "E-HIR-UNWIND001 duplicate or conflicting unwind attributes; found {unwind_count}")
+    hir_effects_with_default_unwind(effects, span)
+
+export hir_effect_kind_is_unwind, hir_effects_unwind_kind
+export hir_effects_with_default_unwind, hir_function_effects_from_attributes
