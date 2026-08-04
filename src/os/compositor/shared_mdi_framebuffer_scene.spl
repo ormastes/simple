@@ -4,7 +4,8 @@ use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 use os.compositor.shared_mdi_setup.{shared_mdi_surfaces}
 use os.compositor.simple_web_window_renderer.{render_simple_web_content}
-use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WM_CHROME_KIND_TITLED, UI_SURFACE_KIND_LEGACY, shared_wm_background_color}
+use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WM_CHROME_KIND_TITLED, UI_SURFACE_KIND_LEGACY, shared_wm_background_color, simple_gui_internal_window, simple_gui_internal_window_scene}
+use os.compositor.wm_action_lifecycle.{WmLifecycleWindowState}
 use common.ui.wm_chrome_theme.{WmChromeColors, wm_chrome_theme}
 use common.ui.window_scene_draw_ir.{_wm_draw_titlebar_gradient}
 use common.ui.native_scalar_text.{ui_native_i64_text}
@@ -237,4 +238,161 @@ fn render_shared_mdi_framebuffer_scene_limited(width: i32, height: i32, backend_
         backend_kind: backend_kind,
         fallback_reason: "",
         readback_status: "unavailable:qemu-framebuffer-write-only"
+    )
+
+fn render_shared_mdi_framebuffer_scene_for_lifecycle_windows(width: i32, height: i32, backend_kind: text, windows: [WmLifecycleWindowState]) -> SharedMdiFramebufferScene:
+    render_shared_mdi_framebuffer_scene_for_windows(width, height, backend_kind, shared_mdi_render_windows_from_lifecycle(windows))
+# `t_micros` (default 0) is consumed only by a kind:"motion" scene background
+# (common.ui.window_scene_draw_ir / shared_wm_scene_resolve_background); every
+# existing caller keeps byte-identical output.
+fn render_shared_mdi_framebuffer_scene_for_simple_gui_scene(scene: SharedWmScene, t_micros: i64 = 0) -> SharedMdiFramebufferScene:
+    val theme = wm_chrome_theme()
+    val backend = SharedMdiFramebufferBackend.create(scene.width, scene.height, theme.compositor_bg)
+    val stats = shared_wm_scene_render_to_backend(backend, scene, t_micros)
+    backend.web_pixel_count = stats.content_pixel_count
+    SharedMdiFramebufferScene(
+        width: scene.width,
+        height: scene.height,
+        pixels: backend.pixels,
+        surface_count: scene.windows.len(),
+        web_pixel_count: backend.web_pixel_count,
+        backend_kind: scene.backend,
+        fallback_reason: "",
+        readback_status: "unavailable:qemu-framebuffer-write-only"
+    )
+# `t_micros` (default 0) is threaded straight through to
+# render_shared_mdi_framebuffer_scene_for_simple_gui_scene: it is only
+# consumed if the scene's background resolves to kind:"motion" (see
+# common.ui.window_scene_draw_ir / shared_wm_scene_resolve_background), so
+# every existing caller that never passes a real wall-clock value keeps
+# byte-identical output. This is the ONE production (non-test) entry point
+# that turns render windows into a rasterized shared-MDI framebuffer, so a
+# hardcoded 0 here would make kind:"motion" backgrounds structurally unable
+# to animate through this API no matter what a future caller wired up
+# upstream — a caller with real time access must be able to reach the
+# resolver, not just tests constructing a SharedWmScene directly.
+fn render_shared_mdi_framebuffer_scene_for_windows(width: i32, height: i32, backend_kind: text, windows: [SharedMdiRenderWindow], t_micros: i64 = 0) -> SharedMdiFramebufferScene:
+    render_shared_mdi_framebuffer_scene_for_simple_gui_scene(_shared_mdi_scene_from_render_windows(width, height, backend_kind, windows), t_micros)
+
+# `t_micros` (default 0) is consumed only by a kind:"motion" scene background
+# (common.ui.window_scene_draw_ir / shared_wm_scene_resolve_background); every
+# existing caller keeps byte-identical output.
+fn _shared_mdi_from_simple_gui_window(id: i64, win: SharedWmWindow, scroll_y: i32) -> SharedMdiRenderWindow:
+    shared_mdi_render_window(
+        id,
+        win.title,
+        win.app_id,
+        win.html,
+        win.x,
+        win.y,
+        win.width,
+        win.height,
+        win.process_id as i64,
+        win.minimized,
+        win.focused,
+        scroll_y
+    )
+fn shared_mdi_lifecycle_seed_windows() -> [WmLifecycleWindowState]:
+    val render_windows = shared_mdi_seed_windows()
+    var windows: [WmLifecycleWindowState] = []
+    var i = 0
+    val count = render_windows.len()
+    while i < count:
+        val win = render_windows[i]
+        windows.push(WmLifecycleWindowState(
+            id: win.id,
+            owner_port: 0,
+            title: win.title,
+            x: win.x,
+            y: win.y,
+            w: win.w,
+            h: win.h,
+            content: win.content,
+            process_id: win.process_id,
+            app_id: win.app_id,
+            minimized: win.minimized,
+            focused: win.focused
+        ))
+        i = i + 1
+    windows
+fn shared_mdi_render_windows_from_lifecycle(windows: [WmLifecycleWindowState]) -> [SharedMdiRenderWindow]:
+    var out: [SharedMdiRenderWindow] = []
+    var i = 0
+    val count = windows.len()
+    while i < count:
+        val win = windows[i]
+        out.push(shared_mdi_render_window(
+            win.id,
+            win.title,
+            win.app_id,
+            win.content,
+            win.x,
+            win.y,
+            win.w,
+            win.h,
+            win.process_id,
+            win.minimized,
+            win.focused,
+            0
+        ))
+        i = i + 1
+    out
+
+# --- Legacy SharedMdiRenderWindow entrypoints (kept as the compat layer;
+# chrome/content/taskbar pixel drawing now lives in the common.ui
+# SharedWmScene->CompositorBackend executor, common.ui.window_scene_draw_ir).
+# These delegate by converting to/from SharedWmWindow via
+# _shared_mdi_to_simple_gui_window so callers (e.g. host_compositor_entry.spl)
+# see byte-identical output.
+fn _shared_mdi_scene_from_render_windows(width: i32, height: i32, backend_kind: text, windows: [SharedMdiRenderWindow]) -> SharedWmScene:
+    var gui_windows: [SharedWmWindow] = []
+    var i = 0
+    val count = windows.len()
+    while i < count:
+        gui_windows.push(_shared_mdi_to_simple_gui_window(windows[i], i))
+        i = i + 1
+    simple_gui_internal_window_scene(width, height, backend_kind, gui_windows)
+fn shared_mdi_seed_windows() -> [SharedMdiRenderWindow]:
+    val surfaces = shared_mdi_surfaces()
+    val count = surfaces.len()
+    var windows: [SharedMdiRenderWindow] = []
+    var i = 0
+    while i < count:
+        val surface = surfaces[i]
+        val id = (i + 1).to_i64()
+        val gui_window = simple_gui_internal_window(
+            "mdi-{id}",
+            id.to_text(),
+            surface.process_id as u64,
+            surface.app_id,
+            surface.title,
+            surface.x,
+            surface.y,
+            surface.w,
+            surface.h,
+            surface.content,
+            false,
+            i == count - 1,
+            i
+        )
+        windows.push(_shared_mdi_from_simple_gui_window(id, gui_window, 0))
+        i = i + 1
+    windows
+fn _shared_mdi_simple_gui_window_id(id: i64) -> text:
+    id.to_text()
+fn _shared_mdi_to_simple_gui_window(win: SharedMdiRenderWindow, z_index: i32) -> SharedWmWindow:
+    simple_gui_internal_window(
+        "mdi-{win.id}",
+        _shared_mdi_simple_gui_window_id(win.id),
+        win.process_id as u64,
+        win.app_id,
+        win.title,
+        win.x,
+        win.y,
+        win.w,
+        win.h,
+        win.content,
+        win.minimized,
+        win.focused,
+        z_index
     )
