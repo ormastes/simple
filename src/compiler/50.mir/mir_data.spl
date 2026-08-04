@@ -743,6 +743,70 @@ fn bootstrap_fn_param_hir_types_lookup(name: text) -> [HirType]?:
         return Some(_bootstrap_fn_param_hir_types[name])
     nil
 
+# One authoritative bootstrap callable record.  The older return/parameter
+# maps above remain compatibility indexes for call sites that have not yet
+# acquired a canonical identity; this registry is the declaration authority
+# and must never silently merge two different ABIs under one textual key.
+struct BootstrapCallable:
+    identity: text
+    link_name: text
+    return_hir: HirType
+    return_shape: text
+    param_hir: [HirType]
+    is_method: bool
+    is_static: bool
+    abi_key: text
+
+enum BootstrapCallableRegistration:
+    Inserted
+    Identical
+    Conflict(existing_abi: text, incoming_abi: text)
+
+var _bootstrap_callables: Dict<text, BootstrapCallable> = {}
+
+fn bootstrap_callable_identity(module_name: text, link_name: text, is_method: bool, is_static: bool) -> text:
+    # Resolved method/static names already carry their owner.  Free functions
+    # require their logical module so equal leaf names in different modules do
+    # not become an ambiguity lottery.
+    if is_method or is_static:
+        return link_name.replace("::", ".")
+    "{module_name}.{link_name}"
+
+fn bootstrap_callable_abi_key(link_name: text, return_hir: HirType, return_shape: text, param_hir: [HirType], is_method: bool, is_static: bool) -> text:
+    var key = "link={link_name}|ret={return_hir.kind}|shape={return_shape}|method={is_method}|static={is_static}|params="
+    var i = 0
+    while i < param_hir.len():
+        if i > 0:
+            key = key + ","
+        key = key + "{param_hir[i].kind}"
+        i = i + 1
+    key
+
+fn bootstrap_callable_register(identity: text, link_name: text, return_hir: HirType, return_shape: text, param_hir: [HirType], is_method: bool, is_static: bool) -> BootstrapCallableRegistration:
+    val normalized_link_name = link_name.replace("::", ".")
+    val abi_key = bootstrap_callable_abi_key(normalized_link_name, return_hir, return_shape, param_hir, is_method, is_static)
+    if _bootstrap_callables.contains_key(identity):
+        val existing = _bootstrap_callables[identity]
+        if existing.abi_key == abi_key:
+            return BootstrapCallableRegistration.Identical
+        return BootstrapCallableRegistration.Conflict(existing.abi_key, abi_key)
+    _bootstrap_callables[identity] = BootstrapCallable(
+        identity: identity,
+        link_name: normalized_link_name,
+        return_hir: return_hir,
+        return_shape: return_shape,
+        param_hir: param_hir,
+        is_method: is_method,
+        is_static: is_static,
+        abi_key: abi_key
+    )
+    BootstrapCallableRegistration.Inserted
+
+fn bootstrap_callable_lookup(identity: text) -> BootstrapCallable?:
+    if _bootstrap_callables.contains_key(identity):
+        return Some(_bootstrap_callables[identity])
+    nil
+
 export BlockId, MirBlock, MirInst, MirInstKind
 export MirFunction, MirModule
 export MirOperand, MirOperandKind, MirTerminator
@@ -753,3 +817,5 @@ export bootstrap_fn_ret_types_reset, bootstrap_fn_ret_type_register, bootstrap_f
 export bootstrap_fn_ret_hir_type_register, bootstrap_fn_ret_hir_type_lookup
 export bootstrap_fn_ret_shape_register, bootstrap_fn_ret_shape_lookup
 export bootstrap_fn_param_hir_types_register, bootstrap_fn_param_hir_types_lookup
+export BootstrapCallable, BootstrapCallableRegistration
+export bootstrap_callable_identity, bootstrap_callable_register, bootstrap_callable_lookup

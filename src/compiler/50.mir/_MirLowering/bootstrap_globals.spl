@@ -110,6 +110,38 @@ fn bootstrap_hir_accumulator_name(module: HirModule, func: HirFunction) -> text:
         return name
     "{bootstrap_mir_logical_module_name(module.name)}.{name}"
 
+fn bootstrap_hir_return_shape(symbols: SymbolTable, type_: HirType) -> text:
+    match type_.kind:
+        case Named(symbol_id, _):
+            if val symbol = symbols.get_symbol_raw(symbol_id.id):
+                val defining_module = symbol.defining_module ?? ""
+                if defining_module != "":
+                    return "{defining_module}::{symbol.name}"
+                return symbol.name
+            ""
+        case Array(_, _) | Slice(_): "__runtime_array__"
+        case _: ""
+
+fn bootstrap_register_callable_or_abort(module_name: text, symbols: SymbolTable, func: HirFunction, link_name: text):
+    var param_hir: [HirType] = []
+    for param in func.params:
+        param_hir.push(param.type_)
+    val identity = bootstrap_callable_identity(module_name, link_name, func.is_method, func.is_static)
+    val registration = bootstrap_callable_register(
+        identity,
+        link_name,
+        func.return_type,
+        bootstrap_hir_return_shape(symbols, func.return_type),
+        param_hir,
+        func.is_method,
+        func.is_static
+    )
+    match registration:
+        case Conflict(existing_abi, incoming_abi):
+            eprint("error: conflicting bootstrap callable ABI for {identity}: existing {existing_abi}; incoming {incoming_abi}\n")
+            rt_exit(1)
+        case _: ()
+
 var _bootstrap_mir_functions: [MirFunction] = []
 var _bootstrap_mir_function_names: [text] = []
 var _bootstrap_mir_function_modules: [i64] = []
@@ -315,6 +347,7 @@ fn bootstrap_register_flat_function_values():
         val functions = bootstrap_hir_module_functions_at(module_index)
         for func in functions:
             val function_name = bootstrap_flat_function_symbol_name(symbols, func)
+            bootstrap_register_callable_or_abort(module_name, symbols, func, function_name)
             _bootstrap_function_value_names.push(function_name)
             # Methods need their return HIR types in the same global prescan
             # as free functions. A chained `field_array_raw(...).build()`
