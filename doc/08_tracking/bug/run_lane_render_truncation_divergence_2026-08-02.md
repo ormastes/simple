@@ -1,8 +1,11 @@
 # Vulkan engine2d lane publishes a TRUNCATED frame as a proven device frame when the font route fails
 
-**Date:** 2026-08-02 (mechanism re-pinned 2026-08-04)
-**Status:** STILL OPEN, and **BOTH** named mechanisms are now REFUTED. Read the
-two correction sections at the END of this file BEFORE anything above them:
+**Date:** 2026-08-02 (mechanism re-pinned 2026-08-04; **FIXED 2026-08-04**)
+**Status:** **FIXED** — see "Fix (2026-08-04, second attempt) — the write-back"
+at the END of this file. Mechanisms (A) and (B) named in the body below are both
+REFUTED; the third correction pinned the real one (a lost value write-back) and
+the fix removes it. Read the correction sections at the END of this file BEFORE
+anything above them:
 
 1. "Correction (2026-08-04): the poison latch is NOT the mechanism" — refutes
    mechanism (B). A router-gate hardening landed in `28288f98102`; it is a real
@@ -606,3 +609,178 @@ face+generation, or move the digest to a native helper).
 - `vkorder/engine_order_probe.spl` / `engine_order.log`,
   `engine_order_v2.log` — bitmap-face control; `composite_font_batch` never
   called, vulkan == software bit-identical
+
+## Fix (2026-08-04, second attempt) — the write-back. FIXED.
+
+The second correction's mechanism (1) is correct and the defect is now closed.
+The state `composite_font_batch` left behind never reached the Engine2D's
+backend because of **one wrong binding form**, not because of anything the font
+route does.
+
+### The write-back site
+
+`src/lib/gc_async_mut/gpu/engine2d/engine.spl`, the `elif target == "vulkan":`
+arm of `_draw_font_batch_planned`'s `for target in plan:` loop. Before:
+
+```
+val active = self.vulkan_backend        # active : VulkanBackend?
+if active == nil:
+    attempts.push("vulkan:unavailable")
+else:
+    val vulkan = active                 # STILL VulkanBackend? -- the defect
+    var evidence = vulkan.composite_font_batch(x, y, batch)
+    self.last_vulkan_font_evidence = evidence
+    self.vulkan_backend = Some(vulkan)  # re-wraps the UNMUTATED value
+```
+
+### Why the mutation was lost
+
+`vulkan` here has static type `VulkanBackend?`. A `me` (mutating) method called
+through an **option-typed** binding mutates a temporary unwrap that is then
+discarded; the binding keeps its pre-call value, so `Some(vulkan)` stored the
+backend exactly as it was before the font route ran. Every other vulkan route in
+the file uses `if val Some(vulkan) = ...`, which **does** write back — which is
+why the pre-text rects accumulated their pending state correctly and only the
+font route lost it.
+
+Minimal reproducer, `SIMPLE_EXECUTION_MODE=interpreter bin/simple run`
+(`optwb_probe.spl`, scratchpad) — a class with `me bump()` held in a `Counter?`,
+bumped twice through each binding form:
+
+```
+A n=0     # val ca = <optional>;         ca.bump(); ca.bump()   -- BOTH LOST
+B n=2     # if val Some(cb) = opt:       cb.bump(); cb.bump()   -- correct
+C n=2     # same as B through a nested `me` call                -- correct
+```
+
+Filed as its own language defect:
+`me_method_mutation_through_optional_binding_discarded_2026-08-04.md`, which
+also tables the 10+ remaining occurrences of the losing idiom.
+
+That single lost write-back explains the entire trace: the font route's entry
+flush (`backend_vulkan_font.spl:269`) consumed and cleared the pending compute
+batch on the discarded copy, so the stored backend still held
+`pending_compute_command = 1, pending_compute_count = 2`. Every later flush
+tried to `end_compute`/`submit` an already-consumed command buffer, returned
+`-1`, quarantined its descriptors, and no-op'd its primitive — and the
+`mark_cpu_fallback("framebuffer-dispatch-failed")` / `completion_unknown` that
+`_dispatch_framebuffer_checked` correctly sets landed on the same doomed copies,
+so the readback published `device_readback` for a truncated frame.
+
+### The change
+
+1. **The real fix.** The vulkan font arm now binds with
+   `if val Some(vulkan) = self.vulkan_backend:` (`else:` keeps the
+   `attempts.push("vulkan:unavailable")` arm). Two sibling sites in the same
+   file with the identical losing idiom and a mutating call are fixed the same
+   way: `install_vulkan_font_spirv` (`install_font_atlas_pipeline`) and
+   `draw_vulkan_image_blend_checked` (`draw_image_blend_checked`).
+   `engine.spl:498` uses the idiom but only reads, so it is left alone. The
+   non-vulkan backends (cuda/metal/opencl/rocm, and `engine3d/engine.spl`) carry
+   the same defect and are tabled in the language bug — deliberately NOT changed
+   here, because none of them initialize on this host and an unverifiable edit to
+   a GPU dispatch path is worse than a filed defect.
+
+2. **Honesty backstop** (`read_pixels_with_source`, same file). EVERY return path
+   of `_flush_pending_compute` clears the pending batch, so pending state that
+   *survives* the flush proves the value the flush mutated is not the value about
+   to be read back. That condition now calls
+   `mark_cpu_fallback("pending-compute-state-contradicts-flush")`, so the
+   readback reports `cpu_fallback` and `_simple_web_layout_execute_draw_ir_composition`'s
+   `lane_demoted` latch raises `render_degraded`. This is exactly the
+   `pending_cmd`/`pending_n`-disagrees-with-the-last-flush detector the second
+   correction specified. It is inert on the fixed lane (measured
+   `pending_cmd=0 pending_n=0` at every readback below) — it never fires and so
+   masks nothing; it exists so a future regression of this shape fails CLOSED
+   instead of publishing a lying frame.
+
+### Verification
+
+All runs `SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_VK_ORDER_TRACE=1
+SIMPLE_EXECUTION_MODE=interpreter bin/simple run`, each **bracketed** by a source
+grep immediately before and after (`PRECHECK=7/1 POSTCHECK=7/1`, counting the
+`if val Some(vulkan) = self.vulkan_backend:` gate sites and the backstop
+string), so each result provably describes the fixed tree.
+
+**Provenance.** Measured in the shared working copy at HEAD `9dcd16644b8`,
+which is **64 commits behind** origin `3daf11f4ae9`. Origin tip does not
+currently compile (`mir_to_llvm_translate_call_trait_break_2026-08-04.md`), so
+these numbers are NOT a verification against origin tip. The change is confined
+to `.spl` engine2d libraries and is independent of that compiler break.
+
+**1. Browser lane with text, 64x48 same-run A/B** (`vulkan_drop_probe.spl`) —
+the failing case. This is the fix:
+
+| | software | vulkan BEFORE | vulkan AFTER |
+|---|---|---|---|
+| len | 3072 | 3072 | 3072 |
+| body | 1656 | **2304** | **1656** |
+| h1 | 742 | 742 | 742 |
+| blue | 216 | **0** | **216** |
+| green | 216 | **0** | **216** |
+| amber | 216 | **0** | **216** |
+
+**2. `[vk-order]` trace, same run — no `rc=-1` anywhere.** The post-font
+dispatches now land on a FRESH command buffer (`pending_cmd=4`), which is the
+direct receipt that the font route's flush reached the stored backend:
+
+```
+flush rc=1   dirty=true                              # font route's entry flush
+font-snapshot fb=1 bytes=12288 want=12288 quads=2
+font-done status=promoted parity=true dispatched=2/2
+dispatch pipe=2 rc=1 pending_cmd=4 pending_n=1       # box -> LANDS  (was rc=-1)
+dispatch pipe=2 rc=1 pending_cmd=4 pending_n=1       # box -> LANDS  (was rc=-1)
+dispatch pipe=2 rc=1 pending_cmd=4 pending_n=1       # box -> LANDS  (was rc=-1)
+flush rc=1
+readback-entry dirty=false pending_cmd=0 pending_n=0 cpu_fallback=false completion_unknown=false
+```
+
+Compare the pre-fix trace in the second correction: `flush rc=-1` from line 739
+onward, all three boxes `rc=-1`, and `readback-entry ... pending_cmd=1
+pending_n=2`. The backstop's contradiction condition is false here (0/0 after a
+successful flush), so it correctly does not fire.
+
+**3. Direct-Engine2D vector-face probe** (`engine_vecfont_probe.spl`), which
+reproduced the collapse without the HTML lane:
+
+| arm | BEFORE | AFTER |
+|-----|--------|-------|
+| software_boxfirst | cpu_mirror 1647/760/207/216/216 | unchanged |
+| vulkan_boxfirst | device_readback 1647/760/207/216/216 | **unchanged (control holds)** |
+| software_textfirst | cpu_mirror 1647/760/216/216/216 | unchanged |
+| vulkan_textfirst | **cpu_fallback 0/0/0/0/0** | **device_readback 1647/760/216/216/216 == software** |
+
+The text-first vulkan arm went from a completely dead frame to bit-identical
+with software.
+
+**4. Bitmap-face control** (`engine_order_probe.spl`, never calls
+`composite_font_batch`) — must not move, and does not. Diff against the
+pre-fix `engine_order_v2.log` is EMPTY across all four arms:
+`notext` and `text`, software and vulkan, all `216/216/216`,
+vulkan `device_readback`.
+
+**5. Quarantine leak — CLEARED as a consequence.** The second correction noted
+that a *freshly created* `Engine2D` in the next arm had its first two dispatches
+come back `rc=0` with `cpu_fallback=true`, because
+`_enqueue_framebuffer_compute`'s `vulkan_sffi_reap_dependency_quarantine()` gate
+was still refusing after the previous arm's quarantined descriptors. With the
+write-back fixed there is no `-1` cascade, so
+`_quarantine_pending_compute_descriptors()` is never reached and nothing is left
+in quarantine. Measured on the second arm of the fixed `vecfont` run: the fresh
+engine's first dispatches are `rc=1 pending_cmd=1 pending_n=1` with
+`cpu_fallback=false`, and that arm reads back `device_readback`. The leak was a
+downstream symptom of this defect, not a separate one.
+
+### Still owed / still open
+
+- **The regression spec** `test/03_system/gui/web_showcase_full_gpu_offload_spec.spl`
+  was again not run to a `Results:` line. Its lane resolves to `"software"`, so
+  the expected impact is nil — but that remains an argument, not a measurement,
+  and it is inherited from the previous fix attempt.
+- **The perf defect is untouched.** The interpreted whole-atlas SHA-256 at
+  `backend_vulkan_font.spl:350-359` still costs ~23 minutes of CPU per two-glyph
+  draw; both verification runs above spent essentially all their wall time
+  there. Fix independently (hash once per face+generation, or a native digest).
+- **The sibling occurrences** of the option-binding write-back defect in
+  `engine2d/engine.spl` (cuda/metal/opencl/rocm) and `engine3d/engine.spl` are
+  filed and unfixed — see the language bug doc's table.

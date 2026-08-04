@@ -279,13 +279,13 @@ class Engine2D with DrawIrRenderTarget:
         """Install one bounded precompiled font compositor on a real Vulkan engine."""
         if spirv_bytes.len() == 0 or spirv_bytes.len() > 16777216:
             return false
-        val active = self.vulkan_backend
-        if active == nil:
-            return false
-        val vulkan = active
-        val evidence = vulkan.install_font_atlas_pipeline(spirv_bytes)
-        self.vulkan_backend = Some(vulkan)
-        evidence.status == "ready"
+        # Destructured binding, not `val vulkan = <optional>` -- see the
+        # write-back note on the vulkan font route below.
+        if val Some(vulkan) = self.vulkan_backend:
+            val evidence = vulkan.install_font_atlas_pipeline(spirv_bytes)
+            self.vulkan_backend = Some(vulkan)
+            return evidence.status == "ready"
+        false
 
     me install_cuda_font_ptx(ptx: text) -> bool:
         """Install one verified generated font companion on a real CUDA engine."""
@@ -1453,11 +1453,16 @@ class Engine2D with DrawIrRenderTarget:
                     attempts.push(if quad_index == batch.quads.len(): "opencl:success" else: "opencl:failed")
                     if quad_index == batch.quads.len(): winner = "opencl"
             elif target == "vulkan":
-                val active = self.vulkan_backend
-                if active == nil:
-                    attempts.push("vulkan:unavailable")
-                else:
-                    val vulkan = active
+                # `if val Some(vulkan) = ...` (NOT `val vulkan = <optional>`):
+                # a `me` call made through an OPTION-typed binding mutates a
+                # temporary unwrap that is discarded, so every state change
+                # `composite_font_batch` makes -- above all the entry flush at
+                # backend_vulkan_font.spl:269 that consumes the pending compute
+                # batch -- was lost, leaving the stored backend re-submitting an
+                # already-consumed command buffer and returning rc=-1 for every
+                # later flush and primitive dispatch (run-lane truncation,
+                # 2026-08-02). Only the destructured binding writes back.
+                if val Some(vulkan) = self.vulkan_backend:
                     # var (not val): evidence.fallback_pixels is cleared below;
                     # W1006 mut-capability failure here silently killed
                     # whole-program JIT (2026-07-18).
@@ -1484,6 +1489,8 @@ class Engine2D with DrawIrRenderTarget:
                     if evidence.promotion_ready and evidence.dispatch_count == batch.quads.len():
                         quad_index = batch.quads.len()
                         winner = "vulkan"
+                else:
+                    attempts.push("vulkan:unavailable")
             elif target == "rocm":
                 val active = self.rocm_backend
                 if active == nil:
@@ -2350,13 +2357,13 @@ class Engine2D with DrawIrRenderTarget:
 
     me draw_vulkan_image_blend_checked(dst_x: i32, dst_y: i32, width: i32, height: i32, pixels: [u32], opacity_milli: i32) -> bool:
         """Blend child pixels only through the active checked Vulkan path."""
-        val active = self.vulkan_backend
-        if active == nil:
-            return false
-        val vulkan = active
-        val completed = vulkan.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
-        self.vulkan_backend = Some(vulkan)
-        completed
+        # Destructured binding, not `val vulkan = <optional>` -- see the
+        # write-back note on the vulkan font route.
+        if val Some(vulkan) = self.vulkan_backend:
+            val completed = vulkan.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
+            self.vulkan_backend = Some(vulkan)
+            return completed
+        false
 
     me draw_metal_image_blend_checked(dst_x: i32, dst_y: i32, width: i32, height: i32, pixels: [u32], opacity_milli: i32) -> bool:
         """Blend child pixels only through the active checked Metal path."""
@@ -2718,6 +2725,14 @@ class Engine2D with DrawIrRenderTarget:
                 vulkan.mark_completion_unknown()
             elif pending_status != 1:
                 vulkan.mark_cpu_fallback("primitive-batch-read-flush-ineligible")
+            # Honesty backstop. EVERY return path of `_flush_pending_compute`
+            # clears the pending batch, so pending state that SURVIVES the
+            # flush proves the value the flush mutated is not the value about
+            # to be read back -- the frame cannot be device-attested. Fail
+            # closed instead of publishing a truncated `device_readback`
+            # (run-lane truncation, 2026-08-02).
+            if vulkan.pending_compute_command != 0 or vulkan.pending_compute_count != 0:
+                vulkan.mark_cpu_fallback("pending-compute-state-contradicts-flush")
             val readback = vulkan.read_pixels_with_source()
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
