@@ -136,6 +136,17 @@ binding failure leaves the prior published generation unchanged. Catalog
 publication alone is not proof that executable pages were mapped or that
 dynamic advice patchpoints were installed.
 
+Facet binding metadata uses the canonical
+`facet_witness_symbol(implementation_id)` name and is emitted only when that
+symbol is proven present in the ordinary-SMF export set. Declaration-only facet
+methods therefore fail closed with `E-AF002`; they are not published as callable
+witnesses. Loader-owned `advice_dispatch_slot` can explicitly invoke validated
+zero-argument `before`, `after_success`, and `after_error` witnesses for the
+active generation. Dynamic `around` remains denied until an exactly-once
+`proceed` continuation exists. The compiler does not yet emit automatic
+prepared-slot business-path callers, so explicit dispatch is not evidence of a
+patchpoint or transparent join-point installation.
+
 ## Current Limitations
 
 - **Libraries must be pre-registered**: `dylib_async_open` calls

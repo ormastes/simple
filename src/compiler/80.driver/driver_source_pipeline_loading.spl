@@ -12,7 +12,9 @@ use compiler.driver.driver_source_loading.{
     _driver_collect_sources_via_find,
     _driver_entry_import_dirname,
     _driver_entry_import_module_paths,
-    _driver_resolve_entry_import,
+    _driver_resolve_entry_import_with_port,
+    _driver_import_path_is_authorized_aspect,
+    _driver_resolved_path_is_hidden_aspect,
     _driver_collect_entry_import_source,
     _driver_physical_source_key,
     _driver_module_name_collision,
@@ -118,6 +120,12 @@ impl CompilerDriver:
         elif driver_inputs.len() == 0:
             if native_entry_input != "":
                 driver_inputs = [native_entry_input]
+        match self.ctx.module_resolver_discovery.resolve_inputs(driver_inputs):
+            case Ok(module_resolution):
+                self.ctx.module_resolution = module_resolution
+            case Err(discovery_error):
+                self.ctx.add_error(discovery_error)
+                return (self.ctx, false)
         val input_len = driver_inputs.len()
         val source_trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"
         if source_trace:
@@ -170,12 +178,6 @@ impl CompilerDriver:
             # Explicit --source roots are resolver fallbacks, not closure seeds.
             # This preserves custom source layouts without parsing every file in
             # each root before the entry's transitive imports are known.
-            var closure_loaded_mods = _driver_text_bucket_set_new(512)
-            var closure_preidx = 0
-            while closure_preidx < all_sources.len():
-                val loaded_module_name = all_sources[closure_preidx].module_name
-                closure_loaded_mods = _driver_text_bucket_set_add(closure_loaded_mods, loaded_module_name)
-                closure_preidx = closure_preidx + 1
             var closure_seen_mods = _driver_text_bucket_set_new(512)
             var closure_scan_sources = _driver_unique_physical_sources(all_sources)
             var closure_queued_paths = _driver_text_bucket_set_new(512)
@@ -202,17 +204,31 @@ impl CompilerDriver:
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
                 for closure_mp in closure_imports:
-                    if _driver_text_bucket_set_has(closure_seen_mods, closure_mp):
+                    val closure_import_key = closure_src.path + "|" + closure_mp
+                    if _driver_text_bucket_set_has(closure_seen_mods, closure_import_key):
                         continue
-                    closure_seen_mods = _driver_text_bucket_set_add(closure_seen_mods, closure_mp)
-                    if _driver_text_bucket_set_has(closure_loaded_mods, closure_mp):
-                        # Already satisfied by an explicit --source root (or an
-                        # earlier closure step): nothing to resolve, not an error.
-                        continue
-                    var closure_file = _driver_resolve_entry_import(closure_mp, closure_dir)
+                    closure_seen_mods = _driver_text_bucket_set_add(
+                        closure_seen_mods, closure_import_key)
+                    var closure_file = _driver_resolve_entry_import_with_port(
+                        closure_mp, closure_dir, self.ctx.module_resolution)
+                    if (closure_file != "" and
+                        _driver_resolved_path_is_hidden_aspect(
+                            closure_file, self.ctx.module_resolution) and
+                        not _driver_import_path_is_authorized_aspect(
+                            closure_src.path, closure_file,
+                            self.ctx.module_resolution)):
+                        closure_file = ""
                     if closure_file == "":
                         for closure_source_root in closure_source_roots:
-                            closure_file = _driver_resolve_entry_import(closure_mp, closure_source_root)
+                            closure_file = _driver_resolve_entry_import_with_port(
+                                closure_mp, closure_source_root, self.ctx.module_resolution)
+                            if (closure_file != "" and
+                                _driver_resolved_path_is_hidden_aspect(
+                                    closure_file, self.ctx.module_resolution) and
+                                not _driver_import_path_is_authorized_aspect(
+                                    closure_src.path, closure_file,
+                                    self.ctx.module_resolution)):
+                                closure_file = ""
                             if closure_file != "":
                                 break
                     if closure_file == "":

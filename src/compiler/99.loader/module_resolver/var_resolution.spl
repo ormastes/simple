@@ -16,6 +16,9 @@
 # increments (H2 / Phase 4).
 
 use std.common.crypto.types.{text_to_bytes}
+pub use compiler.common.aspect_path_policy.{
+    aspect_importer_can_search, aspect_normalize_path, aspect_path_within
+}
 
 # A variant group: a selectable axis with a closed value set.
 struct VarGroup:
@@ -333,30 +336,6 @@ struct AspectRootResolution:
     errors: [text]
     selection_fingerprint: text
 
-# Lexically collapse separators, `.` and `..`. Absolute paths stay absolute.
-# This runs before realpath so a missing final component cannot preserve an
-# unchecked `..` segment in the runtime fallback.
-fn aspect_normalize_path(path: text) -> text:
-    val normalized = path.replace("\\", "/")
-    val absolute = normalized.starts_with("/")
-    var parts: [text] = []
-    for part in normalized.split("/"):
-        if part.len() == 0 or part == ".":
-            continue
-        if part == "..":
-            if parts.len() > 0 and parts[parts.len() - 1] != "..":
-                parts.pop()
-            elif not absolute:
-                parts.push(part)
-            continue
-        parts.push(part)
-    val joined = parts.join("/")
-    if absolute:
-        return "/{joined}"
-    if joined.len() == 0:
-        return "."
-    joined
-
 fn aspect_path_dirname(path: text) -> text:
     val normalized = aspect_normalize_path(path)
     val slash = normalized.last_index_of("/")
@@ -365,20 +344,6 @@ fn aspect_path_dirname(path: text) -> text:
     if slash == 0:
         return "/"
     normalized[0:slash]
-
-fn aspect_path_within(root: text, child: text) -> bool:
-    val canonical_root = aspect_normalize_path(root)
-    val canonical_child = aspect_normalize_path(child)
-    if canonical_root == "/":
-        return canonical_child.starts_with("/")
-    canonical_child == canonical_root or canonical_child.starts_with("{canonical_root}/")
-
-fn aspect_importer_can_search(from_file: text, roots: [text]) -> bool:
-    """Only code already owned by a resolved aspect root may search that registry."""
-    for root in roots:
-        if aspect_path_within(root, from_file):
-            return true
-    false
 
 fn aspect_path_escape_code(
     workspace_lexical: text,

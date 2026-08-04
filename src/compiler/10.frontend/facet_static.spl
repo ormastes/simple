@@ -6,10 +6,12 @@ This parser deliberately owns only declarations beginning with `facet`,
 """
 
 use compiler.common.structural_contracts.aop.{FacetAccess, FacetMultiplicity, FacetRepresentation}
+use compiler.common.structural_contracts.facet_artifact.{facet_witness_method_symbol}
 
 struct FacetMethodDecl:
     name: text
     signature: text
+    body_source: text
 
 struct FacetInterfaceDecl:
     aspect_id: text
@@ -64,14 +66,16 @@ fn facet_static_decl_starts(line: text) -> bool:
         trimmed.starts_with("facet impl ") or trimmed.starts_with("bind facet ") or
         trimmed.starts_with("require facet "))
 
-fn facet_method_from_line(line: text) -> Result<FacetMethodDecl, text>:
+fn facet_method_from_line(line: text, body_source: text) -> Result<FacetMethodDecl, text>:
     val signature = facet_trim_colon(line)
     if not signature.starts_with("fn "):
         return Err("facet implementation members must be methods")
     val name_parts = signature[3:].split("(")
     if name_parts.len() < 2 or name_parts[0].trim() == "":
         return Err("facet method requires a name and parameter list")
-    Ok(FacetMethodDecl(name: name_parts[0].trim(), signature: signature))
+    Ok(FacetMethodDecl(
+        name: name_parts[0].trim(), signature: signature,
+        body_source: body_source))
 
 fn facet_block_end(lines: [text], start: i64) -> i64:
     val declaration_indent = facet_line_indent(lines[start])
@@ -93,14 +97,59 @@ fn facet_block_header(lines: [text], start: i64, end: i64) -> text:
         index = index + 1
     parts.join(" ")
 
-fn facet_block_methods(lines: [text], start: i64, end: i64) -> Result<[FacetMethodDecl], text>:
+fn facet_method_body_source(
+    lines: [text], start: i64, end: i64, method_indent: i64
+) -> text:
+    var body_indent = 0 - 1
+    var index = start
+    while index < end:
+        if lines[index].trim() != "":
+            val indent = facet_line_indent(lines[index])
+            if indent > method_indent and (body_indent < 0 or indent < body_indent):
+                body_indent = indent
+        index = index + 1
+    if body_indent < 0: return ""
+    var body_lines: [text] = []
+    index = start
+    while index < end:
+        val line = lines[index]
+        if line.trim() == "":
+            body_lines = body_lines.push("")
+        else:
+            body_lines = body_lines.push(line[body_indent:])
+        index = index + 1
+    body_lines.join("\n").trim()
+
+fn facet_block_methods(
+    lines: [text], start: i64, end: i64, declaration_only: bool
+) -> Result<[FacetMethodDecl], text>:
     var methods: [FacetMethodDecl] = []
     var index = start + 1
     while index < end:
-        val line = lines[index].trim()
-        if line.starts_with("fn "):
-            methods = methods.push(facet_method_from_line(line)?)
-        index = index + 1
+        val line = lines[index]
+        val trimmed = line.trim()
+        if not trimmed.starts_with("fn "):
+            index = index + 1
+            continue
+        val method_indent = facet_line_indent(line)
+        var method_end = index + 1
+        while method_end < end:
+            val candidate = lines[method_end]
+            if candidate.trim() != "" and facet_line_indent(candidate) <= method_indent:
+                break
+            method_end = method_end + 1
+        val body_source = facet_method_body_source(
+            lines, index + 1, method_end, method_indent)
+        val has_body_marker = trimmed.ends_with(":")
+        val method = facet_method_from_line(trimmed, body_source)?
+        if declaration_only and (has_body_marker or body_source != ""):
+            return Err("E-AF005 facet interface method '{method.name}' must be declaration-only")
+        if not declaration_only and has_body_marker and body_source == "":
+            return Err("E-AF005 executable facet method '{method.name}' requires a body")
+        if not declaration_only and not has_body_marker and body_source != "":
+            return Err("E-AF005 facet implementation method '{method.name}' requires `:` before its body")
+        methods = methods.push(method)
+        index = method_end
     Ok(methods)
 
 fn parse_facet_interface(lines: [text], start: i64, end: i64, aspect_id: text) -> Result<FacetInterfaceDecl, text>:
@@ -117,7 +166,7 @@ fn parse_facet_interface(lines: [text], start: i64, end: i64, aspect_id: text) -
         aspect_id: aspect_id,
         name: name,
         parent_facets: parents,
-        methods: facet_block_methods(lines, start, end)?
+        methods: facet_block_methods(lines, start, end, true)?
     ))
 
 fn facet_impl_header_name(body: text) -> text:
@@ -146,7 +195,7 @@ fn parse_facet_impl(lines: [text], start: i64, end: i64, aspect_id: text) -> Res
         name: facet_impl_header_name(body),
         base_type: base_type,
         interfaces: interfaces,
-        methods: facet_block_methods(lines, start, end)?,
+        methods: facet_block_methods(lines, start, end, false)?,
         access: FacetAccess.PublicReadonly
     ))
 
@@ -237,6 +286,46 @@ fn parse_static_facet_declarations(source: text) -> Result<FacetAstModule, text>
         requirements: requirements
     ))
 
+fn facet_projected_method_signature(
+    implementation: FacetImplDecl, method: FacetMethodDecl
+) -> Result<text, text>:
+    val open_parts = method.signature.split("(")
+    if open_parts.len() < 2:
+        return Err("E-AF005 facet method '{method.name}' has an invalid parameter list")
+    val close_parts = open_parts[1].split(")")
+    if close_parts.len() < 2:
+        return Err("E-AF005 facet method '{method.name}' has an invalid parameter list")
+    val parameters = close_parts[0].trim()
+    if parameters != "self" and not parameters.starts_with("self,"):
+        return Err("E-AF005 executable facet method '{method.name}' must begin with `self`")
+    var projected_parameters = "facet_base: " + implementation.base_type
+    if parameters.starts_with("self,"):
+        projected_parameters = projected_parameters + "," + parameters["self,".len():]
+    val suffix = method.signature.split(")")[1:].join(")")
+    Ok("fn " + facet_witness_method_symbol(implementation.name, method.name) +
+        "(" + projected_parameters + ")" + suffix + ":")
+
+fn facet_projected_method_source(
+    implementation: FacetImplDecl, method: FacetMethodDecl
+) -> Result<text, text>:
+    if method.body_source.contains("self.base"):
+        return Err("E-AF005 executable facet method '{implementation.name}.{method.name}' requires unsupported self.base receiver adaptation")
+    if method.body_source.contains("self"):
+        return Err("E-AF005 executable facet method '{implementation.name}.{method.name}' requires unsupported self receiver adaptation")
+    var body_lines: [text] = []
+    for line in method.body_source.split("\n"):
+        body_lines = body_lines.push(if line == "": "" else: "    " + line)
+    Ok(facet_projected_method_signature(implementation, method)? + "\n" +
+        body_lines.join("\n"))
+
+fn facet_projected_executable_methods(facets: FacetAstModule) -> Result<[text], text>:
+    var sources: [text] = []
+    for implementation in facets.implementations:
+        for method in implementation.methods:
+            if method.body_source != "":
+                sources = sources.push(facet_projected_method_source(implementation, method)?)
+    Ok(sources)
+
 fn project_static_facet_source(source: text) -> Result<FacetSourceProjection, text>:
     """Remove only proposed facet declarations before the established parser runs.
 
@@ -253,6 +342,7 @@ fn project_static_facet_source(source: text) -> Result<FacetSourceProjection, te
         ))
 
     val facets = parse_static_facet_declarations(source)?
+    val executable_methods = facet_projected_executable_methods(facets)?
     val lines = source.split("\n")
     var projected: [text] = []
     var skip_indent = 0 - 1
@@ -275,7 +365,10 @@ fn project_static_facet_source(source: text) -> Result<FacetSourceProjection, te
         else:
             projected = projected.push(line)
         index = index + 1
-    Ok(FacetSourceProjection(source: projected.join("\n"), facets: facets))
+    var projected_source = projected.join("\n")
+    if executable_methods.len() > 0:
+        projected_source = projected_source + "\n\n" + executable_methods.join("\n\n") + "\n"
+    Ok(FacetSourceProjection(source: projected_source, facets: facets))
 
 export FacetMethodDecl, FacetInterfaceDecl, FacetImplDecl, FacetBindDecl, FacetRequireDecl, FacetAstModule
 export FacetSourceProjection, parse_static_facet_declarations, project_static_facet_source

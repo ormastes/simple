@@ -1,0 +1,159 @@
+# @req REQ-AF-007 REQ-AF-008 REQ-AF-010 NFR-AF-003
+# @cover src/compiler/99.loader/loader/advice_binding_registry.spl 80%
+
+use std.spec.*
+use compiler.loader.loader.aspect_catalog.{AspectAdviceSummary}
+use compiler.loader.loader.advice_binding_registry.{
+    AdviceBindingAdmission, AdviceBindingRegistry,
+    advice_binding_stage_validated, advice_publish_generation,
+    advice_lookup_slot, advice_unbind_generation,
+    advice_disabled_path_footprint, advice_dispatch_slot
+}
+use compiler.loader.loader.module_loader.{moduleloader_with_defaults}
+
+fn advice_summary(id: text, witness: text, priority: i64, specificity: i64) -> AspectAdviceSummary:
+    AspectAdviceSummary(
+        advice_id: id,
+        joinpoint_slot_id: "orders.submit.prepared",
+        form: "before",
+        priority: priority,
+        specificity: specificity,
+        witness_symbol: witness,
+        capabilities: ["orders.observe"])
+
+fn publish_advice(
+    registry: AdviceBindingRegistry,
+    activation_key: text,
+    aspect_id: text,
+    admissions: [AdviceBindingAdmission]
+) -> AdviceBindingRegistry:
+    val candidate = advice_binding_stage_validated(
+        registry, activation_key, 7, aspect_id, admissions).unwrap()
+    advice_publish_generation(
+        registry, candidate, activation_key, 7).unwrap()
+
+describe "Loader advice binding registry":
+    it "publishes only prepared slots and preserves canonical AOP order":
+        var registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
+        registry = publish_advice(registry, "pack:a:7", "audit.aspect", [
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.low", "z_audit", 10, 4),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 101),
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.tie", "a_audit", 10, 4),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 102),
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.high", "m_audit", 20, 1),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 103)])
+
+        val lookup = advice_lookup_slot(registry, "orders.submit.prepared").unwrap()
+        expect(lookup.chain.len()).to_equal(3)
+        expect(lookup.chain[0].advice_id).to_equal("audit.high")
+        expect(lookup.chain[1].advice_id).to_equal("audit.tie")
+        expect(lookup.chain[2].advice_id).to_equal("audit.low")
+        expect(lookup.registry.counters.advice_publications).to_equal(1)
+        expect(lookup.registry.counters.slot_lookups).to_equal(1)
+        expect(lookup.registry.counters.slot_hits).to_equal(1)
+        expect(lookup.registry.counters.disabled_slot_checks).to_equal(1)
+        expect(lookup.registry.counters.disabled_slot_branches).to_equal(1)
+
+    it "fails closed for unprepared targets and duplicate advice IDs":
+        val registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
+        var unprepared = advice_summary("audit.bad", "audit_bad", 1, 1)
+        unprepared.joinpoint_slot_id = "orders.unknown"
+        val unprepared_result = advice_binding_stage_validated(
+            registry, "pack:a:7", 7, "audit.aspect", [
+            AdviceBindingAdmission(summary: unprepared, witness_owner_id: "pack:a:7", resolved_witness_address: 101)
+        ])
+        expect(unprepared_result.unwrap_err()).to_contain("without a prepared join point")
+
+        val duplicate = advice_summary("audit.same", "audit_same", 1, 1)
+        val duplicate_result = advice_binding_stage_validated(
+            registry, "pack:a:7", 7, "audit.aspect", [
+            AdviceBindingAdmission(summary: duplicate, witness_owner_id: "pack:a:7", resolved_witness_address: 101),
+            AdviceBindingAdmission(summary: duplicate, witness_owner_id: "pack:a:7", resolved_witness_address: 101)
+        ])
+        expect(duplicate_result.unwrap_err()).to_contain("duplicate staged dynamic advice")
+
+        val unresolved = advice_binding_stage_validated(
+            registry, "pack:a:7", 7, "audit.aspect", [
+                AdviceBindingAdmission(
+                    summary: advice_summary("audit.unresolved", "audit_unresolved", 1, 1),
+                    witness_owner_id: "pack:a:7", resolved_witness_address: 0)])
+        expect(unresolved.unwrap_err()).to_contain("invalid loaded dynamic advice")
+
+    it "counts disabled prepared slots and removes visibility before drain":
+        var registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
+        val miss = advice_lookup_slot(registry, "orders.submit.prepared").unwrap()
+        registry = miss.registry
+        expect(miss.chain.len()).to_equal(0)
+        expect(registry.counters.slot_misses).to_equal(1)
+
+        registry = publish_advice(registry, "pack:a:7", "audit.aspect", [
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.active", "audit_active", 1, 1),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 101)])
+        registry = advice_unbind_generation(registry, "pack:a:7", 7)
+        val after = advice_lookup_slot(registry, "orders.submit.prepared").unwrap()
+        expect(after.chain.len()).to_equal(0)
+        expect(after.registry.counters.advice_unbinds).to_equal(1)
+        expect(after.registry.counters.slot_misses).to_equal(2)
+
+        val footprint = advice_disabled_path_footprint()
+        expect(footprint.dispatch_kind).to_equal("prepared_slot_guard")
+        expect(footprint.disabled_footprint_bytes).to_equal(1)
+        expect(footprint.disabled_footprint_source).to_equal("contract_minimum_not_backend_measurement")
+        expect(footprint.prepared_slot_checks_per_call).to_equal(1)
+        expect(footprint.conditional_branches_per_call).to_equal(1)
+        expect(footprint.exact_zero_overhead).to_equal(false)
+
+    it "dispatches an empty supported phase without inventing a callback":
+        val registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
+        val outcome = advice_dispatch_slot(
+            registry, moduleloader_with_defaults(),
+            "orders.submit.prepared", "before")
+        expect(outcome.status).to_equal("dispatched")
+        expect(outcome.invoked_count).to_equal(0)
+        expect(outcome.return_values.len()).to_equal(0)
+        expect(outcome.registry.counters.dispatch_attempts).to_equal(1)
+        expect(outcome.registry.counters.dispatch_invocations).to_equal(0)
+
+    it "fails before invocation when loader witness ownership is absent":
+        var registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
+        registry = publish_advice(registry, "pack:a:7", "audit.aspect", [
+            AdviceBindingAdmission(
+                summary: advice_summary("audit.stale", "audit_stale", 1, 1),
+                witness_owner_id: "pack:a:7", resolved_witness_address: 101)])
+        val other_phase = advice_dispatch_slot(
+            registry, moduleloader_with_defaults(),
+            "orders.submit.prepared", "after_success")
+        expect(other_phase.status).to_equal("dispatched")
+        expect(other_phase.invoked_count).to_equal(0)
+        registry = other_phase.registry
+        val outcome = advice_dispatch_slot(
+            registry, moduleloader_with_defaults(),
+            "orders.submit.prepared", "before")
+        expect(outcome.status).to_equal("failed")
+        expect(outcome.reason).to_contain("no longer loader-owned")
+        expect(outcome.invoked_count).to_equal(0)
+        expect(outcome.registry.counters.dispatch_failures).to_equal(1)
+        expect(outcome.registry.counters.dispatch_invocations).to_equal(0)
+        expect(outcome.registry.counters.dispatch_attempts).to_equal(2)
+
+    it "rejects runtime around advice without pretending to provide proceed":
+        val registry = AdviceBindingRegistry.create(["orders.submit.prepared"]).unwrap()
+        var around = advice_summary("audit.around", "audit_around", 1, 1)
+        around.form = "around"
+        val staged = advice_binding_stage_validated(
+            registry, "pack:a:7", 7, "audit.aspect", [
+                AdviceBindingAdmission(
+                    summary: around, witness_owner_id: "pack:a:7",
+                    resolved_witness_address: 101)])
+        expect(staged.unwrap_err()).to_contain("exactly-once proceed path")
+
+        val outcome = advice_dispatch_slot(
+            registry, moduleloader_with_defaults(),
+            "orders.submit.prepared", "around")
+        expect(outcome.status).to_equal("failed")
+        expect(outcome.reason).to_contain("exactly-once proceed path")
+        expect(outcome.registry.counters.around_rejections).to_equal(1)

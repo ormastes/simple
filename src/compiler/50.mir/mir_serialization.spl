@@ -11,6 +11,7 @@ use compiler.mir.mir_json.{escape_json_string}
 use compiler.common.structural_contracts.aop.{
     COMPILER_AOP_CONTRACT_VERSION,
     FacetAccess, FacetBindingPlan, FacetMultiplicity, FacetRepresentation,
+    PreparedAdviceSlotPlan,
     TypePredicateInstruction
 }
 use std.common.crypto.types.{text_to_bytes}
@@ -80,6 +81,48 @@ fn serialize_mir_facet_binding_plans(plans: [FacetBindingPlan]) -> text:
     ("{\"contractVersion\":{COMPILER_AOP_CONTRACT_VERSION}," +
         "\"plans\":[{rows_json}]}")
 
+fn serialize_prepared_advice_slot(plan: PreparedAdviceSlotPlan) -> text:
+    var forms: [text] = []
+    for form in plan.admitted_forms:
+        forms.push(form)
+    var i = 0
+    while i < forms.len():
+        var j = i + 1
+        while j < forms.len():
+            if mir_facet_metadata_text_lt(forms[j], forms[i]):
+                val tmp = forms[i]
+                forms[i] = forms[j]
+                forms[j] = tmp
+            j = j + 1
+        i = i + 1
+    var quoted_forms: [text] = []
+    for form in forms:
+        quoted_forms.push("\"{escape_json_string(form)}\"")
+    val forms_json = quoted_forms.join(",")
+    ("{\"admittedForms\":[{forms_json}]," +
+        "\"schemaId\":\"{escape_json_string(plan.schema_id)}\"," +
+        "\"schemaVersion\":{plan.schema_version}," +
+        "\"slotId\":\"{escape_json_string(plan.slot_id)}\"," +
+        "\"targetFunctionId\":\"{escape_json_string(plan.target_function_id)}\"}")
+
+fn serialize_mir_prepared_advice_slots(plans: [PreparedAdviceSlotPlan]) -> text:
+    """Serialize prepared slots deterministically without producing dispatch code."""
+    var rows: [text] = []
+    for plan in plans:
+        rows.push(serialize_prepared_advice_slot(plan))
+    var i = 0
+    while i < rows.len():
+        var j = i + 1
+        while j < rows.len():
+            if mir_facet_metadata_text_lt(rows[j], rows[i]):
+                val tmp = rows[i]
+                rows[i] = rows[j]
+                rows[j] = tmp
+            j = j + 1
+        i = i + 1
+    val rows_json = rows.join(",")
+    "{\"plans\":[{rows_json}]}"
+
 
 fn serialize_mir_module(module: MirModule) -> text:
     """Serialize MIR functions and deterministic compile-time metadata to JSON."""
@@ -97,6 +140,8 @@ fn serialize_mir_module(module: MirModule) -> text:
 
     parts = parts.push("],\"facetBindings\":")
     parts = parts.push(serialize_mir_facet_binding_plans(module.facet_binding_plans))
+    parts = parts.push(",\"preparedAdviceSlots\":")
+    parts = parts.push(serialize_mir_prepared_advice_slots(module.prepared_advice_slots))
     parts = parts.push("}")
     parts.join("")
 
@@ -106,3 +151,4 @@ fn serialize_mir_inst(inst: MirInst) -> text:
     "{\"kind\":{serialize_mir_inst_kind(inst.kind)}}"
 
 export serialize_mir_module, serialize_mir_inst, serialize_mir_facet_binding_plans
+export serialize_mir_prepared_advice_slots

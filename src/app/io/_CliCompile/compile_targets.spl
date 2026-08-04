@@ -14,12 +14,17 @@ use app.io.time_ops (time_now_unix_micros)
 use std.nogc_sync_mut.shell.file (rename)
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
-use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
+use compiler.driver.driver (compiler_driver_create_with_module_resolver_discovery, compiler_driver_run_compile, aot_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
+use compiler.driver.driver_api (aot_c_file_with_module_resolver_discovery)
 use compiler.driver.driver_source_loading.{
     _driver_entry_import_module_paths, _driver_entry_sibling_module_paths,
-    _driver_resolve_entry_import, _driver_text_bucket_set_new,
+    _driver_resolve_entry_import_with_port,
+    _driver_import_path_is_authorized_aspect, _driver_text_bucket_set_new,
     _driver_text_bucket_set_has, _driver_text_bucket_set_add
 }
+use compiler.common.module_resolver_port.{ModuleResolverPort}
+use compiler.loader.module_resolver.aspect_registry.{aspect_registry_port_for_inputs}
+use compiler.loader.module_resolver.aspect_registry_discovery_adapter.{create_aspect_registry_module_resolver_discovery}
 # Dict.entries currently lowers to this implementation; keep its object in the
 # entry closure even though this walker no longer constructs a custom HashMap.
 use std.nogc_sync_mut.src.collections.hashmap.{HashMap}
@@ -346,7 +351,8 @@ fn compile_c_backend(source_file: text, output_file: text, verbose: bool) -> i64
         print "Compiling {source_file} to C++20 (MIR C backend)"
         print "  Output: {out}"
 
-    val aot_result = aot_c_file(source_file, out)
+    val aot_result = aot_c_file_with_module_resolver_discovery(
+        source_file, out, create_aspect_registry_module_resolver_discovery())
     match aot_result:
         case CompileResult.Success(_):
             print "Output: {out}"
@@ -511,15 +517,24 @@ fn _nb_resolve_under_root(root: text, segs: [text]) -> text:
         return p3
     ""
 
-fn _nb_resolve_segs(segs: [text], source_dirs: [text], importer_path: text) -> text:
+fn _nb_resolve_segs(
+    segs: [text],
+    source_dirs: [text],
+    importer_path: text,
+    resolution: ModuleResolverPort
+) -> text:
     # Resolve a module segment list to an .spl file under a --source root.
     # Mirrors the Rust discovery FS-fallback: strip a leading segment matching
     # the root's dir name. Returns "" if unresolved.
     val module_path = _nb_join_segments(segs)
     val entry_dir = _driver_entry_import_dirname(importer_path)
     if segs.len() > 0:
-        val resolved = _driver_resolve_entry_import(module_path, entry_dir)
+        val resolved = _driver_resolve_entry_import_with_port(
+            module_path, entry_dir, resolution)
         if resolved != "":
+            if _driver_import_path_is_authorized_aspect(
+                importer_path, resolved, resolution):
+                return resolved
             val resolved_abs = rt_path_absolute(resolved).replace("\\", "/")
             for root in source_dirs:
                 val root_abs = _nb_trim_trailing_slashes(rt_path_absolute(root).replace("\\", "/"))
@@ -582,6 +597,12 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # safely: an unresolved `use` is skipped; a genuinely missing import still
     # errors in the compile phase.
     val trace_closure = (env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
+    val aspect_install = aspect_registry_port_for_inputs([entry])
+    if aspect_install.errors.len() > 0:
+        for aspect_error in aspect_install.errors:
+            _cli_eprint("aspect registry {aspect_error}: {aspect_install.manifest_path}")
+        return []
+    val module_resolution = aspect_install.port
     # Level-gated, default-off per-file timing probe. The 25-file checkpoint
     # above only shows aggregate progress; this prints a per-file elapsed-us
     # delta so a flat vs. growing per-file cost (O(n) vs O(n^2)) can be told
@@ -626,12 +647,12 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
                     discovered = _driver_text_bucket_set_add(discovered, rel_rp)
                 continue
             val segs = mp.split(".")
-            val seg_key = _nb_join_segments(segs)
+            val seg_key = f + "|" + _nb_join_segments(segs) + "|" + module_resolution.fingerprint
             var rp = ""
             if resolve_cache.has(seg_key):
                 rp = resolve_cache[seg_key]
             else:
-                rp = _nb_resolve_segs(segs, closure_source_dirs, f)
+                rp = _nb_resolve_segs(segs, closure_source_dirs, f, module_resolution)
                 resolve_cache[seg_key] = rp
             if trace_closure and f == entry:
                 _cli_eprint("[native-build] closure import {mp} -> {rp}")
@@ -644,12 +665,13 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
                 while di < segs.len() - 1:
                     drop = drop.push(segs[di])
                     di = di + 1
-                val drop_key = _nb_join_segments(drop)
+                val drop_key = f + "|" + _nb_join_segments(drop) + "|" + module_resolution.fingerprint
                 var drop_rp = ""
                 if resolve_cache.has(drop_key):
                     drop_rp = resolve_cache[drop_key]
                 else:
-                    drop_rp = _nb_resolve_segs(drop, closure_source_dirs, f)
+                    drop_rp = _nb_resolve_segs(
+                        drop, closure_source_dirs, f, module_resolution)
                     resolve_cache[drop_key] = drop_rp
                 if drop_rp != "" and not _driver_text_bucket_set_has(discovered, drop_rp):
                     queue = queue.push(drop_rp)
@@ -1130,7 +1152,8 @@ fn cli_native_build(args: [text]) -> i64:
             options.low_memory = low_memory
             options.target_opt_ctx = _nb_target_opt_ctx
             options = compileoptions_normalize_mir_optimization(options)
-            val driver = compiler_driver_create(options)
+            val driver = compiler_driver_create_with_module_resolver_discovery(
+                options, create_aspect_registry_module_resolver_discovery())
             if verbose:
                 _cli_eprint("[native-build] Driver start: inputs={native_inputs.len()} backend={backend} mode={build_mode}")
             val driver_result = compiler_driver_run_compile(driver)
@@ -1166,7 +1189,8 @@ fn cli_native_build(args: [text]) -> i64:
             options.low_memory = low_memory
             options.target_opt_ctx = _nb_target_opt_ctx
             options = compileoptions_normalize_mir_optimization(options)
-            val driver = compiler_driver_create(options)
+            val driver = compiler_driver_create_with_module_resolver_discovery(
+                options, create_aspect_registry_module_resolver_discovery())
             if verbose:
                 _cli_eprint("[native-build] Driver start: inputs={native_inputs.len()} backend={backend} mode={build_mode}")
             val driver_result = compiler_driver_run_compile(driver)

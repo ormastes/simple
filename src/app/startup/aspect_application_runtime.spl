@@ -22,6 +22,12 @@ use compiler.loader.loader.module_loader.{ModuleLoader, moduleloader_unload}
 use compiler.loader.loader.facet_binding_registry.{
     FacetBindingRecord, facet_lookup, facet_unbind_generation
 }
+use compiler.loader.loader.advice_binding_registry.{
+    AdviceBindingRecord, AdviceBindingCounters, AdviceDisabledPathFootprint,
+    advice_lookup_slot, advice_unbind_generation,
+    advice_disabled_path_footprint,
+    advice_dispatch_slot as loader_advice_dispatch_slot
+}
 use os.smf.dynsmf_session.{DynSmfSession}
 use os.smf.smf_generation.{GenerationToken, LifecycleManager}
 use std.aop.facet.{FacetGenerationLease}
@@ -151,6 +157,16 @@ impl AspectApplicationRuntime:
                 counters: self.coordinator.counters
             )
         val entry = entry_result.unwrap()
+        if entry.advice_summaries.len() > 0:
+            val patch_authorization = self.authorize(AspectApplicationOperation.Patch)
+            if patch_authorization.is_err():
+                return AspectActivationResult(
+                    coordinator: self.coordinator,
+                    status: "failed",
+                    reason: patch_authorization.unwrap_err(),
+                    generation: self.catalog.generation,
+                    staged_count: 0,
+                    counters: self.coordinator.counters)
         if aspect_application_is_mission(self.trust_policy) and entry.activation_policy != "startup":
             return AspectActivationResult(
                 coordinator: self.coordinator,
@@ -256,6 +272,35 @@ impl AspectApplicationRuntime:
             implemented_business_interfaces,
             facet_interface_id)
 
+    # Prepared join-point dispatch seam. This performs no pointcut matching;
+    # it returns the preordered visible chain and records exact harness
+    # counters for both enabled and disabled slots.
+    me fn lookup_published_advice(slot_id: text) -> Result<[AdviceBindingRecord], text>:
+        val lookup = advice_lookup_slot(self.coordinator.advice_bindings, slot_id)?
+        self.coordinator.advice_bindings = lookup.registry
+        Ok(lookup.chain)
+
+    fn advice_binding_counters() -> AdviceBindingCounters:
+        self.coordinator.advice_bindings.counters
+
+    fn advice_disabled_footprint() -> AdviceDisabledPathFootprint:
+        advice_disabled_path_footprint()
+
+    # Synchronous prepared-slot execution boundary. Mutable application-runtime
+    # ownership prevents unload from interleaving between the active-generation
+    # filter and the loader-owned zero-argument witness calls.
+    me fn advice_dispatch_slot(
+        loader: ModuleLoader,
+        slot_id: text,
+        form: text
+    ) -> Result<[i64], text>:
+        val outcome = loader_advice_dispatch_slot(
+            self.coordinator.advice_bindings, loader, slot_id, form)
+        self.coordinator.advice_bindings = outcome.registry
+        if outcome.status != "dispatched":
+            return Err(outcome.reason)
+        Ok(outcome.return_values)
+
     # First-use boundary: resolve the visible witness and pin that record's
     # exact published generation as one application-runtime operation.
     me fn acquire_published_facet(
@@ -311,7 +356,12 @@ impl AspectApplicationRuntime:
             self.coordinator.facet_bindings,
             activation.activation_key,
             generation)
+        self.coordinator.advice_bindings = advice_unbind_generation(
+            self.coordinator.advice_bindings,
+            activation.activation_key,
+            generation)
         activation.bindings = []
+        activation.advices = []
         activation.state = "quiescing"
         self.coordinator.published[aspect_id] = activation
         if not self.coordinator.lifecycle.generation_is_drained_for(

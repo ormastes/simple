@@ -2,7 +2,7 @@
 # owners.  This module stages validated pack modules and publishes binding
 # summaries; it owns no executable loader, artifact cache, or lifecycle table.
 
-use compiler.loader.loader.aspect_catalog.{AspectBindingSummary, AspectCatalogEntry, AspectCatalog}
+use compiler.loader.loader.aspect_catalog.{AspectBindingSummary, AspectAdviceSummary, AspectCatalogEntry, AspectCatalog}
 use compiler.loader.loader.aspect_pack_provider.{AspectPackProviderKey, AspectPackModuleKey, AspectPackProvider, AspectPackProviderCache}
 use std.sfm.aspect_pack.{aspect_pack_find_entry}
 use os.smf.dynsmf_session.{DynSmfSession, DynSmfEvidenceRow, dynsmf_id_disabled}
@@ -11,10 +11,17 @@ use os.smf.smf_generation.{GenerationState, CandidateMapping, LifecycleManager}
 # compatibility loader (which only accepts filesystem paths).
 use compiler.loader.loader.module_loader.{ModuleLoader, LoadResult, moduleloader_load, moduleloader_unload}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.common.structural_contracts.facet_artifact.{
+    FacetBindingArtifactSummary, decode_facet_binding_summaries
+}
 use compiler.loader.loader.smf_cache_manager.{SmfCacheManager}
 use compiler.loader.loader.facet_binding_registry.{
     FacetBindingAdmission, FacetBindingCandidate, FacetBindingRegistry,
     facet_binding_stage_validated, aspect_publish_generation
+}
+use compiler.loader.loader.advice_binding_registry.{
+    AdviceBindingAdmission, AdviceBindingCandidate, AdviceBindingRegistry,
+    advice_binding_stage_validated, advice_publish_generation
 }
 
 struct AspectActivationRequest:
@@ -31,6 +38,7 @@ struct AspectStagedModule:
     smf_bytes: [u8]
     cache_key: AspectPackModuleKey
     bindings: [AspectBindingSummary]
+    advices: [AspectAdviceSummary]
 
 struct AspectActivationCounters:
     # The provider is supplied already open/validated to this adapter.
@@ -50,6 +58,7 @@ struct AspectPublishedActivation:
     owners: [text]
     module_keys: [AspectPackModuleKey]
     bindings: [AspectBindingSummary]
+    advices: [AspectAdviceSummary]
     state: text
 
 struct AspectActivationCoordinator:
@@ -57,6 +66,7 @@ struct AspectActivationCoordinator:
     dynsmf_session: DynSmfSession
     lifecycle: LifecycleManager
     facet_bindings: FacetBindingRegistry
+    advice_bindings: AdviceBindingRegistry
     # Facet-binding publication table.  Generation/resource ownership remains
     # in DynSmfSession and LifecycleManager; this is not a lifecycle registry.
     published: Dict<text, AspectPublishedActivation>
@@ -118,6 +128,7 @@ fn aspect_activation_without_reservation(coordinator: AspectActivationCoordinato
         dynsmf_session: coordinator.dynsmf_session,
         lifecycle: coordinator.lifecycle,
         facet_bindings: coordinator.facet_bindings,
+        advice_bindings: coordinator.advice_bindings,
         published: coordinator.published,
         in_flight: in_flight,
         counters: coordinator.counters
@@ -202,7 +213,8 @@ fn aspect_activation_stage_modules(provider: AspectPackProvider, catalog: Aspect
             byte_count: reader.data_size(),
             smf_bytes: smf_bytes,
             cache_key: module_key,
-            bindings: entry.binding_summaries
+            bindings: entry.binding_summaries,
+            advices: entry.advice_summaries
         ))
     Ok(staged)
 
@@ -242,7 +254,8 @@ fn aspect_activation_stage_modules_cached(
             byte_count: reader.data_size(),
             smf_bytes: smf_bytes,
             cache_key: module_key,
-            bindings: entry.binding_summaries
+            bindings: entry.binding_summaries,
+            advices: entry.advice_summaries
         ))
     Ok(staged)
 
@@ -285,6 +298,19 @@ fn aspect_activation_map_staged(loader: ModuleLoader, staged: [AspectStagedModul
 
 fn aspect_activation_validate_loaded_bindings(loader: ModuleLoader, staged: [AspectStagedModule]) -> Result<(), text>:
     for module in staged:
+        val artifact_reader = SmfReaderMemory.from_data(module.smf_bytes)?
+        val artifact_section = artifact_reader.read_named_section(".facet_bindings")
+        if artifact_section.is_ok():
+            val artifact_bindings = decode_facet_binding_summaries(
+                artifact_section.unwrap())?
+            aspect_activation_validate_artifact_bindings(
+                module.bindings, artifact_bindings, module.owner_id)?
+        else:
+            val section_error = artifact_section.unwrap_err()
+            if not section_error.starts_with("SMF section not found:"):
+                return Err("E-AF002 invalid SMF facet binding section: {section_error}")
+            if module.bindings.len() > 0:
+                return Err("E-AF002 facet-bearing SMF is missing .facet_bindings: {module.owner_id}")
         for binding in module.bindings:
             if binding.binding_id == "" or binding.facet_interface_id == "" or binding.facet_contract_abi_hash == "" or binding.witness_symbol == "":
                 return Err("E-AF002 incomplete loaded facet binding for {module.owner_id}")
@@ -298,9 +324,46 @@ fn aspect_activation_validate_loaded_bindings(loader: ModuleLoader, staged: [Asp
             val symbol_owner = loader.global_symbols[binding.witness_symbol][0]
             if symbol_owner != module.owner_id:
                 return Err("E-AF002 loaded witness symbol owner mismatch: {binding.witness_symbol}")
+        for advice in module.advices:
+            if advice.advice_id == "" or advice.joinpoint_slot_id == "" or advice.witness_symbol == "":
+                return Err("E-AF010 incomplete loaded dynamic advice for {module.owner_id}")
+            if not loader.global_symbols.has(advice.witness_symbol):
+                return Err("E-AF010 loaded advice witness symbol is missing: {advice.witness_symbol}")
+            val advice_owner = loader.global_symbols[advice.witness_symbol][0]
+            if advice_owner != module.owner_id:
+                return Err("E-AF010 loaded advice witness symbol owner mismatch: {advice.witness_symbol}")
+    Ok(())
+
+fn aspect_activation_binding_matches_artifact(
+    catalog: AspectBindingSummary,
+    artifact: FacetBindingArtifactSummary
+) -> bool:
+    (catalog.binding_id == artifact.binding_id and
+     catalog.concrete_type_id == artifact.concrete_type_id and
+     catalog.business_interface_id == artifact.business_interface_id and
+     catalog.facet_interface_id == artifact.facet_interface_id and
+     catalog.facet_contract_abi_hash == artifact.facet_contract_abi_hash and
+     catalog.witness_symbol == artifact.witness_symbol and
+     catalog.capabilities == artifact.capabilities)
+
+fn aspect_activation_validate_artifact_bindings(
+    catalog: [AspectBindingSummary],
+    artifact: [FacetBindingArtifactSummary],
+    owner_id: text
+) -> Result<(), text>:
+    if catalog.len() != artifact.len():
+        return Err("E-AF002 catalog/SMF facet binding count mismatch: {owner_id}")
+    for expected in catalog:
+        var matched = false
+        for actual in artifact:
+            if aspect_activation_binding_matches_artifact(expected, actual):
+                matched = true
+        if not matched:
+            return Err("E-AF002 catalog/SMF facet binding mismatch: {expected.binding_id}")
     Ok(())
 
 fn aspect_activation_stage_binding_candidate(
+    loader: ModuleLoader,
     staged: [AspectStagedModule],
     activation_key: text,
     generation: i64,
@@ -311,10 +374,28 @@ fn aspect_activation_stage_binding_candidate(
         for binding in module.bindings:
             admissions.push(FacetBindingAdmission(
                 summary: binding,
-                witness_owner_id: module.owner_id
+                witness_owner_id: module.owner_id,
+                resolved_witness_address: loader.global_symbols[binding.witness_symbol][1].address
             ))
     facet_binding_stage_validated(
         activation_key, generation, aspect_id, admissions)
+
+fn aspect_activation_stage_advice_candidate(
+    registry: AdviceBindingRegistry,
+    staged: [AspectStagedModule],
+    activation_key: text,
+    generation: i64,
+    aspect_id: text
+) -> Result<AdviceBindingCandidate, text>:
+    var admissions: [AdviceBindingAdmission] = []
+    for module in staged:
+        for advice in module.advices:
+            admissions.push(AdviceBindingAdmission(
+                summary: advice,
+                witness_owner_id: module.owner_id,
+                resolved_witness_address: loader.global_symbols[advice.witness_symbol][1].address))
+    advice_binding_stage_validated(
+        registry, activation_key, generation, aspect_id, admissions)
 
 fn aspect_activation_release_cache_pins(
     provider_cache: AspectPackProviderCache,
@@ -349,7 +430,8 @@ fn aspect_activation_publish_staged(
     relocation_done: bool,
     bindings_valid: bool,
     executable_mapping_count: i64,
-    binding_candidate: FacetBindingCandidate?
+    binding_candidate: FacetBindingCandidate?,
+    advice_candidate: AdviceBindingCandidate?
 ) -> AspectActivationResult:
     var candidate = CandidateMapping.create(key)
     if relocation_done:
@@ -373,6 +455,18 @@ fn aspect_activation_publish_staged(
                 binding_publication.unwrap_err())
         facet_bindings = binding_publication.unwrap()
         published_bindings = entry.binding_summaries
+
+    var advice_bindings = coordinator.advice_bindings
+    var published_advices: [AspectAdviceSummary] = []
+    if val candidate = advice_candidate:
+        val advice_publication = advice_publish_generation(
+            advice_bindings, candidate, key, coordinator.catalog.generation)
+        if advice_publication.is_err():
+            return aspect_activation_failure(
+                coordinator, key, request.request_id,
+                advice_publication.unwrap_err())
+        advice_bindings = advice_publication.unwrap()
+        published_advices = entry.advice_summaries
 
     val generation_candidate = GenerationState.candidate(key, coordinator.catalog.generation)
     val generation_state = generation_candidate.promote()
@@ -407,6 +501,7 @@ fn aspect_activation_publish_staged(
         owners: owners,
         module_keys: module_keys,
         bindings: published_bindings,
+        advices: published_advices,
         state: "active"
     )
 
@@ -438,6 +533,7 @@ fn aspect_activation_publish_staged(
         dynsmf_session: session,
         lifecycle: lifecycle,
         facet_bindings: facet_bindings,
+        advice_bindings: advice_bindings,
         published: published,
         in_flight: in_flight,
         counters: counters
@@ -455,11 +551,18 @@ impl AspectActivationCoordinator:
     static fn create(catalog: AspectCatalog, dynsmf_session: DynSmfSession, lifecycle: LifecycleManager) -> Result<AspectActivationCoordinator, text>:
         if catalog.generation < dynsmf_session.generation:
             return Err("E-APACK001 stale aspect catalog generation")
+        var prepared_slots: [text] = []
+        for entry in catalog.entries:
+            for slot in entry.prepared_joinpoint_slots:
+                if not prepared_slots.contains(slot):
+                    prepared_slots.push(slot)
+        val advice_bindings = AdviceBindingRegistry.create(prepared_slots)?
         Ok(AspectActivationCoordinator(
             catalog: catalog,
             dynsmf_session: dynsmf_session,
             lifecycle: lifecycle,
             facet_bindings: FacetBindingRegistry.create(),
+            advice_bindings: advice_bindings,
             published: {},
             in_flight: {},
             counters: aspect_activation_zero_counters()
@@ -481,6 +584,7 @@ impl AspectActivationCoordinator:
             dynsmf_session: self.dynsmf_session,
             lifecycle: self.lifecycle,
             facet_bindings: self.facet_bindings,
+            advice_bindings: self.advice_bindings,
             published: self.published,
             in_flight: in_flight,
             counters: self.counters
@@ -523,7 +627,7 @@ impl AspectActivationCoordinator:
 
         aspect_activation_publish_staged(
             reserved, entry, key, request, staged,
-            relocation_done, bindings_valid, 0, nil)
+            relocation_done, bindings_valid, 0, nil, nil)
 
     # Runtime activation path.  Pack selection and validation happen before
     # any executable mapping; ModuleLoader remains the sole mapping,
@@ -573,7 +677,7 @@ impl AspectActivationCoordinator:
             return aspect_activation_failure(reserved, key, request.request_id, binding_result.unwrap_err())
 
         val binding_candidate = aspect_activation_stage_binding_candidate(
-            staged, key, self.catalog.generation, entry.aspect_id)
+            loader, staged, key, self.catalog.generation, entry.aspect_id)
         if binding_candidate.is_err():
             var invalid_candidate_owners: [text] = []
             for module in staged:
@@ -583,6 +687,19 @@ impl AspectActivationCoordinator:
             return aspect_activation_failure(
                 reserved, key, request.request_id,
                 binding_candidate.unwrap_err())
+
+        val advice_candidate = aspect_activation_stage_advice_candidate(
+            reserved.advice_bindings, staged, key,
+            self.catalog.generation, entry.aspect_id)
+        if advice_candidate.is_err():
+            var invalid_advice_owners: [text] = []
+            for module in staged:
+                invalid_advice_owners.push(module.owner_id)
+            aspect_activation_rollback_loader(
+                loader, invalid_advice_owners, invalid_advice_owners)
+            return aspect_activation_failure(
+                reserved, key, request.request_id,
+                advice_candidate.unwrap_err())
 
         val pin_result = aspect_activation_acquire_cache_pins(
             provider_cache, loader.lifecycle.smf_cache_mgr, staged)
@@ -595,7 +712,8 @@ impl AspectActivationCoordinator:
 
         val result = aspect_activation_publish_staged(
             reserved, entry, key, request, staged, true, true,
-            mapping_result.unwrap(), Some(binding_candidate.unwrap()))
+            mapping_result.unwrap(), Some(binding_candidate.unwrap()),
+            Some(advice_candidate.unwrap()))
         if result.status != "published":
             var cache_keys: [AspectPackModuleKey] = []
             var owners: [text] = []

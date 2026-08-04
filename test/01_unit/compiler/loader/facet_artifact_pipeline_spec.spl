@@ -1,0 +1,152 @@
+# @req REQ-AF-003 REQ-AF-006
+# @cover src/compiler/00.common/structural_contracts/facet_artifact.spl 80%
+# @cover src/compiler/80.driver/smf_writer.spl 70%
+
+use std.spec.*
+use compiler.common.structural_contracts.facet_artifact.{
+    FACET_ARTIFACT_VERSION, FacetContractMetadata, FacetBindingArtifactSummary,
+    encode_facet_contracts, decode_facet_contracts,
+    encode_facet_binding_summaries, decode_facet_binding_summaries,
+    facet_artifact_text_less, facet_witness_symbol
+}
+use compiler.common.structural_contracts.aop.{
+    TYPE_PREDICATE_BYTECODE_VERSION, TypePredicateInstruction,
+    TypePredicateBytecode, FacetBindingPlan, FacetRepresentation,
+    FacetMultiplicity, FacetAccess
+}
+use compiler.driver.facet_artifact_emission.{facet_binding_artifact_from_plan}
+use compiler.frontend.facet_static.{project_static_facet_source}
+use compiler.driver.smf_writer.{
+    SmfBuildOptions, Target, generate_smf_with_raw_code_options
+}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.mir.{
+    MirInstKind, MirOperandKind, MirConstValue, MirSignature, MirType,
+    mir_operand_const_int, lower_resolved_facet_witness_call
+}
+use test.fixtures.aspect_facet.runtime_fixture.{
+    facet_runtime_fixture_smf
+}
+
+fn artifact_contract() -> FacetContractMetadata:
+    FacetContractMetadata(
+        contract_version: FACET_ARTIFACT_VERSION,
+        aspect_id: "debug", facet_interface_id: "Debuggable",
+        parent_facets: [], method_signatures: ["fn summary() -> text"],
+        abi_hash: "facet-abi-1")
+
+fn artifact_binding() -> FacetBindingArtifactSummary:
+    FacetBindingArtifactSummary(
+        contract_version: FACET_ARTIFACT_VERSION,
+        binding_id: "debug::Debuggable::CacheDebug",
+        aspect_id: "debug", concrete_type_id: "storage.Cache",
+        business_interface_id: "", facet_interface_id: "Debuggable",
+        facet_contract_abi_hash: "facet-abi-1",
+        witness_symbol: facet_witness_symbol("CacheDebug"),
+        capabilities: ["facet.read"])
+
+fn artifact_plan() -> FacetBindingPlan:
+    FacetBindingPlan(
+        aspect_id: "debug", facet_interface_id: "Debuggable",
+        target_predicate: TypePredicateBytecode(
+            contract_version: TYPE_PREDICATE_BYTECODE_VERSION,
+            instructions: [TypePredicateInstruction.MatchType("storage.Cache")]),
+        implementation_id: "CacheDebug",
+        representation: FacetRepresentation.Attached,
+        multiplicity: FacetMultiplicity.Single,
+        access: FacetAccess.PublicReadonly,
+        required: false)
+
+describe "facet artifact emission consumption and call lowering":
+    it "uses one canonical witness symbol and fails closed without emission proof":
+        step("Derive the canonical witness symbol")
+        val witness = facet_witness_symbol("CacheDebug")
+        expect(witness).to_equal("CacheDebug__facet_witness")
+        step("Reject a declared-only facet implementation")
+        val missing = facet_binding_artifact_from_plan(
+            artifact_plan(), [artifact_contract()], [])
+        expect(missing.unwrap_err()).to_contain("has no emitted ordinary-SMF symbol")
+        step("Admit an actually emitted witness symbol")
+        val emitted = facet_binding_artifact_from_plan(
+            artifact_plan(), [artifact_contract()], [witness]).unwrap()
+        expect(emitted.witness_symbol).to_equal(witness)
+
+    it "projects facet implementation signatures as metadata":
+        step("Project declared facet implementation metadata")
+        val projection = project_static_facet_source(
+            "aspect debug:\n" +
+            "    facet interface Debuggable:\n" +
+            "        fn summary(self) -> text\n" +
+            "    facet impl CacheDebug for Cache implements Debuggable public readonly:\n" +
+            "        fn summary(self) -> text\n" +
+            "    bind facet Debuggable to pc{ type(storage.Cache) } using CacheDebug\n" +
+            "pub fn kept() -> i64: 1\n").unwrap()
+        expect(projection.facets.implementations.len()).to_equal(1)
+        expect(projection.facets.implementations[0].methods[0].signature).to_equal(
+            "fn summary(self) -> text")
+        step("Inspect the retained executable source")
+        expect(projection.source).to_contain("pub fn kept()")
+
+    it "roundtrips versioned SHB facet contract metadata":
+        step("Emit facet contract metadata")
+        val decoded = decode_facet_contracts(
+            encode_facet_contracts([artifact_contract()])).unwrap()
+        step("Consume facet contract metadata")
+        expect(decoded.len()).to_equal(1)
+        expect(decoded[0].facet_interface_id).to_equal("Debuggable")
+        expect(decoded[0].method_signatures).to_contain("fn summary() -> text")
+
+    it "uses UTF-8 byte lengths and rejects impossible record counts":
+        var unicode_contract = artifact_contract()
+        unicode_contract.facet_interface_id = "Débogable"
+        unicode_contract.method_signatures = ["fn résumé() -> text"]
+        val decoded = decode_facet_contracts(
+            encode_facet_contracts([unicode_contract])).unwrap()
+        expect(decoded[0].facet_interface_id).to_equal("Débogable")
+        expect(decoded[0].method_signatures).to_contain("fn résumé() -> text")
+
+        val impossible_count: [u8] = [
+            0x46, 0x43, 0x54, 0x43,
+            1, 0, 0, 0,
+            255, 255, 255, 127
+        ]
+        expect(decode_facet_contracts(impossible_count).unwrap_err()).to_contain(
+            "invalid facet contract artifact count")
+        expect(facet_artifact_text_less("alpha", "beta")).to_equal(true)
+        expect(facet_artifact_text_less("beta", "alpha")).to_equal(false)
+        expect(facet_artifact_text_less("same", "same")).to_equal(false)
+
+    it "roundtrips the ordinary SMF facet binding note":
+        step("Emit facet binding metadata")
+        var options = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+        options.facet_binding_bytes = encode_facet_binding_summaries([artifact_binding()])
+        val smf = generate_smf_with_raw_code_options([0xC3], options)
+        step("Consume facet binding metadata")
+        val reader = SmfReaderMemory.from_data(smf).unwrap()
+        val decoded = decode_facet_binding_summaries(
+            reader.read_named_section(".facet_bindings").unwrap()).unwrap()
+        expect(decoded.len()).to_equal(1)
+        expect(decoded[0].witness_symbol).to_equal(facet_witness_symbol("CacheDebug"))
+
+    it "provides a mapped-witness ordinary-SMF activation fixture":
+        step("Open the deterministic facet SMF fixture")
+        var reader = SmfReaderMemory.from_data(facet_runtime_fixture_smf()).unwrap()
+        step("Resolve the fixture witness symbol")
+        val witness_symbol = facet_witness_symbol("fixture_debug")
+        val witness = reader.lookup_symbol(witness_symbol).unwrap()
+        expect(witness.name).to_equal(witness_symbol)
+        expect(reader.read_named_section(".facet_bindings").unwrap().len()).to_be_greater_than(12)
+
+    it "lowers a resolved witness through existing indirect call MIR":
+        step("Resolve the published witness operand")
+        val address = mir_operand_const_int(4096)
+        step("Lower the witness call")
+        val kind = lower_resolved_facet_witness_call(
+            nil, address, [], MirSignature(
+                params: [], return_type: MirType.unit(), is_variadic: false))
+        match kind:
+            case CallIndirect(_, pointer, _, _):
+                match pointer.kind:
+                    case Const(MirConstValue.Int(value), _): expect(value).to_equal(4096)
+                    case _: fail("resolved witness operand was not preserved")
+            case _: fail("facet witness call did not lower through CallIndirect")

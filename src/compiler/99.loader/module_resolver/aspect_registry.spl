@@ -4,7 +4,7 @@
 # they are intentionally read before the general Simple parser is available.
 
 use compiler.loader.module_resolver.types.{
-    ModuleResolver, moduleresolver_with_aspect_roots
+    ModulePath, ModuleResolver, moduleresolver_new, moduleresolver_with_aspect_roots
 }
 use compiler.loader.module_resolver.var_resolution.{
     AspectRootCandidate, AspectRootResolution, VarManifest, VarSelection,
@@ -13,6 +13,7 @@ use compiler.loader.module_resolver.var_resolution.{
 }
 use std.common.crypto.sha256.{sha256_text}
 use std.common.crypto.types.{text_to_bytes}
+use compiler.common.module_resolver_port.{ModuleResolverPort, module_resolver_port_empty}
 
 extern fn rt_path_absolute(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -51,6 +52,11 @@ struct AspectPackageDescriptor:
 
 struct AspectRegistryInstall:
     resolver: ModuleResolver
+    manifest_path: text
+    errors: [text]
+
+struct AspectRegistryPortInstall:
+    port: ModuleResolverPort
     manifest_path: text
     errors: [text]
 
@@ -408,5 +414,25 @@ fn aspect_registry_install_for_inputs(resolver: ModuleResolver, inputs: [text]) 
     AspectRegistryInstall(
         resolver: moduleresolver_with_aspect_roots(resolver, roots, loaded.selection_fingerprint),
         manifest_path: path,
+        errors: []
+    )
+
+fn aspect_registry_port_for_inputs(inputs: [text]) -> AspectRegistryPortInstall:
+    """Build the canonical cross-layer port for one compile input set."""
+    val installed = aspect_registry_install_for_inputs(
+        moduleresolver_new(".", "./src"), inputs)
+    if installed.errors.len() > 0:
+        return AspectRegistryPortInstall(
+            port: module_resolver_port_empty(),
+            manifest_path: installed.manifest_path,
+            errors: installed.errors
+        )
+    AspectRegistryPortInstall(
+        port: ModuleResolverPort(
+            name: "loader-aspect-registry",
+            aspect_roots: installed.resolver.aspect_roots,
+            fingerprint: installed.resolver.aspect_fingerprint
+        ),
+        manifest_path: installed.manifest_path,
         errors: []
     )

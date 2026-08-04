@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |---:|---:|---:|---:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 ## Purpose and audience
 
@@ -32,6 +32,7 @@ REQ-AF-007.
 - **should canonicalize roots from the declaring manifest and order by rank and identity** — checks normalized physical paths and deterministic ordering.
 - **should bind concrete variant roots and the selection fingerprint at build time** — checks selected platform/hardware roots and fingerprint propagation.
 - **should keep logical aspect identity stable across physical root locations** — checks a move changes physical path without changing `aspect_id`.
+- **should install resolved roots on the live resolver without exposing them to core importers** — checks the resolver-owned root snapshot, registry fingerprint, and hidden-import boundary.
 
 ### REQ-AF-004 and REQ-AF-007: fail-closed root validation
 
@@ -48,7 +49,7 @@ REQ-AF-007.
 
 ## Pass/fail criteria
 
-PASS requires all eight examples to execute, every concrete path, ordering,
+PASS requires all nine examples to execute, every concrete path, ordering,
 fingerprint, and diagnostic assertion to pass, and zero skipped or pending
 examples. A crash, partial root publication, missing scenario, or seed execution
 is FAIL.
@@ -59,7 +60,7 @@ is FAIL.
 - Test plan: `doc/03_plan/sys_test/aspect_facet_dynload_smf_pack.md`
 - Design: `doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md`
 - Executable source SHA-256:
-  `1355ee34528176a9b6be18987d6dda278f8b8cf961261e3c90c47343428f8c88`
+  `fc678e3842736a34050f8b38e8947ba0ddc9452735d68a4ead9b4d7ebdf951e8`
 
 <details>
 <summary>Executable SSpec</summary>

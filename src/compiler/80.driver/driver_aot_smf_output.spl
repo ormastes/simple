@@ -27,6 +27,14 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.common.config.{Logger}
 use compiler.common.attributes.{DriverManifestAttr}
 use compiler.mir.mir_data.{MirModule}
+use compiler.common.structural_contracts.facet_artifact.{FacetContractMetadata}
+use compiler.common.structural_contracts.aop.{FacetBindingPlan}
+use compiler.driver.prepared_advice_slot_handoff.{
+    prepared_advice_slot_artifact_gate
+}
+use compiler.driver.facet_artifact_emission.{
+    facet_contract_metadata_from_hir, encode_mir_facet_binding_artifacts
+}
 
 fn smf_log_debug(log: Logger, message: text):
     if log.level >= 10:
@@ -130,6 +138,13 @@ impl CompilerDriver:
         val deps = smf_collect_dependency_hashes(ctx)
         val manifest_bytes = smf_collect_driver_manifest_bytes(ctx.mir_modules)
         val launch_metadata_bytes = smf_render_launch_metadata().bytes()
+        val prepared_slot_gate = prepared_advice_slot_artifact_gate(ctx.mir_modules)
+        if prepared_slot_gate.is_err():
+            return CompileResult.CodegenError(prepared_slot_gate.unwrap_err())
+        val facet_binding_result = smf_collect_facet_binding_bytes(ctx)
+        if facet_binding_result.is_err():
+            return CompileResult.CodegenError(facet_binding_result.unwrap_err())
+        val facet_binding_bytes = facet_binding_result.unwrap()
         val target = Target.host()
         val mode = ctx.options.smf_output_mode
         val smf_bytes = if mode == "elf_embedded":
@@ -137,20 +152,39 @@ impl CompilerDriver:
             opts.deps = deps
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
+            opts.facet_binding_bytes = facet_binding_bytes
             generate_smf_with_raw_code_options(all_object_bytes, opts)
         elif mode == "reloc_sections":
             var opts = SmfBuildOptions.create(target)
             opts.deps = deps
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
+            opts.facet_binding_bytes = facet_binding_bytes
             build_smf_with_relocations(all_object_bytes, opts)
         else:
             var opts = SmfBuildOptions.create(target)
             opts.deps = deps
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
+            opts.facet_binding_bytes = facet_binding_bytes
             generate_smf_with_options(all_object_bytes, opts)
         CompileResult.Success(smf_bytes)
+
+fn smf_collect_facet_binding_bytes(ctx: CompileContext) -> Result<[u8], text>:
+    var contracts: [FacetContractMetadata] = []
+    for module_name in ctx.hir_modules.keys():
+        contracts = contracts.concat(facet_contract_metadata_from_hir(
+            ctx.hir_modules[module_name].static_facets))
+    var plans: [FacetBindingPlan] = []
+    for module_name in ctx.mir_modules.keys():
+        plans = plans.concat(ctx.mir_modules[module_name].facet_binding_plans)
+    if plans.len() == 0:
+        return Ok([])
+    # The current ordinary-SMF wrapper exposes only its primary `main` symbol;
+    # object-file symbols are not copied into the SMF symbol table. Facet
+    # plans therefore fail closed until executable witness bodies are lowered
+    # and their canonical symbols are genuinely exported.
+    encode_mir_facet_binding_artifacts(plans, contracts, ["main"])
 
 fn smf_collect_driver_manifest_bytes(modules: Dict<text, MirModule>) -> [u8]:
     var payload: [u8] = []

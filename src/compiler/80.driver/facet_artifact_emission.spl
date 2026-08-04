@@ -1,0 +1,107 @@
+"""Derive deterministic SHB/SMF facet records from canonical HIR/MIR metadata."""
+
+use compiler.hir.facet_static.{HirFacetModule}
+use compiler.common.structural_contracts.aop.{FacetBindingPlan, TypePredicateInstruction}
+use compiler.common.structural_contracts.facet_artifact.{
+    FACET_ARTIFACT_VERSION, FacetContractMetadata, FacetBindingArtifactSummary,
+    encode_facet_binding_summaries, facet_artifact_text_less,
+    facet_witness_symbol
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn facet_contract_metadata_from_hir(facets: HirFacetModule) -> [FacetContractMetadata]:
+    var records: [FacetContractMetadata] = []
+    for interface_ in facets.interfaces:
+        var signatures: [text] = []
+        for method in interface_.methods:
+            signatures = signatures.push(method.signature)
+        val canonical = "facet-contract-v1\n" + interface_.aspect_id + "\n" +
+            interface_.name + "\n" + interface_.parent_facets.join("\n") +
+            "\n" + signatures.join("\n")
+        records = records.push(FacetContractMetadata(
+            contract_version: FACET_ARTIFACT_VERSION,
+            aspect_id: interface_.aspect_id,
+            facet_interface_id: interface_.name,
+            parent_facets: interface_.parent_facets,
+            method_signatures: signatures,
+            abi_hash: sha256_text(canonical)))
+    records
+
+fn facet_plan_target(plan: FacetBindingPlan) -> Result<(text, text), text>:
+    if plan.target_predicate.instructions.len() != 1:
+        return Err("E-AF002 dynamic facet artifact requires one concrete or business-interface target")
+    match plan.target_predicate.instructions[0]:
+        case MatchType(type_id): Ok((type_id, ""))
+        case MatchImplements(interface_id): Ok(("", interface_id))
+        case _: Err("E-AF002 dynamic facet artifact target is not publishable")
+
+fn facet_contract_hash(
+    contracts: [FacetContractMetadata],
+    aspect_id: text,
+    facet_interface_id: text
+) -> Result<text, text>:
+    for contract in contracts:
+        if contract.aspect_id == aspect_id and contract.facet_interface_id == facet_interface_id:
+            return Ok(contract.abi_hash)
+    Err("E-AF002 facet binding has no SHB contract metadata: {aspect_id}::{facet_interface_id}")
+
+fn facet_binding_artifact_from_plan(
+    plan: FacetBindingPlan,
+    contracts: [FacetContractMetadata],
+    emitted_symbols: [text]
+) -> Result<FacetBindingArtifactSummary, text>:
+    val target = facet_plan_target(plan)?
+    val witness = facet_witness_symbol(plan.implementation_id)
+    if not emitted_symbols.contains(witness):
+        return Err("E-AF002 declared facet witness has no emitted ordinary-SMF symbol: {witness}")
+    val binding_id = plan.aspect_id + "::" + plan.facet_interface_id + "::" + plan.implementation_id
+    Ok(FacetBindingArtifactSummary(
+        contract_version: FACET_ARTIFACT_VERSION,
+        binding_id: binding_id,
+        aspect_id: plan.aspect_id,
+        concrete_type_id: target.0,
+        business_interface_id: target.1,
+        facet_interface_id: plan.facet_interface_id,
+        facet_contract_abi_hash: facet_contract_hash(
+            contracts, plan.aspect_id, plan.facet_interface_id)?,
+        witness_symbol: witness,
+        capabilities: ["facet.read"])))
+
+fn facet_binding_artifact_sort(records: [FacetBindingArtifactSummary]) -> [FacetBindingArtifactSummary]:
+    var sorted: [FacetBindingArtifactSummary] = []
+    for record in records:
+        var inserted = false
+        var next: [FacetBindingArtifactSummary] = []
+        for existing in sorted:
+            if not inserted and facet_artifact_text_less(
+                record.binding_id, existing.binding_id):
+                next = next.push(record)
+                inserted = true
+            next = next.push(existing)
+        if not inserted:
+            next = next.push(record)
+        sorted = next
+    sorted
+
+fn facet_binding_artifacts_from_plans(
+    plans: [FacetBindingPlan],
+    contracts: [FacetContractMetadata],
+    emitted_symbols: [text]
+) -> Result<[FacetBindingArtifactSummary], text>:
+    var records: [FacetBindingArtifactSummary] = []
+    for plan in plans:
+        records = records.push(facet_binding_artifact_from_plan(
+            plan, contracts, emitted_symbols)?)
+    Ok(facet_binding_artifact_sort(records))
+
+fn encode_mir_facet_binding_artifacts(
+    plans: [FacetBindingPlan],
+    contracts: [FacetContractMetadata],
+    emitted_symbols: [text]
+) -> Result<[u8], text>:
+    Ok(encode_facet_binding_summaries(
+        facet_binding_artifacts_from_plans(
+            plans, contracts, emitted_symbols)?))
+
+export facet_contract_metadata_from_hir, facet_binding_artifact_from_plan
+export facet_binding_artifacts_from_plans, encode_mir_facet_binding_artifacts

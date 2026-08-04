@@ -1,0 +1,382 @@
+# Loader-owned publication for build-prepared dynamic advice slots.
+#
+# The registry owns visibility and deterministic chain ordering only. Mapping,
+# generation state, leases, drain, and unload remain with existing owners.
+
+use compiler.loader.loader.aspect_catalog.{AspectAdviceSummary}
+use compiler.common.structural_contracts.facet_artifact.{facet_artifact_text_less}
+use compiler.loader.loader.module_loader.{ModuleLoader}
+use compiler.loader.loader.smf_mmap_native.{native_call_function_0}
+
+struct AdviceBindingAdmission:
+    summary: AspectAdviceSummary
+    witness_owner_id: text
+    resolved_witness_address: i64
+
+struct AdviceBindingRecord:
+    publication_id: text
+    activation_key: text
+    generation: i64
+    aspect_id: text
+    advice_id: text
+    joinpoint_slot_id: text
+    form: text
+    priority: i64
+    specificity: i64
+    witness_symbol: text
+    witness_owner_id: text
+    resolved_witness_address: i64
+    capabilities: [text]
+
+struct AdviceBindingCandidate:
+    activation_key: text
+    generation: i64
+    aspect_id: text
+    records: [AdviceBindingRecord]
+
+struct AdviceBindingCounters:
+    slot_lookups: i64
+    slot_hits: i64
+    slot_misses: i64
+    advice_publications: i64
+    advice_unbinds: i64
+    disabled_slot_checks: i64
+    disabled_slot_branches: i64
+    dispatch_attempts: i64
+    dispatch_invocations: i64
+    dispatch_failures: i64
+    around_rejections: i64
+
+# Stable harness descriptor; it deliberately reports a non-zero prepared-slot
+# guard and makes no backend byte-size claim.
+struct AdviceDisabledPathFootprint:
+    dispatch_kind: text
+    disabled_footprint_bytes: i64
+    disabled_footprint_source: text
+    prepared_slot_checks_per_call: i64
+    conditional_branches_per_call: i64
+    exact_zero_overhead: bool
+
+struct AdviceBindingRegistry:
+    prepared_slots: [text]
+    records: [AdviceBindingRecord]
+    active_publications: Dict<text, text>
+    counters: AdviceBindingCounters
+
+struct AdviceLookupResult:
+    registry: AdviceBindingRegistry
+    chain: [AdviceBindingRecord]
+
+struct AdviceDispatchOutcome:
+    registry: AdviceBindingRegistry
+    status: text
+    reason: text
+    invoked_count: i64
+    return_values: [i64]
+
+fn advice_zero_counters() -> AdviceBindingCounters:
+    AdviceBindingCounters(
+        slot_lookups: 0, slot_hits: 0, slot_misses: 0,
+        advice_publications: 0, advice_unbinds: 0,
+        disabled_slot_checks: 0, disabled_slot_branches: 0,
+        dispatch_attempts: 0, dispatch_invocations: 0,
+        dispatch_failures: 0, around_rejections: 0)
+
+fn advice_disabled_path_footprint() -> AdviceDisabledPathFootprint:
+    AdviceDisabledPathFootprint(
+        dispatch_kind: "prepared_slot_guard",
+        disabled_footprint_bytes: 1,
+        disabled_footprint_source: "contract_minimum_not_backend_measurement",
+        prepared_slot_checks_per_call: 1,
+        conditional_branches_per_call: 1,
+        exact_zero_overhead: false)
+
+fn advice_publication_id(activation_key: text, generation: i64) -> text:
+    "{activation_key}@{generation}"
+
+fn advice_form_valid(form: text) -> bool:
+    form == "before" or form == "after_success" or form == "after_error" or form == "around"
+
+fn advice_record_active(registry: AdviceBindingRegistry, record: AdviceBindingRecord) -> bool:
+    registry.active_publications.has(record.aspect_id) and
+        registry.active_publications[record.aspect_id] == record.publication_id
+
+fn advice_record_precedes(a: AdviceBindingRecord, b: AdviceBindingRecord) -> bool:
+    if a.priority != b.priority:
+        return a.priority > b.priority
+    if a.specificity != b.specificity:
+        return a.specificity > b.specificity
+    facet_artifact_text_less(a.witness_symbol, b.witness_symbol)
+
+fn advice_sort_chain(records: [AdviceBindingRecord]) -> [AdviceBindingRecord]:
+    var remaining = records
+    var ordered: [AdviceBindingRecord] = []
+    while remaining.len() > 0:
+        var best: i64 = 0
+        var i: i64 = 1
+        while i < remaining.len():
+            if advice_record_precedes(remaining[i], remaining[best]):
+                best = i
+            i = i + 1
+        ordered.push(remaining[best])
+        var next: [AdviceBindingRecord] = []
+        var j: i64 = 0
+        while j < remaining.len():
+            if j != best:
+                next.push(remaining[j])
+            j = j + 1
+        remaining = next
+    ordered
+
+impl AdviceBindingRegistry:
+    static fn create(prepared_slots: [text]) -> Result<AdviceBindingRegistry, text>:
+        var admitted: [text] = []
+        for slot in prepared_slots:
+            if slot == "" or admitted.contains(slot):
+                return Err("E-AF010 duplicate or empty prepared join-point slot")
+            admitted.push(slot)
+        Ok(AdviceBindingRegistry(
+            prepared_slots: admitted,
+            records: [],
+            active_publications: {},
+            counters: advice_zero_counters()))
+
+fn advice_binding_candidate(
+    activation_key: text,
+    generation: i64,
+    aspect_id: text
+) -> Result<AdviceBindingCandidate, text>:
+    if activation_key == "" or generation <= 0 or aspect_id == "":
+        return Err("E-AF010 advice binding candidate identity is incomplete")
+    Ok(AdviceBindingCandidate(
+        activation_key: activation_key,
+        generation: generation,
+        aspect_id: aspect_id,
+        records: []))
+
+fn advice_bind_slot(
+    registry: AdviceBindingRegistry,
+    candidate: AdviceBindingCandidate,
+    admission: AdviceBindingAdmission
+) -> Result<AdviceBindingCandidate, text>:
+    val summary = admission.summary
+    if not registry.prepared_slots.contains(summary.joinpoint_slot_id):
+        return Err("E-AF010 dynamic advice targets a function without a prepared join point")
+    if (summary.advice_id == "" or summary.witness_symbol == "" or
+        admission.witness_owner_id == "" or admission.resolved_witness_address <= 0 or
+        not advice_form_valid(summary.form) or
+        summary.specificity < 0):
+        return Err("E-AF010 invalid loaded dynamic advice: {summary.advice_id}")
+    if summary.form == "around":
+        return Err("E-AF010 runtime around advice requires an exactly-once proceed path")
+    for existing in candidate.records:
+        if existing.advice_id == summary.advice_id:
+            return Err("E-AF010 duplicate staged dynamic advice: {summary.advice_id}")
+    var records = candidate.records
+    records.push(AdviceBindingRecord(
+        publication_id: advice_publication_id(candidate.activation_key, candidate.generation),
+        activation_key: candidate.activation_key,
+        generation: candidate.generation,
+        aspect_id: candidate.aspect_id,
+        advice_id: summary.advice_id,
+        joinpoint_slot_id: summary.joinpoint_slot_id,
+        form: summary.form,
+        priority: summary.priority,
+        specificity: summary.specificity,
+        witness_symbol: summary.witness_symbol,
+        witness_owner_id: admission.witness_owner_id,
+        resolved_witness_address: admission.resolved_witness_address,
+        capabilities: summary.capabilities))
+    Ok(AdviceBindingCandidate(
+        activation_key: candidate.activation_key,
+        generation: candidate.generation,
+        aspect_id: candidate.aspect_id,
+        records: records))
+
+fn advice_binding_stage_validated(
+    registry: AdviceBindingRegistry,
+    activation_key: text,
+    generation: i64,
+    aspect_id: text,
+    admissions: [AdviceBindingAdmission]
+) -> Result<AdviceBindingCandidate, text>:
+    var candidate = advice_binding_candidate(activation_key, generation, aspect_id)?
+    for admission in admissions:
+        candidate = advice_bind_slot(registry, candidate, admission)?
+    Ok(candidate)
+
+# Computes the next immutable publication. The coordinator installs it only
+# together with facet visibility and exact lifecycle promotion.
+fn advice_publish_generation(
+    registry: AdviceBindingRegistry,
+    candidate: AdviceBindingCandidate,
+    activation_key: text,
+    generation: i64
+) -> Result<AdviceBindingRegistry, text>:
+    if candidate.activation_key != activation_key or candidate.generation != generation:
+        return Err("E-AF010 advice publication identity does not match staged generation")
+    if candidate.records.len() == 0:
+        return Ok(registry)
+    val publication_id = advice_publication_id(activation_key, generation)
+    if (registry.active_publications.has(candidate.aspect_id) and
+        registry.active_publications[candidate.aspect_id] == publication_id):
+        return Ok(registry)
+    var records = registry.records
+    for record in candidate.records:
+        records.push(record)
+    var active: Dict<text, text> = {}
+    for aspect_id in registry.active_publications.keys():
+        active[aspect_id] = registry.active_publications[aspect_id]
+    active[candidate.aspect_id] = publication_id
+    var counters = registry.counters
+    counters.advice_publications = counters.advice_publications + 1
+    Ok(AdviceBindingRegistry(
+        prepared_slots: registry.prepared_slots,
+        records: records,
+        active_publications: active,
+        counters: counters))
+
+# Prepared dispatch lookup. The returned chain is already in the same order as
+# static AOP: priority desc, specificity desc, then witness name ascending.
+fn advice_lookup_slot(registry: AdviceBindingRegistry, slot_id: text) -> Result<AdviceLookupResult, text>:
+    if not registry.prepared_slots.contains(slot_id):
+        return Err("E-AF010 advice lookup used an unprepared join-point slot")
+    var chain: [AdviceBindingRecord] = []
+    for record in registry.records:
+        if advice_record_active(registry, record) and record.joinpoint_slot_id == slot_id:
+            chain.push(record)
+    chain = advice_sort_chain(chain)
+    var counters = registry.counters
+    counters.slot_lookups = counters.slot_lookups + 1
+    counters.disabled_slot_checks = counters.disabled_slot_checks + 1
+    counters.disabled_slot_branches = counters.disabled_slot_branches + 1
+    if chain.len() == 0:
+        counters.slot_misses = counters.slot_misses + 1
+    else:
+        counters.slot_hits = counters.slot_hits + 1
+    Ok(AdviceLookupResult(
+        registry: AdviceBindingRegistry(
+            prepared_slots: registry.prepared_slots,
+            records: registry.records,
+            active_publications: registry.active_publications,
+            counters: counters),
+        chain: chain))
+
+fn advice_dispatch_failed(
+    registry: AdviceBindingRegistry,
+    reason: text,
+    around_rejected: bool
+) -> AdviceDispatchOutcome:
+    var counters = registry.counters
+    counters.dispatch_failures = counters.dispatch_failures + 1
+    if around_rejected:
+        counters.around_rejections = counters.around_rejections + 1
+    AdviceDispatchOutcome(
+        registry: AdviceBindingRegistry(
+            prepared_slots: registry.prepared_slots,
+            records: registry.records,
+            active_publications: registry.active_publications,
+            counters: counters),
+        status: "failed",
+        reason: reason,
+        invoked_count: 0,
+        return_values: [])
+
+# Production dynamic-advice dispatch. The phase caller remains responsible for
+# placing `before` before the business body and exactly one matching `after_*`
+# after it. No runtime pointcut matching or alternate lifecycle is performed.
+fn advice_dispatch_slot(
+    registry: AdviceBindingRegistry,
+    loader: ModuleLoader,
+    slot_id: text,
+    form: text
+) -> AdviceDispatchOutcome:
+    var attempted = registry
+    attempted.counters.dispatch_attempts = attempted.counters.dispatch_attempts + 1
+    if form == "around":
+        return advice_dispatch_failed(
+            attempted,
+            "E-AF010 runtime around advice requires an exactly-once proceed path",
+            true)
+    if not (form == "before" or form == "after_success" or form == "after_error"):
+        return advice_dispatch_failed(
+            attempted, "E-AF010 invalid dynamic advice dispatch form", false)
+    val lookup = advice_lookup_slot(attempted, slot_id)
+    if lookup.is_err():
+        return advice_dispatch_failed(attempted, lookup.unwrap_err(), false)
+    val looked_up = lookup.unwrap()
+    var visible = looked_up.registry
+    val chain = looked_up.chain
+    # Validate the complete phase chain before invoking its first callback so
+    # an ownership failure cannot leave a partially dispatched phase.
+    for record in chain:
+        if record.form == "around":
+            return advice_dispatch_failed(
+                visible,
+                "E-AF010 runtime around advice requires an exactly-once proceed path",
+                true)
+        if not (record.form == "before" or record.form == "after_success" or
+            record.form == "after_error"):
+            return advice_dispatch_failed(
+                visible, "E-AF010 published dynamic advice form is invalid", false)
+        if record.form != form:
+            continue
+        if (record.witness_owner_id == "" or record.resolved_witness_address <= 0 or
+            not loader.global_symbols.has(record.witness_symbol)):
+            return advice_dispatch_failed(
+                visible, "E-AF010 dynamic advice witness is no longer loader-owned: {record.witness_symbol}", false)
+        val resolved = loader.global_symbols[record.witness_symbol]
+        if (resolved[0] != record.witness_owner_id or
+            resolved[1].address != record.resolved_witness_address):
+            return advice_dispatch_failed(
+                visible, "E-AF010 dynamic advice witness owner/address changed: {record.witness_symbol}", false)
+    var results: [i64] = []
+    var invoked: i64 = 0
+    for record in chain:
+        if record.form != form:
+            continue
+        results.push(native_call_function_0(record.resolved_witness_address))
+        invoked = invoked + 1
+    visible.counters.dispatch_invocations = visible.counters.dispatch_invocations + invoked
+    AdviceDispatchOutcome(
+        registry: visible,
+        status: "dispatched",
+        reason: "",
+        invoked_count: invoked,
+        return_values: results)
+
+# Removes visibility before lifecycle drain; it never owns or waits on pins.
+fn advice_unbind_generation(
+    registry: AdviceBindingRegistry,
+    activation_key: text,
+    generation: i64
+) -> AdviceBindingRegistry:
+    val publication_id = advice_publication_id(activation_key, generation)
+    var records: [AdviceBindingRecord] = []
+    var removed = false
+    for record in registry.records:
+        if record.publication_id == publication_id:
+            removed = true
+        else:
+            records.push(record)
+    var active: Dict<text, text> = {}
+    for aspect_id in registry.active_publications.keys():
+        if registry.active_publications[aspect_id] != publication_id:
+            active[aspect_id] = registry.active_publications[aspect_id]
+    var counters = registry.counters
+    if removed:
+        counters.advice_unbinds = counters.advice_unbinds + 1
+    AdviceBindingRegistry(
+        prepared_slots: registry.prepared_slots,
+        records: records,
+        active_publications: active,
+        counters: counters)
+
+export AdviceBindingAdmission, AdviceBindingRecord, AdviceBindingCandidate
+export AdviceBindingCounters, AdviceDisabledPathFootprint
+export AdviceBindingRegistry, AdviceLookupResult
+export AdviceDispatchOutcome
+export advice_binding_candidate, advice_bind_slot, advice_binding_stage_validated
+export advice_publish_generation, advice_lookup_slot, advice_unbind_generation
+export advice_dispatch_slot
+export advice_disabled_path_footprint

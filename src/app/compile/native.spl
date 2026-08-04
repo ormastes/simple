@@ -32,8 +32,12 @@ extern fn rt_getpid() -> i64
 
 use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
 use std.log.{error, warn, info, debug}
-use compiler.driver.driver.{aot_c_file}
-use compiler.driver.driver_api.{aot_llvm_native_file, aot_native_file_with_backend}
+use compiler.driver.driver_api.{
+    aot_llvm_native_file,
+    aot_c_file_with_module_resolver_discovery,
+    aot_native_file_with_backend_and_module_resolver_discovery
+}
+use compiler.loader.module_resolver.aspect_registry_discovery_adapter.{create_aspect_registry_module_resolver_discovery}
 use compiler.driver.driver_types.{CompileResult}
 use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
 
@@ -311,7 +315,9 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
         if verbose:
             info("compile", "Compiling {source_file} to native binary via {backend} backend...")
         _cli_eprint("[DEBUG] Calling aot_native_file_with_backend({source_file}, {output_file}, {backend}, {release}, {opt_level})")
-        val llvm_result = aot_native_file_with_backend(source_file, output_file, backend, release, opt_level)
+        val llvm_result = aot_native_file_with_backend_and_module_resolver_discovery(
+            source_file, output_file, backend, release, opt_level,
+            create_aspect_registry_module_resolver_discovery())
         _cli_eprint("[DEBUG] aot_native_file_with_backend returned: {llvm_result}")
         match llvm_result:
             case CompileResult.Success(_):
@@ -333,7 +339,8 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
     # Step 1: Generate C via MIR C backend (in-process)
     val pid = rt_getpid()
     val temp_cpp = "{_get_temp_dir()}/simple_native_{pid}.c"
-    val aot_result = aot_c_file(source_file, temp_cpp)
+    val aot_result = aot_c_file_with_module_resolver_discovery(
+        source_file, temp_cpp, create_aspect_registry_module_resolver_discovery())
     match aot_result:
         case CompileResult.Success(_):
             pass
@@ -497,7 +504,8 @@ fn compile_gen_c_only(source_file: text, output_file: text, verbose: bool) -> i6
             error("compile", "Failed to create temp file")
             return 1
 
-    val aot_result = aot_c_file(source_file, actual_output)
+    val aot_result = aot_c_file_with_module_resolver_discovery(
+        source_file, actual_output, create_aspect_registry_module_resolver_discovery())
     match aot_result:
         case CompileResult.Success(_):
             pass

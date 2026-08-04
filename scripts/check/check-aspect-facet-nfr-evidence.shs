@@ -1,0 +1,184 @@
+#!/bin/sh
+set -eu
+
+# Collects NFR-AF-005 evidence from an admitted native probe. This script never
+# invents thresholds and never treats source-hosted or Rust-seed execution as a
+# production baseline.
+
+COMPILER="${ASPECT_FACET_COMPILER:-}"
+PROBE="${ASPECT_FACET_PROBE:-}"
+FIXTURE="${ASPECT_FACET_FIXTURE:-}"
+EXPECTED_COMPILER_SHA256="${ASPECT_FACET_ADMITTED_COMPILER_SHA256:-}"
+PROBE_PROVENANCE="${ASPECT_FACET_PROBE_PROVENANCE:-${PROBE}.provenance}"
+SAMPLES="${ASPECT_FACET_NFR_SAMPLES:-30}"
+OUTPUT="${ASPECT_FACET_NFR_OUTPUT:-build/test-artifacts/aspect-facet-nfr/baseline.sdn}"
+
+case "$SAMPLES" in ''|*[!0-9]*) echo "aspect_facet_nfr_error=invalid_sample_count"; exit 2 ;; esac
+[ "$SAMPLES" -ge 20 ] || { echo "aspect_facet_nfr_error=sample_count_below_20"; exit 2; }
+[ -n "$COMPILER" ] && [ -x "$COMPILER" ] || { echo "aspect_facet_nfr_error=admitted_compiler_required"; exit 2; }
+case "$COMPILER" in *compiler_rust*|*rust_seed*) echo "aspect_facet_nfr_error=rust_seed_not_admissible"; exit 2 ;; esac
+[ -n "$PROBE" ] && [ -x "$PROBE" ] || { echo "aspect_facet_nfr_error=native_probe_required"; exit 2; }
+[ -n "$FIXTURE" ] && [ -f "$FIXTURE" ] || { echo "aspect_facet_nfr_error=fixture_required"; exit 2; }
+[ -n "$EXPECTED_COMPILER_SHA256" ] || { echo "aspect_facet_nfr_error=admitted_compiler_sha256_required"; exit 2; }
+[ -f "$PROBE_PROVENANCE" ] || { echo "aspect_facet_nfr_error=probe_provenance_required"; exit 2; }
+[ -x /usr/bin/time ] || { echo "aspect_facet_nfr_error=gnu_time_required"; exit 2; }
+command -v strace >/dev/null 2>&1 || { echo "aspect_facet_nfr_error=strace_required"; exit 2; }
+
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+field() {
+    key=$1
+    file=$2
+    awk -v wanted="$key" '
+        /^aspect_facet_perf_summary / {
+            for (i = 2; i <= NF; i++) {
+                split($i, pair, "=")
+                if (pair[1] == wanted) { print pair[2]; exit }
+            }
+        }
+    ' "$file"
+}
+
+require_uint_field() {
+    key=$1
+    file=$2
+    value="$(field "$key" "$file")"
+    case "$value" in ''|*[!0-9]*) echo "aspect_facet_nfr_error=missing_or_invalid_${key}"; exit 1 ;; esac
+    printf '%s\n' "$value"
+}
+
+compiler_sha256="$(hash_file "$COMPILER")"
+[ "$compiler_sha256" = "$EXPECTED_COMPILER_SHA256" ] || {
+    echo "aspect_facet_nfr_error=compiler_sha256_not_admitted"
+    exit 1
+}
+probe_sha256="$(hash_file "$PROBE")"
+fixture_sha256="$(hash_file "$FIXTURE")"
+provenance_compiler_sha256="$(sed -n 's/^compiler_sha256=//p' "$PROBE_PROVENANCE")"
+provenance_probe_sha256="$(sed -n 's/^probe_sha256=//p' "$PROBE_PROVENANCE")"
+provenance_compiler_kind="$(sed -n 's/^compiler_kind=//p' "$PROBE_PROVENANCE")"
+[ "$provenance_compiler_kind" = pure-simple-self-hosted ] || {
+    echo "aspect_facet_nfr_error=probe_compiler_kind_not_admissible"
+    exit 1
+}
+[ "$provenance_compiler_sha256" = "$compiler_sha256" ] || {
+    echo "aspect_facet_nfr_error=probe_compiler_provenance_mismatch"
+    exit 1
+}
+[ "$provenance_probe_sha256" = "$probe_sha256" ] || {
+    echo "aspect_facet_nfr_error=probe_binary_provenance_mismatch"
+    exit 1
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT INT TERM
+cold="$tmp/cold.out"
+timing="$tmp/cold.time"
+opens="$tmp/cold.opens"
+first_use_opens="$tmp/first-use.opens"
+lookup_opens="$tmp/lookup.opens"
+first_use="$tmp/first-use.out"
+lookup="$tmp/lookup.out"
+
+/usr/bin/time -f 'startup_wall_seconds=%e\nmax_rss_kib=%M\nmajor_page_faults=%F\nminor_page_faults=%R' \
+    -o "$timing" "$PROBE" --mode=cold --fixture "$FIXTURE" >"$cold"
+strace -f -qq -e trace=openat -o "$opens" \
+    "$PROBE" --mode=cold --fixture "$FIXTURE" >/dev/null
+"$PROBE" --mode=first-use --samples "$SAMPLES" --fixture "$FIXTURE" >"$first_use"
+"$PROBE" --mode=lookup --samples "$SAMPLES" --fixture "$FIXTURE" >"$lookup"
+strace -f -qq -e trace=openat -o "$first_use_opens" \
+    "$PROBE" --mode=first-use --samples 1 --fixture "$FIXTURE" >/dev/null
+strace -f -qq -e trace=openat -o "$lookup_opens" \
+    "$PROBE" --mode=lookup --samples 1 --fixture "$FIXTURE" >/dev/null
+
+[ "$(field mode "$cold")" = cold ] || { echo "aspect_facet_nfr_error=cold_summary_missing"; exit 1; }
+[ "$(field mode "$first_use")" = first-use ] || { echo "aspect_facet_nfr_error=first_use_summary_missing"; exit 1; }
+[ "$(field mode "$lookup")" = lookup ] || { echo "aspect_facet_nfr_error=lookup_summary_missing"; exit 1; }
+
+for key in pack_opens stored_bytes decoded_bytes executable_mappings sidecar_allocations runtime_scans; do
+    [ "$(require_uint_field "$key" "$cold")" -eq 0 ] || {
+        echo "aspect_facet_nfr_error=cold_counter_nonzero_${key}"
+        exit 1
+    }
+done
+
+startup_wall_seconds="$(sed -n 's/^startup_wall_seconds=//p' "$timing")"
+max_rss_kib="$(sed -n 's/^max_rss_kib=//p' "$timing")"
+major_page_faults="$(sed -n 's/^major_page_faults=//p' "$timing")"
+minor_page_faults="$(sed -n 's/^minor_page_faults=//p' "$timing")"
+count_opened_files() {
+    awk '
+    match($0, /openat\([^,]+, "[^"]+"/) {
+        opened = substr($0, RSTART, RLENGTH)
+        sub(/^[^"]*"/, "", opened)
+        sub(/"$/, "", opened)
+        paths[opened] = 1
+    }
+    END { for (path in paths) count += 1; print count + 0 }
+' "$1"
+}
+cold_opened_files="$(count_opened_files "$opens")"
+first_use_opened_files="$(count_opened_files "$first_use_opens")"
+lookup_opened_files="$(count_opened_files "$lookup_opens")"
+first_use_p50_us="$(require_uint_field p50_us "$first_use")"
+first_use_p95_us="$(require_uint_field p95_us "$first_use")"
+first_use_p99_us="$(require_uint_field p99_us "$first_use")"
+lookup_p50_ns="$(require_uint_field p50_ns "$lookup")"
+lookup_p95_ns="$(require_uint_field p95_ns "$lookup")"
+lookup_p99_ns="$(require_uint_field p99_ns "$lookup")"
+disabled_contract_footprint_bytes="$(require_uint_field disabled_footprint_bytes "$first_use")"
+disabled_footprint_source="$(field disabled_footprint_source "$first_use")"
+[ "$disabled_footprint_source" = contract_minimum_not_backend_measurement ] || {
+    echo "aspect_facet_nfr_error=invalid_disabled_footprint_source"
+    exit 1
+}
+
+case "$startup_wall_seconds" in ''|*[!0-9.]*) echo "aspect_facet_nfr_error=invalid_startup_time"; exit 1 ;; esac
+for value in "$max_rss_kib" "$major_page_faults" "$minor_page_faults" "$cold_opened_files" "$first_use_opened_files" "$lookup_opened_files"; do
+    case "$value" in ''|*[!0-9]*) echo "aspect_facet_nfr_error=invalid_process_metric"; exit 1 ;; esac
+done
+
+output_dir=${OUTPUT%/*}
+[ "$output_dir" = "$OUTPUT" ] || mkdir -p "$output_dir"
+record="$tmp/baseline.sdn"
+{
+    echo 'aspect_facet_nfr_evidence:'
+    echo '  schema_version: 1'
+    echo '  status: collected-not-thresholded'
+    echo "  compiler_path: \"$COMPILER\""
+    echo "  compiler_sha256: \"$compiler_sha256\""
+    echo "  probe_path: \"$PROBE\""
+    echo "  probe_sha256: \"$probe_sha256\""
+    echo "  probe_provenance_path: \"$PROBE_PROVENANCE\""
+    echo "  fixture_path: \"$FIXTURE\""
+    echo "  fixture_sha256: \"$fixture_sha256\""
+    echo "  sample_count: $SAMPLES"
+    echo "  startup_wall_seconds: $startup_wall_seconds"
+    echo "  max_rss_kib: $max_rss_kib"
+    echo "  major_page_faults: $major_page_faults"
+    echo "  minor_page_faults: $minor_page_faults"
+    echo "  cold_opened_files: $cold_opened_files"
+    echo "  first_use_opened_files: $first_use_opened_files"
+    echo "  lookup_opened_files: $lookup_opened_files"
+    echo "  first_use_p50_us: $first_use_p50_us"
+    echo "  first_use_p95_us: $first_use_p95_us"
+    echo "  first_use_p99_us: $first_use_p99_us"
+    echo "  lookup_p50_ns: $lookup_p50_ns"
+    echo "  lookup_p95_ns: $lookup_p95_ns"
+    echo "  lookup_p99_ns: $lookup_p99_ns"
+    for key in pack_opens stored_bytes decoded_bytes executable_mappings sidecar_allocations runtime_scans index_hits index_misses index_evictions chunk_hits chunk_misses chunk_evictions negative_hits negative_misses negative_evictions slot_lookups slot_hits slot_misses advice_publications advice_unbinds dispatch_attempts dispatch_invocations dispatch_failures around_rejections disabled_slot_checks disabled_slot_branches; do
+        echo "  ${key}: $(require_uint_field "$key" "$first_use")"
+    done
+    echo "  disabled_contract_footprint_bytes: $disabled_contract_footprint_bytes"
+    echo "  disabled_footprint_source: $disabled_footprint_source"
+} >"$record"
+mv "$record" "$OUTPUT"
+
+echo "aspect_facet_nfr_status=collected-not-thresholded"
+echo "aspect_facet_nfr_output=$OUTPUT"
+echo "aspect_facet_nfr_compiler_sha256=$compiler_sha256"
+echo "aspect_facet_nfr_fixture_sha256=$fixture_sha256"

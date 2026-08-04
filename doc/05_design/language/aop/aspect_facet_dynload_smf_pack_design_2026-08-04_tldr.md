@@ -16,4 +16,9 @@ design:
 - Existing object provider, loader, dynSMF, cache, and lifecycle are extended.
 - Cold aspects do no pack I/O/decompression/mapping/allocation before activation.
 - Patchable advice has measurable non-zero dormant footprint.
-
+- Facet metadata emission fails closed until a canonical witness symbol is
+  genuinely exported; declaration-only method signatures are not executable.
+- `advice_dispatch_slot` supports validated zero-argument before/after calls;
+  dynamic `around` remains denied without an exactly-once `proceed` path.
+- Automatic prepared-slot MIR/backend emission and the final `85.mdsoc`
+  resolver-port injection remain release blockers.

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |---:|---:|---:|---:|
-| 16 | 16 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 ## Purpose and audience
 
@@ -52,6 +52,8 @@ and REQ-AF-010 in the implemented static attached-witness slice.
   checks `RequiredFacetAbsent`.
 - **should reject a required binding whose implementation is incomplete** —
   requires `E-AF002` and no plan.
+- **should persist the driver-selected witness plan in MIR artifact metadata** —
+  requires deterministic versioned metadata with the selected witness identity.
 
 ### REQ-AF-003: deterministic structural selection
 
@@ -76,7 +78,7 @@ the shared `TypePredicateBytecode` against `storage.cache.LruCache`.
 
 ## Pass/fail criteria
 
-PASS requires all 16 examples to execute, every concrete value/diagnostic
+PASS requires all 18 examples to execute, every concrete value/diagnostic
 assertion to pass, and zero skipped or pending examples. `CompileResult.Success`
 alone is not acceptance. Any missing example, matcher failure, crash, or seed
 execution is FAIL.
@@ -87,7 +89,7 @@ execution is FAIL.
 - Test plan: `doc/03_plan/sys_test/aspect_facet_dynload_smf_pack.md`
 - Design: `doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md`
 - Executable source SHA-256:
-  `1d6cbc31e46a9ee420b2f0243c7825766028a7e416a7e92d91f098eea1870d14`
+  `b99348571f339c3fea07f8aa3e096d3cbaea2f6fcd2ba3097fd37a70855cfd92`
 
 <details>
 <summary>Executable SSpec</summary>

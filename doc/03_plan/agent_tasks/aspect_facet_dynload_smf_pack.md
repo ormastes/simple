@@ -19,6 +19,27 @@
 | P5 catalog/lifecycle | `AspectCatalog`, dynSMF adapter, atomic publication/cache policy | P2/P3/P4 metadata | activation system spec and retained counters |
 | P6 resolver roots | manifest-relative aspect roots reusing variant helpers | frozen resolver contract | resolver system spec |
 
+## Continuation lanes (2026-08-04)
+
+| Lane | Owned scope | Frozen handoff |
+|---|---|---|
+| C1 artifact/codegen | common facet artifact metadata, SHB compatibility, ordinary-SMF note emission, witness lowering | deterministic codecs and public probe/fixture APIs |
+| C2 driver registry | one canonical `ModuleResolverPort`, automatic aspect-registry install, fingerprinted driver identity, hidden-import rejection | focused executable spec and manual |
+| C3 advice runtime | loader-owned advice generation registry, prepared slots, publish/unbind ordering, mission denial, counters | app-facade counters and explicit contract-only disabled footprint |
+| C4 NFR evidence | admitted-binary collector, native probe, representative fixture, retained baseline schema | `aspect_facet_perf_summary` and provenance-bound SDN |
+
+## Bounded backend review lanes (2026-08-04)
+
+| Lane | Result | Residual |
+|---|---|---|
+| B1 facet witness ABI | Canonical symbol naming plus emitted-symbol proof; declaration-only plans fail closed | Executable facet bodies, ABI adapter/export, and frontend call lowering |
+| B2 advice dispatch | Exact-generation owner/address validation and zero-argument before/after dispatch; dynamic `around` denied | Prepared MIR slot producer and automatic business-path caller |
+| B3 architecture | Verified resolver and prepared-slot owner boundaries without unsafe partial extraction | `85.mdsoc` resolver injection and `50.mir` → optimizer → backend → driver slot pipeline |
+
+The merge owner remains root Codex. C1/C2/C3 run in parallel; C4 integrates
+their public handoffs. Root performs the final normal/highest-capability review
+and the one admissible focused verification sweep.
+
 ## Cooperative review
 
 - Completed read-only sidecars: `design_audit`, `implementation_gap`, `spec_and_requirements`.
@@ -31,4 +52,3 @@
 ## Merge order
 
 P1 and P2 first; P4 and P3 second; P6 may merge independently; P5 integrates last. Run only focused gates during lane work. Broad verification occurs once after integration.
-

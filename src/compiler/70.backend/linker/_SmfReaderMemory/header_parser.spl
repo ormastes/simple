@@ -214,6 +214,28 @@ impl SmfReaderMemory:
             i = i + 1
         Ok(result)
 
+    """Read one named ordinary-SMF section through the canonical table."""
+    fn read_named_section(name: text) -> Result<[u8], text>:
+        val section_entry_size = 64
+        var index = 0
+        while index < self.header.section_count:
+            val entry = self.sections_offset + index * section_entry_size
+            if entry + section_entry_size > self.data.len():
+                return Err("SMF section table extends beyond data")
+            # Simple writer layout places the fixed 16-byte name after the
+            # 36-byte type/flags/offset/size/virtual-size/alignment prefix.
+            val section_name = read_fixed_section_name(self.data, entry + 36, 16)
+            if section_name == name:
+                val raw_offset = bytes_to_u64(self.data, entry + 8) as i64
+                val offset = smf_payload_file_offset(self.header, raw_offset)
+                val size = bytes_to_u64(self.data, entry + 16) as i64
+                if (offset < 0 or size < 0 or offset > self.data.len() or
+                    size > self.data.len() - offset):
+                    return Err("SMF named section extends beyond data: {name}")
+                return Ok(self.data[offset:offset + size])
+            index = index + 1
+        Err("SMF section not found: {name}")
+
     """Get the parsed header."""
     fn get_header() -> SmfMemoryHeader:
         self.header
@@ -560,6 +582,17 @@ fn read_string_at(data: [u8], abs_offset: i64, stop_at: i64) -> text:
         name_bytes.push(byte)
         pos = pos + 1
     rt_bytes_to_text(name_bytes)
+
+fn read_fixed_section_name(data: [u8], offset: i64, width: i64) -> text:
+    var bytes: [u8] = []
+    var index = 0
+    while index < width and offset + index < data.len():
+        val byte = data[offset + index]
+        if byte == 0:
+            return rt_bytes_to_text(bytes)
+        bytes = bytes.push(byte)
+        index = index + 1
+    rt_bytes_to_text(bytes)
 
 """Parse the symbol dict using raw data + string-table bounds (no copy)."""
 fn parse_symbol_table_inplace(

@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+# Builds the NFR-AF-005 fixture/probe with one explicitly admitted pure-Simple
+# compiler and records the exact compiler-to-probe provenance required by the
+# collector. The Rust seed is never an admissible producer.
+
+COMPILER="${ASPECT_FACET_COMPILER:-}"
+EXPECTED_COMPILER_SHA256="${ASPECT_FACET_ADMITTED_COMPILER_SHA256:-}"
+OUTPUT_DIR="${ASPECT_FACET_NFR_BUILD_DIR:-build/test-artifacts/aspect-facet-nfr}"
+
+[ -n "$COMPILER" ] && [ -x "$COMPILER" ] || { echo "aspect_facet_probe_build_error=admitted_compiler_required"; exit 2; }
+[ -n "$EXPECTED_COMPILER_SHA256" ] || { echo "aspect_facet_probe_build_error=admitted_compiler_sha256_required"; exit 2; }
+case "$COMPILER" in *compiler_rust*|*rust_seed*) echo "aspect_facet_probe_build_error=rust_seed_not_admissible"; exit 2 ;; esac
+
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+compiler_sha256="$(hash_file "$COMPILER")"
+[ "$compiler_sha256" = "$EXPECTED_COMPILER_SHA256" ] || {
+    echo "aspect_facet_probe_build_error=compiler_sha256_not_admitted"
+    exit 1
+}
+
+mkdir -p "$OUTPUT_DIR"
+fixture_builder="$OUTPUT_DIR/build-fixture"
+probe="$OUTPUT_DIR/probe"
+fixture="$OUTPUT_DIR/fixture.sfm"
+provenance="$probe.provenance"
+
+"$COMPILER" native-build \
+    --source src/compiler --source src/app --source src/lib --source test \
+    --entry-closure \
+    --entry test/fixtures/aspect_facet/perf_fixture_builder.spl \
+    --strip --output "$fixture_builder"
+
+"$COMPILER" native-build \
+    --source src/compiler --source src/app --source src/lib --source test \
+    --entry-closure \
+    --entry test/05_perf/aspect_facet/aspect_facet_native_probe.spl \
+    --strip --output "$probe"
+
+"$fixture_builder" --output "$fixture"
+[ -s "$fixture" ] || { echo "aspect_facet_probe_build_error=fixture_not_produced"; exit 1; }
+[ -x "$probe" ] || { echo "aspect_facet_probe_build_error=probe_not_produced"; exit 1; }
+
+probe_sha256="$(hash_file "$probe")"
+tmp="$(mktemp "${TMPDIR:-/tmp}/aspect-facet-provenance.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT INT TERM
+{
+    echo "compiler_kind=pure-simple-self-hosted"
+    echo "compiler_sha256=$compiler_sha256"
+    echo "probe_sha256=$probe_sha256"
+} >"$tmp"
+mv "$tmp" "$provenance"
+trap - EXIT INT TERM
+
+echo "aspect_facet_probe_build_status=pass"
+echo "aspect_facet_probe_path=$probe"
+echo "aspect_facet_fixture_path=$fixture"
+echo "aspect_facet_probe_provenance=$provenance"

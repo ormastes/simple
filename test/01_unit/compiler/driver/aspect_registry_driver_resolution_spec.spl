@@ -1,0 +1,94 @@
+# @req REQ-AF-004 REQ-AF-006 REQ-AF-007
+# @cover src/compiler/80.driver/driver_source_loading.spl 20%
+
+use std.spec.*
+use compiler.loader.module_resolver.aspect_registry.{aspect_registry_port_for_inputs}
+use compiler.loader.module_resolver.aspect_registry_discovery_adapter.{
+    create_aspect_registry_module_resolver_discovery
+}
+use compiler.mdsoc.feature.module_loading.app.module_resolver_discovery_port.{
+    module_resolver_discovery_port_empty
+}
+use compiler.driver.driver.{compiler_driver_create_with_module_resolver_discovery}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_source_loading.{
+    _driver_bulk_path_is_hidden_aspect,
+    _driver_import_path_is_authorized_aspect,
+    _driver_resolved_path_is_hidden_aspect,
+    _driver_resolve_entry_import_with_port
+}
+use compiler.driver.driver_aot_native_output.{
+    driver_native_sources_fingerprint_with_resolution
+}
+
+fn aspect_driver_fixture_root() -> text:
+    "test/01_unit/compiler/module_resolver/fixtures/aspect_registry/app"
+
+describe "canonical driver aspect resolution":
+    it "discovers immutable resolver state through the module-loading port":
+        val discovery = create_aspect_registry_module_resolver_discovery()
+        match discovery.resolve_inputs([
+            "{aspect_driver_fixture_root()}/aspects/debug/src/api.spl"]):
+            case Ok(resolution):
+                expect(resolution.name).to_equal("loader-aspect-registry")
+                expect(resolution.aspect_roots.len()).to_equal(2)
+                expect(resolution.fingerprint == "").to_be(false)
+            case Err(error):
+                expect(error).to_equal("")
+
+    it "preserves explicit no-registry compatibility behavior":
+        val discovery = module_resolver_discovery_port_empty()
+        match discovery.resolve_inputs(["src/main.spl"]):
+            case Ok(resolution):
+                expect(resolution.name).to_equal("empty")
+                expect(resolution.aspect_roots.len()).to_equal(0)
+                expect(resolution.fingerprint).to_equal("")
+            case Err(error):
+                expect(error).to_equal("")
+
+    it "injects discovery at the driver composition boundary":
+        var options = driver_core_compile_options_default()
+        options.input_files = ["{aspect_driver_fixture_root()}/src/main.spl"]
+        val driver = compiler_driver_create_with_module_resolver_discovery(
+            options, create_aspect_registry_module_resolver_discovery())
+        expect(driver.ctx.module_resolver_discovery.name).to_equal(
+            "loader-aspect-registry-discovery")
+        expect(driver.ctx.module_resolution.aspect_roots.len()).to_equal(0)
+
+    it "installs registry roots for real compile inputs and resolves between aspects":
+        val root = aspect_driver_fixture_root()
+        val importer = "{root}/aspects/debug/src/api.spl"
+        val installed = aspect_registry_port_for_inputs([importer])
+        expect(installed.errors.len()).to_equal(0)
+        expect(installed.port.aspect_roots.len()).to_equal(2)
+        val resolved = _driver_resolve_entry_import_with_port(
+            "trace", "{root}/aspects/debug/src", installed.port)
+        expect(resolved).to_end_with("/aspects/logging/src/trace.spl")
+        expect(_driver_import_path_is_authorized_aspect(
+            importer, resolved, installed.port)).to_be(true)
+
+    it "does not expose hidden aspect roots to business source":
+        val root = aspect_driver_fixture_root()
+        val installed = aspect_registry_port_for_inputs([
+            "{root}/aspects/debug/src/api.spl"])
+        val resolved = _driver_resolve_entry_import_with_port(
+            "trace", "{root}/src", installed.port)
+        expect(resolved).to_equal("")
+        expect(_driver_bulk_path_is_hidden_aspect(
+            root, "{root}/aspects/debug/src/api.spl")).to_be(true)
+        expect(_driver_bulk_path_is_hidden_aspect(
+            "{root}/aspects/debug/src",
+            "{root}/aspects/debug/src/api.spl")).to_be(false)
+        val hidden = "{root}/aspects/logging/src/trace.spl"
+        expect(_driver_resolved_path_is_hidden_aspect(
+            hidden, installed.port)).to_be(true)
+        expect(_driver_import_path_is_authorized_aspect(
+            "{root}/src/main.spl", hidden, installed.port)).to_be(false)
+        expect(_driver_import_path_is_authorized_aspect(
+            "{root}/aspects/debug/src/api.spl", hidden,
+            installed.port)).to_be(true)
+
+    it "folds registry identity into native object-cache identity":
+        val first = driver_native_sources_fingerprint_with_resolution([], "registry-a")
+        val second = driver_native_sources_fingerprint_with_resolution([], "registry-b")
+        expect(first == second).to_be(false)

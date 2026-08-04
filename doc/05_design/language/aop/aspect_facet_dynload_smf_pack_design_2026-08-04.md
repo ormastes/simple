@@ -1,9 +1,9 @@
 # Simple Aspect Facets and Demand-Loaded SFM Packs
 
-**Subtitle:** Typed structural AOP, relative aspect packages, variant-aware deployment, and low-overhead lazy activation  
-**Status:** Revised design aligned with current Simple architecture  
-**Date:** 2026-08-04  
-**Repository examined:** `ormastes/simple`, `main`  
+**Subtitle:** Typed structural AOP, relative aspect packages, variant-aware deployment, and low-overhead lazy activation
+**Status:** Revised design aligned with current Simple architecture
+**Date:** 2026-08-04
+**Repository examined:** `ormastes/simple`, `main`
 **Compatibility filename:** `aspect_facet_dynload_smf_pack_design_2026-08-04.md`; “SMF pack” in the original request now means an SFM aspect pack containing opaque SMF code units.
 
 <!-- codex-design -->
@@ -1203,16 +1203,86 @@ combines concrete matches with open-world rules and fails on ambiguity.
 This registry owns binding visibility only; the existing lifecycle manager
 owns generation state and leases. `AspectApplicationRuntime` resolves and pins
 the exact binding generation through `acquire_published_facet`, and removes
-visibility before unload drain. Dynamic advice-slot publication remains an
-explicit residual because current binding summaries contain no advice-slot
-metadata; this slice introduces no parallel advice lifecycle registry.
+visibility before unload drain. Dynamic advice-slot publication is loader-owned:
+catalog metadata identifies prepared slot, form, priority, specificity, witness,
+and capabilities, and loader ownership checks the witness before staging.
+Advice and facet publication are computed before the existing lifecycle
+promotion; exact-generation unbind removes both registries before drain. No
+runtime pointcut evaluator or parallel advice lifecycle/call path is introduced.
 Native driver/runtime wiring and representative startup, lookup-latency, and
 RSS evidence remain explicit verification residuals; this implementation does
 not convert its focused static/unit/system coverage into performance claims.
 
 ### AdviceBindingRegistry
 
-Maps prepared join-point slots to static, startup, or dynamic advice chains.
+Maps catalog-prepared join-point slots to static, startup, or dynamic advice
+chains. Chains use the existing static AOP order: priority descending,
+specificity descending, then witness name ascending. Candidate identity is the
+exact activation key and generation; lookup rejects unknown slots and records
+hits, misses, disabled checks, and disabled branches. A stable descriptor marks
+the disabled path as one prepared-slot check and one conditional branch, with
+`disabled_footprint_bytes = 1` explicitly labeled as a contract minimum rather
+than backend measurement, never as zero overhead. Mission policy denies runtime
+patch publication.
+
+The frozen execution seam is `advice_dispatch_slot`. It accepts one prepared
+slot and one phase (`before`, `after_success`, or `after_error`), applies the
+active exact-generation filter and canonical chain order, validates every
+record's resolved address and owner against `ModuleLoader`, then invokes through
+the loader's existing native zero-argument `fn() -> i64` primitive; dynamic
+advice pack producers must emit that fixed ABI, and returned values are receipts
+rather than substitutes for business control flow. Validation is two-pass so
+an invalid later record cannot cause partial phase execution. Dispatch counters
+cover attempts, successful callback invocations, failures, and rejected around
+requests. `around` admission and dispatch both fail closed until an actual
+exactly-once proceed continuation is designed and lowered.
+
+This does not close the prepared-call-site lane: current MIR/backend output does
+not emit a business-path caller of `advice_dispatch_slot`. Application code can
+invoke the seam explicitly, while automatic prepared-slot lowering remains a
+release-blocking integration residual rather than inferred evidence.
+
+`PreparedAdviceSlotPlan` is the frozen common contract for that future lane. Its
+fields are `schema_id`, `schema_version`, `slot_id`, `target_function_id`, and
+`admitted_forms`. The producer boundary accepts only schema v1 and
+`before`/`after_success`/`after_error`; empty, duplicate, unknown, and `around`
+forms fail closed. `MirModule.prepared_advice_slots` is preserved by every
+current module reconstruction and VHDL aggregation. Deterministic JSON uses
+`serialize_mir_prepared_advice_slots`; the driver collects and validates the
+table, rejects duplicate global slot IDs, and refuses non-empty native/SMF
+emission until backend table encoding and a real business-path caller exist.
+
+#### Production prepared-slot ownership status
+
+The registry is currently only the publication consumer. No source annotation
+or pointcut pass materializes a prepared dynamic slot, `MirModule` has no slot
+table, and `mir_aop_injection.spl` emits only direct static advice calls.
+Catalog `prepared_joinpoint_slots`, registry lookup/counters, and the
+application lookup facade therefore do not complete dynamic dispatch.
+
+The required producer sequence is:
+
+1. frontend/HIR select and validate a finite set of permitted sites;
+2. `compiler/50.mir` assigns stable slot IDs and emits prepared-dispatch MIR
+   plus module slot metadata;
+3. MIR optimization preserves the operation and exactly-once placement;
+4. `compiler/70.backend` lowers the dormant guard or patchpoint;
+5. `compiler/80.driver` emits the finite slot table;
+6. the loader registry binds an exact generation, and runtime dispatch invokes
+   the preordered chain under its matching generation lease.
+
+Until steps 1–5 exist with backend evidence, dynamic advice is a validated
+registry seam rather than a production prepared join point.
+
+#### Resolver composition boundary
+
+Automatic discovery uses the existing `85.mdsoc/feature/module_loading`
+application boundary. `ModuleResolverDiscoveryPort.resolve_inputs(inputs)` is
+implemented by the 99-loader adapter and injected by production CLI/public-driver
+composition. `ModuleResolverPort` remains the immutable shared result. Shared
+normalization/containment/importer authorization lives once in layer 00; the
+loader retains manifest-relative discovery, variant selection, filesystem and
+symlink policy. Legacy constructors select the explicit empty adapter.
 
 ### DynSmfSession activation adapter
 
@@ -1686,6 +1756,27 @@ New outputs:
 - SFM-owned aspect-pack directory,
 - application-SFM Aspect Catalog,
 - per-pack/module content hashes.
+
+Implementation status: SHB v1.1 writes an optional ninth facet-contract
+section and reads both v1.0/eight-section and v1.1 artifacts. The canonical
+factory symbol is `facet_witness_symbol(implementation_id)`. Facet
+implementation method bodies are retained in `FacetMethodDecl.body_source` and
+`HirFacetMethod.body_source`. Receiver-independent bodies project into ordinary
+compiler input under
+`facet_witness_method_symbol(implementation_id, method_name)`, currently
+`<implementation>__facet_witness__<method>`, and proceed through ordinary HIR
+and MIR function lowering. Interface methods remain declaration-only. A body
+that references `self` or `self.base` fails projection with E-AF005 while its
+facet AST/HIR metadata remains intact; no textual substitution is treated as a
+receiver ABI. The AOT driver emits FBND v1 only when the canonical factory
+witness is proven present in the ordinary-SMF symbol table, so current
+production facet plans still fail closed with E-AF002 instead of publishing a
+declared-only factory. The loader checks exact catalog equality and witness
+ownership. Calls lower through existing `CallIndirect` from an explicit
+resolved operand. A real receiver adapter/factory, generic implementations,
+backend export of witness-method symbols, and user-facing type-directed
+facet-method sugar remain residual; no runtime-private invoke path or
+placeholder witness is implied.
 
 ## 22.7 MDSOC owner map
 

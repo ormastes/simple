@@ -67,17 +67,69 @@ architecture:
 | existing-reader adapter | `compiler/99.loader/loader/aspect_pack_provider.spl` |
 | catalog and generation adapter | `compiler/99.loader/loader/aspect_catalog.spl`, `aspect_activation.spl` |
 | dynamic facet publication | `compiler/99.loader/loader/facet_binding_registry.spl` (validated candidates, exact `activation_key@generation` publication, concrete/open-world lookup, exact unbind; no lifecycle ownership) |
+| facet artifact contract | `compiler/00.common/structural_contracts/facet_artifact.spl`; SHB v1.1 optional facet-contract section and ordinary-SMF `.facet_bindings` Note consumed through existing readers |
+| dynamic advice publication | `compiler/99.loader/loader/advice_binding_registry.spl` (catalog-prepared slots, canonical preordered chains, exact-generation publish/unbind, disabled-path counters; no pointcut evaluator or lifecycle ownership) |
 | application runtime owner | `app/startup/aspect_application_runtime.spl` (retained trust/cache/coordinator, exact relative routes, mission seal, opaque per-aspect generation leases, quiesce/drain unload) |
 
 The syntax parser is an explicitly feature-scoped frontend surface; it does not
 replace the established advice/CE parsers. The activation adapter composes
 `DynSmfSession`, `CandidateMapping`, `GenerationState`, and `LifecycleManager`;
 it does not own executable relocation or a second module discovery path.
-Production activation stages facet candidates only after the module loader
-validates witness ownership. Registry publication and lifecycle promotion are
-computed before one coordinator value becomes visible. The application runtime
-resolves and pins an exact binding generation in one first-use operation, then
-removes that generation's binding visibility before unload drain.
+Production activation stages facet and advice candidates only after the module
+loader validates witness ownership. Advice targets must occur in the catalog's
+prepared-slot set. Both registry publications and lifecycle promotion are
+computed before one coordinator value becomes visible. Advice lookup preserves
+existing AOP order (priority, specificity, witness name), never re-evaluates
+pointcuts, and exposes the non-zero prepared-slot guard through deterministic
+counters and a footprint descriptor. The application runtime removes both
+facet and advice visibility before unload drain. Mission policy rejects runtime
+advice-patch activation.
+
+`advice_dispatch_slot` is the loader-validated production execution seam for
+zero-argument `before`, `after_success`, and `after_error` witnesses. Admission
+captures the resolved address and owner; dispatch revalidates both against the
+existing `ModuleLoader` before invoking any callback, so an invalid chain fails
+before partial execution. Runtime `around` is rejected because no dynamic
+exactly-once `proceed` continuation exists. A production MIR prepared-slot call
+site is still absent, so this seam is reachable through the application runtime
+but is not claimed as automatically emitted business-path dispatch.
+
+The shared `PreparedAdviceSlotPlan` contract carries schema ID/version, stable
+slot ID, target function identity, and admitted before/after forms.
+`MirModule.prepared_advice_slots` preserves this table through normal/bootstrap
+lowering, AOP/debug reconstruction, MIR optimizers, and VHDL aggregation;
+`serialize_mir_prepared_advice_slots` provides deterministic handoff bytes.
+There is currently no syntax/config producer. Directly supplied plans pass a
+driver validation/collection boundary, then native and SMF emission fail closed
+because no backend table or prepared business-path caller exists.
+
+## Ownership boundaries
+
+### Resolver installation dependency
+
+The resolver-installation inversion is closed through
+`85.mdsoc/feature/module_loading/app/ModuleResolverDiscoveryPort`.
+Its frozen `resolve_inputs(inputs) -> Result<ModuleResolverPort, text>` operation
+returns the existing immutable roots/fingerprint contract. The 99-loader aspect
+registry adapter implements discovery; production CLI composition injects it
+before phase-one collection. Layer 80 imports only the application port and the
+shared path policy in layer 00, with no loader implementation dependency.
+Compatibility constructors intentionally inject the empty discovery port.
+
+### Prepared dynamic join points
+
+There is no production prepared dynamic join-point slot or table today.
+`MirModule` carries only `facet_binding_plans`; existing
+`mir_aop_injection.spl` emits direct static advice calls. Catalog slot strings,
+loader validation, lookup counters, and application lookup are consumers and
+test seams, not evidence that a business call site contains a prepared guard.
+
+The next implementation owner is `compiler/50.mir`: introduce canonical slot
+metadata and a prepared-dispatch MIR operation, preserve it through MIR
+serialization/optimization, and lower it in `compiler/70.backend`. Layer 80
+then serializes the finite slot table. Layer 99 continues to own validated
+generation bind/unbind only; it must not synthesize slots or add a pointcut
+evaluator.
 
 ## Cache and invalidation
 

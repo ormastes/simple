@@ -1,0 +1,84 @@
+# @req REQ-AF-003 REQ-AF-006
+# @cover src/compiler/10.frontend/facet_static.spl 80%
+# @cover src/compiler/20.hir/facet_static.spl 80%
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.structural_contracts.facet_artifact.{
+    facet_witness_method_symbol
+}
+use compiler.frontend.facet_static.{
+    parse_static_facet_declarations, project_static_facet_source
+}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.facet_static.{lower_static_facets}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.{MirLowering, serialize_mir_module}
+
+fn constant_facet_source() -> text:
+    "aspect debug:\n" +
+    "    facet interface Debuggable:\n" +
+    "        fn debug_name(self) -> text\n" +
+    "    facet impl ConstantDebug for i64 implements Debuggable public readonly:\n" +
+    "        fn debug_name(self) -> text:\n" +
+    "            \"constant\"\n"
+
+fn base_adapting_facet_source() -> text:
+    "aspect debug:\n" +
+    "    facet interface Incrementable:\n" +
+    "        fn increment(self) -> i64\n" +
+    "    facet impl Increment for i64 implements Incrementable public readonly:\n" +
+    "        fn increment(self) -> i64:\n" +
+    "            self.base + 1\n"
+
+describe "executable facet method projection", tag: ["only-compiled"]:
+    it "preserves a real body and lowers its canonical function through HIR and MIR":
+        step("Preserve the implementation body in facet AST and HIR metadata")
+        val projection = project_static_facet_source(constant_facet_source()).unwrap()
+        val method = projection.facets.implementations[0].methods[0]
+        expect(method.body_source).to_equal("\"constant\"")
+        val facet_hir = lower_static_facets(projection.facets).unwrap()
+        expect(facet_hir.implementations[0].methods[0].body_source).to_equal(
+            "\"constant\"")
+
+        step("Project the body under the canonical witness-method symbol")
+        val symbol = facet_witness_method_symbol("ConstantDebug", "debug_name")
+        expect(symbol).to_equal("ConstantDebug__facet_witness__debug_name")
+        expect(projection.source).to_contain(
+            "fn ConstantDebug__facet_witness__debug_name(facet_base: i64) -> text:")
+
+        step("Lower the projected function through the ordinary HIR and MIR pipeline")
+        val parsed = parse_full_frontend(
+            constant_facet_source(), "facet_method.spl", "facet_method", Logger(level: 0))
+        expect(parsed.functions.keys()).to_contain(symbol)
+        var hir_lowering = HirLowering.with_filename("facet_method.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        expect(serialize_mir_module(mir_lowering.lower_module(hir))).to_contain(symbol)
+
+    it "retains self.base source and fails closed before ordinary parsing":
+        step("Retain the unsupported receiver-dependent implementation body")
+        val ast = parse_static_facet_declarations(base_adapting_facet_source()).unwrap()
+        expect(ast.implementations[0].methods[0].body_source).to_equal(
+            "self.base + 1")
+        val hir = lower_static_facets(ast).unwrap()
+        expect(hir.implementations[0].methods[0].body_source).to_equal(
+            "self.base + 1")
+
+        step("Reject projection until a real receiver ABI is available")
+        val diagnostic = project_static_facet_source(
+            base_adapting_facet_source()).unwrap_err()
+        expect(diagnostic).to_contain("E-AF005")
+        expect(diagnostic).to_contain("unsupported self.base receiver adaptation")
+
+    it "keeps facet interfaces declaration-only":
+        step("Reject an interface method body with a typed diagnostic")
+        val source = (
+            "aspect debug:\n" +
+            "    facet interface Debuggable:\n" +
+            "        fn debug_name(self) -> text:\n" +
+            "            \"invalid interface body\"\n")
+        val diagnostic = parse_static_facet_declarations(source).unwrap_err()
+        expect(diagnostic).to_contain("E-AF005")
+        expect(diagnostic).to_contain("must be declaration-only")

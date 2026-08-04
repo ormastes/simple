@@ -15,6 +15,17 @@ struct AspectBindingSummary:
     witness_symbol: text
     capabilities: [text]
 
+# Build-resolved advice metadata. Runtime activation binds only these prepared
+# slot IDs and never re-evaluates pointcuts or discovers join points.
+struct AspectAdviceSummary:
+    advice_id: text
+    joinpoint_slot_id: text
+    form: text
+    priority: i64
+    specificity: i64
+    witness_symbol: text
+    capabilities: [text]
+
 struct AspectCatalogEntry:
     aspect_id: text
     pack_id: text
@@ -32,6 +43,8 @@ struct AspectCatalogEntry:
     dependencies: [text]
     activation_policy: text
     binding_summaries: [AspectBindingSummary]
+    prepared_joinpoint_slots: [text]
+    advice_summaries: [AspectAdviceSummary]
     capabilities: [text]
 
 struct AspectCatalog:
@@ -104,6 +117,25 @@ fn aspect_catalog_validate_binding(entry: AspectCatalogEntry, summary: AspectBin
             return Err("E-AF006 binding capability is not granted by aspect " + entry.aspect_id)
     Ok(())
 
+fn aspect_catalog_advice_form_valid(form: text) -> bool:
+    form == "before" or form == "after_success" or form == "after_error" or form == "around"
+
+fn aspect_catalog_validate_advice(entry: AspectCatalogEntry, summary: AspectAdviceSummary) -> Result<(), text>:
+    if summary.advice_id == "" or summary.joinpoint_slot_id == "" or summary.witness_symbol == "":
+        return Err("E-AF010 incomplete dynamic advice summary for " + entry.aspect_id)
+    if not aspect_catalog_advice_form_valid(summary.form):
+        return Err("E-AF010 invalid dynamic advice form for " + summary.advice_id)
+    if summary.specificity < 0:
+        return Err("E-AF010 dynamic advice specificity cannot be negative")
+    if not entry.prepared_joinpoint_slots.contains(summary.joinpoint_slot_id):
+        return Err("E-AF010 dynamic advice targets a function without a prepared join point")
+    if not aspect_catalog_text_unique(summary.capabilities):
+        return Err("E-AF006 duplicate or empty advice capability for " + summary.advice_id)
+    for capability in summary.capabilities:
+        if not aspect_catalog_contains_text(entry.capabilities, capability):
+            return Err("E-AF006 advice capability is not granted by aspect " + entry.aspect_id)
+    Ok(())
+
 fn aspect_catalog_validate_entry(catalog: AspectCatalog, entry: AspectCatalogEntry) -> Result<(), text>:
     if entry.aspect_id == "" or entry.pack_id == "" or entry.module_id == "":
         return Err("E-APACK001 catalog route identity is empty")
@@ -122,8 +154,10 @@ fn aspect_catalog_validate_entry(catalog: AspectCatalog, entry: AspectCatalogEnt
         return Err("E-APACK006 duplicate or empty aspect dependency")
     if not aspect_catalog_text_unique(entry.capabilities):
         return Err("E-AF006 duplicate or empty aspect capability")
-    if entry.binding_summaries.len() == 0:
-        return Err("E-AF002 aspect has no binding summary")
+    if not aspect_catalog_text_unique(entry.prepared_joinpoint_slots):
+        return Err("E-AF010 duplicate or empty prepared join-point slot")
+    if entry.binding_summaries.len() == 0 and entry.advice_summaries.len() == 0:
+        return Err("E-AF002 aspect has no facet or advice binding summary")
 
     var binding_ids: [text] = []
     for summary in entry.binding_summaries:
@@ -131,6 +165,12 @@ fn aspect_catalog_validate_entry(catalog: AspectCatalog, entry: AspectCatalogEnt
             return Err("E-AF003 duplicate facet binding ID")
         binding_ids.push(summary.binding_id)
         aspect_catalog_validate_binding(entry, summary)?
+    var advice_ids: [text] = []
+    for summary in entry.advice_summaries:
+        if advice_ids.contains(summary.advice_id):
+            return Err("E-AF010 duplicate dynamic advice ID")
+        advice_ids.push(summary.advice_id)
+        aspect_catalog_validate_advice(entry, summary)?
     Ok(())
 
 fn aspect_catalog_validate_unique_routes(entries: [AspectCatalogEntry]) -> Result<(), text>:
@@ -197,5 +237,6 @@ impl AspectCatalog:
         Err("E-APACK006 aspect is absent from application catalog")
 
 export AspectBindingSummary
+export AspectAdviceSummary
 export AspectCatalogEntry
 export AspectCatalog

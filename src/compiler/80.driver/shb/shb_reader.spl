@@ -14,9 +14,11 @@ use compiler.shb.shb_types.{
     SHB_SECTION_FUNCTIONS, SHB_SECTION_STRUCTS, SHB_SECTION_CLASSES,
     SHB_SECTION_TYPE_LAYOUTS, SHB_SECTION_ENUMS, SHB_SECTION_TRAITS,
     SHB_SECTION_REEXPORTS, SHB_SECTION_DEPENDENCIES,
+    SHB_SECTION_FACET_CONTRACTS,
     SHB_MAGIC_0, SHB_MAGIC_1, SHB_MAGIC_2, SHB_MAGIC_3,
     shb_header_valid
 }
+use compiler.common.structural_contracts.facet_artifact.{FacetContractMetadata, decode_facet_contracts}
 use compiler.shb.shb_string_table.{ShbStringReader}
 
 
@@ -48,7 +50,7 @@ class ShbReader:
 
     # Open from raw bytes (for testing without files)
     static fn from_bytes(bytes: [u8]) -> ShbReader:
-        if bytes.len() < SHB_HEADER_SIZE + SHB_SECTION_TABLE_SIZE:
+        if bytes.len() < SHB_HEADER_SIZE + 64:
             return shb_reader_invalid()
 
         var r = BinaryReader.new(bytes)
@@ -58,14 +60,22 @@ class ShbReader:
         val header = header_info.header
         if shb_header_valid(header) == false:
             return shb_reader_invalid()
+        val required_table_size = if header.version_minor >= 1:
+            SHB_SECTION_TABLE_SIZE
+        else:
+            64
+        if bytes.len() < SHB_HEADER_SIZE + required_table_size:
+            return shb_reader_invalid()
 
         # Read section offset table
         var offsets: [i64] = []
         var si = 0
-        while si < SHB_SECTION_COUNT:
+        while si < header.section_count and si < SHB_SECTION_COUNT:
             val off = r.read_i64(ByteOrder.LittleEndian) ?? 0
             offsets.push(off)
             si = si + 1
+        while offsets.len() < SHB_SECTION_COUNT:
+            offsets.push(0)
 
         # Build string table reader
         val strtab_off = header.string_table_offset
@@ -113,6 +123,8 @@ class ShbReader:
     # `self.valid == false` or `section_offsets[section_id] == 0`).
     fn _open_section(section_id: i64) -> _SectionCursor:
         if self.valid == false:
+            return _SectionCursor(reader: BinaryReader.new(self.data), count: 0, valid: false)
+        if section_id < 0 or section_id >= self.section_offsets.len():
             return _SectionCursor(reader: BinaryReader.new(self.data), count: 0, valid: false)
         val offset = self.section_offsets[section_id]
         if offset == 0:
@@ -336,9 +348,22 @@ class ShbReader:
             i = i + 1
         deps
 
+    fn read_facet_contracts() -> Result<[FacetContractMetadata], text>:
+        val cur = self._open_section(SHB_SECTION_FACET_CONTRACTS)
+        if not cur.valid:
+            return Ok([])
+        var r = cur.reader
+        var bytes: [u8] = []
+        var index = 0
+        while index < cur.count:
+            bytes = bytes.push(r.read_u8() ?? 0)
+            index = index + 1
+        decode_facet_contracts(bytes)
+
     # Read all sections into a full ShbModuleInterface
-    fn read_all() -> ShbModuleInterface:
-        ShbModuleInterface(
+    fn read_all() -> Result<ShbModuleInterface, text>:
+        val facet_contracts = self.read_facet_contracts()?
+        Ok(ShbModuleInterface(
             header: self.header,
             functions: self.read_functions(),
             structs: self.read_structs(),
@@ -347,8 +372,9 @@ class ShbReader:
             traits: self.read_traits(),
             reexports: self.read_reexports(),
             type_layouts: self.read_type_layouts(),
-            dependencies: self.read_dependencies()
-        )
+            dependencies: self.read_dependencies(),
+            facet_contracts: facet_contracts
+        ))
 
 # --- Helper: invalid reader ---
 

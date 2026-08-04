@@ -1,0 +1,304 @@
+"""Native NFR-AF-005 probe over real SFM2, SMF, loader, and app runtime APIs."""
+
+use std.cli.cli_util.{get_cli_args}
+use std.io_runtime.{file_read_bytes}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.loader.loader.aspect_catalog.{
+    AspectBindingSummary, AspectCatalogEntry, AspectCatalog
+}
+use compiler.loader.loader.aspect_pack_provider.{
+    AspectPackProviderKey, AspectPackTrustPolicy
+}
+use compiler.loader.loader.aspect_activation.{AspectActivationRequest}
+use compiler.loader.loader.module_loader.{ModuleLoader, moduleloader_with_defaults}
+use compiler.common.structural_contracts.facet_artifact.{facet_witness_symbol}
+use app.startup.aspect_application_runtime.{AspectApplicationRuntime}
+use os.smf.dynsmf_session.{DynSmfPolicy, dynsmf_session_new}
+use os.smf.smf_generation.{LifecycleManager}
+use test.fixtures.aspect_facet.runtime_fixture.{facet_runtime_fixture_smf}
+
+extern fn rt_time_now_nanos() -> i64
+
+struct AspectPerfArgs:
+    mode: text
+    fixture: text
+    samples: i64
+    valid: bool
+
+struct AspectPerfMetrics:
+    mode: text
+    p50: i64
+    p95: i64
+    p99: i64
+    unit: text
+    pack_opens: i64
+    stored_bytes: i64
+    decoded_bytes: i64
+    executable_mappings: i64
+    sidecar_allocations: i64
+    runtime_scans: i64
+    index_hits: i64
+    index_misses: i64
+    index_evictions: i64
+    chunk_hits: i64
+    chunk_misses: i64
+    chunk_evictions: i64
+    negative_hits: i64
+    negative_misses: i64
+    negative_evictions: i64
+    slot_lookups: i64
+    slot_hits: i64
+    slot_misses: i64
+    advice_publications: i64
+    advice_unbinds: i64
+    dispatch_attempts: i64
+    dispatch_invocations: i64
+    dispatch_failures: i64
+    around_rejections: i64
+    disabled_slot_checks: i64
+    disabled_slot_branches: i64
+    disabled_footprint_bytes: i64
+    disabled_footprint_source: text
+
+fn parse_aspect_perf_args(args: [text]) -> AspectPerfArgs:
+    var mode = ""
+    var fixture = ""
+    var samples: i64 = 1
+    var valid = true
+    var index = 0
+    while index < args.len():
+        val arg = args[index]
+        if arg.starts_with("--mode="):
+            mode = arg["--mode=".len():]
+        else if arg == "--mode" and index + 1 < args.len():
+            index = index + 1
+            mode = args[index]
+        else if arg == "--fixture" and index + 1 < args.len():
+            index = index + 1
+            fixture = args[index]
+        else if arg.starts_with("--fixture="):
+            fixture = arg["--fixture=".len():]
+        else if arg == "--samples" and index + 1 < args.len():
+            index = index + 1
+            samples = args[index].to_i64() ?? 0
+        else if arg.starts_with("--samples="):
+            samples = arg["--samples=".len():].to_i64() ?? 0
+        index = index + 1
+    if not (mode == "cold" or mode == "first-use" or mode == "lookup"):
+        valid = false
+    if fixture == "" or samples <= 0:
+        valid = false
+    AspectPerfArgs(mode: mode, fixture: fixture, samples: samples, valid: valid)
+
+fn aspect_perf_binding() -> AspectBindingSummary:
+    AspectBindingSummary(
+        binding_id: "fixture.debug.binding",
+        concrete_type_id: "fixture.Cache", business_interface_id: "",
+        facet_interface_id: "Debuggable",
+        facet_contract_abi_hash: "fixture-facet-abi-v1",
+        witness_symbol: facet_witness_symbol("fixture_debug"),
+        capabilities: ["facet.read"])
+
+fn aspect_perf_catalog(pack_digest: text, module_digest: text) -> AspectCatalog:
+    AspectCatalog.create(
+        1, "x86_64-unknown-linux-gnu", "aspect-perf-v1", "simple-runtime-1",
+        [AspectCatalogEntry(
+            aspect_id: "fixture.debug", pack_id: "aspect-facet-perf",
+            pack_path: "aspect-facet-perf/fixture.sfm", module_id: "fixture.debug",
+            pack_digest: pack_digest, module_digest: module_digest,
+            core_public_abi_hash: module_digest, core_layout_abi_hash: module_digest,
+            target: "x86_64-unknown-linux-gnu", variant_fingerprint: "aspect-perf-v1",
+            runtime_abi: "simple-runtime-1", dependencies: [],
+            activation_policy: "lazy_facet", binding_summaries: [aspect_perf_binding()],
+            prepared_joinpoint_slots: ["fixture.disabled.slot"], advice_summaries: [],
+            capabilities: ["facet.read"])]).unwrap()
+
+fn aspect_perf_runtime(catalog: AspectCatalog) -> AspectApplicationRuntime:
+    AspectApplicationRuntime.create(
+        catalog,
+        dynsmf_session_new("aspect-perf", DynSmfPolicy(
+            disabled_all: false, disabled_ids: [], source: "native-perf")),
+        LifecycleManager.new_manager(), AspectPackTrustPolicy.ordinary_unsigned(),
+        2, 2, 2).unwrap()
+
+fn aspect_perf_provider_key(catalog: AspectCatalog) -> AspectPackProviderKey:
+    val entry = catalog.entries[0]
+    AspectPackProviderKey(
+        pack_id: entry.pack_id, pack_digest: entry.pack_digest,
+        catalog_generation: catalog.generation, target: entry.target,
+        variant_fingerprint: entry.variant_fingerprint, runtime_abi: entry.runtime_abi,
+        core_public_abi_hash: entry.core_public_abi_hash,
+        core_layout_abi_hash: entry.core_layout_abi_hash)
+
+fn aspect_perf_activate(
+    mut runtime: AspectApplicationRuntime,
+    mut loader: ModuleLoader,
+    pack_bytes: [u8],
+    request_id: text
+) -> Result<(AspectApplicationRuntime, ModuleLoader), text>:
+    val result = runtime.activate_pack_bytes(
+        aspect_perf_provider_key(runtime.catalog), pack_bytes, [],
+        AspectActivationRequest(
+            aspect_id: "fixture.debug", request_id: request_id,
+            catalog_generation: runtime.catalog.generation), loader)
+    if result.status != "published":
+        return Err(result.reason)
+    Ok((runtime, loader))
+
+fn aspect_perf_sorted(values: [i64]) -> [i64]:
+    var remaining = values
+    var sorted: [i64] = []
+    while remaining.len() > 0:
+        var best = 0
+        var index = 1
+        while index < remaining.len():
+            if remaining[index] < remaining[best]:
+                best = index
+            index = index + 1
+        sorted = sorted.push(remaining[best])
+        var next: [i64] = []
+        index = 0
+        while index < remaining.len():
+            if index != best:
+                next = next.push(remaining[index])
+            index = index + 1
+        remaining = next
+    sorted
+
+fn aspect_perf_percentile(sorted: [i64], percentile: i64) -> i64:
+    if sorted.len() == 0:
+        return 0
+    var index = ((sorted.len() * percentile + 99) / 100) - 1
+    if index < 0:
+        index = 0
+    if index >= sorted.len():
+        index = sorted.len() - 1
+    sorted[index]
+
+fn aspect_perf_metrics(
+    mode: text,
+    timings: [i64],
+    unit: text,
+    runtime: AspectApplicationRuntime
+) -> AspectPerfMetrics:
+    val sorted = aspect_perf_sorted(timings)
+    val counters = runtime.coordinator.counters
+    val cache = runtime.provider_cache.get_stats()
+    val advice = runtime.advice_binding_counters()
+    val footprint = runtime.advice_disabled_footprint()
+    AspectPerfMetrics(
+        mode: mode, p50: aspect_perf_percentile(sorted, 50),
+        p95: aspect_perf_percentile(sorted, 95), p99: aspect_perf_percentile(sorted, 99),
+        unit: unit, pack_opens: counters.pack_opens,
+        stored_bytes: counters.selected_stored_bytes,
+        decoded_bytes: counters.selected_decoded_bytes,
+        executable_mappings: counters.executable_mappings,
+        sidecar_allocations: counters.sidecar_allocations,
+        runtime_scans: counters.runtime_scans,
+        index_hits: cache.index_hits, index_misses: cache.index_misses,
+        index_evictions: cache.index_evictions, chunk_hits: cache.chunk_hits,
+        chunk_misses: cache.chunk_misses, chunk_evictions: cache.chunk_evictions,
+        negative_hits: cache.negative_hits, negative_misses: cache.negative_misses,
+        negative_evictions: cache.negative_evictions,
+        slot_lookups: advice.slot_lookups, slot_hits: advice.slot_hits,
+        slot_misses: advice.slot_misses, advice_publications: advice.advice_publications,
+        advice_unbinds: advice.advice_unbinds,
+        dispatch_attempts: advice.dispatch_attempts,
+        dispatch_invocations: advice.dispatch_invocations,
+        dispatch_failures: advice.dispatch_failures,
+        around_rejections: advice.around_rejections,
+        disabled_slot_checks: advice.disabled_slot_checks,
+        disabled_slot_branches: advice.disabled_slot_branches,
+        disabled_footprint_bytes: footprint.disabled_footprint_bytes,
+        disabled_footprint_source: footprint.disabled_footprint_source)
+
+fn measure_cold_aspect_startup() -> AspectPerfMetrics:
+    val zero_digest = "0000000000000000000000000000000000000000000000000000000000000000"
+    val runtime = aspect_perf_runtime(aspect_perf_catalog(zero_digest, zero_digest))
+    aspect_perf_metrics("cold", [0], "ns", runtime)
+
+fn measure_first_facet_use(pack_bytes: [u8], samples: i64) -> Result<AspectPerfMetrics, text>:
+    val module_bytes = facet_runtime_fixture_smf()
+    val catalog = aspect_perf_catalog(
+        sha256_u8_hex(pack_bytes), sha256_u8_hex(module_bytes))
+    var timings: [i64] = []
+    var last_runtime = aspect_perf_runtime(catalog)
+    var sample = 0
+    while sample < samples:
+        var runtime = aspect_perf_runtime(catalog)
+        val loader = moduleloader_with_defaults()
+        val started = rt_time_now_nanos()
+        val activated = aspect_perf_activate(runtime, loader, pack_bytes, "sample-{sample}")?
+        val elapsed_us = (rt_time_now_nanos() - started + 999) / 1000
+        runtime = activated.0
+        val _ = runtime.lookup_published_advice("fixture.disabled.slot")?
+        timings = timings.push(elapsed_us)
+        last_runtime = runtime
+        sample = sample + 1
+    Ok(aspect_perf_metrics("first-use", timings, "us", last_runtime))
+
+fn measure_repeated_facet_lookup(pack_bytes: [u8], samples: i64) -> Result<AspectPerfMetrics, text>:
+    val module_bytes = facet_runtime_fixture_smf()
+    val catalog = aspect_perf_catalog(
+        sha256_u8_hex(pack_bytes), sha256_u8_hex(module_bytes))
+    var runtime = aspect_perf_runtime(catalog)
+    val loader = moduleloader_with_defaults()
+    val activated = aspect_perf_activate(runtime, loader, pack_bytes, "lookup-owner")?
+    runtime = activated.0
+    var timings: [i64] = []
+    var sample = 0
+    while sample < samples:
+        val started = rt_time_now_nanos()
+        val acquired = runtime.acquire_published_facet(
+            "fixture.Cache", [], "Debuggable")?
+        if acquired == nil:
+            return Err("facet lookup returned no published witness")
+        val pair = acquired.unwrap()
+        runtime.release_facet_generation_lease(pair.1)?
+        timings = timings.push(rt_time_now_nanos() - started)
+        sample = sample + 1
+    val _ = runtime.lookup_published_advice("fixture.disabled.slot")?
+    Ok(aspect_perf_metrics("lookup", timings, "ns", runtime))
+
+fn aspect_facet_perf_summary(metrics: AspectPerfMetrics) -> text:
+    val percentile_fields = if metrics.unit == "us":
+        "p50_us={metrics.p50} p95_us={metrics.p95} p99_us={metrics.p99}"
+    else:
+        "p50_ns={metrics.p50} p95_ns={metrics.p95} p99_ns={metrics.p99}"
+    "aspect_facet_perf_summary mode={metrics.mode} {percentile_fields} " +
+        "pack_opens={metrics.pack_opens} stored_bytes={metrics.stored_bytes} decoded_bytes={metrics.decoded_bytes} " +
+        "executable_mappings={metrics.executable_mappings} sidecar_allocations={metrics.sidecar_allocations} runtime_scans={metrics.runtime_scans} " +
+        "index_hits={metrics.index_hits} index_misses={metrics.index_misses} index_evictions={metrics.index_evictions} " +
+        "chunk_hits={metrics.chunk_hits} chunk_misses={metrics.chunk_misses} chunk_evictions={metrics.chunk_evictions} " +
+        "negative_hits={metrics.negative_hits} negative_misses={metrics.negative_misses} negative_evictions={metrics.negative_evictions} " +
+        "slot_lookups={metrics.slot_lookups} slot_hits={metrics.slot_hits} slot_misses={metrics.slot_misses} " +
+        "advice_publications={metrics.advice_publications} advice_unbinds={metrics.advice_unbinds} " +
+        "dispatch_attempts={metrics.dispatch_attempts} dispatch_invocations={metrics.dispatch_invocations} " +
+        "dispatch_failures={metrics.dispatch_failures} around_rejections={metrics.around_rejections} " +
+        "disabled_slot_checks={metrics.disabled_slot_checks} disabled_slot_branches={metrics.disabled_slot_branches} " +
+        "disabled_footprint_bytes={metrics.disabled_footprint_bytes} disabled_footprint_source={metrics.disabled_footprint_source}"
+
+fn main() -> i64:
+    val args = parse_aspect_perf_args(get_cli_args())
+    if not args.valid:
+        print "aspect_facet_perf_error=usage"
+        return 2
+    if args.mode == "cold":
+        print aspect_facet_perf_summary(measure_cold_aspect_startup())
+        return 0
+    val pack_bytes = file_read_bytes(args.fixture)
+    if pack_bytes.len() == 0:
+        print "aspect_facet_perf_error=fixture_unreadable"
+        return 2
+    val measured = if args.mode == "first-use":
+        measure_first_facet_use(pack_bytes, args.samples)
+    else:
+        measure_repeated_facet_lookup(pack_bytes, args.samples)
+    if measured.is_err():
+        print "aspect_facet_perf_error={measured.unwrap_err()}"
+        return 1
+    print aspect_facet_perf_summary(measured.unwrap())
+    0
+
+export measure_cold_aspect_startup, measure_first_facet_use, measure_repeated_facet_lookup
+export aspect_facet_perf_summary, main

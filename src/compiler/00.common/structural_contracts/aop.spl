@@ -4,6 +4,8 @@ use std.common.structural.execution.contracts.{StageReceipt}
 
 val COMPILER_AOP_CONTRACT_VERSION: i64 = 1
 val TYPE_PREDICATE_BYTECODE_VERSION: i64 = 1
+val PREPARED_ADVICE_SLOT_SCHEMA_ID: text = "simple.prepared-advice-slot"
+val PREPARED_ADVICE_SLOT_SCHEMA_VERSION: i64 = 1
 
 # Stable postfix instructions shared by static binding and future descriptor
 # registration. Parsing and evaluation remain in the existing predicate owner.
@@ -50,6 +52,46 @@ struct FacetBindingPlan:
     access: FacetAccess
     required: bool
 
+# Build-time declaration of a dynamic dispatch location. This is metadata only:
+# it neither evaluates a pointcut nor claims that a backend patchpoint exists.
+struct PreparedAdviceSlotPlan:
+    schema_id: text
+    schema_version: i64
+    slot_id: text
+    target_function_id: text
+    admitted_forms: [text]
+
+fn prepared_advice_form_supported(form: text) -> bool:
+    form == "before" or form == "after_success" or form == "after_error"
+
+# Fail-closed producer boundary used until a source/config owner supplies these
+# plans. Runtime `around` is deliberately excluded without a real proceed path.
+fn prepared_advice_slot_plan_create(
+    schema_id: text,
+    schema_version: i64,
+    slot_id: text,
+    target_function_id: text,
+    admitted_forms: [text]
+) -> Result<PreparedAdviceSlotPlan, text>:
+    if schema_id != PREPARED_ADVICE_SLOT_SCHEMA_ID or
+        schema_version != PREPARED_ADVICE_SLOT_SCHEMA_VERSION:
+        return Err("E-AF010 unsupported prepared advice slot schema")
+    if slot_id == "" or target_function_id == "" or admitted_forms.len() == 0:
+        return Err("E-AF010 prepared advice slot identity or forms are empty")
+    var seen: [text] = []
+    for form in admitted_forms:
+        if not prepared_advice_form_supported(form):
+            return Err("E-AF010 prepared advice slot form is unsupported: {form}")
+        if seen.contains(form):
+            return Err("E-AF010 duplicate prepared advice slot form: {form}")
+        seen.push(form)
+    Ok(PreparedAdviceSlotPlan(
+        schema_id: schema_id,
+        schema_version: schema_version,
+        slot_id: slot_id,
+        target_function_id: target_function_id,
+        admitted_forms: admitted_forms))
+
 # Opaque handles into the QUERY/MUTATE lanes. This lane never sees IR bytes;
 # it addresses compiled programs by digest and validates versions at bind time.
 struct PointcutQueryRef:
@@ -91,7 +133,10 @@ struct WeavingReceipt:
     receipt: StageReceipt
 
 export COMPILER_AOP_CONTRACT_VERSION, TYPE_PREDICATE_BYTECODE_VERSION
+export PREPARED_ADVICE_SLOT_SCHEMA_ID, PREPARED_ADVICE_SLOT_SCHEMA_VERSION
 export TypePredicateInstruction, TypePredicateBytecode, TypePredicateDescriptor
 export FacetRepresentation, FacetMultiplicity, FacetAccess, FacetBindingPlan
+export PreparedAdviceSlotPlan, prepared_advice_form_supported
+export prepared_advice_slot_plan_create
 export PointcutQueryRef, PointcutSelectorKind
 export AdviceKind, AdviceTemplateRef, AopRule, WeavingReceipt

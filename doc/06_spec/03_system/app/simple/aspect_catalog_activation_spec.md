@@ -60,7 +60,7 @@ FAIL.
 - Test plan: `doc/03_plan/sys_test/aspect_facet_dynload_smf_pack.md`
 - Design: `doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md`
 - Executable source SHA-256:
-  `4816927d9c8148d423ea92eefb6dab48b35095d5015401c17354294e7d7feeea`
+  `b93c644613135905221dab6939ad0703c5dccfe3dc153ea419d6ae83f546d81c`
 
 <details>
 <summary>Executable SSpec</summary>
@@ -73,8 +73,17 @@ assertions, including `build_aspect_pack_fixture`,
 
 ## Compatibility and limitations
 
-The counters are scoped to the catalog/activation adapter, which receives an
-already-open validated provider. This slice proves control-plane staging,
-binding publication/lookup, and exact unbind contracts; it does not claim
-executable relocation/mapping, generation-pin drain, cache eviction, or
-dynamic advice patchpoint execution.
+The counters are scoped to the catalog/activation and loader registries, which
+receive an already-open validated provider. The focused unit source
+`test/01_unit/compiler/loader/advice_binding_registry_spec.spl` additionally
+proves prepared-slot admission, canonical chain ordering, publication/unbind,
+and non-zero disabled-path accounting. These tests do not claim backend
+patchpoint byte size, executable witness invocation, representative latency,
+generation-pin drain, or cache-eviction performance; those remain retained
+harness/integration evidence.
+
+The focused advice-registry unit spec covers phase admission, exact active-chain
+selection, owner/address fail-closed dispatch, counters, and explicit `around`
+denial without source-text assertions. No safe executable callback-address test
+is claimed in the current crashing runtime session, and no production MIR
+prepared-slot caller exists yet.

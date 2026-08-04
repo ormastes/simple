@@ -1,0 +1,39 @@
+# Driver-owned handoff for prepared dynamic advice-slot metadata.
+#
+# Collection and validation are production-ready. Artifact/backend consumption
+# is deliberately fail-closed until a real table and prepared caller exist.
+
+use compiler.mir.mir_data.{MirModule}
+use compiler.common.structural_contracts.aop.{
+    PreparedAdviceSlotPlan, prepared_advice_slot_plan_create
+}
+use compiler.mir.mir_serialization.{serialize_mir_prepared_advice_slots}
+
+fn collect_prepared_advice_slot_table_bytes(
+    modules: Dict<text, MirModule>
+) -> Result<[u8], text>:
+    var plans: [PreparedAdviceSlotPlan] = []
+    var slot_ids: [text] = []
+    for module_name in modules.keys():
+        for plan in modules[module_name].prepared_advice_slots:
+            prepared_advice_slot_plan_create(
+                plan.schema_id, plan.schema_version, plan.slot_id,
+                plan.target_function_id, plan.admitted_forms)?
+            if slot_ids.contains(plan.slot_id):
+                return Err("E-AF010 duplicate prepared advice slot ID: {plan.slot_id}")
+            slot_ids = slot_ids.push(plan.slot_id)
+            plans = plans.push(plan)
+    if plans.len() == 0:
+        return Ok([])
+    Ok(serialize_mir_prepared_advice_slots(plans).bytes())
+
+fn prepared_advice_slot_artifact_gate(
+    modules: Dict<text, MirModule>
+) -> Result<(), text>:
+    val table = collect_prepared_advice_slot_table_bytes(modules)?
+    if table.len() > 0:
+        return Err("E-AF010 prepared advice slot backend/table emission is not implemented")
+    Ok(())
+
+export collect_prepared_advice_slot_table_bytes
+export prepared_advice_slot_artifact_gate

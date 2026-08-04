@@ -13,5 +13,4 @@
 
 ## Verification mechanisms
 
-NFR-AF-001..004 and NFR-AF-008 are asserted in focused system scenarios and format/loader unit tests. NFR-AF-005 uses retained benchmark artifacts tied to binary and fixture hashes. NFR-AF-006 uses negative/fault-injection scenarios. NFR-AF-007 is enforced by MDSOC review, dependency checks, lint, duplication checks, and both direct-env/runtime guards.
-
+NFR-AF-001, NFR-AF-002, NFR-AF-004, and NFR-AF-008 have focused system or format/loader assertions. NFR-AF-003 has a non-zero prepared-slot contract descriptor and counters, but its backend byte/branch measurement remains a release-blocking evidence gap. NFR-AF-005 uses `scripts/check/build-aspect-facet-nfr-probe.shs`, `scripts/check/check-aspect-facet-nfr-evidence.shs`, and retained benchmark artifacts tied to exact admitted compiler, native-probe, and fixture hashes; the build sidecar proves the admitted compiler produced that probe. The first record is explicitly `collected-not-thresholded` so measurements, contract minima, and later host thresholds cannot be confused. NFR-AF-006 has policy and negative-path assertions but still requires admitted runtime/fault-injection evidence. NFR-AF-007 requires a completed MDSOC review, dependency checks, lint, duplication checks, and both direct-env/runtime guards.

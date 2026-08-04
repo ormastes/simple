@@ -1,0 +1,88 @@
+# @req REQ-AF-008 REQ-AF-010
+# @cover src/compiler/00.common/structural_contracts/aop.spl 80%
+# @cover src/compiler/50.mir/mir_serialization.spl 70%
+
+use std.spec.*
+use compiler.common.structural_contracts.aop.{
+    PREPARED_ADVICE_SLOT_SCHEMA_ID, PREPARED_ADVICE_SLOT_SCHEMA_VERSION,
+    PreparedAdviceSlotPlan, prepared_advice_slot_plan_create
+}
+use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_serialization.{
+    serialize_mir_module, serialize_mir_prepared_advice_slots
+}
+use compiler.mir_opt.mir_opt.{
+    run_simd_lowering, run_predicate_promote, run_auto_vectorization
+}
+use compiler.driver.prepared_advice_slot_handoff.{
+    collect_prepared_advice_slot_table_bytes,
+    prepared_advice_slot_artifact_gate
+}
+
+fn prepared_slot(id: text, target: text, forms: [text]) -> PreparedAdviceSlotPlan:
+    prepared_advice_slot_plan_create(
+        PREPARED_ADVICE_SLOT_SCHEMA_ID,
+        PREPARED_ADVICE_SLOT_SCHEMA_VERSION,
+        id, target, forms).unwrap()
+
+fn prepared_slot_module(name: text, plans: [PreparedAdviceSlotPlan]) -> MirModule:
+    MirModule(
+        name: name, functions: {}, statics: {}, constants: {}, types: {},
+        prepared_advice_slots: plans)
+
+describe "Prepared dynamic advice-slot MIR metadata":
+    it "admits only versioned before and after phase plans":
+        val plan = prepared_slot(
+            "orders.submit.prepared", "orders::submit",
+            ["before", "after_success", "after_error"])
+        expect(plan.schema_id).to_equal("simple.prepared-advice-slot")
+        expect(plan.schema_version).to_equal(1)
+        expect(plan.slot_id).to_equal("orders.submit.prepared")
+        expect(plan.target_function_id).to_equal("orders::submit")
+        expect(plan.admitted_forms.len()).to_equal(3)
+
+        expect(prepared_advice_slot_plan_create(
+            PREPARED_ADVICE_SLOT_SCHEMA_ID, 99, "slot", "target",
+            ["before"]).unwrap_err()).to_contain("unsupported prepared advice slot schema")
+        expect(prepared_advice_slot_plan_create(
+            PREPARED_ADVICE_SLOT_SCHEMA_ID,
+            PREPARED_ADVICE_SLOT_SCHEMA_VERSION, "slot", "target",
+            ["around"]).unwrap_err()).to_contain("unsupported")
+        expect(prepared_advice_slot_plan_create(
+            PREPARED_ADVICE_SLOT_SCHEMA_ID,
+            PREPARED_ADVICE_SLOT_SCHEMA_VERSION, "slot", "target",
+            ["before", "before"]).unwrap_err()).to_contain("duplicate")
+
+    it "serializes slots and forms deterministically":
+        val a = prepared_slot("slot.z", "orders::z", ["before", "after_error"])
+        val b = prepared_slot("slot.a", "orders::a", ["after_success", "before"])
+        val forward = serialize_mir_prepared_advice_slots([a, b])
+        val reverse = serialize_mir_prepared_advice_slots([b, a])
+        expect(forward).to_equal(reverse)
+        expect(forward).to_contain("\"slotId\":\"slot.a\"")
+        expect(forward).to_contain("\"targetFunctionId\":\"orders::z\"")
+        expect(serialize_mir_module(
+            prepared_slot_module("orders", [a]))).to_contain("preparedAdviceSlots")
+
+    it "survives optimizer module reconstruction without becoming executable":
+        val plan = prepared_slot("orders.submit.prepared", "orders::submit", ["before"])
+        val original = prepared_slot_module("orders", [plan])
+        val simd = run_simd_lowering(original)
+        val predicate = run_predicate_promote(simd)
+        val vectorized = run_auto_vectorization(predicate)
+        expect(vectorized.prepared_advice_slots.len()).to_equal(1)
+        expect(vectorized.prepared_advice_slots[0].slot_id).to_equal("orders.submit.prepared")
+        expect(vectorized.functions.keys().len()).to_equal(0)
+
+    it "hands a stable table to the driver and fails unsupported emission closed":
+        val plan = prepared_slot("orders.submit.prepared", "orders::submit", ["before"])
+        val module = prepared_slot_module("orders", [plan])
+        val bytes = collect_prepared_advice_slot_table_bytes({"orders": module}).unwrap()
+        expect(bytes.len()).to_be_greater_than(0)
+        expect(prepared_advice_slot_artifact_gate({"orders": module}).unwrap_err()).to_contain(
+            "backend/table emission is not implemented")
+
+        expect(prepared_advice_slot_artifact_gate({
+            "orders": module,
+            "other": prepared_slot_module("other", [plan])}).unwrap_err()).to_contain(
+                "duplicate prepared advice slot ID")

@@ -13,6 +13,7 @@ use compiler.common.visibility.{effective_visibility}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.common.module_resolver_port.{ModuleResolverPort}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
@@ -32,13 +33,6 @@ fn _seed_parity_is_ascii_upper(name: text) -> bool:
 
 fn hir_type_kind_disc(k: TypeKind) -> i64:
     rt_enum_discriminant(k)
-
-# Local placeholder for the module resolver port used in FR-COMPILER-003 A2.
-# The actual 85.mdsoc implementation will be wired by the A2 agent at call sites.
-# Kept here (layer 20) to avoid a layer violation (20 must not import 85).
-struct ModuleResolverPort:
-    name: text
-    resolve_fn: any
 
 type HirImplFunctions = {SymbolId: HirFunction}
 type HirTraitsByName = {text: HirTrait}
@@ -66,7 +60,7 @@ class HirLowering:
     loop_depth: i64
     type_inference_config: TypeInferenceConfig?
     module_filename: text          # Filename/path for visibility matching and defining_module population
-    module_resolver: ModuleResolverPort?   # Optional resolver for 2-pass import resolution (FR-COMPILER-003)
+    module_resolver: ModuleResolverPort? # Shared resolver context for 2-pass import resolution.
     loaded_modules: [text]         # Paths of modules already loaded (for cycle detection in A2 resolve pass)
     module_surfaces: ModuleSurfacesByName   # Compact declaration-only import resolver state
     current_method_self_type: HirType?
@@ -239,6 +233,7 @@ impl HirLowering:
         val preserved_surfaces = self.module_surfaces
         val preserved_traits = self.lowered_traits
         val preserved_inference_config = self.type_inference_config
+        val preserved_module_resolver = self.module_resolver
         val fresh = hirlowering_new()
 
         self.symbols = fresh.symbols
@@ -249,7 +244,7 @@ impl HirLowering:
         self.loop_depth = fresh.loop_depth
         self.type_inference_config = preserved_inference_config
         self.module_filename = filename
-        self.module_resolver = fresh.module_resolver
+        self.module_resolver = preserved_module_resolver
         self.loaded_modules = fresh.loaded_modules
         self.module_surfaces = preserved_surfaces
         self.current_method_self_type = fresh.current_method_self_type

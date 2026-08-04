@@ -9,6 +9,7 @@ use compiler.loader.loader.aspect_catalog.{AspectBindingSummary}
 struct FacetBindingAdmission:
     summary: AspectBindingSummary
     witness_owner_id: text
+    resolved_witness_address: i64
 
 struct FacetBindingRecord:
     publication_id: text
@@ -22,6 +23,7 @@ struct FacetBindingRecord:
     facet_contract_abi_hash: text
     witness_symbol: text
     witness_owner_id: text
+    resolved_witness_address: i64
     capabilities: [text]
 
 struct FacetBindingCandidate:
@@ -53,7 +55,7 @@ fn facet_binding_record_from(
     val summary = admission.summary
     if activation_key == "" or generation <= 0 or aspect_id == "":
         return Err("E-AF002 facet binding publication identity is incomplete")
-    if admission.witness_owner_id == "":
+    if admission.witness_owner_id == "" or admission.resolved_witness_address <= 0:
         return Err("E-AF002 facet witness ownership was not validated")
     if (summary.binding_id == "" or summary.facet_interface_id == "" or
         summary.facet_contract_abi_hash == "" or summary.witness_symbol == ""):
@@ -72,6 +74,7 @@ fn facet_binding_record_from(
         facet_contract_abi_hash: summary.facet_contract_abi_hash,
         witness_symbol: summary.witness_symbol,
         witness_owner_id: admission.witness_owner_id,
+        resolved_witness_address: admission.resolved_witness_address,
         capabilities: summary.capabilities
     ))
 
@@ -144,8 +147,6 @@ fn facet_binding_stage_validated(
     aspect_id: text,
     admissions: [FacetBindingAdmission]
 ) -> Result<FacetBindingCandidate, text>:
-    if admissions.len() == 0:
-        return Err("E-AF002 facet binding publication is empty")
     var candidate = facet_binding_candidate(activation_key, generation, aspect_id)?
     for admission in admissions:
         candidate = facet_bind_type(candidate, admission)?
@@ -163,6 +164,8 @@ fn aspect_publish_generation(
     if (candidate.activation_key != activation_key or
         candidate.generation != generation):
         return Err("E-AF004 facet publication identity does not match staged generation")
+    if candidate.records.len() == 0:
+        return Ok(registry)
     val publication_id = facet_publication_id(activation_key, generation)
     for staged in candidate.records:
         for existing in registry.records:

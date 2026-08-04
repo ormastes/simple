@@ -7,7 +7,8 @@
 
 use compiler.driver.driver_api_types (_combine_driver_api_process_error)
 use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native)
-use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_create_with_module_resolver_discovery, compiler_driver_run_compile}
+use compiler.mdsoc.feature.module_loading.app.module_resolver_discovery_port.{ModuleResolverDiscoveryPort}
 use lazy compiler.mir.mir_instructions (MirModule)
 use compiler.tools.header_gen.shared_lib_flags (SharedLibFlags)
 
@@ -20,6 +21,14 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn _project_build_compile(options: CompileOptions) -> CompileResult:
     val driver = compiler_driver_create(options)
+    compiler_driver_run_compile(driver)
+
+fn _project_build_compile_with_module_resolver_discovery(
+    options: CompileOptions,
+    module_resolver_discovery: ModuleResolverDiscoveryPort
+) -> CompileResult:
+    val driver = compiler_driver_create_with_module_resolver_discovery(
+        options, module_resolver_discovery)
     compiler_driver_run_compile(driver)
 
 pub fn aot_native_project_with_backend(source_dirs: [text], entry: text, output: text, backend: text, strip: bool, release: bool, opt_level: i64) -> CompileResult:
@@ -42,6 +51,23 @@ pub fn aot_native_project_with_backend(source_dirs: [text], entry: text, output:
     val result = _project_build_compile(options)
     print "[API] compile result: {result}"
     result
+
+pub fn aot_native_project_with_backend_and_module_resolver_discovery(
+    source_dirs: [text], entry: text, output: text, backend: text,
+    strip: bool, release: bool, opt_level: i64,
+    module_resolver_discovery: ModuleResolverDiscoveryPort
+) -> CompileResult:
+    var options = driver_core_compile_options_default()
+    options.input_files = source_dirs + [entry]
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.output_format = driver_output_format_native()
+    options.backend = backend
+    options.release = release
+    options.opt_level = opt_level
+    options = compileoptions_normalize_mir_optimization(options)
+    _project_build_compile_with_module_resolver_discovery(
+        options, module_resolver_discovery)
 
 pub fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bool, emit_cpp: bool) -> CompileResult:
     use compiler.tools.header_gen.mod_ (HeaderGenerator)

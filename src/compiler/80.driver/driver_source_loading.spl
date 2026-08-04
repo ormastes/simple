@@ -6,6 +6,10 @@
 # - Structured error formatting helpers for type, borrow, coherence, and trait errors
 
 use compiler.common.driver_core_types.{SourceFile, source_file_coverage_identity}
+use compiler.common.module_resolver_port.{ModuleResolverPort, module_resolver_port_empty}
+use compiler.common.aspect_path_policy.{
+    aspect_importer_can_search, aspect_normalize_path, aspect_path_within
+}
 use compiler.types.type_infer.*
 use compiler.types.dim_constraints_types.{DimError}
 use compiler.borrow.borrow_check.*
@@ -41,6 +45,16 @@ pub fn _driver_should_skip_dir(name: text) -> bool:
             return true
         i = i + 1
     false
+
+pub fn _driver_bulk_path_is_hidden_aspect(root: text, path: text) -> bool:
+    """Keep application directory scans out of resolver-owned aspect roots.
+
+    An explicitly selected path already inside `aspects/` is an aspect build
+    and remains visible; only a broader business/application root hides it.
+    """
+    val normalized_root = root.replace("\\", "/")
+    val normalized_path = path.replace("\\", "/")
+    normalized_path.contains("/aspects/") and not normalized_root.contains("/aspects/")
 
 pub fn _driver_is_bootstrap_entry_source(path: text, module_name: text) -> bool:
     val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
@@ -703,7 +717,11 @@ fn _driver_resolve_numbered_compiler_import(module_path: text, entry_dir: text) 
         return mapped
     _driver_resolve_rewritten_import(module_path, "compiler.backend", "compiler/70.backend/backend", entry_dir)
 
-fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> text:
+fn _driver_resolve_entry_import_exact(
+    module_path: text,
+    entry_dir: text,
+    resolution: ModuleResolverPort
+) -> text:
     val relative = _driver_resolve_relative_entry_import(module_path, entry_dir)
     if relative != "":
         return relative
@@ -712,6 +730,14 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
     val direct = _driver_try_entry_import_rel(rel, entry_dir)
     if direct != "":
         return direct
+
+    # Hidden aspect roots are visible only to importers already located inside
+    # one of the registry's canonical roots.
+    if aspect_importer_can_search(entry_dir, resolution.aspect_roots):
+        for aspect_root in resolution.aspect_roots:
+            val aspect_file = _driver_try_entry_import_rel(rel, aspect_root)
+            if aspect_file != "":
+                return aspect_file
 
     val numbered_compiler = _driver_resolve_numbered_compiler_import(module_path, entry_dir)
     if numbered_compiler != "":
@@ -844,18 +870,49 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
         return mapped
     ""
 
-pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
+pub fn _driver_resolve_entry_import_with_port(
+    module_path: text,
+    entry_dir: text,
+    resolution: ModuleResolverPort
+) -> text:
     """File path backing a Simple import path, or "" when none exists.
     Exact modules are preferred. Dotted terminal names are then removed one at
     a time because Simple permits `use module.function` as a glob-style import
     of the containing source module."""
     var probe = module_path
     while probe != "":
-        val resolved = _driver_resolve_entry_import_exact(probe, entry_dir)
+        val resolved = _driver_resolve_entry_import_exact(probe, entry_dir, resolution)
         if resolved != "":
             return resolved
         probe = _driver_entry_import_parent(probe)
     ""
+
+pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
+    _driver_resolve_entry_import_with_port(
+        module_path, entry_dir, module_resolver_port_empty())
+
+pub fn _driver_import_path_is_authorized_aspect(
+    importer_path: text,
+    resolved_path: text,
+    resolution: ModuleResolverPort
+) -> bool:
+    if not aspect_importer_can_search(importer_path, resolution.aspect_roots):
+        return false
+    val canonical = aspect_normalize_path(rt_path_absolute(resolved_path))
+    for root in resolution.aspect_roots:
+        if aspect_path_within(root, canonical):
+            return true
+    false
+
+pub fn _driver_resolved_path_is_hidden_aspect(
+    resolved_path: text,
+    resolution: ModuleResolverPort
+) -> bool:
+    val canonical = aspect_normalize_path(rt_path_absolute(resolved_path))
+    for root in resolution.aspect_roots:
+        if aspect_path_within(root, canonical):
+            return true
+    false
 
 pub fn _driver_collect_entry_import_source(p: text) -> [SourceFile]:
     """Load one explicitly resolved closure import.
@@ -888,6 +945,8 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
             print "[collect_sources] file {p}"
         # It's a source file
         if p.ends_with("/check.spl") or p.ends_with("\\check.spl"):
+            return result
+        if p == "aspects/__init__.spl" or p == "aspects\\__init__.spl" or p.ends_with("/aspects/__init__.spl") or p.ends_with("\\aspects\\__init__.spl"):
             return result
         if p.ends_with("/20.hir/hir_lowering/__init__.spl") or p.ends_with("\\20.hir\\hir_lowering\\__init__.spl"):
             return result
@@ -925,6 +984,8 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
         for line in lines:
             val path = line.trim()
             if path == "":
+                continue
+            if _driver_bulk_path_is_hidden_aspect(p, path):
                 continue
             if path.contains("/test/") or path.contains("/tests/") or path.contains("/testdata/") or path.contains("/doc/") or path.contains("/verification/"):
                 continue
