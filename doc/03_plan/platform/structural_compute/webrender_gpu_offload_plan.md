@@ -147,16 +147,43 @@ Remaining CPU-only phases (tokenize, dom, style, layout) have no production
 device dispatch today; their GPU-shaped projections are the prepared
 offload surface.
 
-**Gate status: the present row is currently RED.** The 2D offload parity gate
-regressed to `Results: 17 total, 12 passed, 5 failed` — the gpu-first default
-publishes an EMPTY buffer (`expected 0 to equal 4800`) when its decline branch
-mirrors an unusable GPU frame instead of re-running the CPU renderer. The
-capability probe itself is sound (device creation attempt + device-derived
-readback source; a real device produced
-`source=device_readback:handle=1:device_identity=…` in the same session); the
-defect is in the fallback's recovery. Filed as
+**Gate status: the present row is GREEN — `Results: 17 total, 17 passed, 0
+failed` (with presenter spec 5/5 and showcase 13/13), restored in
+`20a82c77cfa`.**
+
+An earlier revision of this section claimed the row was RED at
+`Results: 17 total, 12 passed, 5 failed` and attributed it to the gpu-first
+default. **That attribution was wrong and is retracted.** In a pristine
+worktree the parity gate measured 17/17 at `3ddd017c87d` with the base
+presenter and no fix; the red reproduced only in the shared working copy,
+which was carrying ~6,300 lines of another session's uncommitted
+Engine2D/Vulkan work executed from source, amplified by host load driving
+`budget-break`. The decisive tell: the fifth failing example ("direct
+Engine2D lane render", `expected nil to be greater than 0`) exercises
+`_render_lane_direct`, which calls `Engine2D.create_requested_backend` /
+`present()` / `read_pixels_with_source()` directly and never touches the
+presenter — so no presenter change could have caused or cured it. That
+session's work landed separately as `28288f98102`.
+
+The mirroring defect was nonetheless real and is fixed: the
+`fill_op_count == 0 or fill_pixels == 0` decline branch in `_present_gpu_first`
+no longer mirrors an unusable GPU frame via `_cpu_mirror_for_frame`; it
+re-runs `simple_web_layout_render_html_readback_paint`, matching the
+explicit-CPU declines above it. The decline branch executed in every green run
+(decision marker present), so the green is not vacuous. Detail:
 `doc/08_tracking/bug/web_gpu_first_default_publishes_empty_frame_2026-08-04.md`.
-The 17/17 row in the table above predates this regression.
+
+Still open: the `gpu-full`/`gpu-partial` prefix derives from
+`economics.residual_pixels` rather than `readback.source`, so it can
+over-claim while `source=` stays honest. Binding it changes decision-string
+vocabulary the gates assert against, so it is not a small obviously-correct
+edit.
+
+**Process note for anyone reading a gate verdict from this tree:** a red
+measured in the shared working copy is not evidence about origin. This
+checkout routinely carries thousands of lines of other sessions' uncommitted
+`src/**`, and `.spl` libraries execute from source. Reproduce in a pristine
+worktree at a named sha before attributing a regression to a commit.
 
 ## Acceptance
 
