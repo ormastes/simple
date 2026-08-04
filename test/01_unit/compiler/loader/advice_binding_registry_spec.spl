@@ -10,6 +10,7 @@ use compiler.loader.loader.advice_binding_registry.{
     advice_lookup_slot, advice_unbind_generation,
     advice_disabled_path_footprint, advice_dispatch_projection_empty,
     advice_dispatch_projection_create,
+    advice_dispatch_projection_publish,
     advice_dispatch_projection_invalidate,
     advice_dispatch_projection_with_invoker,
     advice_dispatch_projection_prepare,
@@ -454,12 +455,53 @@ describe "Loader advice binding registry":
                 witness_owner_id: "pack:a:7", resolved_witness_address: 101)])
         val projection = advice_dispatch_projection_create(
             registry, advice_test_loader()).unwrap()
-        val hidden = advice_dispatch_projection_invalidate(
-            projection, "pack:a:7", 7)
         val lifecycle = LifecycleManager.new_manager().register_candidate(
             "pack:a:7", 7).promote_candidate()
+        val issued = advice_dispatch_projection_prepare(
+            projection, registry, lifecycle, advice_test_loader(),
+            "orders.submit.prepared", "before")
+        expect(issued.status).to_equal("prepared")
+        expect(issued.permit != nil).to_equal(true)
+        val permit = issued.permit.unwrap()
+        val hidden = advice_dispatch_projection_invalidate(
+            projection, "pack:a:7", 7)
 
         expect(hidden.entries.len()).to_equal(0)
+        expect(hidden.invalidated_slots).to_contain("orders.submit.prepared")
+        val fresh = advice_dispatch_projection_prepare(
+            hidden, registry, issued.lifecycle, advice_test_loader(),
+            "orders.submit.prepared", "before")
+        expect(fresh.status).to_equal("failed")
+        expect(fresh.reason).to_contain("slot is quiescing")
+        expect(fresh.tokens_acquired).to_equal(0)
+
+        # Invalidation does not revoke a permit already pinned under the
+        # application gate.
+        val receipt = advice_dispatch_permit_invoke_with_invoker(
+            permit, advice_test_invoke)
+        val finalized = advice_dispatch_projection_finalize(
+            permit, receipt,
+            advice_merge_counter_delta(registry, issued.counter_delta),
+            issued.lifecycle)
+        expect(finalized.status).to_equal("dispatched")
+        expect(finalized.tokens_released).to_equal(1)
+
+        val republished = advice_dispatch_projection_publish(
+            hidden, registry, advice_test_loader()).unwrap()
+        expect(republished.invalidated_slots.len()).to_equal(0)
+        val active_again = advice_dispatch_projection_prepare(
+            republished, finalized.registry, finalized.lifecycle,
+            advice_test_loader(), "orders.submit.prepared", "before")
+        expect(active_again.status).to_equal("prepared")
+        expect(active_again.permit != nil).to_equal(true)
+        val active_permit = active_again.permit.unwrap()
+        val active_receipt = advice_dispatch_permit_invoke_with_invoker(
+            active_permit, advice_test_invoke)
+        val active_finalized = advice_dispatch_projection_finalize(
+            active_permit, active_receipt,
+            advice_merge_counter_delta(finalized.registry, active_again.counter_delta),
+            active_again.lifecycle)
+        expect(active_finalized.tokens_released).to_equal(1)
         expect(lifecycle.generation_state_for("pack:a:7", 7)).to_equal("active")
         val quiesced = lifecycle.quiesce_generation_for("pack:a:7", 7).unwrap()
         expect(quiesced.generation_state_for("pack:a:7", 7)).to_equal("quiescing")

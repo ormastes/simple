@@ -85,6 +85,7 @@ struct AdviceDispatchProjection:
     schema_id: text
     schema_version: i64
     entries: [AdviceDispatchProjectionEntry]
+    invalidated_slots: [text]
 
 struct AdviceProjectionDispatchOutcome:
     registry: AdviceBindingRegistry
@@ -238,13 +239,33 @@ fn advice_dispatch_projection_create(
     Ok(AdviceDispatchProjection(
         schema_id: "simple.advice-dispatch-projection",
         schema_version: 1,
-        entries: entries))
+        entries: entries,
+        invalidated_slots: []))
+
+fn advice_dispatch_projection_publish(
+    current: AdviceDispatchProjection,
+    registry: AdviceBindingRegistry,
+    loader: ModuleLoader
+) -> Result<AdviceDispatchProjection, text>:
+    val fresh = advice_dispatch_projection_create(registry, loader)?
+    var invalidated: [text] = []
+    for slot_id in current.invalidated_slots:
+        var active = false
+        for entry in fresh.entries:
+            if entry.slot_id == slot_id:
+                active = true
+        if not active and not invalidated.contains(slot_id):
+            invalidated.push(slot_id)
+    Ok(AdviceDispatchProjection(
+        schema_id: fresh.schema_id, schema_version: fresh.schema_version,
+        entries: fresh.entries, invalidated_slots: invalidated))
 
 fn advice_dispatch_projection_empty() -> AdviceDispatchProjection:
     AdviceDispatchProjection(
         schema_id: "simple.advice-dispatch-projection",
         schema_version: 1,
-        entries: [])
+        entries: [],
+        invalidated_slots: [])
 
 fn advice_dispatch_projection_invalidate(
     projection: AdviceDispatchProjection,
@@ -252,13 +273,25 @@ fn advice_dispatch_projection_invalidate(
     generation: i64
 ) -> AdviceDispatchProjection:
     var entries: [AdviceDispatchProjectionEntry] = []
+    var removed_slots: [text] = []
     for entry in projection.entries:
         if entry.activation_key != activation_key or entry.generation != generation:
             entries.push(entry)
+        elif not removed_slots.contains(entry.slot_id):
+            removed_slots.push(entry.slot_id)
+    var invalidated = projection.invalidated_slots
+    for slot_id in removed_slots:
+        var remains_active = false
+        for entry in entries:
+            if entry.slot_id == slot_id:
+                remains_active = true
+        if not remains_active and not invalidated.contains(slot_id):
+            invalidated.push(slot_id)
     AdviceDispatchProjection(
         schema_id: projection.schema_id,
         schema_version: projection.schema_version,
-        entries: entries)
+        entries: entries,
+        invalidated_slots: invalidated)
 
 impl AdviceBindingRegistry:
     static fn create(prepared_slots: [text]) -> Result<AdviceBindingRegistry, text>:
@@ -539,6 +572,10 @@ fn advice_dispatch_projection_prepare(
         return advice_prepare_failed(
             lifecycle, [], delta,
             "E-AF010 dynamic advice projection schema is invalid", false)
+    if projection.invalidated_slots.contains(slot_id):
+        return advice_prepare_failed(
+            lifecycle, [], delta,
+            "E-AF010 dynamic advice slot is quiescing: {slot_id}", false)
 
     var projected: [AdviceDispatchProjectionEntry] = []
     for entry in projection.entries:
@@ -790,6 +827,7 @@ export AdviceDispatchInvocationReceipt
 export advice_binding_candidate, advice_bind_slot, advice_binding_stage_validated
 export advice_publish_generation, advice_lookup_slot, advice_unbind_generation
 export advice_dispatch_projection_create
+export advice_dispatch_projection_publish
 export advice_dispatch_projection_empty, advice_dispatch_projection_invalidate
 export advice_dispatch_projection, advice_dispatch_projection_with_invoker
 export advice_dispatch_projection_prepare
