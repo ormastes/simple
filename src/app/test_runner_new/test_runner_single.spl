@@ -359,6 +359,23 @@ fn read_test_result_evidence(path: text) -> (i64, i64, i64):
 #     from `# @cover <path>` annotations plus the spec's use-imports.
 # Attribution is heuristic (line numbers are conflated across files), but
 # function-call attribution is exact and bounds the error.
+#
+# KNOWN CAP — instance methods always score 0 (open, needs a seed change).
+# The collector's `functions` section only ever contains free functions and
+# `static fn`s: `record_function_call` is reached from the three plain-call
+# paths in src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs
+# and NOT from instance-method dispatch. A `me name()` body therefore fails the
+# called-function gate no matter how thoroughly it is tested, so every one of
+# its recordable lines reports uncovered. Verified 2026-08-04 against
+# dom_identity_index_spec.spl, which demonstrably calls `contains_route`,
+# `path_for_route`, `event_path_for_route`, `form_owner_for_route` and
+# `radio_members`: none of the five appears in the dump, and 107 of that
+# module's 113 uncovered lines are method bodies. This caps
+# dom_identity_index.spl at ~55% and html_tree_builder.spl (the `_TreeStack`
+# methods) at ~80% — those ceilings are a measurement artefact, not missing
+# tests. Do NOT "fix" this by relaxing the gate for `me` bodies: line numbers
+# are conflated across files, so line-hit alone would credit untaken error
+# branches. The fix belongs in the seed, next to the free-function call sites.
 
 fn _cov_enabled() -> bool:
     val v = env_get("SIMPLE_COVERAGE") ?? ""
@@ -481,10 +498,19 @@ fn _cov_fn_name(header: text) -> text:
 fn _cov_is_recordable(t: text) -> bool:
     """Approximate the statement kinds the interpreter collector records
     (Let/Assignment/If/While/For/Loop/Return/Break/Continue/Match/With).
-    Bare expression statements, case arms, else branches, prints, and struct
-    fields are never recorded, so they stay out of the denominator."""
+    Bare expression statements, case arms, `elif`/`else` branch heads, prints,
+    and struct fields are never recorded, so they stay out of the denominator."""
+    # `elif` heads are NEVER recorded, even when the branch is taken: a probe
+    # of `if n > 100 / elif n > 10 / elif n > 1` driven through both `elif`
+    # arms recorded each arm's BODY line and neither `elif` line (the `if`
+    # head is recorded). Counting them inflated the denominator with lines no
+    # test can ever reach — 13 such lines in html_tokenizer.spl alone. The
+    # `contains(" = ")` fallback below would otherwise re-admit binding forms
+    # like `elif val Some(x) = ...`, so this check has to come first.
+    if t.starts_with("elif "):
+        return false
     if (t.starts_with("val ") or t.starts_with("var ") or t.starts_with("if ") or
-        t.starts_with("elif ") or t.starts_with("while ") or t.starts_with("for ") or
+        t.starts_with("while ") or t.starts_with("for ") or
         t.starts_with("loop") or t.starts_with("return") or t.starts_with("break") or
         t.starts_with("continue") or t.starts_with("match ") or t.starts_with("with ")):
         return true
@@ -518,8 +544,26 @@ fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, b
                 in_doc = false
             continue
         var h = t
-        if h.starts_with("static "):
-            h = h.substring(7)
+        # Strip every visibility/storage prefix, not just `static `. Missing
+        # `pub ` made `pub fn foo()` invisible as a header, so every line of a
+        # `pub fn` body stayed attributed to the PREVIOUS declaration; that
+        # stale name then failed the called-function gate and the whole body
+        # read as uncovered. Measured on html_tokenizer.spl: the entire body of
+        # `html_tokenizer_tokenize_with_limits` was charged to the `_TokenSink`
+        # method declared above it, costing 22 points (65% -> 87%) with no test
+        # change at all.
+        var stripping = true
+        while stripping:
+            stripping = false
+            if h.starts_with("pub "):
+                h = h.substring(4)
+                stripping = true
+            elif h.starts_with("priv "):
+                h = h.substring(5)
+                stripping = true
+            elif h.starts_with("static "):
+                h = h.substring(7)
+                stripping = true
         if h.starts_with("fn ") or h.starts_with("me ") or h.starts_with("gen "):
             current_fn = _cov_fn_name(h)
             continue
