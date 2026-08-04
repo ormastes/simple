@@ -4771,6 +4771,50 @@ fn test_llvm_mangle_keeps_local_bodies_owned_despite_runtime_or_import_names() {
 }
 
 #[test]
+fn test_native_mangle_qualifies_legacy_dynamic_module_initializer() {
+    let mut mir = crate::mir::MirModule::new();
+    let mut dynamic_init = crate::mir::MirFunction::new(
+        "__module_init_dynamic".to_string(),
+        crate::hir::TypeId::VOID,
+        simple_parser::Visibility::Private,
+    );
+    dynamic_init.blocks[0].terminator = crate::mir::Terminator::Return(None);
+    mir.functions.push(dynamic_init);
+
+    let mut wrapper = crate::mir::MirFunction::new(
+        "__module_init_app__ui_dot_render".to_string(),
+        crate::hir::TypeId::VOID,
+        simple_parser::Visibility::Private,
+    );
+    wrapper.blocks[0].instructions.push(crate::mir::MirInst::Call {
+        dest: None,
+        target: crate::mir::CallTarget::Pure("__module_init_dynamic".to_string()),
+        args: vec![],
+    });
+    wrapper.blocks[0].terminator = crate::mir::Terminator::Return(None);
+    mir.functions.push(wrapper);
+
+    let unresolved = super::mangle::mangle_mir(
+        &mut mir,
+        "app__ui.render",
+        false,
+        &std::collections::HashMap::new(),
+        &std::collections::HashSet::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    );
+
+    let expected = "__module_init_app__ui_render_dynamic";
+    assert_eq!(unresolved, 0);
+    assert_eq!(mir.functions[0].name, expected);
+    assert_eq!(mir.functions[1].name, "__module_init_app__ui_dot_render");
+    match &mir.functions[1].blocks[0].instructions[0] {
+        crate::mir::MirInst::Call { target, .. } => assert_eq!(target.name(), expected),
+        other => panic!("expected dynamic initializer call, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_llvm_mangle_resolves_ambiguous_private_call_to_nearest_module() {
     let mut mir = crate::mir::MirModule::new();
     let mut func = crate::mir::MirFunction::new(

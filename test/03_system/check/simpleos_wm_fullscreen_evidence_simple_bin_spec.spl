@@ -27,6 +27,8 @@ launch artifacts are produced.
 - REQ-SIMPLEOS-WM-FULLSCREEN-005: Each host action maps to a newer guest
   `input_seq` shared by IRQ, WM-state, and frame markers; restore reproduces
   the baseline hash.
+- REQ-SIMPLEOS-WM-FULLSCREEN-006: Production native-build admission defaults
+  to an exact LLVM 23.1 toolchain and provenance-verified full Stage4 CLI.
 
 ## Plan
 
@@ -61,8 +63,12 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/simpleos_wm_fullscreen_evide
 
 # @tag: system, gui, simpleos, qmp, simple-bin, wm, fullscreen
 
-use std.io_runtime.{file_read, process_run}
+use std.io_runtime.{env_set, file_read, process_run}
 use std.spec.*
+
+# Fake compiler fixtures exercise the retained diagnostic backend. Production
+# admission remains the wrapper's fail-closed LLVM 23.1 default.
+val _diagnostic_backend_selected = env_set("SIMPLEOS_WM_NATIVE_BACKEND", "cranelift")
 
 fn literal_braces(value: text) -> text:
     "{" + value + "}"
@@ -75,6 +81,7 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         expect(script).to_contain("SIMPLE_BIN_STATUS=pass")
         expect(script).to_contain("\"$ROOT_DIR\"/bin/release/*/simple")
         expect(script).to_contain("\"$ROOT_DIR\"/release/*/simple")
+        expect(script).to_contain("\"$ROOT_DIR\"/build/bootstrap/full/*/simple")
         expect(script).to_contain("\"$ROOT_DIR\"/build/bootstrap/stage3/*/simple")
         expect(script).to_contain("\"$ROOT_DIR\"/bin/simple")
         expect(script).to_contain("is_rust_seed_path")
@@ -92,6 +99,18 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         expect(script).to_contain("simpleos_wm_fullscreen_simple_bin_status=")
         expect(script.index_of("build/bootstrap/stage3/*/simple")).to_be_less_than(script.index_of("bin/release/*/simple"))
 
+    it "fails closed before QEMU when LLVM 23.1 prefixes are absent":
+        val root = "build/test-simpleos-wm-fullscreen-llvm-prefix-required"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple v1.0.0 pure-Simple\"; exit 0; fi' 'exit 99' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && SIMPLEOS_WM_NATIVE_BACKEND=llvm SIMPLE_BIN=$PWD/" + root + "/fake-simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+        val output = file_read(root + "/stdout.txt")
+        expect(output).to_contain("simpleos_wm_fullscreen_reason=llvm-23-1-prefix-required")
+        expect(output).to_contain("simpleos_wm_fullscreen_native_backend=llvm")
+        val (_files_out, _files_err, files_code) = process_run(
+            "/bin/sh", ["-c", "test ! -e " + root + "/out/qemu.out"])
+        expect(files_code).to_equal(0)
+
     it "bounds current-source kernel admission and preserves the native cache":
         val script = file_read("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
         expect(script).to_contain("SIMPLEOS_WM_NATIVE_BUILD_TIMEOUT_SECONDS")
@@ -99,7 +118,22 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         expect(script).to_contain("\"$TIMEOUT_BIN\" --kill-after=10s")
         expect(script).to_contain("\"$NATIVE_BUILD_WORKER_TIMEOUT_SECONDS\" -ge \"$NATIVE_BUILD_TIMEOUT_SECONDS\"")
         expect(script).to_contain("--opt-level=none")
-        expect(script).to_contain("--cache-dir \"$BUILD_DIR/native-cache\"")
+        expect(script).to_contain("NATIVE_BACKEND=\"${SIMPLEOS_WM_NATIVE_BACKEND:-llvm}\"")
+        expect(script).to_contain("--backend \"$NATIVE_BACKEND\"")
+        expect(script).to_contain("NATIVE_CACHE_DIR=\"$BUILD_DIR/native-cache/$NATIVE_BACKEND\"")
+        expect(script).to_contain("--cache-dir \"$NATIVE_CACHE_DIR\"")
+        expect(script).to_contain("NATIVE_BUILD_SIMPLE_BOOTSTRAP=0")
+        expect(script).to_contain("SIMPLE_BOOTSTRAP=\"$NATIVE_BUILD_SIMPLE_BOOTSTRAP\"")
+        expect(script).to_contain("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT=\"$LINKER_SCRIPT\"")
+        expect(script).to_contain("LLVM_23_1_PREFIX")
+        expect(script).to_contain("SIMPLE_LLVM_PREFIX")
+        expect(script).to_contain("llvm_tool_reports_23_1")
+        expect(script).to_contain("stage4_verify_candidate_provenance")
+        expect(script).to_contain("stage4-candidate-provenance.shs")
+        expect(script).to_contain("simple-bin-not-full-stage4")
+        expect(script).to_contain("native_toolchain_identity=$NATIVE_TOOLCHAIN_IDENTITY")
+        expect(script.index_of("--backend cranelift")).to_equal(-1)
+        expect(script.index_of("llvm18")).to_equal(-1)
         expect(script).to_contain("-o \"$KERNEL_CANDIDATE\"")
         expect(script).to_contain("mv \"$KERNEL_CANDIDATE\" \"$KERNEL_OUTPUT\"")
         expect(script).to_contain("schema=simpleos-wm-kernel-admission-v1")

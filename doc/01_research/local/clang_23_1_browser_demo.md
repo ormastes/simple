@@ -83,3 +83,28 @@ through a released or upstream-supported inkwell feature:
 
 No Rust dependency or lockfile change was made because none of the authoritative
 upstream artifacts currently provides the requested LLVM 23.1 ABI support.
+
+## Follow-up implementation evidence (2026-08-04)
+
+The pure-Simple external backend needs more than the original frontend/linker
+subset. A coherent provider must contain `clang`, `ld.lld`, `llc`, `opt`,
+`llvm-ar`, `llvm-nm`, `llvm-objdump`, `llvm-objcopy`, and `llvm-config` from
+one prefix. The signed rc2 cached build installed and validated that complete
+set; the provider builder now emits canonical absolute `SIMPLE_*` handoff
+paths so compiler and wrapper consumers cannot drift onto host tools.
+
+The Rust LLVM-18 binding remains isolated rather than relabeled. A fresh
+Cranelift bootstrap built and sanity-checked 728-module Stage 2 and Stage 3
+artifacts, proving the bootstrap can remain LLVM-free while the resulting full
+CLI owns external LLVM 23.1 execution. That run also exposed and fixed a Rust
+native-project identity bug: 33 hosted modules exported the same strong
+`___module_init_dynamic`; exact legacy initializers are now qualified with the
+module prefix, and the focused MIR regression passed.
+
+The first full-CLI attempt after the fix sealed Stage 3 provenance, then the
+Stage 4 compiler terminated with SIGSEGV immediately after
+`phase2:surface:file:released path=src/app/cli/main.spl seq=1`. The three-cycle
+bootstrap cap was exhausted, so no LLVM QEMU run was started and Stage 4/QEMU
+completion remains unproven. Retained logs are
+`build/bootstrap-clang-23-1-stage4-cycle3.out` and
+`build/bootstrap/logs/aarch64-apple-darwin/stage4-native-build.log`.

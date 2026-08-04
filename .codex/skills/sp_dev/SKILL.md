@@ -89,25 +89,31 @@ record both driver and child identities.
 For LLVM 23.1 migration/bootstrap lanes, build the coherent provider with
 `scripts/setup/build-llvm-23-1-provider.shs` from the signed current
 `llvmorg-23.1.0-rc2` tag (stable 23.1.0 is not published as of 2026-08-04).
-Export its installed prefix as both `LLVM_23_1_PREFIX` for shell consumers and
-`SIMPLE_LLVM_PREFIX` for the pure-Simple backend; never mix a 23.1 frontend with
-an older linker, archiver, optimizer, or code generator. A user-authorized
-fresh artifact such as `build/native_probe/simple` may provide ad-hoc bootstrap
-evidence only after its path, version, and SHA-256 are recorded and its native
-smoke passes with stub fallback disabled. It is not Stage 4 unless the bounded
-essential-tools smoke above also passes against that exact artifact.
+Require the coherent nine-tool family `clang`, `ld.lld`, `llc`, `opt`,
+`llvm-ar`, `llvm-nm`, `llvm-objdump`, `llvm-objcopy`, and `llvm-config`.
+Preserve absolute metadata for both prefixes, paired `CLANG`/`SIMPLE_CLANG`,
+`LINKER`/`SIMPLE_LINKER`, `LLC`/`SIMPLE_LLC`, `OPT`/`SIMPLE_OPT`,
+`LLVM_AR`/`SIMPLE_AR`, `LLVM_NM`/`SIMPLE_NM`, and
+`LLVM_OBJDUMP`/`SIMPLE_OBJDUMP`, plus `LLVM_OBJCOPY` and `LLVM_CONFIG`.
+Keep Rust's LLVM-18-only capsule isolated behind `LLVM_SYS_180_PREFIX` and
+bootstrap current source with Cranelift. Only a fresh
+`build/bootstrap/full/<triple>/simple` with retained source revision, version,
+SHA-256, provenance file, and bounded essential-tools PASS is Stage 4. Stage
+2/3, Rust seed, stale deployed, and ad-hoc native-probe artifacts cannot
+substitute; the latter may provide diagnostic smoke evidence only.
 
 After the backend and SimpleOS port admit the same provider, build the browser
 guest with `scripts/os/build_browser_demo_client.shs`, retain
 `build/os/apps/browser_demo/clang-23.1-evidence.txt`, and run the canonical
-`scripts/check/check-simpleos-wm-fullscreen-evidence.shs` QEMU gate once with
-explicit `SIMPLE_BIN`, `CLANG`, and `LINKER`. Require byte-identical
+LLVM-default `scripts/check/check-simpleos-wm-fullscreen-evidence.shs` QEMU gate
+once with explicit `SIMPLE_BIN`, `SIMPLEOS_WM_NATIVE_BACKEND=llvm`, both prefix
+variables, and every absolute tool variable above. Require byte-identical
 `BROWSMF.SMF` staging plus correlated framebuffer/input evidence; source checks
 or serial markers are not rendering proof. The guest filesystem must expose
 `/usr/bin/clang-23.1` and the `/usr/bin/clang` alias through general FS exec.
 The vendored Rust `inkwell`/`llvm-sys` capsule is LLVM-18-only and remains an
 explicit LLVM-23 blocker; do not relabel it, silently fall back to it, or mark
-the full migration complete. Apply the normal three verify/fix-cycle cap to
+the full migration complete. Apply one shared three verify/fix-cycle cap to
 provider, bootstrap, and QEMU failures and report the first retained blocker.
 
 Use `bin/simple lint <changed .spl files>` and

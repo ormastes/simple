@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -24,15 +24,18 @@ The live fullscreen check requires QEMU and a running SimpleOS `wm-simple-web` t
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/simpleos_wm_fullscreen_evidence_simple_bin_spec.spl` |
-| Updated | 2026-07-27 |
+| Updated | 2026-08-04 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
 The live fullscreen check requires QEMU and a running SimpleOS `wm-simple-web`
-target, but its binary-selection and interaction contracts can be
-verified without launching either. Rust seed overrides must fail before
-launch artifacts are produced.
+target, but its binary-selection and interaction contracts can be verified
+without launching either. Production admission requires a current-source full
+Stage4 CLI, the coherent nine-tool LLVM 23.1 provider, the LLVM backend,
+`SIMPLE_BOOTSTRAP=0`, and an LLVM-scoped cache. Rust seed overrides and missing
+provider metadata must fail before launch artifacts are produced. Fake compiler
+fixtures explicitly use the retained diagnostic-only Cranelift lane.
 
 ## Requirements
 
@@ -49,6 +52,8 @@ launch artifacts are produced.
 - REQ-SIMPLEOS-WM-FULLSCREEN-005: Each host action maps to a newer guest
   `input_seq` shared by IRQ, WM-state, and frame markers; restore reproduces
   the baseline hash.
+- REQ-SIMPLEOS-WM-FULLSCREEN-006: Production native-build admission defaults
+  to an exact LLVM 23.1 toolchain and provenance-verified full Stage4 CLI.
 
 ## Plan
 
@@ -56,11 +61,13 @@ launch artifacts are produced.
 
 1. Inspect the wrapper source for self-hosted candidate selection.
 2. Inspect the wrapper source for Rust seed detection and provenance fields.
-3. Inspect dynamic scanout capture and host-nonce to guest-sequence mapping.
-4. Inspect the guest F11 maximize/restore state machine and correlated markers.
-5. Run the wrapper with a Rust seed `SIMPLE_BIN` override.
-6. Confirm stdout and report show `simple-bin-forbidden`.
-7. Confirm QEMU and screendump artifacts are not created.
+3. Inspect LLVM 23.1 prefix/tool coherence, full Stage4 provenance and
+   essential-tools admission before any QEMU dependency.
+4. Inspect backend-scoped kernel admission and cache identity.
+5. Inspect dynamic scanout capture and host-nonce to guest-sequence mapping.
+6. Inspect the guest F11 maximize/restore state machine and correlated markers.
+7. Run the wrapper with rejected LLVM/Rust-seed inputs and confirm no launch
+   artifacts are created.
 
 ## Design
 
@@ -68,7 +75,17 @@ launch artifacts are produced.
 
 The wrapper validates `SIMPLE_BIN` before launching the SimpleOS `wm-simple-web`
 QEMU target so invalid Rust seed overrides cannot masquerade as GUI/QMP
-evidence.
+evidence. The production branch defaults `SIMPLEOS_WM_NATIVE_BACKEND=llvm`,
+requires the full Stage4 provenance and essential-tools receipt, exports the
+canonical nine-tool `SIMPLE_*` provider metadata, sets `SIMPLE_BOOTSTRAP=0`,
+and binds cache/admission identity to `native-cache/llvm`. Explicit Cranelift is
+diagnostic compatibility only.
+
+The admitted provider tools are `clang`, `ld.lld`, `llc`, `opt`, `llvm-ar`,
+`llvm-nm`, `llvm-objdump`, `llvm-objcopy`, and `llvm-config`. The build-facing
+handoff records `SIMPLE_LLVM_PREFIX`, `SIMPLE_CLANG`, `SIMPLE_LINKER`,
+`SIMPLE_LLC`, `SIMPLE_OPT`, `SIMPLE_AR`, `SIMPLE_NM`, `SIMPLE_OBJDUMP`, and
+`SIMPLE_OBJCOPY`, while `LLVM_CONFIG` proves prefix/bindir coherence.
 
 ## Research
 
@@ -98,6 +115,7 @@ expect(script).to_contain("SIMPLE_BIN_SOURCE=")
 expect(script).to_contain("SIMPLE_BIN_STATUS=pass")
 expect(script).to_contain("\"$ROOT_DIR\"/bin/release/*/simple")
 expect(script).to_contain("\"$ROOT_DIR\"/release/*/simple")
+expect(script).to_contain("\"$ROOT_DIR\"/build/bootstrap/full/*/simple")
 expect(script).to_contain("\"$ROOT_DIR\"/build/bootstrap/stage3/*/simple")
 expect(script).to_contain("\"$ROOT_DIR\"/bin/simple")
 expect(script).to_contain("is_rust_seed_path")
@@ -118,6 +136,29 @@ expect(script.index_of("build/bootstrap/stage3/*/simple")).to_be_less_than(scrip
 
 </details>
 
+#### fails closed before QEMU when LLVM 23.1 prefixes are absent
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-simpleos-wm-fullscreen-llvm-prefix-required"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '#!/bin/sh' 'if [ \"$1\" = \"--version\" ]; then echo \"Simple v1.0.0 pure-Simple\"; exit 0; fi' 'exit 99' > " + root + "/fake-simple && chmod +x " + root + "/fake-simple && SIMPLEOS_WM_NATIVE_BACKEND=llvm SIMPLE_BIN=$PWD/" + root + "/fake-simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+val output = file_read(root + "/stdout.txt")
+expect(output).to_contain("simpleos_wm_fullscreen_reason=llvm-23-1-prefix-required")
+expect(output).to_contain("simpleos_wm_fullscreen_native_backend=llvm")
+val (_files_out, _files_err, files_code) = process_run(
+    "/bin/sh", ["-c", "test ! -e " + root + "/out/qemu.out"])
+expect(files_code).to_equal(0)
+```
+
+</details>
+
 #### bounds current-source kernel admission and preserves the native cache
 
 <details>
@@ -133,7 +174,22 @@ expect(script).to_contain("SIMPLEOS_WM_NATIVE_BUILD_WORKER_TIMEOUT_SECONDS")
 expect(script).to_contain("\"$TIMEOUT_BIN\" --kill-after=10s")
 expect(script).to_contain("\"$NATIVE_BUILD_WORKER_TIMEOUT_SECONDS\" -ge \"$NATIVE_BUILD_TIMEOUT_SECONDS\"")
 expect(script).to_contain("--opt-level=none")
-expect(script).to_contain("--cache-dir \"$BUILD_DIR/native-cache\"")
+expect(script).to_contain("NATIVE_BACKEND=\"${SIMPLEOS_WM_NATIVE_BACKEND:-llvm}\"")
+expect(script).to_contain("--backend \"$NATIVE_BACKEND\"")
+expect(script).to_contain("NATIVE_CACHE_DIR=\"$BUILD_DIR/native-cache/$NATIVE_BACKEND\"")
+expect(script).to_contain("--cache-dir \"$NATIVE_CACHE_DIR\"")
+expect(script).to_contain("NATIVE_BUILD_SIMPLE_BOOTSTRAP=0")
+expect(script).to_contain("SIMPLE_BOOTSTRAP=\"$NATIVE_BUILD_SIMPLE_BOOTSTRAP\"")
+expect(script).to_contain("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT=\"$LINKER_SCRIPT\"")
+expect(script).to_contain("LLVM_23_1_PREFIX")
+expect(script).to_contain("SIMPLE_LLVM_PREFIX")
+expect(script).to_contain("llvm_tool_reports_23_1")
+expect(script).to_contain("stage4_verify_candidate_provenance")
+expect(script).to_contain("stage4-candidate-provenance.shs")
+expect(script).to_contain("simple-bin-not-full-stage4")
+expect(script).to_contain("native_toolchain_identity=$NATIVE_TOOLCHAIN_IDENTITY")
+expect(script.index_of("--backend cranelift")).to_equal(-1)
+expect(script.index_of("llvm18")).to_equal(-1)
 expect(script).to_contain("-o \"$KERNEL_CANDIDATE\"")
 expect(script).to_contain("mv \"$KERNEL_CANDIDATE\" \"$KERNEL_OUTPUT\"")
 expect(script).to_contain("schema=simpleos-wm-kernel-admission-v1")
@@ -578,8 +634,8 @@ expect(capture_code).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

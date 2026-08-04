@@ -186,11 +186,12 @@ fn find_tool_portable(candidates: [text]) -> text:
     # Official LLVM archives install unversioned tools under a dedicated
     # prefix. Probe that deterministic location before PATH-based names.
     val configured_prefix = env_get("SIMPLE_LLVM_PREFIX") ?? ""
-    if configured_prefix != "" and candidates.len() > 0:
-        val configured = "{configured_prefix}/bin/{candidates[candidates.len() - 1]}"
-        val (prefix_out, prefix_err, prefix_code) = backend_shell_tuple("test -x '{configured}'")
-        if prefix_code == 0:
-            return configured
+    if configured_prefix != "":
+        for candidate in candidates:
+            val configured = "{configured_prefix}/bin/{candidate}"
+            val (prefix_out, prefix_err, prefix_code) = backend_shell_tuple("test -x '{configured}'")
+            if prefix_code == 0:
+                return configured
 
     for candidate in candidates:
         if is_windows:
@@ -216,13 +217,34 @@ fn parse_tool_version(path: text) -> LlvmVersionInfo:
     parse_llvm_version(out)
 
 fn find_llc_portable() -> text:
+    val configured = env_get("SIMPLE_LLC") ?? ""
+    if configured != "":
+        return configured
     find_tool_portable(["llc-23", "llc"])
 
 fn find_opt_portable() -> text:
+    val configured = env_get("SIMPLE_OPT") ?? ""
+    if configured != "":
+        return configured
     find_tool_portable(["opt-23", "opt"])
 
-fn find_clang_portable() -> text:
+pub fn find_clang_portable() -> text:
+    val simple_configured = env_get("SIMPLE_CLANG") ?? ""
+    if simple_configured != "":
+        return simple_configured
+    val configured = env_get("CLANG") ?? ""
+    if configured != "":
+        return configured
     find_tool_portable(["clang-23", "clang"])
+
+pub fn find_lld_portable() -> text:
+    val simple_configured = env_get("SIMPLE_LINKER") ?? ""
+    if simple_configured != "":
+        return simple_configured
+    val configured = env_get("LINKER") ?? ""
+    if configured != "":
+        return configured
+    find_tool_portable(["ld.lld-23", "ld.lld"])
 
 fn find_wasm_ld_portable() -> text:
     find_tool_portable(["wasm-ld-23", "wasm-ld"])
@@ -231,6 +253,9 @@ pub fn find_nm_portable() -> text:
     val configured = env_get("SIMPLE_NM") ?? ""
     if configured != "":
         return configured
+    val llvm_configured = env_get("LLVM_NM") ?? ""
+    if llvm_configured != "":
+        return llvm_configured
     # llvm-nm handles ELF, Mach-O, COFF objects, and Unix/MSVC archives with
     # one argument contract. Keep platform nm as the final hosted fallback.
     find_tool_portable([
@@ -241,6 +266,9 @@ pub fn find_archive_portable() -> text:
     val configured = env_get("SIMPLE_AR") ?? ""
     if configured != "":
         return configured
+    val llvm_configured = env_get("LLVM_AR") ?? ""
+    if llvm_configured != "":
+        return llvm_configured
     val os = get_host_os()
     if os == "macos":
         return find_tool_portable([
@@ -260,6 +288,9 @@ pub fn find_objdump_portable() -> text:
     val configured = env_get("SIMPLE_OBJDUMP") ?? ""
     if configured != "":
         return configured
+    val llvm_configured = env_get("LLVM_OBJDUMP") ?? ""
+    if llvm_configured != "":
+        return llvm_configured
     val os = get_host_os()
     if os == "macos":
         return find_tool_portable([
@@ -279,6 +310,9 @@ pub fn find_objcopy_portable() -> text:
     val configured = env_get("SIMPLE_OBJCOPY") ?? ""
     if configured != "":
         return configured
+    val llvm_configured = env_get("LLVM_OBJCOPY") ?? ""
+    if llvm_configured != "":
+        return llvm_configured
     val os = get_host_os()
     if os == "macos":
         return find_tool_portable([
@@ -596,7 +630,7 @@ fn detect_cross_linker(target_prefix: text) -> text:
             return path
 
     # Fallback: try LLD with target flag (lld can cross-link)
-    val lld_path = find_tool_portable(["ld.lld-23", "ld.lld"])
+    val lld_path = find_lld_portable()
     if (lld_path != "" and
         check_version_compatibility(parse_tool_version(lld_path)) == LlvmVersionStatus.Supported):
         return lld_path

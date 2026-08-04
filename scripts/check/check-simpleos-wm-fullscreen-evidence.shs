@@ -13,6 +13,25 @@ SIMPLE_BIN_STATUS=unchecked
 SIMPLE_BIN_RESOLVED=""
 SIMPLE_BIN_VERSION=""
 SIMPLE_BIN_SHA256=""
+NATIVE_BACKEND="${SIMPLEOS_WM_NATIVE_BACKEND:-llvm}"
+NATIVE_PROFILE="$NATIVE_BACKEND|x86-64-v1|none|dynload"
+NATIVE_CACHE_DIR="$BUILD_DIR/native-cache/$NATIVE_BACKEND"
+NATIVE_BUILD_SIMPLE_BOOTSTRAP=1
+NATIVE_TOOLCHAIN_IDENTITY=diagnostic-cranelift
+NATIVE_TOOL_PATH="$PATH"
+STAGE4_PROVENANCE=""
+STAGE4_PROVENANCE_SHA256=""
+LLVM_23_1_PREFIX_RESOLVED=""
+SIMPLE_LLVM_PREFIX_RESOLVED=""
+LLVM_CLANG=""
+LLVM_LLC=""
+LLVM_OPT=""
+LLVM_LLD=""
+LLVM_AR=""
+LLVM_NM=""
+LLVM_OBJDUMP=""
+LLVM_OBJCOPY=""
+LLVM_CONFIG=""
 KERNEL_OUTPUT=""
 KERNEL_SHA256=""
 KERNEL_ADMISSION=""
@@ -88,6 +107,7 @@ if [ -z "${SIMPLE_BIN:-}" ]; then
     SIMPLE_BIN=""
     SIMPLE_BIN_SOURCE=auto-cached-pure-simple
     for candidate in \
+        "$ROOT_DIR"/build/bootstrap/full/*/simple \
         "$ROOT_DIR"/build/bootstrap/stage3/*/simple \
         "$ROOT_DIR"/build/bootstrap/stage2/*/simple \
         "$ROOT_DIR"/bin/release/*/simple \
@@ -132,6 +152,21 @@ file_sha256() {
     else
         echo ""
     fi
+}
+
+llvm_tool_reports_23_1() {
+    "$1" --version 2>&1 | grep -Eq '(^|[^0-9])23\.1\.0([^0-9]|$)'
+}
+
+verify_stage4_simple_bin() {
+    BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+    STAGE4_PROVENANCE_HELPER_PATH="$ROOT_DIR/scripts/check/lib/stage4-candidate-provenance.shs"
+    export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+    # shellcheck source=scripts/check/lib/bootstrap-stage3-provenance.shs
+    . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+    # shellcheck source=scripts/check/lib/stage4-candidate-provenance.shs
+    . "$STAGE4_PROVENANCE_HELPER_PATH"
+    stage4_verify_candidate_provenance "$STAGE4_PROVENANCE" "$SIMPLE_BIN_RESOLVED" "$ROOT_DIR"
 }
 
 font_region_oracle_status() {
@@ -353,6 +388,15 @@ emit_failure() {
         echo "simpleos_wm_fullscreen_simple_bin_status=$SIMPLE_BIN_STATUS"
         echo "simpleos_wm_fullscreen_simple_bin_version=$SIMPLE_BIN_VERSION"
         echo "simpleos_wm_fullscreen_simple_bin_sha256=$SIMPLE_BIN_SHA256"
+        echo "simpleos_wm_fullscreen_native_backend=$NATIVE_BACKEND"
+        echo "simpleos_wm_fullscreen_native_profile=$NATIVE_PROFILE"
+        echo "simpleos_wm_fullscreen_native_cache_dir=$NATIVE_CACHE_DIR"
+        echo "simpleos_wm_fullscreen_native_simple_bootstrap=$NATIVE_BUILD_SIMPLE_BOOTSTRAP"
+        echo "simpleos_wm_fullscreen_native_toolchain_identity=$NATIVE_TOOLCHAIN_IDENTITY"
+        echo "simpleos_wm_fullscreen_stage4_provenance=$STAGE4_PROVENANCE"
+        echo "simpleos_wm_fullscreen_stage4_provenance_sha256=$STAGE4_PROVENANCE_SHA256"
+        echo "simpleos_wm_fullscreen_llvm_23_1_prefix=$LLVM_23_1_PREFIX_RESOLVED"
+        echo "simpleos_wm_fullscreen_simple_llvm_prefix=$SIMPLE_LLVM_PREFIX_RESOLVED"
         echo "simpleos_wm_fullscreen_qemu_out=$LAUNCH_OUT"
         echo "simpleos_wm_fullscreen_serial_log=$SERIAL_LOG"
         echo "simpleos_wm_fullscreen_serial_log_bytes=$(file_byte_count "$SERIAL_LOG")"
@@ -390,6 +434,9 @@ emit_failure() {
         echo "- simple bin status: $SIMPLE_BIN_STATUS"
         echo "- simple bin version: $SIMPLE_BIN_VERSION"
         echo "- simple bin sha256: $SIMPLE_BIN_SHA256"
+        echo "- native backend: $NATIVE_BACKEND (profile=$NATIVE_PROFILE, cache=$NATIVE_CACHE_DIR)"
+        echo "- native toolchain identity: $NATIVE_TOOLCHAIN_IDENTITY"
+        echo "- Stage4 provenance: $STAGE4_PROVENANCE (sha256=$STAGE4_PROVENANCE_SHA256)"
         echo "- kernel: $KERNEL_OUTPUT (sha256=$KERNEL_SHA256)"
         echo "- kernel build: $KERNEL_BUILD_STATUS (wall timeout=${NATIVE_BUILD_TIMEOUT_SECONDS}s)"
         echo "- disk image: $DISK_IMAGE ($disk_image_status, provenance=$disk_image_provenance, sha256=$DISK_IMAGE_SHA256)"
@@ -438,6 +485,98 @@ if [ -z "$SIMPLE_BIN_VERSION" ] || ! is_sha256 "$SIMPLE_BIN_SHA256"; then
     exit 1
 fi
 SIMPLE_BIN_STATUS=pass
+
+case "$NATIVE_BACKEND" in
+    llvm)
+        NATIVE_BUILD_SIMPLE_BOOTSTRAP=0
+        if [ -z "${LLVM_23_1_PREFIX:-}" ]; then
+            emit_failure "llvm-23-1-prefix-required"
+            exit 1
+        fi
+        if [ -z "${SIMPLE_LLVM_PREFIX:-}" ]; then
+            emit_failure "simple-llvm-prefix-required"
+            exit 1
+        fi
+        LLVM_23_1_PREFIX_RESOLVED="$(resolve_path "$LLVM_23_1_PREFIX")"
+        SIMPLE_LLVM_PREFIX_RESOLVED="$(resolve_path "$SIMPLE_LLVM_PREFIX")"
+        if [ -z "$LLVM_23_1_PREFIX_RESOLVED" ] || \
+           [ "$SIMPLE_LLVM_PREFIX_RESOLVED" != "$LLVM_23_1_PREFIX_RESOLVED" ]; then
+            emit_failure "llvm-23-1-prefix-mismatch"
+            exit 1
+        fi
+
+        LLVM_CLANG="$(resolve_path "$LLVM_23_1_PREFIX_RESOLVED/bin/clang")"
+        LLVM_LLC="$(resolve_path "$LLVM_23_1_PREFIX_RESOLVED/bin/llc")"
+        LLVM_OPT="$(resolve_path "$LLVM_23_1_PREFIX_RESOLVED/bin/opt")"
+        LLVM_LLD="$(resolve_path "$LLVM_23_1_PREFIX_RESOLVED/bin/ld.lld")"
+        LLVM_AR="$(resolve_path "$LLVM_23_1_PREFIX_RESOLVED/bin/llvm-ar")"
+        LLVM_NM="$(resolve_path "$LLVM_23_1_PREFIX_RESOLVED/bin/llvm-nm")"
+        LLVM_OBJDUMP="$(resolve_path "$LLVM_23_1_PREFIX_RESOLVED/bin/llvm-objdump")"
+        LLVM_OBJCOPY="$(resolve_path "$LLVM_23_1_PREFIX_RESOLVED/bin/llvm-objcopy")"
+        LLVM_CONFIG="$(resolve_path "$LLVM_23_1_PREFIX_RESOLVED/bin/llvm-config")"
+        for llvm_tool in "$LLVM_CLANG" "$LLVM_LLC" "$LLVM_OPT" "$LLVM_LLD" \
+            "$LLVM_AR" "$LLVM_NM" "$LLVM_OBJDUMP" "$LLVM_OBJCOPY" "$LLVM_CONFIG"; do
+            case "$llvm_tool" in
+                "$LLVM_23_1_PREFIX_RESOLVED"/*) ;;
+                *) emit_failure "llvm-23-1-toolchain-incomplete"; exit 1 ;;
+            esac
+            if [ ! -x "$llvm_tool" ] || ! llvm_tool_reports_23_1 "$llvm_tool"; then
+                emit_failure "llvm-23-1-toolchain-incoherent"
+                exit 1
+            fi
+        done
+
+        LLVM_TOOLCHAIN_MANIFEST="$BUILD_DIR/llvm-23.1-toolchain.env"
+        {
+            echo "prefix=$LLVM_23_1_PREFIX_RESOLVED"
+            echo "clang_sha256=$(file_sha256 "$LLVM_CLANG")"
+            echo "llc_sha256=$(file_sha256 "$LLVM_LLC")"
+            echo "opt_sha256=$(file_sha256 "$LLVM_OPT")"
+            echo "ld_lld_sha256=$(file_sha256 "$LLVM_LLD")"
+            echo "llvm_ar_sha256=$(file_sha256 "$LLVM_AR")"
+            echo "llvm_nm_sha256=$(file_sha256 "$LLVM_NM")"
+            echo "llvm_objdump_sha256=$(file_sha256 "$LLVM_OBJDUMP")"
+            echo "llvm_objcopy_sha256=$(file_sha256 "$LLVM_OBJCOPY")"
+            echo "llvm_config_sha256=$(file_sha256 "$LLVM_CONFIG")"
+        } >"$LLVM_TOOLCHAIN_MANIFEST"
+        NATIVE_TOOLCHAIN_IDENTITY="$(file_sha256 "$LLVM_TOOLCHAIN_MANIFEST")"
+        if ! is_sha256 "$NATIVE_TOOLCHAIN_IDENTITY"; then
+            emit_failure "llvm-23-1-toolchain-identity-invalid"
+            exit 1
+        fi
+
+        STAGE4_PROVENANCE="$SIMPLE_BIN_RESOLVED.provenance.env"
+        STAGE4_PROVENANCE_SHA256="$(file_sha256 "$STAGE4_PROVENANCE")"
+        case "$(printf '%s' "$SIMPLE_BIN_VERSION" | tr '[:upper:]' '[:lower:]')" in
+            *simple-bootstrap*)
+                SIMPLE_BIN_STATUS=unverified
+                emit_failure "simple-bin-not-full-stage4"
+                exit 1
+                ;;
+        esac
+        if ! is_sha256 "$STAGE4_PROVENANCE_SHA256" || \
+           ! verify_stage4_simple_bin >/dev/null 2>&1; then
+            SIMPLE_BIN_STATUS=unverified
+            emit_failure "simple-bin-stage4-provenance-invalid"
+            exit 1
+        fi
+        SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE-stage4-provenance"
+
+        LLVM_TOOL_SHIM_DIR="$BUILD_DIR/llvm-23.1-tool-shim"
+        mkdir -p "$LLVM_TOOL_SHIM_DIR"
+        rm -f "$LLVM_TOOL_SHIM_DIR/cc"
+        ln -s "$LLVM_CLANG" "$LLVM_TOOL_SHIM_DIR/cc"
+        NATIVE_TOOL_PATH="$LLVM_TOOL_SHIM_DIR:$LLVM_23_1_PREFIX_RESOLVED/bin:$PATH"
+        ;;
+    cranelift)
+        # Diagnostic compatibility only. The migration/default admission path
+        # is LLVM 23.1 and cannot be satisfied by this backend.
+        ;;
+    *)
+        emit_failure "native-backend-invalid"
+        exit 1
+        ;;
+esac
 
 FONT_ASSET_BYTES="$(file_byte_count "$FONT_ASSET")"
 FONT_ASSET_SHA256="$(file_sha256 "$FONT_ASSET")"
@@ -541,7 +680,12 @@ elif ! is_sha256 "$KERNEL_SOURCE_REVISION" || \
      [ ! -f "$KERNEL_ADMISSION" ] || \
      ! grep -Fxq "wrapper_sha256=$WRAPPER_SHA256" "$KERNEL_ADMISSION" || \
      ! grep -Fxq "simple_bin_sha256=$SIMPLE_BIN_SHA256" "$KERNEL_ADMISSION" || \
-     ! grep -Fxq "profile=cranelift|x86-64-v1|none|dynload" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "profile=$NATIVE_PROFILE" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "native_backend=$NATIVE_BACKEND" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "native_cache_dir=$NATIVE_CACHE_DIR" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "simple_bootstrap=$NATIVE_BUILD_SIMPLE_BOOTSTRAP" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "native_toolchain_identity=$NATIVE_TOOLCHAIN_IDENTITY" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "stage4_provenance_sha256=$STAGE4_PROVENANCE_SHA256" "$KERNEL_ADMISSION" || \
      ! grep -Fxq "source_revision_sha256=$KERNEL_SOURCE_REVISION" "$KERNEL_ADMISSION" || \
      ! grep -Fxq "kernel_sha256=$(file_sha256 "$KERNEL_OUTPUT")" "$KERNEL_ADMISSION"; then
     kernel_stale=true
@@ -587,15 +731,25 @@ SPL
     done
     rm -f "$KERNEL_CANDIDATE"
     set +e
-    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+    SIMPLE_BOOTSTRAP="$NATIVE_BUILD_SIMPLE_BOOTSTRAP" SIMPLE_LIB="$ROOT_DIR/src" \
+    SIMPLE_OS_LOG_MODE=off LLVM_23_1_PREFIX="$LLVM_23_1_PREFIX_RESOLVED" \
+    SIMPLE_LLVM_PREFIX="$SIMPLE_LLVM_PREFIX_RESOLVED" \
+    CLANG="$LLVM_CLANG" SIMPLE_CLANG="$LLVM_CLANG" \
+    LINKER="$LLVM_LLD" SIMPLE_LINKER="$LLVM_LLD" \
+    LLC="$LLVM_LLC" SIMPLE_LLC="$LLVM_LLC" OPT="$LLVM_OPT" SIMPLE_OPT="$LLVM_OPT" \
+    LLVM_AR="$LLVM_AR" SIMPLE_AR="$LLVM_AR" \
+    LLVM_NM="$LLVM_NM" SIMPLE_NM="$LLVM_NM" \
+    LLVM_OBJDUMP="$LLVM_OBJDUMP" SIMPLE_OBJDUMP="$LLVM_OBJDUMP" \
+    LLVM_OBJCOPY="$LLVM_OBJCOPY" SIMPLE_OBJCOPY="$LLVM_OBJCOPY" LLVM_CONFIG="$LLVM_CONFIG" \
+    SIMPLE_NATIVE_BUILD_LINKER_SCRIPT="$LINKER_SCRIPT" \
     SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
-    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$NATIVE_TOOL_PATH" \
         "$TIMEOUT_BIN" --kill-after=10s "${NATIVE_BUILD_TIMEOUT_SECONDS}s" \
         "$SIMPLE_BIN" native-build \
         --source build/os/generated --source "$ENTRY" \
         --timeout "$NATIVE_BUILD_WORKER_TIMEOUT_SECONDS" \
-        --backend cranelift --cpu x86-64-v1 --opt-level=none --log off \
-        --cache-dir "$BUILD_DIR/native-cache" --mode dynload \
+        --backend "$NATIVE_BACKEND" --cpu x86-64-v1 --opt-level=none --log off \
+        --cache-dir "$NATIVE_CACHE_DIR" --mode dynload \
         --entry-closure --entry "$ENTRY" \
         --target x86_64-unknown-none -o "$KERNEL_CANDIDATE" \
         --linker-script "$LINKER_SCRIPT" \
@@ -638,7 +792,12 @@ SPL
         echo "schema=simpleos-wm-kernel-admission-v1"
         echo "wrapper_sha256=$WRAPPER_SHA256"
         echo "simple_bin_sha256=$SIMPLE_BIN_SHA256"
-        echo "profile=cranelift|x86-64-v1|none|dynload"
+        echo "profile=$NATIVE_PROFILE"
+        echo "native_backend=$NATIVE_BACKEND"
+        echo "native_cache_dir=$NATIVE_CACHE_DIR"
+        echo "simple_bootstrap=$NATIVE_BUILD_SIMPLE_BOOTSTRAP"
+        echo "native_toolchain_identity=$NATIVE_TOOLCHAIN_IDENTITY"
+        echo "stage4_provenance_sha256=$STAGE4_PROVENANCE_SHA256"
         echo "source_revision_sha256=$KERNEL_SOURCE_REVISION"
         echo "kernel_sha256=$KERNEL_SHA256"
     } >"$KERNEL_ADMISSION.candidate"
@@ -655,6 +814,14 @@ if ! is_sha256 "$KERNEL_SHA256"; then
 fi
 
 set +e
+LLVM_23_1_PREFIX="$LLVM_23_1_PREFIX_RESOLVED" \
+SIMPLE_LLVM_PREFIX="$SIMPLE_LLVM_PREFIX_RESOLVED" \
+CLANG="$LLVM_CLANG" SIMPLE_CLANG="$LLVM_CLANG" \
+LINKER="$LLVM_LLD" SIMPLE_LINKER="$LLVM_LLD" \
+LLVM_AR="$LLVM_AR" SIMPLE_AR="$LLVM_AR" \
+LLVM_NM="$LLVM_NM" SIMPLE_NM="$LLVM_NM" \
+LLVM_OBJDUMP="$LLVM_OBJDUMP" SIMPLE_OBJDUMP="$LLVM_OBJDUMP" \
+LLVM_OBJCOPY="$LLVM_OBJCOPY" SIMPLE_OBJCOPY="$LLVM_OBJCOPY" LLVM_CONFIG="$LLVM_CONFIG" \
 scripts/os/build_browser_demo_client.shs >"$BUILD_DIR/build-browser-demo.out" 2>&1
 browser_demo_build_code=$?
 set -e

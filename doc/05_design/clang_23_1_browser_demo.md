@@ -33,10 +33,13 @@ must stage those exact bytes as `BROWSMF.SMF`.
 ## Simple compiler and bootstrap
 
 Pure-Simple discovery candidates begin with 23.1 and reject an explicit
-incompatible provider.  Capability diagnostics name the new prefix contract.
-Rust bootstrap changes the binding feature only when upstream supports LLVM 23;
-otherwise the LLVM-backed Rust bootstrap remains a concrete blocker and must
-not claim migration based on renamed variables.
+incompatible provider. Capability diagnostics name the prefix and exact-tool
+contract. The admitted capsule contains Clang, LLD, LLC, Opt, ar, nm, objdump,
+objcopy, and llvm-config, and every consumer receives canonical absolute paths.
+Rust bootstrap remains on Cranelift until upstream supports LLVM 23; its
+provenance-verified full Stage 4 output, not Stage 2/3, drives external LLVM.
+Renamed Rust LLVM-18 variables or a minimal bootstrap artifact never count as
+migration.
 
 ## SimpleOS filesystem
 
@@ -49,6 +52,9 @@ manifest identity and that the launchable payload exists in the image catalog.
 
 Every rejection includes the observed path/version and expected `23.1.x`.
 Provider/bootstrap/browser/QEMU logs are retained under the isolated build tree.
+The fullscreen wrapper defaults to LLVM, requires matching provider prefixes,
+sets `SIMPLE_BOOTSTRAP=0`, validates full Stage 4 provenance, and scopes its
+native cache by backend before compiling the current-source kernel.
 The QEMU report must prove font, baseline, fullscreen, restored and browser
 frames plus correlated keyboard, pointer/click and browser provenance events.
 

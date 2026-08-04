@@ -12,11 +12,15 @@ source change.
 ## Capsules and ownership
 
 1. **Host provider capsule** resolves an explicit prefix first, then bounded
-   platform names.  It returns absolute Clang, LLD and LLVM utility paths plus
-   parsed versions.  A mixed family is an error.
+   platform names. It returns canonical absolute paths for `clang`, `ld.lld`,
+   `llc`, `opt`, `llvm-ar`, `llvm-nm`, `llvm-objdump`, `llvm-objcopy`, and
+   `llvm-config`, plus parsed versions. A missing or mixed family is an error.
 2. **Pure-Simple compiler capsule** owns compiler/interpreter/runtime discovery
    and exposes the same preference and diagnostic contract without shelling out
-   repeatedly in hot compilation paths.
+   repeatedly in hot compilation paths. It consumes only that provider through `SIMPLE_LLVM_PREFIX` and the
+   matching `SIMPLE_*` overrides. A provenance-verified full Stage 4 CLI is the
+   production provider; Stage 2/3 and ad-hoc native probes are bootstrap
+   evidence only.
 3. **Rust bootstrap capsule** owns the LLVM C-API binding.  An LLVM-18-only
    `inkwell` feature cannot masquerade as 23.1; unsupported upstream bindings
    are a release blocker or the LLVM feature must be explicitly unavailable.
@@ -32,7 +36,7 @@ rescanning the filesystem or silently falling back to LLVM 18/20/22.
 
 ## Data and control flow
 
-`LLVM_23_1_PREFIX` (or explicit `CLANG`/`LINKER`) -> resolver -> version and
+`LLVM_23_1_PREFIX` + `SIMPLE_LLVM_PREFIX` (with exact tool overrides) -> resolver -> version and
 coherence validator -> compiler/sysroot/libc/linker -> ELF/hash -> disk staging
 and byte comparison -> SimpleOS guest execution -> QMP framebuffer and input
 correlation report.

@@ -7,6 +7,7 @@
 use compiler.backend.backend.backend_types.{CompiledSymbol, CompiledSymbolKind, CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.llvm_capability.{find_nm_portable}
 use compiler.mir_opt.mod.{OptLevel}
 use compiler.interp.interpreter.llvm.tools.*
 use compiler.backend.backend.io_compat.{backend_shell_tuple}
@@ -44,15 +45,21 @@ pub fn llvm_object_code_bytes(obj: LlvmObjectCode) -> [u8]:
 pub fn llvm_object_code_symbols(obj: LlvmObjectCode) -> [CompiledSymbol]:
     obj.symbols
 
-fn extract_symbols_nm(obj_path: text) -> [CompiledSymbol]:
+pub fn extract_symbols_nm_checked(obj_path: text) -> Result<[CompiledSymbol], text>:
     """Extract defined symbols from an object file using nm.
 
     Parses nm output to identify function, data, and constant symbols.
     Skips undefined (U) and weak (W/w) symbols.
     """
-    val (nm_out, nm_err, nm_code) = backend_shell_tuple("nm '{obj_path}' 2>/dev/null")
+    val nm = find_nm_portable()
+    if nm == "":
+        return Err(
+            "LLVM object symbol extraction requires llvm-nm or nm; " +
+            "set SIMPLE_NM or LLVM_NM to the admitted LLVM 23.1 executable")
+    val (nm_out, nm_err, nm_code) = process_run(nm, [obj_path])
     if nm_code != 0:
-        return []
+        val detail = if nm_err.trim() != "": nm_err.trim() else: "exit {nm_code}"
+        return Err("LLVM object symbol extraction failed with '{nm}' for '{obj_path}': {detail}")
 
     var symbols: [CompiledSymbol] = []
     val lines = nm_out.split("\n")
@@ -106,7 +113,7 @@ fn extract_symbols_nm(obj_path: text) -> [CompiledSymbol]:
         val sym = CompiledSymbol(name: sym_name, kind: kind, address: 0, size: 0)
         symbols.push(sym)
 
-    symbols
+    Ok(symbols)
 
 pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: OptimizationLevel) -> Result<LlvmObjectCode, text>:
     """Compile LLVM IR text to object code bytes via llc CLI.
@@ -240,7 +247,12 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
             file_delete(bitcode_path)
 
     # Extract symbols before deleting the object file
-    val symbols = extract_symbols_nm(obj_path)
+    val symbols = match extract_symbols_nm_checked(obj_path):
+        case Ok(found): found
+        case Err(message):
+            if not bootstrap_io:
+                file_delete(obj_path)
+            return Err(message)
 
     # Read object bytes
     val bytes = rt_file_read_bytes(obj_path)

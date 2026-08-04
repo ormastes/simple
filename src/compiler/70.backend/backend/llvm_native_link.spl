@@ -13,8 +13,8 @@ use app.io.sysinfo_ops.{getpid}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 use compiler.backend.backend.entry_point.{generate_entry_point_ir}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
-use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
-use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
+use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm_checked, llc_available}
+use compiler.backend.backend.llvm_capability.{find_archive_portable, find_clang_portable, find_lld_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
@@ -969,7 +969,9 @@ fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_leve
     dir_create_all(entry_dir)
     val entry_c = "{entry_dir}/simple_entry.c"
     val entry_o = "{entry_dir}/simple_entry{ext}"
-    val init_names = simpleos_module_init_symbols(user_objects)
+    val init_names = match simpleos_module_init_symbols(user_objects):
+        case Ok(names): names
+        case Err(message): return Err(message)
     var c_source = "extern void spl_init_args(int argc, char** argv);\n"
     c_source = c_source + "extern void __simple_runtime_init(void);\n"
     c_source = c_source + "extern long long __simple_main(void);\n"
@@ -1715,12 +1717,17 @@ fn is_simpleos_riscv32_target(target: text) -> bool:
     target == "riscv32imac-simpleos" or target == "riscv32imac-unknown-simpleos" or target == "riscv32imac-unknown-simpleos-elf" or target == "riscv32imac-unknown-none" or target == "riscv32imac-unknown-none-elf" or target == "riscv32-unknown-none" or target == "riscv32-unknown-none-elf"
 
 fn compile_simpleos_x86_64_c(src: text, obj: text, opt_level: i64) -> Result<text, text>:
+    val clang = find_clang_portable()
+    if clang == "":
+        return Err(
+            "SimpleOS x86_64 C compilation requires Clang 23.1; " +
+            "set SIMPLE_CLANG or CLANG to the admitted executable")
     var opt = "-O2"
     if opt_level <= 0:
         opt = "-O0"
     elif opt_level == 1:
         opt = "-Os"
-    val (_out, err, code) = process_run("cc", [
+    val (_out, err, code) = process_run(clang, [
         "-c", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie", "-mno-red-zone",
         "-ffunction-sections", "-fdata-sections", opt,
         "-I", "examples/09_embedded/simple_os/arch/x86_64/boot",
@@ -1731,12 +1738,17 @@ fn compile_simpleos_x86_64_c(src: text, obj: text, opt_level: i64) -> Result<tex
     Ok(obj)
 
 fn compile_simpleos_arm64(src: text, obj: text, opt_level: i64) -> Result<text, text>:
+    val clang = find_clang_portable()
+    if clang == "":
+        return Err(
+            "SimpleOS ARM64 compilation requires Clang 23.1; " +
+            "set SIMPLE_CLANG or CLANG to the admitted executable")
     var opt = "-O2"
     if opt_level <= 0:
         opt = "-O0"
     elif opt_level == 1:
         opt = "-Os"
-    val (_out, err, code) = process_run("clang", [
+    val (_out, err, code) = process_run(clang, [
         "-target", "aarch64-unknown-none-elf", "-c", "-ffreestanding", "-nostdlib",
         "-fno-pie", "-ffunction-sections", "-fdata-sections", opt,
         "-I", "examples/09_embedded/simple_os/arch/arm64/boot",
@@ -1746,12 +1758,15 @@ fn compile_simpleos_arm64(src: text, obj: text, opt_level: i64) -> Result<text, 
         return Err("SimpleOS ARM64 boot compile failed for {src}: {err}")
     Ok(obj)
 
-fn simpleos_spl_start_symbol(user_objects: [text]) -> text:
+fn simpleos_spl_start_symbol(user_objects: [text]) -> Result<text, text>:
     for obj in user_objects:
-        for symbol in extract_symbols_nm(obj):
+        val symbols = match extract_symbols_nm_checked(obj):
+            case Ok(found): found
+            case Err(message): return Err(message)
+        for symbol in symbols:
             if symbol.name.ends_with("__spl_start"):
-                return symbol.name
-    ""
+                return Ok(symbol.name)
+    Ok("")
 
 fn simpleos_rt_symbol_is_optional_backend(name: text) -> bool:
     """Freestanding-optional families -- the `RT_KEEP` counterpart from the
@@ -1809,7 +1824,7 @@ fn simpleos_rt_symbol_is_optional_backend(name: text) -> bool:
         name == "rt_simd_engine2d_neon_hits" or
         name == "rt_simd_engine2d_neon_reset")
 
-fn simpleos_undefined_rt_symbols(objects: [text]) -> [text]:
+fn simpleos_undefined_rt_symbols(objects: [text], nm: text) -> Result<[text], text>:
     """Undefined `rt_*` references across the user's objects, deduped.
 
     `extract_symbols_nm` deliberately drops undefined and weak entries, so the
@@ -1817,17 +1832,18 @@ fn simpleos_undefined_rt_symbols(objects: [text]) -> [text]:
     var seen: {text: bool} = {}
     var names: [text] = []
     for obj in objects:
-        val (nm_out, _nm_err, nm_code) = process_run("nm", ["-u", obj])
+        val (nm_out, nm_err, nm_code) = process_run(nm, ["-u", obj])
         if nm_code != 0:
-            continue
+            val detail = if nm_err.trim() != "": nm_err.trim() else: "exit {nm_code}"
+            return Err("SimpleOS undefined rt_* scan failed with '{nm}' for '{obj}': {detail}")
         for line in nm_out.split("\n"):
             for part in line.split(" "):
                 if part.starts_with("rt_") and not seen.has(part):
                     seen[part] = true
                     names.push(part)
-    names
+    Ok(names)
 
-fn simpleos_undefined_simple_module_symbols(objects: [text]) -> [text]:
+fn simpleos_undefined_simple_module_symbols(objects: [text], nm: text) -> Result<[text], text>:
     """Undefined pure-Simple (`lib__*` / `os__*`) references across the closure.
 
     The OTHER half of the fabrication fail-open. The `rt_*` channel was built
@@ -1851,9 +1867,10 @@ fn simpleos_undefined_simple_module_symbols(objects: [text]) -> [text]:
     var seen: {text: bool} = {}
     var names: [text] = []
     for obj in objects:
-        val (nm_out, _nm_err, nm_code) = process_run("nm", ["-u", obj])
+        val (nm_out, nm_err, nm_code) = process_run(nm, ["-u", obj])
         if nm_code != 0:
-            continue
+            val detail = if nm_err.trim() != "": nm_err.trim() else: "exit {nm_code}"
+            return Err("SimpleOS undefined pure-Simple scan failed with '{nm}' for '{obj}': {detail}")
         for line in nm_out.split("\n"):
             for part in line.split(" "):
                 if not (part.starts_with("lib__") or part.starts_with("os__")):
@@ -1861,9 +1878,9 @@ fn simpleos_undefined_simple_module_symbols(objects: [text]) -> [text]:
                 if not seen.has(part):
                     seen[part] = true
                     names.push(part)
-    names
+    Ok(names)
 
-fn simpleos_defined_symbols_any_binding(objects: [text]) -> [text]:
+fn simpleos_defined_symbols_any_binding(objects: [text], nm: text) -> Result<[text], text>:
     """Every DEFINED symbol in `objects`, deduped -- weak definitions included.
 
     Deliberately NOT `extract_symbols_nm`: that helper drops `W/w/V/v` as well
@@ -1891,9 +1908,10 @@ fn simpleos_defined_symbols_any_binding(objects: [text]) -> [text]:
     var seen: {text: bool} = {}
     var names: [text] = []
     for obj in objects:
-        val (nm_out, _nm_err, nm_code) = process_run("nm", [obj])
+        val (nm_out, nm_err, nm_code) = process_run(nm, [obj])
         if nm_code != 0:
-            continue
+            val detail = if nm_err.trim() != "": nm_err.trim() else: "exit {nm_code}"
+            return Err("SimpleOS defined-symbol scan failed with '{nm}' for '{obj}': {detail}")
         for line in nm_out.split("\n"):
             var parts: [text] = []
             for p in line.split(" "):
@@ -1916,7 +1934,7 @@ fn simpleos_defined_symbols_any_binding(objects: [text]) -> [text]:
                 continue
             seen[sym_name] = true
             names.push(sym_name)
-    names
+    Ok(names)
 
 fn simpleos_objdump_symbol_name(line: text) -> text:
     """`0000000000000000 <rt_foo>:` -> `rt_foo`."""
@@ -2570,6 +2588,11 @@ pub fn simpleos_check_no_fabricated_rt_stubs(entry_key: text, user_objects: [tex
     boot path */` while `rt_memcpy` two lines away is a real loop). Only the
     body separates them."""
     val strict_no_stub_fallback = (env_get("SIMPLE_NO_STUB_FALLBACK") ?? "") == "1"
+    val nm = find_nm_portable()
+    if nm == "":
+        return Err(
+            "SimpleOS fabricated-symbol verification requires llvm-nm or nm; " +
+            "set SIMPLE_NM or LLVM_NM to the admitted LLVM 23.1 executable")
 
     # One disassembly pass over `real_objects` serves both channels.
     val trivial_names = simpleos_trivial_body_rt_symbols(real_objects)
@@ -2577,15 +2600,23 @@ pub fn simpleos_check_no_fabricated_rt_stubs(entry_key: text, user_objects: [tex
     for name in trivial_names:
         trivial[name] = true
 
+    val real_defined = match simpleos_defined_symbols_any_binding(real_objects, nm):
+        case Ok(names): names
+        case Err(message): return Err(message)
     var real: {text: bool} = {}
-    for name in simpleos_defined_symbols_any_binding(real_objects):
+    for name in real_defined:
         if not trivial.has(name):
             real[name] = true
     for obj in user_objects:
-        for symbol in extract_symbols_nm(obj):
+        val symbols = match extract_symbols_nm_checked(obj):
+            case Ok(found): found
+            case Err(message): return Err(message)
+        for symbol in symbols:
             real[symbol.name] = true
 
-    val referenced_names = simpleos_undefined_rt_symbols(user_objects)
+    val referenced_names = match simpleos_undefined_rt_symbols(user_objects, nm):
+        case Ok(names): names
+        case Err(message): return Err(message)
     var referenced: {text: bool} = {}
     for name in referenced_names:
         referenced[name] = true
@@ -2635,13 +2666,18 @@ pub fn simpleos_check_no_fabricated_rt_stubs(entry_key: text, user_objects: [tex
     #
     # Definitions are collected at ANY binding for the same reason channel 1
     # does: weak linkage does NOT imply fabricated.
-    val simple_referenced = simpleos_undefined_simple_module_symbols(user_objects)
+    val simple_referenced = match simpleos_undefined_simple_module_symbols(user_objects, nm):
+        case Ok(names): names
+        case Err(message): return Err(message)
     var simple_novel: [text] = []
     if simple_referenced.len() > 0:
+        val user_defined = match simpleos_defined_symbols_any_binding(user_objects, nm):
+            case Ok(names): names
+            case Err(message): return Err(message)
         var simple_defined: {text: bool} = {}
-        for name in simpleos_defined_symbols_any_binding(user_objects):
+        for name in user_defined:
             simple_defined[name] = true
-        for name in simpleos_defined_symbols_any_binding(real_objects):
+        for name in real_defined:
             simple_defined[name] = true
         val simple_baseline = if strict_no_stub_fallback: {} else: simpleos_simple_symbol_baseline(entry_key)
         var simple_counted: {text: bool} = {}
@@ -2666,7 +2702,7 @@ pub fn simpleos_check_no_fabricated_rt_stubs(entry_key: text, user_objects: [tex
     novel.sort()
     Err("SimpleOS freestanding link refused for entry '{entry_key}': {novel.len()} rt_* extern(s) are newly fabricated -- they resolve to a zero/nil-returning stub (auto_stubs.c's weak NIL_VALUE definition, or a hand-written constant-return body) and would silently return nil at runtime instead of failing here (task #97): {novel.join(\", \")}. This entry's fabricated set must stay a SUBSET of config/simpleos_fabricated_rt_baseline.sdn. Implement each in the arch's boot/baremetal_stubs.c, or add it to simpleos_rt_symbol_is_optional_backend with a written rationale naming the caller that treats nil as 'unavailable'. Do NOT add it to the baseline -- the baseline is shrink-only and records pre-existing debt, never new debt.")
 
-fn simpleos_module_init_symbols(user_objects: [text]) -> [text]:
+fn simpleos_module_init_symbols(user_objects: [text]) -> Result<[text], text>:
     """Collect defined `__module_init` / `__module_init_<prefix>` symbols
     across the user's compiled objects, sorted + deduped by name.
 
@@ -2688,7 +2724,10 @@ fn simpleos_module_init_symbols(user_objects: [text]) -> [text]:
     var seen: {text: bool} = {}
     var names: [text] = []
     for obj in user_objects:
-        for symbol in extract_symbols_nm(obj):
+        val symbols = match extract_symbols_nm_checked(obj):
+            case Ok(found): found
+            case Err(message): return Err(message)
+        for symbol in symbols:
             var name = symbol.name
             if name.starts_with("___module_init"):
                 name = name.substring(1)
@@ -2697,7 +2736,7 @@ fn simpleos_module_init_symbols(user_objects: [text]) -> [text]:
                     seen[name] = true
                     names.push(name)
     names.sort()
-    names
+    Ok(names)
 
 fn simpleos_module_init_caller_source(init_names: [text]) -> text:
     """Generate the freestanding C source defining `__simple_call_module_inits`,
@@ -2722,6 +2761,11 @@ fn simpleos_module_init_caller_source(init_names: [text]) -> text:
     code
 
 fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
+    val lld = find_lld_portable()
+    if lld == "":
+        return Err(
+            "SimpleOS ARM64 linking requires LLD 23.1; " +
+            "set SIMPLE_LINKER or LINKER to the admitted ld.lld executable")
     val pid = getpid()
     val crt_o = "build/os/simpleos_arm64_crt0_{pid}.o"
     val stubs_o = "build/os/simpleos_arm64_baremetal_stubs_{pid}.o"
@@ -2746,12 +2790,17 @@ fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_le
     val configured_script = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
     val linker_script = if configured_script != "": configured_script else: "examples/09_embedded/simple_os/arch/arm64/linker.ld"
     var args: [text] = ["-T", linker_script, "-nostdlib", "--gc-sections", "-o", output, crt_o, stubs_o]
-    val spl_start = simpleos_spl_start_symbol(user_objects)
+    val spl_start = match simpleos_spl_start_symbol(user_objects):
+        case Ok(symbol): symbol
+        case Err(message):
+            file_delete(crt_o)
+            file_delete(stubs_o)
+            return Err(message)
     if spl_start != "":
         args.push("--defsym=spl_start={spl_start}")
     for obj in user_objects:
         args.push(obj)
-    val (_out, err, code) = process_run("ld.lld", args)
+    val (_out, err, code) = process_run(lld, args)
     file_delete(crt_o)
     file_delete(stubs_o)
     if code != 0:
@@ -2761,7 +2810,12 @@ fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_le
     Ok(output)
 
 fn compile_simpleos_x86_64_asm(src: text, obj: text) -> Result<text, text>:
-    val (_out, err, code) = process_run("cc", [
+    val clang = find_clang_portable()
+    if clang == "":
+        return Err(
+            "SimpleOS x86_64 assembly requires Clang 23.1; " +
+            "set SIMPLE_CLANG or CLANG to the admitted executable")
+    val (_out, err, code) = process_run(clang, [
         "-c", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie", "-mno-red-zone",
         "-o", obj, src
     ])
@@ -2770,6 +2824,11 @@ fn compile_simpleos_x86_64_asm(src: text, obj: text) -> Result<text, text>:
     Ok(obj)
 
 fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
+    val lld = find_lld_portable()
+    if lld == "":
+        return Err(
+            "SimpleOS x86_64 linking requires LLD 23.1; " +
+            "set SIMPLE_LINKER or LINKER to the admitted ld.lld executable")
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     if target == "simpleos" or target == "simpleos-x86_64" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos" or target == "x86_64-unknown-simpleos-elf":
         val sysroot = simpleos_x86_64_sysroot()
@@ -2798,8 +2857,7 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
         user_args.push(support[1])
         user_args.push(support[2])
         user_args.push("--end-group")
-        val linker = if file_exists("/usr/bin/ld.lld"): "/usr/bin/ld.lld" else: "ld.lld"
-        val (_user_out, user_err, user_code) = process_run(linker, user_args)
+        val (_user_out, user_err, user_code) = process_run(lld, user_args)
         file_delete(entry_object)
         if user_code != 0:
             return Err("SimpleOS x86_64 user executable link failed: {user_err}")
@@ -2839,7 +2897,11 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
     # simpleos_module_init_symbols / simpleos_module_init_caller_source
     # above) so the aggregation mechanism exists on the pure-Simple path the
     # same way it does on the Rust seed's generate_init_caller.
-    val module_init_names = simpleos_module_init_symbols(user_objects)
+    val module_init_names = match simpleos_module_init_symbols(user_objects):
+        case Ok(names): names
+        case Err(message):
+            file_delete(init_c)
+            return Err(message)
     file_write(init_c, simpleos_module_init_caller_source(module_init_names))
     match compile_simpleos_x86_64_c(init_c, init_o, opt_level):
         case Err(e):
@@ -2871,7 +2933,7 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
     ]
     for obj in user_objects:
         args.push(obj)
-    val (_link_out, link_err, link_code) = process_run("ld.lld", args)
+    val (_link_out, link_err, link_code) = process_run(lld, args)
     file_delete(crt_o)
     file_delete(stubs_o)
     file_delete(type_o)
@@ -2887,6 +2949,11 @@ pub fn link_simpleos_x86_64_external(user_objects: [text], output: text) -> Resu
     link_simpleos_x86_64(user_objects, output, false, 2)
 
 fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> Result<text, text>:
+    val lld = find_lld_portable()
+    if lld == "":
+        return Err(
+            "SimpleOS RISC-V 64 linking requires LLD 23.1; " +
+            "set SIMPLE_LINKER or LINKER to the admitted ld.lld executable")
     var is_smoke_entry = false
     val is_display_smoke = output.contains("simpleos_riscv64_display_smoke")
     val uses_freestanding_runtime = is_display_smoke or output.contains("simpleos_riscv64_host_gpu_probe")
@@ -2996,7 +3063,11 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     # materializes each callee's ADDRESS as a value (not just a PC-relative
     # call), which overflows medlow's +-2GB-from-zero window once this
     # freestanding kernel is linked high (0x80200000+, see linker_script).
-    val module_init_names = simpleos_module_init_symbols(user_objects)
+    val module_init_names = match simpleos_module_init_symbols(user_objects):
+        case Ok(names): names
+        case Err(message):
+            file_delete(init_c)
+            return Err(message)
     file_write(init_c, simpleos_module_init_caller_source(module_init_names))
     val (init_out, init_err, init_code) = process_run("riscv64-unknown-elf-gcc", [
         "-c", "-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-ffreestanding", "-nostdlib",
@@ -3035,7 +3106,9 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
         "-T", linker_script,
         "--entry=__simple_riscv_entry"
     ]
-    val spl_start = simpleos_spl_start_symbol(user_objects)
+    val spl_start = match simpleos_spl_start_symbol(user_objects):
+        case Ok(symbol): symbol
+        case Err(message): return Err(message)
     if spl_start != "":
         args.push("--defsym=spl_start={spl_start}")
     if not is_smoke_entry and not uses_freestanding_runtime:
@@ -3065,13 +3138,18 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
 
     if verbose:
         val joined_args = args.join(" ")
-        print "[llvm-link] SimpleOS RISC-V link: ld.lld {joined_args}"
-    val (stdout, stderr, code) = process_run("ld.lld", args)
+        print "[llvm-link] SimpleOS RISC-V link: {lld} {joined_args}"
+    val (stdout, stderr, code) = process_run(lld, args)
     if code != 0:
         return Err("SimpleOS RISC-V link failed: {stdout}{stderr}")
     Ok(output)
 
 fn link_simpleos_riscv32(user_objects: [text], output: text, verbose: bool) -> Result<text, text>:
+    val lld = find_lld_portable()
+    if lld == "":
+        return Err(
+            "SimpleOS RISC-V 32 linking requires LLD 23.1; " +
+            "set SIMPLE_LINKER or LINKER to the admitted ld.lld executable")
     val stub_c = "build/os/simpleos_riscv32_link_stubs.c"
     val stub_o = "build/os/simpleos_riscv32_link_stubs.o"
     var stub_src = "#include <stdint.h>\n"
@@ -3117,8 +3195,8 @@ fn link_simpleos_riscv32(user_objects: [text], output: text, verbose: bool) -> R
 
     if verbose:
         val joined_args = args.join(" ")
-        print "[llvm-link] SimpleOS RV32 link: ld.lld {joined_args}"
-    val (stdout, stderr, code) = process_run("ld.lld", args)
+        print "[llvm-link] SimpleOS RV32 link: {lld} {joined_args}"
+    val (stdout, stderr, code) = process_run(lld, args)
     if code != 0:
         return Err("SimpleOS RV32 link failed: {stdout}{stderr}")
     Ok(output)

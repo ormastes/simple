@@ -477,7 +477,7 @@ pub(crate) fn module_init_symbol(module_prefix: Option<&str>) -> String {
     }
 }
 
-fn make_module_init_dynamic_name(module_name: &str) -> String {
+pub(crate) fn make_module_init_dynamic_name(module_name: &str) -> String {
     let normalized = module_name
         .replace('.', "_")
         .replace('/', "_")
@@ -1249,6 +1249,16 @@ impl<M: Module> CodegenBackend<M> {
     ///   prefix mangling (e.g. `module_prefix__main`).
     /// - All other names follow the existing prefix logic.
     pub fn mangle_name(&self, name: &str) -> String {
+        // Hosted HIR lowering still emits the legacy unqualified dynamic
+        // initializer name. Native-project mangling normally qualifies it,
+        // but no-mangle/bypass callers must not export the same strong symbol
+        // from every module.
+        if name == "__module_init_dynamic" {
+            return match &self.module_prefix {
+                Some(prefix) => self.sanitize_symbol(&make_module_init_dynamic_name(prefix)),
+                None => name.to_string(),
+            };
+        }
         // Compiler-synthesized freestanding startup functions must retain this
         // prefix so the linker's module-init symbol scan can discover them.
         if name.starts_with("__module_init_") {

@@ -23,7 +23,8 @@ riscv32, riscv64, arm32, arm64, x86_32, x86_64 (bare-metal QEMU) + aarch64-darwi
 ## Procedure
 
 1. **Build** (only if `--build` or the ELF is missing) — see the guide's recipe.
-   - riscv32 **requires** the pure-Simple LLVM backend. Build the admitted provider with `scripts/setup/build-llvm-23-1-provider.shs`, then export both `LLVM_23_1_PREFIX` and `SIMPLE_LLVM_PREFIX` to that prefix. The Rust in-process LLVM feature remains a separately documented upstream binding blocker.
+   - riscv32 **requires** the pure-Simple LLVM backend. Build the signed `llvmorg-23.1.0-rc2` provider with `scripts/setup/build-llvm-23-1-provider.shs`; require one prefix containing `clang`, `ld.lld`, `llc`, `opt`, `llvm-ar`, `llvm-nm`, `llvm-objdump`, `llvm-objcopy`, and `llvm-config`. Export both prefix variables and the builder's absolute paired `CLANG`/`SIMPLE_CLANG`, `LINKER`/`SIMPLE_LINKER`, `LLC`/`SIMPLE_LLC`, `OPT`/`SIMPLE_OPT`, `LLVM_AR`/`SIMPLE_AR`, `LLVM_NM`/`SIMPLE_NM`, `LLVM_OBJDUMP`/`SIMPLE_OBJDUMP`, `LLVM_OBJCOPY`, and `LLVM_CONFIG` metadata.
+   - Keep the Rust LLVM-18 `inkwell`/`llvm-sys` capsule isolated and bootstrap current source with Cranelift. Build/QEMU evidence requires a provenance-bound full Stage 4 CLI that passed `check-bootstrap-essential-tools-smoke.shs`; Stage 2/3 and ad-hoc probes cannot substitute. Run an unchanged build/boot criterion once and stop with retained blockers after three fix cycles.
    - Judge unresolved by `nm`, not link success. Build nice'd/background; retry under load.
 2. **Boot** each lane with its `<arch>_qemu_args()` from the contract, serial →
    `build/os/systest/<arch>.serial.log`, per-lane `timeout`. Do NOT trust the test

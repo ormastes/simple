@@ -22,27 +22,59 @@ sh scripts/setup/build-llvm-23-1-provider.shs \
 ```
 
 `LLVM_23_1_PREFIX` configures shell producers; `SIMPLE_LLVM_PREFIX` configures
-the pure-Simple backend. They must identify the same coherent Clang, LLD,
-`llvm-ar`, and `llvm-config` 23.1 provider. The Rust in-process LLVM Cargo
-feature is a different boundary: current vendored `inkwell`/`llvm-sys`
-bindings stop at LLVM 18. `LLVM_SYS_180_PREFIX` is therefore legacy Rust-only,
-is not a 23.1 migration path, and must not be used as a production fallback.
-The canonical Rust bootstrap is Cranelift-only and rejects `--backend=llvm`
-or `--backend=llvm-lib` before Cargo runs:
+the pure-Simple backend. Admission requires one prefix containing the coherent
+nine-tool family: `clang`, `ld.lld`, `llc`, `opt`, `llvm-ar`, `llvm-nm`,
+`llvm-objdump`, `llvm-objcopy`, and `llvm-config`. Preserve the builder's exact
+absolute handoff metadata and export it without PATH-based substitutions:
+
+```bash
+export SIMPLE_LLVM_PREFIX="$LLVM_23_1_PREFIX"
+export CLANG="$LLVM_23_1_PREFIX/bin/clang"
+export SIMPLE_CLANG="$CLANG"
+export LINKER="$LLVM_23_1_PREFIX/bin/ld.lld"
+export SIMPLE_LINKER="$LINKER"
+export LLC="$LLVM_23_1_PREFIX/bin/llc"
+export SIMPLE_LLC="$LLC"
+export OPT="$LLVM_23_1_PREFIX/bin/opt"
+export SIMPLE_OPT="$OPT"
+export LLVM_AR="$LLVM_23_1_PREFIX/bin/llvm-ar"
+export SIMPLE_AR="$LLVM_AR"
+export LLVM_NM="$LLVM_23_1_PREFIX/bin/llvm-nm"
+export SIMPLE_NM="$LLVM_NM"
+export LLVM_OBJDUMP="$LLVM_23_1_PREFIX/bin/llvm-objdump"
+export SIMPLE_OBJDUMP="$LLVM_OBJDUMP"
+export LLVM_OBJCOPY="$LLVM_23_1_PREFIX/bin/llvm-objcopy"
+export LLVM_CONFIG="$LLVM_23_1_PREFIX/bin/llvm-config"
+```
+
+The Rust in-process LLVM Cargo feature is a different boundary: current
+vendored `inkwell`/`llvm-sys` bindings stop at LLVM 18.
+`LLVM_SYS_180_PREFIX` is legacy Rust-only and must remain isolated from every
+23.1 variable above. It is not a migration path or production fallback. The
+canonical Rust bootstrap is Cranelift-only and rejects `--backend=llvm` or
+`--backend=llvm-lib` before Cargo runs:
 
 ```bash
 sh scripts/bootstrap/bootstrap-from-scratch.sh \
   --full-bootstrap --backend=cranelift --mode=dynload
 ```
 
-Only the resulting pure-Simple compiler may consume the admitted 23.1
-provider for LLVM native builds.
+Only the resulting current-source pure-Simple compiler may consume the
+admitted 23.1 provider for LLVM native builds.
 
-## 2. Admit the ad-hoc pure-Simple candidate
+## 2. Admit the current-source Stage 4 full CLI
 
-Record `build/native_probe/simple --version` and its SHA-256, then run a
-no-stub native smoke against that exact candidate. Do not replace it with the
-Rust seed or silently enable fallback:
+The qualifying producer is `build/bootstrap/full/<triple>/simple` from the
+current source revision. Retain its absolute path, source revision, version,
+SHA-256, and sibling `.provenance.env`, then run
+`scripts/check/check-bootstrap-essential-tools-smoke.shs` once against that
+exact binary with stub fallback disabled. The gate must prove its calibrated
+test runner, lint, duplicate-check, and aggregate pass markers before QEMU.
+
+An ad-hoc `build/native_probe/simple` can provide diagnostic native-smoke
+evidence only. Stage 2 and Stage 3 artifacts, the Rust seed, a deployed stale
+wrapper, or a candidate without the current-source provenance and essential
+tools PASS may not substitute for Stage 4. For a diagnostic native smoke:
 
 ```bash
 SIMPLE_BINARY="$PWD/build/native_probe/simple" \
@@ -53,9 +85,10 @@ NATIVE_SMOKE_WORK_DIR="$PWD/build/clang-23.1-native-smoke" \
 sh scripts/check/native-smoke-matrix.shs
 ```
 
-Acceptance requires `native_smoke_matrix=true`, no fallback diagnostic, and
-successful execution of the produced probes. Preserve the work directory and
-logs when the smoke fails.
+Acceptance of this diagnostic requires `native_smoke_matrix=true`, no fallback
+diagnostic, and successful execution of the produced probes. It does not
+promote the artifact to Stage 4. Preserve the work directory and logs when the
+smoke fails.
 
 ## 3. Build the browser guest payload
 
@@ -63,9 +96,23 @@ Build with the same admitted compiler, linker, and archiver family:
 
 ```bash
 LLVM_23_1_PREFIX="$LLVM_23_1_PREFIX" \
+SIMPLE_LLVM_PREFIX="$SIMPLE_LLVM_PREFIX" \
 CLANG="$LLVM_23_1_PREFIX/bin/clang" \
+SIMPLE_CLANG="$LLVM_23_1_PREFIX/bin/clang" \
 LINKER="$LLVM_23_1_PREFIX/bin/ld.lld" \
+SIMPLE_LINKER="$LLVM_23_1_PREFIX/bin/ld.lld" \
+LLC="$LLVM_23_1_PREFIX/bin/llc" \
+SIMPLE_LLC="$LLVM_23_1_PREFIX/bin/llc" \
+OPT="$LLVM_23_1_PREFIX/bin/opt" \
+SIMPLE_OPT="$LLVM_23_1_PREFIX/bin/opt" \
 LLVM_AR="$LLVM_23_1_PREFIX/bin/llvm-ar" \
+SIMPLE_AR="$LLVM_23_1_PREFIX/bin/llvm-ar" \
+LLVM_NM="$LLVM_23_1_PREFIX/bin/llvm-nm" \
+SIMPLE_NM="$LLVM_23_1_PREFIX/bin/llvm-nm" \
+LLVM_OBJDUMP="$LLVM_23_1_PREFIX/bin/llvm-objdump" \
+SIMPLE_OBJDUMP="$LLVM_23_1_PREFIX/bin/llvm-objdump" \
+LLVM_OBJCOPY="$LLVM_23_1_PREFIX/bin/llvm-objcopy" \
+LLVM_CONFIG="$LLVM_23_1_PREFIX/bin/llvm-config" \
 sh scripts/os/build_browser_demo_client.shs
 ```
 
@@ -76,17 +123,32 @@ missing `x86_64-unknown-simpleos` ELF admission is a failure.
 ## 4. Run the canonical SimpleOS rendering gate
 
 The fullscreen wrapper rebuilds and stages the browser as
-`/SYS/APPS/BROWSMF.SMF`, boots QEMU, and validates framebuffer, font, keyboard,
-pointer, and browser-content evidence. Pass the exact admitted candidate and
-provider explicitly:
+`/SYS/APPS/BROWSMF.SMF`, defaults its native kernel build to LLVM, boots QEMU,
+and validates framebuffer, font, keyboard, pointer, and browser-content
+evidence. Pass the exact admitted Stage 4 binary and all provider owners
+explicitly; do not rely on the wrapper's artifact search or host PATH:
 
 ```bash
-SIMPLE_BIN="$PWD/build/native_probe/simple" \
+SIMPLE_BIN="$PWD/build/bootstrap/full/<triple>/simple" \
+SIMPLEOS_WM_NATIVE_BACKEND=llvm \
 LLVM_23_1_PREFIX="$LLVM_23_1_PREFIX" \
 SIMPLE_LLVM_PREFIX="$SIMPLE_LLVM_PREFIX" \
 CLANG="$LLVM_23_1_PREFIX/bin/clang" \
+SIMPLE_CLANG="$LLVM_23_1_PREFIX/bin/clang" \
 LINKER="$LLVM_23_1_PREFIX/bin/ld.lld" \
+SIMPLE_LINKER="$LLVM_23_1_PREFIX/bin/ld.lld" \
+LLC="$LLVM_23_1_PREFIX/bin/llc" \
+SIMPLE_LLC="$LLVM_23_1_PREFIX/bin/llc" \
+OPT="$LLVM_23_1_PREFIX/bin/opt" \
+SIMPLE_OPT="$LLVM_23_1_PREFIX/bin/opt" \
 LLVM_AR="$LLVM_23_1_PREFIX/bin/llvm-ar" \
+SIMPLE_AR="$LLVM_23_1_PREFIX/bin/llvm-ar" \
+LLVM_NM="$LLVM_23_1_PREFIX/bin/llvm-nm" \
+SIMPLE_NM="$LLVM_23_1_PREFIX/bin/llvm-nm" \
+LLVM_OBJDUMP="$LLVM_23_1_PREFIX/bin/llvm-objdump" \
+SIMPLE_OBJDUMP="$LLVM_23_1_PREFIX/bin/llvm-objdump" \
+LLVM_OBJCOPY="$LLVM_23_1_PREFIX/bin/llvm-objcopy" \
+LLVM_CONFIG="$LLVM_23_1_PREFIX/bin/llvm-config" \
 BUILD_DIR="$PWD/build/clang-23.1-simpleos-wm-evidence" \
 REPORT_PATH="$PWD/doc/09_report/clang_23_1_simpleos_wm_evidence.md" \
 sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
@@ -94,7 +156,9 @@ sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
 
 Only the wrapper's retained report and evidence bundle can establish the QEMU
 rendering result. Static contracts, a browser ELF alone, cached screenshots,
-or an unavailable QEMU run do not constitute a live PASS.
+an unavailable QEMU run, or a Stage 2/3 substitution do not constitute a live
+PASS. Verify each unchanged criterion once. After each failure make at most one
+focused fix, and stop with retained blockers after the third verify/fix cycle.
 
 ## Related guidance
 

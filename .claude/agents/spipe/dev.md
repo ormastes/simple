@@ -37,6 +37,12 @@ This agent CREATES the initial state file. All subsequent agents read and append
      and requirement-to-test traceability. Use reviewed `--suppressions`
      records with rule, owner, reason, and optional fingerprint; blockers
      cannot be suppressed.
+   - For LLVM 23.1 bootstrap/SimpleOS QEMU requests, include independently
+     testable ACs for the signed coherent nine-tool rc2 provider and absolute
+     `SIMPLE_*` metadata, Cranelift isolation from Rust LLVM 18, current-source
+     full Stage 4 provenance plus essential-tools PASS, and the LLVM-default WM
+     wrapper with explicit environment. State that Stage 2/3 cannot substitute
+     and cap provider/bootstrap/QEMU verification at three fix cycles.
 6. Add `## Cooperative Review`: for broad lanes, list lower-model sidecars
    (Codex Spark, Claude Haiku, or Claude Sonnet), merge owner, final
    normal/highest-capability reviewer, shared interface names, manual

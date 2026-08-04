@@ -962,6 +962,18 @@ wrapper, Rust seed, or stale binary is not evidence. This sanity does not
 replace release `--whole` or repository-wide policy checks, and it must not be
 copied into compiler Stages 2 or 3.
 
+LLVM 23.1 Stage 4/QEMU lanes use the signed `llvmorg-23.1.0-rc2` provider as
+one coherent nine-tool family: `clang`, `ld.lld`, `llc`, `opt`, `llvm-ar`,
+`llvm-nm`, `llvm-objdump`, `llvm-objcopy`, and `llvm-config`. Retain absolute
+paired `SIMPLE_*` overrides and both prefix variables; PATH coincidence is not
+provenance. Keep Rust's LLVM-18-only bindings isolated and use Cranelift to
+bootstrap current source. Only the full Stage 4 binary with source revision,
+version, SHA-256, provenance file, and essential-tools PASS may drive the
+LLVM-default SimpleOS WM QEMU wrapper, with all tool variables and
+`SIMPLEOS_WM_NATIVE_BACKEND=llvm` explicit. Stage 2/3, seed, stale deployed,
+and ad-hoc probe artifacts cannot substitute. Verify each unchanged criterion
+once and stop after three evidence-driven fix cycles with retained blockers.
+
 A temporarily deployed Stage 2 compiler may unblock native artifact builds,
 but it is not Stage 4 evidence and cannot qualify `run`, `test`, SPipe docgen,
 or release. Record its exact path, hash, supported commands, and rollback path.

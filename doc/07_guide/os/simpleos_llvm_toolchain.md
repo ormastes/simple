@@ -21,20 +21,47 @@ sh scripts/setup/build-llvm-23-1-provider.shs \
 
 The default install prefix is `build/toolchains/llvm-23.1.0-rc2`. The builder
 verifies the tag signature and exact tag commit, installs one coherent
-Clang/LLD/LLVM-ar/LLVM-config family, and prints the environment assignments.
-Export the prefix for every consumer:
+nine-tool family (`clang`, `ld.lld`, `llc`, `opt`, `llvm-ar`, `llvm-nm`,
+`llvm-objdump`, `llvm-objcopy`, and `llvm-config`), validates every member as
+23.1 from the same prefix, and prints the absolute environment assignments.
+Export those exact owners for every consumer:
 
 ```sh
 export LLVM_23_1_PREFIX="$PWD/build/toolchains/llvm-23.1.0-rc2"
 export SIMPLE_LLVM_PREFIX="$LLVM_23_1_PREFIX"
 export CLANG="$LLVM_23_1_PREFIX/bin/clang"
+export SIMPLE_CLANG="$CLANG"
 export LINKER="$LLVM_23_1_PREFIX/bin/ld.lld"
+export SIMPLE_LINKER="$LINKER"
+export LLC="$LLVM_23_1_PREFIX/bin/llc"
+export SIMPLE_LLC="$LLC"
+export OPT="$LLVM_23_1_PREFIX/bin/opt"
+export SIMPLE_OPT="$OPT"
+export LLVM_AR="$LLVM_23_1_PREFIX/bin/llvm-ar"
+export SIMPLE_AR="$LLVM_AR"
+export LLVM_NM="$LLVM_23_1_PREFIX/bin/llvm-nm"
+export SIMPLE_NM="$LLVM_NM"
+export LLVM_OBJDUMP="$LLVM_23_1_PREFIX/bin/llvm-objdump"
+export SIMPLE_OBJDUMP="$LLVM_OBJDUMP"
+export LLVM_OBJCOPY="$LLVM_23_1_PREFIX/bin/llvm-objcopy"
+export LLVM_CONFIG="$LLVM_23_1_PREFIX/bin/llvm-config"
 ```
 
 `scripts/check/lib/clang-23-1-toolchain.shs` is the canonical resolver. It
 fails closed if a required tool is absent or reports a version other than
 23.1; mixing a Clang 23.1 frontend with an older linker or archiver is not an
 admitted workaround.
+
+QEMU rendering uses the LLVM-default
+`scripts/check/check-simpleos-wm-fullscreen-evidence.shs` wrapper. Supply a
+current-source `build/bootstrap/full/<triple>/simple` with its matching
+`.provenance.env`, a passing
+`scripts/check/check-bootstrap-essential-tools-smoke.shs` result, and every
+absolute provider variable above. Stage 2/3, Rust-seed, stale deployed, or
+ad-hoc native-probe artifacts are not substitutes for the full Stage 4 CLI.
+Verify an unchanged gate once, make no more than three evidence-driven
+fix/retry cycles, and retain the first unresolved provider/bootstrap/QEMU
+blocker when the cap is reached.
 
 The browser guest is built by `scripts/os/build_browser_demo_client.shs`. Its
 ELF is `build/os/apps/browser_demo/browser_demo.elf`, and its retained provider
@@ -52,8 +79,9 @@ app-registry execution shortcut.
 The vendored Rust bootstrap's `inkwell`/`llvm-sys` integration supports LLVM
 18 only. The canonical bootstrap therefore uses Cranelift and rejects its
 `llvm` and `llvm-lib` selections before Cargo runs. The legacy source cannot be
-relabeled as a 23.1 backend; pure-Simple backend and SimpleOS port evidence
-must not fall back to it.
+relabeled as a 23.1 backend. Keep `LLVM_SYS_180_PREFIX` isolated to that Rust
+capsule, bootstrap the current source through Cranelift, and allow only the
+resulting pure-Simple Stage 4 compiler to consume the LLVM 23.1 variables.
 
 ## Historical Clang 20 locations
 
