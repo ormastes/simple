@@ -1,12 +1,13 @@
 # @req REQ-AF-007
-# @cover src/app/startup/aspect_unload_transition.spl 80%
 
 use std.spec.*
 use compiler.loader.loader.aspect_catalog.{AspectCatalog}
 use compiler.loader.loader.aspect_activation.{
     AspectActivationCoordinator, AspectPublishedActivation
 }
-use compiler.loader.loader.aspect_pack_provider.{AspectPackProviderCache}
+use compiler.loader.loader.aspect_pack_provider.{
+    AspectPackProviderCache, AspectPackProviderKey, AspectPackModuleKey
+}
 use compiler.loader.loader.module_loader.{moduleloader_with_defaults}
 use os.smf.dynsmf_session.{DynSmfPolicy, dynsmf_session_new}
 use os.smf.smf_generation.{LifecycleManager}
@@ -42,6 +43,20 @@ fn unload_transition_coordinator(
 fn unload_transition_cache() -> AspectPackProviderCache:
     AspectPackProviderCache.create(4, 4, 4).unwrap()
 
+fn unload_transition_missing_pin_coordinator() -> AspectActivationCoordinator:
+    var coordinator = unload_transition_coordinator(true, false)
+    val provider = AspectPackProviderKey(
+        pack_id: "audit-pack", pack_digest: "pack-digest",
+        catalog_generation: 7, target: "x86_64-unknown-linux-gnu",
+        variant_fingerprint: "variant-a", runtime_abi: "simple-runtime-1",
+        core_public_abi_hash: "public-abi", core_layout_abi_hash: "layout-abi")
+    var activation = coordinator.published["audit"]
+    activation.module_keys = [AspectPackModuleKey(
+        provider: provider, module_id: "audit.module",
+        module_digest: "module-digest")]
+    coordinator.published["audit"] = activation
+    coordinator
+
 describe "Published aspect unload transition leaf":
     it "preserves state when explicit authorization rejects unload":
         val coordinator = unload_transition_coordinator(true, false)
@@ -76,3 +91,16 @@ describe "Published aspect unload transition leaf":
         expect(outcome.status).to_equal("unloaded")
         expect(outcome.reason).to_equal("")
         expect(outcome.coordinator.published.has("audit")).to_be(false)
+
+    it "retains the installed quiescing state when cache pin validation fails":
+        val outcome = aspect_unload_transition(
+            Ok(()), unload_transition_missing_pin_coordinator(),
+            moduleloader_with_defaults(), unload_transition_cache(), "audit")
+        expect(outcome.status).to_equal("failed")
+        expect(outcome.reason).to_contain("module has no cache pin")
+        expect(outcome.coordinator.published.has("audit")).to_be(true)
+        expect(outcome.coordinator.published["audit"].state).to_equal("quiescing")
+        expect(outcome.coordinator.published["audit"].bindings.len()).to_equal(0)
+        expect(outcome.coordinator.published["audit"].advices.len()).to_equal(0)
+        expect(outcome.coordinator.lifecycle.generation_is_drained_for(
+            "pack:module:audit:7", 7)).to_be(true)

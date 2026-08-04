@@ -1,17 +1,27 @@
 use std.spec.*
 use compiler.loader.loader.aspect_catalog.{AspectCatalog}
-use compiler.loader.loader.aspect_activation.{AspectActivationCoordinator}
+use compiler.loader.loader.aspect_activation.{
+    AspectActivationCoordinator, AspectPublishedActivation
+}
+use compiler.loader.loader.facet_binding_registry.{
+    FacetBindingRecord, FacetBindingRegistry
+}
+use compiler.loader.loader.advice_binding_registry.{AdviceBindingRegistry}
 use compiler.common.structural_contracts.facet_artifact.{
-    FACET_WITNESS_DESCRIPTOR_VERSION, FacetWitnessDescriptorV1
+    FACET_WITNESS_DESCRIPTOR_VERSION, FacetWitnessDescriptorV1,
+    FacetWitnessMethodEntry
 }
 use os.smf.dynsmf_session.{DynSmfPolicy, dynsmf_session_new}
 use os.smf.smf_generation.{LifecycleManager}
 use std.aop.facet.{FacetGenerationLease}
 use app.startup.aspect_facet_runtime_contract.{PublishedFacetDescriptorLease}
 use app.startup.aspect_facet_lifecycle_transition.{
-    aspect_generation_acquire, aspect_generation_pin_count,
+    aspect_generation_acquire, aspect_generation_release,
+    aspect_generation_pin_count, aspect_published_advice_lookup,
     aspect_published_facet_lookup, aspect_published_facet_acquire,
+    aspect_published_facet_method_acquire,
     aspect_published_facet_descriptor_acquire,
+    aspect_published_facet_descriptor_release,
     aspect_published_facet_handle_validate,
     aspect_published_facet_contract_validate
 }
@@ -44,6 +54,46 @@ fn facet_lifecycle_forged_descriptor() -> PublishedFacetDescriptorLease:
             method_entries: []),
         generation_lease: FacetGenerationLease(
             aspect_id: "other.aspect", generation_id: 7, token_id: 1))
+
+fn facet_lifecycle_published_coordinator(
+    resolved_address: i64
+) -> AspectActivationCoordinator:
+    var coordinator = facet_lifecycle_empty_coordinator()
+    val activation_key = "pack:module:fixture.debug:7"
+    coordinator.lifecycle = coordinator.lifecycle.register_candidate(
+        activation_key, 7).promote_candidate()
+    coordinator.published["fixture.debug"] = AspectPublishedActivation(
+        activation_key: activation_key,
+        aspect_id: "fixture.debug", generation: 7,
+        owners: ["fixture.debug.owner"], module_keys: [],
+        bindings: [], advices: [], state: "active")
+    val descriptor = FacetWitnessDescriptorV1(
+        descriptor_version: FACET_WITNESS_DESCRIPTOR_VERSION,
+        facet_contract_abi_hash: "facet-abi-v1",
+        descriptor_symbol: "fixture_debug_witness",
+        owner_id: "fixture.debug.owner",
+        method_entries: [FacetWitnessMethodEntry(
+            method_name: "summary",
+            method_symbol: "fixture_debug_witness__summary",
+            resolved_address: resolved_address)])
+    val publication_id = "{activation_key}@7"
+    var registry = FacetBindingRegistry.create()
+    registry.records = [FacetBindingRecord(
+            publication_id: publication_id,
+            activation_key: activation_key, generation: 7,
+            aspect_id: "fixture.debug",
+            binding_id: "fixture.debug.binding",
+            concrete_type_id: "fixture.Cache",
+            business_interface_id: "",
+            facet_interface_id: "Debuggable",
+            facet_contract_abi_hash: "facet-abi-v1",
+            witness_symbol: "fixture_debug_witness",
+            witness_owner_id: "fixture.debug.owner",
+            witness_descriptor: descriptor,
+            capabilities: [])]
+    registry.active_publications["fixture.debug"] = publication_id
+    coordinator.facet_bindings = registry
+    coordinator
 
 describe "Context-free facet lifecycle transitions":
     it "preserves empty coordinator state on absent generation failures":
@@ -79,3 +129,55 @@ describe "Context-free facet lifecycle transitions":
         expect(aspect_published_facet_contract_validate(
             coordinator, forged, "", "", []).unwrap_err()).to_contain(
             "lease aspect identity is inconsistent")
+
+    it "installs successful generation acquire and release mutations":
+        val coordinator = facet_lifecycle_published_coordinator(4096)
+        val acquired = aspect_generation_acquire(
+            coordinator, "fixture.debug").unwrap()
+        expect(aspect_generation_pin_count(
+            acquired.coordinator, "fixture.debug").unwrap()).to_equal(1)
+        val released = aspect_generation_release(
+            acquired.coordinator, acquired.token).unwrap()
+        expect(aspect_generation_pin_count(
+            released.coordinator, "fixture.debug").unwrap()).to_equal(0)
+
+    it "installs advice lookup miss counters in the returned coordinator":
+        var coordinator = facet_lifecycle_empty_coordinator()
+        coordinator.advice_bindings = AdviceBindingRegistry.create(
+            ["fixture.slot"]).unwrap()
+        val lookup = aspect_published_advice_lookup(
+            coordinator, "fixture.slot").unwrap()
+        expect(lookup.chain.len()).to_equal(0)
+        expect(lookup.coordinator.advice_bindings.counters.slot_lookups).to_equal(1)
+        expect(lookup.coordinator.advice_bindings.counters.slot_misses).to_equal(1)
+        expect(coordinator.advice_bindings.counters.slot_lookups).to_equal(0)
+
+    it "releases the generation lease before returning a method lookup error":
+        val coordinator = facet_lifecycle_published_coordinator(4096)
+        val outcome = aspect_published_facet_method_acquire(
+            coordinator, "fixture.Cache", [], "Debuggable", "missing")
+        expect(outcome.error.unwrap()).to_contain("not in the contract")
+        expect(outcome.acquired).to_be_nil()
+        expect(aspect_generation_pin_count(
+            outcome.coordinator, "fixture.debug").unwrap()).to_equal(0)
+
+    it "releases the generation lease before returning descriptor validation errors":
+        val coordinator = facet_lifecycle_published_coordinator(0)
+        val outcome = aspect_published_facet_descriptor_acquire(
+            coordinator, "fixture.Cache", [], "Debuggable")
+        expect(outcome.error.unwrap()).to_contain("unresolved method")
+        expect(outcome.acquired).to_be_nil()
+        expect(aspect_generation_pin_count(
+            outcome.coordinator, "fixture.debug").unwrap()).to_equal(0)
+
+    it "cleans up a forged descriptor identity before reporting inconsistency":
+        val coordinator = facet_lifecycle_published_coordinator(4096)
+        val acquired = aspect_published_facet_descriptor_acquire(
+            coordinator, "fixture.Cache", [], "Debuggable")
+        var forged = acquired.acquired.unwrap()
+        forged.aspect_id = "forged.aspect"
+        val released = aspect_published_facet_descriptor_release(
+            acquired.coordinator, forged)
+        expect(released.error.unwrap()).to_contain("identity is inconsistent")
+        expect(aspect_generation_pin_count(
+            released.coordinator, "fixture.debug").unwrap()).to_equal(0)
