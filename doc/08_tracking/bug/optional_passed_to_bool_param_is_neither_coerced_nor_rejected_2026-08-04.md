@@ -213,3 +213,69 @@ intended row. This is a correctness fix, not a failure-count fix.
 
 **Deployment note:** Rust seed code. Built clean, but the deployed
 `bin/release/<triple>/simple` keeps the old behaviour until the next redeploy.
+
+---
+
+# RETRACTION 2026-08-04 — the CORRECTION above was WRONG. The original report was RIGHT.
+
+The section above claimed the failure attribution "does not reproduce" and that
+the fix moved nothing. **That claim was itself measured wrong, and is retracted.**
+
+## What actually happens, measured in a PINNED worktree
+
+The repository working copy is mutated continuously by parallel sessions, and
+`bin/simple test` **interprets `src/lib/**` and the spec library from source**.
+So the same spec, same command, same binary returns different verdicts minutes
+apart depending on which lineage the working copy happens to be on. Every
+measurement in the retracted section was taken in that unstable tree.
+
+Re-measured in a detached worktree pinned to a fixed commit (`14b0b036363`),
+which no other session can move:
+
+| binary | `edge_case_11_system_spec.spl` |
+|---|---|
+| deployed `bin/release/x86_64-unknown-linux-gnu/simple` (no fix) | 28 total, 25 passed, **3 failed** |
+| rebuilt seed with `present_value_as_bool_arg` | 28 total, **28 passed, 0 failed** |
+
+The three failures are exactly the ones this report named:
+
+```
+✗ null/nil propagation       expected 42 to equal true
+✗ nested option unwrapping   expected Option::Some(10) to equal true
+✗ dict with missing keys     expected 1 to equal true
+```
+
+i.e. `verify(opt2.?)`, `verify(nested.?)`, `verify(d.get("a").?)`. The fix closes
+all three. Instrumenting the helper confirmed it fires with
+`ty=Some(Simple("bool"))` on this path.
+
+**So: the root cause in the original report is correct, the repro is correct,
+and the fix resolves it.** Only the corpus-wide count (~1,200) remains
+unverified — that is an extrapolation from the idiom census, not a measurement,
+and it should be re-derived per-directory in a pinned tree before being quoted.
+
+## Why the retracted section went wrong — three compounding errors
+
+1. **Unstable tree.** Measurements were taken in a working copy that other
+   sessions were rewriting mid-run; `src/lib` is interpreted, so this changes
+   results without changing the binary or the spec.
+2. **A binary that silently lost the fix.** A jj lineage move reverted
+   `arg_binding.rs` in the working copy; a later rebuild produced a binary with
+   NO fix that was still labelled "NEW (with fix)". The A/B was fix-vs-fix, then
+   nofix-vs-nofix — never a true before/after.
+3. **A vacuous control spec.** The synthetic spec used to "verify" the fix
+   omitted `use std.spec`, so its `expect` never asserted and it reported 6/6
+   green regardless. Any spec written to validate a matcher-level change MUST
+   `use std.spec` and MUST be shown to fail before the fix.
+
+## Mandatory procedure for anyone re-measuring this
+
+```bash
+git worktree add --detach /tmp/pinned $(git ls-remote origin main | cut -f1)
+cd /tmp/pinned
+SIMPLE_TIMEOUT_SECONDS=0 /abs/path/to/simple test --no-cache --no-cover-check <spec>
+```
+
+Pin the tree, use absolute binary paths, and verify the binary actually contains
+the change (`grep` the symbol in the source it was built from) before labelling
+either arm.

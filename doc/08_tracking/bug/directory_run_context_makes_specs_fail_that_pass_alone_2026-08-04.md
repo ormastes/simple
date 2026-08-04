@@ -69,3 +69,45 @@ failure per-spec before attributing it to a cause. A sibling lane independently
 validated a per-spec harness against the official runner and got an exact match
 (146 examples, 13 failures both ways), so per-spec measurement is available and
 trustworthy where directory runs are not.
+
+---
+
+# RETRACTED 2026-08-04 (same day) — WRONG DIAGNOSIS. Not a directory-run defect.
+
+**Status: RETRACTED — do not act on this report.**
+
+The premise was that a spec passes alone and fails inside a directory run. That
+comparison was invalid: the two runs were taken minutes apart in a working copy
+that parallel sessions were rewriting, and `bin/simple test` **interprets
+`src/lib/**` and the spec library from source**. The variable was the tree
+state, not the directory.
+
+Proof the premise is false: the same file, same command, same binary, run twice
+in a row in the mutable tree gave `25 passed / 3 failed`, and later `28 passed /
+0 failed`. No directory was involved in either.
+
+Re-measured in a worktree pinned to a fixed commit (`14b0b036363`):
+
+| binary | `edge_case_11_system_spec.spl` alone |
+|---|---|
+| deployed (no fix) | 25 passed, **3 failed** |
+| seed rebuilt with `present_value_as_bool_arg` | **28 passed, 0 failed** |
+
+The failures are the `T?`-to-`bool` coercion defect and nothing else — see
+`optional_passed_to_bool_param_is_neither_coerced_nor_rejected_2026-08-04.md`,
+whose original diagnosis was correct. `Error: Process exited with code 1` is
+simply how the runner surfaces a child spec exiting non-zero after real
+assertion failures; it is not evidence of cross-spec interference.
+
+## The one durable finding worth keeping
+
+Measurement in this repository is **not reproducible in the shared working
+copy**. Because the runner and the standard library are interpreted from source,
+any concurrent session's push or rebase silently changes test results. Pin a
+worktree before measuring anything:
+
+```bash
+git worktree add --detach /tmp/pinned $(git ls-remote origin main | cut -f1)
+```
+
+That, not the directory-run theory, is the lesson from this file.
