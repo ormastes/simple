@@ -131,6 +131,32 @@ fn has_driver_manifest_attr(attrs: &[Attribute]) -> bool {
         .any(|attr| attr.name == "driver" || attr.name == "native_lib")
 }
 
+/// Number of parameters a *caller* must supply for `f`, i.e. its arity with the
+/// receiver removed.
+///
+/// The receiver is not spelled consistently between the two sides of a trait
+/// conformance, so it must be normalised on BOTH sides before arities are
+/// compared:
+///
+/// * Impl side — `parse_indented_impl_body` auto-injects a parameter literally
+///   named `self` at index 0 for every non-static method
+///   (`types_def/trait_impl_parsing.rs`), whether the source wrote `fn f(self)`,
+///   `me fn f()`, or `var fn f()`.
+/// * Trait side — `parse_trait_method_after_fn` performs NO injection, so a
+///   trait method's params are exactly as written: `fn f(self, a)` keeps the
+///   receiver, `fn f(a)` never had one.
+/// * A receiver written explicitly as `me` survives as a parameter named `me`
+///   (`types_def/mod.rs` tests `params[0].name == "self" || == "me"`).
+///
+/// Filtering by name rather than stripping a fixed prefix therefore makes the
+/// two sides comparable in every combination, and is what stops the check from
+/// red-flagging every `me fn` implementer. This mirrors `is_receiver`/`pcount`
+/// in `scripts/check/check-trait-arity.spl`, which is the reference
+/// implementation and the regression oracle for this check.
+fn trait_conformance_arity(f: &FunctionDef) -> usize {
+    f.params.iter().filter(|p| p.name != "self" && p.name != "me").count()
+}
+
 fn method_with_impl_driver_attrs(method: &FunctionDef, impl_attrs: &[Attribute]) -> FunctionDef {
     if !has_driver_manifest_attr(impl_attrs) || has_driver_manifest_attr(&method.attributes) {
         return method.clone();
@@ -984,16 +1010,41 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             // Check all abstract trait methods are implemented
                             let impl_method_names: std::collections::HashSet<_> =
                                 impl_block.methods.iter().map(|m| m.name.clone()).collect();
+                            let impl_methods_by_name: HashMap<&str, &FunctionDef> =
+                                impl_block.methods.iter().map(|m| (m.name.as_str(), m)).collect();
 
+                            // Accumulate EVERY conformance problem before reporting.  This used to
+                            // `return Err` on the first missing name, which reported a multi-method
+                            // drift one method per rebuild and made a three-method drift look like a
+                            // one-method problem.
+                            let mut problems: Vec<String> = Vec::new();
                             for trait_method in &trait_def.methods {
-                                // Only require implementation of abstract methods
-                                if trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
-                                    return Err(crate::error::factory::missing_trait_method(
-                                        &type_name,
-                                        &trait_method.name,
-                                        trait_name,
-                                    ));
+                                match impl_methods_by_name.get(trait_method.name.as_str()) {
+                                    None => {
+                                        // Only require implementation of abstract methods; a default
+                                        // method the impl does not override is not a problem.
+                                        if trait_method.is_abstract {
+                                            problems.push(format!(
+                                                "type `{}` does not implement required method `{}` from trait `{}`",
+                                                type_name, trait_method.name, trait_name
+                                            ));
+                                        }
+                                    }
+                                    Some(impl_method) => {
+                                        // Arity conformance, receiver-normalised on both sides.
+                                        let declared = trait_conformance_arity(trait_method);
+                                        let implemented = trait_conformance_arity(impl_method);
+                                        if declared != implemented {
+                                            problems.push(format!(
+                                                "type `{}` implements method `{}` from trait `{}` with {} parameter(s), but the trait declares {}",
+                                                type_name, trait_method.name, trait_name, implemented, declared
+                                            ));
+                                        }
+                                    }
                                 }
+                            }
+                            if !problems.is_empty() {
+                                return Err(CompileError::Semantic(problems.join("; ")));
                             }
 
                             // Build combined methods: impl methods + default trait methods

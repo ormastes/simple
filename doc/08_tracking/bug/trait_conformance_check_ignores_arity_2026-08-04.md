@@ -1,10 +1,14 @@
 # Trait conformance check is name-only — arity and parameter types are never compared
 
-- **Status:** OPEN — mechanism confirmed; census complete, re-run by a pure-Simple
-  checker that scores **3,928 Tier-A method pairs at 0 arity drift**, and the
-  census's residual unknowns (the 20 unscorable pairs and the 40 not-found
-  traits) are now closed. The check itself is still **not armed**; see
-  *Before the arity check can be switched on* at the end of this file.
+- **Status:** ARITY ARMED / TYPES STILL OPEN — mechanism confirmed; census
+  complete, re-run by a pure-Simple checker that scores **3,928 Tier-A method
+  pairs at 0 arity drift**, and the census's residual unknowns (the 20
+  unscorable pairs and the 40 not-found traits) are closed. The **arity**
+  comparison is now armed in `interpreter_eval.rs`, with receiver normalisation
+  on both sides and accumulate-then-report; see *The check is armed* at the end
+  of this file. Parameter **types** are still never compared, and the check
+  fires only on the interpreter path — it does not close the JIT nil-sentinel-`3`
+  hole (separate lane).
 - **Standing gate:** `scripts/check/check-trait-arity.spl` (pure Simple).
 - **Found:** 2026-08-04, while closing the `MirTextCodegen` / `MirToLlvm` break (`4670db2d31f2`)
 - **Severity:** latent, repo-wide. A trait declaration can disagree with its
@@ -572,16 +576,18 @@ arm the check. Checklist:
    `scripts/check/check-trait-arity.spl`: **3,928 Tier-A pairs, 0 arity drift**,
    control fatal and run before the scan. 6 sabotages of the implementation each
    confirmed to fail the control.
-7. **Only then** add the comparison, and add it with the receiver normalisation
-   the census uses (`self`/`me`/`&self`/`&mut self` dropped from both sides) —
-   the two receiver conventions are both live and a naive `params.len()` would
-   red-flag every `me fn` implementer of a `fn f(self, …)` trait.
-8. **Land the check behind the follow-ups already filed**: collect all
-   conformance failures per impl rather than `return Err` on the first, or the
-   first arity error will again hide the next one.
+7. ~~**Only then** add the comparison, with receiver normalisation on both
+   sides~~ — done, see *The check is armed* below.
+8. ~~**Collect all conformance failures per impl** rather than `return Err` on
+   the first~~ — done, see *The check is armed* below.
 9. **Expect the check to fire only on the interpreter path.** It does not close
    the JIT hole; the nil-sentinel-`3` silent-wrong-value behaviour under the
    default engine is a separate defect and is not addressed by any of this.
+   **This remains explicitly OUT OF SCOPE here and is owned by another lane.**
+   Arming the conformance check narrows nothing about call-site arity under the
+   JIT: a missing call argument still reads as nil sentinel `3` rather than
+   being rejected. Only trait-conformance *declarations* are now gated, and only
+   where the interpreter registers the impl block.
 
 A standing gate is worth more than a one-off census — **done**:
 `scripts/check/check-trait-arity.spl` fails on any new Tier-A arity drift, so
@@ -596,3 +602,100 @@ must be applied on both sides (the checker's `is_receiver` is the reference
 implementation — `self`, `me`, `&self`, `&mut self`, `mut self`), and the
 first-failure-only `return Err` must become collect-all first, or the first
 arity error will hide the next one exactly as the `MirTextCodegen` break did.
+
+## The check is armed (2026-08-04)
+
+**Steps 7 and 8 are now closed. Step 9 stands as a documented non-goal.** The
+arity comparison is live in `src/compiler_rust/compiler/src/interpreter_eval.rs`
+at the trait-implementation registration site.
+
+### What changed
+
+Two things, in one place:
+
+1. **`return Err` on the first missing name became accumulate-then-report.** The
+   loop now walks every trait method, pushes a description of each problem into
+   a `Vec<String>`, and returns a single `CompileError::Semantic` joining them
+   with `"; "` only after the whole trait has been scored. A three-method drift
+   is now three sentences in one error, not three rebuilds. The single-missing-
+   method wording is byte-identical to the old `factory::missing_trait_method`
+   string, so `simple-type`'s `test_impl_missing_trait_method` is unaffected.
+2. **The arity comparison itself**, via a new `trait_conformance_arity` helper.
+
+### How the receiver was normalised
+
+Not by stripping a fixed prefix — by **filtering parameters by name on both
+sides**:
+
+```rust
+fn trait_conformance_arity(f: &FunctionDef) -> usize {
+    f.params.iter().filter(|p| p.name != "self" && p.name != "me").count()
+}
+```
+
+Filtering rather than head-stripping is load-bearing, because the two sides are
+built by different parser paths and are *not* symmetric:
+
+| side | where | receiver behaviour |
+|------|-------|--------------------|
+| impl | `parser/src/types_def/trait_impl_parsing.rs` `parse_indented_impl_body` | **auto-injects** a param literally named `self` at index 0 for every non-static method, whatever the source wrote (`fn f(self)`, `me fn f()`, `var fn f()`) |
+| trait | `parser/src/types_def/trait_impl_parsing.rs` `parse_trait_method_after_fn` | **no injection at all** — params are exactly as written, so `fn f(self, a)` keeps the receiver and `fn f(a)` never had one |
+
+So the same conforming pair can arrive as `[self, a]` vs `[a]`, or as
+`[self, a]` vs `[self, a]`, depending only on how the trait was spelled. The
+impl-side injection guard tests `params[0].name != "self"` and does **not**
+exclude `"me"`, so a receiver written explicitly as `me` can survive as a
+parameter named `me` alongside an injected `self` — which is why both names are
+filtered, at any position, rather than one leading element being dropped.
+This mirrors `is_receiver`/`pcount` in `scripts/check/check-trait-arity.spl`,
+which is the reference implementation and the regression oracle. The `&self` /
+`&mut self` / `mut self` spellings the `.spl` checker also accepts are text-level
+forms that cannot reach the Rust AST: the lexer maps `self` to `TokenKind::Self_`
+and `parse_parameters` records the name as plain `self`, with `mut` consumed as a
+separate mutability flag.
+
+### Verification
+
+* **Positive, both directions** — a planted drift is rejected, naming trait,
+  method and both counts:
+  * trait 1-arg vs impl 2-arg → `error: semantic: type `Box` implements method
+    `scale` from trait `Shape` with 2 parameter(s), but the trait declares 1`
+  * trait 2-arg vs impl 1-arg → `error: semantic: type `Box` implements method
+    `scale` from trait `Shape` with 1 parameter(s), but the trait declares 2`
+* **Accumulate-then-report** — a fixture with one over-arity method, one missing
+  method and one under-arity method reports all three in a single error.
+* **Negative, `me fn`** — a trait declaring `fn bump(self, by)` / `fn reset(self)`
+  implemented as `me fn bump(by)` / `me fn reset()` runs clean. Receiver
+  normalisation works; this is the case that would have broken `main`.
+* **Negative, generic comma** — `Result<Any, Any>` counts as ONE parameter, in
+  both 1-param and 2-param positions. The Rust parser builds `Parameter`s from
+  parsed types, so a comma inside `<>` cannot manufacture a count; unlike the
+  text-scanning `.spl` checker, this needs no `split_params` equivalent.
+* **Negative, trait without a written receiver** — trait `fn describe(label)`
+  against impl `fn describe(self, label)` runs clean, covering the injection
+  asymmetry above.
+* **Whole repo, both checkers agree — no disagreement found.**
+  `scripts/check/check-trait-arity.spl` reports `PASS -- 3928 Tier-A method
+  pairs scored, 0 arity drift` (614 trait declarations, 909 impl blocks, control
+  fixture passing in the same run). The armed compiler produced **zero** arity
+  diagnostics across 651 executed spec files. Neither side flagged a pair the
+  other cleared.
+* **Gate** — `test/01_unit/lib/gc_async_mut/gpu/browser_engine/html_parser_gpu_flat_spec.spl`
+  → `Results: 24 total, 24 passed, 0 failed`.
+* **Rust suite** — `cargo test -p simple-compiler` was run on the armed tree AND
+  on the pristine base for comparison, because the tree is not green at either.
+  Armed: 3481 passed / 121 failed. Base: 3453 passed / 149 failed. Same 3602
+  total, and the armed failure set is a **strict subset** of the base set — zero
+  test names fail only under the armed build. The delta is pre-existing
+  flakiness under load, not a regression. `cargo clippy` is clean; `cargo fmt
+  --check` reports the same two pre-existing hunks in this file before and after
+  the change, so the edit adds no formatting debt.
+
+### What is still not covered
+
+Everything in step 9. The check runs only where the **interpreter** registers an
+impl block, so it does not fire on the JIT or native paths, and it does not
+close the call-site hole where a missing argument reads as nil sentinel `3`.
+It also compares **arity only** — parameter *types* are still never checked, so
+a same-arity type drift remains invisible, exactly as the title of this bug
+says. Both are separate lanes.
