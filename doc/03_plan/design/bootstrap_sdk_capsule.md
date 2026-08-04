@@ -35,10 +35,10 @@ The implementation keeps these frozen interfaces exactly named:
 
 | Interface | Required fields and invariants |
 |---|---|
-| `BootstrapSdkManifest` | schema version, target, compiler and Stage 4 provenance hashes, source revision, interface-set hash, body-set hash, generation, ordered module list, and whole-capsule hash |
+| `BootstrapSdkManifest` | schema version, target, backend, runtime bundle, compiler and Stage 4 provenance hashes, source revision, interface-set hash, body-set hash, generation, ordered module list, and whole-capsule hash |
 | `BootstrapSdkModuleInterface` | canonical module id, direct imports, exported declaration signatures, interface hash, source hash, SHB path/hash, and schema version |
 | `BootstrapSdkBodyArchive` | canonical module id, target/backend/runtime-bundle identity, body hash, archive path/hash, required interface hash, and producer hash |
-| `BootstrapSdkProvenance` | absolute candidate path/hash, Stage 3 manifest hash, Stage 4 provenance hash, producer/helper hashes, build/smoke log hashes, creation time, and rollback generation |
+| `BootstrapSdkProvenance` | absolute candidate path/hash, target/backend/runtime-bundle identity, Stage 3 manifest hash, Stage 4 provenance hash, producer/helper hashes, build/smoke log hashes, creation time, and rollback generation |
 
 All paths in a manifest are capsule-relative, normalized, and must resolve
 beneath the generation directory.  The only external paths are provenance
@@ -158,16 +158,18 @@ matching guide/skill/agent contracts before verification.
 
 Every row is blocked until the x86 candidate and essential-tools smoke pass.
 Each row produces a separate `BootstrapPlatformEvidenceRow` with target,
-host/capability, exact command, candidate/capsule hashes, logs, status, reason,
-and resume command.  Cross/QEMU evidence stays labeled as such.
+host/capability, exact command (or an explicit absent-command blocker),
+candidate/capsule hashes, logs, status, reason, and resume command.  Cross/QEMU
+evidence stays labeled as such.
 
 | Row | Prerequisites and authoritative command | PASS boundary |
 |---|---|---|
 | Linux AArch64 | native AArch64 host; `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=cranelift --incremental-unlimited --full-cli` | native Stage 4 plus exact tools against its own hash; Linux cross objects do not qualify |
-| macOS x86_64/AArch64 | matching native macOS host, Xcode/LLVM 23.1 provider; same command with `--backend=cranelift --incremental-unlimited --full-cli` | native macOS Stage 4 and smoke for that architecture; QEMU/cross is not a substitute |
+| macOS x86_64 | matching native macOS x86_64 host, Xcode/LLVM 23.1 provider; `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=cranelift --incremental-unlimited --full-cli` | native macOS x86_64 Stage 4 and smoke for its own hash; QEMU/cross is not a substitute |
+| macOS AArch64 | matching native macOS AArch64 host, Xcode/LLVM 23.1 provider; `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=cranelift --incremental-unlimited --full-cli` | native macOS AArch64 Stage 4 and smoke for its own hash; QEMU/cross is not a substitute |
 | FreeBSD x86_64 QEMU | QEMU image, SSH keys, `qemu-system-x86_64`; `sh scripts/check/check-freebsd-bootstrap-qemu.shs --full` | guest-produced and guest-checked evidence retained by the wrapper |
-| SimpleOS x86_64 QEMU | sysroot and guest image; `sh src/os/port/llvm/sysroot.shs`, then `bin/simple run src/os/port/bootstrap_cross.spl -- --target simpleos-x86_64 --build-dir build/os/bootstrap --sysroot build/os/sysroot --seed src/compiler_rust/target/bootstrap/simple --verbose` | required filesystem payloads, in-guest `/usr/bin/simple --version`, and guest hello compile/run |
-| SimpleOS AArch64 QEMU | prepared AArch64 image/QEMU; `sh src/os/port/llvm/sysroot.shs`, then `bin/simple run src/os/port/bootstrap_cross.spl -- --target aarch64-simpleos --build-dir build/os/bootstrap --sysroot build/os/sysroot --seed src/compiler_rust/target/bootstrap/simple --verbose` | same compiler-in-filesystem evidence in the AArch64 guest; host build and fixed-command stubs fail |
+| SimpleOS x86_64 QEMU | sysroot and guest image; `sh src/os/port/llvm/sysroot.shs`, then `bin/simple run src/os/port/bootstrap_cross.spl -- --target simpleos-x86_64 --build-dir build/os/bootstrap --sysroot build/os/sysroot --seed src/compiler_rust/target/bootstrap/simple --verbose`. **Blocked:** no canonical compiler-in-filesystem QEMU wrapper currently exists. Required artifact: `scripts/check/check-simpleos-compiler-filesystem-qemu.shs` with a documented x86_64 guest invocation and retained serial/image receipt. | required filesystem payloads, in-guest `/usr/bin/simple --version`, and guest hello compile/run |
+| SimpleOS AArch64 QEMU | prepared AArch64 image/QEMU; `sh src/os/port/llvm/sysroot.shs`, then `bin/simple run src/os/port/bootstrap_cross.spl -- --target aarch64-simpleos --build-dir build/os/bootstrap --sysroot build/os/sysroot --seed src/compiler_rust/target/bootstrap/simple --verbose`. **Blocked:** the same required wrapper must expose an explicit AArch64 guest invocation, image path, and serial receipt before this row can run. | same compiler-in-filesystem evidence in the AArch64 guest; host build and fixed-command stubs fail |
 | RISC-V Linux | native RISC-V Linux host and provider/toolchain; retain the row even if unavailable | native target evidence only; Linux x86 cross output is `unsupported`/`blocked`, never PASS |
 
 The SimpleOS rows must prove all required paths: `/usr/bin/simple(.smf)`,
@@ -186,3 +188,14 @@ unavailable rows remain explicitly `blocked` or `unsupported` with their exact
 resume command and retained artifacts.  Before a release candidate, run normal
 verification and the release-bound `bin/simple test test --whole
 --mode=interpreter`; no SDK or platform result weakens those gates.
+
+The final verifier must additionally inspect changed contracts in
+`doc/07_guide`, `doc/06_spec`, `.codex/skills`, `.agents/skills`,
+`.claude/skills`, `.claude/agents/spipe`, and `.gemini/commands`; an unchanged
+path is recorded as `N/A`, not silently omitted.  It must run, once on the
+settled change, `find doc/06_spec -name '*_spec.spl' | wc -l` and require `0`,
+`sh scripts/audit/direct-env-runtime-guard.shs --working`, and
+`sh scripts/audit/direct-env-runtime-guard.shs --staged`.  The generated
+manual and every new executable spec are reviewed for real assertions and no
+placeholder pass before any done mark.  AC-12's implementation/spec/manual
+work remains pending until an exact x86 candidate admits capsule execution.
