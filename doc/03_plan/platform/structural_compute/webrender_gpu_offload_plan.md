@@ -260,9 +260,62 @@ and asserting both directions, because the pre-existing spec only probes
 `vulkan` on this host and therefore never reached the over-claiming branch;
 without it the fix would have shipped unpinned.
 
-Still open: `_backend_is_cpu()` does not recognise `cpu_mirror` /
-`cpu_fallback`, so the `gpu_backend_used=true` diagnostic over-claims the same
-way for a backend that constructs but presents in software.
+**Closed (`ddaa072028e`), and the mechanism was worse than this document
+previously stated.** The earlier entry said `_backend_is_cpu()` "does not
+recognise `cpu_mirror` / `cpu_fallback`". It is in fact a **type confusion**:
+`_backend_is_cpu` classifies backend *names* (`software`, `cpu`, `cpu_simd`,
+`simd_cpu`, `cpu-simd`), and it was being handed `out.source`, a readback
+*source*, drawn from a fully disjoint vocabulary (`device_readback`,
+`cpu_mirror`, `cpu_fallback`, `not_requested`, `completion_unknown`,
+`readback_failed`, `device_identity_unknown`, `swapchain_present`,
+`framebuffer_surface`). No source string can ever be in that set, so the
+predicate returned `false` for **every possible input** and
+`gpu_backend_used` was a constant `true` — it could not have been false for
+any backend. `webgpu` was not a special case, only the case that happened to
+be noticed; `cpu_simd`, a literally-named CPU backend, also reported
+`gpu_backend_used=true`.
+
+The flag now uses `_web_gpu_readback_device_proven`, the same predicate as the
+decision string, and the marker also emits `handle=` / `device_identity=`:
+
+```text
+before  webgpu    source=cpu_mirror       gpu_backend_used=true
+after   webgpu    source=cpu_mirror       gpu_backend_used=false
+before  cpu_simd  source=cpu_mirror       gpu_backend_used=true
+after   cpu_simd  source=cpu_mirror       gpu_backend_used=false
+        vulkan    source=device_readback  gpu_backend_used=true   (unchanged)
+        cuda      source=device_readback  gpu_backend_used=true   (unchanged)
+```
+
+A print-only diagnostic cannot be asserted against, so the record is now
+exposed via `web_gpu_paint_last_dispatch_receipt()`, reusing the receipt
+pattern already in this tree; the guarding example sweeps seven backends in
+both directions.
+
+The rest of the provenance family was audited and found honest: the
+`[web-gpu-paint-measure]` marker and the cpu-raster / cpu-fallback /
+`cpu-presented` declines are already gated, the DrawIR receipt reports the
+requested `backend=` *and* the actual `source=` without a boolean claim, and
+the engine2d `*Evidence` classes echo the requested backend name while making
+no usage claim. Two sites are deliberately left alone:
+`hardware_acceleration_verified` is parsed out of Chrome's own JSON rather
+than asserted by us, and `cpu_job_verdict="cpu-paint-offloaded"`
+(presenter:276) is a pre-dispatch economics *prediction*, never a report of
+what ran — renaming it would edit strings three specs assert on.
+
+**Open — gate flakiness, filed separately:** the parity spec probes for a
+backend at `web_engine2d_gpu_offload_parity_spec.spl:258` and calls
+`Engine2D.create_requested_backend` later, so under host contention the probe
+can answer `vulkan` while the create returns `cpu_fallback` — observed live as
+`16 total, 16 passed, 1 failed` with
+`[offload-provenance] lane=vulkan source=cpu_fallback handle=0 identity=nil`
+under 34 concurrent `simple` processes. The re-run measured 17/17 **only
+because the lane resolved to `software` and the GPU branch was skipped**, so
+both arms are untrustworthy: the red is a false failure and that green is
+vacuous while being indistinguishable from a real one. The gate cannot
+currently tell "GPU worked", "GPU unavailable" and "GPU vanished mid-test"
+apart. Any fix must keep the spec able to fail — a repair that removes the
+red is worse than the flake.
 
 **Process note for anyone reading a gate verdict from this tree:** a red
 measured in the shared working copy is not evidence about origin. This
