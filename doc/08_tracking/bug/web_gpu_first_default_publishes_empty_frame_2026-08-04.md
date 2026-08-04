@@ -1,10 +1,11 @@
 # gpu-first present default publishes an EMPTY frame when the GPU lane declines
 
 - **Filed:** 2026-08-04
-- **Status:** OPEN
-- **Severity:** high — regresses the DEFAULT web present path on `main`
+- **Status:** FIXED in the presenter — but see "Correction to the attribution"
+  below: the 12/17 gate failure was NOT caused by this code path.
+- **Severity:** high — the decline branch really could publish an empty frame
 - **Owner module:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_engine2d_presenter.spl`
-- **Fix owner:** unclaimed
+- **Fix owner:** claimed + landed 2026-08-04
 
 ## Symptom
 
@@ -93,3 +94,81 @@ readback source.
 - Decision markers captured in the same run (quoted above), 3 occurrences.
 - The gpu-first lane itself is proven working on a real device elsewhere in the
   same session: `gpu-first:gpu-full:offloaded=rect_fill:2ops/1760px:cpu=none:source=device_readback:handle=1:device_identity=134816422716128`
+
+## Fix
+
+- **Commit:** `fix(web-gpu): make the gpu-first decline actually paint the frame on the CPU` (2026-08-04)
+- **Change:** the `economics.fill_op_count == 0 or economics.fill_pixels == 0`
+  decline branch in `_present_gpu_first` no longer mirrors the unusable GPU
+  frame via `_cpu_mirror_for_frame`. It now calls
+  `simple_web_layout_render_html_readback_paint(html, width, height, backend_name, false)`
+  — the identical call the explicit-CPU-backend / unknown-backend decline a few
+  lines above already makes — so a lane that cannot complete falls back and
+  actually PRODUCES the frame. The decision string is unchanged; it was already
+  honest.
+- **Contract pinned:** `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_gpu_first_present_decision_spec.spl`
+  landed with the fix (5/5). It pins the per-frame decision-string honesty
+  contract: degenerate surface, explicit CPU backend, unknown backend, device
+  provenance required for any offload claim, three-mode env routing.
+
+## Correction to the attribution (measured 2026-08-04)
+
+The root cause described above is real — mirroring a degenerate GPU frame does
+publish an empty buffer — but it is **not** what produced the `12 passed, 5
+failed` gate result, and the gate was never red at `3ddd017c87d` itself.
+Measured in a pristine `git worktree` at that exact base, with the shared
+working copy's uncommitted changes excluded:
+
+| tree | presenter | Results |
+|---|---|---|
+| clean worktree @ `3ddd017c87d` | **base (no fix)** | `17 total, 17 passed, 0 failed` |
+| clean worktree @ `3ddd017c87d` | with this fix | `17 total, 17 passed, 0 failed` |
+| clean worktree @ `5c03d99d65c` | with this fix | `17 total, 17 passed, 0 failed` |
+| shared working copy | with this fix | `17 total, 12 passed, 5 failed` |
+
+The decline branch was exercised in every one of those runs (the
+`[web-gpu-paint-decision] ... reason=cpu-ground-truth-required:cpu-paint-required`
+marker appears 3x, 1x, 2x and 3x respectively), so the green runs are not
+vacuous — the branch this fix rewrites really did execute and really did
+publish a full-size frame.
+
+What actually reddens the gate is the **shared working copy**, which carries
+~6,300 lines of another session's uncommitted, in-flight Engine2D/Vulkan work
+(`src/lib/gc_async_mut/gpu/engine2d/engine.spl`, `vulkan_session.spl`,
+`backend_vulkan*.spl`, `draw_ir_*`). Because these are `.spl` libraries executed
+from source, any spec run in that tree picks them up.
+
+The decisive tell is the fifth failing example, *"direct Engine2D lane render of
+the cpu oracle is bit-exact with real provenance"* → `expected nil to be greater
+than 0`. Its helper `_render_lane_direct` calls `Engine2D.create_requested_backend`,
+`present()` and `read_pixels_with_source()` **directly and never touches the
+presenter at all** — the nil is `readback.backend_handle` coming back from the
+Vulkan backend. No change to this file can affect that assertion. The four
+`expected 0 to equal 4800` failures are the same backend returning an empty
+readback through `present_layout_pixels_with_engine2d_readback`, which the CPU
+fallback also has to traverse.
+
+Contributing factor in that tree: heavy host load (19 concurrent `simple test`
+processes plus a 32-thread build) drives `[web-style-producer] budget-break`,
+which is what degenerates the GPU frame in the first place. That is the
+condition under which the mirroring defect above becomes observable — which is
+why the fix is still worth landing: it removes the empty-frame failure mode
+permanently instead of leaving it latent behind a load-dependent trigger.
+
+**Corroboration:** that in-flight Engine2D work landed independently as
+`28288f98102 fix(engine2d): stop a font-poisoned Vulkan lane publishing a
+partial frame` while this fix was being verified — the same failure mode, fixed
+in the layer that actually owned it.
+
+**Follow-up owed elsewhere:** the Vulkan `read_pixels_with_source()` nil
+`backend_handle` / empty readback belongs to the Engine2D lane, not here. It
+must not be closed by this bug.
+
+## Still open (deliberately not fixed here)
+
+The "Adjacent case to cover" above — the `gpu-full` / `gpu-partial` prefix is
+still derived from `economics.residual_pixels` rather than from
+`readback.source`, so the prefix can over-claim while the `source=` field stays
+honest. Left out because binding the prefix to the readback source changes the
+decision-string vocabulary the parity and showcase gates assert against; that is
+not a small obviously-correct edit and deserves its own lane.
