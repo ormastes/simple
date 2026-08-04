@@ -331,5 +331,6 @@ successor and invalid metadata fail with E-MIR-UNWIND001, or E-AF007 first when
 a facet lease is live.
 
 This does not change the callback rule above. Cleanup-successor construction,
-throw/resume cleanup pads, async cancellation cleanup, LLVM C-API invoke
-binding, and executable verification remain open.
+Throw/Resume, typed landing pads, and the production verifier gate now exist
+statically. Async cancellation cleanup, LLVM C-API personality/invoke support,
+runtime exception representation, and executable verification remain open.

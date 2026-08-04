@@ -80,10 +80,13 @@ bookmark is synchronized with GitHub and is rebased onto the current
   releases before `Throw`. Unsupported backend/interpreter consumers reject the
   new terminators with typed `E-MIR-UNWIND002`. The static call path now builds
   a `MayUnwind` cleanup successor with one unwind-only landing pad, nested
-  reverse releases, and one payload-preserving `Resume`; the optimizer release
+  reverse releases, and terminal `Resume` of the original non-forwarded
+  `ExceptionToken` on every unwind path; the optimizer release
   gate validates every function before and after transformation. Visitors and
-  auxiliary type mappers no longer silently drop the token/destination. This
-  does not prove executable behavior or a backend personality implementation.
+  auxiliary type mappers no longer silently drop the token/destination. The
+  verifier rejects external entries, cycles, non-resuming paths, token
+  forwarding, and unknown cleanup opcodes. This does not prove executable
+  behavior, source exception-packet identity, or a backend personality implementation.
 - **PASS — automatic registry source path (static review):** real compile inputs
   discover and install the resolver-owned aspect registry; its fingerprint is
   carried into object/closure cache identity. Importer-scoped resolution keys,

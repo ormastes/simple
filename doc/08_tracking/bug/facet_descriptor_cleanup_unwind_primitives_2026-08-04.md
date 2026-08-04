@@ -4,8 +4,10 @@ Date: 2026-08-04
 
 Status: partial implementation. Typed source/HIR effects, the fail-closed
 HIR-to-MIR admission bridge, the explicit MIR call-terminator contract, and its
-consumers are implemented and statically reviewed. Cleanup successors and
-throw/resume pads, cancellation, and executable verification remain open.
+consumers are implemented and statically reviewed. Cleanup successors,
+payload-carrying Throw/Resume, typed landing pads, and the production verifier
+gate are also implemented statically. Backend personality/runtime exception
+support, cancellation, and executable verification remain open.
 
 ## Problem
 
@@ -15,9 +17,10 @@ CFG edges, explicit return/error propagation, loop transfer, and aborting panic,
 but it cannot represent portable cleanup for language `throw`, async task
 cancellation, or a foreign exception crossing a call.
 
-`HirExprKind.Throw` exists, but MIR still has no throw/resume terminator and the
-normal lowerer emits no cleanup-pad `MirTerminator.CallTerminator`. The
-terminator now carries a required `MirCallUnwindContract` immediately before
+`HirExprKind.Throw` now lowers to payload-carrying MIR `Throw`, and typed
+`MayUnwind` calls with live facet cleanup emit a cleanup-pad
+`MirTerminator.CallTerminator`. The terminator carries a required
+`MirCallUnwindContract` immediately before
 its unwind target, and canonical construction validates the only legal pairs:
 `NoUnwind` with no edge and `MayUnwind` with an edge. This is MIR groundwork,
 not yet a source-to-backend exception model.
@@ -30,10 +33,6 @@ No path may silently lower an inconsistent contract/edge pair.
 
 ## Missing primitives
 
-- A canonical lowering owner that creates cleanup successors for typed
-  `MayUnwind` calls rather than rejecting them before ordinary call emission.
-- A canonical MIR throw/resume representation carrying the thrown value.
-- Cleanup-pad/landing-pad blocks with defined ordering and exactly-once rules.
 - Backend contracts for cleanup and resume on LLVM, C, Cranelift, interpreter,
   and native x86_64/AArch64/RISC-V targets.
 - Async state-machine ownership hooks for suspension, cancellation, drop, and
@@ -52,12 +51,12 @@ explicit, and neither extern status nor a string/custom effect infers it.
 Callable registration and module-surface import rows preserve the effect for
 direct, imported, instance/static/trait, and function-typed indirect calls.
 
-MIR lowering admits an ordinary `MirInstKind.Call` only for `NoUnwind`.
-`MayUnwind` fails with `E-MIR-UNWIND001` until a real cleanup successor exists;
-missing, duplicate, or conflicting metadata also fails rather than defaulting.
-Inside a live facet lease, the same cases preserve the stronger lexical cleanup
-diagnostic and fail first with E-AF007. `throw`, `await`, and `yield` remain
-E-AF007 while a lease is live.
+MIR lowering admits an ordinary `MirInstKind.Call` only for `NoUnwind`. With
+live facet cleanup, `MayUnwind` builds a typed cleanup successor; without a
+cleanup owner it fails with `E-MIR-UNWIND001`. Missing, duplicate, or conflicting
+metadata remains fail-closed with `E-AF007` precedence inside a live lease.
+Direct `throw` emits reverse cleanup before `Throw`; `await` and `yield` remain
+`E-AF007` while a lease is live.
 
 ## Completion criteria
 
@@ -164,9 +163,10 @@ Current implementation against the minimum truthful model is:
 3. **Implemented fail-closed consumption:** textual LLVM emits `call` for
    `NoUnwind` and `invoke` for `MayUnwind`; the interpreter consumes both; the
    LLVM C API and native/unsupported backends reject unsupported `MayUnwind`.
-4. **Open:** create cleanup successors and lower source-derived `MayUnwind`
-   through `CallTerminator`. The current bridge correctly emits a typed fatal
-   diagnostic before backend selection instead of fabricating an unwind edge.
+4. **Implemented statically:** source-derived `MayUnwind` with live facet
+   cleanup lowers through `CallTerminator` to an unwind-only landing pad,
+   reverse releases, and `Resume`. The production optimizer gate validates the
+   exception CFG before and after transformations.
 5. **Partially implemented:** native and unsupported backends fail closed.
    Textual LLVM can spell `invoke`, but admission remains blocked until the
    function is no longer contradictorily `nounwind` and the unwind block owns a
@@ -200,14 +200,14 @@ block, and does not mutate `facet_cleanup_scopes`. A `CatchException` instructio
 is deliberately excluded: cleanup-only unwinding never decodes or handles the
 language payload, and catch semantics require the separate runtime packet ABI.
 
-`ExceptionToken` is compiler-owned and cannot be named, constructed, copied
-into user storage, returned, or passed to an ordinary call. `LandingPad` is
+`ExceptionToken` is compiler-owned and cannot be named, constructed, forwarded
+through another local, stored, returned, or passed to an ordinary call. `LandingPad` is
 valid only as the first non-phi instruction of an unwind-successor block and
-defines exactly one `ExceptionToken`. `Resume` is valid only with that token or
-a token forwarded through cleanup-only CFG blocks. MIR validation must reject
-landing pads reached by normal edges, unwind targets without a landing pad,
-tokens consumed by ordinary instructions, and cleanup blocks that return or
-fall through instead of resuming.
+defines exactly one `ExceptionToken`. Every path through its unwind region must
+terminate in `Resume` of that original token; mutually exclusive terminal
+resumes are permitted, but forwarding is not. MIR validation rejects landing
+pads reached by normal edges, unwind targets without a landing pad, external
+entries, cycles, unknown opcodes, ordinary token uses, and non-resuming paths.
 
 For one `MayUnwind` call with live facet scopes, lowering must build this CFG:
 
@@ -224,8 +224,9 @@ normal_block:
   ordinary return/break/continue/fallthrough exits
 ```
 
-Guarded facet entries may split the cleanup path, but the token must dominate
-every branch and be resumed exactly once. Emitting the unwind cleanup must not
+Guarded facet entries may split the cleanup path, but the original token must
+dominate every branch and every path must terminate in `Resume` without
+forwarding. Emitting the unwind cleanup must not
 pop or consume the normal-path cleanup-scope metadata.
 
 Textual LLVM may map `ExceptionToken` to `{ptr, i32}`, emit
@@ -240,8 +241,8 @@ nil, abort, return, or ordinary branch is a valid substitute.
 
 Ownership is explicit: MIR construction/validation owns landing-pad placement
 and token linearity; borrow analysis treats the token as compiler-owned and
-non-borrowable; SSA/copy propagation may rename it but not duplicate or erase
-it; CFG/DCE/LICM/outlining must preserve the unwind edge, landing pad, cleanup
+non-borrowable; optimizers preserve the original local without forwarding,
+duplication, or erasure; CFG/DCE/LICM/outlining preserve the unwind edge, landing pad, cleanup
 order, and Resume; backends either implement the entire contract or reject it
 before emission.
 
@@ -274,8 +275,8 @@ before emission.
   explicit contract is rejected inside a leased scope; explicit `NoUnwind` is
   admitted and `MayUnwind` requires the cleanup-edge capability.
 
-Until the remaining cleanup-successor/pad/resume, async/thread cancellation,
-LLVM C-API invoke, executable parser/import/method checks, and NFR evidence
+Until backend personality/runtime exception support, async/thread cancellation,
+executable parser/import/method and cleanup checks, and NFR evidence
 owners land together, E-AF007 and
 the native/unsupported `CallTerminator` rejections remain the authoritative
 portable behavior.
