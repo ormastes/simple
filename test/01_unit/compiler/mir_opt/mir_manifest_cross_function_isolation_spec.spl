@@ -8,12 +8,17 @@ use compiler.mir.{
 }
 use compiler.mir_opt.mir_opt.mod.{
     OptLevel, PassKind, PassScope, passmanager_new,
-    passmanager_run_on_module, run_pass_on_module
+    apply_bulk_recognizers, passmanager_run_on_module, run_pass_on_module
 }
 use compiler.mir_opt.optimizer_plugin.{
     ApplyMode, optimizer_plugin_mir, optimizer_plugin_run_on_module
 }
-use compiler.mir_opt.mir_opt.predicate_promote.{run_predicate_promote}
+use compiler.mir_opt.mir_opt.dce.{create_dce_pass, dce_run_on_function}
+use compiler.mir_opt.mir_opt.copy_prop.{create_copy_prop_pass, copypropagation_run_on_function}
+use compiler.mir_opt.mir_opt.cse.{create_cse_pass, cse_run_on_function}
+use compiler.mir_opt.mir_opt.predicate_promote.{
+    promote_function_predicate, run_predicate_promote
+}
 use compiler.mir_opt.mir_opt._AutoVectorize.rewrite.{run_auto_vectorize}
 use compiler.mir_opt.mir_opt.pattern_dispatch.{run_pattern_idiom_pass}
 
@@ -134,6 +139,22 @@ describe "manifested MIR cross-function optimizer isolation":
             expect(function_call_count(preserved)).to_equal(1)
             expect(preserved.exception_cleanup_contracts.len()).to_equal(1)
 
+        val bulk = apply_bulk_recognizers(module)
+        expect(function_call_count(bulk.functions[sealed.symbol])).to_equal(1)
+        expect(bulk.functions[sealed.symbol].exception_cleanup_contracts.len()).to_equal(1)
+
+    it "identity-preserves manifested functions through raw exported function transforms":
+        val sealed = mark_manifested(
+            isolation_function(711, "sealed_raw_functions", Some("external")))
+        val after_dce = dce_run_on_function(create_dce_pass(), sealed)
+        val after_copy = copypropagation_run_on_function(
+            create_copy_prop_pass(), sealed)
+        val after_cse = cse_run_on_function(create_cse_pass(), sealed)
+        val after_predicate = promote_function_predicate(sealed)
+        for preserved in [after_dce, after_copy, after_cse, after_predicate]:
+            expect(function_call_count(preserved)).to_equal(1)
+            expect(preserved.exception_cleanup_contracts.len()).to_equal(1)
+
     it "routes all module adapters through universal filtering and reinsertion":
         val mod_source = rt_file_read_text(
             "src/compiler/60.mir_opt/mir_opt/mod.spl") ?? ""
@@ -145,3 +166,9 @@ describe "manifested MIR cross-function optimizer isolation":
             "src/compiler/60.mir_opt/optimizer_plugin.spl") ?? ""
         expect(plugin_source).to_contain(
             "run_typed_pass_on_module(kind, module)")
+        val pattern_source = rt_file_read_text(
+            "src/compiler/60.mir_opt/mir_opt/pattern/pattern_rule_pass.spl") ?? ""
+        expect(pattern_source).to_contain(
+            "if func.exception_cleanup_contracts.len() > 0:")
+        expect(pattern_source).to_contain(
+            "result.functions[sym] = func")
