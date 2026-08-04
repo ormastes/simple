@@ -889,3 +889,389 @@ with occurrence counts. The 4 repaired above are excluded.
 | test/01_unit/app/desugar/interface_desugar_spec.spl | 1 |
 | test/01_unit/app/desugar/forwarding_spec.spl | 1 |
 | test/01_unit/app/desugar/context_params_spec.spl | 1 |
+
+## Second pass, 2026-08-04 — coupling gate applied, 15 specs landed
+
+This section supersedes the triage above for the files it names. It re-ran the
+whole canonical family (`test/01_unit`, `test/02_integration`, `test/03_system`:
+246 files carrying `pending_reason`) rather than the 94-file subset, so its
+class counts are larger and were measured independently.
+
+### The measurement was invalid before b3a3f804b6c
+
+Four tracked symlinks pointed at an ABSOLUTE path inside one developer's
+checkout, `/home/ormastes/dev/pub/simple/src/...`:
+
+    test/01_unit/app/desugar/app     test/unit/app/desugar/app
+    test/01_unit/lib/database/lib    test/unit/lib/database/lib
+
+They entered main in 7f5a55fa46e, the 2026-08-01 restore after the
+truncated-tree wipe. In a second worktree they resolve back into the ORIGINAL
+clone, so a spec appears to exercise the worktree's source while actually
+running another checkout's. Every coupling result taken in a worktree before
+that fix is fail-open. Demonstrated by value: with the absolute link, renaming
+all 16 `fn`s in `src/app/desugar/context_params.spl` left
+`context_params_spec` at exactly `14 examples, 5 failures`; DELETING the module
+file outright also left it at `14 examples, 5 failures`. After repointing the
+link, the same rename gives `14 examples, 14 failures`. On a fresh clone or CI
+runner the links simply dangle. Fixed in b3a3f804b6c.
+
+### Gate used
+
+Rename every top-level `fn` (and `class`/`struct`/`enum`) in the module the
+spec names; require the example count to HOLD (proving the module still loads
+and no describe was dropped) and the failure count to RISE. Two refinements the
+earlier pass did not have:
+
+- The count-and-failure gate is fail-open when the only examples touching the
+  module are ALREADY failing. `interface_desugar_spec` against
+  `trait_desugar.spl` stays at `9 examples, 2 failures` under the rename and
+  reads NOT-COUPLED, yet the two failure MESSAGES change from a value mismatch
+  to `semantic: function 'desugar_traits' not found`. Compare messages, not
+  just counts, whenever the delta is zero.
+- A `print` probe inside the production function is NOT a valid binding check:
+  the spec runner captures example stdout, so the marker never appears and the
+  probe reads as 'never entered' regardless. `strace` is also unavailable in
+  this sandbox and produces an EMPTY log, which reads the same way. Both nearly
+  produced a false 'uncoupled' verdict here.
+
+### Landed (15 specs, 8 commits)
+
+| Spec | before | after | commit |
+|---|---|---|---|
+| `test/01_unit/app/desugar/context_params_spec.spl` (+ `test/unit/…`) | 1 example (tautology) | 14 examples, 0 failures | 27f50e28fcf |
+| `test/01_unit/app/desugar/rewriter_constants_spec.spl` (+ `test/unit/…`) | 1 example | 32 examples, 0 failures | 7c40b71e170 |
+| `test/01_unit/app/desugar/rewriter_static_calls_spec.spl` (+ `test/unit/…`) | 1 example | 41 examples, 0 failures | 7c40b71e170 |
+| `test/01_unit/app/desugar/static_constants_spec.spl` (+ `test/unit/…`) | 1 example | 29 examples, 1 failure | 9a7d7f8e3b3 |
+| `test/01_unit/app/desugar/interface_desugar_spec.spl` (+ `test/unit/…`) | 1 example | 9 examples, 2 failures | 386e1043706 |
+| `test/01_unit/app/desugar/forwarding_spec.spl` (+ `test/unit/…`) | 1 example | 15 examples, 0 failures | faea633557a |
+| `test/01_unit/app/desugar/static_methods_desugar_spec.spl` (+ `test/unit/…`) | 1 example | 28 examples, 0 failures | faea633557a |
+| `test/01_unit/app/desugar/struct_defaults_spec.spl` (+ `test/unit/…`) | 1 example | 14 examples, 0 failures | faea633557a |
+| `test/01_unit/app/desugar/trait_scanner_spec.spl` (+ `test/unit/…`) | 1 example | 9 examples, 0 failures | faea633557a |
+| `test/01_unit/app/desugar/trait_static_dispatch_spec.spl` (+ `test/unit/…`) | 1 example | 12 examples, 0 failures | faea633557a |
+| `test/01_unit/compiler_core/lexer_intensive_spec.spl` (+ `test/unit/…`) | 1 example | 60 examples, 1 failure | 85a51c4adeb |
+| `test/01_unit/compiler_core/parser_spec.spl` (+ `test/unit/…`) | 1 example | 24 examples, 2 failures | 98df0e31049 |
+| `test/01_unit/compiler_core/parser_option_coverage_spec.spl` (+ `test/unit/…`) | 1 example | 29 examples, 0 failures | 011d509151d |
+| `test/01_unit/compiler_core/parser_intensive_spec.spl` (+ `test/unit/…`) | 1 example | 40 examples, 1 failure | 011d509151d |
+| `test/01_unit/compiler_core/ast_spec.spl` (+ `test/unit/…`) | 1 example | 11 examples, 3 failures | 67fa0ab1f2a |
+
+Per canonical copy: **15 vacuous passing examples -> 367 real examples, 357
+passing and 10 honestly failing.** Doubled by the byte-identical `test/unit`
+mirrors: 30 -> 734, and **20 examples the repo previously reported as green are
+now red.** Every one of those 20 is a defect that existed before this work; none
+is a regression.
+
+### Production defects found and fixed
+
+- 27f50e28fcf — `with_context` was NEVER desugared when any argument carried a
+  colon, i.e. for its entire intended input set. `_find_char(trimmed, ":")`
+  took the `name:` separator inside the parentheses as the block colon, so the
+  guard saw no `)` before it and the pass returned the line untouched. Only the
+  degenerate `with_context(logger):` form worked. Second defect in the same
+  pass: a nested `with_context` was never rewritten. Sabotage: making
+  `_find_matching_paren` return -1 reproduces the original 5 failures exactly.
+- 7c40b71e170 — the static-call rewriter dropped any single-character member
+  that ended a line (`Defaults.B` unchanged, `Defaults.B ` with a trailing
+  space rewritten) from an `after_ident + 2 < llen` guard that should have been
+  `+ 1`; and it never chained, so `Outer.Inner.CONSTANT` collapsed only one
+  level to `Outer__Inner.CONSTANT`.
+- 98df0e31049 — `parser_error_count()` returned a literal `0` and
+  `parser_get_errors()` a fresh `[]`, always: `par_errors` was declared,
+  cleared and exported but never pushed to. A caller gating on the COUNT saw a
+  clean parse no matter how many errors were printed. This is the THIRD fix in
+  this family — `par_had_error_mirror` and `par_first_error_mirror` both routed
+  around the count and the list instead of filling them in.
+
+### Honest reds landed (10 examples per copy)
+
+| Spec | example | why |
+|---|---|---|
+| static_constants_spec | handles nested impl blocks correctly | pass does not descend into a nested impl and MIS-ATTRIBUTES the inner constant as `Outer__Y`; Simple has no nested impl, so the input cannot reach the pass from the real pipeline |
+| interface_desugar_spec | interface desugars to struct with fn-fields | `desugar_traits` matches only `trait `; an `interface` header falls through untouched, though `trait_scanner.spl` fully understands the form |
+| interface_desugar_spec | impl Interface for value generates factory | the module header documents `impl T for X: -> fn X_as_T()`; no factory generation exists anywhere in the file |
+| lexer_intensive_spec | emits attribute token for #[ | `"#[test]\n"` lexes to `[TOK_EOF]` alone. `TOK_HASH_LBRACKET` has exactly 2 references in all of `src/`: its declaration and its export. Nothing produces or consumes it |
+| parser_spec | parses a mixed module | 6 declared top-level forms produce 7 decls |
+| parser_spec | parses module-level expression as pseudo-decl | `decls=1 tag=4 bodylen=1 errors=false`, but reading the one body stmt aborts with `[stmt_get_tag] OOB idx=2 arena_len=0 arena_gen=6` — an AST-arena lifetime bug |
+| parser_intensive_spec | parses strings with and without interpolation | via `parser_init`+`parse_expr`, `"hi"`, `"hi {n}!"` and unterminated `"hi {n"` ALL return tag 3 (EXPR_STRING_LIT); 34 is never produced on this path |
+| ast_spec | creates arrays, tuples, dicts | `expr_get_args()` on a 2-element array literal returns 1 |
+| ast_spec | creates struct literals and ranges | `expr_get_extra()` on a range returns -1, expected 1 |
+| ast_spec | creates functions and structs | `expr_func_decl` arity: spec and implementation disagree on `type_params` |
+
+### A spec-literal trap that made three examples unrunnable
+
+`{...}` inside a `.spl` text literal INTERPOLATES. Three specs embedded sample
+source containing braces — `"print \"Value: {Config.DEFAULT_VALUE}\""`,
+`static val FORMAT = \"({x}, {y})\"`, `"hello {name}!"` — so the example died
+with `semantic: variable 'Config'/'x'/'name' not found` BEFORE reaching its
+subject. Doubling the braces (`{{`) yields the intended single-brace text.
+Any spec in this family that carries Simple source in a literal is suspect.
+
+### Remaining inventory (mechanically restored and executed, 2026-08-04)
+
+Counts are `examples / failures` from a restore-and-run of the canonical copy,
+BEFORE any coupling gate. A green line here is NOT evidence of coverage —
+`safety_checker_spec` restores to 26 green examples whose every assertion is
+`check(<the test's own string literal>.contains(...))`, and
+`devtools_cli_spec` to 9 x `check(true)`. None of the files below has passed a
+coupling gate; none should be landed until it does.
+
+#### Mixed — real defects exposed (21 files)
+
+| Spec | examples | failures |
+|---|---|---|
+| test/01_unit/compiler/blocks/block_definition_three_level_spec.spl | 70 | 67 |
+| test/01_unit/app/io/gamepad_ffi_spec.spl | 61 | 22 |
+| test/01_unit/app/io/graphics2d_ffi_spec.spl | 59 | 52 |
+| test/01_unit/compiler/driver/driver_spec.spl | 59 | 9 |
+| test/01_unit/compiler/blocks/pre_lex_info_spec.spl | 49 | 47 |
+| test/01_unit/compiler/backend/instruction_coverage_spec.spl | 47 | 35 |
+| test/01_unit/app/io/http_ffi_spec.spl | 45 | 14 |
+| test/01_unit/app/io/window_ffi_spec.spl | 42 | 39 |
+| test/01_unit/app/io/rapier2d_ffi_spec.spl | 39 | 9 |
+| test/01_unit/compiler/native/arm_neon_spec.spl | 39 | 21 |
+| test/01_unit/compiler/blocks/block_outline_info_spec.spl | 37 | 32 |
+| test/01_unit/compiler/backend/backend_factory_spec.spl | 35 | 34 |
+| test/01_unit/compiler/mono/mono_cache_efficiency_spec.spl | 35 | 5 |
+| test/01_unit/compiler/backend/backend_orchestration_spec.spl | 34 | 21 |
+| test/01_unit/compiler/blocks/pre_lex_per_dsl_spec.spl | 32 | 26 |
+| test/01_unit/compiler/mdsoc/construct_checker_spec.spl | 29 | 11 |
+| test/01_unit/compiler/backend/differential_testing_spec.spl | 27 | 23 |
+| test/01_unit/compiler/dependency/import_resolution_spec.spl | 24 | 17 |
+| test/01_unit/app/io/file_ops_rw_spec.spl | 12 | 1 |
+| test/01_unit/app/leak_check/types_spec.spl | 10 | 1 |
+| test/01_unit/compiler/di/di_proxy_spec.spl | 10 | 5 |
+
+#### All-red (19 files)
+
+| Spec | examples | failures |
+|---|---|---|
+| test/01_unit/compiler/mdsoc/construct_types_spec.spl | 68 | 68 |
+| test/01_unit/app/io/audio_ffi_spec.spl | 61 | 61 |
+| test/01_unit/compiler/dependency/resolution_spec.spl | 35 | 35 |
+| test/01_unit/compiler/dependency/graph_basic_spec.spl | 33 | 33 |
+| test/01_unit/app/lsp/message_dispatcher_spec.spl | 29 | 29 |
+| test/01_unit/app/io/regex_sffi_spec.spl | 25 | 25 |
+| test/01_unit/compiler/semantics/alloc_inference_spec.spl | 23 | 23 |
+| test/01_unit/compiler/mdsoc/config_multi_dim_spec.spl | 22 | 22 |
+| test/01_unit/compiler/semantics/closure_capture_warning_spec.spl | 22 | 22 |
+| test/01_unit/compiler/semantics/call_graph_spec.spl | 21 | 21 |
+| test/01_unit/compiler/mdsoc/cross_query_spec.spl | 19 | 19 |
+| test/01_unit/app/lsp/document_sync_spec.spl | 18 | 18 |
+| test/01_unit/compiler/dependency/symbol_spec.spl | 18 | 18 |
+| test/01_unit/app/lsp/server_lifecycle_spec.spl | 17 | 17 |
+| test/01_unit/compiler/dependency/graph_cycles_spec.spl | 16 | 16 |
+| test/01_unit/compiler/dependency/graph_transitive_spec.spl | 15 | 15 |
+| test/01_unit/compiler/dependency/graph_topo_spec.spl | 13 | 13 |
+| test/01_unit/compiler/dependency/integration_spec.spl | 7 | 7 |
+| test/01_unit/compiler/blocks/easy_api_spec.spl | 3 | 3 |
+
+#### Restores green — coupling UNPROVEN, do not land as-is (9 files)
+
+| Spec | examples | failures |
+|---|---|---|
+| test/01_unit/compiler/semantics/safety_checker_spec.spl | 26 | 0 |
+| test/01_unit/app/io/dir_ops_create_list_spec.spl | 12 | 0 |
+| test/01_unit/app/devtools/devtools_cli_spec.spl | 11 | 0 |
+| test/01_unit/compiler/mdsoc/doc_validation_spec.spl | 5 | 0 |
+| test/01_unit/lib/gc_async_mut/dl/config_loader_spec.spl | 2 | 0 |
+| test/01_unit/lib/gc_async_mut/dl/config_spec.spl | 2 | 0 |
+| test/01_unit/lib/nogc_async_mut/async_host_mt_spec.spl | 2 | 0 |
+| test/01_unit/lib/pure/data_loader_spec.spl | 2 | 0 |
+| test/01_unit/app/io/jit_availability_spec.spl | 1 | 0 |
+
+#### Will not load (stale module/API paths) — 0 examples (181 files)
+
+| Spec |
+|---|
+| test/01_unit/app/diagram/call_flow_profiling_spec.spl |
+| test/01_unit/app/ffi_gen/module_gen_spec.spl |
+| test/01_unit/app/grammar_doc/doc_generator_spec.spl |
+| test/01_unit/app/interpreter/class_method_call_spec.spl |
+| test/01_unit/app/interpreter/debug_spec.spl |
+| test/01_unit/app/interpreter/lazy_seq_spec.spl |
+| test/01_unit/app/interpreter/persistent_dict_spec.spl |
+| test/01_unit/app/interpreter/persistent_vec_spec.spl |
+| test/01_unit/app/io/process_limits_basic_spec.spl |
+| test/01_unit/app/lsp/compiler_query_api_spec.spl |
+| test/01_unit/app/lsp/folding_range_spec.spl |
+| test/01_unit/app/lsp/hover_handler_spec.spl |
+| test/01_unit/app/lsp/hover_spec.spl |
+| test/01_unit/app/lsp/references_spec.spl |
+| test/01_unit/app/lsp/server_query_integration_spec.spl |
+| test/01_unit/app/mcp_unit/capabilities_spec.spl |
+| test/01_unit/app/mcp_unit/di_integration_spec.spl |
+| test/01_unit/app/mcp_unit/editor_spec.spl |
+| test/01_unit/app/mcp_unit/failure_analysis_spec.spl |
+| test/01_unit/app/mcp_unit/fileio_lite_safe_read_spec.spl |
+| test/01_unit/app/mcp_unit/fileio_temp_spec.spl |
+| test/01_unit/app/mcp_unit/mcp_completions_intensive_spec.spl |
+| test/01_unit/app/mcp_unit/mcp_debug_tools_spec.spl |
+| test/01_unit/app/mcp_unit/mcp_dx_helpers_spec.spl |
+| test/01_unit/app/mcp_unit/mcp_jj_commit_spec.spl |
+| test/01_unit/app/mcp_unit/mcp_sampling_spec.spl |
+| test/01_unit/app/mcp_unit/mcp_server_spec.spl |
+| test/01_unit/app/mcp_unit/mcp_spec.spl |
+| test/01_unit/app/mcp_unit/mcp_structured_output_spec.spl |
+| test/01_unit/app/mcp_unit/mcp_subscriptions_spec.spl |
+| test/01_unit/app/mcp_unit/mcp_tasks_spec.spl |
+| test/01_unit/app/mcp_unit/mcp_tools_spec.spl |
+| test/01_unit/app/mcp_unit/outline_renderer_spec.spl |
+| test/01_unit/app/mcp_unit/prompts_compiled_spec.spl |
+| test/01_unit/compiler/async/async_desugar_integration_spec.spl |
+| test/01_unit/compiler/async/async_frame_analysis_spec.spl |
+| test/01_unit/compiler/async/async_mir_spec.spl |
+| test/01_unit/compiler/async/async_pipeline_spec.spl |
+| test/01_unit/compiler/async/async_state_machine_spec.spl |
+| test/01_unit/compiler/async/poll_generator_spec.spl |
+| test/01_unit/compiler/async/state_enum_spec.spl |
+| test/01_unit/compiler/async/suspension_analysis_spec.spl |
+| test/01_unit/compiler/backend/differential_backend_consistency_spec.spl |
+| test/01_unit/compiler/backend/execution_manager_spec.spl |
+| test/01_unit/compiler/backend/expression_evaluator_spec.spl |
+| test/01_unit/compiler/backend/llvm_lib_backend_spec.spl |
+| test/01_unit/compiler/backend/llvm_wasm_spec.spl |
+| test/01_unit/compiler/blocks/block_skip_policy_spec.spl |
+| test/01_unit/compiler/blocks/builder_api_spec.spl |
+| test/01_unit/compiler/blocks/utils_spec.spl |
+| test/01_unit/compiler/config/error_formatter_spec.spl |
+| test/01_unit/compiler/config/literal_config_spec.spl |
+| test/01_unit/compiler/dependency/macro_import_theorems_spec.spl |
+| test/01_unit/compiler/dependency/visibility_integration_spec.spl |
+| test/01_unit/compiler/dependency/visibility_spec.spl |
+| test/01_unit/compiler/di/di_config_spec.spl |
+| test/01_unit/compiler/di/di_runtime_spec.spl |
+| test/01_unit/compiler/di/di_validation_spec.spl |
+| test/01_unit/compiler/driver/compiler_shared_di_check_spec.spl |
+| test/01_unit/compiler/driver/pipeline_basic_spec.spl |
+| test/01_unit/compiler/driver/pipeline_mir_spec.spl |
+| test/01_unit/compiler/driver/pipeline_var_spec.spl |
+| test/01_unit/compiler/hir/hir_async_errors_spec.spl |
+| test/01_unit/compiler/hir/hir_async_integration_spec.spl |
+| test/01_unit/compiler/hir/hir_async_spec.spl |
+| test/01_unit/compiler/hir/hir_lowering_spec.spl |
+| test/01_unit/compiler/hir/hir_new_spec.spl |
+| test/01_unit/compiler/macros/macro_integration_spec.spl |
+| test/01_unit/compiler/mdsoc/vc_import_spec.spl |
+| test/01_unit/compiler/mdsoc/vc_static_spec.spl |
+| test/01_unit/compiler/mir/mir_data_spec.spl |
+| test/01_unit/compiler/mir/mir_enum_access_spec.spl |
+| test/01_unit/compiler/mir/mir_opt_spec.spl |
+| test/01_unit/compiler/mir/mir_serialization_spec.spl |
+| test/01_unit/compiler/mono/monomorphize_spec.spl |
+| test/01_unit/compiler/mono/note_sdn_bdd_spec.spl |
+| test/01_unit/compiler/mono/note_sdn_spec.spl |
+| test/01_unit/compiler/native/auto_vectorize_spec.spl |
+| test/01_unit/compiler/native/cli_interpreter_path_spec.spl |
+| test/01_unit/compiler/native/native_compile_spec.spl |
+| test/01_unit/compiler/parser/ast_debug_spec.spl |
+| test/01_unit/compiler/parser/defer_spec.spl |
+| test/01_unit/compiler/parser/do_block_spec.spl |
+| test/01_unit/compiler/parser/dyn_trait_spec.spl |
+| test/01_unit/compiler/parser/grammar_compile_spec.spl |
+| test/01_unit/compiler/parser/lexer_contextual_keywords_spec.spl |
+| test/01_unit/compiler/parser/parse_error_spec.spl |
+| test/01_unit/compiler/parser/parse_formats_spec.spl |
+| test/01_unit/compiler/parser/parser_factory_spec.spl |
+| test/01_unit/compiler/parser/parser_new_spec.spl |
+| test/01_unit/compiler/parser/parser_outline_spec.spl |
+| test/01_unit/compiler/parser/parser_step_spec.spl |
+| test/01_unit/compiler/parser/struct_update_spec.spl |
+| test/01_unit/compiler/semantics/arch_rules_syntax_spec.spl |
+| test/01_unit/compiler/semantics/borrow_check_spec.spl |
+| test/01_unit/compiler/semantics/comptime_spec.spl |
+| test/01_unit/compiler/semantics/effect_inference_spec.spl |
+| test/01_unit/compiler/semantics/resolve_spec.spl |
+| test/01_unit/compiler/target/target_spec_spec.spl |
+| test/01_unit/compiler/traits/associated_types_trait_spec.spl |
+| test/01_unit/compiler/type/runtime_type_check_spec.spl |
+| test/01_unit/compiler/type_checker/type_inference_executable_spec.spl |
+| test/01_unit/compiler/type_inference/bidir_type_check_spec.spl |
+| test/01_unit/compiler/type_inference/type_infer_comprehensive_spec.spl |
+| test/01_unit/compiler/type_inference/variance_inference_spec.spl |
+| test/01_unit/compiler_core/branch_coverage_31_spec.spl |
+| test/01_unit/compiler_core/branch_coverage_33_spec.spl |
+| test/01_unit/compiler_core/branch_coverage_36_spec.spl |
+| test/01_unit/compiler_core/eager_yield_spec.spl |
+| test/01_unit/compiler_core/must_use_spec.spl |
+| test/01_unit/compiler_core/structural_subtyping_spec.spl |
+| test/01_unit/lib/common/error_trace_spec.spl |
+| test/01_unit/lib/common/iterable_spec.spl |
+| test/01_unit/lib/common/mock_spec.spl |
+| test/01_unit/lib/common/phantom_spec.spl |
+| test/01_unit/lib/common/pure/nn/attention_spec.spl |
+| test/01_unit/lib/common/pure/nn/conv_integration_spec.spl |
+| test/01_unit/lib/common/pure/nn/embedding_backward_spec.spl |
+| test/01_unit/lib/common/pure/nn/embedding_integration_spec.spl |
+| test/01_unit/lib/common/pure/nn/embedding_spec.spl |
+| test/01_unit/lib/common/pure/nn/pooling_integration_spec.spl |
+| test/01_unit/lib/common/pure/nn/serialization_spec.spl |
+| test/01_unit/lib/common/repr_spec.spl |
+| test/01_unit/lib/common/seq_ce_e2e_spec.spl |
+| test/01_unit/lib/common/seq_ce_spec.spl |
+| test/01_unit/lib/common/string_compiled_spec.spl |
+| test/01_unit/lib/common/tap_spec.spl |
+| test/01_unit/lib/ml/activation_spec.spl |
+| test/01_unit/lib/ml/custom_autograd_spec.spl |
+| test/01_unit/lib/ml/fft_spec.spl |
+| test/01_unit/lib/ml/simple_math_spec.spl |
+| test/01_unit/lib/ml/test_ffi_operator_spec.spl |
+| test/01_unit/lib/nogc_async_mut/async_embedded_spec.spl |
+| test/01_unit/lib/nogc_async_mut/game3d/assets_spec.spl |
+| test/01_unit/lib/nogc_async_mut/game3d/input_spec.spl |
+| test/01_unit/lib/nogc_async_mut/game3d/material_spec.spl |
+| test/01_unit/lib/nogc_async_mut/game3d/physics_spec.spl |
+| test/01_unit/lib/nogc_async_mut/io/event_loop_spec.spl |
+| test/01_unit/lib/nogc_async_mut/ml/activation_spec.spl |
+| test/01_unit/lib/nogc_async_mut/ml/async_training_spec.spl |
+| test/01_unit/lib/nogc_async_mut/ml/custom_autograd_spec.spl |
+| test/01_unit/lib/nogc_async_mut/ml/data_pipeline_spec.spl |
+| test/01_unit/lib/nogc_async_mut/ml/fft_spec.spl |
+| test/01_unit/lib/nogc_async_mut/ml/pure_load_spec.spl |
+| test/01_unit/lib/nogc_async_mut/ml/simple_math_spec.spl |
+| test/01_unit/lib/nogc_async_mut/ml/test_ffi_operator_spec.spl |
+| test/01_unit/lib/physics/aabb_spec.spl |
+| test/01_unit/lib/physics/contact_spec.spl |
+| test/01_unit/lib/physics/materials_spec.spl |
+| test/01_unit/lib/physics/rigidbody_spec.spl |
+| test/01_unit/lib/physics/shapes_spec.spl |
+| test/01_unit/lib/physics/spatial_hash_spec.spl |
+| test/01_unit/lib/physics/vector_spec.spl |
+| test/01_unit/lib/ptr/ptr_spec.spl |
+| test/01_unit/lib/pure/autograd_advanced_spec.spl |
+| test/01_unit/lib/pure/autograd_extended_spec.spl |
+| test/01_unit/lib/pure/nn/attention_spec.spl |
+| test/01_unit/lib/pure/nn/conv_integration_spec.spl |
+| test/01_unit/lib/pure/nn/conv_spec.spl |
+| test/01_unit/lib/pure/nn/embedding_backward_spec.spl |
+| test/01_unit/lib/pure/nn/embedding_integration_spec.spl |
+| test/01_unit/lib/pure/nn/embedding_spec.spl |
+| test/01_unit/lib/pure/nn/functional_spec.spl |
+| test/01_unit/lib/pure/nn/init_spec.spl |
+| test/01_unit/lib/pure/nn/loss_spec.spl |
+| test/01_unit/lib/pure/nn/norm_spec.spl |
+| test/01_unit/lib/pure/nn/pooling_integration_spec.spl |
+| test/01_unit/lib/pure/nn/pooling_spec.spl |
+| test/01_unit/lib/pure/nn/serialization_spec.spl |
+| test/01_unit/lib/pure/nn_extended_spec.spl |
+| test/01_unit/lib/pure/optim/scheduler_spec.spl |
+| test/01_unit/lib/pure/training_extended_spec.spl |
+| test/01_unit/lib/pure/training_spec.spl |
+| test/01_unit/lib/torch_spec.spl |
+| test/01_unit/os/crypto/ffdhe_kat_spec.spl |
+| test/01_unit/std/mock_spec.spl |
+| test/02_integration/baremetal/remote_riscv32_spec.spl |
+| test/02_integration/compiler/llvm_backend_e2e_spec.spl |
+| test/02_integration/compiler/llvm_compiled_proof_spec.spl |
+| test/02_integration/compiler/llvm_native_link_spec.spl |
+| test/02_integration/compiler/llvm_parity_spec.spl |
+
+Dominant failure shapes in the two red classes, for triage:
+
+- `semantic: unknown extern function: rt_*` — the FFI specs (audio, regex,
+  gamepad, graphics2d, http, window). Identical under the default engine and
+  under `SIMPLE_EXECUTION_MODE=interpret`, so NOT an interpreter artifact.
+- `unknown static method new on class X` / `variable X not found` — the
+  compiler/dependency (ImportGraph, FileSystem, ModPath, SymbolTable) and
+  compiler/mdsoc (ConstructCapsule, CrossDimensionQuery) clusters. 7 + 4 files,
+  ~275 examples, all-red.
+
