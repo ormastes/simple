@@ -2,7 +2,8 @@
 
 ## Status
 
-Open; next x86 Phase 4 blocker retained on 2026-08-04.
+Resolved in source on 2026-08-04; the next x86 Phase 4 blocker is tracked
+separately in `stage4_db_atomic_physical_owner_2026_08_04.md`.
 
 ## Symptom
 
@@ -18,9 +19,15 @@ lint, CLI handler, and leak-check repairs. HIR lowering then reported four
 - semantic threshold positional option;
 - semantic threshold `--name=value` option.
 
-## Next action
+## Repair and evidence
 
-In a fresh bounded session, reproduce the four conversions with a focused
-duplicate-check native contract, identify the canonical text-to-`f64` owner,
-replace only the non-canonical conversions, and retain threshold parsing and
-invalid-input behavior. Do not widen HIR resolution or add a runtime alias.
+The four legacy constructors now use the canonical optional
+`text.parse_float()` method. A failed parse becomes the existing out-of-range
+sentinel and is rejected by `config_validation_error`; malformed CLI values
+therefore retain exit 2 instead of becoming a valid zero threshold.
+
+`test/03_system/native/stage4_duplicate_check_hir_contract.spl` retains both
+malformed split/equal forms. The focused native shard crossed parsing, HIR, and
+object generation, then stopped only at the deliberately narrow core bundle's
+unrelated `rt_http_request` link boundary. Production Phase 4 cycle 1 crossed
+all four sites and advanced to `test_runner_main.spl`.
