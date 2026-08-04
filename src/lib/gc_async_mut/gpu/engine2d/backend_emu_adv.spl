@@ -96,9 +96,14 @@ fn emu_draw_image_blend(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32,
     core.draw_image(x, y, w, h, result)
 
 # ============================================================================
-# Box Blur — full O((2*radius+1)^2) 2D convolution on framebuffer region
-# (NOT separable: each output pixel re-sums the full square tap window rather
-# than a horizontal pass followed by a vertical pass)
+# Box Blur — exact bounded convolution on framebuffer region.
+#
+# Radii up to seven use rolling horizontal and vertical sums. Horizontal
+# channel sums fit in 12 bits at that bound, so one u64 scratch value carries
+# all four channels. The vertical pass accumulates those unrounded sums and
+# performs the only division at the output pixel. This is byte-identical to
+# the full square-tap reference below, including clipped-edge sample counts;
+# it avoids the rounding drift of a conventional separable blur.
 # ============================================================================
 
 fn emu_draw_blur_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, radius: i32):
@@ -108,6 +113,109 @@ fn emu_draw_blur_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, r
     val fb_w = core.width()
     val fb_h = core.height()
     var temp: [u32] = [0u32; w * h]
+    if radius <= 7:
+        val source_y0 = _emu_max(0, y - radius)
+        val source_y1 = _emu_min(fb_h, y + h + radius)
+        val source_rows = _emu_max(0, source_y1 - source_y0)
+        if source_rows == 0:
+            core.draw_image(x, y, w, h, temp)
+            return
+        var horizontal: [u64] = [0u64; w * source_rows]
+        var source_row = 0
+        while source_row < source_rows:
+            val source_y = source_y0 + source_row
+            var sr: i64 = 0
+            var sg: i64 = 0
+            var sb: i64 = 0
+            var sa: i64 = 0
+            var sample_x = _emu_max(0, x - radius)
+            val first_x_end = _emu_min(fb_w, x + radius + 1)
+            while sample_x < first_x_end:
+                val p = fb[source_y * fb_w + sample_x]
+                sr = sr + (((p >> 16) & 0xFFu32) as i64)
+                sg = sg + (((p >> 8) & 0xFFu32) as i64)
+                sb = sb + ((p & 0xFFu32) as i64)
+                sa = sa + (((p >> 24) & 0xFFu32) as i64)
+                sample_x = sample_x + 1
+            var px: i32 = 0
+            while px < w:
+                if px > 0:
+                    val leaving_x = x + px - radius - 1
+                    if leaving_x >= 0 and leaving_x < fb_w:
+                        val p = fb[source_y * fb_w + leaving_x]
+                        sr = sr - (((p >> 16) & 0xFFu32) as i64)
+                        sg = sg - (((p >> 8) & 0xFFu32) as i64)
+                        sb = sb - ((p & 0xFFu32) as i64)
+                        sa = sa - (((p >> 24) & 0xFFu32) as i64)
+                    val entering_x = x + px + radius
+                    if entering_x >= 0 and entering_x < fb_w:
+                        val p = fb[source_y * fb_w + entering_x]
+                        sr = sr + (((p >> 16) & 0xFFu32) as i64)
+                        sg = sg + (((p >> 8) & 0xFFu32) as i64)
+                        sb = sb + ((p & 0xFFu32) as i64)
+                        sa = sa + (((p >> 24) & 0xFFu32) as i64)
+                horizontal[source_row * w + px] = (
+                    sr.to_u64() |
+                    (sg.to_u64() << 12) |
+                    (sb.to_u64() << 24) |
+                    (sa.to_u64() << 36)
+                )
+                px = px + 1
+            source_row = source_row + 1
+
+        var px: i32 = 0
+        while px < w:
+            var sr: i64 = 0
+            var sg: i64 = 0
+            var sb: i64 = 0
+            var sa: i64 = 0
+            val first_y0 = _emu_max(0, y - radius)
+            val first_y1 = _emu_min(fb_h, y + radius + 1)
+            var sample_y = first_y0
+            while sample_y < first_y1:
+                val packed = horizontal[(sample_y - source_y0) * w + px]
+                sr = sr + ((packed & 0xFFFu64) as i64)
+                sg = sg + (((packed >> 12) & 0xFFFu64) as i64)
+                sb = sb + (((packed >> 24) & 0xFFFu64) as i64)
+                sa = sa + (((packed >> 36) & 0xFFFu64) as i64)
+                sample_y = sample_y + 1
+            val sample_x0 = _emu_max(0, x + px - radius)
+            val sample_x1 = _emu_min(fb_w, x + px + radius + 1)
+            val horizontal_count = sample_x1 - sample_x0
+            var py: i32 = 0
+            while py < h:
+                if py > 0:
+                    val leaving_y = y + py - radius - 1
+                    if leaving_y >= source_y0 and leaving_y < source_y1:
+                        val packed = horizontal[(leaving_y - source_y0) * w + px]
+                        sr = sr - ((packed & 0xFFFu64) as i64)
+                        sg = sg - (((packed >> 12) & 0xFFFu64) as i64)
+                        sb = sb - (((packed >> 24) & 0xFFFu64) as i64)
+                        sa = sa - (((packed >> 36) & 0xFFFu64) as i64)
+                    val entering_y = y + py + radius
+                    if entering_y >= source_y0 and entering_y < source_y1:
+                        val packed = horizontal[(entering_y - source_y0) * w + px]
+                        sr = sr + ((packed & 0xFFFu64) as i64)
+                        sg = sg + (((packed >> 12) & 0xFFFu64) as i64)
+                        sb = sb + (((packed >> 24) & 0xFFFu64) as i64)
+                        sa = sa + (((packed >> 36) & 0xFFFu64) as i64)
+                val sample_y0 = _emu_max(0, y + py - radius)
+                val sample_y1 = _emu_min(fb_h, y + py + radius + 1)
+                val count = horizontal_count * (sample_y1 - sample_y0)
+                if count > 0:
+                    temp[py * w + px] = rgba(
+                        (sr / count.to_i64()).to_i32(),
+                        (sg / count.to_i64()).to_i32(),
+                        (sb / count.to_i64()).to_i32(),
+                        (sa / count.to_i64()).to_i32()
+                    )
+                py = py + 1
+            px = px + 1
+        core.draw_image(x, y, w, h, temp)
+        return
+
+    # Reference path retained for radii whose horizontal sums exceed the
+    # compact 12-bit scratch representation used above.
     var py: i32 = 0
     # cpu-lane-loop-ok: box blur scanline walk: one iteration per destination row
     while py < h:

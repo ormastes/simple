@@ -1,0 +1,118 @@
+# Focused freestanding proof that the rolling Engine2D blur remains byte-exact
+# with the original square-tap convolution, including framebuffer clipping.
+
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+
+extern fn serial_println(msg: text)
+extern fn rt_port_outb(port: u16, value: u8)
+
+fn _pixel(r: i32, g: i32, b: i32, a: i32) -> u32:
+    (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+
+fn _fixture(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0u32; width * height]
+    var i = 0
+    while i < pixels.len():
+        pixels[i] = _pixel(
+            (i * 37 + 11) % 256,
+            (i * 53 + 29) % 256,
+            (i * 71 + 47) % 256,
+            (i * 19 + 131) % 256
+        )
+        i = i + 1
+    pixels
+
+fn _reference_blur(
+    source: [u32], framebuffer_width: i32, framebuffer_height: i32,
+    x: i32, y: i32, width: i32, height: i32, radius: i32
+) -> [u32]:
+    var result = source
+    var py = 0
+    while py < height:
+        var px = 0
+        while px < width:
+            var sr = 0
+            var sg = 0
+            var sb = 0
+            var sa = 0
+            var count = 0
+            var ky = -radius
+            while ky <= radius:
+                var kx = -radius
+                while kx <= radius:
+                    val fx = x + px + kx
+                    val fy = y + py + ky
+                    if (
+                        fx >= 0 and fx < framebuffer_width and
+                        fy >= 0 and fy < framebuffer_height
+                    ):
+                        val p = source[fy * framebuffer_width + fx]
+                        sr = sr + (((p >> 16) & 0xFFu32) as i32)
+                        sg = sg + (((p >> 8) & 0xFFu32) as i32)
+                        sb = sb + ((p & 0xFFu32) as i32)
+                        sa = sa + (((p >> 24) & 0xFFu32) as i32)
+                        count = count + 1
+                    kx = kx + 1
+                ky = ky + 1
+            val dx = x + px
+            val dy = y + py
+            if (
+                count > 0 and dx >= 0 and dx < framebuffer_width and
+                dy >= 0 and dy < framebuffer_height
+            ):
+                result[dy * framebuffer_width + dx] = _pixel(
+                    sr / count, sg / count, sb / count, sa / count
+                )
+            px = px + 1
+        py = py + 1
+    result
+
+fn _render_blur(
+    source: [u32], framebuffer_width: i32, framebuffer_height: i32,
+    x: i32, y: i32, width: i32, height: i32, radius: i32
+) -> [u32]:
+    var backend = SoftwareBackend.create()
+    backend.init(framebuffer_width, framebuffer_height)
+    backend.draw_image(
+        0, 0, framebuffer_width, framebuffer_height, source
+    )
+    backend.draw_blur_rect(x, y, width, height, radius)
+    backend.read_pixels()
+
+fn _equal(left: [u32], right: [u32]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+fn _case(
+    framebuffer_width: i32, framebuffer_height: i32,
+    x: i32, y: i32, width: i32, height: i32, radius: i32
+) -> bool:
+    val source = _fixture(framebuffer_width, framebuffer_height)
+    _equal(
+        _render_blur(
+            source, framebuffer_width, framebuffer_height,
+            x, y, width, height, radius
+        ),
+        _reference_blur(
+            source, framebuffer_width, framebuffer_height,
+            x, y, width, height, radius
+        )
+    )
+
+fn _start():
+    val centered = _case(8, 6, 1, 1, 6, 4, 4)
+    val clipped = _case(7, 5, -2, -1, 6, 5, 2)
+    serial_println(
+        "[engine2d-blur-probe] centered={centered} clipped={clipped}"
+    )
+    if centered and clipped:
+        serial_println("ENGINE2D_BLUR_EXACT_PROBE_PASS")
+        rt_port_outb(0xf4u16, 0x03u8)
+    serial_println("ENGINE2D_BLUR_EXACT_PROBE_FAIL")
+    rt_port_outb(0xf4u16, 0x04u8)
