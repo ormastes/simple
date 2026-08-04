@@ -688,7 +688,62 @@ impl HirLowering:
                 self.imported_traits[local_name] = hir_surface_trait_to_trait(imported_mod.traits[imported_name], local_name)
             # lower_impl materializes defaults only when this trait is used.
         elif imported_mod.type_aliases.contains_key(imported_name):
-            val already_bound = self.symbols.lookup(local_name).?
+            # TAL3 (2026-08-04): an IMPORTED `type X = Y` alias was never entered
+            # into the importing module's symbol table, so every use of it in
+            # type position died with "unresolved type: X". This is the import-
+            # side twin of TAL2 below, which fixed the same asymmetry for a
+            # module's OWN aliases.
+            #
+            # The mechanism is `lookup(..).?`: it builds an Option<SymbolId>, and
+            # that Option's nil case does not survive the staged native ABI -- it
+            # reads as PRESENT even when the name is unbound. claim_materialized_
+            # payload_binding below already documents exactly this hazard and
+            # already uses lookup_or_invalid to dodge it ("Avoid constructing or
+            # unwrapping Option<SymbolId> on the staged native ABI").
+            #
+            # Why only aliases broke: the composite / enum / trait branches above
+            # call `define` UNCONDITIONALLY and use `already_bound` only to guard
+            # the rename, so a false "already bound" is harmless there. This
+            # branch guarded the DEFINE itself, so the false positive meant the
+            # alias was never defined at all.
+            #
+            # Repro (probe m4): module A declares `type Prov2Alias = Prov2Thing`
+            # and exports it; module B in a DIFFERENT directory does
+            # `use ...prov2.{Prov2Thing, Prov2Alias}` and annotates a parameter
+            # `v: Prov2Alias` -> "unresolved type: Prov2Alias". Stage-3 hit this
+            # as `unresolved type: Symbol` in backend/interpreter.spl, which
+            # imports `type Symbol = HirSymbol` from compiler.hir.hir_types.
+            #
+            # The guard itself is kept (not dropped in favour of an unconditional
+            # define): SymbolTable.define's first-write-wins list does not cover
+            # TypeAlias, so an alias cycle or a competing import could otherwise
+            # shadow the first binding.
+            #
+            # Binding the alias to its TARGET's declaration (rather than to a
+            # bare TypeAlias symbol with a nil type) is the other half of the
+            # fix. `define(.., SymbolKind.TypeAlias, nil, ..)` records the NAME
+            # but no type, so the name resolved and then every field access
+            # through it died with "runtime error: field access on nil receiver"
+            # -- the alias-shaped crash simply replaced the alias-shaped
+            # "unresolved type". Re-registering the alias under the target's own
+            # decl kind gives the local name a real type, so `v.field` and
+            # method dispatch behave exactly as they do through the target name.
+            #
+            # Only a single-name target that the SAME module declares as a
+            # NON-alias is followed. That keeps this strictly non-recursive (the
+            # re-entry can only land on a composite / enum / trait / callable /
+            # const branch, never back here), so an `type A = B` / `type B = A`
+            # cycle cannot spin. Generic and compound targets (`type M = {text:
+            # V}`, `type Symbol = text`) have no single declared target and keep
+            # the plain TypeAlias binding below.
+            val alias_decl = imported_mod.type_aliases[imported_name]
+            val alias_targets = parser_type_named_dependencies(alias_decl.type_)
+            if alias_decl.type_params.len() == 0 and alias_targets.len() == 1:
+                val alias_target = alias_targets[0]
+                if alias_target != imported_name and not imported_mod.type_aliases.contains_key(alias_target) and hir_module_declares_item(imported_mod, alias_target):
+                    self.register_imported_symbol(imported_mod, imported_mod_name, alias_target, local_name, import_span, materialize_enum)
+                    return
+            val already_bound = self.symbols.lookup_or_invalid(local_name).is_valid()
             if not already_bound:
                 # SymbolTable.define's type-level first-write-wins list does
                 # not include TypeAlias. Guard the define itself so an alias
