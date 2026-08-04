@@ -59,14 +59,17 @@ Owner: `app.startup.aspect_lifecycle_gate`.
 class AspectLifecycleGate
 
 fn aspect_lifecycle_gate_create() -> AspectLifecycleGate
-fn with_lock_keeping<T>(operation: text, body: fn() -> T) -> T
 ```
 
-`with_lock_keeping` blocks without polling and returns the exact generic body
-result. It delegates to the canonical mutex guard form and exposes no manual
-lock, unlock, ticket, or guard value. The body is restricted to callback-free
-canonical-state work; application I/O and advice invocation occur between
-separate scopes.
+The gate is an identity/container only. `AspectExecutionContext` calls
+`mutex_with_lock_keeping(context.lifecycle_gate.mutex, 0, body)` directly.
+This single cross-module hop lets the mutex module invoke the application
+closure without forwarding it through a gate-module trampoline; the latter is
+a documented interpreter deadlock shape. Simple has no evidenced peer-only
+field visibility, so the mutex field is owner-only by convention and the gate
+is not re-exported by the startup facade. The body is restricted to
+callback-free canonical-state work; application I/O and advice invocation
+occur between separate scopes.
 
 Simple currently has no catch/unwind boundary. A panic inside the body is
 process fail-stop, not a recoverable cleanup path; the design does not claim
@@ -157,12 +160,12 @@ an isolated lifecycle value. `AspectExecutionContext` must use the split API.
 ```text
 acquire_or_activate_facet_descriptor
   -> lazy_singleflight.begin(route)
-  -> lifecycle_gate.with_lock_keeping("lazy-preflight", \:
+  -> mutex_with_lock_keeping(lifecycle_gate.mutex, 0, \: # lazy-preflight
        acquire_published_facet_descriptor_under_lifecycle_gate
        coordinator.reserve (owner only)
        install reserved coordinator)
   -> pack_io.load_exact_route                    [callback; no lifecycle owner]
-  -> lifecycle_gate.with_lock_keeping("lazy-commit", \:
+  -> mutex_with_lock_keeping(lifecycle_gate.mutex, 0, \: # lazy-commit
        revalidate reservation + catalog generation + policy
        activate_pack_bytes_under_lifecycle_gate [decode/map/publish; no app callback]
        acquire descriptor lease)
@@ -179,7 +182,7 @@ exists; it must not silently wait on itself.
 
 ```text
 compiler context ABI
-  -> lifecycle_gate.with_lock_keeping("facet-acquire" | "facet-release", \:
+  -> mutex_with_lock_keeping(lifecycle_gate.mutex, 0, \: # facet acquire/release
        registry lookup + canonical token acquire/release)
 ```
 
@@ -189,11 +192,11 @@ Each caller receives its own lease. Single-flight success never shares a lease.
 
 ```text
 prepared_advice_dispatch_context_invoke
-  -> lifecycle_gate.with_lock_keeping("advice-prepare", \:
+  -> mutex_with_lock_keeping(lifecycle_gate.mutex, 0, \: # advice prepare
        advice_dispatch_projection_prepare(current state)
        install returned registry + lifecycle)        [pins are now canonical]
   -> advice_dispatch_permit_invoke               [callbacks; no lifecycle owner]
-  -> lifecycle_gate.with_lock_keeping("advice-finalize", \:
+  -> mutex_with_lock_keeping(lifecycle_gate.mutex, 0, \: # advice finalize
        advice_dispatch_projection_finalize(current state, permit, receipt)
        install returned registry + lifecycle)
   -> return receipt values/error
@@ -208,7 +211,7 @@ reclaim the generation.
 
 ```text
 unload_published_aspect
-  -> lifecycle_gate.with_lock_keeping("unload", \:
+  -> mutex_with_lock_keeping(lifecycle_gate.mutex, 0, \: # unload
        authorize; remove facet/advice/projection visibility; quiesce
        if pinned: commit quiescing state and return "quiescing"
        else: validate cache pins; unmap owners; release/invalidate cache;
@@ -249,8 +252,8 @@ never copied back by finalization.
   matching followers with the same typed error.
 - Activation commit failure: roll back only transaction-owned loader/cache
   material under the gate, clear the reservation, then complete the flight.
-- Empty scoped-operation identity fails before mutex acquisition. Do not invoke
-  callbacks or reclaim code from a lifecycle-gate body.
+- Do not invoke callbacks or wait for external progress from a lifecycle-gate
+  body.
 
 ## Required deterministic tests
 
