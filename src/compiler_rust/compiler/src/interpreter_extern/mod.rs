@@ -110,6 +110,7 @@ pub mod span_sffi;
 pub mod rc;
 pub mod wsffi;
 pub mod crypto;
+pub mod sha256;
 pub mod sha512;
 pub mod dynamic_sffi;
 #[cfg(feature = "gui")]
@@ -1604,6 +1605,17 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_sha1_new", crypto::rt_sha1_new);
     insert_simple!("rt_sha1_reset", crypto::rt_sha1_reset);
     insert_simple!("rt_sha1_write", crypto::rt_sha1_write);
+    // SHA-256 hasher family. Previously AOT-only: the native symbols exist in
+    // `simple_runtime` but `rt_sha256_write` takes a raw `(*const u8, u64)`
+    // pointer pair and `rt_sha256_finish` returns a packed `RuntimeValue`,
+    // neither of which the `dynamic_sffi` i64-coercing fallthrough can express.
+    // See `interpreter_extern/sha256.rs` and
+    // doc/08_tracking/bug/vulkan_font_whole_atlas_sha256_per_upload_2026-08-04.md.
+    insert_simple!("rt_sha256_finish", sha256::rt_sha256_finish);
+    insert_simple!("rt_sha256_free", sha256::rt_sha256_free);
+    insert_simple!("rt_sha256_new", sha256::rt_sha256_new);
+    insert_simple!("rt_sha256_reset", sha256::rt_sha256_reset);
+    insert_simple!("rt_sha256_write", sha256::rt_sha256_write);
     insert_simple!("rt_simd_add_f32x4", simd::rt_simd_add_f32x4);
     insert_simple!("rt_simd_add_f32x8", simd::rt_simd_add_f32x8);
     insert_simple!("rt_simd_add_f64x4", simd::rt_simd_add_f64x4);
@@ -2606,6 +2618,29 @@ mod tests {
     fn dispatch_registers_rt_cli_arg_count_and_at() {
         assert!(EXTERN_DISPATCH.contains_key("rt_cli_arg_count"));
         assert!(EXTERN_DISPATCH.contains_key("rt_cli_arg_at"));
+    }
+
+    /// The SHA-256 hasher family must stay registered for the interpreter.
+    ///
+    /// Before this registration the family was AOT-only, so every interpreted
+    /// caller fell through to `dynamic_sffi`, which cannot express either the
+    /// native `(*const u8, u64)` argument pair or the packed `RuntimeValue`
+    /// return. Interpreted SHA-256 therefore had to be done in pure Simple at
+    /// ~7.2 KB/s — a 624 s cost on a single 4 MB font atlas
+    /// (doc/08_tracking/bug/vulkan_font_whole_atlas_sha256_per_upload_2026-08-04.md).
+    /// A stale-WC sync that dropped these lines would silently reinstate that
+    /// cliff, so it is guarded here.
+    #[test]
+    fn dispatch_registers_sha256_hasher_family() {
+        for name in [
+            "rt_sha256_new",
+            "rt_sha256_write",
+            "rt_sha256_finish",
+            "rt_sha256_reset",
+            "rt_sha256_free",
+        ] {
+            assert!(EXTERN_DISPATCH.contains_key(name), "{} not registered", name);
+        }
     }
 
     #[test]
