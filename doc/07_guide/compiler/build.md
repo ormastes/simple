@@ -173,6 +173,13 @@ Stage 2: Pure Simple (compiled by Rust seed)
   -> Backend: selected backend (LLVM default; Cranelift supported)
 
 Stage 3: Self-Hosted (compiled by Stage 2)
+
+If Stage 2 was already admitted but Stage 3 was externally killed, resume only
+through `scripts/bootstrap/bootstrap-from-scratch.sh
+--resume-stage3-from-admitted=OUTPUT --jobs=1`.
+The recovery uses a separate evidence lane, one self-host worker, the frozen
+admitted compiler/runtime, and fails if source, git, tool, or runtime snapshots
+change. It never rebuilds Stage 2.
   stage2 native-build --entry bootstrap_main.spl
   -> build/bootstrap/stage3/<triple>/simple
   -> Backend: selected backend (LLVM default; Cranelift supported)

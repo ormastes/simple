@@ -31,6 +31,9 @@ Options:
   --full-bootstrap   Rebuild the Rust seed/runtime when missing or stale, then
                      rebuild the pure-Simple stages. Without this flag bootstrap
                      never runs cargo and reuses the existing Rust seed.
+  --resume-stage3-from-admitted=<output>
+                     Resume only Stage 3 from OUTPUT's frozen admitted Stage 2
+                     using a new one-thread recovery transcript/evidence lane.
   --pure-simple      Compatibility alias for the default no-Rust rebuild mode.
   --mode=<name>      Pure-Simple build mode: dynload or one-binary
                      (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
@@ -87,6 +90,7 @@ verbose=0
 jobs=""
 pure_simple=0
 full_bootstrap=0
+resume_stage3_output=""
 full_cli=0
 fresh_cache=0
 release_tests=0
@@ -126,6 +130,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --full-bootstrap)
       full_bootstrap=1
+      ;;
+    --resume-stage3-from-admitted=*)
+      resume_stage3_output=${1#*=}
       ;;
     --pure-simple)
       pure_simple=1
@@ -245,6 +252,18 @@ case "${execution_profile}" in
     exit 1
     ;;
 esac
+
+if [ -n "${resume_stage3_output}" ]; then
+  [ "${full_bootstrap}" -eq 0 ] && [ "${full_cli}" -eq 0 ] &&
+    [ "${fresh_cache}" -eq 0 ] && [ "${deploy}" -eq 0 ] &&
+    [ "${release_tests}" -eq 0 ] && [ "${diagnostic_sweep}" -eq 0 ] &&
+    [ "${diagnostics_mode}" = off ] || {
+    echo "error: Stage 3 resume is mutually exclusive with rebuild/deploy/diagnostic options" >&2
+    exit 1
+  }
+  case "${jobs}" in ''|1) ;; *) echo "error: Stage 3 resume permits only --jobs=1" >&2; exit 1 ;; esac
+  exec "$(dirname -- "$0")/resume-stage3-from-admitted.sh" "${resume_stage3_output}"
+fi
 
 case "${diagnostics_mode}" in
   off) ;;
