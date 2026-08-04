@@ -15,6 +15,7 @@
 #   inference_expr_ops.spl — infer_binary_op, infer_unary_op, narrowing helpers
 
 use compiler.hir.hir.*
+use compiler.hir.hir_unwind_effects.{hir_effects_unwind_kind}
 use compiler.frontend.core.lexer.*
 use compiler.types.dim_constraints.*
 use compiler.traits.traits.*
@@ -436,6 +437,18 @@ impl HmInferContext:
                             case Function(_, _, effects): effects
                             case _: []
 
+                        # Calls cannot guess unwind behavior from an absent or
+                        # conflicting effect set. Symbol/import/method/static/
+                        # trait resolution all converge on this typed callee.
+                        match resolved_callee.kind:
+                            case Function(_, _, function_effects):
+                                val unwind_kind = hir_effects_unwind_kind(
+                                    function_effects)
+                                if unwind_kind.is_err():
+                                    return Err(TypeInferError.Other(
+                                        unwind_kind.unwrap_err(), span))
+                            case _: ()
+
                         # Accumulate callee effects into current function context
                         for eff in callee_effects:
                             self.accumulate_effect(eff)
@@ -466,7 +479,8 @@ impl HmInferContext:
 
                         val ret_ty = self.fresh_var(span)
                         val expected_fn_ty = HirType(
-                            kind: HirTypeKind.Function(arg_types, ret_ty, []),
+                            kind: HirTypeKind.Function(
+                                arg_types, ret_ty, callee_effects),
                             span: span
                         )
 

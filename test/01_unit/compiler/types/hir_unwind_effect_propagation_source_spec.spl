@@ -1,0 +1,46 @@
+# @cover src/compiler/30.types/type_infer/core.spl
+# @cover src/compiler/30.types/type_infer/inference_expr.spl
+# @cover src/compiler/30.types/type_infer/inference_effects.spl
+# @cover src/compiler/30.types/type_infer_types.spl
+# @cover src/compiler/30.types/type_infer/generalization.spl
+
+extern fn rt_file_read_text(path: text) -> text
+
+use std.spec.*
+
+fn type_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "Typed HIR unwind-effect propagation":
+    it "preserves function effects through substitution and generalization":
+        val substitution = type_source(
+            "src/compiler/30.types/type_infer_types.spl")
+        val generalization = type_source(
+            "src/compiler/30.types/type_infer/generalization.spl")
+        expect(substitution).to_contain(
+            "HirTypeKind.Function(new_params, self.apply(ret), effects)")
+        expect(generalization).to_contain(
+            "HirTypeKind.Function(new_params, self.instantiate_type(ret, var_map), effects)")
+
+    it "requires matching explicit unwind metadata during function unification":
+        val source = type_source(
+            "src/compiler/30.types/type_infer/core.spl")
+        expect(source).to_contain("hir_effects_unwind_kind(effects1)")
+        expect(source).to_contain("hir_effects_unwind_kind(effects2)")
+        expect(source).to_contain(
+            "E-HIR-UNWIND001 conflicting function unwind effects during type unification")
+
+    it "carries resolved callee effects into the synthetic call function type":
+        val source = type_source(
+            "src/compiler/30.types/type_infer/inference_expr.spl")
+        expect(source).to_contain(
+            "hir_effects_unwind_kind(function_effects)")
+        expect(source).to_contain(
+            "arg_types, ret_ty, callee_effects")
+        expect(source).to_contain("self.accumulate_effect(eff)")
+
+    it "keeps unwind effects distinct during effect-row merging":
+        val source = type_source(
+            "src/compiler/30.types/type_infer/inference_effects.spl")
+        expect(source).to_contain("case (NoUnwind, NoUnwind): true")
+        expect(source).to_contain("case (MayUnwind, MayUnwind): true")
