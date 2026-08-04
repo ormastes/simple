@@ -24,7 +24,10 @@ fn contains_import_line(content: text, pattern: text) -> bool:
     while i < lines.len():
         val line = lines[i].trim()
         if line != "" and not line.starts_with("#"):
-            if (line.starts_with("use ") or line.starts_with("use lazy ") or line.starts_with("export use ")) and line.contains(pattern):
+            # `pub use` is an import line too — the driver tree migrated to it,
+            # so omitting it made every positive check false and every
+            # "does not import" check vacuously true.
+            if (line.starts_with("use ") or line.starts_with("use lazy ") or line.starts_with("export use ") or line.starts_with("pub use ") or line.starts_with("pub use lazy ")) and line.contains(pattern):
                 return true
         i = i + 1
     false
@@ -75,7 +78,10 @@ describe "Driver API Tier Policy Guardrails":
 
     it "tier 0 driver_api_types exports find_runtime_lib_dir":
         val content = rt_file_read_text("src/compiler/80.driver/driver_api_types.spl") ?? ""
-        expect(contains_line(content, "export find_runtime_lib_dir")).to_equal(true)
+        # The declaration carries its own visibility now (`pub fn`); the
+        # separate `export` line form it used to need is gone.
+        val exported = contains_line(content, "export find_runtime_lib_dir") or contains_line(content, "pub fn find_runtime_lib_dir")
+        expect(exported).to_equal(true)
 
     # ---------------------------------------------------------------
     # Facade: driver_api must not import driver_api_core
@@ -109,6 +115,7 @@ describe "Driver API Tier Policy Guardrails":
             "export compiler_shared.semantics.*"
         ]
         var unexpected_bare_export_count = 0
+        var explicit_export_use_count = 0
         var i = 0
         while i < lines.len():
             val line = lines[i].trim()
@@ -120,11 +127,19 @@ describe "Driver API Tier Policy Guardrails":
                         matched_allowed = true
                         break
                     j = j + 1
-                if not matched_allowed and not line.starts_with("export use "):
+                if line.starts_with("export use "):
+                    explicit_export_use_count = explicit_export_use_count + 1
+                elif not matched_allowed:
                     unexpected_bare_export_count = unexpected_bare_export_count + 1
             i = i + 1
         expect(unexpected_bare_export_count).to_equal(0)
-        expect(count_exact_lines(content, allowed_shared_exports)).to_equal(allowed_shared_exports.len())
+        # The 8 `export compiler_shared.*` lines above were grandfathered bare
+        # exports; the driver tree has since removed all of them, so requiring
+        # them to still be present asserted the opposite of the invariant this
+        # example is named for. Assert the end state instead: every export line
+        # in the file is an explicit `export use`, and there is at least one.
+        expect(count_exact_lines(content, allowed_shared_exports)).to_equal(0)
+        expect(explicit_export_use_count).to_be_greater_than(0)
 
     # ---------------------------------------------------------------
     # No upward tier dependencies
@@ -299,10 +314,21 @@ describe "Driver API Tier Policy Guardrails":
     # ---------------------------------------------------------------
 
     it "driver_core_types canonical source is in compiler.common":
-        val content = rt_file_read_text("src/compiler/00.common/driver_core_types.spl") ?? ""
-        expect(contains_line(content, "enum CompileMode")).to_equal(true)
-        expect(contains_line(content, "enum CompileResult")).to_equal(true)
-        expect(contains_line(content, "struct CompileOptions")).to_equal(true)
+        # 00.common/driver_core_types.spl is now itself a facade; the three
+        # declarations live in sibling compiler.common modules. The invariant
+        # under test is unchanged — the canonical source is under
+        # compiler.common, never under 80.driver.
+        val modes = rt_file_read_text("src/compiler/00.common/driver_core_modes.spl") ?? ""
+        expect(contains_line(modes, "enum CompileMode")).to_equal(true)
+        val result = rt_file_read_text("src/compiler/00.common/driver_compile_result.spl") ?? ""
+        expect(contains_line(result, "enum CompileResult")).to_equal(true)
+        val options = rt_file_read_text("src/compiler/00.common/driver_compile_options.spl") ?? ""
+        expect(contains_line(options, "struct CompileOptions")).to_equal(true)
+        # ... and the facade still re-exports all three.
+        val facade = rt_file_read_text("src/compiler/00.common/driver_core_types.spl") ?? ""
+        expect(contains_line(facade, "CompileMode")).to_equal(true)
+        expect(contains_line(facade, "CompileResult")).to_equal(true)
+        expect(contains_line(facade, "CompileOptions")).to_equal(true)
 
     it "driver_core_types shim in 80.driver re-exports from compiler.common":
         val content = rt_file_read_text("src/compiler/80.driver/driver_core_types.spl") ?? ""
