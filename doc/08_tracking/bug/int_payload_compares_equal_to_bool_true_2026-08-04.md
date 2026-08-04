@@ -1,21 +1,47 @@
 # `1` compares equal to `true`, turning a real type error into a passing assertion
 
-**Status:** OPEN (equality / matcher coercion).
+**Status:** **NOT REPRODUCIBLE 2026-08-04 — the stated repro is refuted.**
+Retained because the *observation* that prompted it is real and still
+unexplained; the *mechanism* asserted below is not.
 **Found:** 2026-08-04, while measuring the `T?`-to-`bool` coercion fix.
-**Impact:** silent. Makes assertions pass that should fail, and makes any
-grep-based estimate of the `T?`-to-`bool` defect's reach wrong.
 
-## Symptom
+## REFUTATION (read this first)
+
+The central claim — that `expect(1).to_equal(true)` passes — is **false**.
+Tested from a worktree at origin, spec placed inside the tree so discovery
+works, with a deliberate failing control proving the file was not vacuous:
+
+| expression | OLD binary | binary with the coercion fix | pure-Simple runner |
+|---|---|---|---|
+| `check(Some(1).?)` (the 632-file pattern) | passes | passes | passes |
+| `expect(1).to_equal(true)` | **fails** | **fails** | **fails** |
+
+Equality is strict in every engine reachable here, on both sides of the
+coercion fix. So `1` does **not** compare equal to `true`, and the explanation
+offered below for why the `deep`/`improved` families are green is wrong.
+
+**What remains true and unexplained:** those ~632 files *are* green, and
+sabotage proved they are not vacuous (`43 total, 42 passed, 1 failed`). Since
+`check(Some(1).?)` passes even on the OLD binary — which lacks the argument
+coercion — neither loose equality nor the coercion fix accounts for it. The
+real mechanism is still unidentified; whoever picks this up should start by
+instrumenting what value actually reaches `condition` in
+`fn check(condition: bool)` on the OLD binary, rather than trusting either
+story below.
+
+Note also that per `reference_spec_dsl_is_rust_intrinsics`, the spec DSL
+resolves to Rust intrinsics in `bdd.rs` and the `.spl` spec-library matchers
+may be unreachable — so "the pure-Simple matcher is looser" is not a testable
+hypothesis as stated.
+
+## Original (refuted) symptom
 
 An `i64` value compares equal to a `bool`:
 
 ```simple
-expect(1).to_equal(true)      # passes
+expect(1).to_equal(true)      # claimed to pass — IT DOES NOT
 expect(42).to_equal(true)     # fails: "expected 42 to equal true"
 ```
-
-So the assertion succeeds for exactly one integer value and fails for all
-others. Nothing warns that the two sides have different types.
 
 ## How it was found
 
