@@ -16,7 +16,7 @@ use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptio
 use compiler.backend.backend.backend_helpers.{compile_bootstrap_module_with_backend}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_function_count, bootstrap_hir_function_at, bootstrap_hir_module_count}
-use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_mir_function_module_at, bootstrap_mir_function_return_type_tag_at, bootstrap_mir_function_param_count_at, bootstrap_mir_function_param_type_tag_at, bootstrap_mir_static_count, bootstrap_mir_static_module_at, bootstrap_mir_static_symbol_id_at, bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at, bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at, bootstrap_lower_hir_globals_to_mir_module_for_target, bootstrap_lower_flat_hir_modules_to_mir_for_target, bootstrap_set_entry_hir_module, bootstrap_clear_entry_hir_module, bootstrap_lower_extra_hir_module_to_mir_for_target, bootstrap_function_value_names_reset, bootstrap_register_function_value_module, bootstrap_register_fn_ret_types_module}
+use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_mir_function_module_at, bootstrap_mir_function_return_type_tag_at, bootstrap_mir_function_return_unsigned_at, bootstrap_mir_function_param_count_at, bootstrap_mir_function_param_type_tag_at, bootstrap_mir_static_count, bootstrap_mir_static_module_at, bootstrap_mir_static_symbol_id_at, bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at, bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at, bootstrap_lower_hir_globals_to_mir_module_for_target, bootstrap_lower_flat_hir_modules_to_mir_for_target, bootstrap_set_entry_hir_module, bootstrap_clear_entry_hir_module, bootstrap_lower_extra_hir_module_to_mir_for_target, bootstrap_function_value_names_reset, bootstrap_register_function_value_module, bootstrap_register_fn_ret_types_module}
 use compiler.mir_opt.{ssa_alloca_transform_blocks}
 use compiler.common.driver_core_types.{CompileResult}
 use driver_types.{CompileContext, CompileOptions}
@@ -350,6 +350,9 @@ pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> Comp
         val signature_ret = translator.valid_llvm_type(bootstrap_static_llvm_type_text(bootstrap_mir_function_return_type_tag_at(signature_idx)))
         translator.remember_function_return_type(signature_name, signature_ret)
         translator.remember_function_return_type(emitted_signature_name, signature_ret)
+        val signature_ret_unsigned = bootstrap_mir_function_return_unsigned_at(signature_idx)
+        translator.remember_function_return_unsigned(signature_name, signature_ret_unsigned)
+        translator.remember_function_return_unsigned(emitted_signature_name, signature_ret_unsigned)
         var signature_param_types: [text] = []
         var signature_param_idx = 0
         while signature_param_idx < bootstrap_mir_function_param_count_at(signature_idx):
@@ -404,27 +407,21 @@ pub fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> Comp
         )
         if bootstrap_trace_enabled():
             print "[bootstrap-real-llvm] body-start {name}"
-        var body_return_ty = MirType.i64()
-        match bootstrap_mir_function_return_type_tag_at(idx):
-            case 2: body_return_ty = MirType(kind: MirTypeKind.I32)
-            case 3: body_return_ty = MirType(kind: MirTypeKind.I16)
-            case 4: body_return_ty = MirType(kind: MirTypeKind.I8)
-            case 5: body_return_ty = MirType(kind: MirTypeKind.F64)
-            case 6: body_return_ty = MirType(kind: MirTypeKind.F32)
-            case 7: body_return_ty = MirType.bool()
-            case 8: body_return_ty = MirType.unit()
-            case 9: body_return_ty = MirType.ptr(MirType.unit(), false)
-            case _: ()
-        val body = MirBody.from_parts(
+        val body = MirBody.from_bootstrap_parts(
             name: name,
             blocks: fn_.blocks,
             locals: fn_.locals,
-            arg_count: bootstrap_mir_function_param_count_at(idx),
-            return_ty: body_return_ty
+            arg_count: bootstrap_mir_function_param_count_at(idx)
         )
         if bootstrap_trace_enabled():
             print "[bootstrap-real-llvm] translate-start {name}"
-        translator.translate_function(if name == "main": "__simple_main" else: name, body)
+        val return_type_tag = bootstrap_mir_function_return_type_tag_at(idx)
+        translator.translate_bootstrap_function(
+            if name == "main": "__simple_main" else: name,
+            body,
+            bootstrap_static_llvm_type_text(return_type_tag),
+            bootstrap_mir_function_return_unsigned_at(idx)
+        )
         if bootstrap_trace_enabled():
             print "[bootstrap-real-llvm] translate-done {name}"
         idx = idx + 1

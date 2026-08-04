@@ -84,8 +84,43 @@ describe "bootstrap MIR-to-LLVM owner mutation":
             "src/compiler/50.mir/mir_instruction_graph.spl"
         ) ?? ""
 
-        expect(driver).to_contain("val body = MirBody.from_parts(")
+        expect(driver).to_contain("val body = MirBody.from_bootstrap_parts(")
         expect(driver.contains("val body = MirBody(")).to_equal(false)
-        expect(body_owner).to_contain("static fn from_parts(")
-        expect(body_owner).to_contain("return_ty: MirType")
+        expect(body_owner).to_contain("static fn from_bootstrap_parts(")
+        expect(body_owner).to_contain("return_ty: MirType.unit()")
+        expect(driver.contains("var body_return_ty = MirType.i64()")).to_equal(false)
         expect(body_owner).to_contain("MirBody(")
+
+    it "passes the flattened return ABI as owner-selected scalars":
+        val driver = rt_file_read_text(
+            "src/compiler/80.driver/driver_bootstrap.spl"
+        ) ?? ""
+        val codegen = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+        ) ?? ""
+        val translator = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/class_def.spl"
+        ) ?? ""
+
+        expect(driver).to_contain("translator.translate_bootstrap_function(")
+        expect(driver).to_contain("bootstrap_static_llvm_type_text(return_type_tag)")
+        expect(driver).to_contain("bootstrap_mir_function_return_unsigned_at(idx)")
+        expect(driver).to_contain("remember_function_return_unsigned(signature_name")
+        expect(codegen).to_contain("me translate_bootstrap_function(")
+        expect(codegen).to_contain("self.select_bootstrap_return_abi(return_type, return_unsigned)")
+        expect(translator).to_contain("bootstrap_return_abi_text: text")
+        expect(translator).to_contain("bootstrap_return_abi_unsigned: bool")
+        expect(translator).to_contain("bootstrap_return_abi_active: bool")
+
+    it "accumulates signedness independently from LLVM return type tags":
+        val globals = rt_file_read_text(
+            "src/compiler/50.mir/_MirLowering/bootstrap_globals.spl"
+        ) ?? ""
+
+        expect(globals).to_contain("_bootstrap_mir_function_return_unsigned: [bool]")
+        expect(globals).to_contain("bootstrap_mir_return_type_unsigned(fn_.signature.return_type)")
+        expect(globals).to_contain("case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: true")
+        expect(globals).to_contain("case MirTypeKind.I64 | MirTypeKind.U64: 1")
+        expect(globals).to_contain("case MirTypeKind.Struct(_) | MirTypeKind.Enum(_) | MirTypeKind.Tuple(_)")
+        expect(globals).to_contain("fn bootstrap_mir_function_return_unsigned_at(index: i64) -> bool:")
+        expect(globals).to_contain("ret_unsigned={{_bootstrap_mir_function_return_unsigned.len()}}")
