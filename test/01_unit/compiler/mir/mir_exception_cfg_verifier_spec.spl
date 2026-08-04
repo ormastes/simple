@@ -41,6 +41,70 @@ describe "MIR exception CFG verifier":
             exception_cfg_builder("valid_unwind", 981))
         expect(validate_mir_exception_cfg(body).is_ok()).to_be(true)
 
+    it "rejects duplicate block and local identities":
+        var duplicate_block = install_valid_unwind_shape(
+            exception_cfg_builder("duplicate_block", 988))
+        duplicate_block.blocks.push(duplicate_block.blocks[0])
+        expect(validate_mir_exception_cfg(duplicate_block).unwrap_err()).to_contain(
+            "duplicate MIR block id")
+
+        var duplicate_local = install_valid_unwind_shape(
+            exception_cfg_builder("duplicate_local", 989))
+        duplicate_local.locals.push(duplicate_local.locals[0])
+        expect(validate_mir_exception_cfg(duplicate_local).unwrap_err()).to_contain(
+            "duplicate MIR local id")
+
+    it "rejects every call contract mismatch including NoUnwind stray edges":
+        var builder = exception_cfg_builder("stray_unwind", 990)
+        val normal = builder.new_block(Some("normal"))
+        val stray = builder.new_block(Some("stray"))
+        builder.set_terminator(MirTerminator.CallTerminator(
+            nil, mir_operand_const_int(1), [], normal,
+            MirCallUnwindContract.NoUnwind, Some(stray)))
+        builder.switch_to_block(normal)
+        builder.terminate_return(nil)
+        builder.switch_to_block(stray)
+        builder.terminate_return(nil)
+        expect(validate_mir_exception_cfg(
+            exception_cfg_body(builder)).unwrap_err()).to_contain(
+            "NoUnwind call terminator cannot carry an unwind edge")
+
+    it "rejects token destination redefinition and forged release calls":
+        var redefine = exception_cfg_builder("redefine_token", 991)
+        val redefine_normal = redefine.new_block(Some("normal"))
+        val redefine_unwind = redefine.new_block(Some("unwind"))
+        redefine.set_terminator(mir_call_terminator_create(
+            nil, mir_operand_const_int(1), [], redefine_normal,
+            MirCallUnwindContract.MayUnwind, Some(redefine_unwind)).unwrap())
+        redefine.switch_to_block(redefine_unwind)
+        val redefine_token = redefine.emit_landing_pad()
+        redefine.emit(MirInst(kind: MirInstKind.Const(
+            redefine_token, MirConstValue.Zero, MirType.exception_token()), span: nil))
+        redefine.terminate_resume(mir_operand_move(redefine_token))
+        redefine.switch_to_block(redefine_normal)
+        redefine.terminate_return(nil)
+        expect(validate_mir_exception_cfg(
+            exception_cfg_body(redefine)).unwrap_err()).to_contain(
+            "redefines an ExceptionToken local")
+
+        var forged = exception_cfg_builder("forged_release", 992)
+        val forged_normal = forged.new_block(Some("normal"))
+        val forged_unwind = forged.new_block(Some("unwind"))
+        forged.set_terminator(mir_call_terminator_create(
+            nil, mir_operand_const_int(1), [], forged_normal,
+            MirCallUnwindContract.MayUnwind, Some(forged_unwind)).unwrap())
+        forged.switch_to_block(forged_unwind)
+        val forged_token = forged.emit_landing_pad()
+        forged.emit_call(MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("aspect_execution_context_release_facet_descriptor_or_panic"),
+            MirType.i64())), [], MirType.unit())
+        forged.terminate_resume(mir_operand_move(forged_token))
+        forged.switch_to_block(forged_normal)
+        forged.terminate_return(nil)
+        expect(validate_mir_exception_cfg(
+            exception_cfg_body(forged)).unwrap_err()).to_contain(
+            "exact NoUnwind facet release ABI")
+
     it "rejects a LandingPad reached by a normal successor":
         var builder = exception_cfg_builder("normal_pad", 982)
         val pad = builder.new_block(Some("shared_pad"))

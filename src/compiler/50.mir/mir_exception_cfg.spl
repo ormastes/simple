@@ -17,6 +17,29 @@ fn exception_operand_local(operand: MirOperand) -> i64:
 fn exception_operand_is_token(operand: MirOperand, tokens: Dict<i64, bool>) -> bool:
     tokens.has(exception_operand_local(operand))
 
+fn exception_optional_dest_id(dest: LocalId?) -> i64:
+    if dest == nil:
+        return -1
+    dest.unwrap().id
+
+fn exception_inst_dest_id(inst: MirInstKind) -> i64:
+    match inst:
+        case LandingPad(dest) | Const(dest, _, _) | Alloc(dest, _): dest.id
+        case Copy(dest, _) | Move(dest, _): dest.id
+        case BinOp(dest, _, _, _) | CheckedBinOp(dest, _, _, _): dest.id
+        case UnaryOp(dest, _, _) | Load(dest, _) | GetElementPtr(dest, _, _): dest.id
+        case Aggregate(dest, _, _) | GetField(dest, _, _): dest.id
+        case Cast(dest, _, _) | Bitcast(dest, _, _): dest.id
+        case PipeForward(dest, _, _) | Compose(dest, _, _, _) | Parallel(dest, _): dest.id
+        case Call(dest, _, _) | CallIndirect(dest, _, _, _) | Intrinsic(dest, _, _):
+            exception_optional_dest_id(dest)
+        case _: -1
+
+fn exception_terminator_dest_id(term: MirTerminator) -> i64:
+    match term:
+        case CallTerminator(dest, _, _, _, _, _): exception_optional_dest_id(dest)
+        case _: -1
+
 fn exception_operands_have_token(
     operands: [MirOperand], tokens: Dict<i64, bool>
 ) -> bool:
@@ -77,8 +100,52 @@ fn exception_successors(term: MirTerminator) -> [i64]:
             result
         case _: []
 
+fn exception_release_signature_is_exact(type_: MirType) -> bool:
+    match type_.kind:
+        case FuncPtr(signature):
+            if signature.is_variadic or signature.params.len() != 2:
+                return false
+            if signature.return_type.kind != MirTypeKind.Unit:
+                return false
+            match signature.params[0].kind:
+                case Opaque(name):
+                    if name != "AspectExecutionContext": return false
+                case _: return false
+            match signature.params[1].kind:
+                case Opaque(name): name == "__simple_facet_descriptor_lease_abi"
+                case _: false
+        case _: false
+
+fn exception_is_exact_facet_release(
+    dest: LocalId?, func: MirOperand, args: [MirOperand]
+) -> bool:
+    if dest != nil or args.len() != 2:
+        return false
+    match func.kind:
+        case Const(MirConstValue.Str(name), type_):
+            if name != "aspect_execution_context_release_facet_descriptor_or_panic":
+                return false
+            if not exception_release_signature_is_exact(type_): return false
+        case _: return false
+    # The MIR body carries no cleanup-entry manifest, so the verifier can
+    # authenticate the generated ABI shape and argument order, but cannot
+    # prove one release per registered entry. The closed cleanup region still
+    # rejects every other call and every non-release instruction.
+    exception_operand_local(args[0]) >= 0 and exception_operand_local(args[1]) >= 0
+
 fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
     """Validate unwind-only landing pads and linear exception-token provenance."""
+    var block_ids: Dict<i64, bool> = {}
+    for block in body.blocks:
+        if block_ids.has(block.id.id):
+            return exception_cfg_error("duplicate MIR block id {block.id.id}")
+        block_ids[block.id.id] = true
+    var local_ids: Dict<i64, bool> = {}
+    for local in body.locals:
+        if local_ids.has(local.id.id):
+            return exception_cfg_error("duplicate MIR local id {local.id.id}")
+        local_ids[local.id.id] = true
+
     var unwind_targets: Dict<i64, bool> = {}
     var normal_targets: Dict<i64, bool> = {}
     for block in body.blocks:
@@ -92,10 +159,11 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
                 for target in targets:
                     normal_targets[target.target.id] = true
             case CallTerminator(_, _, _, normal, contract, unwind):
+                val contract_validation = validate_mir_call_unwind_contract(contract, unwind)
+                if contract_validation.is_err():
+                    return exception_cfg_error(contract_validation.unwrap_err())
                 normal_targets[normal.id] = true
                 if contract == MirCallUnwindContract.MayUnwind:
-                    if unwind == nil:
-                        return exception_cfg_error("MayUnwind call has no unwind successor")
                     unwind_targets[unwind.unwrap().id] = true
             case _: ()
 
@@ -138,6 +206,13 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
 
     for block in body.blocks:
         for instruction in block.instructions:
+            val instruction_dest = exception_inst_dest_id(instruction.kind)
+            if token_ids.has(instruction_dest):
+                match instruction.kind:
+                    case LandingPad(_): ()
+                    case _:
+                        return exception_cfg_error(
+                            "ordinary instruction redefines an ExceptionToken local")
             match instruction.kind:
                 case LandingPad(_): ()
                 case Call(_, func, args) | CallIndirect(_, func, args, _):
@@ -149,6 +224,9 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
                     if exception_illegal_inst_use(instruction.kind, token_ids):
                         return exception_cfg_error(
                             "exception token used by ordinary instruction")
+        if token_ids.has(exception_terminator_dest_id(block.terminator)):
+            return exception_cfg_error(
+                "CallTerminator redefines an ExceptionToken local")
         match block.terminator:
             case Resume(token):
                 val token_id = exception_operand_local(token)
@@ -194,15 +272,10 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
             for instruction in current_block.unwrap().instructions:
                 match instruction.kind:
                     case LandingPad(_): ()
-                    case Call(_, func, args):
-                        var known_release = false
-                        match func.kind:
-                            case Const(MirConstValue.Str(name), _):
-                                known_release = name == "aspect_execution_context_release_facet_descriptor_or_panic"
-                            case _: ()
-                        if not known_release:
+                    case Call(dest, func, args):
+                        if not exception_is_exact_facet_release(dest, func, args):
                             return exception_cfg_error(
-                                "cleanup region call is not the known NoUnwind facet release ABI")
+                                "cleanup region call is not the exact NoUnwind facet release ABI")
                     case _:
                         return exception_cfg_error(
                             "cleanup region contains a non-cleanup instruction")
@@ -264,4 +337,11 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
                 "unwind cleanup region contains a cycle or non-resuming path")
     Ok(())
 
-export validate_mir_exception_cfg
+fn validate_mir_exception_module_gate_or_panic(module: MirModule, phase: text):
+    """Validate every function at a production pipeline boundary."""
+    for function in module.functions.values():
+        val validation = validate_mir_exception_cfg(MirBody.from_function(function))
+        if validation.is_err():
+            panic("{validation.unwrap_err()} in function '{function.name}' {phase}")
+
+export validate_mir_exception_cfg, validate_mir_exception_module_gate_or_panic
