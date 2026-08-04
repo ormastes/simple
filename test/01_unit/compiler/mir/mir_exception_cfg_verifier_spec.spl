@@ -34,6 +34,20 @@ fn exact_facet_release_operand() -> MirOperand:
                     "__simple_facet_descriptor_lease_abi"))],
             return_type: MirType.unit(), is_variadic: false)))))
 
+fn defined_cleanup_owner(builder: MirBuilder, symbol_id: i64) -> LocalId:
+    val context = builder.new_temp(MirType(kind: MirTypeKind.Struct(
+        SymbolId(id: symbol_id))))
+    builder.emit_bitcast(
+        mir_operand_copy(context),
+        MirType(kind: MirTypeKind.Opaque("AspectExecutionContext")))
+
+fn defined_cleanup_lease(builder: MirBuilder) -> LocalId:
+    val lease = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
+        "__simple_facet_descriptor_lease_abi")))
+    builder.emit_const(lease, MirConstValue.Zero,
+        MirType(kind: MirTypeKind.Opaque("__simple_facet_descriptor_lease_abi")))
+    lease
+
 fn install_single_release_manifest(
     body: MirBody, unwind: BlockId, token: LocalId,
     owner: LocalId, lease: LocalId, instruction_index: i64
@@ -54,6 +68,14 @@ fn install_single_release_manifest(
                 "aspect_execution_context_release_facet_descriptor_or_panic")])]
     result
 
+fn install_empty_manifest(
+    body: MirBody, unwind: BlockId, token: LocalId
+) -> MirBody:
+    var result = body
+    result.exception_cleanup_contracts = [MirExceptionCleanupContract(
+        unwind_entry: unwind, token: token, entries: [])]
+    result
+
 fn install_valid_unwind_shape(builder: MirBuilder) -> MirBody:
     val normal = builder.new_block(Some("normal"))
     val unwind = builder.new_block(Some("unwind"))
@@ -68,10 +90,11 @@ fn install_valid_unwind_shape(builder: MirBuilder) -> MirBody:
     exception_cfg_body(builder)
 
 describe "MIR exception CFG verifier":
-    it "accepts one unwind-only LandingPad and one token Resume":
+    it "rejects an unwind-only LandingPad without its mandatory manifest":
         val body = install_valid_unwind_shape(
             exception_cfg_builder("valid_unwind", 981))
-        expect(validate_mir_exception_cfg(body).is_ok()).to_be(true)
+        expect(validate_mir_exception_cfg(body).unwrap_err()).to_contain(
+            "facet cleanup landing pad has no manifest")
 
     it "rejects duplicate block and local identities":
         var duplicate_block = install_valid_unwind_shape(
@@ -133,18 +156,17 @@ describe "MIR exception CFG verifier":
         forged.terminate_resume(mir_operand_move(forged_token))
         forged.switch_to_block(forged_normal)
         forged.terminate_return(nil)
-        expect(validate_mir_exception_cfg(
-            exception_cfg_body(forged)).unwrap_err()).to_contain(
+        val forged_body = install_empty_manifest(
+            exception_cfg_body(forged), forged_unwind, forged_token)
+        expect(validate_mir_exception_cfg(forged_body).unwrap_err()).to_contain(
             "exact NoUnwind facet release ABI")
 
     it "rejects swapped and arbitrary facet release argument locals":
         var exact = exception_cfg_builder("exact_release_args", 995)
         val exact_normal = exact.new_block(Some("normal"))
         val exact_unwind = exact.new_block(Some("unwind"))
-        val exact_owner = exact.new_temp(MirType(kind: MirTypeKind.Opaque(
-            "AspectExecutionContext")))
-        val exact_lease = exact.new_temp(MirType(kind: MirTypeKind.Opaque(
-            "__simple_facet_descriptor_lease_abi")))
+        val exact_owner = defined_cleanup_owner(exact, 8201)
+        val exact_lease = defined_cleanup_lease(exact)
         exact.set_terminator(mir_call_terminator_create(
             nil, mir_operand_const_int(1), [], exact_normal,
             MirCallUnwindContract.MayUnwind, Some(exact_unwind)).unwrap())
@@ -179,8 +201,9 @@ describe "MIR exception CFG verifier":
         swapped.terminate_resume(mir_operand_move(swapped_token))
         swapped.switch_to_block(swapped_normal)
         swapped.terminate_return(nil)
-        expect(validate_mir_exception_cfg(
-            exception_cfg_body(swapped)).unwrap_err()).to_contain(
+        val swapped_body = install_empty_manifest(
+            exception_cfg_body(swapped), swapped_unwind, swapped_token)
+        expect(validate_mir_exception_cfg(swapped_body).unwrap_err()).to_contain(
             "exact NoUnwind facet release ABI")
 
         var arbitrary = exception_cfg_builder("arbitrary_release_args", 994)
@@ -199,18 +222,17 @@ describe "MIR exception CFG verifier":
         arbitrary.terminate_resume(mir_operand_move(arbitrary_token))
         arbitrary.switch_to_block(arbitrary_normal)
         arbitrary.terminate_return(nil)
-        expect(validate_mir_exception_cfg(
-            exception_cfg_body(arbitrary)).unwrap_err()).to_contain(
+        val arbitrary_body = install_empty_manifest(
+            exception_cfg_body(arbitrary), arbitrary_unwind, arbitrary_token)
+        expect(validate_mir_exception_cfg(arbitrary_body).unwrap_err()).to_contain(
             "exact NoUnwind facet release ABI")
 
     it "rejects missing duplicate stale and mismatched cleanup manifests":
         var builder = exception_cfg_builder("manifest_adversarial", 996)
         val normal = builder.new_block(Some("normal"))
         val unwind = builder.new_block(Some("unwind"))
-        val owner = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
-            "AspectExecutionContext")))
-        val lease = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
-            "__simple_facet_descriptor_lease_abi")))
+        val owner = defined_cleanup_owner(builder, 8202)
+        val lease = defined_cleanup_lease(builder)
         builder.set_terminator(mir_call_terminator_create(
             nil, mir_operand_const_int(1), [], normal,
             MirCallUnwindContract.MayUnwind, Some(unwind)).unwrap())
@@ -260,11 +282,10 @@ describe "MIR exception CFG verifier":
         val unwind = builder.new_block(Some("unwind"))
         val release = builder.new_block(Some("release"))
         val continuation = builder.new_block(Some("continuation"))
-        val owner = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
-            "AspectExecutionContext")))
-        val lease = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
-            "__simple_facet_descriptor_lease_abi")))
+        val owner = defined_cleanup_owner(builder, 8203)
+        val lease = defined_cleanup_lease(builder)
         val present = builder.new_temp(MirType.bool())
+        builder.emit_const(present, MirConstValue.Bool(true), MirType.bool())
         builder.set_terminator(mir_call_terminator_create(
             nil, mir_operand_const_int(1), [], normal,
             MirCallUnwindContract.MayUnwind, Some(unwind)).unwrap())
@@ -339,8 +360,9 @@ describe "MIR exception CFG verifier":
         builder.terminate_resume(mir_operand_const_int(9))
         builder.switch_to_block(normal)
         builder.terminate_return(nil)
-        expect(validate_mir_exception_cfg(
-            exception_cfg_body(builder)).unwrap_err()).to_contain(
+        val bad_resume_body = install_empty_manifest(
+            exception_cfg_body(builder), unwind, _token)
+        expect(validate_mir_exception_cfg(bad_resume_body).unwrap_err()).to_contain(
             "Resume operand is not a LandingPad token")
 
         var wrong_type = exception_cfg_builder("wrong_token_type", 987)
@@ -375,8 +397,9 @@ describe "MIR exception CFG verifier":
         ordinary.terminate_resume(mir_operand_move(ordinary_token))
         ordinary.switch_to_block(ordinary_normal)
         ordinary.terminate_return(nil)
-        expect(validate_mir_exception_cfg(
-            exception_cfg_body(ordinary)).unwrap_err()).to_contain(
+        val ordinary_body = install_empty_manifest(
+            exception_cfg_body(ordinary), ordinary_unwind, ordinary_token)
+        expect(validate_mir_exception_cfg(ordinary_body).unwrap_err()).to_contain(
             "exception token passed to ordinary call")
 
         var duplicate = exception_cfg_builder("duplicate_resume", 985)

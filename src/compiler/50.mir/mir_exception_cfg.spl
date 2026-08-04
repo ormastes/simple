@@ -100,6 +100,101 @@ fn exception_successors(term: MirTerminator) -> [i64]:
             result
         case _: []
 
+fn exception_normal_successors(term: MirTerminator) -> [i64]:
+    match term:
+        case CallTerminator(_, _, _, normal, _, _): [normal.id]
+        case _: exception_successors(term)
+
+fn exception_reaches_block_avoiding(
+    body: MirBody, target: i64, forbidden: i64
+) -> bool:
+    if body.blocks.len() == 0:
+        return false
+    var visited: Dict<i64, bool> = {}
+    var worklist: [i64] = [body.blocks[0].id.id]
+    while worklist.len() > 0:
+        val current = worklist.pop()
+        if current == forbidden or visited.has(current):
+            continue
+        if current == target:
+            return true
+        visited[current] = true
+        val block = exception_block_by_id(body, current)
+        if block != nil:
+            for successor in exception_normal_successors(
+                block.unwrap().terminator):
+                worklist.push(successor)
+    false
+
+fn exception_definition_count(body: MirBody, local: LocalId) -> i64:
+    var count = 0
+    for block in body.blocks:
+        for instruction in block.instructions:
+            if exception_inst_dest_id(instruction.kind) == local.id:
+                count = count + 1
+        if exception_terminator_dest_id(block.terminator) == local.id:
+            count = count + 1
+    count
+
+fn exception_definition_block(body: MirBody, local: LocalId) -> BlockId?:
+    for block in body.blocks:
+        for instruction in block.instructions:
+            if exception_inst_dest_id(instruction.kind) == local.id:
+                return Some(block.id)
+        if exception_terminator_dest_id(block.terminator) == local.id:
+            return Some(block.id)
+    nil
+
+fn exception_has_instruction_definition(body: MirBody, local: LocalId) -> bool:
+    for block in body.blocks:
+        for instruction in block.instructions:
+            if exception_inst_dest_id(instruction.kind) == local.id:
+                return true
+    false
+
+fn exception_owner_has_canonical_bitcast(body: MirBody, owner: LocalId) -> bool:
+    for block in body.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case Bitcast(dest, source, target):
+                    if dest.id != owner.id:
+                        continue
+                    match target.kind:
+                        case Opaque(name):
+                            if name != "AspectExecutionContext": return false
+                        case _: return false
+                    val source_type = exception_local_type(
+                        body, exception_operand_local(source))
+                    if source_type == nil:
+                        return false
+                    match source_type.unwrap():
+                        case Struct(_): return true
+                        case _: return false
+                case _: ()
+    false
+
+fn exception_definition_dominates_unwind_calls(
+    body: MirBody, local: LocalId, unwind_entry: BlockId
+) -> bool:
+    val definition = exception_definition_block(body, local)
+    if definition == nil:
+        return false
+    var found_call = false
+    for block in body.blocks:
+        match block.terminator:
+            case CallTerminator(_, _, _, _, MayUnwind, unwind):
+                if unwind != nil and unwind.unwrap().id == unwind_entry.id:
+                    found_call = true
+                    if not exception_reaches_block_avoiding(
+                        body, block.id.id, -1):
+                        return false
+                    if (definition.unwrap().id != block.id.id and
+                        exception_reaches_block_avoiding(
+                            body, block.id.id, definition.unwrap().id)):
+                        return false
+            case _: ()
+    found_call
+
 fn exception_release_signature_is_exact(type_: MirType) -> bool:
     match type_.kind:
         case FuncPtr(signature):
@@ -187,6 +282,21 @@ fn exception_validate_cleanup_manifest(
             case _: false
         if not owner_ok or not lease_ok:
             return exception_cfg_error("facet cleanup manifest owner or lease type is not exact")
+        if (exception_definition_count(body, entry.owner) != 1 or
+            exception_definition_count(body, entry.lease) != 1 or
+            not exception_has_instruction_definition(body, entry.owner) or
+            not exception_has_instruction_definition(body, entry.lease)):
+            return exception_cfg_error(
+                "facet cleanup manifest local must have exactly one definition")
+        if not exception_owner_has_canonical_bitcast(body, entry.owner):
+            return exception_cfg_error(
+                "facet cleanup manifest owner is not a canonical context Bitcast")
+        if (not exception_definition_dominates_unwind_calls(
+                body, entry.owner, contract.unwind_entry) or
+            not exception_definition_dominates_unwind_calls(
+                body, entry.lease, contract.unwind_entry)):
+            return exception_cfg_error(
+                "facet cleanup manifest local definition does not dominate unwind call")
         if leases.has(entry.lease.id):
             return exception_cfg_error("facet cleanup manifest repeats a lease local")
         leases[entry.lease.id] = true
@@ -210,6 +320,14 @@ fn exception_validate_cleanup_manifest(
             val present_type = exception_local_type(body, present.id)
             if present_type == nil or present_type.unwrap() != MirTypeKind.Bool:
                 return exception_cfg_error("facet cleanup manifest presence guard is not Bool")
+            if (exception_definition_count(body, present) != 1 or
+                not exception_has_instruction_definition(body, present)):
+                return exception_cfg_error(
+                    "facet cleanup manifest local must have exactly one definition")
+            if not exception_definition_dominates_unwind_calls(
+                body, present, contract.unwind_entry):
+                return exception_cfg_error(
+                    "facet cleanup manifest local definition does not dominate unwind call")
             if entry.guard_block == nil or entry.continue_block == nil:
                 return exception_cfg_error("guarded cleanup manifest entry lacks CFG metadata")
             val guard_id = entry.guard_block.unwrap().id
@@ -392,6 +510,9 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
         if not unwind_targets.has(unwind_id):
             return exception_cfg_error("orphan facet cleanup manifest has no unwind entry")
         manifest_entries[unwind_id] = true
+    for unwind_id in unwind_targets.keys():
+        if not manifest_entries.has(unwind_id):
+            return exception_cfg_error("facet cleanup landing pad has no manifest")
 
     for block in body.blocks:
         for instruction in block.instructions:
@@ -485,7 +606,7 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
         for contract in body.exception_cleanup_contracts:
             if contract.unwind_entry.id == unwind_id:
                 matching_contract = Some(contract)
-        if has_facet_release and matching_contract == nil:
+        if matching_contract == nil:
             return exception_cfg_error("facet cleanup landing pad has no manifest")
         if not has_facet_release and matching_contract != nil:
             return exception_cfg_error("orphan facet cleanup manifest has no release calls")

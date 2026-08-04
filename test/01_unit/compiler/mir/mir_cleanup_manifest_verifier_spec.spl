@@ -4,7 +4,8 @@ use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.{
     BlockId, LocalId, MirBody, MirBuilder, MirCallUnwindContract,
     MirConstValue, MirExceptionCleanupContract, MirFacetCleanupEntryContract,
-    MirFunction, MirInstructionSite, MirModule, MirOperand, MirOperandKind,
+    MirFunction, MirInst, MirInstKind, MirInstructionSite, MirModule,
+    MirOperand, MirOperandKind,
     MirSignature, MirTerminator, MirType, MirTypeKind,
     mir_call_terminator_create, mir_operand_const_int, mir_operand_copy,
     mir_operand_move, validate_mir_exception_cfg,
@@ -45,14 +46,24 @@ fn reverse_cleanup_body(name: text, symbol_id: i64) -> MirBody:
     var builder = cleanup_manifest_builder(name, symbol_id)
     val normal = builder.new_block(Some("normal"))
     val unwind = builder.new_block(Some("unwind"))
-    val outer_owner = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
-        "AspectExecutionContext")))
+    val outer_context = builder.new_temp(MirType(kind: MirTypeKind.Struct(
+        SymbolId(id: 8001))))
+    val outer_owner = builder.emit_bitcast(
+        mir_operand_copy(outer_context),
+        MirType(kind: MirTypeKind.Opaque("AspectExecutionContext")))
     val outer_lease = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
         "__simple_facet_descriptor_lease_abi")))
-    val inner_owner = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
-        "AspectExecutionContext")))
+    builder.emit_const(outer_lease, MirConstValue.Zero,
+        MirType(kind: MirTypeKind.Opaque("__simple_facet_descriptor_lease_abi")))
+    val inner_context = builder.new_temp(MirType(kind: MirTypeKind.Struct(
+        SymbolId(id: 8002))))
+    val inner_owner = builder.emit_bitcast(
+        mir_operand_copy(inner_context),
+        MirType(kind: MirTypeKind.Opaque("AspectExecutionContext")))
     val inner_lease = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
         "__simple_facet_descriptor_lease_abi")))
+    builder.emit_const(inner_lease, MirConstValue.Zero,
+        MirType(kind: MirTypeKind.Opaque("__simple_facet_descriptor_lease_abi")))
     builder.set_terminator(mir_call_terminator_create(
         nil, mir_operand_const_int(1), [], normal,
         MirCallUnwindContract.MayUnwind, Some(unwind)).unwrap())
@@ -119,6 +130,52 @@ describe "MIR cleanup manifest exact acceptance":
         expect(validate_mir_exception_cfg(
             duplicate_extra).unwrap_err()).to_contain("extra release")
 
+    it "rejects paired cleanup and manifest deletion":
+        var deleted = reverse_cleanup_body("paired_deleted", 1111)
+        val unwind = deleted.exception_cleanup_contracts[0].unwind_entry
+        val unwind_index = cleanup_block_index(deleted, unwind)
+        var unwind_block = deleted.blocks[unwind_index]
+        unwind_block.instructions = [unwind_block.instructions[0]]
+        deleted.blocks[unwind_index] = unwind_block
+        deleted.exception_cleanup_contracts = []
+        expect(validate_mir_exception_cfg(deleted).unwrap_err()).to_contain(
+            "facet cleanup landing pad has no manifest")
+
+    it "rejects fabricated, missing, repeated, and post-call local definitions":
+        var fabricated = reverse_cleanup_body("fabricated_owner", 1112)
+        val fabricated_owner = fabricated.exception_cleanup_contracts[0].entries[0].owner
+        var fabricated_entry = fabricated.blocks[0]
+        fabricated_entry.instructions[2] = MirInst(kind: MirInstKind.Const(
+            fabricated_owner, MirConstValue.Zero,
+            MirType(kind: MirTypeKind.Opaque("AspectExecutionContext"))), span: nil)
+        fabricated.blocks[0] = fabricated_entry
+        expect(validate_mir_exception_cfg(fabricated).unwrap_err()).to_contain(
+            "owner is not a canonical context Bitcast")
+
+        var missing = reverse_cleanup_body("missing_lease_definition", 1113)
+        var missing_entry = missing.blocks[0]
+        missing_entry.instructions.pop()
+        missing.blocks[0] = missing_entry
+        expect(validate_mir_exception_cfg(missing).unwrap_err()).to_contain(
+            "local must have exactly one definition")
+
+        var repeated = reverse_cleanup_body("repeated_lease_definition", 1114)
+        var repeated_entry = repeated.blocks[0]
+        repeated_entry.instructions.push(repeated_entry.instructions[3])
+        repeated.blocks[0] = repeated_entry
+        expect(validate_mir_exception_cfg(repeated).unwrap_err()).to_contain(
+            "local must have exactly one definition")
+
+        var late = reverse_cleanup_body("post_call_lease_definition", 1115)
+        var late_entry = late.blocks[0]
+        val late_definition = late_entry.instructions.pop()
+        late.blocks[0] = late_entry
+        var late_normal = late.blocks[cleanup_block_index(late, BlockId(id: 1))]
+        late_normal.instructions.push(late_definition)
+        late.blocks[cleanup_block_index(late, BlockId(id: 1))] = late_normal
+        expect(validate_mir_exception_cfg(late).unwrap_err()).to_contain(
+            "local definition does not dominate unwind call")
+
     it "rejects stale locals and blocks plus wrong lease and presence types":
         var stale_local = reverse_cleanup_body("stale_local", 1104)
         var stale_local_contract = stale_local.exception_cleanup_contracts[0]
@@ -168,11 +225,17 @@ describe "MIR cleanup manifest exact acceptance":
         val release = builder.new_block(Some("release"))
         val bypass = builder.new_block(Some("bypass"))
         val join = builder.new_block(Some("join"))
-        val owner = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
-            "AspectExecutionContext")))
+        val context = builder.new_temp(MirType(kind: MirTypeKind.Struct(
+            SymbolId(id: 8003))))
+        val owner = builder.emit_bitcast(
+            mir_operand_copy(context),
+            MirType(kind: MirTypeKind.Opaque("AspectExecutionContext")))
         val lease = builder.new_temp(MirType(kind: MirTypeKind.Opaque(
             "__simple_facet_descriptor_lease_abi")))
+        builder.emit_const(lease, MirConstValue.Zero,
+            MirType(kind: MirTypeKind.Opaque("__simple_facet_descriptor_lease_abi")))
         val condition = builder.new_temp(MirType.bool())
+        builder.emit_const(condition, MirConstValue.Bool(true), MirType.bool())
         builder.set_terminator(mir_call_terminator_create(
             nil, mir_operand_const_int(1), [], normal,
             MirCallUnwindContract.MayUnwind, Some(unwind)).unwrap())
