@@ -158,18 +158,42 @@ describe "facet descriptor lexical cleanup scopes":
         expect(released.len()).to_equal(1)
         expect(released[0]).to_equal(5002)
 
-    it "fails closed when throw appears while a descriptor lease may be live":
+    it "releases nested leases once in reverse order before terminating Throw":
         var lowering = cleanup_lowering()
         lowering.enter_facet_cleanup_scope()
         lowering.remember_facet_adapter(
             LocalId(id: 61), cleanup_adapter(6, 601, 6001))
+        lowering.enter_facet_cleanup_scope()
+        lowering.remember_facet_adapter(
+            LocalId(id: 62), cleanup_adapter(6, 602, 6002))
         val thrown = unit_hir_expr(HirExprKind.Throw(
             unit_hir_expr(HirExprKind.UnitLit)))
         val _result = lowering.lower_expr(thrown)
-        if not has_fatal_error_containing(lowering, "E-AF007"):
-            fail("expected leased throw to fail with E-AF007")
-        if not has_fatal_error_containing(lowering, "throw"):
-            fail("expected leased throw diagnostic")
+        var builder = lowering.builder
+        val function = builder.end_function()
+        var released: [i64] = []
+        var saw_throw = false
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case Call(_, function_operand, arguments):
+                        match function_operand.kind:
+                            case Const(MirConstValue.Str(name), _):
+                                if (name == "aspect_execution_context_release_facet_descriptor_or_panic" and
+                                    arguments.len() == 2):
+                                    match arguments[1].kind:
+                                        case Const(MirConstValue.Int(id), _): released.push(id)
+                                        case _: ()
+                            case _: ()
+                    case _: ()
+            match block.terminator:
+                case Throw(_): saw_throw = true
+                case _: ()
+        expect(released.len()).to_equal(2)
+        expect(released[0]).to_equal(6002)
+        expect(released[1]).to_equal(6001)
+        expect(saw_throw).to_be(true)
+        expect(lowering.errors.len()).to_equal(0)
 
     it "fails closed at an await suspension while a descriptor lease may be live":
         var lowering = cleanup_lowering()
