@@ -202,6 +202,9 @@ class SymbolTable:
     next_scope_id: i64
     gpu_function_targets: Dict<text, text>
     gpu_function_backend_orders: Dict<text, text>
+    qualified_functions: Dict<text, i64>
+    qualified_types: Dict<text, i64>
+    exact_symbols: Dict<text, i64>
 
 fn _hir_symbol_owner_module(path: text) -> text:
     if path.starts_with("../"):
@@ -219,7 +222,10 @@ impl SymbolTable:
             next_symbol_id: 0,
             next_scope_id: 1,
             gpu_function_targets: {},
-            gpu_function_backend_orders: {}
+            gpu_function_backend_orders: {},
+            qualified_functions: {},
+            qualified_types: {},
+            exact_symbols: {}
         )
         # Create root scope (direct mutation avoids copy-modify-reassign bug)
         table.scopes[0] = Scope(
@@ -288,6 +294,8 @@ impl SymbolTable:
         )
 
         self.symbols[raw_id] = symbol
+        if not self.exact_symbols.has(name):
+            self.exact_symbols[name] = raw_id
 
         # Copy-modify-reassign for interpreter compatibility
         var scope = self.scopes[self.current_scope.id]
@@ -304,10 +312,17 @@ impl SymbolTable:
             self.qualified_functions[key] = id.id
 
     fn lookup_qualified_function(module_name: text, member_name: text) -> SymbolId?:
+        val raw_id = self.lookup_qualified_function_raw(module_name, member_name)
+        if raw_id >= 0:
+            return SymbolId(id: raw_id)
+        nil
+
+    fn lookup_qualified_function_raw(module_name: text, member_name: text) -> i64:
+        """Native-safe scalar qualified-function lookup, including id zero."""
         val key = module_name + "." + member_name
         if self.qualified_functions.has(key):
-            return Some(SymbolId(id: self.qualified_functions[key]))
-        nil
+            return self.qualified_functions[key]
+        -1
 
     me bind_qualified_type(module_name: text, member_name: text, id: SymbolId):
         val key = module_name + "." + member_name
@@ -479,6 +494,8 @@ impl SymbolTable:
                         defining_module: sym.defining_module
                     )
                     self.symbols[raw] = renamed
+                    if not self.exact_symbols.has(new_name):
+                        self.exact_symbols[new_name] = raw
             case _:
                 pass
 
