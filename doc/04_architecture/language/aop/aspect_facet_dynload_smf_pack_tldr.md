@@ -36,10 +36,11 @@ flow:
   trampoline, process-global handle, or second lease authority is permitted.
 - Check/interpreter reject the option directly; JIT and every AOT backend reject
   produced slots through the same centralized admission boundary.
-- D4 is implemented pending executable verification. D5 has genuine source/HIR
-  acquisition, context descriptor APIs, and semantic affine checks, but runtime
-  descriptor-to-adapter lowering and balanced release insertion remain open;
-  verification is `STATUS: FAIL`.
+- D4 is implemented pending executable verification. D5 now has genuine
+  source/HIR acquisition, nominal context/contract proof, an opaque descriptor
+  lease, checked ordinal method lookup, typed-base indirect-call lowering, and
+  HIR-symbol capture rejection. CFG-wide balanced release and complete wrapper
+  lowering remain open; verification is `STATUS: FAIL`.
 - Resolver startup now crosses `85.mdsoc` through
   `ModuleResolverDiscoveryPort.resolve_inputs`; production composition injects
   the 99-loader adapter, while compatibility/test constructors stay explicitly

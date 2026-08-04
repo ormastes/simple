@@ -9,8 +9,9 @@ use compiler.common.structural_contracts.facet_artifact.{
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.{
     FacetRefEscapeKind, MirConstValue, MirInstKind, MirOperandKind,
-    MirSignature, MirType, MirTypeKind,
+    MirType, MirTypeKind,
     facet_acquisition_context_plan, plan_typed_dynamic_facet_adapter,
+    resolve_typed_facet_member,
     validate_dynamic_facet_ref_escape, validate_typed_facet_descriptor,
     lower_typed_facet_member_call, mir_operand_const_int
 }
@@ -48,22 +49,26 @@ describe "typed dynamic facet adapter compiler contract":
         val context = facet_acquisition_context_plan(
             "app.AspectApplicationRuntime",
             mir_operand_const_int(7),
-            "acquire_published_facet",
-            "release_facet_generation_lease").unwrap()
+            "aspect_execution_context_acquire_facet_descriptor",
+            "aspect_execution_context_release_facet_descriptor_or_panic").unwrap()
         val adapter = plan_typed_dynamic_facet_adapter(
             MirType(kind: MirTypeKind.Struct(SymbolId(id: 51))),
             mir_operand_const_int(41),
             typed_facet_contract(),
-            resolved_typed_facet_descriptor(),
-            context,
-            true).unwrap()
+            mir_operand_const_int(99),
+            context).unwrap()
+        expect(adapter.context.release_symbol).to_equal(
+            "aspect_execution_context_release_facet_descriptor_or_panic")
+        match adapter.descriptor_lease.kind:
+            case Const(MirConstValue.Int(value), _): expect(value).to_equal(99)
+            case _: fail("typed adapter did not retain the runtime lease operand")
 
+        val member = resolve_typed_facet_member(adapter, "details").unwrap()
+        expect(member.method_ordinal).to_equal(1)
+        expect(member.signature.params.len()).to_equal(2)
         val lowered = lower_typed_facet_member_call(
-            nil, adapter, "details", [mir_operand_const_int(3)],
-            MirSignature(
-                params: [MirType.i64(), MirType.i64()],
-                return_type: MirType.i64(),
-                is_variadic: false)).unwrap()
+            nil, adapter, member, mir_operand_const_int(8192),
+            [mir_operand_const_int(3)]).unwrap()
         match lowered:
             case CallIndirect(_, pointer, arguments, _):
                 match pointer.kind:
@@ -119,7 +124,7 @@ describe "typed dynamic facet adapter compiler contract":
         expect(validate_typed_facet_descriptor(
             contract, wrong_abi).unwrap_err()).to_contain("ABI hash")
 
-    it "rejects erased bases, missing leases, and absent acquisition ownership":
+    it "rejects erased bases and absent acquisition ownership":
         val missing_context = facet_acquisition_context_plan(
             "", mir_operand_const_int(0), "", "")
         expect(missing_context.unwrap_err()).to_contain("explicit application runtime context")
@@ -127,24 +132,19 @@ describe "typed dynamic facet adapter compiler contract":
         val context = facet_acquisition_context_plan(
             "app.AspectApplicationRuntime",
             mir_operand_const_int(7),
-            "acquire_published_facet",
-            "release_facet_generation_lease").unwrap()
+            "aspect_execution_context_acquire_facet_descriptor",
+            "aspect_execution_context_release_facet_descriptor_or_panic").unwrap()
         val erased = plan_typed_dynamic_facet_adapter(
             MirType(kind: MirTypeKind.Opaque("Any")),
             mir_operand_const_int(41), typed_facet_contract(),
-            resolved_typed_facet_descriptor(), context, true)
+            mir_operand_const_int(99), context)
         expect(erased.unwrap_err()).to_contain("must remain typed")
 
         val dyn_erased = plan_typed_dynamic_facet_adapter(
             MirType(kind: MirTypeKind.Opaque("dyn_Debuggable")),
             mir_operand_const_int(41), typed_facet_contract(),
-            resolved_typed_facet_descriptor(), context, true)
+            mir_operand_const_int(99), context)
         expect(dyn_erased.unwrap_err()).to_contain("must remain typed")
-
-        val unleased = plan_typed_dynamic_facet_adapter(
-            MirType.i64(), mir_operand_const_int(41), typed_facet_contract(),
-            resolved_typed_facet_descriptor(), context, false)
-        expect(unleased.unwrap_err()).to_contain("exact generation lease")
 
     it "fails closed for every leased-reference escape shape":
         val local_use = validate_dynamic_facet_ref_escape(
@@ -168,14 +168,10 @@ describe "typed dynamic facet adapter compiler contract":
         val context = facet_acquisition_context_plan(
             "app.AspectApplicationRuntime",
             mir_operand_const_int(7),
-            "acquire_published_facet",
-            "release_facet_generation_lease").unwrap()
+            "aspect_execution_context_acquire_facet_descriptor",
+            "aspect_execution_context_release_facet_descriptor_or_panic").unwrap()
         val adapter = plan_typed_dynamic_facet_adapter(
             MirType.i64(), mir_operand_const_int(41), typed_facet_contract(),
-            resolved_typed_facet_descriptor(), context, true).unwrap()
-        val result = lower_typed_facet_member_call(
-            nil, adapter, "missing", [],
-            MirSignature(
-                params: [MirType.i64()], return_type: MirType.i64(),
-                is_variadic: false))
+            mir_operand_const_int(99), context).unwrap()
+        val result = resolve_typed_facet_member(adapter, "missing")
         expect(result.unwrap_err()).to_contain("not in the validated contract")

@@ -14,10 +14,17 @@ use compiler.mir.mir_lowering_expr.*
 use compiler.mir.mir_data.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.facet_static.{HirFacetInterface}
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.mir.mir_instructions.{MirPlace}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+use compiler.mir.facet_witness_call.{
+    FacetAcquisitionContextPlan, TypedFacetAdapterPlan,
+    facet_acquisition_context_plan, facet_contract_metadata_from_hir_interface,
+    plan_typed_dynamic_facet_adapter, resolve_typed_facet_member,
+    lower_typed_facet_member_call
+}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
@@ -70,6 +77,253 @@ fn hir_expr_static_unsigned(e: HirExpr) -> bool:
 # ============================================================================
 
 impl MirLowering:
+    fn facet_interface_for_contract(contract: HirType): HirFacetInterface?:
+        var contract_symbol_id = -1
+        match contract.kind:
+            case HirTypeKind.Named(symbol, _): contract_symbol_id = symbol.id
+            case _: return nil
+        for interface_ in self.static_facets.interfaces:
+            if interface_.symbol_id == contract_symbol_id:
+                return Some(interface_)
+        nil
+
+    fn facet_concrete_type_id(base: HirExpr) -> text:
+        if not base.has_type_ or base.type_ == nil:
+            return ""
+        match base.type_.kind:
+            case HirTypeKind.Named(symbol, _):
+                val info = self.symbols.get_symbol_raw(symbol.id)
+                if info != nil:
+                    return self.composite_layout_key(info)
+                ""
+            case _: ""
+
+    fn facet_implemented_interfaces(base: HirExpr) -> [text]:
+        var names: [text] = []
+        if not base.has_type_ or base.type_ == nil:
+            return names
+        var base_symbol_id = -1
+        match base.type_.kind:
+            case HirTypeKind.Named(symbol, _): base_symbol_id = symbol.id
+            case _: return names
+        for impl_ in self.current_impls:
+            var impl_symbol_id = -1
+            match impl_.type_.kind:
+                case HirTypeKind.Named(symbol, _): impl_symbol_id = symbol.id
+                case _: ()
+            if impl_symbol_id != base_symbol_id or not impl_.has_trait_:
+                continue
+            match impl_.trait_.kind:
+                case HirTypeKind.Named(trait_symbol, _):
+                    val info = self.symbols.get_symbol_raw(trait_symbol.id)
+                    if info != nil and not names.contains(info.name):
+                        names.push(info.name)
+                case _: ()
+        names
+
+    fn facet_runtime_function(name: text, params: [MirType], result: MirType) -> MirOperand:
+        MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str(name),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: params, return_type: result, is_variadic: false)))))
+
+    me facet_unwrap_or_panic(value: LocalId, label: text, option: bool) -> LocalId:
+        var b = self.builder
+        val predicate = if option:
+            self.facet_runtime_function("rt_is_some", [MirType.i64()], MirType.bool())
+        else:
+            self.facet_runtime_function("rt_enum_discriminant", [MirType.i64()], MirType.i64())
+        val check_result = b.emit_call(predicate, [mir_operand_copy(value)],
+            if option: MirType.bool() else: MirType.i64())
+        val check_local = check_result ?? LocalId(id: 0)
+        var condition = check_local
+        if not option:
+            val ok_discriminant = b.emit_const_int(0)
+            condition = b.emit_binop(
+                MirBinOp.Eq, mir_operand_copy(check_local),
+                mir_operand_copy(ok_discriminant), MirType.bool())
+        val present_block = b.new_block(Some(label + "_present"))
+        val absent_block = b.new_block(Some(label + "_absent"))
+        val merge_block = b.new_block(Some(label + "_merge"))
+        val payload = b.new_temp(MirType.i64())
+        b.terminate_if(mir_operand_copy(condition), present_block, absent_block)
+        self.builder = b
+
+        var present = self.builder
+        present.switch_to_block(present_block)
+        val unwrap = self.facet_runtime_function(
+            if option: "rt_unwrap_or_self" else: "rt_enum_payload",
+            [MirType.i64()], MirType.i64())
+        val unwrapped = present.emit_call(
+            unwrap, [mir_operand_copy(value)], MirType.i64()) ?? LocalId(id: 0)
+        present.emit_copy(payload, unwrapped)
+        present.terminate_goto(merge_block)
+        self.builder = present
+
+        var absent = self.builder
+        absent.switch_to_block(absent_block)
+        val message = absent.emit_const_str(
+            if option: "required facet is not published" else: "facet descriptor acquisition failed")
+        absent.emit_call(
+            self.facet_runtime_function("rt_panic", [], MirType.unit()),
+            [mir_operand_copy(message)], MirType.unit())
+        absent.emit_const(payload, MirConstValue.Zero, MirType.i64())
+        absent.terminate_goto(merge_block)
+        self.builder = absent
+
+        var merge = self.builder
+        merge.switch_to_block(merge_block)
+        self.builder = merge
+        payload
+
+    me facet_assert_contract_hash(lease: LocalId, expected_hash: text):
+        var b = self.builder
+        val actual_hash = b.emit_get_field(
+            mir_operand_copy(lease), 3, MirType.i64())
+        val expected = b.emit_const_str(expected_hash)
+        val equal_result = b.emit_call(
+            self.facet_runtime_function(
+                "rt_text_eq_any", [MirType.i64(), MirType.i64()], MirType.i64()),
+            [mir_operand_copy(actual_hash), mir_operand_copy(expected)], MirType.i64())
+        val equal = equal_result ?? LocalId(id: 0)
+        val valid_block = b.new_block(Some("facet_contract_valid"))
+        val invalid_block = b.new_block(Some("facet_contract_invalid"))
+        b.terminate_if(mir_operand_copy(equal), valid_block, invalid_block)
+        self.builder = b
+        var invalid = self.builder
+        invalid.switch_to_block(invalid_block)
+        val message = invalid.emit_const_str(
+            "acquired facet descriptor ABI hash does not match compiled contract")
+        invalid.emit_call(
+            self.facet_runtime_function("rt_panic", [], MirType.unit()),
+            [mir_operand_copy(message)], MirType.unit())
+        invalid.terminate_goto(valid_block)
+        self.builder = invalid
+        var valid = self.builder
+        valid.switch_to_block(valid_block)
+        self.builder = valid
+
+    me lower_facet_acquire(
+        context: HirExpr, base: HirExpr, contract_type: HirType, mode: text
+    ) -> LocalId:
+        val interface_opt = self.facet_interface_for_contract(contract_type)
+        if not interface_opt.?:
+            self.error_fatal("E-AF005 facet acquisition contract is not a declared facet interface", Some(base.span))
+            return self.builder.emit_const_int(0)
+        val interface_ = interface_opt.unwrap()
+        val concrete_type_id = self.facet_concrete_type_id(base)
+        if concrete_type_id == "":
+            self.error_fatal("E-AF005 facet acquisition base type is not concrete", Some(base.span))
+            return self.builder.emit_const_int(0)
+
+        val context_local = self.lower_expr(context)
+        val base_local = self.lower_expr(base)
+        val base_type = if base.has_type_ and base.type_ != nil:
+            self.lower_type(base.type_)
+        else:
+            self.local_mir_type_of(base_local) ?? MirType.i64()
+        var b = self.builder
+        val zero = b.emit_const_int(0)
+        val interfaces_result = b.emit_call(
+            self.facet_runtime_function("rt_array_new", [MirType.i64()], MirType.i64()),
+            [mir_operand_copy(zero)], MirType.i64())
+        val interfaces = interfaces_result ?? LocalId(id: 0)
+        self.builder = b
+        for interface_name in self.facet_implemented_interfaces(base):
+            var interface_builder = self.builder
+            val interface_text = interface_builder.emit_const_str(interface_name)
+            self.builder = interface_builder
+            val boxed_interface = self.box_runtime_value(interface_text)
+            interface_builder = self.builder
+            interface_builder.emit_call(
+                self.rt_array_push_operand(),
+                [mir_operand_copy(interfaces), mir_operand_copy(boxed_interface)],
+                MirType.unit())
+            self.builder = interface_builder
+        b = self.builder
+        val concrete = b.emit_const_str(concrete_type_id)
+        val facet_id = b.emit_const_str(interface_.name)
+        val acquired_result = b.emit_call(
+            self.facet_runtime_function(
+                "aspect_execution_context_acquire_facet_descriptor",
+                [self.local_mir_type_of(context_local) ?? MirType.i64(),
+                 MirType(kind: MirTypeKind.Opaque("str")), MirType.i64(),
+                 MirType(kind: MirTypeKind.Opaque("str"))],
+                MirType.i64()),
+            [mir_operand_copy(context_local), mir_operand_copy(concrete),
+             mir_operand_copy(interfaces), mir_operand_copy(facet_id)],
+            MirType.i64())
+        self.builder = b
+        val acquired = acquired_result ?? LocalId(id: 0)
+        if mode != "require_facet":
+            # try_facet/facet preserve their Optional/Result wrapper; an
+            # adapter is installed only after a required acquisition owns an
+            # exact descriptor lease in this currently executable lane.
+            return acquired
+        val optional_lease = self.facet_unwrap_or_panic(acquired, "facet_result", false)
+        val lease = self.facet_unwrap_or_panic(optional_lease, "facet_option", true)
+        val contract = facet_contract_metadata_from_hir_interface(interface_)
+        self.facet_assert_contract_hash(lease, contract.abi_hash)
+        val owner = facet_acquisition_context_plan(
+            "AspectExecutionContext", mir_operand_copy(context_local),
+            "aspect_execution_context_acquire_facet_descriptor",
+            "aspect_execution_context_release_facet_descriptor_or_panic").unwrap()
+        val adapter = plan_typed_dynamic_facet_adapter(
+            base_type, mir_operand_copy(base_local), contract,
+            mir_operand_copy(lease), owner).unwrap()
+        self.remember_facet_adapter(lease, adapter)
+        lease
+
+    me lower_facet_member_call(
+        receiver: HirExpr, method: text, args: [HirCallArg]
+    ) -> LocalId:
+        val receiver_local = self.lower_expr(receiver)
+        val adapter_opt = self.find_facet_adapter(receiver_local)
+        if not adapter_opt.?:
+            self.error_fatal(
+                "E-AF005 typed facet member has no acquired descriptor lease",
+                Some(receiver.span))
+            return self.builder.emit_const_int(0)
+        val adapter = adapter_opt.unwrap()
+        val member_result = resolve_typed_facet_member(adapter, method)
+        if member_result.is_err():
+            self.error_fatal(member_result.unwrap_err(), Some(receiver.span))
+            return self.builder.emit_const_int(0)
+        val member = member_result.unwrap()
+        var b = self.builder
+        val ordinal = b.emit_const_int(member.method_ordinal)
+        val expected_name = b.emit_const_str(member.method_name)
+        val address_result = b.emit_call(
+            self.facet_runtime_function(
+                "aspect_execution_context_facet_method_address",
+                [MirType.i64(), MirType.i64(), MirType.i64(),
+                 MirType(kind: MirTypeKind.Opaque("str"))],
+                MirType.i64()),
+            [adapter.context.runtime_owner, adapter.descriptor_lease,
+             mir_operand_copy(ordinal), mir_operand_copy(expected_name)],
+            MirType.i64())
+        val address_result_local = address_result ?? LocalId(id: 0)
+        self.builder = b
+        val resolved_address = self.facet_unwrap_or_panic(
+            address_result_local, "facet_method_address", false)
+        var operands: [MirOperand] = []
+        for arg in args:
+            val lowered = self.lower_expr(arg.value)
+            operands.push(mir_operand_copy(lowered))
+        b = self.builder
+        val destination: LocalId? = if member.signature.return_type.kind == MirTypeKind.Unit:
+            nil
+        else:
+            Some(b.new_temp(member.signature.return_type))
+        val instruction = lower_typed_facet_member_call(
+            destination, adapter, member, mir_operand_copy(resolved_address), operands)
+        if instruction.is_err():
+            self.error_fatal(instruction.unwrap_err(), Some(receiver.span))
+            return self.builder.emit_const_int(0)
+        b.emit(MirInst(kind: instruction.unwrap(), span: Some(receiver.span)))
+        self.builder = b
+        destination ?? b.new_temp(MirType.unit())
+
     # mutglobal2 lane (module-level `var`/`val` mutation end-to-end, see
     # scratchpad/mutglobal_plan.md + scratchpad/mutglobal2 report). The prior
     # lane gave `MirModule.statics`/`LoadGlobal`/`StoreGlobal` real backend
@@ -2764,25 +3018,11 @@ impl MirLowering:
                 eprint("[mir-lower-expr] method-dispatch-after method={method} id={method_result.id}\n")
                 method_result
 
-            case FacetAcquire(_, _, _, _):
-                self.error(
-                    "E-AF005 typed facet acquisition reached MIR before the " +
-                    "AspectExecutionContext descriptor-result adapter ABI was installed",
-                    Some(expr_value.span))
-                var facet_acquire_builder = self.builder
-                val facet_acquire_error = facet_acquire_builder.new_temp(MirType.unit())
-                self.builder = facet_acquire_builder
-                facet_acquire_error
+            case FacetAcquire(context, base, contract, mode):
+                self.lower_facet_acquire(context, base, contract, mode)
 
-            case FacetMemberCall(_, method, _, _):
-                self.error(
-                    "E-AF005 typed facet member '" + method +
-                    "' reached MIR without a validated runtime descriptor ordinal",
-                    Some(expr_value.span))
-                var facet_member_builder = self.builder
-                val facet_member_error = facet_member_builder.new_temp(MirType.unit())
-                self.builder = facet_member_builder
-                facet_member_error
+            case FacetMemberCall(receiver, method, args, _):
+                self.lower_facet_member_call(receiver, method, args)
 
             case ArrayLit(elements, _):
                 self.lower_array_lit(elements)

@@ -9,6 +9,7 @@
 
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_types.*
+use compiler.hir.facet_static.{HirFacetInterface, HirFacetModule}
 use compiler.common.diagnostics.span.{Span}
 
 # ============================================================================
@@ -80,6 +81,8 @@ struct SafetyContext:
     params: [SafetyParamTrack]  # current function's trackable non-mut params
     iter_tracks: [SafetyIterTrack]  # E1048: stack of collections currently being for-iterated
     facet_refs: [SafetyFacetRefTrack] # E-AF006 leased affine locals
+    facet_capture_depth: i64 # lambda/async closure nesting
+    facet_capture_reports: [i64] # one diagnostic per captured symbol/closure
 
 
 # ============================================================================
@@ -87,7 +90,7 @@ struct SafetyContext:
 # ============================================================================
 
 fn safetycontext_new() -> SafetyContext:
-        SafetyContext(in_unsafe: false, errors: [], extern_fns: [], class_symbol_ids: [], params: [], iter_tracks: [], facet_refs: [])
+        SafetyContext(in_unsafe: false, errors: [], extern_fns: [], class_symbol_ids: [], params: [], iter_tracks: [], facet_refs: [], facet_capture_depth: 0, facet_capture_reports: [])
 
 fn safetychecker_facet_contract(expr: HirExpr) -> HirType?:
     match expr.kind:
@@ -108,6 +111,68 @@ fn safetychecker_facet_ref(self: SafetyChecker, expr: HirExpr) -> SafetyFacetRef
 fn safetychecker_facet_escape(self: SafetyChecker, message: text, span: Span):
     self.context.errors = self.context.errors.push(
         SafetyError.Other("E-AF006 " + message, span))
+
+fn safetychecker_named_type_symbol(type_: HirType) -> i64:
+    match type_.kind:
+        case HirTypeKind.Named(symbol, _): symbol.id
+        case _: -1
+
+fn safetychecker_expr_named_type_symbol(self: SafetyChecker, expr: HirExpr) -> i64:
+    if expr.type_ != nil:
+        val explicit_type = expr.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
+        val explicit_symbol = safetychecker_named_type_symbol(explicit_type)
+        if explicit_symbol >= 0: return explicit_symbol
+    match expr.kind:
+        case Var(symbol) | NamedVar(symbol, _):
+            if val value_symbol = self.symbols.get_symbol_raw(symbol.id):
+                if value_symbol.type_ != nil:
+                    val value_type = value_symbol.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
+                    return safetychecker_named_type_symbol(value_type)
+            -1
+        case Try(inner) | Unwrap(inner):
+            safetychecker_expr_named_type_symbol(self, inner)
+        case _: -1
+
+fn safetychecker_is_aspect_execution_context(
+    self: SafetyChecker, expr: HirExpr
+) -> bool:
+    val type_symbol_id = safetychecker_expr_named_type_symbol(self, expr)
+    if type_symbol_id < 0: return false
+    if val type_symbol = self.symbols.get_symbol_raw(type_symbol_id):
+        if type_symbol.name != "AspectExecutionContext": return false
+        match type_symbol.kind:
+            case SymbolKind.Struct | SymbolKind.Class: return true
+            case _: return false
+    false
+
+fn safetychecker_facet_interface_for_contract(
+    self: SafetyChecker, contract: HirType
+) -> HirFacetInterface?:
+    val contract_symbol_id = safetychecker_named_type_symbol(contract)
+    if contract_symbol_id < 0: return nil
+    for interface_ in self.static_facets.interfaces:
+        if interface_.symbol_id == contract_symbol_id:
+            return interface_
+    nil
+
+fn safetychecker_facet_interface_has_method(
+    interface_: HirFacetInterface, method_name: text
+) -> bool:
+    # The method's canonical signature and ordinal remain owned by this array;
+    # downstream lowering uses the matching entry rather than synthesizing a
+    # call from the member's source spelling.
+    for method in interface_.methods:
+        if method.name == method_name: return true
+    false
+
+fn safetychecker_report_facet_capture(self: SafetyChecker, expr: HirExpr):
+    if self.context.facet_capture_depth <= 0: return
+    if val captured = safetychecker_facet_ref(self, expr):
+        if not self.context.facet_capture_reports.contains(captured.symbol_id):
+            self.context.facet_capture_reports = self.context.facet_capture_reports.push(captured.symbol_id)
+            safetychecker_facet_escape(
+                self, "leased FacetRef '" + captured.name +
+                "' cannot be captured by a lambda or async closure", expr.span)
 
 
 # Raw-pointer runtime primitive families (see src/lib/nogc_sync_mut/ptr/raw.spl
@@ -338,15 +403,23 @@ class SafetyChecker:
     is a `class` for exactly this reason -- it accumulates `self.errors`
     across an equally deep recursive lowering walk."""
     context: SafetyContext
+    symbols: SymbolTable
+    static_facets: HirFacetModule
 
 
 impl SafetyChecker:
     static fn create() -> SafetyChecker:
-        SafetyChecker(context: safetycontext_new())
+        SafetyChecker(
+            context: safetycontext_new(),
+            symbols: SymbolTable.new(),
+            static_facets: HirFacetModule(
+                interfaces: [], implementations: [], bindings: [], requirements: []))
 
 
 fn safetychecker_check_module(self: SafetyChecker, module: HirModule) -> [SafetyError]:
     """Check an entire module for safety violations."""
+    self.symbols = module.symbols
+    self.static_facets = module.static_facets
     # Collect module-local extern fn names first: direct calls to these are
     # FFI boundary crossings and must sit inside an `unsafe:` block.
     for _for_item_e in module.functions:
@@ -629,11 +702,31 @@ fn safetychecker_check_expr(self: SafetyChecker, expr: HirExpr):
             safetychecker_check_expr(self, receiver)
             safetychecker_check_args(self, args)
 
-        case FacetAcquire(context, base, _, _):
+        case FacetAcquire(context, base, contract, _):
+            if not safetychecker_is_aspect_execution_context(self, context):
+                self.context.errors = self.context.errors.push(SafetyError.Other(
+                    "E-AF005 facet acquisition requires an exact AspectExecutionContext expression",
+                    context.span))
+            if safetychecker_facet_interface_for_contract(self, contract) == nil:
+                self.context.errors = self.context.errors.push(SafetyError.Other(
+                    "E-AF005 facet acquisition contract is not a declared facet interface",
+                    expr.span))
             safetychecker_check_expr(self, context)
             safetychecker_check_expr(self, base)
 
-        case FacetMemberCall(receiver, _, args, _):
+        case FacetMemberCall(receiver, method_name, args, contract):
+            val interface_ = safetychecker_facet_interface_for_contract(self, contract)
+            if interface_ == nil:
+                self.context.errors = self.context.errors.push(SafetyError.Other(
+                    "E-AF005 facet member receiver has no declared facet interface",
+                    expr.span))
+            else:
+                val declared_interface = interface_ ?? self.static_facets.interfaces[0]
+                if not safetychecker_facet_interface_has_method(declared_interface, method_name):
+                    self.context.errors = self.context.errors.push(SafetyError.Other(
+                        "E-AF005 facet interface '" + declared_interface.name +
+                        "' has no member '" + method_name + "'",
+                        expr.span))
             safetychecker_check_expr(self, receiver)
             for arg in args:
                 if val passed = safetychecker_facet_ref(self, arg.value):
@@ -675,7 +768,12 @@ fn safetychecker_check_expr(self: SafetyChecker, expr: HirExpr):
 
         # Lambdas
         case Lambda(_, body, _):
+            val saved_capture_reports = self.context.facet_capture_reports
+            self.context.facet_capture_reports = []
+            self.context.facet_capture_depth = self.context.facet_capture_depth + 1
             safetychecker_check_expr(self, body)
+            self.context.facet_capture_depth = self.context.facet_capture_depth - 1
+            self.context.facet_capture_reports = saved_capture_reports
 
         # Returns and breaks
         case Return(value):
@@ -817,6 +915,9 @@ fn safetychecker_check_expr(self: SafetyChecker, expr: HirExpr):
 
         case UnitLit:
             pass
+
+        case Var(_) | NamedVar(_, _):
+            safetychecker_report_facet_capture(self, expr)
 
         case NilLit:
             pass

@@ -325,6 +325,37 @@ impl HirLowering:
         self.error("static facet lowering failed: {lowered.unwrap_err()}", Span.empty())
         HirFacetModule(interfaces: [], implementations: [], bindings: [], requirements: [])
 
+    me register_static_facet_interface_symbols(
+        facets: HirFacetModule
+    ) -> HirFacetModule:
+        # Static facet declarations are projected out before the ordinary
+        # parser runs, so declare their type identities explicitly before any
+        # executable expression lowers a `facet<Contract>` type argument.
+        # SymbolKind.Trait is the nearest existing type-level category; the
+        # exact facet distinction is the symbol_id stored on HirFacetInterface,
+        # not the enum kind or the source name.
+        var registered = facets
+        var interfaces = registered.interfaces
+        var index = 0
+        while index < interfaces.len():
+            var interface_ = interfaces[index]
+            val existing = self.symbols.lookup_or_invalid(interface_.name)
+            if existing.is_valid():
+                self.error(
+                    "E-AF005 facet interface '{interface_.name}' conflicts with an ordinary type declaration",
+                    Span.empty())
+                interface_.symbol_id = -1
+            else:
+                val owner = if self.module_filename != "": Some(self.module_filename) else: nil
+                val symbol = self.symbols.define(
+                    interface_.name, SymbolKind.Trait, nil, Span.empty(),
+                    Visibility.Public, false, owner)
+                interface_.symbol_id = symbol.id
+            interfaces[index] = interface_
+            index = index + 1
+        registered.interfaces = interfaces
+        registered
+
     me prescan_composite_field_types(name: text, fields: [ParserField]):
         """Register parser struct/class fields before function lowering."""
         var field_types: Dict<text, HirType> = {}
@@ -1746,7 +1777,7 @@ impl HirLowering:
         # had real cross-module imports to resolve, so this only widens
         # behavior for the closure path.
         val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-        val static_facets = self.lower_module_static_facets(module)
+        var static_facets = self.lower_module_static_facets(module)
         if bootstrap_diag:
             # NOTE: parser ParserModule has no `path` field (parser_types.spl) — a
             # `{module.path}` interpolation here aborted the whole worker under
@@ -1814,6 +1845,7 @@ impl HirLowering:
             # coverage to types/consts for the closure path.
             self.declare_module_symbols(module)
             hir_module_phase_probe("phase3:hir:declare:done {module.name}")
+        static_facets = self.register_static_facet_interface_symbols(static_facets)
         if bootstrap_diag:
             eprint("[hir-lower] declare:done module={module.name}")
 

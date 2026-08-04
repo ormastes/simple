@@ -52,7 +52,7 @@ enum AspectApplicationOperation:
 # Whole-descriptor acquisition returned to compiler-generated private typed
 # adapters. The application owns the lease and descriptor; the compiler keeps
 # the concrete base operand separately and supplies no caller-created view.
-struct PublishedFacetDescriptorLease:
+class PublishedFacetDescriptorLease:
     aspect_id: text
     binding_id: text
     facet_interface_id: text
@@ -453,6 +453,34 @@ impl AspectExecutionContext:
             return Err("E-AF004 facet descriptor lease aspect identity is inconsistent")
         self.release_facet_generation_lease(acquired.generation_lease)
 
+    # Runtime-owned ordinal lookup keeps descriptor layout and array decoding
+    # out of compiler-generated code. The retained handle remains usable while
+    # its exact generation is quiescing, until the compiler releases the lease.
+    fn published_facet_descriptor_method_address(
+        acquired: PublishedFacetDescriptorLease,
+        ordinal: i64,
+        expected_name: text
+    ) -> Result<i64, text>:
+        if acquired.aspect_id != acquired.generation_lease.aspect_id:
+            return Err("E-AF004 facet descriptor lease aspect identity is inconsistent")
+        if not self.coordinator.published.has(acquired.aspect_id):
+            return Err("E-AF004 facet descriptor generation is no longer published")
+        val activation = self.coordinator.published[acquired.aspect_id]
+        if activation.generation != acquired.generation_lease.generation_id:
+            return Err("E-AF004 facet descriptor generation identity is inconsistent")
+        if not activation.owners.contains(acquired.witness_descriptor.owner_id):
+            return Err("E-AF002 facet descriptor owner is not retained by its generation")
+        if expected_name == "":
+            return Err("E-AF005 facet contract method name is empty")
+        if ordinal < 0 or ordinal >= acquired.witness_descriptor.method_entries.len():
+            return Err("E-AF005 facet contract method ordinal is out of bounds: {ordinal}")
+        val method = acquired.witness_descriptor.method_entries[ordinal]
+        if method.method_name != expected_name:
+            return Err("E-AF002 facet descriptor method order/name does not match the contract")
+        if method.method_symbol == "" or method.resolved_address <= 0:
+            return Err("E-AF002 facet descriptor contains an unresolved method: {expected_name}")
+        Ok(method.resolved_address)
+
     # Ownership-neutral std.aop lease adapter. The lease carries no app/os
     # object; this boundary reconstructs the canonical lifecycle token.
     me fn acquire_facet_generation_lease(aspect_id: text) -> Result<FacetGenerationLease, text>:
@@ -576,6 +604,28 @@ fn aspect_execution_context_release_facet_descriptor(
 ) -> Result<(), text>:
     context.release_published_facet_descriptor(acquired)
 
+fn aspect_execution_context_facet_method_address(
+    context: AspectExecutionContext,
+    acquired: PublishedFacetDescriptorLease,
+    ordinal: i64,
+    expected_name: text
+) -> Result<i64, text>:
+    context.published_facet_descriptor_method_address(
+        acquired, ordinal, expected_name)
+
+# Unit-returning cleanup ABI for compiler-generated typed facet adapters.
+# Cleanup may be inserted into a function with any declared return type, so a
+# release error cannot be returned through the enclosing function. Fail stop
+# instead of silently discarding an invalid, forged, or replayed lease.
+fn aspect_execution_context_release_facet_descriptor_or_panic(
+    context: AspectExecutionContext,
+    acquired: PublishedFacetDescriptorLease
+) -> ():
+    val released = aspect_execution_context_release_facet_descriptor(
+        context, acquired)
+    if released.is_err():
+        panic(released.unwrap_err())
+
 export AspectApplicationPhase
 export AspectApplicationOperation
 export PublishedFacetDescriptorLease
@@ -584,4 +634,6 @@ export AspectApplicationRuntime
 export prepared_advice_dispatch_context_invoke
 export prepared_advice_dispatch_context_invoke_or_panic
 export aspect_execution_context_acquire_facet_descriptor
+export aspect_execution_context_facet_method_address
 export aspect_execution_context_release_facet_descriptor
+export aspect_execution_context_release_facet_descriptor_or_panic

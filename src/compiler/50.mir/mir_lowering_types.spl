@@ -7,8 +7,10 @@
 use compiler.mir.mir_data.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.facet_static.{HirFacetModule}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.mir.facet_witness_call.{TypedFacetAdapterPlan}
 
 # ============================================================================
 # MIR Lowering Types
@@ -347,6 +349,13 @@ struct MirLowering:
     # "mutable array global has no backing static" diagnostic is emitted once
     # per symbol instead of once per reference site.
     array_global_mutation_warned: Dict<i64, bool>
+    # Dynamic facet locals carry only the application-owned descriptor lease
+    # handle. These parallel arrays retain the separately typed base and the
+    # exact compile-time contract/context plan without changing base layout.
+    facet_adapter_local_ids: [i64]
+    facet_adapter_plans: [TypedFacetAdapterPlan]
+    static_facets: HirFacetModule
+    current_impls: [HirImpl]
     target_context: MirTargetContext
 
 impl MirLowering:
@@ -374,6 +383,24 @@ impl MirLowering:
                 return self.local_symbol_values[i]
             i = i - 1
         LocalId(id: -1)
+
+    me remember_facet_adapter(local: LocalId, plan: TypedFacetAdapterPlan):
+        var index = 0
+        while index < self.facet_adapter_local_ids.len():
+            if self.facet_adapter_local_ids[index] == local.id:
+                self.facet_adapter_plans[index] = plan
+                return
+            index = index + 1
+        self.facet_adapter_local_ids.push(local.id)
+        self.facet_adapter_plans.push(plan)
+
+    fn find_facet_adapter(local: LocalId) -> TypedFacetAdapterPlan?:
+        var index = self.facet_adapter_local_ids.len() - 1
+        while index >= 0:
+            if self.facet_adapter_local_ids[index] == local.id:
+                return Some(self.facet_adapter_plans[index])
+            index = index - 1
+        nil
 
     me remember_local_hir_type(local_id: i64, type_: HirType):
         var ids = self.local_hir_type_ids

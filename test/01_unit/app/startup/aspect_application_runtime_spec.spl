@@ -21,12 +21,15 @@ use compiler.common.structural_contracts.facet_artifact.{
 use app.startup.aspect_application_runtime.{
     AspectApplicationPhase,
     AspectApplicationOperation,
+    PublishedFacetDescriptorLease,
     AspectExecutionContext,
     AspectApplicationRuntime,
     prepared_advice_dispatch_context_invoke,
     prepared_advice_dispatch_context_invoke_or_panic,
     aspect_execution_context_acquire_facet_descriptor,
-    aspect_execution_context_release_facet_descriptor
+    aspect_execution_context_facet_method_address,
+    aspect_execution_context_release_facet_descriptor,
+    aspect_execution_context_release_facet_descriptor_or_panic
 }
 use os.smf.dynsmf_session.{DynSmfSession, DynSmfPolicy, dynsmf_session_new}
 use os.smf.smf_generation.{LifecycleManager}
@@ -205,6 +208,31 @@ fn app_aspect_key() -> AspectPackProviderKey:
         core_public_abi_hash: digest,
         core_layout_abi_hash: digest
     )
+
+# Mirrors compiler-inserted function-scope cleanup without introducing a
+# second lifecycle owner. The generated adapter itself remains compiler-private.
+fn app_release_descriptor_on_fallthrough(
+    context: AspectExecutionContext,
+    acquired: PublishedFacetDescriptorLease
+):
+    defer aspect_execution_context_release_facet_descriptor_or_panic(
+        context, acquired)
+
+fn app_release_descriptor_on_early_return(
+    context: AspectExecutionContext,
+    acquired: PublishedFacetDescriptorLease
+) -> i64:
+    defer aspect_execution_context_release_facet_descriptor_or_panic(
+        context, acquired)
+    return 17
+
+fn app_release_descriptor_on_error_return(
+    context: AspectExecutionContext,
+    acquired: PublishedFacetDescriptorLease
+) -> Result<i64, text>:
+    defer aspect_execution_context_release_facet_descriptor_or_panic(
+        context, acquired)
+    return Err("fixture business error")
 
 fn app_aspect_session() -> DynSmfSession:
     dynsmf_session_new(
@@ -466,6 +494,12 @@ describe "Application aspect runtime policy owner":
         expect(descriptor.witness_descriptor.method_entries.len()).to_equal(1)
         expect(descriptor.witness_descriptor.method_entries[0].method_name).to_equal("audit")
         expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(1)
+        expect(aspect_execution_context_facet_method_address(
+            runtime, descriptor, 0, "audit").unwrap()).to_equal(4096)
+        expect(aspect_execution_context_facet_method_address(
+            runtime, descriptor, 1, "audit").unwrap_err()).to_contain("ordinal")
+        expect(aspect_execution_context_facet_method_address(
+            runtime, descriptor, 0, "wrong").unwrap_err()).to_contain("order/name")
         aspect_execution_context_release_facet_descriptor(
             runtime, descriptor).unwrap()
         expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(0)
@@ -477,6 +511,23 @@ describe "Application aspect runtime policy owner":
         inconsistent.aspect_id = "forged-aspect"
         expect(aspect_execution_context_release_facet_descriptor(
             runtime, inconsistent).unwrap_err()).to_contain("identity is inconsistent")
+        expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(0)
+
+        val fallthrough_descriptor = aspect_execution_context_acquire_facet_descriptor(
+            runtime, "security.AuditRecord", [], "Auditable").unwrap().unwrap()
+        app_release_descriptor_on_fallthrough(runtime, fallthrough_descriptor)
+        expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(0)
+
+        val return_descriptor = aspect_execution_context_acquire_facet_descriptor(
+            runtime, "security.AuditRecord", [], "Auditable").unwrap().unwrap()
+        expect(app_release_descriptor_on_early_return(
+            runtime, return_descriptor)).to_equal(17)
+        expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(0)
+
+        val error_descriptor = aspect_execution_context_acquire_facet_descriptor(
+            runtime, "security.AuditRecord", [], "Auditable").unwrap().unwrap()
+        expect(app_release_descriptor_on_error_return(
+            runtime, error_descriptor).unwrap_err()).to_equal("fixture business error")
         expect(runtime.published_generation_pin_count("security.audit").unwrap()).to_equal(0)
 
         runtime.coordinator.facet_bindings.records[0].witness_descriptor.method_entries[0].resolved_address = 0

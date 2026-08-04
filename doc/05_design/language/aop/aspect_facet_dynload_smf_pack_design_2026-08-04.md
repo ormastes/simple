@@ -2371,6 +2371,8 @@ validates the entire resolved descriptor, selects by contract member, lowers
 through base-first `CallIndirect`, rejects erased bases, and diagnoses every
 currently wired affine escape category by HIR symbol identity. The application
 exposes context-first whole-descriptor acquisition/release with validation and
-failure cleanup. Execution remains fail-closed at MIR until exact context-type
-proof, runtime descriptor extraction, contract method ordinal/signature
-resolution, lambda capture checks, and balanced release insertion are wired.
+failure cleanup. The current continuation wires exact nominal context/contract
+proof, canonical method ordinal/signature resolution, HIR-symbol lambda/async
+capture checks, and typed-base indirect dispatch through an opaque lease and
+context-first checked method accessor. CFG-wide reverse-order release insertion
+and complete `try_facet`/`facet` wrapper lowering remain fail-closed.

@@ -58,9 +58,11 @@ Current implementation status:
   name/owner/address validation, base-first indirect-call selection, erased-base
   rejection, genuine parser/AST/HIR acquisition and member provenance, real
   symbol-based escape checks, and context-first whole-descriptor acquisition/
-  release APIs exist. Exact context-type proof, runtime descriptor-to-adapter
-  MIR, contract ordinal/signature resolution, lambda-capture rejection, and
-  compiler-inserted release on every exit remain open.
+  release APIs exist. Exact nominal context/contract proof, canonical member
+  ordinal/signature resolution, runtime lease-to-adapter lowering, checked
+  method-address access, and lambda/async capture rejection now exist.
+  CFG-wide compiler-inserted release on every exit and full optional/fallible
+  acquisition wrapper lowering remain open.
 
 These lanes retain the five system-manual phrases already frozen in the system
 test plan. Focused setup/checker helpers are

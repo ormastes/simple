@@ -1,13 +1,15 @@
 """Canonical typed facet adapter lowering through the existing indirect call."""
 
 use compiler.common.structural_contracts.facet_artifact.{
-    FACET_WITNESS_DESCRIPTOR_VERSION, FacetContractMetadata,
+    FACET_ARTIFACT_VERSION, FACET_WITNESS_DESCRIPTOR_VERSION, FacetContractMetadata,
     FacetWitnessDescriptorV1
 }
+use compiler.hir.facet_static.{HirFacetInterface}
 use compiler.mir.mir_types.{LocalId, MirSignature, MirType, MirTypeKind}
 use compiler.mir.mir_instructions.{
-    MirInstKind, MirOperand, mir_operand_const_int
+    MirInstKind, MirOperand
 }
+use std.common.crypto.sha256.{sha256_text}
 
 enum FacetRefEscapeKind:
     LocalUse
@@ -26,14 +28,19 @@ struct FacetAcquisitionContextPlan:
     release_symbol: text
 
 struct TypedFacetAdapterPlan:
-    """Application-local adapter; the base remains typed and is never erased."""
+    """Application-local adapter over an acquired runtime descriptor lease."""
     base_type: MirType
     base: MirOperand
     facet_interface_id: text
     facet_contract_abi_hash: text
-    descriptor: FacetWitnessDescriptorV1
+    descriptor_lease: MirOperand
+    contract: FacetContractMetadata
     context: FacetAcquisitionContextPlan
-    has_generation_lease: bool
+
+struct TypedFacetMemberPlan:
+    method_name: text
+    method_ordinal: i64
+    signature: MirSignature
 
 fn facet_acquisition_context_plan(
     owner_type_id: text,
@@ -87,23 +94,109 @@ fn plan_typed_dynamic_facet_adapter(
     base_type: MirType,
     base: MirOperand,
     contract: FacetContractMetadata,
-    descriptor: FacetWitnessDescriptorV1,
-    context: FacetAcquisitionContextPlan,
-    has_generation_lease: bool
+    descriptor_lease: MirOperand,
+    context: FacetAcquisitionContextPlan
 ) -> Result<TypedFacetAdapterPlan, text>:
     if not facet_typed_base_type_supported(base_type):
         return Err("E-AF005 dynamic facet base must remain typed; erased Any/dyn bases are forbidden")
-    if not has_generation_lease:
-        return Err("E-AF004 dynamic facet adapter requires an exact generation lease")
-    validate_typed_facet_descriptor(contract, descriptor)?
+    if contract.facet_interface_id == "" or contract.abi_hash == "":
+        return Err("E-AF002 typed facet contract identity is incomplete")
     Ok(TypedFacetAdapterPlan(
         base_type: base_type,
         base: base,
         facet_interface_id: contract.facet_interface_id,
         facet_contract_abi_hash: contract.abi_hash,
-        descriptor: descriptor,
+        descriptor_lease: descriptor_lease,
+        contract: contract,
         context: context,
-        has_generation_lease: true))
+    ))
+
+fn facet_contract_metadata_from_hir_interface(
+    interface_: HirFacetInterface
+) -> FacetContractMetadata:
+    var names: [text] = []
+    var signatures: [text] = []
+    for method in interface_.methods:
+        names = names.push(method.name)
+        signatures = signatures.push(method.signature)
+    val canonical = "facet-contract-v2\n" + interface_.aspect_id + "\n" +
+        interface_.name + "\n" + interface_.parent_facets.join("\n") +
+        "\n" + names.join("\n") + "\n" + signatures.join("\n")
+    FacetContractMetadata(
+        contract_version: FACET_ARTIFACT_VERSION,
+        aspect_id: interface_.aspect_id,
+        facet_interface_id: interface_.name,
+        parent_facets: interface_.parent_facets,
+        method_names: names,
+        method_signatures: signatures,
+        abi_hash: sha256_text(canonical))
+
+fn facet_signature_scalar_type(name: text) -> Result<MirType, text>:
+    val type_name = name.trim()
+    match type_name:
+        case "i8": Ok(MirType(kind: MirTypeKind.I8))
+        case "i16": Ok(MirType(kind: MirTypeKind.I16))
+        case "i32": Ok(MirType(kind: MirTypeKind.I32))
+        case "i64" | "int": Ok(MirType(kind: MirTypeKind.I64))
+        case "u8": Ok(MirType(kind: MirTypeKind.U8))
+        case "u16": Ok(MirType(kind: MirTypeKind.U16))
+        case "u32": Ok(MirType(kind: MirTypeKind.U32))
+        case "u64": Ok(MirType(kind: MirTypeKind.U64))
+        case "f32": Ok(MirType(kind: MirTypeKind.F32))
+        case "f64" | "float": Ok(MirType(kind: MirTypeKind.F64))
+        case "bool": Ok(MirType(kind: MirTypeKind.Bool))
+        case "char": Ok(MirType(kind: MirTypeKind.Char))
+        case "text": Ok(MirType(kind: MirTypeKind.Opaque("str")))
+        case "()": Ok(MirType.unit())
+        case _:
+            if type_name == "" or type_name == "Any" or type_name.starts_with("dyn_"):
+                return Err("E-AF005 facet method signature contains an erased or missing type")
+            Ok(MirType(kind: MirTypeKind.Opaque(type_name)))
+
+fn facet_method_signature(
+    signature_text: text, base_type: MirType
+) -> Result<MirSignature, text>:
+    val open = signature_text.split("(")
+    if open.len() < 2:
+        return Err("E-AF005 facet method signature has no parameter list")
+    val close = open[1:].join("(").split(")")
+    if close.len() < 2:
+        return Err("E-AF005 facet method signature has no closing parameter delimiter")
+    val source_params = close[0].trim()
+    var params: [MirType] = [base_type]
+    if source_params != "":
+        val parts = source_params.split(",")
+        var index = 0
+        while index < parts.len():
+            val parameter = parts[index].trim()
+            if index == 0 and parameter == "self":
+                index = index + 1
+                continue
+            val colon = parameter.split(":")
+            val type_text = if colon.len() > 1: colon[1:].join(":").trim() else: parameter
+            params = params.push(facet_signature_scalar_type(type_text)?)
+            index = index + 1
+    val suffix = close[1:].join(")").trim()
+    var return_type = MirType.unit()
+    if suffix.starts_with("->"):
+        return_type = facet_signature_scalar_type(suffix[2:].trim())?
+    Ok(MirSignature(params: params, return_type: return_type, is_variadic: false))
+
+fn resolve_typed_facet_member(
+    adapter: TypedFacetAdapterPlan, method_name: text
+) -> Result<TypedFacetMemberPlan, text>:
+    var index = 0
+    while index < adapter.contract.method_names.len():
+        if adapter.contract.method_names[index] == method_name:
+            if index >= adapter.contract.method_signatures.len():
+                return Err("E-AF002 facet contract method signature is missing")
+            return Ok(TypedFacetMemberPlan(
+                method_name: method_name,
+                method_ordinal: index,
+                signature: facet_method_signature(
+                    adapter.contract.method_signatures[index], adapter.base_type)?))
+        index = index + 1
+    Err("E-AF005 typed facet member is not in the validated contract: {method_name}")
 
 fn validate_dynamic_facet_ref_escape(kind: FacetRefEscapeKind) -> Result<(), text>:
     match kind:
@@ -140,27 +233,18 @@ fn lower_resolved_facet_witness_method_call(
 fn lower_typed_facet_member_call(
     destination: LocalId?,
     adapter: TypedFacetAdapterPlan,
-    method_name: text,
-    arguments: [MirOperand],
-    signature: MirSignature
+    member: TypedFacetMemberPlan,
+    resolved_method: MirOperand,
+    arguments: [MirOperand]
 ) -> Result<MirInstKind, text>:
-    if method_name == "":
+    if member.method_name == "":
         return Err("E-AF005 typed facet member name is empty")
-    var index = 0
-    while index < adapter.descriptor.method_entries.len():
-        val method = adapter.descriptor.method_entries[index]
-        if method.method_name == method_name:
-            return lower_resolved_facet_witness_method_call(
-                destination,
-                mir_operand_const_int(method.resolved_address),
-                adapter.base,
-                arguments,
-                signature)
-        index = index + 1
-    Err("E-AF005 typed facet member is not in the validated contract: {method_name}")
+    lower_resolved_facet_witness_method_call(
+        destination, resolved_method, adapter.base, arguments, member.signature)
 
-export FacetRefEscapeKind, FacetAcquisitionContextPlan, TypedFacetAdapterPlan
+export FacetRefEscapeKind, FacetAcquisitionContextPlan, TypedFacetAdapterPlan, TypedFacetMemberPlan
 export facet_acquisition_context_plan, validate_typed_facet_descriptor
-export plan_typed_dynamic_facet_adapter, validate_dynamic_facet_ref_escape
+export facet_contract_metadata_from_hir_interface, facet_method_signature
+export plan_typed_dynamic_facet_adapter, resolve_typed_facet_member, validate_dynamic_facet_ref_escape
 export lower_resolved_facet_witness_call, lower_resolved_facet_witness_method_call
 export lower_typed_facet_member_call

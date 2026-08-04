@@ -214,10 +214,12 @@ automatic registry integration, advice publication, and retained NFR harness
 are substantially complete. D4 now has the stable execution-context owner,
 typed v2 production/validation, fail-stop ordinary-call rewriting, isolation,
 cleanup, entry-closure, residual-intrinsic, and coverage checks. D5 now has
-genuine source/HIR acquisition, application whole-descriptor APIs, typed adapter
-planning, and symbol-based affine checks. Release/merge remains blocked by
-runtime descriptor-to-adapter MIR, exact contract ordinal/signature resolution,
-context-type proof, lambda capture rejection, balanced release insertion, the self-hosted runtime crash,
+genuine source/HIR acquisition, application-owned opaque descriptor leases,
+exact nominal context/contract proof, canonical ordinal/signature resolution,
+checked context-first method-address lookup, typed-base indirect-call lowering,
+and HIR-symbol lambda/async capture rejection. Release/merge remains blocked by
+CFG-wide balanced release insertion, complete optional/fallible acquisition
+lowering, the self-hosted runtime crash,
 missing generated-manual/runtime evidence, prepared-advice backend dispatch,
 user-facing facet-call sugar, and absent NFR measurements. The WIP feature bookmark may
 be committed/rebased/pushed for collaboration; no version bump, main push, tag,

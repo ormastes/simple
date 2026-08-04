@@ -14,11 +14,15 @@ use compiler.semantics.safety_checker.{
 }
 
 fn typed_facet_source(body: text) -> text:
+    "aspect debug:\n" +
+    "    facet interface Debuggable:\n" +
+    "        fn snapshot(self) -> i64\n" +
+    "        fn merge(self, other: i64) -> i64\n" +
     "struct AspectExecutionContext:\n" +
     "    marker: i64\n" +
     "struct Cache:\n" +
     "    marker: i64\n" +
-    "struct Debuggable:\n" +
+    "struct OrdinaryContract:\n" +
     "    marker: i64\n" +
     "fn use_facet(context: AspectExecutionContext, cache: Cache) -> i64:\n" +
     body
@@ -99,3 +103,67 @@ describe "typed facet source and HIR ownership":
         val checker = SafetyChecker.create()
         val errors = safetychecker_check_module(checker, hir)
         expect(count_facet_escape_errors(errors)).to_equal(0)
+
+    it "rejects a nominally wrong acquisition context":
+        val hir = lower_typed_facet_source(
+            "    val debug = cache.require_facet<Debuggable>(cache)\n" +
+            "    0\n")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        var found = false
+        for error in errors:
+            match error:
+                case Other(message, _):
+                    if message.contains("exact AspectExecutionContext"):
+                        found = true
+                case _: pass
+        expect(found).to_be(true)
+
+    it "rejects an ordinary nominal type as the facet contract":
+        val hir = lower_typed_facet_source(
+            "    val wrong = context.require_facet<OrdinaryContract>(cache)\n" +
+            "    0\n")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        var found = false
+        for error in errors:
+            match error:
+                case Other(message, _):
+                    if message.contains("not a declared facet interface"):
+                        found = true
+                case _: pass
+        expect(found).to_be(true)
+
+    it "rejects a member absent from the canonical facet interface":
+        val hir = lower_typed_facet_source(
+            "    val debug = context.require_facet<Debuggable>(cache)\n" +
+            "    debug.missing_member()\n" +
+            "    0\n")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        var found = false
+        for error in errors:
+            match error:
+                case Other(message, _):
+                    if message.contains("has no member 'missing_member'"):
+                        found = true
+                case _: pass
+        expect(found).to_be(true)
+
+    it "rejects lambda capture using HIR symbol identity":
+        val hir = lower_typed_facet_source(
+            "    val debug = context.require_facet<Debuggable>(cache)\n" +
+            "    val closure = \\: debug.snapshot()\n" +
+            "    0\n")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(count_facet_escape_errors(errors)).to_equal(1)
+
+    it "rejects capture by a closure passed to an async boundary":
+        val hir = lower_typed_facet_source(
+            "    val debug = context.require_facet<Debuggable>(cache)\n" +
+            "    task_spawn(\\: debug.snapshot())\n" +
+            "    0\n")
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(count_facet_escape_errors(errors)).to_equal(1)

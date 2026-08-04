@@ -255,3 +255,14 @@ verification-failed
 - no compiler/bootstrap/test command was run in this continuation. Root static
   integration review remains the only admissible verification pass; authoritative
   status remains `verification-failed` / `STATUS: FAIL`.
+
+## 2026-08-04 — D5 typed-adapter continuation
+
+- Exact nominal context and facet-contract identity now use canonical HIR
+  symbols; missing members and lambda/async captures fail without text scans.
+- MIR retains the concrete typed base separately from the application-owned
+  descriptor lease, resolves canonical member metadata, and emits base-first
+  indirect dispatch through the context-first checked method accessor.
+- CFG-wide reverse-order release and complete `try_facet`/`facet` wrapper
+  lowering remain open. No compiler/bootstrap command was run; authoritative
+  status remains `verification-failed` / `STATUS: FAIL`.
