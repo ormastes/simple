@@ -20,6 +20,34 @@ has_discarded_release() {
     rg -n "$DISCARDED_RELEASE_RE" "$1"
 }
 
+transition_install_precedes_propagation() {
+    source_file="$1"
+    transition_call="$2"
+    propagation_text="$3"
+    awk -v call_text="val transitioned = ${transition_call}(" \
+        -v propagation_text="$propagation_text" '
+        index($0, call_text) > 0 {
+            if (active || found_call) exit 1
+            active = 1
+            found_call = 1
+            next
+        }
+        active && /val transitioned = [a-zA-Z0-9_]+\(/ { exit 1 }
+        active && /(self|context)\.coordinator = transitioned\.coordinator/ {
+            installed = 1
+            next
+        }
+        active && index($0, propagation_text) > 0 {
+            if (!installed) exit 1
+            propagated = 1
+            active = 0
+        }
+        END {
+            if (!found_call || !installed || !propagated) exit 1
+        }
+    ' "$source_file"
+}
+
 self_test() {
     tmp_dir="${TMPDIR:-/tmp}/aspect-lifecycle-gate-source-guard.$$"
     mkdir -p "$tmp_dir"
@@ -56,6 +84,46 @@ self_test() {
         'return self.release_published_facet_descriptor(value)' >"$tmp_dir/safe.spl"
     if has_discarded_release "$tmp_dir/safe.spl" >/dev/null; then
         echo "STATUS: FAIL lifecycle gate guard rejected handled release" >&2
+        exit 1
+    fi
+    printf '%s\n' \
+        'fn safe_wrapper(context: Context) -> Result<(), text>:' \
+        '    val transitioned = fixture_transition(' \
+        '        context.coordinator)' \
+        '    context.coordinator = transitioned.coordinator' \
+        '    if transitioned.status == "failed":' \
+        '        return Err(transitioned.reason)' >"$tmp_dir/transition-safe.spl"
+    transition_install_precedes_propagation \
+        "$tmp_dir/transition-safe.spl" fixture_transition \
+        'if transitioned.status' || {
+        echo "STATUS: FAIL lifecycle gate guard rejected ordered transition install" >&2
+        exit 1
+    }
+    printf '%s\n' \
+        'fn unsafe_wrapper(context: Context) -> Result<(), text>:' \
+        '    val transitioned = fixture_transition(' \
+        '        context.coordinator)' \
+        '    if transitioned.status == "failed":' \
+        '        return Err(transitioned.reason)' \
+        '    context.coordinator = transitioned.coordinator' >"$tmp_dir/transition-late.spl"
+    if transition_install_precedes_propagation \
+        "$tmp_dir/transition-late.spl" fixture_transition \
+        'if transitioned.status'; then
+        echo "STATUS: FAIL lifecycle gate guard accepted late transition install" >&2
+        exit 1
+    fi
+    printf '%s\n' \
+        'fn unsafe_wrapper(context: Context) -> Result<(), text>:' \
+        '    val transitioned = fixture_transition(' \
+        '        context.coordinator)' \
+        '    if transitioned.status == "failed":' \
+        '        return Err(transitioned.reason)' \
+        'fn unrelated(context: Context):' \
+        '    context.coordinator = transitioned.coordinator' >"$tmp_dir/transition-unrelated.spl"
+    if transition_install_precedes_propagation \
+        "$tmp_dir/transition-unrelated.spl" fixture_transition \
+        'if transitioned.status'; then
+        echo "STATUS: FAIL lifecycle gate guard accepted unrelated later install" >&2
         exit 1
     fi
     echo "STATUS: PASS aspect-lifecycle-gate-source-guard self-test"
@@ -162,21 +230,22 @@ if has_discarded_release "$runtime_source"; then
     exit 1
 fi
 
-for transition_call in \
-    aspect_published_advice_lookup \
-    aspect_published_facet_method_acquire \
-    aspect_published_facet_descriptor_acquire \
-    aspect_published_facet_descriptor_release \
-    aspect_unload_transition
+while IFS='|' read -r transition_call propagation_re
 do
-    call_line=$(rg -n "val transitioned = ${transition_call}\\(" "$runtime_source" | cut -d: -f1)
-    install_line=$(rg -n '(self|context)\.coordinator = transitioned\.coordinator' "$runtime_source" | \
-        awk -F: -v call_line="$call_line" '$1 > call_line { print $1; exit }')
-    if [ -z "$call_line" ] || [ -z "$install_line" ]; then
-        echo "FAIL: mutating transition lacks unconditional coordinator installation: ${transition_call}" >&2
+    [ -n "$transition_call" ] || continue
+    if [ "$(rg -c "val transitioned = ${transition_call}\\(" "$runtime_source")" -ne 1 ] || \
+        ! transition_install_precedes_propagation \
+            "$runtime_source" "$transition_call" "$propagation_re"; then
+        echo "FAIL: mutating transition does not install its coordinator before its own propagation: ${transition_call}" >&2
         exit 1
     fi
-done
+done <<'TRANSITION_INSTALLS'
+aspect_published_advice_lookup|Ok(transitioned.chain)
+aspect_published_facet_method_acquire|if val reason = transitioned.error
+aspect_published_facet_descriptor_acquire|if val reason = transitioned.error
+aspect_published_facet_descriptor_release|if val reason = transitioned.error
+aspect_unload_transition|if transitioned.status == "failed"
+TRANSITION_INSTALLS
 
 prepare_line=$(rg -n 'aspect_prepared_advice_prepare\(' "$runtime_source" | tail -n 1 | cut -d: -f1)
 native_line=$(rg -n 'advice_dispatch_permit_invoke_native\(' "$runtime_source" | tail -n 1 | cut -d: -f1)
