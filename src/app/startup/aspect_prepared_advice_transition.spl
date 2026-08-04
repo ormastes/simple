@@ -1,0 +1,125 @@
+# State-parameterized application transition for prepared advice dispatch.
+#
+# The caller owns lifecycle serialization and supplies then-current state to
+# each transition. Native invocation deliberately remains outside this leaf so
+# no loader callback can run while the application lifecycle gate is held.
+
+use compiler.loader.loader.advice_binding_registry.{
+    AdviceBindingRegistry, AdviceDispatchProjection, AdviceDispatchPermit,
+    AdviceDispatchInvocationReceipt, advice_dispatch_projection_prepare,
+    advice_dispatch_projection_finalize, advice_merge_counter_delta
+}
+use compiler.loader.loader.module_loader.{ModuleLoader}
+use os.smf.smf_generation.{LifecycleManager}
+use app.startup.aspect_advice_dispatch_ledger.{AspectAdviceDispatchLedger}
+
+struct AspectPreparedAdviceState:
+    registry: AdviceBindingRegistry
+    lifecycle: LifecycleManager
+
+struct AspectPreparedAdviceTransitionInvocation:
+    claim_id: text
+    permit: AdviceDispatchPermit
+
+struct AspectPreparedAdvicePrepareTransition:
+    state: AspectPreparedAdviceState
+    invocation: AspectPreparedAdviceTransitionInvocation?
+    status: text
+    reason: text
+
+struct AspectPreparedAdviceFinishTransition:
+    state: AspectPreparedAdviceState
+    status: text
+    reason: text
+    return_values: [i64]
+
+fn aspect_prepared_advice_prepare(
+    projection: AdviceDispatchProjection,
+    current: AspectPreparedAdviceState,
+    canonical_loader: ModuleLoader,
+    ledger: AspectAdviceDispatchLedger,
+    slot_id: text,
+    form: text
+) -> AspectPreparedAdvicePrepareTransition:
+    val prepared = advice_dispatch_projection_prepare(
+        projection, current.registry, current.lifecycle,
+        canonical_loader, slot_id, form)
+    val prepared_state = AspectPreparedAdviceState(
+        registry: advice_merge_counter_delta(
+            current.registry, prepared.counter_delta),
+        lifecycle: prepared.lifecycle)
+    if prepared.status != "prepared" or prepared.permit == nil:
+        return AspectPreparedAdvicePrepareTransition(
+            state: prepared_state, invocation: nil,
+            status: "failed", reason: prepared.reason)
+
+    val permit = prepared.permit.unwrap()
+    val claimed = ledger.claim(permit.permit_id)
+    if claimed.is_ok():
+        return AspectPreparedAdvicePrepareTransition(
+            state: prepared_state,
+            invocation: Some(AspectPreparedAdviceTransitionInvocation(
+                claim_id: claimed.unwrap(), permit: permit)),
+            status: "prepared", reason: "")
+
+    val claim_error = claimed.unwrap_err()
+    val rejected = AdviceDispatchInvocationReceipt(
+        permit_id: "unclaimed-application-permit",
+        status: "failed", reason: claim_error,
+        invoked_count: 0, return_values: [])
+    val finalized = advice_dispatch_projection_finalize(
+        permit, rejected, prepared_state.registry, prepared_state.lifecycle)
+    var reason = claim_error
+    if finalized.status != "dispatched" and finalized.reason != "":
+        reason = "{claim_error}; {finalized.reason}"
+    AspectPreparedAdvicePrepareTransition(
+        state: AspectPreparedAdviceState(
+            registry: finalized.registry, lifecycle: finalized.lifecycle),
+        invocation: nil, status: "failed", reason: reason)
+
+fn aspect_prepared_advice_finish(
+    current: AspectPreparedAdviceState,
+    ledger: AspectAdviceDispatchLedger,
+    invocation: AspectPreparedAdviceTransitionInvocation,
+    native_receipt: AdviceDispatchInvocationReceipt
+) -> AspectPreparedAdviceFinishTransition:
+    val claim_owned = ledger.owns(
+        invocation.claim_id, invocation.permit.permit_id)
+    val receipt = if claim_owned:
+        native_receipt
+    else:
+        AdviceDispatchInvocationReceipt(
+            permit_id: "invalid-application-claim",
+            status: "failed",
+            reason: "E-AF010 prepared advice dispatch claim is missing or mismatched",
+            invoked_count: 0, return_values: [])
+    val finalized = advice_dispatch_projection_finalize(
+        invocation.permit, receipt, current.registry, current.lifecycle)
+    val next = AspectPreparedAdviceState(
+        registry: finalized.registry, lifecycle: finalized.lifecycle)
+    if not claim_owned:
+        return AspectPreparedAdviceFinishTransition(
+            state: next, status: "failed", reason: finalized.reason,
+            return_values: [])
+
+    val terminalized = ledger.terminalize(
+        invocation.claim_id, invocation.permit.permit_id)
+    if terminalized.is_err():
+        var reason = terminalized.unwrap_err()
+        if finalized.status != "dispatched" and finalized.reason != "":
+            reason = "{reason}; {finalized.reason}"
+        return AspectPreparedAdviceFinishTransition(
+            state: next, status: "failed", reason: reason,
+            return_values: [])
+    if finalized.status != "dispatched":
+        return AspectPreparedAdviceFinishTransition(
+            state: next, status: "failed", reason: finalized.reason,
+            return_values: [])
+    AspectPreparedAdviceFinishTransition(
+        state: next, status: "dispatched", reason: "",
+        return_values: finalized.return_values)
+
+export AspectPreparedAdviceState
+export AspectPreparedAdviceTransitionInvocation
+export AspectPreparedAdvicePrepareTransition, AspectPreparedAdviceFinishTransition
+export aspect_prepared_advice_prepare, aspect_prepared_advice_finish

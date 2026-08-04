@@ -1,0 +1,92 @@
+# @req REQ-AF-008
+# @cover src/app/startup/aspect_prepared_advice_transition.spl 80%
+
+use std.spec.*
+use compiler.loader.loader.advice_binding_registry.{
+    AdviceBindingRegistry, AdviceDispatchInvocationReceipt,
+    advice_dispatch_projection_empty
+}
+use compiler.loader.loader.module_loader.{moduleloader_with_defaults}
+use os.smf.smf_generation.{LifecycleManager}
+use app.startup.aspect_advice_dispatch_ledger.{AspectAdviceDispatchLedger}
+use app.startup.aspect_prepared_advice_transition.{
+    AspectPreparedAdviceState,
+    AspectPreparedAdviceTransitionInvocation,
+    aspect_prepared_advice_prepare, aspect_prepared_advice_finish
+}
+
+fn prepared_advice_test_state() -> AspectPreparedAdviceState:
+    AspectPreparedAdviceState(
+        registry: AdviceBindingRegistry.create(
+            ["orders.submit.prepared"]).unwrap(),
+        lifecycle: LifecycleManager.new_manager())
+
+describe "Prepared advice state transition leaf":
+    it "prepares and terminalizes an empty canonical dispatch":
+        val ledger = AspectAdviceDispatchLedger.create()
+        val prepared = aspect_prepared_advice_prepare(
+            advice_dispatch_projection_empty(), prepared_advice_test_state(),
+            moduleloader_with_defaults(), ledger,
+            "orders.submit.prepared", "before")
+        expect(prepared.status).to_equal("prepared")
+        expect(prepared.invocation != nil).to_equal(true)
+        expect(ledger.in_flight_count()).to_equal(1)
+        expect(prepared.state.registry.counters.dispatch_attempts).to_equal(1)
+
+        val invocation = prepared.invocation.unwrap()
+        val finished = aspect_prepared_advice_finish(
+            prepared.state, ledger, invocation,
+            AdviceDispatchInvocationReceipt(
+                permit_id: invocation.permit.permit_id,
+                status: "invoked", reason: "",
+                invoked_count: 0, return_values: []))
+        expect(finished.status).to_equal("dispatched")
+        expect(finished.return_values.len()).to_equal(0)
+        expect(ledger.in_flight_count()).to_equal(0)
+
+    it "returns failed state and counters when prepare rejects a form":
+        val ledger = AspectAdviceDispatchLedger.create()
+        val prepared = aspect_prepared_advice_prepare(
+            advice_dispatch_projection_empty(), prepared_advice_test_state(),
+            moduleloader_with_defaults(), ledger,
+            "orders.submit.prepared", "around")
+        expect(prepared.status).to_equal("failed")
+        expect(prepared.reason).to_contain("exactly-once proceed")
+        expect(prepared.invocation == nil).to_equal(true)
+        expect(prepared.state.registry.counters.dispatch_attempts).to_equal(1)
+        expect(prepared.state.registry.counters.around_rejections).to_equal(1)
+        expect(ledger.in_flight_count()).to_equal(0)
+
+    it "finalizes a prepared permit when application claim creation fails":
+        val ledger = AspectAdviceDispatchLedger.create()
+        ledger.next_claim_id = 9223372036854775807
+        val prepared = aspect_prepared_advice_prepare(
+            advice_dispatch_projection_empty(), prepared_advice_test_state(),
+            moduleloader_with_defaults(), ledger,
+            "orders.submit.prepared", "before")
+        expect(prepared.status).to_equal("failed")
+        expect(prepared.reason).to_contain("sequence is exhausted")
+        expect(prepared.invocation == nil).to_equal(true)
+        expect(prepared.state.registry.counters.dispatch_attempts).to_equal(1)
+        expect(prepared.state.registry.counters.dispatch_failures).to_equal(1)
+        expect(ledger.in_flight_count()).to_equal(0)
+
+    it "fails closed without terminalizing a mismatched claim":
+        val ledger = AspectAdviceDispatchLedger.create()
+        val prepared = aspect_prepared_advice_prepare(
+            advice_dispatch_projection_empty(), prepared_advice_test_state(),
+            moduleloader_with_defaults(), ledger,
+            "orders.submit.prepared", "before")
+        val owned = prepared.invocation.unwrap()
+        val mismatched = AspectPreparedAdviceTransitionInvocation(
+            claim_id: "missing-claim", permit: owned.permit)
+        val finished = aspect_prepared_advice_finish(
+            prepared.state, ledger, mismatched,
+            AdviceDispatchInvocationReceipt(
+                permit_id: owned.permit.permit_id,
+                status: "invoked", reason: "",
+                invoked_count: 0, return_values: []))
+        expect(finished.status).to_equal("failed")
+        expect(finished.reason).to_contain("receipt does not match")
+        expect(ledger.in_flight_count()).to_equal(1)
+        ledger.terminalize(owned.claim_id, owned.permit.permit_id).unwrap()
