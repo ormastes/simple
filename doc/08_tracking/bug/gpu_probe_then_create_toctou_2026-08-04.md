@@ -183,6 +183,43 @@ a **device-derived** one (the readback's source/handle/identity). A receipt
 synthesized from the backend name alone will happily stamp GPU evidence onto a
 CPU-served frame.
 
+#### SCOPE — the tooth applies to STRICT creates only, NOT to name-resolving façades
+
+This tooth is correct for a spec that drives `Engine2D.create_with_backend_strict`
+directly, and it is a **FALSE RED** for a spec that goes through the browser-engine
+façade. Applying it blindly to the wrong lane costs a clean tree 3/3 red runs at
+`ulimit -n 44`.
+
+- **Strict-create lanes** (e.g. `backend_probe_spec`, `vulkan_strict_spec`): a
+  strict create never falls back. When the device is gone the CREATE FAILS and the
+  spec takes the structured-failure path, so a successful strict GPU create really
+  does hold a device, and `cpu_mirror` really is a bookkeeping defect. Verified:
+  `backend_probe_spec` at `ulimit -n 44`, 5/5 runs green with `device_readback` as
+  the ONLY source observed — `cpu_mirror` never appears.
+- **Façade lanes** (e.g. `web_render_pixel_backend_queue_spec`): `backend_vulkan.spl`
+  has **no `cpu_mirror` emitter at all**. There, `cpu_mirror` comes from
+  `simple_web_engine2d_renderer.spl:1153`, and the sticky-flag justification does
+  not transfer. On such a lane `cpu_mirror` is an environmental divergence, not a
+  defect signal, and must be disclosed rather than failed.
+
+Corollary for sabotage: `backend_vulkan.spl:824` is NOT a universal probe. On the
+façade lane the frames return through a different branch (L837) and the L824
+sabotage has **NO EFFECT** — a green result there would read as "over-relaxed"
+when in truth the sabotage never touched the executed path. Prefer a
+source-label-independent failability probe (zeroing the handle/identity the
+assertion actually reads) and confirm your sabotage lies on the executed path.
+
+### Separate production defect — two independent backend resolvers disagree
+
+Disclosed but NOT fixed; worth filing in its own right. On the browser-engine
+path the backend name is resolved **twice, independently**:
+`web_render_resolved_engine2d_backend_name` (`web_render_pixel_backend.spl:321`)
+versus the renderer's own `_resolved_render_backend`
+(`simple_web_engine2d_renderer.spl:1146`). Under fd pressure they disagree: the
+façade stamps `vulkan` and emits a full drained queue receipt while the renderer
+rasterises on the CPU and reports `cpu_mirror` (L1153). This is the same
+resolve-then-use gap as the spec-level defect, but living in production code.
+
 ## Sibling instances — OPEN
 
 Same probe-then-create shape, GPU assertions still driven by the prediction:
