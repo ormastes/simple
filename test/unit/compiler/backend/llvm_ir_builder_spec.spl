@@ -66,8 +66,31 @@ describe "LLVM IR Builder":
 # --- Regression: builder storage must remain per-instance in bootstrap mode ---
 # doc/08_tracking/bug/llvm_bootstrap_ir_buffer_not_reset_2026-08-01.md
 extern fn rt_env_set(key: text, value_str: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 
 describe "LLVM IR Builder bootstrap per-instance parity":
+    it "emits every function header before recording function state":
+        val source = rt_file_read_text(
+            "src/compiler/70.backend/backend/llvm_ir_builder.spl"
+        ) ?? ""
+        val plain_start = source.find("    me start_function(name:")
+        val opt_start = source.find("    me start_function_opt(")
+        val attrs_start = source.find("    me start_function_with_attrs(")
+        val attrs_end = source.find("    me end_function():")
+        val plain_body = source.substring(plain_start, opt_start)
+        val opt_body = source.substring(opt_start, attrs_start)
+        val attrs_body = source.substring(attrs_start, attrs_end)
+
+        expect(plain_body.find("self.emit(\"define ")).to_be_less_than(
+            plain_body.find("self.current_function = Some(name)")
+        )
+        expect(opt_body.find("self.emit(\"define ")).to_be_less_than(
+            opt_body.find("self.current_function = Some(name)")
+        )
+        expect(attrs_body.find("self.emit(\"{prefix} ")).to_be_less_than(
+            attrs_body.find("self.current_function = Some(name)")
+        )
+
     it "does not prepend a previous module's IR to the next module":
         # SIMPLE_BOOTSTRAP must use the same per-instance runtime string
         # builder as every other mode. Module B therefore cannot inherit any
