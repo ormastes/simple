@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+runtime_source="src/app/startup/aspect_application_runtime.spl"
+
+if rg -n '^[[:space:]]+(me )?fn [a-zA-Z0-9_]+_locked\(' "$runtime_source"; then
+    echo "FAIL: lifecycle locked helper remains on the exported context method surface" >&2
+    exit 1
+fi
+
+if rg -n '^export .*_locked|^[[:space:]]+aspect_execution_context_.*_locked,' "$runtime_source"; then
+    echo "FAIL: lifecycle locked helper is exported" >&2
+    exit 1
+fi
+
+for box_name in \
+    AspectGenerationTokenBox \
+    AspectFacetGenerationLeaseBox \
+    AspectFacetQueryBox \
+    AspectFacetMethodQueryBox \
+    AspectFacetDescriptorBox \
+    AspectFacetContractQueryBox
+do
+    if ! rg -q "^class ${box_name}:" "$runtime_source"; then
+        echo "FAIL: missing lifecycle mutex capture box: ${box_name}" >&2
+        exit 1
+    fi
+done
+
+if rg -n '_ = self\.release_published_facet_descriptor\(' "$runtime_source"; then
+    echo "FAIL: lazy completion discards descriptor release failure" >&2
+    exit 1
+fi
+
+echo "PASS: aspect lifecycle gate helpers are module-private and aggregate captures are boxed"
