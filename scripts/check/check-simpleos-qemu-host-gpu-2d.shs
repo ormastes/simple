@@ -1019,15 +1019,45 @@ qemu_capabilities_available() {
     qemu_accel_for_isa "$isa" "$qemu_bin" >/dev/null
 }
 
+simple_function_body_contains() {
+    source_path=$1
+    function_name=$2
+    body_needle=$3
+    argument_needle=$4
+    awk -v function_name="$function_name" -v body_needle="$body_needle" \
+        -v argument_needle="$argument_needle" '
+        $0 ~ "^(pub )?fn " function_name "\\(" { in_function = 1; next }
+        in_function && $0 ~ /^(pub )?fn |^struct / { exit }
+        in_function && index($0, body_needle) && index($0, argument_needle) { found = 1 }
+        END { exit(found ? 0 : 1) }
+    ' "$source_path"
+}
+
+metal_guest_negotiation_two_hop_available() {
+    probe=$1
+    simple_function_body_contains "$probe" _host_gpu_probe_main_at \
+        '_host_gpu_probe_attempt(' render_backend &&
+    simple_function_body_contains "$probe" _host_gpu_probe_attempt \
+        'host_gpu_ivshmem_negotiate(' backend
+}
+
 metal_guest_contract_available() {
     probe=examples/09_embedded/simple_os/arch/common/host_gpu_ivshmem_probe_entry.spl
     [ -f "$probe" ] &&
     grep -Fq 'render_backend = "metal"' "$probe" &&
-    grep -Eq 'host_gpu_ivshmem_negotiate\(.*render_backend' "$probe" &&
+    metal_guest_negotiation_two_hop_available "$probe" &&
     grep -Fq 'HOST_GPU_RENDER_OK' "$probe" &&
     grep -Fq 'HOST_GPU_DRAW_IR_OK' "$probe" &&
     grep -Fq 'HOST_GPU_FIXTURE_OK' "$probe" &&
     grep -Fq 'HOST_GPU_PROCESS_OK' "$probe"
+}
+
+self_test_metal_guest_contract() {
+    fixture_root=test/fixtures/simpleos_host_gpu_metal_contract
+    metal_guest_negotiation_two_hop_available "$fixture_root/valid_two_hop.spl" || return 1
+    if metal_guest_negotiation_two_hop_available "$fixture_root/missing_helper_hop.spl"; then return 1; fi
+    if metal_guest_negotiation_two_hop_available "$fixture_root/misrouted_caller_hop.spl"; then return 1; fi
+    echo simpleos_qemu_host_gpu_metal_contract_self_test=pass
 }
 
 core_c_bootstrap_runtime_available() {
@@ -2552,6 +2582,10 @@ fi
 if [ "${1:-}" = --self-test-guest-isas ]; then
     self_test_guest_isa_contract
     exit 0
+fi
+if [ "${1:-}" = --self-test-metal-guest-contract ]; then
+    self_test_metal_guest_contract
+    exit $?
 fi
 if [ "${1:-}" = --validate-report ]; then
     [ "$#" -eq 2 ] || exit 2
