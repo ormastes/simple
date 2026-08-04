@@ -7,13 +7,14 @@ two correction sections at the END of this file BEFORE anything above them:
 1. "Correction (2026-08-04): the poison latch is NOT the mechanism" — refutes
    mechanism (B). A router-gate hardening landed in `28288f98102`; it is a real
    fix for a real separate path, but it did not change this bug.
-2. "Second correction (2026-08-04): the font roll-back is NOT the mechanism
-   either" — refutes mechanism (A), by **draw order**. Everything in the
-   Mechanism section below is now known to be wrong for this document; it is
-   kept only so the refutations have something to point at.
+2. "Second correction (2026-08-04): mechanism (A) refuted, and the REAL
+   mechanism measured" — refutes mechanism (A) (**no restore ever fires; the
+   font composite PROMOTES**) and pins what actually drops the primitives.
+   Everything in the Mechanism section below is now known to be wrong for this
+   document; it is kept only so the refutations have something to point at.
 
-Do not re-derive either theory. The instrument that refuted (A) is
-`SIMPLE_VK_ORDER_TRACE=1` — see the second correction for what it prints.
+Do not re-derive either theory. The instrument is `SIMPLE_VK_ORDER_TRACE=1` —
+see the second correction for what it prints and what it measured.
 **Severity:** High (silent wrong frame, exit 0, `render_degraded=false`,
 `readback.source=device_readback`)
 **Lane:** engine2d backend `"vulkan"` under
@@ -412,165 +413,196 @@ ignores that return. Separate follow-up, not part of this fix.
   resolves to `"software"`, so the expected impact is nil — but that is an
   argument, not a measurement.
 
-## Second correction (2026-08-04): the font roll-back is NOT the mechanism either
+## Second correction (2026-08-04): mechanism (A) refuted, and the REAL mechanism measured
 
-Mechanism **(A)** — "`_composite_font_batch_impl` snapshots the device
-framebuffer at `backend_vulkan_font.spl:376` and restores it at
-`:462/467/472/478/499/519`, and the restore lands after the later rect draws" —
-is **REFUTED**, by draw order, before any restore even needs to be observed.
+Mechanism **(A)** — "`_composite_font_batch_impl` snapshots the framebuffer at
+`backend_vulkan_font.spl:376` and one of the six restores at
+`:462/467/472/478/499/519` lands after the later rect draws" — is **REFUTED by
+direct measurement**: on the failing run the font route does not restore
+anything. It *succeeds*. **Zero `font-restore` lines are emitted**, and the
+outcome is `status=promoted parity=true promotion_ready=true dispatched=2/2`,
+which takes `:516 if result.promotion_ready: self.dirty = true` and skips both
+terminal restores.
+
+The real mechanism is one line further on and is now pinned.
 
 ### The instrument
 
 `SIMPLE_VK_ORDER_TRACE=1` (level-gated, default OFF; one `env_get` per dispatch
-when disarmed) prints `[vk-order]` receipts from three files:
+when disarmed) prints `[vk-order]` submission-order receipts:
 
 | line | site | answers |
 |------|------|---------|
-| `dispatch pipe= batched= rc= fb= pending_cmd= pending_n=` | `backend_vulkan_helpers.spl::_dispatch_framebuffer_checked` | which primitives reach the device, in what order, in which command buffer |
-| `flush rc= dirty= cpu_fallback= completion_unknown=` | `..._helpers.spl::_flush_pending_compute` | when a batch is actually submitted |
-| `image-composite x= y= w= h= mode= rc= fb=` | `backend_vulkan.spl::_draw_image_composite_native` | glyph/image blits, incl. the CPU font suffix |
+| `dispatch pipe= batched= rc= fb= pending_cmd= pending_n= clip_on= clip=` | `backend_vulkan_helpers.spl::_dispatch_framebuffer_checked` | which primitives reach the device, with what result and clip |
+| `flush rc= dirty= cpu_fallback= completion_unknown=` | `..._helpers.spl::_flush_pending_compute` | every batch submission outcome (all 8 return paths, via a traced wrapper over `_flush_pending_compute_impl`) |
+| `image-composite x= y= w= h= mode= rc= fb=` | `backend_vulkan.spl::_draw_image_composite_native` | glyph/image blits |
 | `readback-entry dirty= pending_cmd= pending_n= cpu_fallback= completion_unknown= fb=` | `backend_vulkan.spl::read_pixels_with_source` | backend state at readback |
-| `font-snapshot fb= bytes= want= quads=` | `backend_vulkan_font.spl:376` | whether the snapshot is taken |
-| `font-restore site=<six distinct sites> fb= ok= quad=` | `backend_vulkan_font.spl:462,467,472,478,499,519` | **whether any restore fires, and which** |
-| `font-done status= reason= parity= promotion_ready= dispatched=` | end of `_composite_font_batch_impl` | the outcome the engine routes on |
+| `font-snapshot` / `font-restore site=<six named sites>` / `font-done` | `backend_vulkan_font.spl:376 / 462,467,472,478,499,519 / end of impl` | whether the snapshot and each restore fire, and the outcome |
 
-`_flush_pending_compute` was split into a traced wrapper plus
-`_flush_pending_compute_impl` so every one of its eight return paths is
-reported through one line.
-
-### Falsification 1 — primitives drawn AFTER a text draw are not lost
-
-`engine_order_probe.spl` (scratchpad) drives `Engine2D` directly, with no HTML
-lane at all, in the exact order hypothesis (A) needs: `clear`, h1 rect,
-**`draw_text`**, then the three boxes. 64x48, both backends in one process.
-Verbatim:
+### The failing run, verbatim (`vulkan_drop_probe.spl`, 64x48, vulkan arm)
 
 ```
-software_notext body=1656 h1=768 blue=216 green=216 amber=216  source=cpu_mirror
-vulkan_notext   body=1656 h1=768 blue=216 green=216 amber=216  source=device_readback
-software_text   body=1650 h1=756 blue=216 green=216 amber=216  source=cpu_mirror
-vulkan_text     body=1650 h1=756 blue=216 green=216 amber=216  source=device_readback
+730  dispatch pipe=1 rc=1  pending_cmd=1 pending_n=1     # clear
+731  dispatch pipe=2 rc=1  pending_cmd=1 pending_n=2     # rect
+732  dispatch pipe=2 rc=1  pending_cmd=1 pending_n=2     # rect
+733  dispatch pipe=2 rc=1  pending_cmd=1 pending_n=2     # rect
+734  dispatch pipe=2 rc=1  pending_cmd=1 pending_n=2     # rect
+736  flush rc=1  dirty=true                              # font route's entry flush
+737  font-snapshot fb=1 bytes=12288 want=12288 quads=2
+738  font-done status=promoted reason=fence-device-identity-readback-proven parity=true promotion_ready=true dispatched=2/2
+739  flush    rc=-1 dirty=true cpu_fallback=false completion_unknown=false
+740  dispatch pipe=2 rc=-1 pending_cmd=0 pending_n=0     # box  -> LOST
+741  flush    rc=-1
+742  dispatch pipe=2 rc=-1 pending_cmd=0 pending_n=0     # box  -> LOST
+743  flush    rc=-1
+744  dispatch pipe=2 rc=-1 pending_cmd=0 pending_n=0     # box  -> LOST
+745  flush    rc=-1
+746  flush    rc=-1
+747  flush    rc=-1
+748  readback-entry dirty=true pending_cmd=1 pending_n=2 cpu_fallback=false completion_unknown=false fb=1
+749  flush    rc=-1
 ```
 
-Bit-identical. Its trace shows the boxes dispatched into a *new* command buffer
-(`pending_cmd=3`) after the glyph blit (`image-composite x=1 y=9 w=10 h=7
-mode=1 rc=1`) and surviving readback intact.
+`vk_body=2304 vk_h1=742 vk_blue=0 vk_green=0 vk_amber=0`.
 
-Caveat, stated because it bounds the claim: this arm emits **no**
-`font-snapshot` / `font-restore` / `font-done` at all. `Engine2D.draw_text` with
-the bitmap default face never reaches `composite_font_batch`; the plan's
-non-`cpu` targets are rejected and the glyphs go through the CPU suffix's
-`draw_image_blend`. So this falsifies "post-text primitives are dropped"; it
-does not by itself exonerate the font composite.
+### What this says
 
-### Falsification 2 — the boxes are drawn BEFORE the text, not after
+1. **No restore fires.** The font composite promotes. (A) is dead.
+2. **The lane dies immediately after the font composite.** Every single
+   `_flush_pending_compute()` from line 739 onward returns **-1**, and every
+   post-font primitive dispatch returns **rc=-1**. The three box rects are
+   never recorded on the device. That, not a roll-back, is why they come back
+   as body background.
+3. **The Engine2D's backend still believes the pre-font command buffer is
+   pending.** `-1` out of `_flush_pending_compute_impl` requires `cmd > 0` and
+   then a failed `end_compute`/`submit`/`wait_idle`. But the font route's own
+   entry flush at `backend_vulkan_font.spl:269` already submitted and cleared
+   that batch (line 736, `rc=1`). So the object being flushed at 739 still
+   carries `pending_compute_command = 1` — the clearing done inside
+   `composite_font_batch` did not reach it. Every later operation then tries to
+   end and submit a command buffer that was already consumed, fails, quarantines
+   its descriptors, and returns -1.
+4. **The state divergence is directly visible at readback.** Line 747 is a flush
+   returning -1, whose `-1` path runs
+   `_quarantine_pending_compute_descriptors()` + `_clear_pending_compute_state()`
+   and therefore leaves `pending_compute_command = 0, pending_compute_count = 0`.
+   Line 748 — the very next statement, `read_pixels_with_source()` on the same
+   local binding (`engine.spl:2716-2721`) — reports **`pending_cmd=1
+   pending_n=2`**. Those two lines cannot both describe one object. The backend
+   the readback sees is a *different value* from the one the flushes mutated.
+5. **That is also why the frame is silent.** `_dispatch_framebuffer_checked`
+   does run its failure bookkeeping on `rc < 0` —
+   `mark_cpu_fallback("framebuffer-dispatch-failed")` and
+   `self.completion_unknown = true` — but line 748 shows the readback observing
+   `cpu_fallback=false completion_unknown=false`. The flags are set on the same
+   non-propagating value. So `read_pixels_with_source()` takes the healthy
+   branch and returns `device_readback` with a positive handle, a real device
+   identity, a full pixel count and `render_degraded=false`, for a frame that is
+   missing every primitive issued after the text.
 
-This is the decisive one, and it does not depend on which restore fires.
-`[vk-order]` from the failing 64x48 browser-lane run (`vulkan_drop_probe.spl`,
-vulkan arm, log lines 694-736):
+So the defect is **not** in the font route's roll-back logic and **not** in the
+poison latch. It is: *a promoted `composite_font_batch` leaves the Engine2D's
+`VulkanBackend` value holding stale `pending_compute_*` state, which breaks every
+subsequent submission, and the resulting failure flags do not survive back to the
+readback that publishes the frame.*
+
+### Same-process discriminator
+
+`engine_vecfont_probe.spl` (scratchpad) drives `Engine2D` directly — no HTML
+lane — with the same bundled vector face the browser resolves
+(`select_font_identity("sha256=a3041811...;axes=wght=100")`, `font_ready=true`),
+in two orders:
 
 ```
-694  sw_done
-695  flush rc=1 dirty=false                    # engine init, nothing pending
-730  dispatch pipe=1 ... pending_cmd=1 pending_n=1    # clear  -> body background
-731  dispatch pipe=2 ... pending_cmd=1 pending_n=2    # rect 1
-732  dispatch pipe=2 ... pending_cmd=1 pending_n=2    # rect 2
-733  dispatch pipe=2 ... pending_cmd=1 pending_n=2    # rect 3
-734  dispatch pipe=2 ... pending_cmd=1 pending_n=2    # rect 4
-735  [draw-ir-font-trace] font_identity=sha256=a3041811...   # the TEXT command
-736  flush rc=1 dirty=true                     # _composite_font_batch_impl's entry flush
+software_boxfirst  body=1647 h1=760 blue=207 green=216 amber=216   cpu_mirror
+vulkan_boxfirst    body=1647 h1=760 blue=207 green=216 amber=216   device_readback
 ```
 
-The document is `clear(body bg)` + **one h1 background rect + three box rects**
-+ one text run — exactly four filled rects, and the pixel accounting confirms
-it (h1 = 64x12 = 768 px, each box 18x12 = 216 px, `1656 + 742 + 648 + 26 glyph
-px = 3072`). All four are dispatched **before** the text command, into **one**
-batched command buffer (`pending_cmd=1` throughout, one descriptor per pipeline
-so `pending_n` saturates at 2), and that command buffer is submitted `rc=1` by
-the font route's own entry flush at `backend_vulkan_font.spl:269`.
+Boxes issued **before** the text are bit-identical to software: they were
+dispatched while the lane was still healthy. Its trace shows the identical
+post-font collapse — `font-done status=promoted`, then `flush rc=-1`,
+`flush rc=-1`, then `readback-entry ... pending_cmd=1 pending_n=2
+cpu_fallback=false completion_unknown=false` — the lane is already dead, there
+is simply nothing left to draw. The damage is also **not confined to the
+engine that caused it**: the next arm's first two dispatches on a *freshly
+created* `Engine2D` come back `rc=0` and flip `cpu_fallback=true`, because
+`_enqueue_framebuffer_compute`'s `vulkan_sffi_reap_dependency_quarantine()`
+gate is still refusing after the previous arm's quarantined descriptors.
 
-Therefore:
+A control that never enters the font composite stays clean:
+`engine_order_probe.spl` uses `draw_text` with the bitmap default face, whose
+plan rejects every non-`cpu` target, so `composite_font_batch` is never called
+(no `font-*` lines at all) and the glyphs go through the CPU suffix's
+`draw_image_blend` (`image-composite x=1 y=9 w=10 h=7 mode=1 rc=1`). Boxes drawn
+after that text survive:
 
-1. **The bug doc's central premise is wrong.** "Everything drawn AFTER the text
-   command is lost" describes the *pixels*, not the *draw order*. In DrawIR
-   order the boxes come first. The Draw-IR emits the whole fill layer, then the
-   text layer.
-2. **`before_bytes` necessarily contains the boxes.** It is downloaded at
-   `:376`, after the `:269` flush that landed all four rects. Restoring it puts
-   the boxes **back**; it cannot take them away. Every one of the six restore
-   sites writes that same buffer.
-3. **The loss is asymmetric inside a single command buffer.** The h1 rect and
-   the three boxes are the same pipeline, the same descriptor, the same
-   submission, differing only in push constants — and the h1 survives while all
-   three boxes do not. No submission-ordering or roll-back story explains that.
-4. Push-constant aliasing across a batched multi-dispatch is independently ruled
-   out by the text-free control, which puts five differently-placed boxes
-   through the identical batching path and comes back bit-identical to software.
+```
+software_text body=1650 h1=756 blue=216 green=216 amber=216   cpu_mirror
+vulkan_text   body=1650 h1=756 blue=216 green=216 amber=216   device_readback
+```
 
-An independent reproduction confirms the order is a property of the *document*,
-not of the browser lane: `engine_vecfont_probe.spl` (scratchpad) selects the
-same bundled vector face the browser resolved
-(`select_font_identity("sha256=a3041811...;axes=wght=100")` → `font_ready=true`)
-and issues `clear, h1 rect, 3 boxes, draw_text_with_advances` directly on an
-`Engine2D`. Its `[vk-order]` prefix is byte-for-byte the same shape as the
-browser lane's: `pipe=1`, four `pipe=2` at `pending_cmd=1`, then the font
-route's entry flush.
+This is the clean discrimination: **text alone does not break the lane — a
+`composite_font_batch` call does**, whether it succeeds or not.
 
-### What is still open
+### Correction to an earlier draft of this section
 
-The mechanism is **not** pinned. What is now excluded:
+An earlier version of this section argued (A) was refuted because "all the box
+rects are dispatched BEFORE the text". That was an inference from a partial
+trace — at the time the run had only reached line 736 — and it is **wrong**:
+the completed trace shows four rects before the text and **three after**, and
+the three that follow are exactly the ones that are lost. The refutation of (A)
+does not depend on it; the measured `font-done status=promoted` with zero
+`font-restore` lines is what refutes (A), and it is stronger. Recorded here
+rather than quietly deleted so the next reader does not rediscover the wrong
+argument from the git history.
 
-- (B) the poison latch — refuted 2026-08-04, see the previous correction;
-- (A) the font roll-back / submission ordering — refuted above;
-- whole-batch submission failure — the h1 rect from the same batch survives;
-- push-constant aliasing in a batched multi-dispatch — the text-free control.
+### Fix direction
 
-What survives, and what the next reader should test **first**:
+Standing policy is GPU-first with an honest fallback, so there are two separate
+things to fix and they must not be conflated:
 
-- **Clip state.** `draw_ir_adv.spl:1477-1484` restores the clip after every
-  command, and `_pack_rect_pc` folds `clip_x/y/w/h/clip_enabled` into the rect
-  push constants. A clip left armed to the h1 band would make the GPU discard
-  exactly the three box rects while the h1 rect lands, with `rc=1` and
-  `dirty=true` on every dispatch and a fully honest `device_readback` — which is
-  precisely the observed signature. `[vk-order] dispatch` does **not** yet print
-  clip state; adding `clip_enabled/clip_x/clip_y/clip_w/clip_h` to that line is
-  the single highest-value next probe.
-- A later full-width write of body-background pixels over the box rows (an image
-  COPY from a CPU mirror that predates the boxes). `image-composite` lines with
-  `mode=0` and a tall `h` would show this.
+1. **Stop losing the primitives (the real fix).** After
+   `composite_font_batch` returns, the Engine2D's `VulkanBackend` must observe
+   the pending-batch state the font route actually left behind. The font route
+   flushes at `backend_vulkan_font.spl:269` and clears
+   `pending_compute_command`/`pending_compute_count`; that clearing has to reach
+   the value stored back into `self.vulkan_backend` at `engine.spl:1466`.
+   Re-flushing a consumed command-buffer handle is what produces the -1 cascade.
+2. **Never publish a partial frame as device-proven (the honesty backstop).**
+   `_dispatch_framebuffer_checked` already sets
+   `mark_cpu_fallback("framebuffer-dispatch-failed")` and `completion_unknown`
+   on `rc < 0`; the bug is that neither reaches `read_pixels_with_source()`.
+   Until (1) lands, a readback taken from a backend whose pending state
+   contradicts the last flush must fail closed to `cpu_fallback` +
+   `render_degraded=true`. `pending_cmd`/`pending_n` disagreeing with the last
+   flush result is a cheap, sufficient detector — it is exactly what lines
+   747/748 show.
 
-### Not yet obtained, stated plainly
-
-No `font-snapshot`, `font-restore`, or `font-done` line has been captured on a
-failing run. Both instrumented probes were still executing
-`_composite_font_batch_impl` when this was written — see the perf note below.
-So the question "does a restore fire, and which site" is **still unanswered by
-measurement**; the refutation of (A) above rests on the draw-order argument,
-which does not need it. Whoever picks this up should re-run
-`vulkan_drop_probe.spl` or `engine_vecfont_probe.spl` under
-`SIMPLE_VK_ORDER_TRACE=1` and read the `font-*` lines.
+Do **not** attempt (2) alone. An honest degraded frame is better than a lying
+one, but the lane is losing real GPU work and (1) is the actual defect.
 
 ### Perf defect found on the way (separate, filed here so it is not lost)
 
 Between the entry flush (`backend_vulkan_font.spl:269`) and the framebuffer
 snapshot (`:376`) the vulkan font route spent **over an hour of wall time and
->20 minutes of CPU** for a **two-glyph** draw at 64x48, under
-`SIMPLE_EXECUTION_MODE=interpreter`. Both probes stalled there identically, with
-the process demonstrably busy (rising `utime`), so it is compute, not a hang.
-The only whole-atlas work in that window is
+~25 minutes of CPU** for a **two-glyph** draw at 64x48 under
+`SIMPLE_EXECUTION_MODE=interpreter`. Both instrumented probes stalled there
+identically with the process demonstrably busy (rising `utime`), so it is
+compute, not a hang. The only whole-atlas work in that window is
 `_vulkan_font_pixels_to_bytes(batch.atlas_pixels)` followed by
 `sha256_u8_hex(atlas_payload)` at `:350-359` — an interpreted SHA-256 over the
-entire glyph atlas, run on every batch whose
-`font_atlas_generation`/`owner_identity` misses. That is what makes this bug so
-expensive to investigate, and it should be fixed independently (hash the atlas
-once per face+generation, or move the digest to a native helper).
+entire glyph atlas on every batch that misses the
+`font_atlas_generation`/`owner_identity` cache. This is what makes the bug
+expensive to investigate and should be fixed independently (hash once per
+face+generation, or move the digest to a native helper).
 
 ### Probe artifacts (scratchpad, this session)
 
-- `vkorder/engine_order_probe.spl` / `engine_order.log` — direct `Engine2D` A/B,
-  text-then-boxes, bitmap face: vulkan == software bit-identical
-- `vkorder/engine_vecfont_probe.spl` / `vecfont.log` — direct `Engine2D` with the
-  real bundled vector face, both draw orders; reproduces the browser lane's
-  dispatch sequence without the HTML lane
-- `vkorder/drop_trace.log` — the failing 64x48 browser-lane run with `[vk-order]`
-  armed; source of the order evidence above
+- `vkorder/drop_trace.log` — the failing 64x48 browser-lane run with
+  `[vk-order]` armed; source of the trace above
+- `vkorder/engine_vecfont_probe.spl` / `vecfont.log` — direct `Engine2D` with
+  the real bundled vector face, both draw orders; reproduces the post-font
+  collapse without the HTML lane
+- `vkorder/engine_order_probe.spl` / `engine_order.log`,
+  `engine_order_v2.log` — bitmap-face control; `composite_font_batch` never
+  called, vulkan == software bit-identical
