@@ -74,6 +74,34 @@ can build the required kernel.
   Its exact admission log is
   `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-indexed-call-cycle3/admission/bootstrap_nonentry_module_global/native-build.log`.
 - Phase 3, the ARM64 attested build, and QEMU evidence still were not run.
+- A third fresh bounded session completed its three-cycle cap while removing
+  the terminator and Ret aggregate crossings. Every cycle passed focused
+  coverage and Phase 2 Cranelift sanity, then failed the canonical admission
+  exactly once with exit 134:
+  1. `6b7f7f634d` introduced indexed `[MirBlock]` terminator dispatch and scalar
+     block targets for every terminator variant. Candidate SHA-256
+     `a92746cc81f053bfcee9ff7dc8c63079dd3d94288aec402ca1ee36fc8b18bbbb`
+     reached `terminator:ret index=0 present=true`, then panicked before Ret
+     payload extraction or emission.
+  2. `dd1dd05798` moved Ret optional unboxing into the `MirTerminator` owner and
+     passed an indexed operand array to LLVM. Candidate SHA-256
+     `0f91939aba20160e45d80f8c44aed85b22b6de6fab1b7604331d6647e09ed7fe`
+     reached `terminator:ret-operand-kind block=0 index=0`, then panicked before
+     the first operand-kind match or emission.
+  3. `435855c952` replaced Ret payload transport with `MirBlock`-owned scalar
+     projections for nil, Copy/Move local IDs, and every constant family.
+     Candidate SHA-256
+     `f96696cb80e06225abc5c14b6864f8682e370802f9527702d6678f343a0febb0`
+     reached `terminator:ret-scalar-kind index=0 kind=1` and
+     `terminator:ret-scalar-local index=0 local=0`, then panicked before the
+     first translator-state decision or Ret emission.
+- The final retained compiler is
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-ret-scalar-cycle3/stage2/aarch64-apple-darwin/simple`.
+  The exact exit-134 admission log is
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-ret-scalar-cycle3/admission/bootstrap_nonentry_module_global/native-build.log`.
+- Phase 3, ARM64 attestation/build, and QEMU were not run in this session because
+  functional admission never passed. No fourth rebuild/admission cycle is
+  permitted in the exhausted session.
 
 ## Current Resume Gate
 
@@ -85,15 +113,17 @@ Owner: compiler-admission lane. Final reviewer: ARM64 integration owner.
    older retained worktree is still current.
 3. Start a fresh bounded session. The completed session exhausted its three
    rebuild/admission cycles, so no fourth cycle may be appended to it.
-4. Continue at the exact `block:terminator-before bb0` boundary. Implement an
-   indexed terminator route using `[MirBlock]` plus block index and owner-local
-   scalar projections. Do not pass `MirTerminator` or `BlockId` by value across
-   method/helper boundaries. A suitable shape is `translate_terminator_at`,
-   which refetches the block and terminator locally and scalarizes target IDs
-   before crossing a boundary.
-5. The fixture's first terminator is likely `Ret`, but preserve exhaustive
-   terminator semantics rather than hardcoding the fixture. Add debug-gated
-   entry/kind, return-payload or target, and emission markers before rebuilding.
+4. Continue at the exact `terminator:ret-scalar-local index=0 local=0`
+   boundary. The next statements read mutable translator state directly in
+   `core_codegen`: `_start` selection through `current_function_name`, fallback
+   selection through `return_locals`/`local_types`/`defined_locals`, and result
+   ABI through `current_return_type`.
+5. Move those decisions behind `MirToLlvm` owner scalar getters: one boolean for
+   whether the current function is `_start`, one boolean for whether local ID 0
+   requires the zero fallback, and one text getter for the current return type.
+   Keep the local ID scalar. Avoid direct consumer-side reads of those fields in
+   the Ret branch, preserve Copy and Move semantics, and add gated markers after
+   each owner decision before any new rebuild.
 6. Only after the focused regression passes, run one fresh Phase 2 build and
    the canonical non-entry module-global/native admission checks once. Phase 3
    or ARM64 QEMU may start only after both pass.
@@ -120,6 +150,13 @@ Retained evidence:
   (`imported-method.status` records exit 1).
 - Final indexed-Call Cycle 3 build and exact terminator-before admission log:
   `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-indexed-call-cycle3/`
+- Indexed-terminator Cycle 1 build and Ret-present boundary log:
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-indexed-terminator-cycle1/`
+- Ret-owner Cycle 2 build and indexed operand-kind boundary log:
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-ret-owner-cycle2/`
+- Final scalar-Ret Cycle 3 build, sanity evidence, and exact scalar-local
+  admission log:
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-ret-scalar-cycle3/`
 
 ## Parallel Lanes
 
