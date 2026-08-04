@@ -88,6 +88,46 @@ figure of ~1,200 was exactly such an extrapolation and is withdrawn.
 converts a real type error into a passing assertion. Filed separately as
 `int_payload_compares_equal_to_bool_true_2026-08-04.md`.)
 
+### The legacy `test/system/**` figure double-counts a mirror
+
+At the pinned commit, blob-hash comparison (path-independent — path-relative
+diffing misses the rename) shows:
+
+- **all 838** idiom-carrying files in `test/system/` have byte-identical twins in
+  `test/03_system/`. There is **zero unique legacy idiom source**;
+- 3,221 of 3,424 `test/system/` files (94%) are byte-duplicates;
+- `test/system/batch` (1,000 files) mirrors `test/03_system/infrastructure/batch`,
+  not a same-named path;
+- the 838 files collapse to **44 unique blobs** — `test/system/batch`'s 500 spec
+  files are **2 distinct source texts**, 250 copies each, one `verify(opt.?)`
+  site apiece. True occurrence count is **937**, not 1,087.
+
+Measured there: batch blob A (covering 250 files) went `10 examples, 1 failure`
+→ `10 examples, 0 failures`. So 500 failures close in that tree and 500 more in
+its mirror — from fixing **two source lines once**. Six blob pairs remain
+unmeasured and are not extrapolated.
+
+Note also that the `edge_case` blobs use `verify(not d.get("c").?)`, which yields
+a genuine bool and passes in **both** arms — a further reason occurrence counts
+overstate failures.
+
+### Measurement trap: `bin/simple` silently collapses the A/B
+
+`simple test` **resolves through `bin/simple` when it exists**, even when a
+different binary is invoked by absolute path. Planting an OLD copy at
+`bin/simple` flipped a NEW-arm run from `0 failures` to `1 failure` with the OLD
+defect text, with the NEW binary's md5 and mtime unchanged; removing it restored
+`0`. **Absolute paths alone do not isolate the arms** — `bin/simple` must point
+at the arm under test and be re-pointed when arms switch.
+
+The `01_unit` numbers above were audited against this after the fact and are
+sound: the symlink was re-pointed between arms and verified at each point
+(`readlink` plus a symbol count), the two app arms ran in separate worktrees with
+their own symlinks, and the single-spec probes ran with **no `bin/simple` on disk
+at all** — immune to the mechanism — yet still diverged 1 → 0 on the same spec
+whose family measured 28 → 0. A collapsed arm forces both sides to one binary,
+which cannot produce 72-vs-0 and 28-vs-0.
+
 ### Not measured
 - legacy duplicates `test/unit/std`, `test/unit/app` (byte-identical but for 4
   files; 69 + 29 idiom sites) — the reports' "138" adds these to the 72 above;
