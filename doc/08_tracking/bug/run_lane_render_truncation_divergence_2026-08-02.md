@@ -1,7 +1,12 @@
 # Vulkan engine2d lane publishes a TRUNCATED frame as a proven device frame when the font route fails
 
 **Date:** 2026-08-02 (mechanism re-pinned 2026-08-04)
-**Status:** FIXED 2026-08-04 — see "Fix (2026-08-04)" at the end of this file.
+**Status:** STILL OPEN. A router-gate hardening landed in `28288f98102` and is
+correct on its own terms, but the A/B **falsified the poison-latch mechanism**
+and the truncation is unchanged. Read
+"Correction (2026-08-04): the poison latch is NOT the mechanism" at the end of
+this file BEFORE the Mechanism section above — sections (B) and Result there
+are now known to be wrong for this document.
 **Severity:** High (silent wrong frame, exit 0, `render_degraded=false`,
 `readback.source=device_readback`)
 **Lane:** engine2d backend `"vulkan"` under
@@ -246,9 +251,74 @@ complete must fall back and say so, never publish a truncated frame.
 - `vk96_readback.log` — provenance receipt for the truncated with-text frame
 - `probe_releaseseed_run.log` — 320x240 with phase traces
 
-## Fix (2026-08-04)
+## Correction (2026-08-04): the poison latch is NOT the mechanism
 
-Applied exactly where the mechanism section pins it: at the router gate. The
+**The fix below landed (`28288f98102`) and did NOT fix this bug.** It is kept
+because it is a real hardening of a real (separate) silent-drop path, but the
+mechanism section (B) above is REFUTED for this document, and this bug is still
+open. The refutation is clean, and it is worth stating precisely because it
+turns the landed change into a *falsification instrument*:
+
+The landed `read_pixels_with_source()` returns
+`engine2d_readback(..., "cpu_fallback")` **unconditionally** whenever
+`vulkan_font_state_unknown` is true. So on the fixed tree the string
+`device_readback` is *impossible* for a poisoned lane. Post-fix run, gate
+verified present in the source immediately before AND after the run
+(`PRECHECK=31 POSTCHECK=31`), `withtext_ab_probe.spl`, 96x72, verbatim:
+
+```
+sw_source=cpu_mirror   sw_blue=504 sw_green=504 sw_amber=504
+vk_source=device_readback
+vk_degraded=false
+vk_backend_handle=1
+vk_pixel_count=6912
+vk_body=5376
+vk_blue=0  vk_green=0  vk_amber=0
+Results: FAIL-silent-partial sw_boxes=504/504/504 vk_boxes=0/0/0 vk_source=device_readback vk_degraded=false
+```
+
+and the 64x48 same-run A/B, also post-fix, reproduces the pre-fix numbers
+*exactly* (`vk_body=2304 vk_h1=742 vk_blue=vk_green=vk_amber=0`).
+
+Therefore:
+
+1. **`vulkan_font_state_unknown` was FALSE.** `_poison_vulkan_font_surface`
+   never ran for this document, so the "all routers keep dispatching into the
+   poisoned backend" story in (B) cannot be what drops the boxes. The poison
+   list at `engine.spl:1455-1464` only fires for nine specific
+   `evidence.reason` values; this document's font route evidently returns some
+   other reason.
+2. **The backend does not think it is degraded either.** `completion_unknown`
+   would surface as source `completion_unknown`, and `cpu_fallback_used` as
+   `cpu_fallback`. We got neither — a genuine `device_readback` with a positive
+   handle and full pixel count.
+3. So the box rects are dispatched to a Vulkan backend that believes it is
+   healthy, and their writes still do not reach the framebuffer that is read
+   back. That points at the **(A)** roll-back / submission-ordering axis, not
+   at any latch: the surviving hypothesis is that the font route's
+   `vulkan_sffi_copy_to_buffer(framebuffer, before_bytes, 0)` restore, or the
+   pending-compute batch it leaves behind, lands AFTER the later primitives'
+   writes at submit/flush time and overwrites them — which would explain
+   exactly "everything document-order after the first text command is missing"
+   while every receipt stays honest-looking.
+
+**Next step for whoever picks this up:** instrument
+`_flush_pending_compute` / `_enqueue_framebuffer_compute`
+(`backend_vulkan_helpers.spl`) and the restore at
+`backend_vulkan_font.spl:462,467,472,478,499,519` with submission-order and
+generation counters, and check whether the restore's buffer copy is submitted
+after the post-text rect dispatches. Do NOT re-derive the poison-latch theory:
+the A/B above rules it out.
+
+## Fix (2026-08-04) — landed, correct, but INSUFFICIENT for this bug
+
+Landed as `28288f98102`. **It does not fix this bug** — see the Correction
+above. What it does fix is a genuine, separate silent-drop path: *if* the
+poison latch ever does fire, every later primitive used to be swallowed. That
+path is now closed and, as a side effect, the readback provenance became a
+usable probe (it is what falsified the mechanism). Kept on those grounds.
+
+Applied where the mechanism section pinned it: at the router gate. The
 `(A)` framebuffer roll-back in `backend_vulkan_font.spl` is left alone — it is a
 legitimate "undo my partial writes"; the defect was `(B)`, that the roll-back
 was then published as a complete frame.
@@ -308,10 +378,17 @@ ignores that return. Separate follow-up, not part of this fix.
   `textfree_v2.log`). The source was re-grepped immediately before AND after the
   run (31 gate sites both times) so the result provably describes the fixed
   tree.
-- **With-text A/B** — `vulkan_drop_probe.spl` (64x48, both arms in one process,
-  the probe whose pre-fix numbers are quoted above) and `withtext_ab_probe.spl`
-  (96x72, through the readback-result entry, prints one authoritative
-  `Results:` line). PASS requires the vulkan arm to either match software or
-  report `render_degraded=true` with a non-`device_readback` source; a partial
-  frame claiming `device_readback` is a FAIL by construction.
-- **Regression gate** — `test/03_system/gui/web_showcase_full_gpu_offload_spec.spl`.
+- **With-text A/B — FAILED, and that failure is the finding.**
+  `vulkan_drop_probe.spl` (64x48) and `withtext_ab_probe.spl` (96x72) both
+  reproduce the truncation unchanged on the fixed tree; the 96x72 arm emits
+  `Results: FAIL-silent-partial ... vk_source=device_readback vk_degraded=false`.
+  See the Correction section for why that verdict refutes the mechanism rather
+  than merely reporting a miss.
+- **Regression gate** — `test/03_system/gui/web_showcase_full_gpu_offload_spec.spl`
+  was started three times and never reached a `Results:` line: run 1 was
+  invalidated by a working-copy revert mid-run, runs 2 and 3 were killed
+  (exit 144 / exit 1) under heavy parallel-session contention (6+ concurrent
+  copies of this same spec were running). **Still owed.** The change is
+  inert unless `vulkan_font_state_unknown` is set, and that spec's lane
+  resolves to `"software"`, so the expected impact is nil — but that is an
+  argument, not a measurement.
