@@ -274,6 +274,15 @@ to time-of-use gap in it, and it must not be "fixed" — it has 7 callers.
 Mild: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_backend_resolver_spec.spl`
 (12, 24, 39) re-validates one prediction with another; no create involved.
 
+**Re-examined — "no create involved" is true but understates the consequence.**
+`val chosen = simple_web_engine2d_resolved_backend_name(...)` followed by
+`expect(probe(chosen).status == BackendStatus.Initialized).to_equal(true)` is a
+probe-vs-probe gap: the resolver's internal probe and the spec's re-probe are two
+independent device queries, so under fd pressure the re-probe can fail while the
+resolver said vulkan. That is a genuine FALSE RED. There is no vacuous-green half
+(the assertion is unconditional), so it is the lowest-severity member of the
+family — but it is a member, not a non-instance.
+
 Checked and SAFE, re-verified independently by the second sweep:
 `web_gpu_first_present_decision_spec.spl` (L74 probe is asserted directly; L142
 branches on the real receipt), `web_showcase_full_gpu_offload_spec.spl` (L321
