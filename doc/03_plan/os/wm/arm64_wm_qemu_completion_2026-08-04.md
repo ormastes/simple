@@ -136,6 +136,40 @@ can build the required kernel.
 
 ## Current Resume Gate
 
+### 2026-08-04 packed-ID recovery closeout
+
+- Fresh bounded cycles removed both observed packed-ID failures. Indexed
+  `LoadGlobal` now decodes its high packed lane through `rt_value_as_int`, and
+  Ret Copy/Move preserves raw IDs while decoding only packed low-lane values.
+  Focused evidence ended PASS 4/4 at `adefa51eda`.
+- Final Phase 2 candidate SHA-256
+  `b3eb7f7ee8b4769dca50147a0273e93beee95b270bbcbd782ab4c0904759059f`
+  passed Stage 2 Cranelift sanity/native smoke. Canonical functional admission
+  ran once and reached correct `LoadGlobal` symbol `3`, completed global load
+  emission, and emitted provider Ret `%l0` with decoded local `0`.
+- Functional admission then failed at LLVM `llc` because the produced IR file
+  was only 104 bytes and began with `ret i64 %l0` / `}`, followed by external
+  declarations. It lacked the module header and function prefix. Retained
+  evidence:
+  `build/phase2-ret-local-conditional-cycle3/admission/bootstrap_nonentry_module_global/failed.ll`
+  (SHA-256 `52861de23029ede256b75a68deaf4a2a4183a94200a6a54dcd14206c0d3a7d1b`)
+  and the sibling `native-build.log`.
+- This candidate is not admitted. No Phase 3, provenance admission, ARM64
+  build, or QEMU run occurred. The three-cycle cap is exhausted.
+
+Fresh-session resume:
+
+1. Start at LLVM module assembly/output, not packed ID projection. Determine
+   whether `compile_ir_to_object` receives a 104-byte `llvm_ir` value or whether
+   bootstrap `rt_file_write_text_at(path, 0, llvm_ir)` truncates a complete
+   value; record length/hash immediately before and after the write.
+2. Preserve the passing packed-ID regressions and do not rework their ABI.
+3. After a focused module-assembly/write regression passes, run one fresh Phase
+   2 build and canonical functional admission once. Only an admitted Phase 2
+   artifact may seed Phase 3.
+4. Continue with Phase 3 functional/native/provenance admission, then strict
+   ARM64 attestation and same-run QEMU serial/QMP/RAMFB evidence.
+
 ### 2026-08-04 inline global-dispatch closeout
 
 - The next bounded three-cycle lane advanced non-entry module initialization

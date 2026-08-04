@@ -59,3 +59,8 @@ dev-done
 
 - dev: Refined the active recovery goal into seven testable acceptance criteria
   (type: bug).
+- implement: Packed `LoadGlobal` symbol and Ret local IDs now normalize through
+  focused PASS 4/4 evidence (`adefa51eda`).
+- verify: Final Phase 2 candidate passed Stage 2 sanity/native smoke but failed
+  functional admission because LLVM module output was truncated to 104 bytes;
+  Phase 3 and ARM64/QEMU remain active.
