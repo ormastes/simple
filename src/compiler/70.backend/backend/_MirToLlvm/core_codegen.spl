@@ -522,6 +522,51 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] function:done {name}"
 
+    me translate_block(block: MirBlock):
+        """Translate a single MIR basic block (trait entry point).
+
+        The bootstrap by-index refactor renamed this backend's lowering methods
+        to take `(collection, index)`, which left `MirToLlvm` no longer
+        satisfying the `MirTextCodegen` trait it declares above. Because the
+        trait check is a hard semantic error, that broke module load for EVERY
+        spec, not just this backend's own tests.
+
+        Delegation here is exact rather than approximate: `translate_block_at`
+        reads only `blocks[block_index]` and never inspects sibling blocks, so a
+        one-element array is equivalent.
+        """
+        self.translate_block_at([block], 0)
+
+    me translate_terminator(term: MirTerminator):
+        """Trait entry point — not reachable on this backend.
+
+        `translate_terminator_at` lowers a terminator through its indexed
+        `MirBlock` owner, so it needs the block (for the label/successor ids),
+        not just the terminator value. A `MirTerminator` alone cannot be
+        widened back into that owner, so there is no faithful delegation.
+
+        The by-index path never routes here (`translate_block_at` calls
+        `translate_terminator_at` directly). Failing loudly rather than
+        no-oping: a silent empty body would drop the branch and miscompile.
+        """
+        panic("MirToLlvm.translate_terminator is not the LLVM lowering path — call translate_terminator_at(blocks, block_index), which resolves the terminator through its indexed MirBlock owner")
+
+    me translate_call(dest: LocalId?, func: MirOperand, args: [MirOperand]):
+        """Trait entry point — not reachable on this backend.
+
+        `translate_call_at` reads the whole `MirInst` at `instructions[index]`,
+        so it needs the instruction, not the destructured `(dest, func, args)`
+        triple; rebuilding a synthetic `MirInst` here would be a guess.
+
+        Note this one IS reachable in principle: the trait's default
+        `translate_instruction` dispatches `case Call(...)` to it, and this
+        backend does not override `translate_instruction`. The by-index path
+        bypasses that default (`translate_block_at` calls
+        `translate_instruction_at`), so in practice it never fires — and if it
+        ever does, a panic naming the right method beats emitting nothing.
+        """
+        panic("MirToLlvm.translate_call is not the LLVM lowering path — call translate_call_at(instructions, index), which reads the full MirInst")
+
     me translate_block_at(blocks: [MirBlock], block_index: i64):
         """Translate a MIR basic block."""
         val block = blocks[block_index]
