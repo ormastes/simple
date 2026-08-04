@@ -1114,6 +1114,44 @@ impl Lowerer {
             self.bind_sequence(&subject_ref, elements, is_array, &binding_type_map, ctx, &mut binding_stmts);
             return binding_stmts;
         }
+        // Top-level named-field struct destructuring: `case Point { x: 0, y: b }:`.
+        // This had no binder arm at all, so the arm was selected (the condition
+        // half, `named_struct_pattern_condition`, is correct) and then every
+        // name was read off the zeroed stack — `b` came back 0 on the JIT while
+        // the tree-walk interpreter, which recurses in `interpreter_patterns.rs`,
+        // answered correctly. Same shape as the Tuple/Array gap above.
+        //
+        // Resolve each field NAME to its declaration index and bind positionally,
+        // exactly as `bind_subpattern`'s `Pattern::Struct` arm does for the
+        // nested position and as `named_struct_pattern_condition` does for the
+        // refutability half.
+        if let Pattern::Struct { name, fields } = binding_pattern {
+            let Some(struct_fields) = self.struct_field_list(name) else {
+                return binding_stmts;
+            };
+            let mut positional: Vec<(usize, &Pattern)> = Vec::new();
+            for (field_name, field_pattern) in fields {
+                let Some(idx) = struct_fields.iter().position(|(n, _)| n == field_name) else {
+                    return binding_stmts;
+                };
+                positional.push((idx, field_pattern));
+            }
+            let binding_type_map: std::collections::HashMap<String, TypeId> = bindings.iter().cloned().collect();
+            let subject_ref = HirExpr {
+                kind: HirExprKind::Local(subject_idx),
+                ty: subject_ty,
+            };
+            let struct_name = name.clone();
+            self.bind_struct_fields(
+                &subject_ref,
+                &struct_name,
+                &positional,
+                &binding_type_map,
+                ctx,
+                &mut binding_stmts,
+            );
+            return binding_stmts;
+        }
         if let Pattern::Enum {
             payload: Some(payload_patterns),
             variant: enum_variant,

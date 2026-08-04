@@ -15,6 +15,13 @@ enum-payload bug: the tag half was handled, the payload half was dropped, so
 `case Point(0, y)` matched EVERY Point and swallowed every later arm. The
 named-field spelling `Pattern::Struct` was the same unconditional `Bool(true)`.
 
+The NAMED-FIELD spelling `case Point { x: 0, y: b }:` needed two more fixes
+before any row could be written for it, and both are pinned by the `d1_named_*`
+rows: it did not PARSE (the field-separating `,` was eaten as a comma
+or-pattern), and once it parsed it had no BINDER
+(`build_pattern_binding_stmts` had no `Pattern::Struct` arm, so names were read
+off the zeroed stack -- 0 on the JIT, correct on the interpreter).
+
 Run under BOTH engines and diff -- the tree-walk interpreter recurses correctly
 (`interpreter_patterns.rs`) and was always right here, so an interpreter-only
 run proves nothing:
@@ -81,13 +88,33 @@ fn d1_pos_both(p: Point) -> i64:
         case Point(a, b): a + b + 200
         case _: -1
 
-# The named-field spelling `case Point { x: 0, y: b }:` is NOT covered here: it
-# does not PARSE in `case` position at all (`Unexpected token: expected Comma,
-# found Colon`), so no lowering row can be written for it. That is a separate,
-# upstream parser defect -- see
-# doc/08_tracking/bug/named_field_struct_pattern_unparseable_in_case_2026-08-04.md.
-# The lowering side is fixed for it regardless (`Pattern::Struct` in both
-# condition twins), so the row can be added the day the parser accepts it.
+# --- depth 1: the NAMED-FIELD spelling `case Point { x: 0, y: b }: ` ---------
+# This spelling used to be unreachable: it did not PARSE in `case` position
+# (`Unexpected token: expected Comma, found Colon`), because the field
+# sub-pattern was parsed with the full `parse_pattern`, which swallowed the
+# field-separating `,` as a comma OR-pattern and then choked on the next
+# field's `:`. Fixed by `parse_pattern_no_comma_or` (parser_patterns.rs).
+#
+# Once it parsed, a SECOND defect showed: `build_pattern_binding_stmts` had no
+# `Pattern::Struct` arm, so the arm was selected correctly and then every name
+# was read off the ZEROED stack -- `d1_named_hit` answered 0 instead of 7 on
+# the JIT while the tree-walk interpreter was right, the usual signature of a
+# missing binder. Fixed by the `Pattern::Struct` arm there.
+#
+# `d1_named_miss` is the load-bearing row: it is the one an irrefutable
+# `Bool(true)` condition cannot answer. `d1_named_hit`'s 7 is the one a missing
+# binder cannot answer (it reads 0). Both directions are needed.
+fn d1_named(p: Point) -> i64:
+    match p:
+        case Point { x: 0, y: b }: b
+        case Point { x: a, y: b }: a + b + 100
+        case _: -1
+
+# Field-shorthand spelling `{ x, y }` -- binds by field name, no sub-pattern.
+fn d1_named_short(p: Point) -> i64:
+    match p:
+        case Point { x, y }: x + y
+        case _: -1
 
 # --- depth 2: struct inside a top-level struct pattern ----------------------
 fn d2_pos(w: Wrap2) -> i64:
@@ -175,6 +202,10 @@ fn main() -> i64:
     bad = bad + check("d1_both_hit", d1_pos_both(Point(x: 1, y: 2)), 12)
     bad = bad + check("d1_both_partial", d1_pos_both(Point(x: 1, y: 5)), 105)
     bad = bad + check("d1_both_miss", d1_pos_both(Point(x: 4, y: 5)), 209)
+
+    bad = bad + check("d1_named_hit", d1_named(Point(x: 0, y: 7)), 7)
+    bad = bad + check("d1_named_miss", d1_named(Point(x: 3, y: 4)), 107)
+    bad = bad + check("d1_named_short", d1_named_short(Point(x: 3, y: 4)), 7)
 
     bad = bad + check("d2_hit", d2_pos(Wrap2(p: Point(x: 0, y: 7), n: 2)), 9)
     bad = bad + check("d2_miss", d2_pos(Wrap2(p: Point(x: 3, y: 4), n: 2)), 109)

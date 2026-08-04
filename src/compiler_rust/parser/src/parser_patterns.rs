@@ -47,6 +47,27 @@ impl<'a> Parser<'a> {
     // === Pattern Parsing ===
 
     pub(crate) fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        self.parse_pattern_inner(true)
+    }
+
+    /// Parse a pattern that sits inside a comma-DELIMITED list (a `{ ... }`
+    /// struct-pattern field list). `|` or-patterns are still accepted, but a
+    /// `,` is left for the caller: there it separates list elements, it does
+    /// not build an `Or`.
+    ///
+    /// Without this, `case Point { x: 0, y: b }:` fails to parse. The field
+    /// sub-pattern `0` is parsed by the full `parse_pattern`, which sees the
+    /// `,` and `is_comma_or_pattern_context()` (peek == Identifier `y`) says
+    /// "comma or-pattern", so it swallows the separator, parses `y`, and then
+    /// leaves the field colon sitting there — which the field loop reports as
+    /// `expected Comma, found Colon`. Same reasoning as
+    /// `parse_enum_payload_patterns`, which already avoids `parse_pattern`
+    /// for exactly this reason.
+    pub(crate) fn parse_pattern_no_comma_or(&mut self) -> Result<Pattern, ParseError> {
+        self.parse_pattern_inner(false)
+    }
+
+    fn parse_pattern_inner(&mut self, allow_comma_or: bool) -> Result<Pattern, ParseError> {
         // Parse the first pattern
         let first = self.parse_single_pattern()?;
 
@@ -85,7 +106,7 @@ impl<'a> Parser<'a> {
         // Comma-separated or-patterns: `case Int(_), Float(_), Bool(_):`
         // The comma acts as pattern separator when followed by a pattern-start token
         // (not a colon, which would indicate named arguments).
-        if self.check(&TokenKind::Comma) && self.is_comma_or_pattern_context() {
+        if allow_comma_or && self.check(&TokenKind::Comma) && self.is_comma_or_pattern_context() {
             let mut patterns = vec![first];
             while self.check(&TokenKind::Comma) {
                 self.advance();
@@ -300,7 +321,10 @@ impl<'a> Parser<'a> {
                         let field_name = self.expect_identifier()?;
                         let pattern = if self.check(&TokenKind::Colon) {
                             self.advance();
-                            self.parse_pattern()?
+                            // NOT `parse_pattern`: the `,` here separates
+                            // FIELDS, so it must not be consumed as a comma
+                            // or-pattern. See `parse_pattern_no_comma_or`.
+                            self.parse_pattern_no_comma_or()?
                         } else {
                             Pattern::Identifier(field_name.clone())
                         };
