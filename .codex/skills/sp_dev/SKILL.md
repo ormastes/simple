@@ -98,7 +98,6 @@ provide ad-hoc bootstrap evidence only after its path, version, and SHA-256 are
 recorded and its native smoke passes with stub fallback disabled. It is not
 Stage 4 unless the bounded essential-tools smoke above also passes against that
 exact artifact.
-
 When the user explicitly authorizes `SIMPLE_ADHOC_BOOTSTRAP=1`, run a fresh
 Stage2→Stage3 bootstrap in an isolated output directory and retain its
 `adhoc-stage3-evidence.env` receipt. The hook rejects `--full-cli`, `--deploy`,
