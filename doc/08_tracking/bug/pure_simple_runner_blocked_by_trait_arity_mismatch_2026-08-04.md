@@ -1,9 +1,27 @@
 # Pure-Simple test runner executes ZERO specs — trait/impl arity mismatch in `MirToLlvm`
 
-**Status:** OPEN (semantic analysis / trait conformance).
+**Status:** **FIXED 2026-08-04** — `00202fbb346` widened the `MirTextCodegen`
+trait to match its implementor. Verified by A/B, see "Verification" below.
 **Found:** 2026-08-04, while measuring `test/03_system/core` with a pinned worktree.
-**Impact:** the **default** runner cannot execute any spec at the affected pin.
-Fails loudly, but is easily misread as host slowness or a hung run.
+**Impact:** the **default** runner could not execute any spec at the affected pin.
+Failed loudly, but was easily misread as host slowness or a hung run.
+
+## Verification (2026-08-04)
+
+The fix could not be observed with any deployed binary, because the
+trait-conformance check that emits this diagnostic is *newer* than the deployed
+compiler. Verified instead with a binary built to contain the check
+(`strings -a <bin> | grep -c "but the trait declares"` = 1, so the instrument
+was confirmed present before either arm was trusted), run against two worktrees
+differing only in the trait declaration:
+
+| arm | trait | exit | `MirTextCodegen` errors | specs |
+|---|---|---|---|---|
+| OLD (`6969b907bdb`) | 5 / 2 params | 1 | **1** | none ran |
+| NEW (`00202fbb346`) | 7 / 3 params | 0 | **0** | **30 passed, 0 failed** |
+
+So the mismatch was the whole blocker: with the trait realigned, the default
+pure-Simple runner executes specs normally.
 
 ## Symptom
 
