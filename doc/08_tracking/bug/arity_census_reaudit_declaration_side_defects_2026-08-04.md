@@ -174,12 +174,48 @@ proves nothing. The discriminator that matched the `wine_vm_adapter` /
 is still referenced somewhere while being defined nowhere in the tree.** A
 split moves the definition, so it stays defined and is filtered out.
 
-Confirmed instances:
+### The discriminator's own first version was fail-open — corrected
 
-| module | current | last intact | lost symbols still referenced |
-|--------|---------|-------------|-------------------------------|
-| `src/lib/nogc_sync_mut/js/engine/interpreter.spl` | 616 lines / 23,099 B | 165,652 B (13%) | `_find_class_proto`, `_is_object_frozen`, `_json_stringify`, `_json_parse_allocated`, and more |
-| `src/lib/gc_async_mut/gpu/browser_engine/text_painter.spl` | 302 lines / 11,690 B | 16,168 B | `browser_render_vector_font_probe_pixels` |
+v1 of the check reported four casualties. **Three were false**, and the
+fourth named the wrong symbols. Two fail-open bugs:
+
+- Its "defined today" set counted only `fn NAME`, missing the **`me NAME(...)`
+  method-declaration form**, so every method read as undefined. `_find_class_proto`,
+  `_is_object_frozen`, `_json_stringify` and `_json_parse_allocated` were
+  reported as lost from the JS interpreter; all four are alive and well as
+  `me` methods on sibling classes.
+- Its "referenced" test matched the declaration site itself and matched names
+  inside **string literals**. `prepare_helper_context` in `vhdl_backend.spl`
+  was only ever a `me` declaration; `_spawn_from_resolved_bytes` in
+  `syscall.spl` appeared only inside `to_contain("...")` assertions.
+
+**A dangling-symbol check that does not model every declaration form the
+language offers reports live code as dead.** The corrected version adds `me`
+to the defined set, strips string literals, and excludes declaration lines.
+
+### Confirmed results (corrected discriminator)
+
+**95 files** carry at least one lost symbol that is called somewhere and
+defined nowhere, spanning **533 distinct symbols**. This is far larger than
+the census's scope and needs its own lane. Representative:
+
+| module | current | last intact | dangling symbols |
+|--------|---------|-------------|------------------|
+| `src/os/tls13/tls13.spl` and 3 more | 611 B | 82,412 B | `_append_bytes` |
+| `src/lib/nogc_sync_mut/js/engine/interpreter.spl` | 23,099 B | 165,652 B (13%) | `_resolve_fetch_url`, `_simple_fetch_base_url`, `_simple_fetch_cookie_header`, `_simple_fetch_marker` |
+| `src/compiler/80.driver/driver_pipeline.spl` | 237 B | 32,422 B | `get_optimization_config`, `optimize_mir` |
+| `src/lib/gc_async_mut/gpu/browser_engine/dom.spl` | 14,421 B | 81,790 B | `be_dom_get_attribute`, `be_dom_get_tag_name`, `be_dom_find_path_to_id` |
+| `src/lib/gc_async_mut/gpu/browser_engine/layout.spl` | 7,170 B | 73,082 B | `layout_block`, `layout_inline`, `layout_table` |
+| `src/lib/common/text_advanced.spl` | 662 B | 39,684 B | `expandtabs`, `gsub`, `index_of_any`, `is_title`, … |
+| `src/lib/gc_async_mut/gpu/browser_engine/text_painter.spl` | 11,690 B | 16,168 B | `browser_render_vector_font_probe_pixels` |
+
+Spot-verified as genuine: `_append_bytes` is defined **nowhere** in owned
+`src/` yet called from `src/os/crypto/x25519_mlkem768/hybrid.spl` (3 sites)
+and referenced from `handshake13.spl`, `aes_gcm_siv.spl` and
+`structural/parse/runtime.spl`. `_resolve_fetch_url` and
+`_simple_fetch_base_url` are called in `interpreter_native.spl` in both tier
+copies with no definition anywhere. `browser_render_vector_font_probe_pixels`
+is imported and called by two specs.
 
 Already repaired before this audit, recorded for the family:
 `src/lib/common/wine_vm_adapter.spl` (89 → 322 lines) and
@@ -187,23 +223,29 @@ Already repaired before this audit, recorded for the family:
 and referenced 3 — `_resolve_multi_expr`, `_exec_printf`, `_exec_assign` —
 that it no longer defined).
 
-### Why these two were NOT restored
+### Read the symbol list, not the file list
 
-Neither is a clean truncation; both are **divergent rewrites**, and restoring
-wholesale would destroy newer work.
+The **file** list is noisy; the **symbol** list is the real signal. A file can
+shrink to 1% of its historical size for a perfectly good reason:
+`src/os/tls13/tls13.spl` is 14 lines because it is now a deliberate facade —
+*"Split from src/os/tls13/tls13.spl to keep module cohesion under the 800-line
+source limit"* — that re-exports its parts with `export use`. Nothing was
+lost there. What is genuinely broken is `_append_bytes`, and that is true
+independently of which file is supposed to hold it.
 
-`text_painter.spl`: the historical version defines 14 functions the current
-one lacks, but the current one defines **15 the historical one lacks** and
-carries 288 lines that never existed in it (`_strip_tags`, `_wrap_text`,
-`_estimate_char_width_px`, the famous-site corpus layout paths). Two lineages,
-not one truncation. The same applies to the JS interpreter.
+### Why nothing here was restored
 
-The dangling references are real defects either way — four symbols in the JS
-engine are referenced by `interpreter_async.spl`, `interpreter_object.spl` and
-`interpreter_native.spl` (in both the `gc_async_mut` and `nogc_async_mut` tier
-copies) while being defined nowhere in owned `src/`. Repair needs a per-symbol
-decision about which lineage is authoritative — exactly the judgement that,
-skipped, produced the `wine_vm_adapter` stub in the first place.
+None of these is a clean truncation that history can simply undo. The two
+examined closely are **divergent rewrites**, and restoring wholesale would
+destroy newer work: `text_painter.spl`'s historical version defines 14
+functions the current one lacks, but the current one defines **15 the
+historical one lacks** and carries 288 lines that never existed in it
+(`_strip_tags`, `_wrap_text`, `_estimate_char_width_px`, the famous-site
+corpus layout paths). Two lineages, not one truncation.
+
+Repair needs a per-symbol decision about which lineage is authoritative —
+exactly the judgement that, skipped, produced the `wine_vm_adapter` stub in
+the first place. Filed rather than guessed.
 
 ## Recommendation for the census tooling
 
