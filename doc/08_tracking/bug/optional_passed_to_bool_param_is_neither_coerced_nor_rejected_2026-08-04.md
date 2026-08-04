@@ -36,20 +36,73 @@ failing files carry the idiom; 100 files x 1 + 1 x 2 + 49 x 3 = 249, an exact
 match). `test/03_system/stdlib` — 51 of 63. `test/03_system/compiler` — 50 of
 the `comprehensive/*` failures.
 
-> **WITHDRAWN 2026-08-04 — the "249 of 249" figure is an environment artifact.**
-> A bare `git worktree` has no `bin/simple` (it is a gitignored symlink), so
-> every spec returns `(0 passed, 1 failed)` plus `Error: Process exited with code
-> 127` — 50 of 50 `edge_case` files, and 0 once the symlink is created. That
-> mechanically manufactures an "N of N failing" reading at *file* scale.
-> Corrected facts: the tier holds **229 spec files / 5,573 examples**, not 249
-> failing examples; and the fix can only reach **2 of its 7 subdirectories**
-> (`.?` sites: `edge_case` 199, `error_path` 400, **zero** in `compatibility`,
-> `exploratory`, `regression`, `resilience` — those five pass genuine booleans,
-> which the fix passes through untouched via `Value::Bool => None`). So ~77 files
-> provably cannot change. The true delta for this tier is **UNMEASURED**; the
-> defensible statement is an upper bound of **≤599** closable failures in scope.
-> The `stdlib` (51 of 63) and `compiler` (50) figures above are from the same
-> unpinned environment and are likewise unverified.
+> **RESOLVED 2026-08-04 by direct measurement. The count of 249 is CORRECT; the
+> attribution "all 249 are this defect" is NOT.** An intermediate note withdrew
+> the 249 as an artifact of the `code 127` failure mode (a bare worktree has no
+> `bin/simple`, so directory runs fail per-file and the total equals the FILE
+> count). That artifact is real and worth knowing, but it is **not** what
+> produced this number. A controlled A/B over the whole tier found exactly 249
+> failing examples in the OLD arm. See "MEASURED — `test/03_system/core`" below
+> for the split: **149** are this defect, **100** are a different spec bug.
+> The `stdlib` (51 of 63) and `compiler` (50) figures above remain unverified.
+
+## MEASURED — `test/03_system/core` (2026-08-04, pin `851a0e8d82e`)
+
+Whole tier, both arms, all 5,573 examples executed (`passed + failed` equalled
+the static example count in every cell; `code 127` was 0 in all 16 runs).
+
+| subdirectory | files | examples | fail OLD | fail NEW | delta |
+|---|---|---|---|---|---|
+| `edge_case` | 50 | 1,400 | **149** | **0** | **−149** |
+| `error_path` | 100 | 3,000 | 100 | 100 | 0 |
+| `compatibility` | 25 | 375 | 0 | 0 | 0 |
+| `exploratory` | 25 | 375 | 0 | 0 | 0 |
+| `regression` | 25 | 375 | 0 | 0 | 0 |
+| `resilience` | 2 | 33 | 0 | 0 | 0 |
+| top-level specs | 2 | 15 | 0 | 0 | 0 |
+| **total** | **229** | **5,573** | **249** | **100** | **−149** |
+
+The 149 decomposes exactly as `50 nested.? + 49 opt2.? + 50 d.get("a").?`,
+matching the site counts. The prediction that the four subdirectories with no
+`.?` sites would show no delta held.
+
+**The 100 `error_path` failures are NOT this defect** — they are a genuine spec
+bug, one per file: `verify(Some(nil).?)`. OLD reports `expected nil to equal
+true`, NEW reports `expected false to equal true`. The fix changes the message,
+not the verdict, and correctly so: `Some(nil)` is present-but-nil, and the spec
+asserts it is `true`. **The spec is wrong, not the compiler.**
+
+Arm identity established behaviorally, not by label: OLD = the same tree with
+`return None;` as the first statement of `present_value_as_bool_arg`; md5 NEW
+`bcbb7c53…` vs OLD `f0dfee65…`; isolated probes via `bin/simple run` gave
+`verify(Some(Some(Some(10))).?)` → OLD `expected Option::Some(10) to equal true`,
+NEW passes, and `verify(d.get("a").?)` → OLD `expected 1 to equal true`, NEW
+passes.
+
+### `1 == true` is runner-dependent
+
+The masking effect documented below for `test/01_unit/std` — where `Some(1).?`
+passes because payload `1` compares equal to `true` — **does not hold in this
+tier**. Here `d.get("a").?` yields `1` and OLD fails it with `expected 1 to equal
+true`. The difference is the runner: this measurement required
+`SIMPLE_TEST_RUNNER_RUST=1`. So the loose comparison is a property of the
+**pure-Simple** matcher, not of the language. Treat any `.?`-site census as
+runner-specific.
+
+### Deviation: the pure-Simple runner cannot run this tier at this pin
+
+With the default runner, **both** arms died before executing any spec:
+
+```
+error: semantic: type MirToLlvm implements method translate_block_at from trait
+MirTextCodegen with 7 parameter(s), but the trait declares 5
+```
+
+Zero examples, no `Results:` line. That — not host load — is the likeliest cause
+of the earlier failed attempt to measure this tier. Filed separately as
+`pure_simple_runner_blocked_by_trait_arity_mismatch_2026-08-04.md`. The Rust
+runner is the correct instrument for a Rust-side change, but note that stdlib
+`.spl` behavior is **not** exercised by it.
 
 ## MEASURED delta (2026-08-04, pinned worktrees at `b0f305f1ae6`)
 
