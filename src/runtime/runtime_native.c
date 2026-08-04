@@ -6912,10 +6912,12 @@ int rt_file_delete(const char* path) {
     return remove(path) == 0 ? 1 : 0;
 }
 
-int rt_file_remove(int64_t path_value, int64_t path_len_unused) {
-    (void)path_len_unused;
-    char* path = rt_core_string_to_cpath(path_value);
+int rt_file_remove(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!path_ptr || path_len > SIZE_MAX - 1) return 0;
+    char* path = (char*)malloc((size_t)path_len + 1);
     if (!path) return 0;
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[(size_t)path_len] = '\0';
     int ok = remove(path) == 0 ? 1 : 0;
     free(path);
     return ok;
