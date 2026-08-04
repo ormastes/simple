@@ -5,6 +5,7 @@ use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{CompileResult}
 use compiler.common.config.{Logger}
 use compiler.mir.mir_aop_injection.{aop_advices_requested, aop_weave_count}
+use compiler.mir.mir_exception_cfg.{validate_mir_exception_module}
 use compiler.backend.backend.vhdl.vhdl_design_catalog.{
     VhdlDesignCatalog,
     vhdl_build_design_catalog_with_metadata
@@ -69,6 +70,11 @@ impl CompilerDriver:
         val ctx: CompileContext = self.ctx
         val log = ctx.logger
         vhdl_log_debug(log, "AOT VHDL: generating VHDL to {output}")
+        for mir_module in ctx.mir_modules.values():
+            val validation = validate_mir_exception_module(
+                mir_module, "at post-weave/debug/prepared VHDL boundary")
+            if validation.is_err():
+                return CompileResult.CodegenError(validation.unwrap_err())
         if not vhdl_remove_production_artifacts(output):
             return CompileResult.CodegenError(
                 "Failed to remove stale VHDL artifacts for {output}")
@@ -109,6 +115,10 @@ impl CompilerDriver:
             return CompileResult.CodegenError(
                 "VHDL design catalog error: {catalog_error}")
         val catalog: VhdlDesignCatalog = rt_enum_payload(catalog_result)
+        val catalog_validation = validate_mir_exception_module(
+            catalog.design, "at final VHDL backend handoff")
+        if catalog_validation.is_err():
+            return CompileResult.CodegenError(catalog_validation.unwrap_err())
         if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
             eprint("[vhdl-driver] catalog payload extracted")
 

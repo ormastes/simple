@@ -117,7 +117,7 @@ fn exception_release_signature_is_exact(type_: MirType) -> bool:
         case _: false
 
 fn exception_is_exact_facet_release(
-    dest: LocalId?, func: MirOperand, args: [MirOperand]
+    body: MirBody, dest: LocalId?, func: MirOperand, args: [MirOperand]
 ) -> bool:
     if dest != nil or args.len() != 2:
         return false
@@ -127,11 +127,20 @@ fn exception_is_exact_facet_release(
                 return false
             if not exception_release_signature_is_exact(type_): return false
         case _: return false
-    # The MIR body carries no cleanup-entry manifest, so the verifier can
-    # authenticate the generated ABI shape and argument order, but cannot
-    # prove one release per registered entry. The closed cleanup region still
-    # rejects every other call and every non-release instruction.
-    exception_operand_local(args[0]) >= 0 and exception_operand_local(args[1]) >= 0
+    val owner_type = exception_local_type(body, exception_operand_local(args[0]))
+    val lease_type = exception_local_type(body, exception_operand_local(args[1]))
+    if owner_type == nil or lease_type == nil:
+        return false
+    val owner_exact = match owner_type.unwrap():
+        case Opaque(name): name == "AspectExecutionContext"
+        case _: false
+    val lease_exact = match lease_type.unwrap():
+        case Opaque(name): name == "__simple_facet_descriptor_lease_abi"
+        case _: false
+    # The MIR body carries no cleanup-entry manifest, so exact release count
+    # cannot be proven here. Symbol, signature, nil destination, and the two
+    # body-local ABI arguments in owner/lease order are nevertheless exact.
+    owner_exact and lease_exact
 
 fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
     """Validate unwind-only landing pads and linear exception-token provenance."""
@@ -273,7 +282,7 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
                 match instruction.kind:
                     case LandingPad(_): ()
                     case Call(dest, func, args):
-                        if not exception_is_exact_facet_release(dest, func, args):
+                        if not exception_is_exact_facet_release(body, dest, func, args):
                             return exception_cfg_error(
                                 "cleanup region call is not the exact NoUnwind facet release ABI")
                     case _:
@@ -337,11 +346,19 @@ fn validate_mir_exception_cfg(body: MirBody) -> Result<(), text>:
                 "unwind cleanup region contains a cycle or non-resuming path")
     Ok(())
 
-fn validate_mir_exception_module_gate_or_panic(module: MirModule, phase: text):
-    """Validate every function at a production pipeline boundary."""
+fn validate_mir_exception_module(module: MirModule, phase: text) -> Result<(), text>:
+    """Validate every function at a typed production pipeline boundary."""
     for function in module.functions.values():
         val validation = validate_mir_exception_cfg(MirBody.from_function(function))
         if validation.is_err():
-            panic("{validation.unwrap_err()} in function '{function.name}' {phase}")
+            return Err("{validation.unwrap_err()} in function '{function.name}' {phase}")
+    Ok(())
 
-export validate_mir_exception_cfg, validate_mir_exception_module_gate_or_panic
+fn validate_mir_exception_module_gate_or_panic(module: MirModule, phase: text):
+    """Validate every function at a production pipeline boundary."""
+    val validation = validate_mir_exception_module(module, phase)
+    if validation.is_err():
+        panic(validation.unwrap_err())
+
+export validate_mir_exception_cfg, validate_mir_exception_module
+export validate_mir_exception_module_gate_or_panic
