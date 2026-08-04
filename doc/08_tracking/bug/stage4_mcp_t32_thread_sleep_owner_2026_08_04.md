@@ -2,8 +2,8 @@
 
 ## Status
 
-Source fixed; focused native contract PASS; exact Phase 4 verification requires
-a fresh bounded session.
+Thread and file-read owners fixed; focused native contract PASS; the full
+closure crossed the module.
 
 ## Symptom
 
@@ -29,3 +29,9 @@ facade. Preserve both retry timings and all T32 behavior.
 exercises a zero-duration physical-owner sleep and a session helper, compiled
 and linked 41 modules, and exited 30. The three-cycle full-closure cap is
 exhausted, so no fourth Phase 4 build is permitted in this session.
+
+A fresh full-closure cycle crossed `thread_sleep` and then reported the same
+module's two free `rt_file_read_text` calls. Both reads now use the existing
+`read_file` facade. The strengthened 41-module contract reads a deliberately
+missing CMM path, returns an empty warning set, and exits 30. The following full
+cycle crossed the entire T32 module.
