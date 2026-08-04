@@ -136,6 +136,38 @@ can build the required kernel.
 
 ## Current Resume Gate
 
+### 2026-08-04 inline global-dispatch closeout
+
+- The next bounded three-cycle lane advanced non-entry module initialization
+  through direct indexed `StoreGlobal` and most of indexed `LoadGlobal`.
+  The final candidate at `9181b448e1` passed Stage 2 Cranelift sanity/native
+  smoke with stable SHA-256
+  `c250e7d16e2c61e0a3291d190722c5d4bb1d72c5068dcee5b7944fc75bb09ce1`.
+- Canonical functional admission ran once and failed with rc 138 (`SIGBUS`).
+  The trace completed payload extraction, destination-slot extraction,
+  destination ID `0`, and symbol-slot extraction. The exact first unobserved
+  operation is the nested `load_symbol.id` field access, before the symbol-ID
+  marker.
+- Evidence log:
+  `/private/tmp/simple-phase2-cycle2-20260804/build/phase2-inline-load-global-cycle3/admission/bootstrap_nonentry_module_global/native-build.log`.
+- This candidate is not admitted and must not seed Phase 3. Phase 3,
+  provenance admission, ARM64 attestation/build, and QEMU evidence remain
+  pending. The lane exhausted its three-cycle cap; continue only in a fresh
+  bounded session from the `load_symbol.id` boundary.
+
+Updated owner: compiler-admission lane. Final reviewer: ARM64 integration owner.
+
+1. Preserve direct scalar handling for the already-proven destination ID.
+2. Remove the nested `SymbolId.id` projection after `rt_tuple_get(payload, 1)`;
+   extract or thread the symbol ID as a raw scalar at the enum-payload boundary.
+3. Run its focused regression once, then one fresh Phase 2 build and canonical
+   functional admission once. Only an admitted Phase 2 artifact may seed
+   Phase 3.
+4. Admit Phase 3 for functional behavior, native smoke, and absence of Rust
+   provenance before starting strict ARM64/QEMU work.
+
+### Prior return-translation resume gate (superseded)
+
 Owner: compiler-admission lane. Final reviewer: ARM64 integration owner.
 
 1. Begin with at least 12 GiB free so the 2.6 GiB runtime authority can be
