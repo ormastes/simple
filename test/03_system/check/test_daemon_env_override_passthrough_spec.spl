@@ -78,6 +78,18 @@ fn seed_daemon_without_override():
     val cmd = "bin/simple test '{TARGET}' --no-db >/dev/null 2>&1"
     val (_o, _e, _c) = process_run("/bin/sh", ["-c", cmd])
 
+# The sibling-selector fixture reports one line per selector name, so a single
+# run answers the question for the whole family at once.
+val SIBLING_TARGET = "test/fixtures/mem_infra/env_selector_probe_spec.spl"
+
+fn run_siblings_with(value: text) -> text:
+    val cmd = "SIMPLE_MMU_DIRECT_BACKEND={value} LLVM_BUILD={value} T32_PYTHON_BINARY={value} SIMPLEOS_QEMU_SIMPLE_BIN={value} SIMPLE_HOSTED_BROWSER_EXECUTABLE={value} CPU_SIMD_RENDER_SCALE_TEST_SIMPLE_BIN={value} bin/simple test '{SIBLING_TARGET}' --no-db 2>&1"
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
+    out
+
+fn sibling_observed(output: text, name: text, value: text) -> bool:
+    output.contains("SELECTOR_PROBE direct {name}=[{value}]")
+
 fn observed_direct(output: text, value: text) -> bool:
     output.contains("OVERRIDE_TARGET direct=[{value}]")
 
@@ -113,3 +125,32 @@ describe "a binary override on the command line reaches the spec body":
 
         step("And it must not still be carrying the first value")
         assert_equal(observed_direct(second, "OVERRIDE_ONE"), false)
+
+    # The 2026-08-02 fix named five variables. It was not closed over the family:
+    # sixteen further spec files select a binary, backend or toolchain from a
+    # DIFFERENT environment variable, and every one of those was still dead. This
+    # example is the guard against the list drifting open again — it deliberately
+    # names NO variable from the original five, so it can only pass if the
+    # sibling names are themselves in `_binary_override_vars()`.
+    it "delivers sibling selectors that name no binary variable from the original five":
+        step("Run the sibling-selector fixture with a first set of values")
+        val first = run_siblings_with("SIB_ONE")
+        assert_true(sibling_observed(first, "SIMPLE_MMU_DIRECT_BACKEND", "SIB_ONE"))
+
+        step("Run it again with a second set, with the daemon from the first run still alive")
+        val second = run_siblings_with("SIB_TWO")
+
+        step("Every sibling selector must observe the second value in the Simple channel")
+        assert_true(sibling_observed(second, "SIMPLE_MMU_DIRECT_BACKEND", "SIB_TWO"))
+        assert_true(sibling_observed(second, "LLVM_BUILD", "SIB_TWO"))
+        assert_true(sibling_observed(second, "T32_PYTHON_BINARY", "SIB_TWO"))
+        assert_true(sibling_observed(second, "SIMPLEOS_QEMU_SIMPLE_BIN", "SIB_TWO"))
+        assert_true(sibling_observed(second, "SIMPLE_HOSTED_BROWSER_EXECUTABLE", "SIB_TWO"))
+        assert_true(sibling_observed(second, "CPU_SIMD_RENDER_SCALE_TEST_SIMPLE_BIN", "SIB_TWO"))
+
+        step("Replaying the first run's value is the bug this guards")
+        assert_equal(sibling_observed(second, "SIMPLE_MMU_DIRECT_BACKEND", "SIB_ONE"), false)
+
+        step("The runner must announce the bypass, naming the sibling that triggered it")
+        assert_true(second.contains("binary-override: "))
+        assert_true(second.contains("SIMPLE_MMU_DIRECT_BACKEND"))

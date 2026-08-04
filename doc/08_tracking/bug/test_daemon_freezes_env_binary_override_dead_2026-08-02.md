@@ -91,6 +91,62 @@ Regression coverage:
 (deliberately seeds a daemon from a non-overridden invocation first, then
 asserts both channels observe the caller's value).
 
+## Follow-up 2026-08-04: the fix was not closed over the family
+
+The list above names five variables. A census of `env_get("…")` across all
+20,310 tracked spec files found **16 further spec files** that select a binary,
+backend or toolchain from a variable that was *not* on it. Every one of them was
+still dead.
+
+Decisive probe (`test/fixtures/mem_infra/env_selector_probe_spec.spl`, a
+generalisation of the single-name fixture; Rust seed, bootstrap-identity probe
+= 0). The daemon PID was recorded before and after every run:
+
+| run | environment | daemon | spec body observed |
+|-----|-------------|--------|--------------------|
+| B | six sibling selectors = `BRAVO` | *started* by this run (PID changed) | `BRAVO` — the misleading case |
+| C | same six = `CHARLIE` | 3112464, unchanged | **`BRAVO`** — DEAD, both channels |
+| D | same six = `DELTA` **plus** `SIMPLE_TEST_BINARY=DELTA` | 3112464, unchanged | `DELTA` — bypass works |
+| E | same six = `ECHO`, after the list was expanded | 3287410, unchanged | `ECHO`, and the runner printed the bypass line naming the siblings |
+
+Run D differs from run C *only* by naming an allowlisted variable, so membership
+in `_binary_override_vars()` is exactly what makes a selector live. Run B is the
+trap the original report already warned about and is worth restating: a run that
+happens to start the daemon reports correctly, so a one-shot check of a dead
+override looks green. Always compare the daemon PID across the two runs.
+
+Sixteen affected files, by the variable that was dead:
+
+| variable | spec files |
+|----------|-----------|
+| `CPU_SIMD_RENDER_SCALE_TEST_SIMPLE_BIN` | test/03_system/check/cpu_simd_render_scale_contract_spec.spl |
+| `SIMPLEOS_QEMU_SIMPLE_BIN` | test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl |
+| `SIMPLEOS_DBFS_BOOT_QEMU_EXEC` | test/03_system/os/port/dbfs_disk_boot_spec.spl |
+| `SIMPLE_HOSTED_BROWSER_EXECUTABLE` | test/05_perf/browser/hosted_browser_process_pipe_perf_spec.spl |
+| `DEVHUB_MAIL_BIN` | test/01_unit/app/devhub/email_cmd_spec.spl |
+| `T32_PYTHON_BINARY`, `T32_BACKEND_PREFERENCE` | test/02_integration/t32_hw/t32_hw_helpers.spl, test/integration/t32_hw/t32_hw_helpers.spl |
+| `LLVM_BUILD` | test/integration/os/port/llvm/smoke_clang_spec.spl |
+| `SIMPLE_MMU_DIRECT_BACKEND`, `SIMPLE_MMU_DEVICE_INITIATED_BACKEND` | test/03_system/lib/gpu/object_vm/gpu_mmu_spec.spl, test/01_unit/lib/nogc_async_mut/gpu/placement_backends/placement_backends_spec.spl |
+| `SIMPLE_WEB_GPU_PAINT_MEASURE_BACKEND` | test/05_perf/web_render_chrome/web_gpu_paint_device_measured_spec.spl, test/05_perf/web_render_chrome/web_draw_ir_gpu_route_device_measured_spec.spl |
+| `SIMPLE_GPU_COMPILER_{PRODUCER,RUNTIME_PATH,*_SHA256}` | test/03_system/compiler/native_cli_mode_transport_regression_spec.spl |
+| `SIMPLE_NATIVE_BUILD_TARGET` | test/01_unit/app/compile_targets_env_facade_source_spec.spl |
+| `SIMPLE_ENGINE2D_RUNNER_MODE`, `SIMPLE_ENGINE2D_FULL_MODE` | test/05_perf/graphics_2d/simple_runner.spl, test/perf/graphics_2d/simple_runner.spl (helpers) |
+
+All are now in `_binary_override_vars()`. None of them is set in a normal run,
+so the daemon hot path is unaffected (verified: none present in the ambient
+environment).
+
+Checked and **not** a compounding factor: none of the sixteen uses the inert
+bare-`assert` form — all assert through `expect` / `assert_true` / `assert_equal`
+(counts 7..234 per file). One, `green_carrier_qemu_spec.spl`, does carry the
+self-heal fallback ladder described below, so its override is now delivered but
+still not decisive.
+
+Regression coverage extended:
+`test/03_system/check/test_daemon_env_override_passthrough_spec.spl` gained an
+example that deliberately names **no** variable from the original five, so it
+can only pass while the sibling names remain listed.
+
 ## Still open
 
 The protocol-level fix. `light_request_encode`/`light_request_parse` should
@@ -108,6 +164,52 @@ control in `c6e30f3a745` — "pointing the override at a deliberately broken
 binary and the spec still passed" — was correct as an *observation* but was
 misattributed to `env_get`; the shell-based replacement it motivated is
 equally dead, so that spec's override remained non-decisive until this fix.
+
+Extending that to the sibling family (2026-08-04): for each of the sixteen files
+listed above, **every past verdict produced while a daemon was already alive was
+produced against the DEFAULT target, whatever the caller selected.** Concretely,
+any prior claim of the following shape is now unsupported and must be re-run:
+
+- *"the CPU-SIMD render-scale contract holds for binary X"* — the run exercised
+  `bin/simple`, not X (`cpu_simd_render_scale_contract_spec.spl`).
+- *"the QEMU green-carrier / DBFS-boot path was verified against the selected
+  guest binary or QEMU build"* — it used the daemon's frozen selection
+  (`green_carrier_qemu_spec.spl`, `dbfs_disk_boot_spec.spl`). This one also
+  bears on the board-runnable rule: a QEMU claim whose executable selector was
+  dead did not test the executable it named.
+- *"the direct / device-initiated MMU backends were exercised"* — these two
+  names are not backend *pickers*, they are availability gates and oracles
+  (`env_get("SIMPLE_MMU_DIRECT_BACKEND") == "1"` guards whether the direct arm
+  runs at all, and `gpu_mmu_spec.spl:373` asserts
+  `device.probe().available == (env_get("SIMPLE_MMU_DEVICE_INITIATED_BACKEND") == "1")`).
+  Frozen, that is worse than a dead picker in one specific way: the *expected
+  value* of an assertion came from the stale environment, so the oracle and the
+  measurement could disagree for a reason unrelated to the code. A caller who
+  enabled a backend may have had the arm silently skipped, and a caller who
+  disabled one may have asserted availability against the wrong expectation.
+  Same shape in `placement_backends_spec.spl:89`.
+- *"the web GPU paint / DrawIR GPU route measurements are per-backend"* — the
+  backend selector was frozen, so measurements attributed to different backends
+  may all be from one (`web_gpu_paint_device_measured_spec.spl`,
+  `web_draw_ir_gpu_route_device_measured_spec.spl`). Any perf *number* attributed
+  to a named backend from these two specs should be treated as unattributed.
+- *"the GPU-compiler artifact provenance/SHA256 was checked against the supplied
+  producer/runtime"* — path and expected-hash were both frozen
+  (`native_cli_mode_transport_regression_spec.spl`).
+- *"clang/LLVM smoke passed against the `LLVM_BUILD` toolchain"* — it passed
+  against whichever build the daemon had (`smoke_clang_spec.spl`).
+- *"the hosted-browser pipe perf was measured with the selected browser"*
+  (`hosted_browser_process_pipe_perf_spec.spl`), *"devhub mail was exercised
+  against the selected mail binary"* (`email_cmd_spec.spl`), *"T32 ran on the
+  selected Python/backend"* (`t32_hw_helpers.spl`, both copies), and *"the
+  native build target was honoured"* (`compile_targets_env_facade_source_spec.spl`).
+
+The scope limit is worth stating precisely, because it keeps this from being an
+over-claim: a verdict is only suspect if the run **set the selector at all**.
+Runs that took the default were always testing the default and are unaffected;
+and a run that itself started the daemon was correct (run B above). What can no
+longer be assumed is that any *particular* historical run fell in either safe
+category, because nothing recorded the daemon's identity at the time.
 
 ## Second, independent vacuity found during the sweep
 

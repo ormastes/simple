@@ -261,15 +261,49 @@ fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64) -> i64:
     print "ERROR: test daemon timed out: {path}"
     1
 
-# Environment variables by which a caller selects WHICH binary (or compiler) a
-# spec exercises. These are the names specs resolve in a `contract_binary()` /
-# `simple_binary()` helper; see test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl
-# and the ~39 sibling specs sharing the convention. None of them is set in a
-# normal run, so this list is inert on the hot path and costs the daemon lane
-# nothing — it only diverts the runs that actually asked for an override.
+# Environment variables by which a caller selects WHICH binary, backend or
+# toolchain a spec exercises. These are the names specs resolve in a
+# `contract_binary()` / `simple_binary()` helper; see
+# test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl and its siblings.
+# None of them is set in a normal run, so this list is inert on the hot path and
+# costs the daemon lane nothing — it only diverts the runs that actually asked
+# for an override.
+#
+# The list must stay CLOSED over the family. The daemon freezes its environment
+# at whichever invocation started it, so any selector NOT named here is silently
+# replayed from a previous run and the spec exercises the default target while
+# reporting the selected one's name — a sabotage check then passes for the wrong
+# reason. Measured 2026-08-04 on the Rust seed (`bin/simple`; bootstrap-identity
+# probe = 0), with one daemon alive across all three runs and
+# test/fixtures/mem_infra/env_selector_probe_spec.spl as the target:
+#
+#   run 1: <six sibling selectors>=BRAVO    body observed BRAVO   (this run
+#                                           STARTED the daemon — the trap: a
+#                                           single run always looks correct)
+#   run 2: same six =CHARLIE                body observed BRAVO   <- DEAD
+#   run 3: same six =DELTA + SIMPLE_TEST_BINARY=DELTA
+#                                           body observed DELTA   <- bypass works
+#
+# Run 3 differs from run 2 only in naming an allowlisted variable, so membership
+# in this list is exactly what makes a selector live.
 fn _binary_override_vars() -> [text]:
     ["SIMPLE_TEST_BINARY", "SIMPLE_BINARY", "SIMPLE_BIN",
-     "SIMPLE_SEED_BINARY", "SIMPLE_SPEC_COMPILER"]
+     "SIMPLE_SEED_BINARY", "SIMPLE_SPEC_COMPILER",
+     # sibling selectors, added 2026-08-04 after the probe above
+     "CPU_SIMD_RENDER_SCALE_TEST_SIMPLE_BIN",
+     "SIMPLEOS_QEMU_SIMPLE_BIN", "SIMPLEOS_DBFS_BOOT_QEMU_EXEC",
+     "SIMPLEOS_QEMU_SSH_TOOLCHAIN_LIVE",
+     "SIMPLE_HOSTED_BROWSER_EXECUTABLE", "DEVHUB_MAIL_BIN",
+     "T32_PYTHON_BINARY", "T32_BACKEND_PREFERENCE", "LLVM_BUILD",
+     "SIMPLE_MMU_DIRECT_BACKEND", "SIMPLE_MMU_DEVICE_INITIATED_BACKEND",
+     "SIMPLE_WEB_GPU_PAINT_MEASURE_BACKEND", "SIMPLE_NATIVE_BUILD_TARGET",
+     "SIMPLE_ENGINE2D_RUNNER_MODE", "SIMPLE_ENGINE2D_FULL_MODE",
+     # the GPU-compiler provenance family travels together: the *_PATH/PRODUCER
+     # names select the artifact, the *_SHA256 names are the expected values
+     # checked against it, and a half-frozen pair is worse than a frozen one.
+     "SIMPLE_GPU_COMPILER_PRODUCER", "SIMPLE_GPU_COMPILER_PRODUCER_SHA256",
+     "SIMPLE_GPU_COMPILER_RUNTIME_PATH", "SIMPLE_GPU_COMPILER_RUNTIME_SHA256",
+     "SIMPLE_GPU_COMPILER_BACKFILL_SHA256"]
 
 fn _has_binary_override() -> bool:
     for name in _binary_override_vars():
