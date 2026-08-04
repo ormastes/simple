@@ -20,6 +20,37 @@ can build the required kernel.
   nil receiver.
 - `clang-20`/browser-demo work is owned by a separate lane and does not block
   ARM64-first progress.
+- A current-main Phase 2 build at `7daa55e42c` reached the final allowed build
+  cycle but stopped at the storage guard: materializing the 2.6 GiB frozen
+  runtime authority reduced free space from 8.1 GiB to 6.8 GiB. The generated
+  copy was removed and 9.4 GiB restored; no new compiler artifact was emitted.
+- The preceding Phase 2 artifact (`033e16e5...7eab830`) passed bootstrap sanity
+  but is inadmissible: it contains Rust provenance and its canonical
+  module-global fixture exits 132 in `MirToLlvm`. The owner-mutation repair for
+  that nil receiver is on `main` at `7daa55e42c`, but still needs a fresh build.
+
+## Current Resume Gate
+
+Owner: compiler-admission lane. Final reviewer: ARM64 integration owner.
+
+1. Begin with at least 12 GiB free so the 2.6 GiB runtime authority can be
+   materialized while retaining the 7 GiB safety floor.
+2. Use the clean current-main worktree at
+   `.claude/worktrees/agent-aaf2c9946eded166b`.
+3. Resume with one fresh scoped session (the present session exhausted its
+   three-cycle cap):
+
+   ```sh
+   sh scripts/bootstrap/bootstrap-from-scratch.sh \
+     --pure-simple --backend=cranelift \
+     --output=build/phase2-arm64-recovery-20260804 \
+     --jobs=2 --no-mcp \
+     --progress=build/phase2-arm64-recovery-20260804/progress-resume.log
+   ```
+
+4. Stop after Phase 2 sanity; retain the artifact and its runtime authority.
+5. Run the canonical non-entry module-global and native compiler admission
+   checks exactly once. Phase 3 or ARM64 QEMU may start only after both pass.
 
 ## Parallel Lanes
 
