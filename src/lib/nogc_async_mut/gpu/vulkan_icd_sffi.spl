@@ -94,12 +94,21 @@ pub fn vk_icd_create_instance() -> VkIcdResult:
     """Create a Vulkan instance via SFFI shim.
 
     Routes through dlopen leaf when a Vulkan/DXVK/VKD3D library exists in
-    the local prefix or system paths; otherwise uses structured handles.
+    the local prefix or system paths; otherwise refuses honestly — a
+    structured (no-library) handle is not a real instance (site 14,
+    doc/04_architecture/ui/wm_host_platform_matrix.md: this used to return
+    is_ok=true unconditionally regardless of `leaf`, so every downstream
+    D3D9/10/11/12-over-Vulkan translation layer fabricated device handles
+    with zero real backing).
 
     Returns:
-        VkIcdResult with is_ok=true, valid handles, and leaf evidence.
+        VkIcdResult with is_ok=true, valid handles, and leaf evidence when a
+        real Vulkan/DXVK/VKD3D library was found; is_ok=false with
+        leaf="structured" otherwise.
     """
     val leaf = _icd_probe_leaf()
+    if leaf != "dlopen":
+        return _icd_err("no-vulkan-library-found: structured handles refused")
     _icd_instance_ctr = _icd_instance_ctr + 1
     val inst = _icd_instance_ctr
     _icd_device_ctr = _icd_device_ctr + 1
@@ -110,6 +119,10 @@ pub fn vk_icd_create_instance() -> VkIcdResult:
 pub fn vk_icd_create_device(instance_handle: i64) -> VkIcdResult:
     """Create a Vulkan logical device for the given instance.
 
+    Refuses honestly when no real Vulkan/DXVK/VKD3D library is present on
+    disk (see vk_icd_create_instance) — a structured handle is not a real
+    device.
+
     Args:
         instance_handle: handle from vk_icd_create_instance
 
@@ -119,6 +132,8 @@ pub fn vk_icd_create_device(instance_handle: i64) -> VkIcdResult:
     if instance_handle <= 0:
         return _icd_err("invalid-instance")
     val leaf = _icd_probe_leaf()
+    if leaf != "dlopen":
+        return _icd_err("no-vulkan-library-found: structured handles refused")
     _icd_device_ctr = _icd_device_ctr + 1
     val dev = _icd_device_ctr
     val disp = vulkan_dispatch_create(instance_handle, dev)

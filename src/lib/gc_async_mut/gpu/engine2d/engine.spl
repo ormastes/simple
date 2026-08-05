@@ -887,6 +887,19 @@ class Engine2D with DrawIrRenderTarget:
         A `SIMPLE_2D_BACKEND` config/environment override takes precedence when
         the named backend actually initializes; otherwise the auto-probe runs.
 
+        MITIGATION UNIFICATION (doc/04_architecture/ui/wm_host_platform_matrix.md
+        cluster 3): every auto-probed candidate must also pass
+        probe_backend_viable()'s deep provenance check, same as
+        detect_best_backend_viable() — a candidate that shallow-inits but only
+        ever serves cpu_mirror/unproven readback (e.g. webgpu with no real
+        adapter) is rejected here too, instead of only in the separate `_viable`
+        entry point. This does NOT delegate to detect_best_backend_viable()
+        (which memoizes per-process and logs) — the override branch below stays
+        shallow-probe-only, matching detect_best_backend_viable()'s own
+        documented override semantics, and this function keeps its existing
+        no-cache, no-logging contract so callers that vary SIMPLE_2D_BACKEND
+        across repeated calls (e.g. tests) keep seeing a fresh result each time.
+
         Returns:
             Backend name string
         """
@@ -903,7 +916,9 @@ class Engine2D with DrawIrRenderTarget:
             val name = order[idx]
             val probe = Engine2D.probe_backend(1, 1, name)
             if probe.status == BackendStatus.Initialized:
-                return name
+                val viable = Engine2D.probe_backend_viable(name)
+                if viable.status == BackendStatus.Initialized:
+                    return name
             idx = idx + 1
         "cpu"
 
