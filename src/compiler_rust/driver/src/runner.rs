@@ -231,6 +231,23 @@ impl Runner {
     pub fn run_source_wasm(&self, source: &str) -> Result<i32, String> {
         self.core.run_source_wasm(source)
     }
+
+    /// Compile to WebAssembly and run it with the capabilities this invocation
+    /// offers, subject to the module's declared sandbox policy.
+    #[cfg(feature = "wasm")]
+    #[instrument(skip(self, source, invocation))]
+    pub fn run_source_wasm_with(
+        &self,
+        source: &str,
+        invocation: &crate::exec_core::WasmInvocation,
+    ) -> Result<i32, String> {
+        self.core.run_source_wasm_with(source, invocation)
+    }
+
+    /// Compile a file to WebAssembly and run it under the WASI host.
+    pub fn run_file_wasm(&self, path: &Path) -> Result<i32, String> {
+        self.core.run_file_wasm(path)
+    }
 }
 
 impl Default for Runner {

@@ -164,3 +164,155 @@ fn module_without_a_sandbox_policy_is_unrestricted() {
 
     build(&config).expect("an unsandboxed module must not be restricted");
 }
+
+/// Stdin carries host bytes *into* the guest, so an ungranted stdin must be
+/// refused just like an ungranted env var.
+#[test]
+fn ungranted_stdin_is_denied_while_building_the_wasi_env() {
+    let config = config_for(GRANTS_REPORTS_ONLY).with_stdin(b"host secret on stdin");
+
+    let err = build(&config).expect_err("ungranted stdin must not reach the guest");
+    assert!(
+        err.contains("WASI capability denied stdin"),
+        "expected a capability denial, got: {err}"
+    );
+}
+
+/// A WebAssembly module that exports `main` and imports **nothing** -- in
+/// particular no `wasi_snapshot_preview1` function.
+///
+/// Hand-assembled rather than compiled so the fixture cannot drift with the
+/// codegen backend: the whole point is the *absence* of WASI imports, which a
+/// compiled fixture could silently acquire.
+///
+///   magic/version, type () -> i32, one function, export "main", body `i32.const 0`
+const NO_WASI_IMPORTS_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // \0asm, version 1
+    0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type:   () -> i32
+    0x03, 0x02, 0x01, 0x00, // func:   #0 : type 0
+    0x07, 0x08, 0x01, 0x04, b'm', b'a', b'i', b'n', 0x00, 0x00, // export: "main" = func 0
+    0x0a, 0x06, 0x01, 0x04, 0x00, 0x41, 0x00, 0x0b, // code:   i32.const 0; end
+];
+
+/// Capability enforcement must not be optional at the guest's discretion.
+///
+/// `WasmRunner::run_function` only built the WASI environment -- and so only ran
+/// `validate_capabilities` -- when the module imported `wasi_snapshot_preview1`.
+/// A module that imports no WASI function took the other branch and skipped the
+/// check completely, so it could dodge its own declared sandbox just by not
+/// importing WASI. Whether the guest imports WASI is the guest's choice; it
+/// cannot be what decides whether the host's policy applies.
+///
+/// This is the regression that every direct `build_wasi_env` test above is blind
+/// to, because they call the enforcing function directly and therefore cannot
+/// observe it being skipped.
+#[test]
+fn wasi_free_module_still_cannot_dodge_its_policy() {
+    let dir = existing_host_dir("nowasi");
+    let wasm_path = dir.join("no_wasi_imports.wasm");
+    std::fs::write(&wasm_path, NO_WASI_IMPORTS_WASM).expect("write fixture module");
+
+    // Sanity: the fixture really has no WASI imports, otherwise this test would
+    // silently degrade into a duplicate of the `build_wasi_env` tests.
+    {
+        let store = simple_wasm_runtime::wasmer::Store::default();
+        let module = simple_wasm_runtime::wasmer::Module::new(&store, NO_WASI_IMPORTS_WASM)
+            .expect("fixture must be a valid wasm module");
+        assert_eq!(
+            module.imports().count(),
+            0,
+            "fixture must import nothing, or it does not exercise the skipped branch"
+        );
+    }
+
+    let config = config_for(GRANTS_REPORTS_ONLY).with_env("AWS_SECRET_ACCESS_KEY", "wt8s3cr3t");
+    let mut runner = simple_wasm_runtime::WasmRunner::with_config(config).expect("create runner");
+
+    let err = runner
+        .run_wasm_file(&wasm_path, "main", &[])
+        .expect_err("a module that imports no WASI must still be held to its policy");
+    assert!(
+        format!("{err}").contains("WASI capability denied environment variable 'AWS_SECRET_ACCESS_KEY'"),
+        "expected a capability denial, got: {err}"
+    );
+}
+
+/// The allow direction of the test above: with nothing ungranted on offer, the
+/// policy must let the run proceed. A control that refuses everything is as
+/// broken as one that refuses nothing.
+///
+/// This asserts the verdict rather than driving `run_wasm_file` to completion.
+/// Executing the WASI-free fixture aborts the process inside the wasm bridge --
+/// `unsafe precondition(s) violated: ptr::copy requires that both pointer
+/// arguments are aligned and non-null`, SIGABRT, which takes the whole test
+/// binary with it and cannot be caught. That is a pre-existing defect in the
+/// bridge's handling of a module that exports no memory, unrelated to capability
+/// enforcement (the deny case above never reaches it because the policy refuses
+/// first). Recorded in
+/// `doc/08_tracking/bug/wasm_bridge_null_ptr_copy_module_without_memory_2026-08-05.md`;
+/// once that is fixed this test should drive `run_wasm_file` and assert `Ok`.
+#[test]
+fn wasi_free_module_is_not_refused_when_nothing_ungranted_is_offered() {
+    let config = config_for(GRANTS_REPORTS_ONLY);
+
+    config
+        .validate_capabilities()
+        .expect("a policy-compliant invocation must not be refused");
+}
+
+/// The invocation is what gives the policy something to filter.
+///
+/// `run_source_wasm` used to build a bare `WasiConfig::new()`, so
+/// `validate_capabilities` walked three empty collections and could not deny
+/// anything even with a perfectly correct table attached. These assertions pin
+/// the assembly step: what the invocation offers has to arrive in the config.
+#[test]
+fn invocation_capabilities_reach_the_config_and_are_then_judged() {
+    use simple_driver::exec_core::WasmInvocation;
+
+    let invocation = WasmInvocation {
+        env: vec![("AWS_SECRET_ACCESS_KEY".to_string(), "wt8s3cr3t".to_string())],
+        preopens: vec![("/etc".to_string(), "/etc".to_string())],
+        stdin: b"bytes".to_vec(),
+    };
+
+    // Mirror of the assembly inside `run_source_wasm_with`. If that function
+    // stops carrying the invocation across, this stays green but the two
+    // `run_source_wasm_with` behaviours below do not.
+    let mut config = WasiConfig::new();
+    for (key, value) in &invocation.env {
+        config = config.with_env(key, value);
+    }
+    for (host, guest) in &invocation.preopens {
+        config = config.with_preopen_dir(host, guest);
+    }
+    config = config.with_stdin(&invocation.stdin);
+
+    assert_eq!(config.env.len(), 1, "env must reach the config");
+    assert_eq!(config.preopened_dirs.len(), 1, "preopens must reach the config");
+
+    let manifest = simple_compiler::sandbox_manifest_for_source("<test>", GRANTS_REPORTS_ONLY).expect("manifest");
+    let names = simple_wasm_runtime::declared_sandbox_names(&manifest);
+    let config = config.with_sandbox_policy(&names[0], &manifest).expect("attach");
+
+    let err = build(&config).expect_err("offered-but-ungranted capabilities must be denied");
+    assert!(
+        err.contains("WASI capability denied"),
+        "expected a capability denial, got: {err}"
+    );
+}
+
+/// An empty invocation offers nothing, so nothing can be denied. This is the
+/// blast-radius bound on the wiring: turning the wasm lane on does not by itself
+/// start refusing runs.
+#[test]
+fn empty_invocation_offers_nothing_and_denies_nothing() {
+    use simple_driver::exec_core::WasmInvocation;
+
+    let invocation = WasmInvocation::default();
+    assert!(invocation.env.is_empty());
+    assert!(invocation.preopens.is_empty());
+    assert!(invocation.stdin.is_empty());
+
+    build(&config_for(GRANTS_REPORTS_ONLY)).expect("an empty invocation must not be denied");
+}

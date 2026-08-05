@@ -87,6 +87,19 @@ impl WasmRunner {
         use crate::bridge::{extract_result, to_wasm_values};
         use wasmer::{ExternType, Global, Imports, Memory, Value as WasmerValue};
 
+        // Enforce the capability policy before anything is wired up, and do it
+        // unconditionally.
+        //
+        // `validate_capabilities` also runs inside `build_wasi_env`, but that is
+        // only reached when `needs_wasi` is true. A guest that imports no
+        // `wasi_snapshot_preview1` function took the `else` branch below and
+        // skipped the check entirely -- so the capabilities the host was
+        // offering were never compared against the module's policy, and a module
+        // could dodge its own sandbox simply by not importing WASI. Whether the
+        // guest imports WASI is the guest's choice; it cannot be what decides
+        // whether the host's policy applies.
+        self.config.validate_capabilities()?;
+
         // Check if the module actually needs WASI (has wasi_snapshot_preview1 imports)
         let needs_wasi = module
             .imports()

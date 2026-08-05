@@ -29,22 +29,114 @@ pub enum ExecutionMode {
     CraneliftJit,
     /// Force LLVM JIT backend
     LlvmJit,
+    /// Compile to `wasm32-wasi` and run under the Wasmer WASI host, enforcing
+    /// the module's declared `sandbox` capability policy.
+    Wasm,
+}
+
+/// What the host is offering a WebAssembly guest for one invocation.
+///
+/// This exists because WASI capability enforcement can only refuse things it is
+/// actually handed. `run_source_wasm` used to build a bare `WasiConfig::new()`
+/// -- empty env, empty preopens, empty stdin -- so `validate_capabilities`
+/// iterated three empty collections and could not deny anything even when the
+/// module carried a correct policy table. The control was wired but starved.
+///
+/// Grants are *opt-in* rather than "forward the whole host environment".
+/// `validate_capabilities` denies by returning an error, it does not silently
+/// filter, so forwarding every host variable by default would hard-fail every
+/// sandboxed module on the first unlisted variable -- a control that refuses
+/// everything is as broken as one that refuses nothing. The operator names what
+/// the guest should receive; the module's policy decides whether it may.
+#[derive(Debug, Clone, Default)]
+pub struct WasmInvocation {
+    /// Environment variables offered to the guest, as (key, value).
+    pub env: Vec<(String, String)>,
+    /// Directories offered to the guest, as (host_path, guest_path).
+    pub preopens: Vec<(String, String)>,
+    /// Bytes offered to the guest on stdin.
+    pub stdin: Vec<u8>,
+}
+
+impl WasmInvocation {
+    /// Assemble the invocation from the process environment.
+    ///
+    /// * `SIMPLE_WASM_ENV="A,B"` forwards host variables `A` and `B` (only
+    ///   those that are actually set). The single entry `*` forwards the entire
+    ///   host environment -- deliberately spellable, deliberately not default.
+    /// * `SIMPLE_WASM_PREOPEN="host:guest,host2"` preopens directories. With no
+    ///   `:guest` part the guest sees the host path under its own name.
+    /// * stdin is forwarded when it is redirected (a pipe or a file). On a
+    ///   terminal nothing is read, so an interactive run never blocks.
+    pub fn from_process_env() -> Self {
+        let mut invocation = Self::default();
+
+        if let Ok(spec) = std::env::var("SIMPLE_WASM_ENV") {
+            for name in spec.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                if name == "*" {
+                    invocation.env = std::env::vars().collect();
+                    break;
+                }
+                if let Ok(value) = std::env::var(name) {
+                    invocation.env.push((name.to_string(), value));
+                }
+            }
+        }
+
+        if let Ok(spec) = std::env::var("SIMPLE_WASM_PREOPEN") {
+            for entry in spec.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+                let (host, guest) = match entry.split_once(':') {
+                    Some((host, guest)) if !guest.is_empty() => (host, guest),
+                    _ => (entry, entry),
+                };
+                invocation.preopens.push((host.to_string(), guest.to_string()));
+            }
+        }
+
+        {
+            use std::io::{IsTerminal, Read};
+            if !std::io::stdin().is_terminal() {
+                let mut buffer = Vec::new();
+                if std::io::stdin().read_to_end(&mut buffer).is_ok() {
+                    invocation.stdin = buffer;
+                }
+            }
+        }
+
+        invocation
+    }
 }
 
 impl ExecutionMode {
     /// Parse from string (CLI flag or env var).
+    ///
+    /// Note the `_` arm: an unrecognised value is *not* an error, it silently
+    /// means JIT. That is why `SIMPLE_EXECUTION_MODE=wasm` used to run the
+    /// module through the JIT and exit 0 without touching WebAssembly at all --
+    /// the value was accepted and discarded. `wasm` is now a real mode, so the
+    /// wasm lane is selectable rather than merely spellable.
     pub fn parse_str(s: &str) -> Self {
         match s {
             "interpret" | "interpreter" => ExecutionMode::Interpret,
             "cranelift" => ExecutionMode::CraneliftJit,
             "llvm" => ExecutionMode::LlvmJit,
+            "wasm" | "wasm32" | "wasi" | "wasm32-wasi" => ExecutionMode::Wasm,
             _ => ExecutionMode::Jit,
         }
     }
 
     /// Check if this mode uses JIT.
+    ///
+    /// `Wasm` must be excluded explicitly. The old body was
+    /// `!matches!(self, Interpret)`, so every new variant defaulted to "is JIT"
+    /// and would have been routed straight back into the JIT lane.
     pub fn is_jit(&self) -> bool {
-        !matches!(self, ExecutionMode::Interpret)
+        !matches!(self, ExecutionMode::Interpret | ExecutionMode::Wasm)
+    }
+
+    /// Check if this mode compiles to WebAssembly and runs under a WASI host.
+    pub fn is_wasm(&self) -> bool {
+        matches!(self, ExecutionMode::Wasm)
     }
 }
 
@@ -696,9 +788,25 @@ impl ExecCore {
         }
     }
 
-    /// Compile to WebAssembly and run with Wasmer runtime (WASI environment)
+    /// Compile to WebAssembly and run with Wasmer runtime (WASI environment).
+    ///
+    /// Offers the guest nothing. Kept for callers that only want to execute a
+    /// module; see `run_source_wasm_with` for the lane the CLI uses.
     #[cfg(feature = "wasm")]
     pub fn run_source_wasm(&self, source: &str) -> Result<i32, String> {
+        self.run_source_wasm_with(source, &WasmInvocation::default())
+    }
+
+    /// Compile to WebAssembly and run it with the capabilities this invocation
+    /// offers, subject to the module's declared sandbox policy.
+    ///
+    /// The `invocation` argument is the point of this function. Enforcement
+    /// happens in `validate_capabilities`, which walks the env, stdin and
+    /// preopens the host is handing over; with the bare `WasiConfig::new()` this
+    /// used to build, all three were empty and no policy could ever deny
+    /// anything.
+    #[cfg(feature = "wasm")]
+    pub fn run_source_wasm_with(&self, source: &str, invocation: &WasmInvocation) -> Result<i32, String> {
         use simple_common::target::{Target, TargetArch, WasmRuntime};
         use simple_wasm_runtime::{WasiConfig, WasmRunner};
 
@@ -711,11 +819,26 @@ impl ExecCore {
         let wasm_path = tmp.path().join("module.wasm");
         fs::write(&wasm_path, wasm_bytes).map_err(|e| format!("write wasm: {e}"))?;
 
-        // Create WasmRunner with WASI configuration, carrying the module's own
-        // sandbox policy so `validate_capabilities` has something to enforce.
-        // Without this the capability table stays `None` and every grant check
-        // short-circuits to "allow".
-        let config = self.apply_wasm_sandbox_policy(source, WasiConfig::new())?;
+        // Offer the guest exactly what this invocation supplies. This has to
+        // happen before the policy is attached only in the sense that the
+        // config must already carry the capabilities; `validate_capabilities`
+        // then compares the two. An empty config here is what made the whole
+        // control unobservable.
+        let mut config = WasiConfig::new();
+        for (key, value) in &invocation.env {
+            config = config.with_env(key, value);
+        }
+        for (host_path, guest_path) in &invocation.preopens {
+            config = config.with_preopen_dir(host_path, guest_path);
+        }
+        if !invocation.stdin.is_empty() {
+            config = config.with_stdin(&invocation.stdin);
+        }
+
+        // Carry the module's own sandbox policy so `validate_capabilities` has
+        // something to enforce. Without this the capability table stays `None`
+        // and every grant check short-circuits to "allow".
+        let config = self.apply_wasm_sandbox_policy(source, config)?;
         let mut runner = WasmRunner::with_config(config).map_err(|e| format!("create wasm runner: {e}"))?;
 
         // Run the main function
@@ -755,6 +878,24 @@ impl ExecCore {
         Ok(exit_code)
     }
 
+    /// Compile a source file to WebAssembly and run it under the WASI host,
+    /// offering the guest whatever this process invocation supplies.
+    ///
+    /// This is the CLI's entry into the wasm lane. It fails loudly rather than
+    /// silently falling back to the JIT: a run that was asked to be sandboxed
+    /// must never quietly become an unsandboxed one.
+    #[cfg(feature = "wasm")]
+    pub fn run_file_wasm(&self, path: &Path) -> Result<i32, String> {
+        let source = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        self.run_source_wasm_with(&source, &WasmInvocation::from_process_env())
+    }
+
+    /// Without the `wasm` feature the wasm lane cannot run. Refuse explicitly.
+    #[cfg(not(feature = "wasm"))]
+    pub fn run_file_wasm(&self, _path: &Path) -> Result<i32, String> {
+        Err("SIMPLE_EXECUTION_MODE=wasm requires a build with `--features wasm`".to_string())
+    }
+
     /// Run a file, auto-detecting type by extension (.spl or .smf).
     ///
     /// Dispatches to JIT or interpreter based on `execution_mode`.
@@ -775,6 +916,16 @@ impl ExecCore {
         // store. Initialize that runtime boundary before choosing a lane so
         // every execution mode observes the same supplied argv.
         simple_runtime::value::rt_set_args_vec(&args);
+
+        // The wasm lane is checked before the extension match so that it cannot
+        // be reached by only one of the two run entry points. `run_file_with_args`
+        // and `run_file_interpreted_with_args` are both public and both are
+        // called directly (cli/basic.rs picks between them on `is_jit_mode()`),
+        // so a wasm arm added to only one of them would be inert whenever the
+        // other is chosen.
+        if self.execution_mode.is_wasm() {
+            return self.run_file_wasm(path);
+        }
 
         match extension {
             "smf" => self.run_smf_with_args(path, args),
@@ -1047,6 +1198,13 @@ impl ExecCore {
         use simple_compiler::pipeline::module_loader::load_module_with_imports;
         use simple_compiler::set_interpreter_args;
         use std::collections::HashSet;
+
+        // See the matching guard in `run_file_with_args`: both entry points must
+        // honour the wasm mode, otherwise which lane enforces the sandbox policy
+        // depends on which of the two the caller happened to pick.
+        if self.execution_mode.is_wasm() {
+            return self.run_file_wasm(path);
+        }
 
         // Set interpreter arguments
         set_interpreter_args(args);

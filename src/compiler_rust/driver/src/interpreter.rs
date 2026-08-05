@@ -179,8 +179,17 @@ impl Interpreter {
                 }
                 interp_result
             }
+            // The stdin this run was configured with has to reach the guest,
+            // otherwise the `Stdin` grant is unenforceable through this entry
+            // point: `validate_capabilities` only refuses stdin it can see, and
+            // the previous `run_source_wasm(code)` call dropped `config.stdin`
+            // on the floor along with everything else the invocation supplied.
             #[cfg(feature = "wasm")]
-            RunningType::Wasm => self.runner.run_source_wasm(code)?,
+            RunningType::Wasm => {
+                let mut invocation = crate::exec_core::WasmInvocation::default();
+                invocation.stdin = config.stdin.clone().into_bytes();
+                self.runner.run_source_wasm_with(code, &invocation)?
+            }
         };
 
         // Stop capture and collect output
