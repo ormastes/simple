@@ -1,6 +1,21 @@
 # AC-4 SIMD byte-identity probe crashes on reproduction — reported PASS does not hold
 
-**Status:** OPEN
+**Status:** OPEN, UNSTABLE — do not treat as fixed. A dispatched root-cause
+agent (session-limit-terminated before delivering a report) apparently left
+"both probes healthy" as its last status line, and independent re-testing
+now gets 6/6 consecutive PASS on `mlkem_ntt_simd_public_interface_probe.spl`
+against the currently-deployed binary. **No source diff explains this** —
+every file under `src/runtime/` and `src/compiler_rust/` was diffed against
+origin and none contains an alignment-related change; the two files that ARE
+modified in this area (`runtime_simd_dispatch.c/.h`) diff to unrelated
+OpenCL-probe removals from a different concurrent session's work, not a
+`rt_simd_mul_i32x8` fix. The most likely explanation is heap-layout-dependent
+nondeterminism (consistent with the original 3x-SIGABRT-then-1x-SIGSEGV
+pattern across different binary builds) rather than a genuine fix — the
+underlying misalignment condition should be assumed to still exist until a
+source-level root cause is found and landed. Re-run the reproduce steps
+below under load / after other allocations to check whether it still
+recurs before relying on this probe's green status for anything.
 **Found:** 2026-08-05
 **Severity:** HIGH — a landed campaign claim ("AC-4 x86 lane closed under
 `interpret`, `ac4_x86_simd_public_interface_verdict=PASS ... checks_failed=0`")
