@@ -175,11 +175,41 @@ host-only shell) so the core stays offloadable. Details, ban list, and the
 phase-by-phase GPU-reality audit:
 [gpu_offload_check feature expert](../../feature_expert/gpu_offload_check/skill.md).
 
+## Session update 2026-08-05 (the viable probe was FAIL-OPEN against the render lane's op set)
+
+The 2026-08-02 deep probe below tested `clear + draw_rect_filled` and nothing
+else, so it did not predict the render lane it was gating. Measured on the
+dual-GPU host: `auto` selected **cuda**, whose 8x8 fill round-tripped
+`device_readback`, while **every real web frame on that lane returned
+`source=cpu_fallback handle=0 identity=0`**. Op bisect: clear / fill /
+sub-blit / full-blit / blend-blit all stayed `device_readback`; the **clipped
+fill** was what flipped it, because `CudaBackend.set_clip` only mutates the CPU
+mirror and the next paint then takes `_begin_cpu_path`/`_finish_cpu_path`,
+latching `cpu_fallback_used` for the whole surface. Every page with text paints
+under a clip. `vulkan`/`qualcomm` served the identical frame on-device and were
+never reached.
+
+`Engine2D.probe_backend_viable` now requires **fill + CLIPPED fill + draw_image
+blit**, all device-proven, with four disjoint pixel witnesses (blit at (0,0),
+unclipped fill at (7,7), clipped fill at (3,3), untouched at (5,0) proving the
+clip clipped). Auto now names a lane whose showcase frame reads back
+`host_cache_after_device_present` with real credentials, bit-identical to the
+CPU ground truth.
+
+**Rule for this layer: a resolved lane NAME is not evidence — only the readback
+source is.** `resolved=<gpu>` with `source=cpu_fallback` is a routing defect.
+`test/03_system/gui/web_showcase_full_gpu_offload_spec.spl` is the gate that
+holds this (per-example `[showcase-lane]` receipts; a named GPU lane serving a
+CPU frame is a hard `LANE INTEGRITY FAILURE`, a named CPU lane is
+inconclusive-but-green). Before that fix the same spec silently retargeted all
+13 examples to `"software"` and reported `13 examples, 0 failures`.
+
 ## Session update 2026-08-02 (backend auto-resolution, heuristic sizing, position:fixed, platform nil-guard)
 
 - **Viable-probe "auto" backend resolution** (`b0ef8e6aee5` engine2d +
   `6eb19236c05` browser side): engine2d `engine.spl` "auto" now deep-probes
-  each candidate (create 8x8 → clear+rect+submit+present → readback) and
+  each candidate (create 8x8 → clear+rect+submit+present → readback; **extended
+  2026-08-05** to clear+clipped-rect+rect+blit+submit+present → readback) and
   requires device provenance plus a pixel round-trip before selecting; a
   lane that looks available but cannot render is rejected with a
   **`[backend-resolve] <name> rejected: <why>`** line (grep for that prefix

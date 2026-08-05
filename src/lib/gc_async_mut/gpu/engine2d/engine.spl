@@ -913,9 +913,17 @@ class Engine2D with DrawIrRenderTarget:
         Catches the seems-available-but-cannot-render case (e.g. CUDA on a
         headless host whose runtime inits but whose present/readback path
         cannot deliver device pixels). A GPU backend passes only when a tiny
-        8x8 surface round-trips a drawn pixel with device provenance
-        (source device_readback or host_cache_after_device_present, and a
-        backend handle or device identity > 0). CPU lanes pass by definition.
+        8x8 surface round-trips ALL THREE of the render lane's paint
+        primitives — a solid fill, a CLIPPED fill, and a residual draw_image
+        blit — with device provenance (source device_readback or
+        host_cache_after_device_present, and a backend handle or device
+        identity > 0). CPU lanes pass by definition.
+
+        The clip and blit halves are load-bearing: a lane that serves plain
+        fills on-device but mirrors clipped paint or draw_image to the CPU
+        degrades EVERY real web frame to source=cpu_fallback, so accepting it
+        here names a GPU lane that cannot GPU-serve the workload and starves
+        the next candidate that can.
         """
         val canon = backend_canonical_name(backend_name)
         if canon == "software" or canon == "cpu" or canon == "cpu_simd":
@@ -942,7 +950,33 @@ class Engine2D with DrawIrRenderTarget:
         # uses without the Option-unwrap arms (seed lowers `.?` to bool).
         var b = engine.backend
         b.clear(0xFF000000u32)
-        b.draw_rect_filled(0, 0, 8, 8, 0xFF3366CCu32)
+        # A solid fill alone is NOT the render lane's op set, and probing only
+        # that made this check FAIL-OPEN — the comment above was literally
+        # false. Every real web frame also (a) composites the CPU residual
+        # (glyphs, gradients, borders) back onto the device surface with
+        # draw_image, and (b) paints under a clip rect. Measured on a host with
+        # both CUDA and Vulkan: auto committed to cuda because its 8x8 fill
+        # round-tripped device_readback, yet every real web frame on that lane
+        # came back source=cpu_fallback handle=0 identity=0. Bisecting the op
+        # sequence showed clear/fill/sub-blit/full-blit/blend-blit all stayed
+        # device_readback and the CLIPPED fill was what flipped it —
+        # CudaBackend.set_clip only mutates the CPU mirror, so the next paint
+        # takes _begin_cpu_path/_finish_cpu_path and latches cpu_fallback_used
+        # for the whole surface. Vulkan, the very next candidate, served the
+        # identical frame on-device. So auto named a GPU lane that provably
+        # could not GPU-serve the workload while starving the lane that could.
+        # These three ops are the render lane's paint vocabulary; viability
+        # means all three, on-device, or the lane is not viable.
+        b.set_clip(0, 0, 4, 4)
+        b.draw_rect_filled(0, 0, 8, 8, 0xFFCC3366u32)
+        b.clear_clip()
+        b.draw_rect_filled(4, 4, 4, 4, 0xFF3366CCu32)
+        var patch: [u32] = []
+        var patch_i: i32 = 0
+        while patch_i < 4:
+            patch.push(0xFF66CC33u32)
+            patch_i = patch_i + 1
+        b.draw_image(0, 0, 2, 2, patch)
         b.submit_batch()
         b.present()
         val rb = b.read_pixels_with_source()
@@ -953,9 +987,18 @@ class Engine2D with DrawIrRenderTarget:
             return BackendProbeResult.failed(canon, "readback_unproven handle=0 source=" + rb.source)
         if rb.pixels.len() != 64:
             return BackendProbeResult.failed(canon, "readback_unproven size=" + rb.pixels.len().to_text())
-        if rb.pixels[0] != 0xFF3366CCu32:
-            return BackendProbeResult.failed(canon, "wrong_pixels")
-        BackendProbeResult.success(canon, "viable: device provenance + pixel round-trip")
+        # Four disjoint witnesses, one per op — none can be dropped and still
+        # pass: (0,0) blit, (7,7) unclipped fill, (3,3) clipped fill, (5,0)
+        # untouched because the clip actually clipped.
+        if rb.pixels[0] != 0xFF66CC33u32:
+            return BackendProbeResult.failed(canon, "wrong_pixels blit")
+        if rb.pixels[63] != 0xFF3366CCu32:
+            return BackendProbeResult.failed(canon, "wrong_pixels fill")
+        if rb.pixels[27] != 0xFFCC3366u32:
+            return BackendProbeResult.failed(canon, "wrong_pixels clipped_fill")
+        if rb.pixels[5] != 0xFF000000u32:
+            return BackendProbeResult.failed(canon, "wrong_pixels clip_not_honored")
+        BackendProbeResult.success(canon, "viable: device provenance + fill/clip/blit pixel round-trip")
 
     static fn detect_best_backend_viable() -> text:
         """Auto-resolution that commits only to a PROVABLY working backend.

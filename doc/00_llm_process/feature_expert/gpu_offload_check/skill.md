@@ -172,10 +172,68 @@ Read this table together with the **phase-audit reality** section above: a green
 lane proves the *parity oracle* holds, NOT that the phase reaches a device.
 Phases 1-2 and 4 are still naming-only per that audit.
 
+## Auto-resolution names a lane that must actually serve the frame (2026-08-05)
+
+`Engine2D.detect_best_backend_viable()` promises to commit "only to a PROVABLY
+working backend", but its deep probe used to exercise a solid fill and nothing
+else — so it was FAIL-OPEN against the render lane's real op set. Measured on
+the dual-GPU dev host (TITAN RTX + RTX A6000, Vulkan 1.4):
+
+- `auto` selected **cuda** (its 8x8 fill round-tripped `device_readback`).
+- Every real web frame on that lane came back **`source=cpu_fallback handle=0
+  identity=0`**. Bisecting the op sequence — clear / fill / sub-blit /
+  full-blit / blend-blit all stayed `device_readback`, the **clipped fill**
+  flipped it — showed `CudaBackend.set_clip` only mutates the CPU mirror, so
+  the next paint takes `_begin_cpu_path`/`_finish_cpu_path` and latches
+  `cpu_fallback_used` for the whole surface. Every page with text paints under
+  a clip, so on cuda every page was CPU-served.
+- `vulkan`/`qualcomm`, the next candidates, served the identical frame
+  on-device — and were never reached.
+
+The probe now requires a fill, a **CLIPPED** fill and a `draw_image` blit, all
+device-proven, with four disjoint pixel witnesses. Auto now resolves to a lane
+whose showcase frame reads back `host_cache_after_device_present` with real
+credentials, **bit-identical to the CPU ground truth** (checksum `413538218`,
+unique=18, nonbg=5565).
+
+Reading rule for any lane that reports a GPU backend: a resolved lane NAME is
+not evidence. Only the readback source is. `resolved=cuda` with
+`source=cpu_fallback` is a routing defect, not a host condition.
+
 ## Two measurement traps in these lanes (READ BEFORE running or editing)
 
 Both are silent — they produce a plausible wrong answer, not an error. They are
 the single most expensive things to rediscover in this campaign.
+
+### 0. A "full GPU offload" suite that silently retargets itself to the CPU
+
+`web_showcase_full_gpu_offload_spec.spl` carried a private
+`_executed_render_backend()` that **silently retargeted all 13 examples to the
+`"software"` lane** whenever its probe was not `device_readback`. The suite then
+printed `13 examples, 0 failures` under a "full GPU offload" title with nothing
+in the output disclosing that no pixel had been near a device — and its one
+diagnostic field (`probe_source=`) printed EMPTY, because a module-level `var`
+written inside an example is not visible when read back (the same trap the
+parity gate records; the spec's `_base_px_cache`/`_mutated_px_cache` memos never
+worked either). Fixed 2026-08-05: the retarget is gone, the suite runs on the
+lane the resolver names, and every example emits exactly one greppable receipt:
+
+```
+grep -c '^.showcase-lane. '                -> receipts emitted (expect 13)
+grep -c '^.showcase-lane. .*GPU-PROVEN'    -> strict device_readback proofs
+grep -c '^.showcase-lane. .*DEVICE-SERVED' -> device-presented frames
+grep -c '^.showcase-lane. .*CPU LANE'      -> examples that prove NOTHING
+```
+
+**Anchor these.** The closing `[showcase-verdict]` lines name the tokens on
+purpose (different prefix, never counted); an unanchored `grep -c 'GPU-PROVEN'`
+reads 2 on a run whose true count is 0.
+
+Fail-vs-inconclusive split, deliberately NOT the parity gate's uniform
+"inconclusive": a resolver-named **CPU** lane is inconclusive-but-green (genuine
+host condition, keeps the suite runnable device-free), while a resolver-named
+**GPU** lane that serves a CPU frame is a **hard fail** (`LANE INTEGRITY
+FAILURE`) — the resolver broke its own contract.
 
 ### 1. `# @exec_limit <N>` — the ONLY way to raise a spec's op cap
 
