@@ -676,6 +676,46 @@ fn _decl_over_quota(decls: text) -> bool:
         count = count + 1
     count > WEB_RULE_DECL_QUOTA
 
+# WEB_RULE_DECL_QUOTA bounds ONE RULE's declaration count: a rule over the cap
+# is dropped wholesale and the cascade continues with the remaining rules, and
+# css_declaration_priority_split already enforces that on every rule as it is
+# extracted. compute_styles_with_material then merges all of a node's matching
+# rules into a single string and calls apply_decls once (a perf change) -- but
+# that merged string is not a rule. It legitimately carries the sum of several
+# rules that each already passed the per-rule cap, so handing it back to the
+# per-rule guard made the guard discard the node's WHOLE author cascade: the
+# element rendered as if no stylesheet rule had matched it at all.
+#
+# Trim to the cap instead of rejecting, and trim from the FRONT: later
+# declarations win the cascade, so the last WEB_RULE_DECL_QUOTA of them are
+# exactly the ones that would have won anyway. apply_decls still never sees
+# more than the cap, so the work bound the guard exists to enforce is unchanged.
+fn _merged_decls_within_quota(decls: text) -> text:
+    if not _decl_over_quota(decls):
+        return decls
+    val n = decls.len()
+    var total = 0
+    var pos = 0
+    while pos < n:  # cpu-lane-loop-ok: counts declarations in ONE node's merged cascade string; reached only on the over-quota path, bound is that string's semicolon count
+        val semi = find_from(decls, ";", pos)
+        if semi < 0:
+            break
+        total = total + 1
+        pos = semi + 1
+    if pos < n and decls.substring(pos, n).trim().len() > 0:
+        total = total + 1
+    var drop = total - WEB_RULE_DECL_QUOTA
+    if drop <= 0:
+        return decls
+    var cut = 0
+    while drop > 0:  # cpu-lane-loop-ok: skips the `drop` earliest (cascade-losing) declarations; bound is `drop`, itself bounded by the count above
+        val semi = find_from(decls, ";", cut)
+        if semi < 0:
+            return decls
+        cut = semi + 1
+        drop = drop - 1
+    decls.substring(cut, n)
+
 class CssDeclarationPrioritySplit:
     normal: text
     important: text
