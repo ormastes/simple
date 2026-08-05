@@ -257,11 +257,23 @@ pub(crate) fn pattern_matches(
             // compiler currently accepts and then answers silently and
             // differently per engine. Measured 2026-08-01 at 9349ff90f60:
             // the interpreter falls through to the fallback arm, while the
-            // default (JIT) engine TAKES the `Some` arm and binds a corrupt
-            // value --- `i64 6` binds `<value:0x6>`, `[10,20,30].first()` binds
-            // a DENORMAL FLOAT (element bits reinterpreted as f64), `.get(1)`
-            // binds `<value:0x14>`, `bool` binds nil, `text` and array bind the
-            // whole receiver. Both exit 0 with no diagnostic.
+            // default (JIT) engine TAKES the `Some` arm.
+            //
+            // CORRECTION 2026-08-05: that earlier reading also claimed the JIT
+            // "binds a CORRUPT value" (`i64 6` binds `<value:0x6>`,
+            // `[10,20,30].first()` binds a DENORMAL FLOAT). Re-measured by VALUE
+            // rather than by `to_text` --- `x == 42`, `x == "hi"`, `x.len()`,
+            // `x.field` --- the JIT binding is CORRECT for i64, text, bool, f64,
+            // array and class instances. `<value:0x6>` and the denormal float
+            // are artifacts of `to_text` over an untagged raw value, a separate
+            // and still-open rendering defect. The binding itself is sound, which
+            // is why the interpreter is now aligned to it (see the `Some` JIT
+            // parity block near the end of this arm).
+            //
+            // What remains a genuine type error is a `Some`/`Ok`/`Err` pattern
+            // over a value that is not nullable at all; that is what this
+            // warn-only check is for. Both engines still exit 0 with no
+            // diagnostic when it is off.
             //
             // Checked on the VALUE, not on an inferred type, so it has no false
             // positives: `Value::Enum` (any real enum, including Option/Result),
@@ -401,6 +413,55 @@ pub(crate) fn pattern_matches(
                             }
                             // ClassDef not found — fall through to Ok(false)
                         }
+                    }
+                }
+            }
+
+            // JIT parity for `case Some(p)` over a NULLABLE `T?`.
+            //
+            // A nullable `T?` is NOT an `Option` enum at runtime in either
+            // engine: measured 2026-08-05, both the interpreter and the default
+            // (JIT) engine store a bare `T` bound to a `T?` as the RAW value,
+            // and `nil` as `Value::Nil`. Neither engine ever `Some`-wraps at the
+            // coercion site (parameter binding, `val v: T? = <bare>`, return).
+            //
+            // The two engines then diverged in the PATTERN, not the coercion:
+            // the JIT's `Some(p)` arm matches any non-nil, non-enum value and
+            // binds `p` to the value itself, while this function fell through to
+            // `Ok(false)` below --- silently, with no error. That made every
+            // `case Some(...)` over a `T?` dead under the interpreter, which is
+            // the only engine the spec suite runs.
+            //
+            // The JIT reference behaviour, measured by VALUE (not by `to_text`,
+            // which has separate rendering defects that made an earlier reading
+            // of this call it "corrupt"):
+            //   i64 42     -> binds x, `x == 42`   is true
+            //   text "hi"  -> binds x, `x == "hi"` is true
+            //   bool true  -> binds x, `x == true` is true
+            //   f64 2.5    -> binds x, `x == 2.5`  is true
+            //   [1,2,3]    -> binds x, `x.len()`   is 3
+            //   class inst -> binds x, `x.field`   reads correctly
+            //   nil        -> does NOT match `Some`; takes the `None` arm
+            //
+            // Scope is deliberately `Some` only, and only when the pattern
+            // carries payload sub-patterns. Both restrictions are measured, not
+            // assumed:
+            //   * `case Ok(x)` / `case Err(e)` over a bare value do NOT match
+            //     under the JIT either, so widening this to `Result` would
+            //     invent a third behaviour rather than match the reference.
+            //   * `case Some:` with no payload already matched in both engines
+            //     via the arm above, so it needs nothing here.
+            //
+            // `Value::Enum` and `Value::Nil` are excluded so real `Option::Some`
+            // destructuring (handled above) and `None`/nil (handled at the top of
+            // this arm) keep their existing, already-correct behaviour.
+            if enum_name == "Option"
+                && variant == "Some"
+                && !matches!(value, Value::Enum { .. } | Value::Nil)
+            {
+                if let Some(patterns) = payload {
+                    if patterns.len() == 1 {
+                        return pattern_matches(&patterns[0], value, bindings, enums, classes);
                     }
                 }
             }
@@ -590,6 +651,110 @@ mod tests {
         let mut parser = Parser::new(src);
         let module = parser.parse().expect("parse");
         evaluate_module(&module.items).expect("evaluate")
+    }
+
+    // --- `case Some(p)` over a nullable `T?` (JIT parity) ---
+    //
+    // These lock the fix for
+    // doc/08_tracking/bug/interpreter_bare_arg_not_some_wrapped_at_optional_param_2026-08-04.md.
+    // Each asserts a VALUE, not just that an arm was taken: a test that only
+    // checked "the Some arm fired" would pass even if the binding were garbage,
+    // which is exactly the mistake the original report made about the JIT.
+
+    #[test]
+    fn some_pattern_matches_bare_value_at_nullable_param_and_binds_it() {
+        let src = r#"
+fn probe(v: i64?) -> i64:
+    match v:
+        case Some(x): x
+        case None: -1
+        case _: -2
+
+main = probe(42) - 42
+"#;
+        assert_eq!(
+            run(src),
+            0,
+            "`case Some(x)` over a bare i64 at a `T?` param must fire and bind 42, as the JIT does"
+        );
+    }
+
+    #[test]
+    fn some_pattern_matches_bare_value_at_nullable_local() {
+        // Not a parameter — a local with a declared `T?` type. Proves the defect
+        // was never in argument binding.
+        let src = r#"
+fn probe() -> i64:
+    val v: i64? = 7
+    match v:
+        case Some(x): x
+        case None: -1
+        case _: -2
+
+main = probe() - 7
+"#;
+        assert_eq!(run(src), 0, "`case Some(x)` over a bare local `T?` must fire and bind 7");
+    }
+
+    #[test]
+    fn nil_still_takes_the_none_arm_and_never_matches_some() {
+        // The honest direction. `Some` must not become irrefutable.
+        let src = r#"
+fn probe(v: i64?) -> i64:
+    match v:
+        case Some(_): 1
+        case None: 0
+        case _: 2
+
+main = probe(nil)
+"#;
+        assert_eq!(run(src), 0, "nil must take the `None` arm, never `Some`");
+    }
+
+    #[test]
+    fn some_pattern_binds_text_not_just_integers() {
+        let src = r#"
+fn probe(v: text?) -> i64:
+    match v:
+        case Some(x): if x == "hi": 0 else: 3
+        case None: 1
+        case _: 2
+
+main = probe("hi")
+"#;
+        assert_eq!(run(src), 0, "`case Some(x)` over a bare text must bind the text itself");
+    }
+
+    #[test]
+    fn real_option_enum_some_still_destructures() {
+        // The pre-existing `Value::Enum` path must be untouched by the new
+        // fallback: an explicitly constructed `Some(...)` still destructures.
+        let src = r#"
+fn probe(v: i64?) -> i64:
+    match v:
+        case Some(x): x
+        case None: -1
+        case _: -2
+
+main = probe(Some(9)) - 9
+"#;
+        assert_eq!(run(src), 0, "an explicit `Some(9)` must still destructure to 9");
+    }
+
+    #[test]
+    fn ok_and_err_patterns_do_not_match_a_bare_value() {
+        // Measured JIT behaviour: `case Ok(x)` over a bare value does NOT match.
+        // Widening the fix to Result would invent a third behaviour.
+        let src = r#"
+fn probe(v: i64?) -> i64:
+    match v:
+        case Ok(_): 1
+        case Err(_): 2
+        case _: 0
+
+main = probe(5)
+"#;
+        assert_eq!(run(src), 0, "`case Ok(x)` over a bare value must NOT match, matching the JIT");
     }
 
     // --- Positional class pattern (the bug) ---

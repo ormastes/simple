@@ -51,17 +51,36 @@ describe "style_block_resolve selector entry points":
         expect(simple_selector_matches("", el("div"), 1, 1)).to_equal(false)
 
 describe "style_block_resolve child combinator":
-    # The `case Some(parent_node)` arm (style_block_resolve.spl line 41) is NOT
-    # covered here and cannot be: under the interpreter -- the only engine a
-    # spec ever runs on -- a bare argument passed to a `T?` parameter is not
-    # Some-wrapped, so `match parent` takes NEITHER arm and control falls
-    # through into the descendant branch. `selector_matches("p > span", span,
-    # div, 1, 1)` therefore answers `true` in a spec and `false` from `fn main`
-    # on the same binary. Filed:
-    # doc/08_tracking/bug/interpreter_bare_arg_not_some_wrapped_at_optional_param_2026-08-04.md
-    # Asserting either observed value here would enshrine an engine defect, and
-    # an example on the matching pair would pass for the wrong reason (the
-    # descendant fallback returns true regardless), so both are omitted.
+    # The `case Some(parent_node)` arm (style_block_resolve.spl line 41) used to
+    # be uncoverable here: the interpreter -- the only engine a spec ever runs
+    # on -- fell through BOTH arms of `match parent` when `parent` held a bare
+    # (non-nil) node, and control dropped into the descendant branch below, which
+    # returns true whenever the LAST selector matches the node. So `a > b` was
+    # silently answering like `a b`.
+    #
+    # The cause was NOT a missing Some-wrap at the coercion site: neither engine
+    # wraps, and the value in `parent` is the raw node in both. It was the
+    # interpreter's `Some(p)` PATTERN refusing to match a non-nil, non-enum
+    # value. Aligned to the default (JIT) engine in
+    # src/compiler_rust/compiler/src/interpreter_patterns.rs.
+    #
+    # These three examples are the by-value proof: same node and same parent,
+    # `>` and ` ` must disagree. If the `Some` arm ever stops matching again, the
+    # first example flips to true and this describe goes red instead of silent.
+
+    it "matches a child combinator only when the parent is the immediate parent":
+        expect(selector_matches("div > span", el("span"), el("p"), 1, 1)).to_equal(false)
+
+    it "matches a child combinator when the parent does match":
+        expect(selector_matches("div > span", el("span"), el("div"), 1, 1)).to_equal(true)
+
+    it "distinguishes the child combinator from the descendant combinator":
+        # Identical node and parent; only the combinator differs. Under the
+        # fall-through defect both answered true.
+        val span = el("span")
+        val p = el("p")
+        expect(selector_matches("div > span", span, p, 1, 1)).to_equal(false)
+        expect(selector_matches("div span", span, p, 1, 1)).to_equal(true)
 
     it "rejects when the right-hand side does not match the node":
         # Returns before the `match parent`, so this example is unaffected.
