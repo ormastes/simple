@@ -33,6 +33,15 @@
 #  include <immintrin.h>
 #endif
 
+/* GCC/Clang can isolate AVX2 instructions in runtime-dispatched functions.
+ * MSVC has no GNU target attribute; its x64 build keeps the same CPUID guard
+ * and emits these intrinsic bodies according to the translation-unit flags. */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+#  define SIMPLE_RUNTIME_TARGET_AVX2 __attribute__((target("avx2")))
+#else
+#  define SIMPLE_RUNTIME_TARGET_AVX2
+#endif
+
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
 static bool rt_msvc_x86_os_avx_enabled(void) {
     int regs[4];
@@ -622,13 +631,411 @@ int64_t rt_simd_engine2d_neon_reset(void) {
     return 0;
 }
 
+/* MLKEM_SIMD_BEGIN
+ * ML-KEM native SIMD NTT/INTT.
+ *
+ * The Simple boundary is a flat [i64] containing one or more 256-coefficient
+ * polynomials. Values are unboxed once, transformed in an int32 work buffer,
+ * and boxed into a fresh array. AVX2, NEON, and RVV vectorize butterfly
+ * arithmetic plus exact canonical reciprocal reduction; scalar code handles
+ * only sub-vector stage tails and unsupported backends.
+ * ---------------------------------------------------------------------- */
+
+#if defined(_MSC_VER)
+#define MLKEM_THREAD_LOCAL __declspec(thread)
+#else
+#define MLKEM_THREAD_LOCAL _Thread_local
+#endif
+
+/* Synchronous operation receipt. ML-KEM candidate entry points reset, execute,
+ * and read this value without yielding. Thread-local ownership prevents one
+ * native request from resetting or claiming another request's SIMD work. */
+static MLKEM_THREAD_LOCAL uint64_t g_mlkem_ntt_simd_hits;
+static MLKEM_THREAD_LOCAL uint64_t g_mlkem_ntt_simd_observed_rvv_vlen_bits;
+
+static SplArray* mlkem_new_i64_array(int64_t count) {
+    if (count < 0) count = 0;
+    SplArray* result = rt_array_new_uninit(count);
+    if (!result) return NULL;
+    rt_array_set_len_known(rt_array_header_ptr(result), count);
+    return result;
+}
+
+static const int32_t g_mlkem_ntt_zetas[128] = {
+       1, 1729, 2580, 3289, 2642,  630, 1897,  848,
+    1062, 1919,  193,  797, 2786, 3260,  569, 1746,
+     296, 2447, 1339, 1476, 3046,   56, 2240, 1333,
+    1426, 2094,  535, 2882, 2393, 2879, 1974,  821,
+     289,  331, 3253, 1756, 1197, 2304, 2277, 2055,
+     650, 1977, 2513,  632, 2865,   33, 1320, 1915,
+    2319, 1435,  807,  452, 1438, 2868, 1534, 2402,
+    2647, 2617, 1481,  648, 2474, 3110, 1227,  910,
+      17, 2761,  583, 2649, 1637,  723, 2288, 1100,
+    1409, 2662, 3281,  233,  756, 2156, 3015, 3050,
+    1703, 1651, 2789, 1789, 1847,  952, 1461, 2687,
+     939, 2308, 2437, 2388,  733, 2337,  268,  641,
+    1584, 2298, 2037, 3220,  375, 2549, 2090, 1645,
+    1063,  319, 2773,  757, 2099,  561, 2466, 2594,
+    2804, 1092,  403, 1026, 1143, 2150, 2775,  886,
+    1722, 1212, 1874, 1029, 2110, 2935,  885, 2154
+};
+
+static inline int32_t mlkem_modq_i64(int64_t value) {
+    int64_t reduced = value % 3329;
+    return (int32_t)(reduced < 0 ? reduced + 3329 : reduced);
+}
+
+#if defined(__x86_64__) || defined(_M_X64)
+/* Exact q=3329 reduction for the reachable NTT butterfly interval.
+ *
+ * Butterfly inputs are canonical [0,q), so every pre-reduction value lies in
+ * [-11,078,912, 11,078,912]. Adding 4096*q makes it positive without changing
+ * its residue.  floor(2^32/q) underestimates the quotient by at most one in
+ * this interval; the final conditional subtract therefore canonicalizes the
+ * exact residue without division or floating point.
+ */
+SIMPLE_RUNTIME_TARGET_AVX2
+static inline __m256i mlkem_reduce8_avx2(__m256i value) {
+    const __m256i bias = _mm256_set1_epi32(13635584); /* 4096 * 3329 */
+    const __m256i reciprocal = _mm256_set1_epi32(1290167); /* floor(2^32/q) */
+    const __m256i modulus = _mm256_set1_epi32(3329);
+    __m256i positive = _mm256_add_epi32(value, bias);
+    __m256i even_product = _mm256_mul_epu32(positive, reciprocal);
+    __m256i odd_values = _mm256_srli_epi64(positive, 32);
+    __m256i odd_product = _mm256_mul_epu32(odd_values, reciprocal);
+    __m256i even_quotient = _mm256_srli_epi64(even_product, 32);
+    __m256i odd_quotient = _mm256_slli_epi64(
+        _mm256_srli_epi64(odd_product, 32), 32);
+    __m256i quotient = _mm256_or_si256(even_quotient, odd_quotient);
+    __m256i residue = _mm256_sub_epi32(
+        positive, _mm256_mullo_epi32(quotient, modulus));
+    __m256i subtract_mask = _mm256_cmpgt_epi32(
+        residue, _mm256_set1_epi32(3328));
+    return _mm256_sub_epi32(
+        residue, _mm256_and_si256(subtract_mask, modulus));
+}
+
+SIMPLE_RUNTIME_TARGET_AVX2
+static void mlkem_butterfly8_avx2(int32_t* lower, int32_t* upper,
+                                  int32_t zeta, bool inverse) {
+    __m256i lo = _mm256_loadu_si256((const __m256i*)(const void*)lower);
+    __m256i hi = _mm256_loadu_si256((const __m256i*)(const void*)upper);
+    __m256i zv = _mm256_set1_epi32(zeta);
+    __m256i sum;
+    __m256i product;
+    if (inverse) {
+        sum = _mm256_add_epi32(lo, hi);
+        product = _mm256_mullo_epi32(_mm256_sub_epi32(hi, lo), zv);
+    } else {
+        product = _mm256_mullo_epi32(hi, zv);
+        sum = _mm256_add_epi32(lo, product);
+        product = _mm256_sub_epi32(lo, product);
+    }
+    _mm256_storeu_si256((__m256i*)(void*)lower, mlkem_reduce8_avx2(sum));
+    _mm256_storeu_si256((__m256i*)(void*)upper, mlkem_reduce8_avx2(product));
+}
+
+SIMPLE_RUNTIME_TARGET_AVX2
+static void mlkem_inverse_scale_avx2(int32_t* coefficients) {
+    const __m256i scale = _mm256_set1_epi32(3303);
+    for (int i = 0; i < 256; i += 8) {
+        __m256i values = _mm256_loadu_si256(
+            (const __m256i*)(const void*)(coefficients + i));
+        __m256i products = _mm256_mullo_epi32(values, scale);
+        _mm256_storeu_si256(
+            (__m256i*)(void*)(coefficients + i),
+            mlkem_reduce8_avx2(products));
+    }
+}
+
+SIMPLE_RUNTIME_TARGET_AVX2
+int64_t rt_mlkem_modq_avx2_selfcheck(void) {
+    if (!simd_detect_avx2()) return -1;
+    const int32_t limit = 11078912;
+    int32_t input[8];
+    int32_t output[8];
+    int64_t mismatches = 0;
+    for (int32_t base = -limit; base <= limit; base += 8) {
+        for (int lane = 0; lane < 8; lane++) input[lane] = base + lane;
+        __m256i values = _mm256_loadu_si256((const __m256i*)(const void*)input);
+        _mm256_storeu_si256((__m256i*)(void*)output, mlkem_reduce8_avx2(values));
+        for (int lane = 0; lane < 8 && input[lane] <= limit; lane++) {
+            if (output[lane] != mlkem_modq_i64(input[lane])) mismatches++;
+        }
+    }
+    return mismatches;
+}
+#else
+int64_t rt_mlkem_modq_avx2_selfcheck(void) { return -1; }
+#endif
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+static inline int32x4_t mlkem_reduce4_neon(int32x4_t value) {
+    const uint32x4_t positive = vreinterpretq_u32_s32(
+        vaddq_s32(value, vdupq_n_s32(13635584)));
+    const uint32x2_t reciprocal = vdup_n_u32(1290167);
+    const uint64x2_t low_product = vmull_u32(
+        vget_low_u32(positive), reciprocal);
+    const uint64x2_t high_product = vmull_u32(
+        vget_high_u32(positive), reciprocal);
+    const uint32x4_t quotient = vcombine_u32(
+        vmovn_u64(vshrq_n_u64(low_product, 32)),
+        vmovn_u64(vshrq_n_u64(high_product, 32)));
+    const uint32x4_t modulus = vdupq_n_u32(3329);
+    uint32x4_t residue = vsubq_u32(
+        positive, vmulq_u32(quotient, modulus));
+    const uint32x4_t subtract_mask = vcgeq_u32(residue, modulus);
+    residue = vsubq_u32(residue, vandq_u32(subtract_mask, modulus));
+    return vreinterpretq_s32_u32(residue);
+}
+
+static void mlkem_butterfly4_neon(int32_t* lower, int32_t* upper,
+                                  int32_t zeta, bool inverse) {
+    int32x4_t lo = vld1q_s32(lower);
+    int32x4_t hi = vld1q_s32(upper);
+    int32x4_t zv = vdupq_n_s32(zeta);
+    int32x4_t sum;
+    int32x4_t product;
+    if (inverse) {
+        sum = vaddq_s32(lo, hi);
+        product = vmulq_s32(vsubq_s32(hi, lo), zv);
+    } else {
+        product = vmulq_s32(hi, zv);
+        sum = vaddq_s32(lo, product);
+        product = vsubq_s32(lo, product);
+    }
+    vst1q_s32(lower, mlkem_reduce4_neon(sum));
+    vst1q_s32(upper, mlkem_reduce4_neon(product));
+}
+
+static void mlkem_inverse_scale_neon(int32_t* coefficients) {
+    const int32x4_t scale = vdupq_n_s32(3303);
+    for (int i = 0; i < 256; i += 4) {
+        const int32x4_t values = vld1q_s32(coefficients + i);
+        vst1q_s32(coefficients + i,
+            mlkem_reduce4_neon(vmulq_s32(values, scale)));
+    }
+}
+#endif
+
+#if defined(__riscv) && defined(__riscv_vector)
+static vint32m1_t mlkem_reduce_rvv(vint32m1_t value, size_t vl) {
+    const vint32m1_t positive = __riscv_vadd_vx_i32m1(
+        value, 13635584, vl);
+    const vint64m2_t product = __riscv_vwmul_vx_i64m2(
+        positive, 1290167, vl);
+    const vint32m1_t quotient = __riscv_vnsra_wx_i32m1(
+        product, 32, vl);
+    vint32m1_t residue = __riscv_vsub_vv_i32m1(
+        positive, __riscv_vmul_vx_i32m1(quotient, 3329, vl), vl);
+    const vint32m1_t reduced = __riscv_vsub_vx_i32m1(
+        residue, 3329, vl);
+    const vbool32_t subtract = __riscv_vmsge_vx_i32m1_b32(
+        residue, 3329, vl);
+    return __riscv_vmerge_vvm_i32m1(residue, reduced, subtract, vl);
+}
+
+static size_t mlkem_butterfly_rvv(int32_t* lower, int32_t* upper,
+                                  size_t count, int32_t zeta, bool inverse,
+                                  uint64_t* chunk_count) {
+    size_t done = 0;
+    uint64_t chunks = 0;
+    while (done < count) {
+        size_t vl = __riscv_vsetvl_e32m1(count - done);
+        vint32m1_t lo = __riscv_vle32_v_i32m1(lower + done, vl);
+        vint32m1_t hi = __riscv_vle32_v_i32m1(upper + done, vl);
+        vint32m1_t sum;
+        vint32m1_t product;
+        if (inverse) {
+            sum = __riscv_vadd_vv_i32m1(lo, hi, vl);
+            product = __riscv_vmul_vx_i32m1(
+                __riscv_vsub_vv_i32m1(hi, lo, vl), zeta, vl);
+        } else {
+            product = __riscv_vmul_vx_i32m1(hi, zeta, vl);
+            sum = __riscv_vadd_vv_i32m1(lo, product, vl);
+            product = __riscv_vsub_vv_i32m1(lo, product, vl);
+        }
+        __riscv_vse32_v_i32m1(
+            lower + done, mlkem_reduce_rvv(sum, vl), vl);
+        __riscv_vse32_v_i32m1(
+            upper + done, mlkem_reduce_rvv(product, vl), vl);
+        done += vl;
+        chunks++;
+    }
+    if (chunk_count) *chunk_count = chunks;
+    return done;
+}
+
+static void mlkem_inverse_scale_rvv(int32_t* coefficients) {
+    size_t done = 0;
+    while (done < 256) {
+        const size_t vl = __riscv_vsetvl_e32m1(256 - done);
+        const vint32m1_t values = __riscv_vle32_v_i32m1(
+            coefficients + done, vl);
+        const vint32m1_t products = __riscv_vmul_vx_i32m1(
+            values, 3303, vl);
+        __riscv_vse32_v_i32m1(
+            coefficients + done, mlkem_reduce_rvv(products, vl), vl);
+        done += vl;
+    }
+}
+#endif
+
+int64_t rt_mlkem_ntt_simd_backend(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    return simd_detect_avx2() ? 1 : 0;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return 2;
+#elif defined(__riscv) && defined(__riscv_vector)
+    return rt_simd_has_rvv() ? 3 : 0;
+#else
+    return 0;
+#endif
+}
+
+int64_t rt_mlkem_ntt_simd_hits(void) {
+    return g_mlkem_ntt_simd_hits > (uint64_t)INT64_MAX
+        ? INT64_MAX : (int64_t)g_mlkem_ntt_simd_hits;
+}
+
+int64_t rt_mlkem_ntt_simd_observed_rvv_vlen_bits(void) {
+    return g_mlkem_ntt_simd_observed_rvv_vlen_bits > (uint64_t)INT64_MAX
+        ? INT64_MAX : (int64_t)g_mlkem_ntt_simd_observed_rvv_vlen_bits;
+}
+
+int64_t rt_mlkem_ntt_simd_reset(void) {
+    g_mlkem_ntt_simd_hits = 0;
+    g_mlkem_ntt_simd_observed_rvv_vlen_bits = 0;
+    return 0;
+}
+
+static uint64_t mlkem_ntt_one(int32_t* f, bool inverse, int64_t backend) {
+    uint64_t hits = 0;
+    int k = inverse ? 127 : 1;
+    int len = inverse ? 2 : 128;
+    while (inverse ? len <= 128 : len >= 2) {
+        for (int start = 0; start < 256; start += 2 * len) {
+            int32_t zeta = g_mlkem_ntt_zetas[k];
+            k += inverse ? -1 : 1;
+            int j = start;
+            while (j < start + len) {
+                int remaining = start + len - j;
+                int width = 0;
+                uint64_t executed_chunks = 0;
+#if defined(__x86_64__) || defined(_M_X64)
+                if (backend == 1 && remaining >= 8) {
+                    mlkem_butterfly8_avx2(f + j, f + j + len, zeta, inverse);
+                    width = 8;
+                    executed_chunks = 1;
+                }
+#elif defined(__aarch64__) || defined(_M_ARM64)
+                if (backend == 2 && remaining >= 4) {
+                    mlkem_butterfly4_neon(f + j, f + j + len, zeta, inverse);
+                    width = 4;
+                    executed_chunks = 1;
+                }
+#elif defined(__riscv) && defined(__riscv_vector)
+                if (backend == 3 && remaining > 0) {
+                    width = (int)mlkem_butterfly_rvv(
+                        f + j, f + j + len, (size_t)remaining, zeta, inverse,
+                        &executed_chunks);
+                }
+#endif
+                if (width > 0) {
+                    j += width;
+                    hits += executed_chunks;
+                    continue;
+                }
+                int32_t lo = f[j];
+                int32_t hi = f[j + len];
+                if (inverse) {
+                    f[j] = mlkem_modq_i64((int64_t)lo + hi);
+                    f[j + len] = mlkem_modq_i64(
+                        (int64_t)zeta * mlkem_modq_i64((int64_t)hi - lo));
+                } else {
+                    int32_t product = mlkem_modq_i64((int64_t)zeta * hi);
+                    f[j] = mlkem_modq_i64((int64_t)lo + product);
+                    f[j + len] = mlkem_modq_i64((int64_t)lo - product);
+                }
+                j++;
+            }
+        }
+        len = inverse ? len * 2 : len / 2;
+    }
+    if (inverse) {
+#if defined(__x86_64__) || defined(_M_X64)
+        if (backend == 1) {
+            mlkem_inverse_scale_avx2(f);
+        } else
+#elif defined(__aarch64__) || defined(_M_ARM64)
+        if (backend == 2) {
+            mlkem_inverse_scale_neon(f);
+        } else
+#elif defined(__riscv) && defined(__riscv_vector)
+        if (backend == 3) {
+            mlkem_inverse_scale_rvv(f);
+        } else
+#endif
+        {
+            for (int i = 0; i < 256; i++)
+                f[i] = mlkem_modq_i64((int64_t)f[i] * 3303);
+        }
+    }
+    return hits;
+}
+
+SplArray* rt_mlkem_ntt_simd_batch(SplArray* coefficients, bool inverse) {
+    if (!coefficients) return mlkem_new_i64_array(0);
+    int64_t count = rt_array_len(coefficients);
+    if (count < 0 || count % 256 != 0)
+        return mlkem_new_i64_array(0);
+    if (count == 0) return mlkem_new_i64_array(0);
+    const int64_t* input = (const int64_t*)(uintptr_t)
+        rt_array_data_ptr(coefficients);
+    if (!input) return mlkem_new_i64_array(0);
+    SplArray* result = mlkem_new_i64_array(count);
+    if (!result) return NULL;
+    int64_t* output = (int64_t*)(uintptr_t)rt_array_data_ptr(result);
+    if (!output) return result;
+    int64_t backend = rt_mlkem_ntt_simd_backend();
+    uint64_t hits = 0;
+    for (int64_t offset = 0; offset < count; offset += 256) {
+        int32_t work[256];
+        for (int64_t i = 0; i < 256; i++)
+            work[i] = mlkem_modq_i64(
+                rv_to_int((RuntimeValue)input[offset + i]));
+        hits += mlkem_ntt_one(work, inverse, backend);
+        for (int64_t i = 0; i < 256; i++)
+            output[offset + i] = (int64_t)rv_from_int(work[i]);
+        /* Coefficients can contain secret material. A volatile wipe prevents
+         * the compiler from deleting cleanup of this bounded stack scratch. */
+        volatile int32_t* wipe = work;
+        for (int64_t i = 0; i < 256; i++) wipe[i] = 0;
+    }
+    if (hits > 0) {
+#if defined(__riscv) && defined(__riscv_vector)
+        if (backend == 3) {
+            g_mlkem_ntt_simd_observed_rvv_vlen_bits =
+                (uint64_t)__riscv_vsetvlmax_e32m1() * 32u;
+        }
+#endif
+        if (UINT64_MAX - g_mlkem_ntt_simd_hits < hits)
+            g_mlkem_ntt_simd_hits = UINT64_MAX;
+        else
+            g_mlkem_ntt_simd_hits += hits;
+    }
+    return result;
+}
+
+/* MLKEM_SIMD_END */
+
 #if defined(__x86_64__) || defined(_M_X64)
 static void engine2d_fill_u32_sse2(int64_t* data, int64_t count, int64_t color);
-__attribute__((target("avx2")))
+SIMPLE_RUNTIME_TARGET_AVX2
 static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color);
 static void engine2d_blend_into_sse2(int64_t* out, const int64_t* dst,
                                      const int64_t* src, int64_t n);
-__attribute__((target("avx2")))
+SIMPLE_RUNTIME_TARGET_AVX2
 static void engine2d_blend_into_avx2(int64_t* out, const int64_t* dst,
                                      const int64_t* src, int64_t n);
 #endif
@@ -743,7 +1150,7 @@ static void engine2d_blend_into_sse2(int64_t* out, const int64_t* dst,
     }
 }
 
-__attribute__((target("avx2")))
+SIMPLE_RUNTIME_TARGET_AVX2
 static void engine2d_blend_into_avx2(int64_t* out, const int64_t* dst,
                                      const int64_t* src, int64_t n) {
     int64_t i = 0;
@@ -1043,7 +1450,7 @@ static void engine2d_fill_u32_sse2(int64_t* data, int64_t count, int64_t color) 
     }
 }
 
-__attribute__((target("avx2")))
+SIMPLE_RUNTIME_TARGET_AVX2
 static void engine2d_fill_u32_avx2(int64_t* data, int64_t count, int64_t color) {
     __m256i v = _mm256_set1_epi64x(color);
     int64_t i = 0;
