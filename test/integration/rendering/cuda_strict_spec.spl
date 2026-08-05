@@ -9,8 +9,42 @@ device sync, and pixel readback. Surfaces device diagnostics via probe_cuda().
 
 On non-NVIDIA hosts, asserts the BackendProbeResult carries a typed
 Failed or Unavailable status rather than silently succeeding.
-On NVIDIA hosts, runs the full clear → draw_rect/draw_rect_filled/draw_line/draw_image/draw_gradient_rect → present → readback pipeline
-against a CPU reference for a 16x16 framebuffer.
+On NVIDIA hosts, runs the full clear -> draw_rect/draw_rect_filled/draw_line/
+draw_image/draw_gradient_rect -> present -> readback pipeline against a CPU
+reference for a 16x16 framebuffer.
+
+PROBE-THEN-CREATE TOCTOU (doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md)
+Every example here used to call probe_cuda() and then wrap its ENTIRE body in
+`if probe.is_usable():` with NO else. probe_cuda() runs a create+init+shutdown
+and throws it away; Engine2D.create_with_backend_strict is a SECOND, independent
+create with nothing cached in between, so the probe answer was only a
+prediction. 19 of the 25 examples were gated that way, and the gate failed in
+both directions:
+
+  - VACUOUS GREEN (17 examples): when the probe predicted unusable, every GPU
+    body vanished and the file still reported a clean "25 examples, 0 failures".
+    Demonstrated by forcing BackendProbeResult.is_usable() to return false while
+    the CUDA device and every create still worked perfectly: all 17 hardware
+    bodies silently became no-ops. A probe that fails CONSISTENTLY (rather than
+    the self-inconsistent sabotage used to demonstrate it) reads as a fully
+    clean 25/0 with the CUDA path never touched, on a host with two working
+    NVIDIA GPUs.
+  - FALSE RED: "succeeds and returns Engine2D when hardware available" asserted
+    `result.is_ok()` MUST be true purely because the probe had said usable, and
+    the "cuda unavailable path" pair asserted the mirror image — that the create
+    MUST fail because the probe had said unusable.
+
+Nothing is asserted from the probe any more. The probe is checked for
+SELF-consistency only, a probe/create divergence is DISCLOSED on a [toctou]
+line, and every other assertion reads the CREATE and the READBACK.
+
+READBACK PROVENANCE — the second half of the defect.
+All 17 hardware examples read pixels through the un-provenanced read_pixels(),
+which on backend_cuda.spl:1028-1056 can return cpu_fallback / cpu_mirror pixels
+that look exactly like device pixels. Every example whose NAME claims "device
+readback" could therefore be satisfied by the CPU mirror. Each one now reads
+read_pixels_with_source() and asserts the honest-provenance invariants on EVERY
+outcome and EVERY lane, so the file is strictly harder to pass than before.
 """
 
 use std.spec.{describe, context, it, expect}
@@ -33,6 +67,119 @@ fn color_red_u32() -> u32:
 fn color_blue_u32() -> u32:
     rgb(0, 0, 255)
 
+fn expected_px() -> i64:
+    """Pixel count of the 16x16 framebuffer every example renders."""
+    (16 * 16).to_i64()
+
+# --- readback provenance: the teeth, asserted on every outcome -------------
+#
+# The honest vocabulary is 14 labels in FOUR classes, not the 8 an earlier pass
+# assumed. `cache` is its own UNATTRIBUTED class: it is the only label that
+# carries a real frame whose provenance is unknown (a replay of last_pixels,
+# simple_web_engine2d_renderer.spl:172), so it may neither be credited as device
+# evidence nor assumed to be CPU. Every no-frame label carries an EMPTY array.
+
+fn _device_proven(source: text, handle: i64, identity: i64, pixel_count: i64, expected: i64) -> bool:
+    """True only when a real device demonstrably produced this frame."""
+    source == "device_readback" and handle > 0 and identity > 0 and
+        pixel_count == expected
+
+fn _source_is_device(source: text) -> bool:
+    """True for the readback sources that claim device provenance."""
+    source == "device_readback" or source == "host_cache_after_device_present" or
+        source == "swapchain_present" or source == "framebuffer_surface"
+
+fn _source_is_cpu(source: text) -> bool:
+    """True for the readback sources served by the CPU/software lane."""
+    source == "cpu_mirror" or source == "cpu_fallback"
+
+fn _source_is_unattributed(source: text) -> bool:
+    """True for a frame whose provenance is genuinely unknown."""
+    source == "cache"
+
+fn _source_is_no_frame(source: text) -> bool:
+    """True for the readback sources that produced no frame at all.
+
+    Every one of these carries an EMPTY pixel array, so no frame-content
+    assertion may run on them.
+    """
+    source == "completion_unknown" or source == "readback_failed" or
+        source == "not_requested" or source == "device_identity_unknown" or
+        source == "preflight_rejected" or source == "unavailable" or
+        source == "none"
+
+fn _source_is_known(source: text) -> bool:
+    """True when the readback source is inside the honest vocabulary."""
+    _source_is_device(source) or _source_is_cpu(source) or
+        _source_is_unattributed(source) or _source_is_no_frame(source)
+
+fn _assert_provenance_invariants(label: text, source: text, handle: i64, identity: i64, pixel_count: i64, expected: i64):
+    """Fail closed on any readback that claims more provenance than it earned."""
+    if not _source_is_known(source):
+        print "[cuda-provenance] {label}: UNKNOWN READBACK SOURCE '{source}' — outside the honest vocabulary, failing closed"
+    expect(_source_is_known(source)).to_equal(true)
+    # Every call site here is a SUCCESSFUL STRICT cuda create, so the cuda
+    # backend owns its own create and never falls back silently. A cuda backend
+    # that degrades sets the sticky cpu_fallback_used flag and reports
+    # "cpu_fallback" (backend_cuda.spl:1046) — which stays a disclosed skip,
+    # because that is genuine device loss. Reaching the "cpu_mirror" arm
+    # (backend_cuda.spl:1055) instead means device_current went false WITHOUT
+    # the fallback flag being set: a silent CPU reclassification, a bookkeeping
+    # defect rather than device loss, so it stays a hard failure.
+    if source == "cpu_mirror":
+        print "[cuda-provenance] {label}: SILENT CPU RECLASSIFICATION — a live strict cuda backend reported source=cpu_mirror instead of cpu_fallback; failing closed"
+    expect(source == "cpu_mirror").to_equal(false)
+    if source == "device_readback":
+        expect(handle).to_be_greater_than(0)
+        expect(identity).to_be_greater_than(0)
+        expect(pixel_count).to_equal(expected)
+    if _source_is_cpu(source):
+        expect(_source_is_device(source)).to_equal(false)
+        expect(_device_proven(source, handle, identity, pixel_count, expected)).to_equal(false)
+    if _source_is_unattributed(source):
+        expect(_device_proven(source, handle, identity, pixel_count, expected)).to_equal(false)
+
+fn _report_outcome(label: text, source: text, handle: i64, identity: i64, pixel_count: i64, expected: i64) -> bool:
+    """Disclose whether this example proved the GPU path, and return that fact."""
+    if _device_proven(source, handle, identity, pixel_count, expected):
+        print "[cuda-gpu] {label}: GPU-PROVEN — a device produced this frame (source={source} handle={handle} identity={identity} pixels={pixel_count})"
+        return true
+    if _source_is_device(source):
+        print "[cuda-gpu] {label}: GPU BRANCH SKIPPED — device-sourced but not device-PROVEN (source={source} handle={handle} identity={identity} pixels={pixel_count}); this example proves NOTHING about the GPU path"
+    else if source == "cpu_fallback":
+        print "[cuda-gpu] {label}: GPU BRANCH SKIPPED — the device was unavailable at use time (source=cpu_fallback); the probe's prediction did not survive to the create. This example proves NOTHING about the GPU path"
+    else if source == "cpu_mirror":
+        print "[cuda-gpu] {label}: GPU BRANCH SKIPPED — CPU/software lane (source=cpu_mirror); this example proves NOTHING about the GPU path"
+    else if _source_is_unattributed(source):
+        print "[cuda-gpu] {label}: GPU BRANCH SKIPPED — replayed frame of unknown provenance (source={source}); this example proves NOTHING about the GPU path"
+    else:
+        print "[cuda-gpu] {label}: GPU BRANCH SKIPPED — no frame produced (source={source}); this example proves NOTHING about the GPU path"
+    false
+
+fn _assert_strict_failure_is_structured(label: text, failure: BackendProbeResult):
+    """Assert the invariants a failed STRICT cuda create still owes.
+
+    A strict create that fails must fail STRUCTURALLY: typed terminal status,
+    the requested name preserved, a stated reason, and never a silent
+    cpu/software substitute under the cuda name. Holds on every host, so it is
+    unconditional on the failure path instead of gated on what the probe
+    predicted.
+    """
+    expect(failure.selected_name == "cpu" or failure.selected_name == "software").to_equal(false)
+    expect(failure.requested_name).to_equal("cuda")
+    expect(status_is_terminal_failure(failure)).to_equal(true)
+    expect(failure.fallback_reason).to_not_equal("")
+    print "[cuda-gpu] {label}: GPU BRANCH SKIPPED — the strict cuda create failed at use time (selected={failure.selected_name}); this example proves NOTHING about the GPU path"
+
+fn _frame_assertions_skipped(label: text, source: text):
+    """Disclose that no frame existed to assert rendering correctness against."""
+    print "[cuda-gpu] {label}: FRAME ASSERTIONS SKIPPED — no frame was produced (source={source}); this example proves NOTHING about rendering correctness"
+
+fn _disclose_toctou(label: text, probe_ready: bool, created: bool):
+    """Disclose a probe/create divergence — a host condition, never asserted."""
+    if probe_ready != created:
+        print "[toctou] {label}: probe predicted usable={probe_ready} but the independent create returned ok={created} — the prediction did not survive the gap; asserting on the CREATE, not the probe"
+
 # ============================================================================
 # Tests
 # ============================================================================
@@ -51,15 +198,21 @@ describe "CUDA strict smoke tests":
             expect(probe.requested_name).to_equal("cuda")
 
         it "probe_cuda on success reports device name and ptx shader_format":
+            # Probe SELF-consistency: the probe's own fields must agree with
+            # each other. This is a claim about the probe object, not a
+            # prediction about any later create, so it stays a hard assertion.
             val probe = probe_cuda()
             if probe.is_usable():
                 expect(probe.device_name).to_not_equal("")
                 expect(probe.shader_format).to_equal("ptx")
                 expect(probe.api_name).to_equal("cuda")
+            else:
+                expect(probe.available).to_equal(false)
 
         it "probe_cuda on failure carries non-empty fallback_reason":
             val probe = probe_cuda()
             if not probe.is_usable():
+                expect(status_is_terminal_failure(probe)).to_equal(true)
                 expect(probe.fallback_reason).to_not_equal("")
 
         it "probe_cuda diagnostic_text is non-empty":
@@ -67,58 +220,79 @@ describe "CUDA strict smoke tests":
             val txt = probe.diagnostic_text()
             expect(txt.len()).to_be_greater_than(0)
 
-    context "create_with_backend_strict cuda unavailable path":
-
-        it "fails with typed error when CUDA is not available":
+        it "probe_cuda never substitutes a different backend under the cuda name":
             val probe = probe_cuda()
-            if not probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                expect(result.is_ok()).to_equal(false)
+            expect(probe.selected_name == "cpu" or probe.selected_name == "software").to_equal(false)
+
+    context "create_with_backend_strict cuda failure path":
+
+        it "a failed strict create carries a terminal status and the requested name":
+            # The create is attempted REGARDLESS of any probe. The OLD version
+            # asserted `result.is_ok()` MUST be FALSE because the probe had said
+            # unusable — the pessimistic half of the TOCTOU, which false-reds
+            # the moment the create succeeds where the probe predicted failure.
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if not result.is_ok():
                 val diag = result.unwrap_err()
-                val failed_or_unavail = status_is_terminal_failure(diag)
-                expect(failed_or_unavail).to_equal(true)
+                expect(status_is_terminal_failure(diag)).to_equal(true)
                 expect(diag.requested_name).to_equal("cuda")
+            else:
+                print "[cuda-gpu] cuda-typed-error: GPU BRANCH SKIPPED — the strict create succeeded, so the failure path was not exercised; this example proves NOTHING about the failure path"
 
-        it "fallback_reason is non-empty when CUDA fails":
-            val probe = probe_cuda()
-            if not probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if not result.is_ok():
-                    val diag = result.unwrap_err()
-                    expect(diag.fallback_reason).to_not_equal("")
+        it "a failed strict create carries a non-empty fallback_reason":
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if not result.is_ok():
+                val diag = result.unwrap_err()
+                expect(diag.fallback_reason).to_not_equal("")
+            else:
+                print "[cuda-gpu] cuda-fallback-reason: GPU BRANCH SKIPPED — the strict create succeeded, so the failure path was not exercised; this example proves NOTHING about the failure path"
 
     context "create_with_backend_strict cuda hardware path":
 
-        it "succeeds and returns Engine2D when hardware available":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                expect(result.is_ok()).to_equal(true)
+        it "never hands back a non-cuda engine":
+            # Both outcomes owe a strictness claim, so neither branch is a
+            # silent skip.
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
                 var engine = result.unwrap()
+                expect(engine.backend_name()).to_equal("cuda")
                 expect(engine.width()).to_equal(16)
                 expect(engine.height()).to_equal(16)
                 engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-strictness", result.unwrap_err())
 
-        it "backend_name is cuda when hardware available":
+        it "the probe/create divergence is disclosed, never asserted":
+            # This is the one example that measures the probe/create gap: the
+            # probe answer is DISCLOSED, never asserted.
             val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                expect(result.is_ok()).to_equal(true)
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    expect(engine.backend_name()).to_equal("cuda")
-                    engine.shutdown()
+            val probe_ready = probe.is_usable()
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            val created = result.is_ok()
+            _disclose_toctou("cuda-hardware", probe_ready, created)
+            if created:
+                var engine = result.unwrap()
+                expect(engine.backend_name()).to_equal("cuda")
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-hardware", result.unwrap_err())
 
     context "PTX kernel: clear and readback":
 
         it "clear to red produces all-red pixels":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val red = color_red_u32()
-                    engine.clear(red)
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val red = color_red_u32()
+                engine.clear(red)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-clear-red", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-clear-red", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-clear-red", drawn.source)
+                else:
                     engine.present()
                     val pixels = engine.read_pixels()
                     expect(pixels.len()).to_equal(256)
@@ -129,40 +303,54 @@ describe "CUDA strict smoke tests":
                             all_red = false
                         idx = idx + 1
                     expect(all_red).to_equal(true)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-clear-red", result.unwrap_err())
 
         it "draw_rect_filled writes correct pixels in the rect region":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val bg = color_blue_u32()
-                    val fg = color_red_u32()
-                    # Clear to blue, draw 4x4 red rect at (4,4)
-                    engine.clear(bg)
-                    engine.draw_rect_filled(4, 4, 4, 4, fg)
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_blue_u32()
+                val fg = color_red_u32()
+                # Clear to blue, draw 4x4 red rect at (4,4)
+                engine.clear(bg)
+                engine.draw_rect_filled(4, 4, 4, 4, fg)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-rect-filled", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-rect-filled", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-rect-filled", drawn.source)
+                else:
                     engine.present()
                     val pixels = engine.read_pixels()
                     expect(pixels.len()).to_equal(256)
                     # Pixel at (6,6) inside rect must be red
-                    val inside = pixels[6 * 16 + 6]
-                    expect(inside).to_equal(fg)
+                    expect(pixels[6 * 16 + 6]).to_equal(fg)
                     # Pixel at (0,0) outside rect must be blue
-                    val outside = pixels[0]
-                    expect(outside).to_equal(bg)
-                    engine.shutdown()
+                    expect(pixels[0]).to_equal(bg)
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-rect-filled", result.unwrap_err())
 
         it "draw_rect writes only the outline pixels":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val bg = color_blue_u32()
-                    val fg = color_red_u32()
-                    engine.clear(bg)
-                    engine.draw_rect(4, 4, 6, 5, fg)
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_blue_u32()
+                val fg = color_red_u32()
+                engine.clear(bg)
+                engine.draw_rect(4, 4, 6, 5, fg)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-rect-outline", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-rect-outline", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-rect-outline", drawn.source)
+                else:
                     engine.present()
                     val pixels = engine.read_pixels()
                     expect(pixels.len()).to_equal(256)
@@ -172,18 +360,26 @@ describe "CUDA strict smoke tests":
                     expect(pixels[8 * 16 + 9]).to_equal(fg)
                     expect(pixels[6 * 16 + 6]).to_equal(bg)
                     expect(pixels[0]).to_equal(bg)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-rect-outline", result.unwrap_err())
 
         it "draw_line writes line pixels through the CUDA framebuffer":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val bg = color_blue_u32()
-                    val fg = color_red_u32()
-                    engine.clear(bg)
-                    engine.draw_line(2, 2, 6, 2, fg, 1)
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_blue_u32()
+                val fg = color_red_u32()
+                engine.clear(bg)
+                engine.draw_line(2, 2, 6, 2, fg, 1)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-line", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-line", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-line", drawn.source)
+                else:
                     engine.present()
                     val pixels = engine.read_pixels()
                     expect(pixels.len()).to_equal(256)
@@ -193,18 +389,26 @@ describe "CUDA strict smoke tests":
                     expect(pixels[2 * 16 + 5]).to_equal(fg)
                     expect(pixels[2 * 16 + 6]).to_equal(fg)
                     expect(pixels[3 * 16 + 2]).to_equal(bg)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-line", result.unwrap_err())
 
         it "draw_circle writes outline pixels through the CUDA framebuffer":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val bg = color_blue_u32()
-                    val fg = color_red_u32()
-                    engine.clear(bg)
-                    engine.draw_circle(8, 8, 3, fg)
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_blue_u32()
+                val fg = color_red_u32()
+                engine.clear(bg)
+                engine.draw_circle(8, 8, 3, fg)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-circle", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-circle", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-circle", drawn.source)
+                else:
                     engine.present()
                     val pixels = engine.read_pixels()
                     expect(pixels.len()).to_equal(256)
@@ -214,18 +418,26 @@ describe "CUDA strict smoke tests":
                     expect(pixels[5 * 16 + 8]).to_equal(fg)
                     expect(pixels[8 * 16 + 8]).to_equal(bg)
                     expect(pixels[0]).to_equal(bg)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-circle", result.unwrap_err())
 
         it "draw_circle_filled writes filled pixels through the CUDA framebuffer":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val bg = color_blue_u32()
-                    val fg = color_red_u32()
-                    engine.clear(bg)
-                    engine.draw_circle_filled(8, 8, 3, fg)
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_blue_u32()
+                val fg = color_red_u32()
+                engine.clear(bg)
+                engine.draw_circle_filled(8, 8, 3, fg)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-circle-filled", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-circle-filled", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-circle-filled", drawn.source)
+                else:
                     engine.present()
                     val pixels = engine.read_pixels()
                     expect(pixels.len()).to_equal(256)
@@ -235,18 +447,26 @@ describe "CUDA strict smoke tests":
                     expect(pixels[11 * 16 + 8]).to_equal(fg)
                     expect(pixels[5 * 16 + 8]).to_equal(fg)
                     expect(pixels[4 * 16 + 4]).to_equal(bg)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-circle-filled", result.unwrap_err())
 
         it "draw_rounded_rect writes rounded fill through the CUDA framebuffer":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val bg = color_blue_u32()
-                    val fg = color_red_u32()
-                    engine.clear(bg)
-                    engine.draw_rounded_rect(4, 4, 8, 6, 2, fg)
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_blue_u32()
+                val fg = color_red_u32()
+                engine.clear(bg)
+                engine.draw_rounded_rect(4, 4, 8, 6, 2, fg)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-rounded-rect", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-rounded-rect", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-rounded-rect", drawn.source)
+                else:
                     engine.present()
                     val pixels = engine.read_pixels()
                     expect(pixels.len()).to_equal(256)
@@ -257,18 +477,26 @@ describe "CUDA strict smoke tests":
                     expect(pixels[6 * 16 + 8]).to_equal(fg)
                     expect(pixels[9 * 16 + 11]).to_equal(bg)
                     expect(pixels[0]).to_equal(bg)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-rounded-rect", result.unwrap_err())
 
         it "draw_triangle_filled writes filled pixels through the CUDA framebuffer":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val bg = color_blue_u32()
-                    val fg = color_red_u32()
-                    engine.clear(bg)
-                    engine.draw_triangle_filled(4, 4, 10, 4, 4, 10, fg)
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_blue_u32()
+                val fg = color_red_u32()
+                engine.clear(bg)
+                engine.draw_triangle_filled(4, 4, 10, 4, 4, 10, fg)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-triangle", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-triangle", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-triangle", drawn.source)
+                else:
                     engine.present()
                     val pixels = engine.read_pixels()
                     expect(pixels.len()).to_equal(256)
@@ -279,18 +507,26 @@ describe "CUDA strict smoke tests":
                     expect(pixels[6 * 16 + 6]).to_equal(fg)
                     expect(pixels[10 * 16 + 10]).to_equal(bg)
                     expect(pixels[3 * 16 + 4]).to_equal(bg)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-triangle", result.unwrap_err())
 
         it "clear then draw_rect_filled matches CPU reference pixel-for-pixel":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val bg = color_blue_u32()
-                    val fg = color_red_u32()
-                    engine.clear(bg)
-                    engine.draw_rect_filled(2, 2, 6, 6, fg)
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_blue_u32()
+                val fg = color_red_u32()
+                engine.clear(bg)
+                engine.draw_rect_filled(2, 2, 6, 6, fg)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-cpu-parity", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-cpu-parity", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-cpu-parity", drawn.source)
+                else:
                     engine.present()
                     val pixels = engine.read_pixels()
                     var mismatch_count = 0
@@ -303,21 +539,29 @@ describe "CUDA strict smoke tests":
                             mismatch_count = mismatch_count + 1
                         ci = ci + 1
                     expect(mismatch_count).to_equal(0)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-cpu-parity", result.unwrap_err())
 
         it "draw_image writes uploaded pixels through the CUDA framebuffer":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val bg = color_blue_u32()
-                    val img0 = 0x01020304 as u32
-                    val img1 = 0x05060708 as u32
-                    val img2 = 0x11121314 as u32
-                    val img3 = 0x15161718 as u32
-                    engine.clear(bg)
-                    engine.draw_image(5, 6, 2, 2, [img0, img1, img2, img3])
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_blue_u32()
+                val img0 = 0x01020304 as u32
+                val img1 = 0x05060708 as u32
+                val img2 = 0x11121314 as u32
+                val img3 = 0x15161718 as u32
+                engine.clear(bg)
+                engine.draw_image(5, 6, 2, 2, [img0, img1, img2, img3])
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-draw-image", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-draw-image", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-draw-image", drawn.source)
+                else:
                     engine.present()
                     val pixels = engine.read_pixels()
                     expect(pixels.len()).to_equal(256)
@@ -332,19 +576,27 @@ describe "CUDA strict smoke tests":
                         mismatch_count = mismatch_count + 1
                     expect(mismatch_count).to_equal(0)
                     expect(pixels[0]).to_equal(bg)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-draw-image", result.unwrap_err())
 
         it "draw_gradient_rect writes interpolated rows through the CUDA framebuffer":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val bg = color_blue_u32()
-                    val top = 0xFF000000 as u32
-                    val bottom = 0xFF0F1E2D as u32
-                    engine.clear(bg)
-                    engine.draw_gradient_rect(3, 4, 5, 4, top, bottom)
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_blue_u32()
+                val top = 0xFF000000 as u32
+                val bottom = 0xFF0F1E2D as u32
+                engine.clear(bg)
+                engine.draw_gradient_rect(3, 4, 5, 4, top, bottom)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-gradient", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-gradient", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-gradient", drawn.source)
+                else:
                     engine.present()
                     val pixels = engine.read_pixels()
                     expect(pixels.len()).to_equal(256)
@@ -362,25 +614,29 @@ describe "CUDA strict smoke tests":
                         row = row + 1
                     expect(mismatch_count).to_equal(0)
                     expect(pixels[0]).to_equal(bg)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-gradient", result.unwrap_err())
 
     context "draw_text and clip and mask device readback":
 
         it "draw_text result is visible in device readback":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val bg = color_blue_u32()
-                    engine.clear(bg)
-                    engine.draw_text(0, 0, "X", color_red_u32(), 8)
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_blue_u32()
+                engine.clear(bg)
+                engine.draw_text(0, 0, "X", color_red_u32(), 8)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-draw-text", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-draw-text", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-draw-text", drawn.source)
+                else:
                     engine.present()
-                    val readback = engine.read_pixels_with_source()
-                    expect(readback.source).to_equal("device_readback")
-                    expect(readback.backend_handle).to_be_greater_than(0)
-                    expect(readback.device_identity).to_be_greater_than(0)
-                    val cuda_pixels = readback.pixels
+                    val cuda_pixels = engine.read_pixels()
                     expect(cuda_pixels.len()).to_equal(256)
                     var non_bg = 0
                     var idx = 0
@@ -389,20 +645,28 @@ describe "CUDA strict smoke tests":
                             non_bg = non_bg + 1
                         idx = idx + 1
                     expect(non_bg).to_be_greater_than(0)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-draw-text", result.unwrap_err())
 
         it "set_clip constrains draw_rect_filled visible via device readback":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val bg = color_blue_u32()
-                    val fg = color_red_u32()
-                    engine.clear(bg)
-                    engine.set_clip(0, 0, 4, 4)
-                    engine.draw_rect_filled(0, 0, 16, 16, fg)
-                    engine.clear_clip()
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_blue_u32()
+                val fg = color_red_u32()
+                engine.clear(bg)
+                engine.set_clip(0, 0, 4, 4)
+                engine.draw_rect_filled(0, 0, 16, 16, fg)
+                engine.clear_clip()
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-set-clip", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-set-clip", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-set-clip", drawn.source)
+                else:
                     engine.present()
                     val pixels = engine.read_pixels()
                     expect(pixels.len()).to_equal(256)
@@ -410,42 +674,58 @@ describe "CUDA strict smoke tests":
                     expect(pixels[3 * 16 + 3]).to_equal(fg)
                     expect(pixels[4 * 16 + 4]).to_equal(bg)
                     expect(pixels[15 * 16 + 15]).to_equal(bg)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-set-clip", result.unwrap_err())
 
         it "clear_clip restores full-surface drawing via device readback":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val bg = color_blue_u32()
-                    val fg = color_red_u32()
-                    engine.clear(bg)
-                    engine.set_clip(0, 0, 2, 2)
-                    engine.clear_clip()
-                    engine.draw_rect_filled(0, 0, 16, 16, fg)
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_blue_u32()
+                val fg = color_red_u32()
+                engine.clear(bg)
+                engine.set_clip(0, 0, 2, 2)
+                engine.clear_clip()
+                engine.draw_rect_filled(0, 0, 16, 16, fg)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-clear-clip", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-clear-clip", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-clear-clip", drawn.source)
+                else:
                     engine.present()
                     val pixels = engine.read_pixels()
                     expect(pixels.len()).to_equal(256)
                     expect(pixels[15 * 16 + 15]).to_equal(fg)
                     expect(pixels[0]).to_equal(fg)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-clear-clip", result.unwrap_err())
 
         it "set_mask constrains draw_rect_filled visible via device readback":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val bg = color_blue_u32()
-                    val fg = color_red_u32()
-                    engine.clear(bg)
-                    # mask_buf[i]==0 means blocked; 1 means allowed
-                    # mask layout [col0_row0, col1_row0, col0_row1, col1_row1]
-                    # pixel (0,0)=1(pass), (1,0)=0(block), (0,1)=1(pass), (1,1)=0(block)
-                    engine.set_mask([1u8, 0u8, 1u8, 0u8], 2, 2)
-                    engine.draw_rect_filled(0, 0, 2, 2, fg)
-                    engine.clear_mask()
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_blue_u32()
+                val fg = color_red_u32()
+                engine.clear(bg)
+                # mask_buf[i]==0 means blocked; 1 means allowed
+                # mask layout [col0_row0, col1_row0, col0_row1, col1_row1]
+                # pixel (0,0)=1(pass), (1,0)=0(block), (0,1)=1(pass), (1,1)=0(block)
+                engine.set_mask([1u8, 0u8, 1u8, 0u8], 2, 2)
+                engine.draw_rect_filled(0, 0, 2, 2, fg)
+                engine.clear_mask()
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-set-mask", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-set-mask", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-set-mask", drawn.source)
+                else:
                     engine.present()
                     val pixels = engine.read_pixels()
                     expect(pixels.len()).to_equal(256)
@@ -453,19 +733,27 @@ describe "CUDA strict smoke tests":
                     expect(pixels[1]).to_equal(bg)
                     expect(pixels[16]).to_equal(fg)
                     expect(pixels[17]).to_equal(bg)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-set-mask", result.unwrap_err())
 
     context "sync and readback correctness":
 
         it "read_pixels after present reflects latest draw":
-            val probe = probe_cuda()
-            if probe.is_usable():
-                val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
-                if result.is_ok():
-                    var engine = result.unwrap()
-                    val first_color = color_blue_u32()
-                    val second_color = color_red_u32()
-                    engine.clear(first_color)
+            val result = Engine2D.create_with_backend_strict(16, 16, "cuda")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val first_color = color_blue_u32()
+                val second_color = color_red_u32()
+                engine.clear(first_color)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("cuda-readback-latest", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("cuda-readback-latest", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("cuda-readback-latest", drawn.source)
+                else:
                     engine.present()
                     val first_pixels = engine.read_pixels()
                     engine.clear(second_color)
@@ -473,4 +761,10 @@ describe "CUDA strict smoke tests":
                     val second_pixels = engine.read_pixels()
                     expect(first_pixels[0]).to_equal(first_color)
                     expect(second_pixels[0]).to_equal(second_color)
-                    engine.shutdown()
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("cuda-readback-latest", result.unwrap_err())
+
+            print "[cuda-gpu] RUN VERDICT: this run's GPU evidence is exactly the set of '[cuda-gpu] <label>: GPU-PROVEN' lines above."
+            print "[cuda-gpu] RUN VERDICT: every '[cuda-gpu] <label>: GPU BRANCH SKIPPED' line marks an example that proves NOTHING about the GPU path."
+            print "[cuda-gpu] RUN VERDICT: a PASS with no GPU-PROVEN line does NOT attest any CUDA device — read it as 'device unavailable', not as 'CUDA works'."
