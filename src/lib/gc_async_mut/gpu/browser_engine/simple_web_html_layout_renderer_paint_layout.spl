@@ -669,7 +669,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     val node_count = nodes.len()
     var i = 0
     var has_absolute_node = false
-    # cpu-lane-loop-ok: fn paint pass 1 of 6: normal-flow (non-absolute, non-relative-root) box paint - shadow, background, border, outline plus widget panel and button fills, in document order = back to front. Bound is node_count; the CPU lane rasterises per node by design, and the pass is budget-guarded via _web_budget_expired
+    # cpu-lane-loop-ok: fn paint pass 1 of 6: normal-flow (non-absolute, non-relative-root) box paint - shadow, background, border, outline plus widget panel and button fills, in document order = back to front. Bound is node_count; the CPU lane rasterises per node by design, and the pass is budget-guarded via _web_budget_expired_at
     while i < node_count:
         # Budget guard: stop painting backgrounds on expiry; the framebuffer keeps
         # whatever was painted so far (already sized width*height).
@@ -838,6 +838,17 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         var positive_z_pos = 0
         # cpu-lane-loop-ok: fn paint pass 4 of 6: the positive-z absolute boxes gathered by pass 3, walked in z-sorted order. Bound is positive_z_count (absolute nodes with z-index > 0), not node_count
         while positive_z_pos < positive_z_count:
+            # Budget guard: stop painting positive-z absolute boxes on expiry.
+            # positive_z_count bounds this pass below node_count, so it is not
+            # runaway the way passes 1-3 were -- but "bounded" is not "free":
+            # every iteration walks content_paint_hidden_by_ancestor and can
+            # rasterise a shadow/gradient, and passes 5 (scrollbars) and 6
+            # (text) run AFTER it. Leaving this one pass unguarded is exactly
+            # how a truncated render loses its text and still reports success,
+            # so it names its site like the other five rather than being the
+            # single silent exit in the family.
+            if _web_budget_expired_at(WEB_BUDGET_SITE_PAINT_ABSOLUTE_HIGH_Z):
+                break
             i = positive_z_indices[positive_z_pos]
             val nd = nodes[i]
             val st = styles[i]
