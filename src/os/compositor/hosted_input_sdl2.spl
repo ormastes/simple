@@ -2,12 +2,28 @@ use os.drivers.input.ps2_keyboard.{KeyEvent, Key}
 use os.drivers.input.ps2_mouse.{MouseEvent}
 use os.compositor.input_backend.{InputBackend}
 
-extern fn rt_sdl2_poll_event(handle: i64) -> i64
-extern fn rt_sdl2_get_event_type() -> i64
+# NOTE (2026-08-05): 3 of these 6 externs previously named functions that do
+# not exist anywhere in the registered SDL2 surface, plus rt_sdl2_poll_event
+# had a wrong arity (declared with a handle arg; the real C signature takes
+# none) — see doc/04_architecture/ui/sdl2_seam_subset_audit.md. Fixed:
+# `get_event_type` deleted (rt_sdl2_poll_event's own return value already IS
+# the event-type code — see runtime_sdl2.c's rt_sdl2_poll_event, which
+# returns rt_sdl2_event_code()); `get_key_code` -> `event_key_code` (real,
+# returns the USB-HID *scancode* of the last event — matches the existing
+# 224-231 modifier-key checks below, which are already scancode numbers) plus
+# `event_key_sym` (real, added — returns the SDL *keysym*, which is what
+# `_sdl_keycode_to_key` below actually decodes: ASCII-ish letters/digits and
+# `SDLK_*` arrow constants, a different numbering than scancode); wrongly
+# feeding a scancode into that decoder to disambiguate keys would have been a
+# silent behavior bug, not a bagged decoder. `get_mouse_button` ->
+# `event_mouse_button` (real; note its button-index mapping differs from raw
+# SDL button constants — see the down-stream fix in `poll_events` below).
+extern fn rt_sdl2_poll_event() -> i64
+extern fn rt_sdl2_event_key_code() -> i64
+extern fn rt_sdl2_event_key_sym() -> i64
 extern fn rt_sdl2_get_mouse_x() -> i64
 extern fn rt_sdl2_get_mouse_y() -> i64
-extern fn rt_sdl2_get_key_code() -> i64
-extern fn rt_sdl2_get_mouse_button() -> i64
+extern fn rt_sdl2_event_mouse_button() -> i64
 
 val SDL_EVENT_NONE: i64 = 0
 val SDL_EVENT_QUIT: i64 = 256
@@ -40,12 +56,14 @@ class HostedSdl2Input:
         )
 
     me poll_events():
-        val has_event = rt_sdl2_poll_event(self.window_handle)
-        if has_event == 0:
+        # rt_sdl2_poll_event()'s return value is itself the event-type code
+        # (0 = no event); there is no separate "get event type" accessor.
+        val event_type = rt_sdl2_poll_event()
+        if event_type == 0:
             return
-        val event_type = rt_sdl2_get_event_type()
         if event_type == SDL_EVENT_KEYDOWN or event_type == SDL_EVENT_KEYUP:
-            val code = rt_sdl2_get_key_code()
+            val code = rt_sdl2_event_key_code()
+            val sym = rt_sdl2_event_key_sym()
             val pressed = event_type == SDL_EVENT_KEYDOWN
             if code == 226 or code == 230:
                 self.alt_state = pressed
@@ -53,15 +71,19 @@ class HostedSdl2Input:
                 self.shift_state = pressed
             elif code == 224 or code == 228:
                 self.ctrl_state = pressed
-            self.pending_key = KeyEvent(key: _sdl_keycode_to_key(code), pressed: pressed)
+            self.pending_key = KeyEvent(key: _sdl_keycode_to_key(sym), pressed: pressed)
         elif event_type == SDL_EVENT_MOUSEMOTION:
             self.last_mouse_x = rt_sdl2_get_mouse_x().to_i32()
             self.last_mouse_y = rt_sdl2_get_mouse_y().to_i32()
             self.pending_mouse = MouseEvent(dx: self.last_mouse_x, dy: self.last_mouse_y, left: false, right: false, middle: false)
         elif event_type == SDL_EVENT_MOUSEBUTTONDOWN or event_type == SDL_EVENT_MOUSEBUTTONUP:
-            val btn = rt_sdl2_get_mouse_button()
+            # rt_sdl2_event_mouse_button() already remaps SDL's raw button
+            # constants to 0=left, 1=right, 2=middle (see runtime_sdl2.c) —
+            # different from the 1/2/3 SDL_BUTTON_* numbering the old
+            # (nonexistent) rt_sdl2_get_mouse_button implied.
+            val btn = rt_sdl2_event_mouse_button()
             val down = event_type == SDL_EVENT_MOUSEBUTTONDOWN
-            self.pending_mouse = MouseEvent(dx: self.last_mouse_x, dy: self.last_mouse_y, left: btn == 1 and down, right: btn == 3 and down, middle: btn == 2 and down)
+            self.pending_mouse = MouseEvent(dx: self.last_mouse_x, dy: self.last_mouse_y, left: btn == 0 and down, right: btn == 1 and down, middle: btn == 2 and down)
 
 impl InputBackend for HostedSdl2Input:
 

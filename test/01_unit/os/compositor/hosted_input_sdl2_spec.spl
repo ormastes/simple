@@ -1,0 +1,52 @@
+# @cover src/os/compositor/hosted_input_sdl2.spl 30%
+"""
+# Hosted SDL2 Input Spec
+
+Unit tests for the SDL2 compositor input backend. `HostedSdl2Input` has zero
+callers anywhere in the tree today (lane A4 of
+`doc/03_plan/ui/wm_platform_honesty_agent_lanes.md` owns deciding whether it
+gets wired up or deleted), so this file had no test coverage at all before
+this spec. It exists to (a) force a real compile of the module — half its
+declared `rt_sdl2_*` externs were dangling (named functions that do not exist
+in `runtime_sdl2.c`) until fixed per
+`doc/04_architecture/ui/sdl2_seam_subset_audit.md` — and (b) lock in the
+runtime-observable part of those fixes: `rt_sdl2_poll_event`'s arity
+(0 args, not 1) and the fact that its return value already carries the
+event-type code, so there is no separate `get_event_type` accessor to call.
+
+Tests use the headless path: with no real SDL2 display, `rt_sdl2_poll_event()`
+returns 0 (no event), so `poll_key`/`poll_mouse` return nil without ever
+reaching the event-decode branches — the same constraint the existing
+`hosted_backend_sdl2_spec.spl` documents for `try_create`.
+"""
+
+use std.spec.{describe, it, expect}
+use os.compositor.hosted_input_sdl2.{HostedSdl2Input}
+use os.drivers.input.ps2_keyboard.{Key}
+
+describe "HostedSdl2Input":
+
+    it "constructs with no modifier keys held":
+        val inp = HostedSdl2Input.new(0)
+        expect(inp.alt_held()).to_equal(false)
+        expect(inp.shift_held()).to_equal(false)
+        expect(inp.ctrl_held()).to_equal(false)
+
+    # Regression coverage: rt_sdl2_poll_event used to be declared with a
+    # spurious `handle: i64` parameter that does not exist on the real C
+    # signature (`rt_sdl2_poll_event(void)`, runtime_sdl2.c:771). Calling it
+    # through the fixed 0-arg declaration must not crash headless.
+    it "poll_key() calls the real 0-arg rt_sdl2_poll_event and returns nil headless":
+        val inp = HostedSdl2Input.new(0)
+        expect(inp.poll_key()).to_equal(nil)
+
+    it "poll_mouse() calls the real 0-arg rt_sdl2_poll_event and returns nil headless":
+        val inp = HostedSdl2Input.new(0)
+        expect(inp.poll_mouse()).to_equal(nil)
+
+    it "key_to_char maps the keys it knows and refuses the ones it does not":
+        val inp = HostedSdl2Input.new(0)
+        expect(inp.key_to_char(Key.A)).to_equal("a")
+        expect(inp.key_to_char(Key.Space)).to_equal(" ")
+        expect(inp.key_to_char(Key.Enter)).to_equal("\n")
+        expect(inp.key_to_char(Key.Escape)).to_equal(nil)
