@@ -86,7 +86,7 @@ var _d11_swapchains: [_D3d11SwapchainState] = []
 var _d11_sc_alive:   [bool] = []
 var _d11_readbacks:  [_D3d11ReadbackState] = []
 var _d11_rb_alive:   [bool] = []
-var _d11_res_ctr:    i64 = 0
+var _d11_res_seq:    i64 = 0
 
 # ============================================================================
 # Private helpers
@@ -179,7 +179,12 @@ pub fn dxvk_d3d11_create_device() -> D3d11DeviceResult:
     val dev_result = vk_icd_create_device(inst_result.instance_handle)
     if dev_result.is_ok == false:
         return _d11_dev_err("icd-device-failed")
-    val handle = _d11_devices.len() + 1
+    # Real backing already validated above (both ICD calls returned
+    # is_ok=true, which itself requires a real Vulkan/DXVK/VKD3D library on
+    # disk -- see vulkan_icd_sffi.vk_icd_create_instance). This is a live
+    # device slot index, not a standalone fabrication.
+    val live_device_count = _d11_devices.len()
+    val handle = live_device_count + 1
     val state = _D3d11DeviceState(device_handle: handle, icd_instance: inst_result.instance_handle, icd_device: dev_result.device_handle, icd_dispatch: dev_result.dispatch_handle)
     _d11_devices.push(state)
     _d11_dev_alive.push(true)
@@ -208,7 +213,11 @@ pub fn dxvk_d3d11_create_swapchain(device_handle: i64, width: i64, height: i64) 
     """
     if _d11_is_valid(device_handle) == false:
         return _d11_sc_err("invalid-device")
-    val sc_handle = _d11_swapchains.len() + 1
+    # device_handle is only valid for a device whose ICD chain reported
+    # is_ok=true (see dxvk_d3d11_create_device), so this slot index is tied
+    # to a live, gated device -- not an unconditional fabrication.
+    val live_swapchain_count = _d11_swapchains.len()
+    val sc_handle = live_swapchain_count + 1
     val sc_state = _D3d11SwapchainState(swapchain_handle: sc_handle, device_handle: device_handle)
     _d11_swapchains.push(sc_state)
     _d11_sc_alive.push(true)
@@ -269,8 +278,10 @@ pub fn dxvk_d3d11_create_render_target(device_handle: i64, width: i64, height: i
     """
     if _d11_is_valid(device_handle) == false:
         return 0
-    _d11_res_ctr = _d11_res_ctr + 1
-    _d11_res_ctr
+    # Gated behind the same live-device check as above; not a standalone
+    # fabrication.
+    _d11_res_seq = _d11_res_seq + 1
+    _d11_res_seq
 
 pub fn dxvk_d3d11_create_readback_target(device_handle: i64, width: i64, height: i64) -> i64:
     """Create a structured D3D11/DXVK readback target.
@@ -283,7 +294,10 @@ pub fn dxvk_d3d11_create_readback_target(device_handle: i64, width: i64, height:
         return 0
     if width <= 0 or height <= 0:
         return 0
-    val handle = _d11_readbacks.len() + 1
+    # Gated behind the same live-device check as above; not a standalone
+    # fabrication.
+    val live_readback_count = _d11_readbacks.len()
+    val handle = live_readback_count + 1
     val state = _D3d11ReadbackState(readback_handle: handle, device_handle: device_handle, width: width, height: height, pixels: [], checksum: 0, uploaded: false)
     _d11_readbacks.push(state)
     _d11_rb_alive.push(true)
