@@ -42,20 +42,80 @@ naming exactly these five names.
 - Not fatal on the Linux dev host today only because of linker tolerance, not
   because the duplication is safe.
 
-## Suggested fix shape (not yet attempted — needs an owner)
+## Resolution (2026-08-05) — NOT a delete-one-copy fix
 
-Decide which implementation is the real one (likely `host_gpu_lane.rs`, given
-`runtime_native.c`'s copy has no test coverage found by Lane B and the Rust
-side carries its own unit tests at `host_gpu_lane.rs:431+`), delete the
-losing C copy, and confirm no caller depended on divergent behavior between
-the two (same trap as
+Investigated the "suggested fix shape" above (delete `runtime_native.c`'s
+copy, keep `host_gpu_lane.rs`) before acting on it, per
 [[reference_a_fix_labelled_commit_can_be_a_tree_wipe]] — diff both directions
-before deleting either side).
+before deleting either side. That investigation found the suggested shape was
+**wrong**: the two copies are not stale-vs-real, they back two different,
+never-coexisting lanes, and deleting either would break real callers.
+
+**Both copies are load-bearing, for different consumers, and must stay:**
+
+- `runtime_native.c`'s copy backs **native-compiled (AOT) Simple
+  executables**: `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`
+  lowers `target.later() gpu|host:` blocks to calls against
+  `rt_host_gpu_lane_event`/`rt_host_gpu_queue_emit` (this C ABI family), and
+  `src/compiler/70.backend/backend/runtime_compiler.spl` unconditionally
+  includes `runtime_native` in the native-product-build C source bundle.
+  Those standalone output binaries embed no Rust runtime at all, so they
+  need their own C implementation of the primitive.
+- `host_gpu_lane.rs`'s copy backs the **Rust-hosted seed/compiler binary's
+  own interpreter and JIT** execution of the same lane markers (see
+  `interpreter/_EvalOps/call_method_eval.spl`) and carries its own unit
+  tests (`cargo test -p simple-runtime --lib host_gpu_lane`, 7/7 green).
+
+**The actual FreeBSD-blocking hazard was narrower than "both defined twice in
+the same staticlib" and has already been fixed as a side effect of an
+unrelated commit landed the same day.** `src/compiler_rust/runtime/build.rs`
+(`compile_c_runtime_sources`) is the file that decides what the
+`simple-runtime` crate — and therefore `cargo build -p simple-driver --bin
+simple`, the exact command `check-freebsd-wm-seam-refusal.shs` runs in-guest —
+actually links. As committed, that function has **never** compiled the full
+`runtime_native.c`; before commit `7eb0f507702a` (lane R2,
+"fix(interp): register rt_opengl_*/rt_oneapi_* externs", same day) it wasn't
+in the list at all (which is why `rt_opengl_*`/`rt_oneapi_*` were unreachable
+from the interpreter — a separate bug). R2's fix added
+`src/runtime/runtime_native_gpu_stub.c`, a narrow verbatim extract of just
+the `rt_opengl_*`/`rt_oneapi_*` bodies, specifically **because** compiling the
+whole `runtime_native.c` file would duplicate-symbol against
+`host_gpu_lane.rs`'s `rt_host_gpu_*` family — R2's own commit message names
+this exact hazard. A stray `runtime_native.o` left over in one `OUT_DIR` from
+an intermediate WIP state (mtime before the fix) is consistent with this
+being the same failure Lane B observed, from a transient state of the tree
+already superseded by the time this doc's fix landed.
+
+**Verified (2026-08-05, this fix):**
+
+- Static: `ar t libruntime_sffi_c.a` for a fresh `cargo build -p
+  simple-driver --bin simple` lists 15 members, no `runtime_native.o`.
+- Sabotage RED: temporarily added `"runtime_native.c"` back to
+  `compile_c_runtime_sources()`'s `c_sources` and forced
+  `RUSTFLAGS="-C link-arg=-fuse-ld=lld"` (lld is FreeBSD's default linker,
+  unlike this dev host's GNU ld). Link failed with 24
+  `rust-lld: error: duplicate symbol: rt_host_gpu_*` errors — the whole
+  family, not just the five named above — reproducing the reported failure
+  shape locally on Linux by forcing the stricter linker.
+- Sabotage GREEN: reverted the one-line addition; `cargo build -p
+  simple-driver --bin simple` under the same forced `lld` linker finished
+  clean (`Finished dev profile ... in 1m 46s`), no duplicate-symbol errors.
+- `cargo test -p simple-runtime --lib host_gpu_lane`: 7 passed, 0 failed.
+- Added a regression guard,
+  `test/01_unit/compiler/backend/runtime_native_gpu_stub_duplicate_symbol_guard_spec.spl`,
+  asserting `build.rs` never re-adds a literal `"runtime_native.c"` C-source
+  entry (only the extracted stub) and that both per-lane implementations stay
+  present. Sabotage/revert re-verified green (2 examples, 0 failures) and red
+  (1 of 2 failed) against this spec directly.
 
 ## Verification once fixed
 
 Re-run `scripts/check/check-freebsd-wm-seam-refusal.shs` inside the FreeBSD
 QEMU guest (`build/freebsd/vm/`, real BASIC-CLOUDINIT boot, KVM accel, no
-`-kernel`/`isa-debug-exit`) — it currently exits non-zero with `refusal=blocked
-reason=in-guest build did not complete`. A clean link should let it reach the
-real `refusal=yes` verdict against the live `wm_host_2d_for("freebsd")` seam.
+`-kernel`/`isa-debug-exit`) — it previously exited non-zero with
+`refusal=blocked reason=in-guest build did not complete`. A clean link should
+let it reach the real `refusal=yes` verdict against the live
+`wm_host_2d_for("freebsd")` seam. (In-guest re-run launched as part of this
+fix; the in-guest build is a cold ~40-minute budget — see this doc's history
+or the task tracker for the resulting verdict line if it isn't folded in
+here yet.)
