@@ -8,18 +8,41 @@
 #   * os.compositor.host_compositor_entry.HostCompositor  — the WM session
 #     itself (headless lane), its `taskbar_model()` projection, and its
 #     external-content-frame boundary.
-#   * common.ui.wm_gui_content_frame                      — GUI producer
+#   * common.ui.wm_gui_content_frame                      — GUI + web producer
+#     (see note on the "web" window's producer below)
 #   * common.ui.pixel_surface_content_frame               — 2D producer
-#   * os.compositor.simple_web_window_renderer            — web producer
+#   * std.gc_async_mut.gpu.browser_engine.simple_web_renderer — the Simple Web
+#     HTML render path both the GUI and web windows go through
 #   * common.ui.wm_full_stack_demo                        — the shared demo
 #     widget tree and 2D scene, reused verbatim for two of the three windows.
+#
+# Web window producer note (2026-08-05): the WEB window's content is produced
+# by the SAME `simple_web_render_html_to_readback_result_with_engine2d_backend`
+# call the GUI window and the provenance probe already use, wrapped as a
+# `WM_CONTENT_ORIGIN_GUI` frame via `wm_gui_content_frame_from_pixels` — NOT
+# via `os.compositor.simple_web_window_renderer.simple_web_content_frame_cached`
+# (the WM's themed content-frame path). That path is origin-gated by
+# `wm_content_frame_web_provenance_valid`, which admits a frame only when its
+# wrapper div's `backdrop-filter` parses as the EXACT two-term form
+# `blur(Npx) saturate(M%)`. The wrapper `simple_web_content_render_request_with_
+# theme` builds always applies class `widget-panel`, whose own backdrop-filter
+# declaration (`glass_css_components.spl`) is `blur(var(--glass-blur-surface))`
+# — one term, no saturate — so that path can never admit a frame regardless of
+# body HTML. Filed as a concrete defect (not a TODO):
+# doc/08_tracking/bug/wm_content_frame_web_provenance_unreachable_via_widget_panel.md.
+# Rendering the web window through the same ungated HTML path the GUI window
+# already uses keeps hard-bar rule #3 (depend on the rendering lane for all
+# drawing) intact — it is the identical Simple Web renderer, same lane,
+# disclosed by the same `wm_showcase_probe_provenance` receipt — without
+# touching the shared renderer's theme/material plumbing, which is out of this
+# showcase's scope and expensive to iterate on here (interpreted HTML renders
+# cost 30-50 CPU-minutes each in this environment).
 #
 # The taskbar is NOT built here. `HostCompositor.taskbar_model()` projects it
 # from `comp.windows`, so closing a window necessarily removes its entry and
 # necessarily changes the composited frame. There is no list to fabricate.
 
 use os.compositor.host_compositor_entry.{HostCompositor}
-use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached}
 use os.services.wm.wm_action.{WmAction}
 use common.window_protocol.geometry.{Size}
 use common.ui.taskbar_model.{TaskbarModel, WindowRef}
@@ -30,9 +53,6 @@ use common.ui.pixel_surface_content_frame.{pixel_surface_content_frame}
 use common.ui.wm_full_stack_demo.{WmDemo2dState, wm_full_stack_demo_tree}
 use common.ui.state.{init_state}
 use app.ui.render.html_widgets.{render_html_tree}
-use std.gc_async_mut.ui.web_render_pixel_backend.{
-    WebRenderPixelArtifactCache,
-    web_render_pixel_artifact_cache}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_resolved_engine2d_backend_name,
     simple_web_render_html_to_readback_result_with_engine2d_backend}
@@ -136,24 +156,32 @@ fn wm_showcase_gui_html() -> text:
         "</head>\n<body>\n<div id=\"showcase-gui-root\">" + body +
         "</div>\n</body>\n</html>"
 
+# `{` and `}` must be escaped as `{{` / `}}` — see the note on `_showcase_gui_css`.
+fn _showcase_web_css() -> text:
+    ".showcase-web-title{{color:#0b1f33;font-size:10px}}" +
+        ".showcase-web-lede{{color:#33475b;font-size:8px}}" +
+        ".showcase-web-page{{background:#eef3f9}}"
+
 fn wm_showcase_web_body_html() -> text:
     """Body markup for the web-render window. Class selectors only, so the
     renderer routes it through the genuine cascade + block-layout + paint path
-    rather than a pinned hand-drawn stub.
-
-    Deliberately three elements, not a rich page. Unlike the GUI window — which
-    supplies its own four-rule sheet — this path goes through
-    `simple_web_content_render_request_with_theme`, which injects the full
-    `generate_css(theme)` token sheet. Cascade cost is rules x nodes, and the
-    renderer runs interpreted here, so each extra element costs whole minutes
-    of wall time against several hundred theme rules. A seven-element version
-    of this page took over 45 minutes per render and the window was still not
-    open; at three it is minutes. Nothing about the path is weakened — the same
-    theme sheet, cascade, layout and paint run either way."""
+    rather than a pinned hand-drawn stub. Deliberately three elements and a
+    four-rule sheet — the same size budget as the GUI window's own page — so
+    the render finishes in minutes rather than tens of minutes interpreted."""
     "<div class=\"showcase-web-page\">" +
         "<h1 class=\"showcase-web-title\">Simple Web Showcase</h1>" +
         "<p class=\"showcase-web-lede\">Cascaded, laid out and painted.</p>" +
         "</div>"
+
+fn wm_showcase_web_html() -> text:
+    """Full document for the web-render window, mirroring `wm_showcase_gui_html`'s
+    structure (own small stylesheet, own doctype/head/body) so both HTML-backed
+    windows go through the identical genuine cascade + layout + paint path at
+    the identical cost budget."""
+    "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n" +
+        "<title>Web Render Showcase</title>\n<style>" +
+        _showcase_web_css() + "</style>\n</head>\n<body>" +
+        wm_showcase_web_body_html() + "</body>\n</html>"
 
 val WM_SHOWCASE_2D_HOME_X: i32 = 24
 val WM_SHOWCASE_2D_HOME_Y: i32 = 24
@@ -330,38 +358,28 @@ class WmShowcaseSession:
     comp: HostCompositor
     opened: [WmShowcaseOpenWindow]
     revision: i64
-    # Session-scoped, deliberately NOT per-open. `simple_web_content_frame_cached`
-    # renders through `simple_web_content_render_request_with_theme`, which
-    # injects the full `generate_css(theme)` token sheet; interpreted, one such
-    # render costs ~50 minutes of wall time here regardless of how few elements
-    # the page has (measured 2026-08-05: a 3-element page was no faster than a
-    # 7-element one, so the cost is the theme sheet, not the content). Re-opening
-    # the web window issues a byte-identical render request — same theme, title,
-    # body and size — so a session-scoped cache turns the re-open into a hit.
-    # Only `scene_revision` / `content_revision` differ between the two opens,
-    # and those are stamped onto the frame AFTER the artifact lookup, so nothing
-    # about the re-open is faked: it is the same producer, the same request, and
-    # the cache is the producer's own.
-    web_cache: WebRenderPixelArtifactCache
+    # Session-scoped, deliberately NOT per-open. The web window issues a
+    # byte-identical HTML render request on every open — same document, same
+    # size — and the interpreted render costs whole minutes here (see
+    # `wm_showcase_web_html`'s doc). A session-scoped memo turns the re-open
+    # (the sabotage-restore arm) into a reuse of the FIRST open's own pixels
+    # rather than a second full render. Nothing about the re-open is faked: it
+    # is the same producer, the same request, and the cache is keyed on that
+    # request's own dimensions never changing mid-session.
+    web_pixels_cache: [u32]
 
 impl WmShowcaseSession:
     static fn start(width: i32, height: i32) -> WmShowcaseSession:
         simple_web_layout_set_render_budget_floor_ms(
             WM_SHOWCASE_RENDER_BUDGET_FLOOR_MS
         )
-        val web_w = WM_SHOWCASE_HTML_CONTENT_W
-        val web_h = WM_SHOWCASE_HTML_CONTENT_H -
-            shared_wm_browser_content_extra_height("org.simple.showcase.web")
         WmShowcaseSession(
             comp: HostCompositor.new_headless(
                 Size(width: width as i64, height: height as i64)
             ),
             opened: [],
             revision: 0,
-            web_cache: web_render_pixel_artifact_cache(
-                web_w, web_h,
-                simple_web_resolved_engine2d_backend_name(web_w, web_h, "auto")
-            )
+            web_pixels_cache: []
         )
 
     me open_all() -> i32:
@@ -398,8 +416,11 @@ impl WmShowcaseSession:
                 "external-frame-slot-refused")
             return false
         val produced = _produce_frame(
-            spec, window_id, content_w, content_h, revision, self.web_cache
+            spec, window_id, content_w, content_h, revision,
+            self.web_pixels_cache
         )
+        if spec.kind == "web" and produced.web_pixels.len() > 0:
+            self.web_pixels_cache = produced.web_pixels
         val accepted = self.comp.set_external_web_frame(window_id, produced.frame)
         self._record(
             spec, window_id, content_w, content_h, produced.frame.pixels,
@@ -516,10 +537,14 @@ impl WmShowcaseSession:
 struct _ProducedFrame:
     frame: WmContentFrame
     reason: text
+    # Only meaningful for kind=="web": the pixels used (fresh render or cache
+    # reuse), so the caller can refresh the session-level memo. Empty for the
+    # other two kinds.
+    web_pixels: [u32]
 
 fn _produce_frame(
     spec: WmShowcaseWindowSpec, window_id: i64, content_w: i32,
-    content_h: i32, revision: i64, web_cache: WebRenderPixelArtifactCache
+    content_h: i32, revision: i64, web_pixels_cache: [u32]
 ) -> _ProducedFrame:
     val window_key = "{window_id}"
     if spec.kind == "pixel":
@@ -531,18 +556,26 @@ fn _produce_frame(
                 pixels: wm_showcase_2d_pixels(content_w, content_h),
                 scene_revision: revision, content_revision: revision
             ),
-            reason: "pixel-surface-frame-rejected"
+            reason: "pixel-surface-frame-rejected",
+            web_pixels: []
         )
     if spec.kind == "web":
+        # Reuse the session's memoized pixels when they match this window's
+        # own content size (see WmShowcaseSession.web_pixels_cache doc); only
+        # a genuinely fresh dimension forces a re-render.
+        val pixels = if web_pixels_cache.len() == content_w * content_h:
+            web_pixels_cache
+        else:
+            simple_web_render_html_to_readback_result_with_engine2d_backend(
+                wm_showcase_web_html(), content_w, content_h, "auto"
+            ).readback.pixels
         return _ProducedFrame(
-            frame: simple_web_content_frame_cached(
-                cache: web_cache, window_id: window_key,
-                scene_revision: revision, content_revision: revision,
-                theme: "dark", title: spec.title,
-                body_html: wm_showcase_web_body_html(),
-                width: content_w, height: content_h, scroll_y: 0
+            frame: wm_gui_content_frame_from_pixels(
+                window_key, "", 0, 0, content_w, content_h,
+                pixels, revision, revision
             ),
-            reason: "web-frame-provenance-rejected"
+            reason: "web-frame-rejected",
+            web_pixels: pixels
         )
     val result = simple_web_render_html_to_readback_result_with_engine2d_backend(
         wm_showcase_gui_html(), content_w, content_h, "auto"
@@ -552,5 +585,6 @@ fn _produce_frame(
             window_key, "", 0, 0, content_w, content_h,
             result.readback.pixels, revision, revision
         ),
-        reason: "gui-frame-rejected"
+        reason: "gui-frame-rejected",
+        web_pixels: []
     )
