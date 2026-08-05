@@ -78,6 +78,67 @@ verify that the caller actually crosses the worker/library boundary.
   identity separately from the seed/driver.
 - Guide: `doc/07_guide/compiler/build.md#bootstrap-debug-and-test-modes`.
 
+## Spec run verdict / "did the tests pass?"
+
+- **Canonical verdict for one spec FILE:** the `SPEC FILE VERDICT: <path>
+  declared>=N executed=N passed=N failed=N dropped=N` line, emitted on stdout,
+  last, by `report_spec_file_verdict`
+  (`src/compiler_rust/driver/src/cli/basic.rs:144`, landed `5b57a79f8ba`).
+- **Canonical verdict for a `bin/simple test` run:** `Results: N total, M
+  passed, K failed` (`src/app/test_runner_new/test_runner_single.spl:225`).
+- **`bin/simple run` speaks a DIFFERENT grammar:** `N examples, M failures`
+  (`src/compiler_rust/driver/src/cli/test_output.rs:164`), singular `1 failure`
+  at `:251`, and it is **ANSI-colour-wrapped**. `test` and `run` summaries are
+  not interchangeable and neither pattern matches the other's output.
+- **Do not substitute:** `tail -1` of a spec log (that is the last `describe`'s
+  count, not the file's), the process exit status (fail-open: an unresolved
+  `use` is only a WARN and still exits 0), or a green stdout while the real
+  failure line went to stderr.
+- **Do not confuse with:** exit 143 (≈60s CPU guard, SIGTERM) and exit 255 +
+  `Process timed out` (600s daemon request cap). Neither is a test result.
+- **Detailed traps:** `.claude/skills/spipe.md` §"Reading the verdict — how a
+  spec run lies to you".
+- **Layer note:** `doc/00_llm_process/layer_expert/test_runner/skill.md`.
+
+### Agent lookup rule
+
+When a request asks whether a spec, suite, or corpus passes, resolve the answer
+from the verdict line named above — never from the exit code alone, never from
+the last line of a log, and never from a summary grammar belonging to the other
+command. Strip ANSI before anchoring any pattern. Compare `executed` counts
+across runs, not only `failed`: a module-load failure drops whole `describe`
+blocks at exit 0.
+
+### Vacuity rule
+
+A bare `assert` is inert (`assert 1 == 2` has reported `7 passed`). `check()`
+is a real assertion (`.../cli/test_runner/execution.rs:989`), so an
+`expect(`-only vacuity scan both misses `check()` specs and mis-scores
+`check(true)`. A failing `expect` does not abort the example body and only the
+last failure per example prints, so the count of printed failures is a lower
+bound on defects, never the defect count.
+
+## Evidence discipline: census, sabotage, and size
+
+- **Census:** raw false-positive rates measured here ran 83.9% (arity), 74% (a
+  constant scan actually counting deliberate `FAILMARK`s), 46.2% (dead code),
+  and 31.5% (tautology). Bare-name collisions are the recurring cause; `ugrep`
+  is the default `grep`, so pin `/usr/bin/grep` and anchor on qualified names.
+  Validate a census against known ground truth **before** believing any of its
+  other output.
+- **Sabotage:** an arm that does not bite is a fact about the arm, not the code.
+  Disclose it in the commit and escalate to the broader arm (all 33 increments,
+  all 227 constants), and sabotage the implementation rather than a shim.
+- **Unanimity:** when every call site disagrees with a declaration in the same
+  way, that is evidence against the declaration **only** when the declaration
+  independently shows stub signs. Two counterexamples here had unanimous call
+  sites and a correct declaration. Ask which side is internally consistent.
+- **Size:** never indicts a module on its own. A file at 38% of its historical
+  size was a legitimate split; a 294-byte file was a deliberate facade over a
+  123 KB core. Size opens an investigation, never closes one.
+- **Detail:** `.claude/skills/spipe.md` §"Sabotage discipline" / §"Census
+  discipline".
+
 ## Maintenance
 
 Add a compact entry here when repeated ambiguity causes an agent to choose the

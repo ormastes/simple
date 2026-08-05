@@ -55,6 +55,29 @@ that are mostly methods (dom.spl: 17 of 27 callables) read 1-28% under a
   never-imported files (a hit at line N of file A must not attribute to
   line N of an unrelated file B).
 
+## Running a coverage pass — three flags, or it executes ZERO tests
+
+```bash
+SIMPLE_COVERAGE=1 bin/simple test <path> --no-cache --no-cover-check --timeout 1800
+```
+
+- **`--no-cache` AND `--no-cover-check` are both required.** With either
+  missing, an observed run emitted ~900 lines of lint, **exited 0, and executed
+  zero tests** — cached results plus the coverage precondition check satisfy the
+  invocation without running anything. `--no-cover-check` is parsed at
+  `src/lib/nogc_sync_mut/test_runner/test_runner_args.spl:458` and announces
+  itself as `Bypass: --no-cover-check` (`test_runner_main.spl:166`); the absence
+  of that line in a log means the bypass was not applied.
+- **`--timeout 1800`.** Without it the default budget expires and the timeout is
+  reported as a spurious `1 failed` — a fabricated defect. Note the light daemon
+  clamps `--timeout` at 600s
+  ([test_runner layer expert](../../layer_expert/test_runner/skill.md)); a pass
+  whose real cost exceeds that must be run detached and read from its log.
+- **Score the verdict line, not the exit code.** Coverage runs are exactly the
+  shape where exit-0-with-nothing-run is invisible: confirm a non-zero
+  `Results: N total, ...` (or `SPEC FILE VERDICT ... executed=N`) before
+  believing any percentage the run printed.
+
 ## Known Constraints / Verification
 
 - Measured effect: dom.spl 28% -> 87% (80/91), dom_identity_index 40% -> 83%.

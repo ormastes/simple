@@ -1065,6 +1065,207 @@ absent from rodata in a perfectly good gui build → false
 was a 4-line probe spec that CALLS the extern: a capable driver validates the
 argument types, an incapable one reports `unknown extern function`.
 
+## Reading the verdict — how a spec run lies to you (2026-08-05)
+
+Everything below cost a lane real hours on 2026-08-04/05, and every item is
+reproducible. **Getting the verdict wrong is the single most common way work in
+this repo produces a confidently wrong answer**, so read this section before you
+grep a log, and before you believe a number you did not personally anchor.
+
+### The two summary grammars are DIFFERENT — grep the right one
+
+| command | line it prints | emitter |
+|---|---|---|
+| `bin/simple test <spec>` | `Results: N total, M passed, K failed` | `src/app/test_runner_new/test_runner_single.spl:225` |
+| `bin/simple run <spec>` | `N examples, M failures` | `src/compiler_rust/driver/src/cli/test_output.rs:164` |
+
+A lane grepped `Results:` against `run` output, got nothing, read that as "no
+tests", and had to retract a landed claim. Match `example` and `failure` as
+**substrings**, not exact words: the runner emits the singular `1 failure`
+(`test_output.rs:251`), so a `failures` pattern silently drops one-failure
+blocks — the mirror of the `examples\?` trap already in `.claude/rules/testing.md`.
+
+### Never `tail -1` a spec log
+
+The `N examples, M failures` line is printed **once per top-level `describe`**,
+and the file-level failure line goes to **stderr**, so stdout's last line can be
+a green count from the last group while the file failed. Measured on the
+nine-example `trait_scanner_spec.spl`: stdout ended `3 examples, 0 failures` —
+the size of its last `describe`. That is exactly the "9 examples became 3" report.
+
+**Use the authoritative per-FILE line instead**, landed in `5b57a79f8ba`
+("fail the run when a spec silently drops examples",
+`src/compiler_rust/driver/src/cli/basic.rs:144-176`):
+
+```text
+SPEC FILE VERDICT: <path> declared>=9 executed=9 passed=9 failed=0 dropped=0
+```
+
+One line per file, always, on stdout, last. Notes that matter when you parse it:
+
+- It deliberately does **not** contain `examples, ` or `failures` — because
+  `test_runner_single.spl:305` SUMS every per-describe line it sees, and a
+  file-level line in that shape would double every count in the repo.
+- `declared` is a strict lower bound (`unconditional_example_floor`): examples
+  generated conditionally (`if cfg:`, `for x in xs:`), by `it_behaves_like`, or
+  marked skip/pending contribute **zero**. So `declared>=` can legitimately be
+  far below `executed`; only `executed < declared` is a drop, and that is
+  arithmetically impossible without one. It cannot cry wolf.
+- A file with `declared == 0 && executed == 0` prints nothing — absence of the
+  line means "not a spec file", not "clean".
+
+### Verdict lines are ANSI-colour-wrapped — strip before you anchor
+
+`test_output.rs:164` emits `"\x1b[32m{} examples, 0 failures\x1b[0m ({}ms)"`.
+Consequences, both observed:
+
+- `^[0-9]+ examples` anchored at line start matches **nothing** — one lane read
+  all 62 specs in its scope as "no verdict emitted".
+- A pattern that scoops digits out of the escape sequence reads `[32m` as
+  digits and inflates counts by roughly 10×.
+
+Strip ANSI first (`std.test_runner.test_runner_files.strip_ansi` is the in-tree
+implementation, `test_runner_files.spl`), *then* anchor.
+
+### Compare example COUNTS, not just failure counts
+
+A module-load failure drops whole `describe` blocks and still exits 0. Zero
+failures out of three examples where nine were declared is a red run wearing
+green. Any before/after comparison must diff `executed`, not just `failed`.
+
+### Which assertions actually assert
+
+- **A bare `assert` is INERT.** `assert 1 == 2` has been observed reporting
+  `7 passed`. Never gate on one.
+- **`check()` IS a real assertion** (`check(condition: bool)`,
+  `src/compiler_rust/driver/src/cli/test_runner/execution.rs:989`; `check_msg`
+  at `:992`). This cuts both ways: a vacuity scan that looks only for `expect(`
+  will mark a `check()`-based spec as assertion-free, **and** a spec full of
+  `check(true)` is vacuous while passing that same scan. Score what the
+  assertion's argument can vary over, not which function is called.
+- **A failing `expect` does not abort the example body**, and only the **LAST**
+  failure per example is printed. An example with four broken assertions reports
+  one. Do not infer the number of defects from the number of printed failures.
+
+### Exit status is a FAIL-OPEN oracle
+
+- **An unresolved `use` is only a WARN — exit 0.** One spec in this repo was
+  entirely dead for this reason, 12/12 examples failing at call time, while the
+  run exited 0. Any "did my delete/rename break anything?" check built on exit
+  status will pass on a spec that no longer loads its subject.
+- **Exit 255 or 143 with no output is a timeout/kill, not a result.** 143 is the
+  ~60s CPU guard (SIGTERM); 255 + `Process timed out` is the 600s daemon request
+  cap. Directory-mode `simple test` killed at 60s emits only the runner's own
+  warnings — which reads *exactly* like a clean corpus. See the two-limits table
+  in [layer_expert/test_runner](../../doc/00_llm_process/layer_expert/test_runner/skill.md).
+- Score the **verdict line**. Exit status is corroboration, never the primary.
+
+### Coverage runs need three flags or they execute nothing
+
+```bash
+SIMPLE_COVERAGE=1 bin/simple test <path> --no-cache --no-cover-check --timeout 1800
+```
+
+- Without **both** `--no-cache` and `--no-cover-check`
+  (`src/lib/nogc_sync_mut/test_runner/test_runner_args.spl:458`), a run emits
+  ~900 lines of lint, exits 0, and executes **zero** tests. Cached results plus
+  the coverage precondition check between them satisfy the run without running it.
+- Without `--timeout 1800`, the default budget expires and the timeout surfaces
+  as a spurious "1 failed" — a fabricated defect, not a real one. (Note the
+  daemon clamps `--timeout` at 600s; above that, run detached and read the log.)
+
+### Waiter anti-patterns that fabricate results
+
+- **Never `pgrep -f <pattern>`** as a completion waiter — the pattern matches
+  the waiter's own command line, so it "finds" the job forever, or reports it
+  done. This produced phantom results twice.
+- **Never `kill -0` on a `setsid` launch** — the pid you hold is the launcher's,
+  not the detached child's.
+- **Never a long-lived poll loop inside one harness-managed call.** Launch
+  detached, write to a log, return, and read the log on a later call.
+
+### Corpus shape: what discovery does and does not walk
+
+- **`test/unit/` is a frozen legacy mirror** of the maintained `test/01_unit/`.
+  Excluded from **directory** discovery in `acea4ec4c1c`; still runnable by
+  explicit path (same policy as `/fuzz/`, `/chaos/`, `/deploy/`, `/security/`).
+  Rationale and measurements are in the source comment,
+  `src/lib/nogc_sync_mut/test_runner/test_runner_files.spl:25-45`: 874 shared
+  pairs differ, sampling found ~33% with different example counts, and cases
+  exist that are GREEN under `01_unit` and RED under `unit`. Never census both.
+- **Discovery has a fast path and a slow path.** `discover_test_files` defaults
+  to `discover_test_files_fast` (filters the warm manifest in memory) and never
+  reaches `discover_test_files_slow` (the walk). **Patching one is inert** on
+  every warm-manifest run. Any discovery filter must be applied in both.
+- **`test/` contains 14 symlinks pointing into `src/`** — measured at
+  `c605154975e` with `git ls-tree -r <sha> test/ | grep '^120000'`. A
+  follow-links walk made 27% of one census's "test files" `src/` aliases. Walk
+  **without** `-L` and dedupe by realpath.
+  - Refinement worth knowing: **3 of the 14 are dangling**
+    (`test/03_system/feature/lib/{app,compiler,lib}` → `../../../src/...`
+    resolves to the non-existent `test/src/...`). A filter written as
+    `[ -d "$(readlink -f $l)" ]` counts only **11** and silently drops them.
+    Count the mode-`120000` blobs, not the resolvable directories.
+
+### Don't destroy the evidence you're measuring
+
+- **Verify a backup is non-empty before restoring from it.** `git show
+  HEAD:<path> > <path>` can fail silently and leave a zero-byte file; a 673-line
+  source was truncated by trusting exactly that. Check the line count of the
+  backup *before* it becomes the restore source. `git checkout -- <path>` has
+  also silently failed for a lane here.
+- **`git fetch` without `GIT_SSH_COMMAND` silently fails auth on this host**,
+  and a missing object then reads *exactly* like a wiped tree. Run
+  `git cat-file -t <sha>` before concluding anything is gone. (Thirteen false
+  "GONE" verdicts came from this.)
+- **The deployed `bin/simple` is often a stale bootstrap seed.** Establish
+  capability by **positive probe** — call the thing and read the diagnostic —
+  never by binary size, `--version` banner, or grepping the executable for a
+  symbol. Both size and banner have lied; the grep-the-binary variant fails
+  *closed* (release LLVM folds the string away) and is covered above under
+  "Source-text assertions are not evidence".
+
+### Sabotage discipline
+
+A sabotage arm that does not bite proves nothing about the code — it proves the
+arm missed. When that happens:
+
+1. **Say so in the commit message.** A silently-dropped non-biting arm is how a
+   vacuous gate gets recorded as a passing one. Three lanes disclosed non-biting
+   arms on 2026-08-04 and each was right to.
+2. **Escalate to a broader arm** rather than concluding. Sabotage *all 33*
+   increments, not 3. Sabotage *all 227* constants, not the one marker you
+   picked. A narrow arm's silence is a statement about your sample.
+3. Sabotage the **implementation**, not the shim in front of it.
+
+### Census discipline
+
+Raw census false-positive rates measured on this repo, before validation:
+
+| census | raw FP rate | what it was really counting |
+|---|---|---|
+| arity mismatch | 83.9% | overloads and bare-name collisions |
+| constant scan | 74% | deliberate `FAILMARK` sentinels |
+| dead code | 46.2% | re-exports and dynamically-dispatched entries |
+| tautology | 31.5% | intentionally-constant fixtures |
+
+**Bare-name collisions are the recurring culprit** — `ugrep` is the default
+`grep` here, so pin `/usr/bin/grep`, anchor on a qualified name, and exclude
+generic identifiers. **Validate every census against known ground truth before
+believing any of its other output.** A census that cannot reproduce a fact you
+already know is not evidence about the facts you don't.
+
+Two judgement rules that go with it:
+
+- **When every call site disagrees with a declaration in the same way, that is
+  evidence against the declaration** — but only when the declaration
+  *independently* shows stub signs. Two counterexamples in this repo had
+  unanimous call sites and a correct declaration. Ask which side is
+  **internally consistent**, not which side is more numerous.
+- **Size never indicts a module on its own.** A file at 38% of its historical
+  line count was a legitimate split; a 294-byte file was a deliberate facade
+  over a 123 KB core. Size opens an investigation; it never closes one.
+
 ## Running specs on a loaded box (harness truths, 2026-07-29)
 
 Under parallel sessions these look like test failures but are not:
