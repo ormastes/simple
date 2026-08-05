@@ -34,7 +34,10 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/wm_fullscreen_metal_evidence}"
 APP_SPL="${WM_FULLSCREEN_APP:-examples/06_io/ui/wm_fullscreen_metal_gui.spl}"
-TIMEOUT_SECS="${WM_FULLSCREEN_TIMEOUT_SECS:-540}"
+# The web-engine phase can spend its full ~90s physical-render budget and then
+# re-render at logical dims, plus a 20s on-screen hold for the capture; 540s left
+# no headroom (a real run finished at ~539s).
+TIMEOUT_SECS="${WM_FULLSCREEN_TIMEOUT_SECS:-780}"
 REPORT="$BUILD_DIR/report.md"
 APP_LOG="$BUILD_DIR/app.log"
 APP_ERR="$BUILD_DIR/app.err"
@@ -491,16 +494,35 @@ fi
 WEBENGINE_DIMS="$(grep '\[wm-fullscreen\] web_engine_dims=' "$APP_LOG" 2>/dev/null | tail -1 | sed -n 's/.*web_engine_dims=\([a-z]*\).*/\1/p')"
 
 # Web-engine capture-side pixel evidence. The scene's THREE window titlebars use
-# the theme accent (0xff2563eb) across the upper band; sample a horizontal line
+# the theme accent (0xff2c6fef) across the upper band; sample a horizontal line
 # through the titlebars and require a large blue fraction (proves the captured
-# frame is the CSS-rendered demo desktop). The far corners must be the dark
-# desktop backdrop (compositor_bg), same navy technique as the no-resize check.
+# frame is the CSS-rendered demo desktop). The far corners must be the theme's
+# desktop backdrop.
+#
+# NOTE: the backdrop here is NOT the dark navy the fit/no-resize phases clear to
+# (BG_CLEAR 0x14141c). This scene's <body> background is wm_chrome_theme()
+# .compositor_bg, which is 0xff5a7fb5 = rgb(90,127,181) — a mid-blue slate
+# (src/lib/common/ui/wm_chrome_theme.spl:49). Reusing corner_is_navy() here (max
+# channel < 0x40) was a copy-paste from the no-resize check and could never pass
+# on a correctly rendered web-engine frame, so assert the actual theme color.
+webengine_pixel_is_compositor_bg() {
+    # $1=R $2=G $3=B -> return 0 if within tolerance of compositor_bg 5a 7f b5.
+    _cr=$(( $1 - 90 ));  [ "$_cr" -lt 0 ] && _cr=$((-_cr))
+    _cg=$(( $2 - 127 )); [ "$_cg" -lt 0 ] && _cg=$((-_cg))
+    _cb=$(( $3 - 181 )); [ "$_cb" -lt 0 ] && _cb=$((-_cb))
+    [ "$_cr" -le 45 ] && [ "$_cg" -le 45 ] && [ "$_cb" -le 45 ] && return 0
+    return 1
+}
 webengine_pixel_is_blue() {
-    # $1=R $2=G $3=B -> return 0 if within tolerance of accent 25 63 eb (37,99,235).
-    _dr=$(( $1 - 37 )); [ "$_dr" -lt 0 ] && _dr=$((-_dr))
-    _dg=$(( $2 - 99 )); [ "$_dg" -lt 0 ] && _dg=$((-_dg))
-    _db=$(( $3 - 235 )); [ "$_db" -lt 0 ] && _db=$((-_db))
-    [ "$_dr" -le 55 ] && [ "$_dg" -le 55 ] && [ "$_db" -le 70 ] && return 0
+    # $1=R $2=G $3=B -> return 0 if within tolerance of the theme accent.
+    # The accent is wm_chrome_theme().accent = 0xff2c6fef = rgb(44,111,239)
+    # (src/lib/common/ui/wm_chrome_theme.spl:51). The previous 0x2563eb (37,99,235)
+    # was a stale copy of an older palette; a real capture of a correct render
+    # reads 2b70ef, i.e. the 2c6fef above shifted ~1 by the display color profile.
+    _dr=$(( $1 - 44 ));  [ "$_dr" -lt 0 ] && _dr=$((-_dr))
+    _dg=$(( $2 - 111 )); [ "$_dg" -lt 0 ] && _dg=$((-_dg))
+    _db=$(( $3 - 239 )); [ "$_db" -lt 0 ] && _db=$((-_db))
+    [ "$_dr" -le 45 ] && [ "$_dg" -le 45 ] && [ "$_db" -le 45 ] && return 0
     return 1
 }
 if [ -f "$FS_WEBENGINE_BMP" ] && [ "$(wc -c <"$FS_WEBENGINE_BMP" | tr -d ' ')" -gt 1024 ]; then
@@ -508,13 +530,34 @@ if [ -f "$FS_WEBENGINE_BMP" ] && [ "$(wc -c <"$FS_WEBENGINE_BMP" | tr -d ' ')" -
     WEHS="$(od -An -t d4 -j 22 -N 4 "$FS_WEBENGINE_BMP" 2>/dev/null | tr -d ' ')"
     WEH="$WEHS"; [ "$WEHS" -lt 0 ] 2>/dev/null && WEH=$((-WEHS))
     if [ -n "$WEW" ] && [ -n "$WEH" ] && [ "$WEW" -gt 40 ] && [ "$WEH" -gt 40 ]; then
-        # Titlebars span ~14%..21% down; sample the 18% line across 40 x points.
-        _wliney=$((WEH * 18 / 100))
+        # The scene places each titlebar at top:14%..21% OF THE WINDOW CONTENT
+        # SURFACE (wm_web_scene_html: win_top=0.14h, title_h=0.07h), not of the
+        # whole screen. The capture is the whole display, which is taller than
+        # the fullscreen content rect by the menu-bar/notch band, so the sample
+        # line must be taken relative to the content rect: it is bottom-anchored
+        # in the capture, so its origin is (capture_h - content_h).
+        _wcw="$WEW"
+        _wch="$WEH"
+        _wcx0=0
+        _wcy0=0
+        if [ -n "$FULLSCREEN_SIZE" ]; then
+            _fsw="${FULLSCREEN_SIZE%x*}"
+            _fsh="${FULLSCREEN_SIZE#*x}"
+            if [ "$_fsw" -gt 40 ] 2>/dev/null && [ "$_fsh" -gt 40 ] 2>/dev/null \
+               && [ "$_fsw" -le "$WEW" ] && [ "$_fsh" -le "$WEH" ]; then
+                _wcw="$_fsw"
+                _wch="$_fsh"
+                _wcx0=$(((WEW - _fsw) / 2))
+                _wcy0=$((WEH - _fsh))
+            fi
+        fi
+        # Sample the 18% line (mid-titlebar) across 40 x points of the content.
+        _wliney=$((_wcy0 + _wch * 18 / 100))
         _whits=0
         _wn=0
         _wi=0
         while [ "$_wi" -lt 40 ]; do
-            _wsx=$((WEW * _wi / 40))
+            _wsx=$((_wcx0 + _wcw * _wi / 40))
             [ "$_wsx" -ge "$WEW" ] && _wsx=$((WEW - 1))
             _wp="$(sample_bmp_corner "$FS_WEBENGINE_BMP" "$_wsx" "$_wliney")"
             if [ -n "$_wp" ]; then
@@ -533,13 +576,15 @@ if [ -f "$FS_WEBENGINE_BMP" ] && [ "$(wc -c <"$FS_WEBENGINE_BMP" | tr -d ' ')" -
                 WEBENGINE_CAP_BLUE=mismatch
             fi
         fi
-        # Desktop backdrop corners must be the dark theme bg (navy).
-        WC_TR="$(sample_bmp_corner "$FS_WEBENGINE_BMP" $((WEW - 2)) 1)"
-        WC_BL="$(sample_bmp_corner "$FS_WEBENGINE_BMP" 1 $((WEH - 2)))"
-        WC_BR="$(sample_bmp_corner "$FS_WEBENGINE_BMP" $((WEW - 2)) $((WEH - 2)))"
+        # Desktop backdrop corners must be the theme compositor_bg. Sampled at the
+        # CONTENT-RECT corners (not the capture corners) for the same reason as
+        # the titlebar line above.
+        WC_TR="$(sample_bmp_corner "$FS_WEBENGINE_BMP" $((_wcx0 + _wcw - 2)) $((_wcy0 + 1)))"
+        WC_BL="$(sample_bmp_corner "$FS_WEBENGINE_BMP" $((_wcx0 + 1)) $((_wcy0 + _wch - 2)))"
+        WC_BR="$(sample_bmp_corner "$FS_WEBENGINE_BMP" $((_wcx0 + _wcw - 2)) $((_wcy0 + _wch - 2)))"
         WEBENGINE_BG_CAPTURE_HEX="tr=$WC_TR;bl=$WC_BL;br=$WC_BR"
         if [ -n "$WC_TR" ] && [ -n "$WC_BL" ] && [ -n "$WC_BR" ]; then
-            if corner_is_navy $WC_TR && corner_is_navy $WC_BL && corner_is_navy $WC_BR; then
+            if webengine_pixel_is_compositor_bg $WC_TR && webengine_pixel_is_compositor_bg $WC_BL && webengine_pixel_is_compositor_bg $WC_BR; then
                 WEBENGINE_BG_CAPTURE=ok
             else
                 WEBENGINE_BG_CAPTURE=mismatch
@@ -716,12 +761,12 @@ if [ "$WEBENGINE_MARKER" != "present" ]; then
 fi
 # Capture-side pixel validation for the web-engine frame (binding when the
 # capture yielded real content): the CSS titlebars must show the theme accent
-# blue, and the desktop backdrop corners must be the dark theme bg.
+# blue, and the desktop backdrop corners must be the theme compositor_bg.
 if [ "$WEBENGINE_CAP_BLUE" = "mismatch" ]; then
     fail "web-engine-capture-not-accent-blue-pct=$WEBENGINE_CAP_BLUE_PCT-corners=$WEBENGINE_BG_CAPTURE_HEX"
 fi
 if [ "$WEBENGINE_BG_CAPTURE" = "mismatch" ]; then
-    fail "web-engine-capture-corners-not-navy-$WEBENGINE_BG_CAPTURE_HEX"
+    fail "web-engine-capture-corners-not-compositor-bg-$WEBENGINE_BG_CAPTURE_HEX"
 fi
 
 STATUS=pass
