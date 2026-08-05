@@ -16302,6 +16302,24 @@ RuntimeValue rt_array_new_with_cap_u64(int64_t cap)
 
 int64_t rt_any_add(int64_t left, int64_t right)
 {
+    /* BUGFIX (freestanding_text_concat_chain_drops_operands_2026-08-05):
+     * this stub used to do raw `left + right` unconditionally, treating
+     * every operand as an integer -- including tagged heap-string pointers.
+     * A 3+ operand `text` `+` chain (`a + ":" + b + "\n"`) type-infers its
+     * middle operands as ANY when they come from a chained method call with
+     * no explicit `text` annotation (e.g. `val name =
+     * body.substring(dd, colon).trim()`), so MIR lowering routes that `+`
+     * through `rt_any_add` (see lowering_expr_ops.rs: ANY+ANY -> rt_any_add).
+     * Adding two tagged pointers as raw integers produces neither a valid
+     * heap pointer nor the sum of two strings -- it silently drops the
+     * concatenated value (observed as `.len()` reading back -1, or a
+     * truncated result on the next `+` in the chain). Mirror the two other
+     * `rt_any_add` implementations (src/runtime/runtime_native.c,
+     * src/runtime/simple_core/core_string.spl), which already dispatch to
+     * string concatenation when either operand is a heap value. */
+    if (IS_HEAP(left) || IS_HEAP(right)) {
+        return rt_string_concat(left, right);
+    }
     return left + right;
 }
 

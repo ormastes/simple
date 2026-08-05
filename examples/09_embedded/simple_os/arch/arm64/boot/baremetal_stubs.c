@@ -699,6 +699,17 @@ RuntimeValue f64_from_bits(RuntimeValue bits)
 /* --- any-add (from x86_64 baremetal_stubs.c) --- */
 int64_t rt_any_add(int64_t left, int64_t right)
 {
+    /* BUGFIX (freestanding_text_concat_chain_drops_operands_2026-08-05):
+     * see the x86_64 baremetal_stubs.c sibling for the full writeup -- this
+     * copy inherited the same raw-`left + right` bug, which silently drops
+     * data on a 3+ operand `text` `+` chain whose middle operand(s)
+     * type-infer as ANY (e.g. a `.substring().trim()` chain with no
+     * explicit `text` annotation). Mirror src/runtime/runtime_native.c and
+     * src/runtime/simple_core/core_string.spl: dispatch to string
+     * concatenation whenever either operand is a heap value. */
+    if (IS_HEAP(left) || IS_HEAP(right)) {
+        return rt_string_concat(left, right);
+    }
     return left + right;
 }
 
