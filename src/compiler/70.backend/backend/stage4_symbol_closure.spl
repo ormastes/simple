@@ -442,15 +442,23 @@ pub fn stage4_runtime_native_localization_symbols(nm_output: text, object_format
         val symbol = stage4_provider_symbol(raw_symbol, object_format)
         counts[symbol] = (counts[symbol] ?? 0) + 1
         raw_by_symbol[symbol] = raw_symbol
+    # A legacy dynload symbol may legitimately be ABSENT: since 2026-08-05
+    # runtime_native.c guards its fallback copies with
+    # `#if !defined(SIMPLE_RUNTIME_DYNLOAD_OWNER)`, and runtime_compiler.spl
+    # defines that macro on every bundle that also compiles runtime_dynload.c
+    # (which Stage4 always does). Removing the definition at source level is
+    # strictly stronger than localizing it here, so absent = nothing to
+    # localize. Two or more definitions is still an error.
     for symbol in legacy:
-        if (counts[symbol] ?? 0) != 1:
-            return Err("Stage4 runtime-native legacy definition '" + symbol + "' must exist exactly once")
+        if (counts[symbol] ?? 0) > 1:
+            return Err("Stage4 runtime-native legacy definition '" + symbol + "' must not be defined more than once")
     for symbol in required:
         if (counts[symbol] ?? 0) != 1:
             return Err("Stage4 runtime-native required definition '" + symbol + "' must exist exactly once")
     var localize: [text] = []
     for symbol in legacy:
-        localize = localize.push(raw_by_symbol[symbol])
+        if (counts[symbol] ?? 0) == 1:
+            localize = localize.push(raw_by_symbol[symbol])
     Ok(stage4_sorted_text(localize))
 
 pub fn stage4_validate_runtime_native_core_symbol_contract(nm_output: text, object_format: text) -> Result<(), text>:

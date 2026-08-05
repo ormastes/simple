@@ -5672,48 +5672,56 @@ int64_t rt_array_data_ptr_u8(SplArray* a) {
     return (int64_t)(uintptr_t)scratch;
 }
 
-static char* rt_core_string_to_cstring(int64_t value) {
-    RtCoreString* string = rt_core_as_string(value);
-    if (!string || string->len > SIZE_MAX - 1) return NULL;
-    char* out = (char*)malloc((size_t)string->len + 1);
-    if (!out) return NULL;
-    memcpy(out, string->data, (size_t)string->len);
-    out[string->len] = '\0';
-    return out;
-}
-
+#if !defined(SIMPLE_RUNTIME_DYNLOAD_OWNER)
+/* Hosted dynamic loading, per-lane fallback copy.
+ *
+ * runtime_dynload.c is the canonical owner (see
+ * test/01_unit/compiler/backend/runtime_dynload_owner_source_spec.spl). It is
+ * NOT in every bundle: runtime_compiler.spl drops it under native-all, and the
+ * core-c lane (native_project/tools.rs) compiles runtime_native.c without it.
+ * Those lanes need a definition here, so this copy exists — but it must never
+ * co-exist with the owner in one bundle. runtime_compiler.spl defines
+ * SIMPLE_RUNTIME_DYNLOAD_OWNER exactly when it pushes runtime_dynload, which
+ * compiles this copy out and leaves exactly ONE definition per bundle.
+ *
+ * The bodies below are kept BYTE-IDENTICAL to runtime_dynload.c's (enforced by
+ * the `same` marker in scripts/check/runtime_bundle_duplicate_symbols_baseline.txt).
+ * Until 2026-08-05 they were NOT: this copy decoded its argument with
+ * rt_core_string_to_cstring, which returns NULL for anything that is not a
+ * tagged heap RtCoreString. A raw char* (how a bootstrap string literal reaches
+ * an extern) therefore made spl_dlopen return 0 — indistinguishable from a
+ * missing library. Because the bundle links runtime_native.o BEFORE
+ * runtime_dynload.o under -z muldefs, THIS weaker copy was the one that won.
+ * rt_interp_cstr accepts both encodings and is a strict superset. */
 int64_t spl_dlopen(int64_t path_value) {
-    char* path = rt_core_string_to_cstring(path_value);
+    const char* path = rt_interp_cstr(path_value);
     if (!path) return 0;
-#if defined(_WIN32)
-    void* handle = (void*)LoadLibraryA(path);
+#ifdef _WIN32
+    return (int64_t)(intptr_t)LoadLibraryA(path);
 #else
-    void* handle = dlopen(path, RTLD_NOW);
+    return (int64_t)(intptr_t)dlopen(path, RTLD_NOW | RTLD_LOCAL);
 #endif
-    free(path);
-    return (int64_t)(uintptr_t)handle;
 }
 
-int64_t spl_dlsym(int64_t handle_value, int64_t name_value) {
-    char* name = rt_core_string_to_cstring(name_value);
-    if (!name) return 0;
-#if defined(_WIN32)
-    void* symbol = handle_value == 0 ? NULL : (void*)GetProcAddress((HMODULE)(uintptr_t)handle_value, name);
+int64_t spl_dlsym(int64_t handle, int64_t name_value) {
+    const char* name = rt_interp_cstr(name_value);
+    if (!handle || !name) return 0;
+#ifdef _WIN32
+    return (int64_t)(intptr_t)GetProcAddress((HMODULE)(intptr_t)handle, name);
 #else
-    void* symbol = dlsym((void*)(uintptr_t)handle_value, name);
+    return (int64_t)(intptr_t)dlsym((void*)(intptr_t)handle, name);
 #endif
-    free(name);
-    return (int64_t)(uintptr_t)symbol;
 }
 
-int64_t spl_dlclose(int64_t handle_value) {
-    if (handle_value == 0) return 0;
-#if defined(_WIN32)
-    return FreeLibrary((HMODULE)(uintptr_t)handle_value) ? 0 : 1;
+int64_t spl_dlclose(int64_t handle) {
+    if (!handle) return 0;
+#ifdef _WIN32
+    return FreeLibrary((HMODULE)(intptr_t)handle) ? 0 : -1;
 #else
-    return (int64_t)dlclose((void*)(uintptr_t)handle_value);
+    return (int64_t)dlclose((void*)(intptr_t)handle);
 #endif
 }
+#endif /* !SIMPLE_RUNTIME_DYNLOAD_OWNER */
 
 int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs) {
     typedef int64_t (*Fn0)(void);

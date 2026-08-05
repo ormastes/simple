@@ -44,6 +44,27 @@
 # same convention as check-runtime-symbol-lane-divergence.shs and
 # check-core-lib-purity.shs). Only NEW duplicate pairs fail.
 #
+# Semantic-agreement marker (added 2026-08-05). Recording a collision is NOT
+# enough: on 2026-08-05 spl_dlopen/spl_dlsym/spl_dlclose were baselined here
+# as a known runtime_dynload.c/runtime_native.c pair while the two copies
+# decoded their string argument from DIFFERENT value encodings
+# (rt_interp_cstr vs a tagged-string-only helper). runtime_native.o links
+# first, so the weaker copy won and spl_dlopen returned 0 for any raw-char*
+# path -- indistinguishable from a missing library. This gate was GREEN on
+# that bug because it only compared the collision line.
+#
+# A baseline line may therefore carry an optional THIRD tab-separated field:
+#
+#   <symbol><TAB><file1,file2><TAB>same
+#
+# `same` means: the normalized function body must be IDENTICAL in every listed
+# file. That is the machine-checkable form of the "confirm the bodies agree"
+# instruction below, and it fails loudly (runtime_bundle_duplicate_symbol_
+# divergent=...) the moment two shipped copies drift apart. Use it for every
+# pair that is a deliberate per-lane duplicate of one implementation. Omit it
+# only for pairs that are genuinely different implementations (e.g. a weak
+# stub vs the real thing) and say so in a comment.
+#
 # Caveat: pure regex over "identifier(...) {" lines starting at column 0.
 # Does not understand #ifdef/#ifndef platform guards, so a symbol guarded to
 # be mutually exclusive across two files can still show up as a candidate
@@ -136,14 +157,82 @@ done <"$TMP_DIR/dup_syms.txt"
 sort -o "$FOUND" "$FOUND"
 
 total=$(wc -l <"$FOUND" | tr -d ' ')
+
+# Baseline keys = first two fields only, so an optional third `same` field does
+# not change which collisions are considered already-triaged.
+KEYS_FILE="$TMP_DIR/baseline_keys.txt"
+awk -F'\t' '!/^#/ && NF>=2 {print $1 "\t" $2}' "$BASELINE" >"$KEYS_FILE" 2>/dev/null || : >"$KEYS_FILE"
+
 new_count=0
 while IFS= read -r line; do
     [ -n "$line" ] || continue
-    if ! grep -qxF "$line" "$BASELINE" 2>/dev/null; then
+    if ! grep -qxF "$line" "$KEYS_FILE" 2>/dev/null; then
         echo "runtime_bundle_duplicate_symbol_new=$line"
         new_count=$((new_count + 1))
     fi
 done <"$FOUND"
+
+# --- Semantic agreement: baseline lines marked `same` must have IDENTICAL
+# normalized bodies in every file that defines them. ---
+AWK_BODY='
+    BEGIN { inb = 0 }
+    # src/runtime/runtime.c is CRLF, runtime_native.c is LF. Strip CR first so
+    # the comparison is about code, not line endings.
+    { gsub(/\r/, "") }
+    inb == 0 {
+        if ($0 !~ /^[A-Za-z_]/) next
+        if ($0 ~ /^static[[:space:]]/) next
+        if ($0 !~ ("[^A-Za-z0-9_]" sym "[[:space:]]*\\(")) next
+        if ($0 !~ /\)[[:space:]]*\{/) next
+        inb = 1
+        line = $0
+        sub(/^.*\(/, "(", line)
+        gsub(/[[:space:]]+/, " ", line)
+        print line
+        next
+    }
+    inb == 1 {
+        line = $0
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+        gsub(/[[:space:]]+/, " ", line)
+        if (line != "") print line
+        if ($0 ~ /^\}/) { inb = 0 }
+    }
+'
+divergent_count=0
+same_checked=0
+while IFS="$(printf '\t')" read -r bsym bfiles bmark; do
+    case "$bsym" in \#*|"") continue ;; esac
+    [ "${bmark:-}" = "same" ] || continue
+    same_checked=$((same_checked + 1))
+    ref=""
+    first=1
+    mismatch=""
+    IFS=','
+    for bf in $bfiles; do
+        unset IFS
+        body=$(awk -v sym="$bsym" "$AWK_BODY" "$RUNTIME_DIR/$bf" 2>/dev/null)
+        if [ -z "$body" ]; then
+            mismatch="$bf (body not extractable)"
+            break
+        fi
+        if [ "$first" = 1 ]; then
+            ref="$body"
+            first=0
+        elif [ "$body" != "$ref" ]; then
+            mismatch="$bf"
+            break
+        fi
+        IFS=','
+    done
+    unset IFS
+    if [ -n "$mismatch" ]; then
+        echo "runtime_bundle_duplicate_symbol_divergent=$bsym	$bfiles	$mismatch"
+        divergent_count=$((divergent_count + 1))
+    fi
+done <"$BASELINE"
+echo "runtime_bundle_duplicate_symbols_same_checked=$same_checked"
+echo "runtime_bundle_duplicate_symbols_divergent=$divergent_count"
 
 baseline_total=$(grep -cv '^#' "$BASELINE" 2>/dev/null || echo 0)
 echo "runtime_bundle_duplicate_symbols_baselined=$baseline_total"
@@ -155,10 +244,26 @@ echo "runtime_bundle_duplicate_symbols_new=$new_count"
 while IFS= read -r b; do
     [ -n "$b" ] || continue
     case "$b" in \#*) continue ;; esac
-    if ! grep -qxF "$b" "$FOUND"; then
-        echo "runtime_bundle_duplicate_symbols_stale_baseline=$b"
+    key=$(printf '%s\n' "$b" | cut -f1,2)
+    if ! grep -qxF "$key" "$FOUND"; then
+        echo "runtime_bundle_duplicate_symbols_stale_baseline=$key"
     fi
 done <"$BASELINE"
+
+if [ "$divergent_count" -gt 0 ]; then
+    echo "runtime_bundle_duplicate_symbols_ok=false"
+    echo "A duplicate pair marked 'same' in $BASELINE now has DIVERGENT bodies." >&2
+    echo "" >&2
+    echo "Both copies ship. The bundle links with -z muldefs, so the FIRST" >&2
+    echo "definition in link order silently wins and the other set of callers" >&2
+    echo "gets the wrong behaviour with no diagnostic -- exactly the" >&2
+    echo "spl_dlopen encoding split fixed on 2026-08-05." >&2
+    echo "" >&2
+    echo "Make the bodies identical again, or split the two behaviours into" >&2
+    echo "two DIFFERENTLY NAMED functions. Dropping the 'same' marker to" >&2
+    echo "silence this is not a fix." >&2
+    exit 1
+fi
 
 if [ "$new_count" -gt 0 ]; then
     echo "runtime_bundle_duplicate_symbols_ok=false"
