@@ -226,6 +226,7 @@ impl Linter:
         self.check_leading_operator_spl(path, content)
         self.check_const_ref_default_spl(path, content)
         self.check_bare_primitive_internal_spl(path, content)
+        self.check_wm_lane_boundary(file_config, path, content)
 
         # Run shared EasyFix rules and attach as lint results
         val shared_fixes = check_all_rules(content, path)
@@ -390,6 +391,31 @@ impl Linter:
     # non-type-checked patterns must never fail the build.
     me check_os_freestanding_patterns(path: String, content: String):
         val warnings = lint_os_freestanding_patterns(path, content)
+        for warning in warnings:
+            val lint = Lint.new(warning.code, LintLevel.Warn, LintCategory.Correctness, warning.message)
+                .with_fix(warning.hint)
+            self.results.push(LintResult.new(path, warning.line, 0, lint))
+
+    # WM/GUI/web/2D portable-lane dependency boundary (WML001/WML002).
+    #
+    # OPT-IN ONLY, and the gate below is what makes "off" actually free: the
+    # rule walks every module-level import of every in-scope file, so before
+    # touching `content` at all it does a single O(1) override lookup. The
+    # default level is "allow" and no profile promotes it, so the ONLY ways the
+    # name appears in config.levels are an explicit simple.sdn [lints] entry,
+    # --wm-lane, or --warn-all — each of which calls set_level. When it is off
+    # this costs one dict probe per file and reads zero lines. Deliberately not
+    # routed through get_level(), which rebuilds the whole defaults dict on
+    # every call.
+    me check_wm_lane_boundary(file_config: LintConfig, path: String, content: String):
+        if not file_config.levels.has("wm_lane_boundary"):
+            return
+        match file_config.get_level("wm_lane_boundary"):
+            case Allow:
+                return
+            case _:
+                val _ = 0
+        val warnings = lint_wm_lane_boundary(path, content)
         for warning in warnings:
             val lint = Lint.new(warning.code, LintLevel.Warn, LintCategory.Correctness, warning.message)
                 .with_fix(warning.hint)
