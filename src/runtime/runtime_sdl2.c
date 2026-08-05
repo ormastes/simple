@@ -8,24 +8,431 @@
  * Pixel format: each pixel is an i64 packed as R*16777216 + G*65536 + B*256 + A
  * (RGBA, high byte to low byte). The pixel buffer is a SplArray* of i64 values.
  *
- * Build: cc -c -fPIC -O2 -std=gnu11 -I. runtime_sdl2.c -o runtime_sdl2.o $(sdl2-config --cflags)
- * Link:  -lSDL2
+ * SDL2 is loaded DYNAMICALLY at first use (dlopen/dlsym, LoadLibrary/GetProcAddress)
+ * exactly as SDL itself does it. No SDL2 headers are needed to build this file and
+ * no -lSDL2 is needed to link it, so a host without SDL2 still builds and links; a
+ * missing library degrades to an honest runtime refusal (rt_sdl2_init() -> 0,
+ * rt_sdl2_last_error() -> the soname list that was tried) instead of a link error.
+ *
+ * Build: cc -c -fPIC -O2 -std=gnu11 -I. runtime_sdl2.c -o runtime_sdl2.o
+ * Link:  (nothing; libdl only where it is a separate library)
  */
 
 #include "runtime.h"
 
-#if defined(__has_include)
-#  if __has_include(<SDL2/SDL.h>)
-#    include <SDL2/SDL.h>
-#  else
-#    include <SDL.h>
-#  endif
-#else
-#  include <SDL.h>
-#endif
 #include <limits.h>
+#include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* ================================================================
+ * SDL2 ABI (header-free)
+ *
+ * Every offset, size and constant below was generated from the real
+ * SDL2 headers (2.30.0) with an offsetof/sizeof probe -- see the
+ * static asserts at the end of this block, which re-verify the layout
+ * at compile time on every build.
+ * ================================================================ */
+
+typedef uint8_t  Uint8;
+typedef uint16_t Uint16;
+typedef uint32_t Uint32;
+typedef uint64_t Uint64;
+typedef int32_t  Sint32;
+typedef int      SDL_bool;
+
+#define SDL_FALSE 0
+#define SDL_TRUE  1
+
+typedef struct SDL_Window SDL_Window;
+typedef uint32_t SDL_AudioDeviceID;
+
+typedef struct { int x, y, w, h; } SDL_Rect;
+
+typedef struct {
+    Uint32 flags;          /* 0 */
+    void*  format;         /* 8 */
+    int    w, h;           /* 16, 20 */
+    int    pitch;          /* 24 */
+    void*  pixels;         /* 32 */
+    /* remainder of SDL_Surface (userdata, locked, list_blitmap, clip_rect,
+       map, refcount) is never touched here; pad to the real 96 bytes so a
+       stack/array of SDL_Surface would still be correctly sized. */
+    char   _tail[96 - 40];
+} SDL_Surface;
+
+typedef struct {
+    int    scancode;       /* 0 */
+    int    sym;            /* 4 */
+    Uint16 mod;            /* 8 */
+    Uint32 unused;         /* 12 */
+} SDL_Keysym;
+
+typedef union {
+    Uint32 type;
+    struct { Uint32 type, timestamp; Uint32 windowID; Uint8 state, repeat, pad2, pad3;
+             SDL_Keysym keysym; } key;
+    struct { Uint32 type, timestamp; Uint32 windowID; char text[32]; } text;
+    struct { Uint32 type, timestamp; Uint32 windowID, which, state; Sint32 x, y, xrel, yrel; } motion;
+    struct { Uint32 type, timestamp; Uint32 windowID, which; Uint8 button, state, clicks, padding1;
+             Sint32 x, y; } button;
+    struct { Uint32 type, timestamp; Uint32 windowID, which; Sint32 x, y; Uint32 direction; } wheel;
+    struct { Uint32 type, timestamp; Uint32 windowID; Uint8 event, padding1, padding2, padding3;
+             Sint32 data1, data2; } window;
+    Uint8 padding[56];
+} SDL_Event;
+
+typedef void (*SDL_AudioCallback)(void* userdata, Uint8* stream, int len);
+
+typedef struct {
+    int    freq;              /* 0 */
+    Uint16 format;            /* 4 */
+    Uint8  channels;          /* 6 */
+    Uint8  silence;           /* 7 */
+    Uint16 samples;           /* 8 */
+    Uint16 padding;           /* 10 */
+    Uint32 size;              /* 12 */
+    SDL_AudioCallback callback; /* 16 */
+    void*  userdata;          /* 24 */
+} SDL_AudioSpec;
+
+#define SDL_INIT_AUDIO   0x00000010u
+#define SDL_INIT_VIDEO   0x00000020u
+#define SDL_INIT_EVENTS  0x00004000u
+
+#define SDL_QUIT             0x100u
+#define SDL_WINDOWEVENT      0x200u
+#define SDL_KEYDOWN          0x300u
+#define SDL_KEYUP            0x301u
+#define SDL_TEXTINPUT        0x303u
+#define SDL_MOUSEMOTION      0x400u
+#define SDL_MOUSEBUTTONDOWN  0x401u
+#define SDL_MOUSEBUTTONUP    0x402u
+#define SDL_MOUSEWHEEL       0x403u
+
+#define SDL_WINDOW_SHOWN               0x00000004u
+#define SDL_WINDOW_RESIZABLE           0x00000020u
+#define SDL_WINDOW_INPUT_FOCUS         0x00000200u
+#define SDL_WINDOW_FULLSCREEN_DESKTOP  0x00001001u
+#define SDL_WINDOWPOS_CENTERED         0x2FFF0000u
+
+#define SDL_BUTTON_LEFT    1
+#define SDL_BUTTON_MIDDLE  2
+#define SDL_BUTTON_RIGHT   3
+#define SDL_BUTTON_LMASK   0x1u
+#define SDL_BUTTON_MMASK   0x2u
+#define SDL_BUTTON_RMASK   0x4u
+
+#define SDL_DISABLE 0
+#define SDL_ENABLE  1
+
+#define AUDIO_F32LSB 0x8120u
+#define AUDIO_F32MSB 0x9120u
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define AUDIO_F32SYS AUDIO_F32MSB
+#else
+#define AUDIO_F32SYS AUDIO_F32LSB
+#endif
+
+#define SDL_zero(x) memset(&(x), 0, sizeof((x)))
+
+/* Compile-time re-verification of the probed layout. */
+#define RT_SDL2_ASSERT(cond, tag) typedef char rt_sdl2_static_##tag[(cond) ? 1 : -1]
+RT_SDL2_ASSERT(sizeof(SDL_Event) == 56, event_size);
+RT_SDL2_ASSERT(sizeof(SDL_Surface) == 96, surface_size);
+RT_SDL2_ASSERT(sizeof(SDL_AudioSpec) == 32, audiospec_size);
+RT_SDL2_ASSERT(sizeof(SDL_Rect) == 16, rect_size);
+RT_SDL2_ASSERT(sizeof(SDL_Keysym) == 16, keysym_size);
+RT_SDL2_ASSERT(offsetof(SDL_Event, key.keysym) == 16, key_keysym);
+RT_SDL2_ASSERT(offsetof(SDL_Event, text.text) == 12, text_text);
+RT_SDL2_ASSERT(offsetof(SDL_Event, motion.x) == 20, motion_x);
+RT_SDL2_ASSERT(offsetof(SDL_Event, button.button) == 16, button_button);
+RT_SDL2_ASSERT(offsetof(SDL_Event, button.x) == 20, button_x);
+RT_SDL2_ASSERT(offsetof(SDL_Event, wheel.x) == 16, wheel_x);
+RT_SDL2_ASSERT(offsetof(SDL_Event, window.event) == 12, window_event);
+RT_SDL2_ASSERT(offsetof(SDL_Event, window.data1) == 16, window_data1);
+RT_SDL2_ASSERT(offsetof(SDL_Surface, w) == 16, surface_w);
+RT_SDL2_ASSERT(offsetof(SDL_Surface, pitch) == 24, surface_pitch);
+RT_SDL2_ASSERT(offsetof(SDL_Surface, pixels) == 32, surface_pixels);
+RT_SDL2_ASSERT(offsetof(SDL_AudioSpec, callback) == 16, audiospec_callback);
+
+/* ================================================================
+ * Dynamic loader
+ * ================================================================ */
+
+#if defined(_WIN32)
+#include <windows.h>
+static void* sdl2_open(const char* name) { return (void*)LoadLibraryA(name); }
+static void* sdl2_symbol(void* lib, const char* name) {
+    return lib ? (void*)(uintptr_t)GetProcAddress((HMODULE)lib, name) : NULL;
+}
+#else
+#include <dlfcn.h>
+static void* sdl2_open(const char* name) { return dlopen(name, RTLD_NOW | RTLD_LOCAL); }
+static void* sdl2_symbol(void* lib, const char* name) { return lib ? dlsym(lib, name) : NULL; }
+#endif
+
+/*
+ * Candidate sonames, most-specific first -- the same order SDL's own loader
+ * uses. The versioned soname is tried before the unversioned developer
+ * symlink, because the latter is only present when a -dev package is
+ * installed and is not what a deployed application should bind to.
+ */
+static const char* const g_sdl2_candidates[] = {
+#if defined(_WIN32)
+    "SDL2.dll",
+#elif defined(__APPLE__)
+    "libSDL2-2.0.0.dylib", "libSDL2-2.0.dylib", "libSDL2.dylib",
+#else
+    "libSDL2-2.0.so.0", "libSDL2-2.0.so", "libSDL2.so.0", "libSDL2.so",
+#endif
+    NULL
+};
+
+static void*       g_sdl2_library;
+static const char* g_sdl2_resolved;          /* soname that actually opened */
+static int         g_sdl2_load_attempted;
+static char        g_sdl2_load_error[512];
+
+/* Every SDL2 entry point this file uses, resolved at first use. */
+static int         (*p_SDL_Init)(Uint32);
+static void        (*p_SDL_Quit)(void);
+static int         (*p_SDL_InitSubSystem)(Uint32);
+static void        (*p_SDL_QuitSubSystem)(Uint32);
+static Uint32      (*p_SDL_WasInit)(Uint32);
+static const char* (*p_SDL_GetError)(void);
+static void        (*p_SDL_free)(void*);
+static SDL_Window* (*p_SDL_CreateWindow)(const char*, int, int, int, int, Uint32);
+static void        (*p_SDL_DestroyWindow)(SDL_Window*);
+static void        (*p_SDL_GetWindowSize)(SDL_Window*, int*, int*);
+static void        (*p_SDL_SetWindowTitle)(SDL_Window*, const char*);
+static SDL_Surface*(*p_SDL_GetWindowSurface)(SDL_Window*);
+static int         (*p_SDL_UpdateWindowSurface)(SDL_Window*);
+static SDL_Surface*(*p_SDL_CreateRGBSurfaceFrom)(void*, int, int, int, int,
+                                                 Uint32, Uint32, Uint32, Uint32);
+static void        (*p_SDL_FreeSurface)(SDL_Surface*);
+static int         (*p_SDL_UpperBlitScaled)(SDL_Surface*, const SDL_Rect*, SDL_Surface*, SDL_Rect*);
+static int         (*p_SDL_PollEvent)(SDL_Event*);
+static int         (*p_SDL_WaitEvent)(SDL_Event*);
+static int         (*p_SDL_WaitEventTimeout)(SDL_Event*, int);
+static const Uint8*(*p_SDL_GetKeyboardState)(int*);
+static Uint32      (*p_SDL_GetMouseState)(int*, int*);
+static Uint32      (*p_SDL_GetTicks)(void);
+static Uint64      (*p_SDL_GetPerformanceCounter)(void);
+static Uint64      (*p_SDL_GetPerformanceFrequency)(void);
+static void        (*p_SDL_StartTextInput)(void);
+static void        (*p_SDL_StopTextInput)(void);
+static int         (*p_SDL_ShowCursor)(int);
+static void        (*p_SDL_SetWindowGrab)(SDL_Window*, SDL_bool);
+static void        (*p_SDL_WarpMouseInWindow)(SDL_Window*, int, int);
+static char*       (*p_SDL_GetClipboardText)(void);
+static int         (*p_SDL_SetClipboardText)(const char*);
+static SDL_bool    (*p_SDL_HasClipboardText)(void);
+static int         (*p_SDL_GetNumVideoDisplays)(void);
+static const char* (*p_SDL_GetDisplayName)(int);
+static int         (*p_SDL_GetDisplayBounds)(int, SDL_Rect*);
+static int         (*p_SDL_GetDisplayUsableBounds)(int, SDL_Rect*);
+static int         (*p_SDL_GetDisplayDPI)(int, float*, float*, float*);
+static void        (*p_SDL_SetWindowResizable)(SDL_Window*, SDL_bool);
+static int         (*p_SDL_SetWindowFullscreen)(SDL_Window*, Uint32);
+static void        (*p_SDL_SetWindowSize)(SDL_Window*, int, int);
+static void        (*p_SDL_SetWindowPosition)(SDL_Window*, int, int);
+static void        (*p_SDL_GetWindowPosition)(SDL_Window*, int*, int*);
+static void        (*p_SDL_ShowWindow)(SDL_Window*);
+static void        (*p_SDL_HideWindow)(SDL_Window*);
+static void        (*p_SDL_SetWindowMinimumSize)(SDL_Window*, int, int);
+static void        (*p_SDL_SetWindowMaximumSize)(SDL_Window*, int, int);
+static void        (*p_SDL_MinimizeWindow)(SDL_Window*);
+static void        (*p_SDL_MaximizeWindow)(SDL_Window*);
+static void        (*p_SDL_RestoreWindow)(SDL_Window*);
+static void        (*p_SDL_RaiseWindow)(SDL_Window*);
+static void        (*p_SDL_SetWindowBordered)(SDL_Window*, SDL_bool);
+static Uint32      (*p_SDL_GetWindowFlags)(SDL_Window*);
+static SDL_AudioDeviceID (*p_SDL_OpenAudioDevice)(const char*, int, const SDL_AudioSpec*,
+                                                  SDL_AudioSpec*, int);
+static void        (*p_SDL_CloseAudioDevice)(SDL_AudioDeviceID);
+static void        (*p_SDL_PauseAudioDevice)(SDL_AudioDeviceID, int);
+static int         (*p_SDL_QueueAudio)(SDL_AudioDeviceID, const void*, Uint32);
+static Uint32      (*p_SDL_GetQueuedAudioSize)(SDL_AudioDeviceID);
+static void        (*p_SDL_ClearQueuedAudio)(SDL_AudioDeviceID);
+/* Optional: added in SDL 2.0.16. Absence is not a load failure. */
+static void        (*p_SDL_SetWindowAlwaysOnTop)(SDL_Window*, SDL_bool);
+
+#define SDL2_BIND_REQUIRED(name) do { \
+    *(void**)(&p_##name) = sdl2_symbol(g_sdl2_library, #name); \
+    if (!p_##name) { missing = #name; goto bind_failed; } \
+} while (0)
+
+#define SDL2_BIND_OPTIONAL(name) \
+    (*(void**)(&p_##name) = sdl2_symbol(g_sdl2_library, #name))
+
+/*
+ * Lazy, idempotent. Returns 1 when SDL2 is usable, 0 when it is not; on
+ * failure g_sdl2_load_error carries a human-readable reason naming every
+ * soname that was tried, which rt_sdl2_last_error() surfaces to callers.
+ */
+static int sdl2_load(void) {
+    const char* missing;
+    if (g_sdl2_library) return 1;
+    if (g_sdl2_load_attempted) return 0;
+    g_sdl2_load_attempted = 1;
+
+    for (int i = 0; g_sdl2_candidates[i] && !g_sdl2_library; ++i) {
+        g_sdl2_library = sdl2_open(g_sdl2_candidates[i]);
+        if (g_sdl2_library) g_sdl2_resolved = g_sdl2_candidates[i];
+    }
+    if (!g_sdl2_library) {
+        size_t used = (size_t)snprintf(g_sdl2_load_error, sizeof(g_sdl2_load_error),
+                                       "SDL2 unavailable: none of these could be loaded:");
+        for (int i = 0; g_sdl2_candidates[i] && used < sizeof(g_sdl2_load_error); ++i) {
+            used += (size_t)snprintf(g_sdl2_load_error + used, sizeof(g_sdl2_load_error) - used,
+                                     "%s %s", i ? "," : "", g_sdl2_candidates[i]);
+        }
+        return 0;
+    }
+
+    SDL2_BIND_REQUIRED(SDL_Init);
+    SDL2_BIND_REQUIRED(SDL_Quit);
+    SDL2_BIND_REQUIRED(SDL_InitSubSystem);
+    SDL2_BIND_REQUIRED(SDL_QuitSubSystem);
+    SDL2_BIND_REQUIRED(SDL_WasInit);
+    SDL2_BIND_REQUIRED(SDL_GetError);
+    SDL2_BIND_REQUIRED(SDL_free);
+    SDL2_BIND_REQUIRED(SDL_CreateWindow);
+    SDL2_BIND_REQUIRED(SDL_DestroyWindow);
+    SDL2_BIND_REQUIRED(SDL_GetWindowSize);
+    SDL2_BIND_REQUIRED(SDL_SetWindowTitle);
+    SDL2_BIND_REQUIRED(SDL_GetWindowSurface);
+    SDL2_BIND_REQUIRED(SDL_UpdateWindowSurface);
+    SDL2_BIND_REQUIRED(SDL_CreateRGBSurfaceFrom);
+    SDL2_BIND_REQUIRED(SDL_FreeSurface);
+    /* SDL_BlitScaled is a macro in SDL_surface.h; the exported symbol is
+       SDL_UpperBlitScaled. Binding "SDL_BlitScaled" would silently yield NULL. */
+    SDL2_BIND_REQUIRED(SDL_UpperBlitScaled);
+    SDL2_BIND_REQUIRED(SDL_PollEvent);
+    SDL2_BIND_REQUIRED(SDL_WaitEvent);
+    SDL2_BIND_REQUIRED(SDL_WaitEventTimeout);
+    SDL2_BIND_REQUIRED(SDL_GetKeyboardState);
+    SDL2_BIND_REQUIRED(SDL_GetMouseState);
+    SDL2_BIND_REQUIRED(SDL_GetTicks);
+    SDL2_BIND_REQUIRED(SDL_GetPerformanceCounter);
+    SDL2_BIND_REQUIRED(SDL_GetPerformanceFrequency);
+    SDL2_BIND_REQUIRED(SDL_StartTextInput);
+    SDL2_BIND_REQUIRED(SDL_StopTextInput);
+    SDL2_BIND_REQUIRED(SDL_ShowCursor);
+    SDL2_BIND_REQUIRED(SDL_SetWindowGrab);
+    SDL2_BIND_REQUIRED(SDL_WarpMouseInWindow);
+    SDL2_BIND_REQUIRED(SDL_GetClipboardText);
+    SDL2_BIND_REQUIRED(SDL_SetClipboardText);
+    SDL2_BIND_REQUIRED(SDL_HasClipboardText);
+    SDL2_BIND_REQUIRED(SDL_GetNumVideoDisplays);
+    SDL2_BIND_REQUIRED(SDL_GetDisplayName);
+    SDL2_BIND_REQUIRED(SDL_GetDisplayBounds);
+    SDL2_BIND_REQUIRED(SDL_GetDisplayUsableBounds);
+    SDL2_BIND_REQUIRED(SDL_GetDisplayDPI);
+    SDL2_BIND_REQUIRED(SDL_SetWindowResizable);
+    SDL2_BIND_REQUIRED(SDL_SetWindowFullscreen);
+    SDL2_BIND_REQUIRED(SDL_SetWindowSize);
+    SDL2_BIND_REQUIRED(SDL_SetWindowPosition);
+    SDL2_BIND_REQUIRED(SDL_GetWindowPosition);
+    SDL2_BIND_REQUIRED(SDL_ShowWindow);
+    SDL2_BIND_REQUIRED(SDL_HideWindow);
+    SDL2_BIND_REQUIRED(SDL_SetWindowMinimumSize);
+    SDL2_BIND_REQUIRED(SDL_SetWindowMaximumSize);
+    SDL2_BIND_REQUIRED(SDL_MinimizeWindow);
+    SDL2_BIND_REQUIRED(SDL_MaximizeWindow);
+    SDL2_BIND_REQUIRED(SDL_RestoreWindow);
+    SDL2_BIND_REQUIRED(SDL_RaiseWindow);
+    SDL2_BIND_REQUIRED(SDL_SetWindowBordered);
+    SDL2_BIND_REQUIRED(SDL_GetWindowFlags);
+    SDL2_BIND_REQUIRED(SDL_OpenAudioDevice);
+    SDL2_BIND_REQUIRED(SDL_CloseAudioDevice);
+    SDL2_BIND_REQUIRED(SDL_PauseAudioDevice);
+    SDL2_BIND_REQUIRED(SDL_QueueAudio);
+    SDL2_BIND_REQUIRED(SDL_GetQueuedAudioSize);
+    SDL2_BIND_REQUIRED(SDL_ClearQueuedAudio);
+    SDL2_BIND_OPTIONAL(SDL_SetWindowAlwaysOnTop);
+    return 1;
+
+bind_failed:
+    snprintf(g_sdl2_load_error, sizeof(g_sdl2_load_error),
+             "SDL2 unusable: %s loaded but symbol %s is missing",
+             g_sdl2_resolved ? g_sdl2_resolved : "(library)", missing);
+    g_sdl2_library = NULL;
+    g_sdl2_resolved = NULL;
+    return 0;
+}
+
+/*
+ * Route every SDL2 call in the body of this file through the resolved
+ * pointer. The bodies below are unchanged from the link-time version.
+ */
+#define SDL_Init                    p_SDL_Init
+#define SDL_Quit                    p_SDL_Quit
+#define SDL_InitSubSystem           p_SDL_InitSubSystem
+#define SDL_QuitSubSystem           p_SDL_QuitSubSystem
+#define SDL_WasInit                 p_SDL_WasInit
+#define SDL_GetError                p_SDL_GetError
+#define SDL_free                    p_SDL_free
+#define SDL_CreateWindow            p_SDL_CreateWindow
+#define SDL_DestroyWindow           p_SDL_DestroyWindow
+#define SDL_GetWindowSize           p_SDL_GetWindowSize
+#define SDL_SetWindowTitle          p_SDL_SetWindowTitle
+#define SDL_GetWindowSurface        p_SDL_GetWindowSurface
+#define SDL_UpdateWindowSurface     p_SDL_UpdateWindowSurface
+#define SDL_CreateRGBSurfaceFrom    p_SDL_CreateRGBSurfaceFrom
+#define SDL_FreeSurface             p_SDL_FreeSurface
+#define SDL_BlitScaled              p_SDL_UpperBlitScaled
+#define SDL_PollEvent               p_SDL_PollEvent
+#define SDL_WaitEvent               p_SDL_WaitEvent
+#define SDL_WaitEventTimeout        p_SDL_WaitEventTimeout
+#define SDL_GetKeyboardState        p_SDL_GetKeyboardState
+#define SDL_GetMouseState           p_SDL_GetMouseState
+#define SDL_GetTicks                p_SDL_GetTicks
+#define SDL_GetPerformanceCounter   p_SDL_GetPerformanceCounter
+#define SDL_GetPerformanceFrequency p_SDL_GetPerformanceFrequency
+#define SDL_StartTextInput          p_SDL_StartTextInput
+#define SDL_StopTextInput           p_SDL_StopTextInput
+#define SDL_ShowCursor              p_SDL_ShowCursor
+#define SDL_SetWindowGrab           p_SDL_SetWindowGrab
+#define SDL_WarpMouseInWindow       p_SDL_WarpMouseInWindow
+#define SDL_GetClipboardText        p_SDL_GetClipboardText
+#define SDL_SetClipboardText        p_SDL_SetClipboardText
+#define SDL_HasClipboardText        p_SDL_HasClipboardText
+#define SDL_GetNumVideoDisplays     p_SDL_GetNumVideoDisplays
+#define SDL_GetDisplayName          p_SDL_GetDisplayName
+#define SDL_GetDisplayBounds        p_SDL_GetDisplayBounds
+#define SDL_GetDisplayUsableBounds  p_SDL_GetDisplayUsableBounds
+#define SDL_GetDisplayDPI           p_SDL_GetDisplayDPI
+#define SDL_SetWindowResizable      p_SDL_SetWindowResizable
+#define SDL_SetWindowFullscreen     p_SDL_SetWindowFullscreen
+#define SDL_SetWindowSize           p_SDL_SetWindowSize
+#define SDL_SetWindowPosition       p_SDL_SetWindowPosition
+#define SDL_GetWindowPosition       p_SDL_GetWindowPosition
+#define SDL_ShowWindow              p_SDL_ShowWindow
+#define SDL_HideWindow              p_SDL_HideWindow
+#define SDL_SetWindowMinimumSize    p_SDL_SetWindowMinimumSize
+#define SDL_SetWindowMaximumSize    p_SDL_SetWindowMaximumSize
+#define SDL_MinimizeWindow          p_SDL_MinimizeWindow
+#define SDL_MaximizeWindow          p_SDL_MaximizeWindow
+#define SDL_RestoreWindow           p_SDL_RestoreWindow
+#define SDL_RaiseWindow             p_SDL_RaiseWindow
+#define SDL_SetWindowBordered       p_SDL_SetWindowBordered
+#define SDL_GetWindowFlags          p_SDL_GetWindowFlags
+#define SDL_OpenAudioDevice         p_SDL_OpenAudioDevice
+#define SDL_CloseAudioDevice        p_SDL_CloseAudioDevice
+#define SDL_PauseAudioDevice        p_SDL_PauseAudioDevice
+#define SDL_QueueAudio              p_SDL_QueueAudio
+#define SDL_GetQueuedAudioSize      p_SDL_GetQueuedAudioSize
+#define SDL_ClearQueuedAudio        p_SDL_ClearQueuedAudio
+
+/*
+ * Entry-point gate. SDL2 is loaded on first use; if it is not there, the
+ * caller gets this value back rather than a NULL function pointer call.
+ */
+#define SDL2_REQUIRE(fail_value) do { if (!sdl2_load()) return fail_value; } while (0)
+#define SDL2_REQUIRE_VOID()      do { if (!sdl2_load()) return; } while (0)
 
 /* ================================================================
  * Global State
@@ -53,6 +460,7 @@ static int g_audio_owns_subsystem = 0;
  * ================================================================ */
 
 int64_t rt_sdl2_init(void) {
+    SDL2_REQUIRE(0);
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "[rt_sdl2] SDL_Init failed: %s\n", SDL_GetError());
         return 0;
@@ -65,6 +473,7 @@ int64_t rt_sdl2_init(void) {
 }
 
 void rt_sdl2_quit(void) {
+    SDL2_REQUIRE_VOID();
     if (g_audio_handle != 0) {
         rt_audio_sdl2_close(g_audio_handle);
     }
@@ -79,6 +488,7 @@ void rt_sdl2_quit(void) {
  * ================================================================ */
 
 int64_t rt_audio_sdl2_init(void) {
+    SDL2_REQUIRE(0);
     SDL_AudioSpec desired;
     SDL_AudioSpec obtained;
 
@@ -193,6 +603,7 @@ int64_t rt_audio_sdl2_close(int64_t handle) {
  * ================================================================ */
 
 int64_t rt_sdl2_create_window(const char* title, int64_t width, int64_t height) {
+    SDL2_REQUIRE(0);
     if (!title) title = "Simple Window";
     SDL_Window* win = SDL_CreateWindow(
         title,
@@ -358,6 +769,7 @@ static int64_t rt_sdl2_event_code(void) {
 }
 
 int64_t rt_sdl2_poll_event(void) {
+    SDL2_REQUIRE(0);
     while (SDL_PollEvent(&g_last_event)) {
         int64_t code;
         g_last_event_valid = 1;
@@ -369,6 +781,7 @@ int64_t rt_sdl2_poll_event(void) {
 }
 
 int64_t rt_sdl2_wait_event(int64_t timeout_ms) {
+    SDL2_REQUIRE(0);
     int timeout = timeout_ms < 0 ? -1 :
                   timeout_ms > INT_MAX ? INT_MAX : (int)timeout_ms;
     for (;;) {
@@ -481,6 +894,7 @@ int64_t rt_sdl2_event_wheel_y(void) {
  * ================================================================ */
 
 int64_t rt_sdl2_is_key_pressed(int64_t scancode) {
+    SDL2_REQUIRE(0);
     int numkeys = 0;
     const Uint8* state = SDL_GetKeyboardState(&numkeys);
     if (scancode < 0 || scancode >= numkeys) return 0;
@@ -492,18 +906,21 @@ int64_t rt_sdl2_is_key_pressed(int64_t scancode) {
  * ================================================================ */
 
 int64_t rt_sdl2_get_mouse_x(void) {
+    SDL2_REQUIRE(0);
     int x = 0, y = 0;
     SDL_GetMouseState(&x, &y);
     return (int64_t)x;
 }
 
 int64_t rt_sdl2_get_mouse_y(void) {
+    SDL2_REQUIRE(0);
     int x = 0, y = 0;
     SDL_GetMouseState(&x, &y);
     return (int64_t)y;
 }
 
 int64_t rt_sdl2_is_mouse_button_pressed(int64_t button) {
+    SDL2_REQUIRE(0);
     Uint32 state = SDL_GetMouseState(NULL, NULL);
     /* button: 0=left, 1=right, 2=middle (matching our event mapping) */
     switch (button) {
@@ -519,10 +936,12 @@ int64_t rt_sdl2_is_mouse_button_pressed(int64_t button) {
  * ================================================================ */
 
 int64_t rt_sdl2_get_ticks_ms(void) {
+    SDL2_REQUIRE(0);
     return (int64_t)SDL_GetTicks();
 }
 
 int64_t rt_sdl2_get_ticks_ns(void) {
+    SDL2_REQUIRE(0);
     if (g_perf_freq == 0) {
         g_perf_freq = SDL_GetPerformanceFrequency();
         if (g_perf_freq == 0) return 0;
@@ -682,16 +1101,19 @@ int64_t rt_sdl2_set_window_bordered(int64_t handle, int64_t bordered) {
 
 int64_t rt_sdl2_set_window_always_on_top(int64_t handle, int64_t on_top) {
     if (handle == 0) return 0;
-#if SDL_VERSION_ATLEAST(2, 0, 16)
-    SDL_SetWindowAlwaysOnTop(
+    SDL2_REQUIRE(0);
+    /*
+     * Added in SDL 2.0.16. With dynamic loading this is a RUNTIME capability
+     * question, not a compile-time one: an older libSDL2 simply does not
+     * export the symbol, and we report that honestly instead of baking the
+     * build machine's SDL version into the binary.
+     */
+    if (!p_SDL_SetWindowAlwaysOnTop) return 0;
+    p_SDL_SetWindowAlwaysOnTop(
         (SDL_Window*)(uintptr_t)handle,
         on_top ? SDL_TRUE : SDL_FALSE
     );
     return 1;
-#else
-    (void)on_top;
-    return 0;
-#endif
 }
 
 int64_t rt_sdl2_focus_window(int64_t handle) {
@@ -708,10 +1130,17 @@ int64_t rt_sdl2_window_flags(int64_t handle) {
 }
 
 const char* rt_sdl2_last_error(void) {
+    /*
+     * "the library is not installed" and "SDL failed" are different facts and
+     * callers need to tell them apart, so a failed load reports the soname
+     * list that was tried rather than an empty SDL_GetError().
+     */
+    if (!sdl2_load()) return g_sdl2_load_error;
     return SDL_GetError();
 }
 
 void rt_sdl2_set_cursor_visible(int64_t visible) {
+    SDL2_REQUIRE_VOID();
     SDL_ShowCursor(visible ? SDL_ENABLE : SDL_DISABLE);
 }
 
@@ -730,6 +1159,7 @@ void rt_sdl2_warp_mouse(int64_t handle, int64_t x, int64_t y) {
 /* ===== Clipboard ===== */
 
 const char* rt_sdl2_clipboard_get(void) {
+    SDL2_REQUIRE("");
     char* text = SDL_GetClipboardText();
     if (!text) return "";
     char* copy = strdup(text);
@@ -738,74 +1168,87 @@ const char* rt_sdl2_clipboard_get(void) {
 }
 
 bool rt_sdl2_clipboard_set(const char* text) {
+    SDL2_REQUIRE(false);
     return SDL_SetClipboardText(text) == 0;
 }
 
 bool rt_sdl2_clipboard_has_text(void) {
+    SDL2_REQUIRE(false);
     return SDL_HasClipboardText() == SDL_TRUE;
 }
 
 /* ===== Display Info ===== */
 
 int64_t rt_sdl2_get_num_displays(void) {
+    SDL2_REQUIRE(0);
     int n = SDL_GetNumVideoDisplays();
     return n > 0 ? (int64_t)n : 0;
 }
 
 const char* rt_sdl2_get_display_name(int64_t index) {
+    SDL2_REQUIRE("Unknown");
     const char* name = SDL_GetDisplayName((int)index);
     return name ? name : "Unknown";
 }
 
 int64_t rt_sdl2_get_display_bounds_x(int64_t index) {
+    SDL2_REQUIRE(0);
     SDL_Rect r;
     if (SDL_GetDisplayBounds((int)index, &r) != 0) return 0;
     return (int64_t)r.x;
 }
 
 int64_t rt_sdl2_get_display_bounds_y(int64_t index) {
+    SDL2_REQUIRE(0);
     SDL_Rect r;
     if (SDL_GetDisplayBounds((int)index, &r) != 0) return 0;
     return (int64_t)r.y;
 }
 
 int64_t rt_sdl2_get_display_bounds_w(int64_t index) {
+    SDL2_REQUIRE(0);
     SDL_Rect r;
     if (SDL_GetDisplayBounds((int)index, &r) != 0) return 0;
     return (int64_t)r.w;
 }
 
 int64_t rt_sdl2_get_display_bounds_h(int64_t index) {
+    SDL2_REQUIRE(0);
     SDL_Rect r;
     if (SDL_GetDisplayBounds((int)index, &r) != 0) return 0;
     return (int64_t)r.h;
 }
 
 double rt_sdl2_get_display_dpi(int64_t index) {
+    SDL2_REQUIRE(96.0);
     float ddpi = 0.0f;
     if (SDL_GetDisplayDPI((int)index, &ddpi, NULL, NULL) != 0) return 96.0;
     return (double)ddpi;
 }
 
 int64_t rt_sdl2_get_display_usable_x(int64_t index) {
+    SDL2_REQUIRE(0);
     SDL_Rect r;
     if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return 0;
     return (int64_t)r.x;
 }
 
 int64_t rt_sdl2_get_display_usable_y(int64_t index) {
+    SDL2_REQUIRE(0);
     SDL_Rect r;
     if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return 0;
     return (int64_t)r.y;
 }
 
 int64_t rt_sdl2_get_display_usable_w(int64_t index) {
+    SDL2_REQUIRE(0);
     SDL_Rect r;
     if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return 0;
     return (int64_t)r.w;
 }
 
 int64_t rt_sdl2_get_display_usable_h(int64_t index) {
+    SDL2_REQUIRE(0);
     SDL_Rect r;
     if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return 0;
     return (int64_t)r.h;
