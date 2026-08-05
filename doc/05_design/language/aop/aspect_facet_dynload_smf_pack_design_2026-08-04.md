@@ -1906,7 +1906,7 @@ Reuse the current variant-root computation while resolving the aspect package at
 
 ### Existing SMF and loader
 
-Use embedded ordinary opaque SMF blobs in SFM aspect-pack v1. Add `AspectPackProvider` as an `ObjectProvider` adapter and do not change the ordinary SMF reader format.
+Use embedded ordinary opaque SMF blobs in SFM aspect-pack v1. Keep the existing `ObjectProvider` concrete seam and adapt through `register_module_bytes`/`get_module_bytes` instead of introducing a new pluggable provider interface.
 
 ### Existing `note.sdn` and JIT
 
@@ -1959,7 +1959,7 @@ This permits module-level ownership even though several modules share one physic
 
 - Add versioned `kind=aspect_pack` SFM manifest metadata and an uncompressed pack directory.
 - Embed independently compressed complete ordinary SMF modules.
-- Implement `AspectPackProvider` as an `ObjectProvider` adapter returning module bytes.
+- Implement `AspectPackProvider` as an `ObjectProvider` concrete-byte adapter returning module bytes through the provider's registered-module path.
 - Reuse existing in-memory reader, relocation, JIT, and lifecycle paths.
 
 ## Phase 5 — Application catalog and lazy facet activation
