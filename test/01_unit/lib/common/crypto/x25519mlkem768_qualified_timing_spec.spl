@@ -183,6 +183,36 @@ fn _rehash_schedule(
         x25519_mlkem768_paired_schedule_receipt_sha256(changed)
     changed
 
+# Per-backend qualification fixtures, built ONCE.
+#
+# `x25519_mlkem768_synthetic_measurement_qualification` costs ~7 s per call
+# under the tree-walk interpreter the spec suite is pinned to: it admits the
+# full 7-row backend matrix twice (once via
+# `x25519_mlkem768_synthetic_measurement_target`, once inside
+# `x25519_mlkem768_qualify_measurement`). The 9 examples below called it 11
+# times -- ~77 s of a ~137 s run -- which pushed the file past the 120 s child
+# default in `src/app/test_runner_new/test_runner_single.spl:129` and left it
+# with NO verdict line at all (the daemon reported "test daemon timed out").
+#
+# The function is pure in `backend` (verified: three calls, identical
+# `qualification_sha256`), and struct assignment COPIES rather than aliases
+# (verified by src/app/test/x25519mlkem768_struct_value_probe.spl), so the one
+# example that mutates its qualification cannot poison the shared value.
+# Reusing the value recomputes nothing and pins nothing -- every digest below
+# is still derived by the same `sha256_text` calls on the same bytes.
+val _QUALIFICATION_AVX2 =
+    x25519_mlkem768_synthetic_measurement_qualification(
+        X25519MlKem768EvidenceBackend.Avx2)
+val _QUALIFICATION_NEON =
+    x25519_mlkem768_synthetic_measurement_qualification(
+        X25519MlKem768EvidenceBackend.Neon)
+val _QUALIFICATION_RVV =
+    x25519_mlkem768_synthetic_measurement_qualification(
+        X25519MlKem768EvidenceBackend.Rvv)
+val _QUALIFICATION_VULKAN =
+    x25519_mlkem768_synthetic_measurement_qualification(
+        X25519MlKem768EvidenceBackend.Vulkan)
+
 # @manual_section: Qualified raw timing primary flow
 
 describe "X25519MLKEM768 qualified raw timing receipts":
@@ -193,8 +223,7 @@ describe "X25519MLKEM768 qualified raw timing receipts":
     it "admits role-fixed scalar and AVX2 samples and derives every aggregate":
         step("Bind measurements to an admitted backend matrix")
         val qualification =
-            x25519_mlkem768_synthetic_measurement_qualification(
-                X25519MlKem768EvidenceBackend.Avx2)
+            _QUALIFICATION_AVX2
         val scalar_warm = _warm_receipt(
             qualification, X25519MlKem768TimingRole.ScalarReference)
         val candidate_warm = _warm_receipt(
@@ -232,8 +261,7 @@ describe "X25519MLKEM768 qualified raw timing receipts":
 
     it "rejects malformed, misordered, overlapping, or rebound paired schedules":
         val qualification =
-            x25519_mlkem768_synthetic_measurement_qualification(
-                X25519MlKem768EvidenceBackend.Avx2)
+            _QUALIFICATION_AVX2
         val scalar_warm = _warm_receipt(
             qualification, X25519MlKem768TimingRole.ScalarReference)
         val candidate_warm = _warm_receipt(
@@ -361,8 +389,7 @@ describe "X25519MLKEM768 qualified raw timing receipts":
     it "rejects forged warmup hashes, role counts, and timed setup":
         step("Reject setup, fallback, kernel-only, or mismatch contamination")
         val qualification =
-            x25519_mlkem768_synthetic_measurement_qualification(
-                X25519MlKem768EvidenceBackend.Neon)
+            _QUALIFICATION_NEON
         var forged = _warm_receipt(
             qualification, X25519MlKem768TimingRole.Candidate)
         forged.receipt_sha256 = "0" * 64
@@ -398,8 +425,7 @@ describe "X25519MLKEM768 qualified raw timing receipts":
 
     it "rejects short, reordered, miscounted, and contaminated sample sets":
         val qualification =
-            x25519_mlkem768_synthetic_measurement_qualification(
-                X25519MlKem768EvidenceBackend.Rvv)
+            _QUALIFICATION_RVV
         val warm = _warm_receipt(
             qualification, X25519MlKem768TimingRole.Candidate)
         var short_samples: [i64] = []
@@ -457,8 +483,7 @@ describe "X25519MLKEM768 qualified raw timing receipts":
 
     it "rejects rehashed timed binding and exchange-count mutations":
         val qualification =
-            x25519_mlkem768_synthetic_measurement_qualification(
-                X25519MlKem768EvidenceBackend.Avx2)
+            _QUALIFICATION_AVX2
         val warm = _warm_receipt(
             qualification, X25519MlKem768TimingRole.Candidate)
         var rebound = _timed_receipt(
@@ -484,8 +509,7 @@ describe "X25519MLKEM768 qualified raw timing receipts":
 
     it "requires complete multi-kernel GPU lifecycle counts":
         val qualification =
-            x25519_mlkem768_synthetic_measurement_qualification(
-                X25519MlKem768EvidenceBackend.Vulkan)
+            _QUALIFICATION_VULKAN
         val warm = _warm_receipt(
             qualification, X25519MlKem768TimingRole.Candidate)
         var stale_v1_hash = _timed_receipt(
@@ -537,8 +561,7 @@ describe "X25519MLKEM768 qualified raw timing receipts":
 
     it "rejects invalid qualification and warm-session rebinding first":
         var qualification =
-            x25519_mlkem768_synthetic_measurement_qualification(
-                X25519MlKem768EvidenceBackend.Avx2)
+            _QUALIFICATION_AVX2
         val original_warm = _warm_receipt(
             qualification, X25519MlKem768TimingRole.Candidate)
         qualification.qualification_sha256 = "0" * 64
@@ -548,8 +571,7 @@ describe "X25519MLKEM768 qualified raw timing receipts":
                 "measurement-qualification-invalid")
             case Ok(_): fail("invalid qualification admitted warmup")
         val valid_qualification =
-            x25519_mlkem768_synthetic_measurement_qualification(
-                X25519MlKem768EvidenceBackend.Avx2)
+            _QUALIFICATION_AVX2
         var rebound = _warm_receipt(
             valid_qualification, X25519MlKem768TimingRole.Candidate)
         rebound.session_id = "different-session"
@@ -562,8 +584,7 @@ describe "X25519MLKEM768 qualified raw timing receipts":
 
     it "admits RVV only with observed VLEN and keeps scalar acceleration zero":
         val qualification =
-            x25519_mlkem768_synthetic_measurement_qualification(
-                X25519MlKem768EvidenceBackend.Rvv)
+            _QUALIFICATION_RVV
         val candidate_warm = _warm_receipt(
             qualification, X25519MlKem768TimingRole.Candidate)
         val candidate = _timed_receipt(
@@ -610,8 +631,7 @@ describe "X25519MLKEM768 qualified raw timing receipts":
 
     it "rejects AVX2 and NEON VLEN claims and incomplete SIMD evidence":
         val avx_qualification =
-            x25519_mlkem768_synthetic_measurement_qualification(
-                X25519MlKem768EvidenceBackend.Avx2)
+            _QUALIFICATION_AVX2
         val avx_warm = _warm_receipt(
             avx_qualification, X25519MlKem768TimingRole.Candidate)
         var avx_vlen = _timed_receipt(
@@ -625,8 +645,7 @@ describe "X25519MLKEM768 qualified raw timing receipts":
             case Ok(_): fail("AVX2 timing claimed an RVV VLEN")
 
         val neon_qualification =
-            x25519_mlkem768_synthetic_measurement_qualification(
-                X25519MlKem768EvidenceBackend.Neon)
+            _QUALIFICATION_NEON
         val neon_warm = _warm_receipt(
             neon_qualification, X25519MlKem768TimingRole.Candidate)
         var neon_vlen = _timed_receipt(
