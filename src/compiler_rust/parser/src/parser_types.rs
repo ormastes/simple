@@ -436,6 +436,21 @@ impl<'a> Parser<'a> {
                 TokenKind::RBracket
             };
 
+            // Angle-bracket generic argument lists may wrap across lines:
+            //   fn g() -> Result<i64,
+            //           text>:
+            // `(`/`[`/`{` are tracked by the indentation lexer, which suppresses
+            // Newline/Indent inside them. `<` is NOT tracked -- it is ambiguous
+            // with the less-than operator, so the lexer cannot know it opened a
+            // delimiter -- and the wrapped list therefore still sees the line's
+            // Newline/Indent tokens. Drain them here so the type grammar sees a
+            // flat token stream, and repay the indents as dedents once the list
+            // closes so the enclosing block's indentation state is unchanged.
+            let mut angle_indents: usize = 0;
+            if using_angle_brackets {
+                angle_indents += self.skip_newlines_and_indents_for_method_chain();
+            }
+
             while !self.check(&closing_token) {
                 // Handle >> token splitting for nested generics like List<List<T>>
                 // When using angle brackets and we encounter >>, treat it as two > tokens
@@ -465,12 +480,19 @@ impl<'a> Parser<'a> {
                     args.push(self.parse_type()?);
                 }
 
+                if using_angle_brackets {
+                    angle_indents += self.skip_newlines_and_indents_for_method_chain();
+                }
+
                 if !self.check(&closing_token) {
                     // Again check for >> before expecting comma
                     if using_angle_brackets && self.check(&TokenKind::ShiftRight) {
                         break;
                     }
                     self.expect(&TokenKind::Comma)?;
+                    if using_angle_brackets {
+                        angle_indents += self.skip_newlines_and_indents_for_method_chain();
+                    }
                 }
             }
 
@@ -515,6 +537,12 @@ impl<'a> Parser<'a> {
                 self.advance();
             } else {
                 self.expect(&closing_token)?;
+            }
+
+            // Repay the indents drained for a wrapped angle-bracket list so the
+            // enclosing block's indentation state is exactly as it was.
+            if angle_indents > 0 {
+                self.consume_dedents_for_method_chain(angle_indents);
             }
 
             // Special handling for Constructor[T] or Constructor[T, (args)]
