@@ -824,3 +824,16 @@ rather than landed under this pass's scope.
 **Blocked on bootstrap?** No — this is pure C-runtime test/tooling work
 (`src/runtime/test/*.c`, `scripts/check/*.shs`), verified via direct `cc`
 invocation without any bootstrap stage.
+
+**Commit-message note:** the fixture/doc changes described in this addendum
+were pushed to `main` as commit `374856c73958a01eb5952334e1bff417dbda4478`.
+That commit's message is a stale, unrelated one (a struct-pattern-fields fix
+from a different session) — a `git commit-tree -F` plumbing call
+accidentally read a same-named leftover file from an earlier session's
+scratchpad instead of this change's intended message. The tree content is
+verified correct by blob hash (`rt_mem_guard_stale_slot_selfcheck.c`,
+`rt_mem_guard_after_sweep_selfcheck.c`, the capsule-script wiring, the new
+bug doc, and this addendum are all present and byte-identical to what is
+described here); only the commit's own message text is wrong. Left
+uncorrected in git history (no force-push to `main`) — this note is the
+correction of record.
