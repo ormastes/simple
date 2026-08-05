@@ -31,14 +31,38 @@ struct MemInfraPlan:
 fn mem_infra_matrix() -> [MemInfraRow]:
     [
         MemInfraRow(name: "attr", interpreter: true, cranelift: true, llvm: true),
-        # guard is interpreter-ONLY. The guard-page allocator lives in
+        # guard is interpreter-ONLY as far as the DEPLOYED binary is
+        # concerned. The guard-page allocator lives in
         # `src/compiler_rust/compiler/src/interpreter_extern/mem_guard.rs`
         # (mmap + mprotect(PROT_NONE)); cranelift and llvm both resolve
-        # `rt_alloc` to the C runtime, which has no guard-page mechanism at
-        # all. Measured behaviourally, not read off the source tree — see
-        # `test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl`, which
-        # commits a real use-after-free per backend and records which ones
-        # actually trap.
+        # `rt_alloc` to the C runtime.
+        #
+        # UPDATE 2026-08-05: a native-C mirror now EXISTS in source --
+        # `src/runtime/runtime_memory_guard.h` (shared, `static`-linkage so
+        # it is safe to `#include` into both C files below without a new
+        # multiple-definition symbol), wired into `rt_alloc`/`rt_free` in
+        # both `src/runtime/runtime_memory.c` (the object the cranelift-JIT
+        # process `dlsym`s `rt_alloc` from) and `src/runtime/runtime_native.c`
+        # (the object `native-build --runtime-bundle core-c-bootstrap`
+        # actually ships for llvm/cranelift AOT artifacts -- confirmed the
+        # true provider by `nm`, same method the harden comment below uses).
+        # Sabotage-verified in isolated `cc`+`ar`+`nm` builds (no bootstrap):
+        # `src/runtime/test/rt_mem_guard_native_selfcheck.c`, linked directly
+        # against the real `core-c-bootstrap` archive, forks a child per
+        # check and asserts SIGSEGV (not just a boolean) on a 1-byte
+        # overflow AND on read/write-after-free; flipping the mprotect calls
+        # in the shared header to non-PROT_NONE turns exactly those checks
+        # red and nothing else, proving the check isn't vacuous.
+        #
+        # This row STAYS false here anyway: nothing has redeployed the seed
+        # (cranelift path) or the self-hosted `native-build` toolchain (llvm
+        # path) with this new C, so `--mem-infra=guard` today still exports
+        # `SIMPLE_MEM_GUARD_RATE` into a process whose linked `rt_alloc`
+        # predates this change. Flipping the matrix before that redeploy
+        # would reproduce this exact bug from the other direction -- see
+        # `doc/08_tracking/bug/mem_infra_guard_row_false_on_native_backends_2026-07-31.md`.
+        # Re-measure with `test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl`
+        # against a REDEPLOYED binary before flipping cranelift/llvm to true.
         MemInfraRow(name: "guard", interpreter: true, cranelift: false, llvm: false),
         # harden is real on the interpreter and on cranelift, but NOT on llvm.
         # Measured behaviourally on 2026-08-02, not read off the source tree —

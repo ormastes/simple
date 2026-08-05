@@ -17,6 +17,7 @@
  * here to avoid duplicate symbol definitions. */
 #include "runtime.h"
 #include "runtime_simd_dispatch.h"
+#include "runtime_memory_guard.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -4754,6 +4755,13 @@ int64_t rt_net_http_plain_local_probe(void) {
 
 void* rt_alloc(int64_t size) {
     if (size < 0) return NULL;
+    if (rt_mem_guard_should_sample((size_t)size)) {
+        void* guarded = rt_mem_guard_alloc_sampled((size_t)size);
+        if (guarded != NULL) return guarded;
+        /* mmap/mprotect failed (or the slot table is full) -- fall through
+         * to the normal allocator below rather than returning NULL for a
+         * sampling decision that isn't itself an OOM. */
+    }
     void* ptr = malloc((size_t)size);
     if (ptr && !rt_core_transient_raw_register(ptr, (size_t)size)) {
         free(ptr);
@@ -4765,6 +4773,29 @@ void* rt_alloc(int64_t size) {
 void* rt_realloc(void* ptr, int64_t size) {
     if (size < 0) return NULL;
     if (!ptr) return rt_alloc(size);
+    if (rt_mem_guard_is_slot(ptr)) {
+        /* A guard slot is a page-aligned mmap mapping, not a libc heap
+         * chunk -- realloc()ing it directly would be undefined behaviour.
+         * Emulate realloc instead: allocate fresh through the normal
+         * allocator (re-sampling a slot that's about to be resized isn't
+         * required), copy the overlap, then free the OLD slot through the
+         * guard path so a UAF on the stale pointer still traps. */
+        RtMemGuardSlot* slot = rt_mem_guard_find(ptr);
+        size_t old_size = slot ? slot->size : 0;
+        if (size == 0) {
+            rt_mem_guard_free_sampled(ptr);
+            return NULL;
+        }
+        void* next = malloc((size_t)size);
+        if (!next) return NULL;
+        if (!rt_core_transient_raw_register(next, (size_t)size)) {
+            free(next);
+            return NULL;
+        }
+        memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
+        rt_mem_guard_free_sampled(ptr);
+        return next;
+    }
     RtCoreTransientRawAlloc* tracked = rt_core_transient_raw_lookup((uintptr_t)ptr);
     if (!tracked) return realloc(ptr, (size_t)size);
     if (size == 0) {
@@ -4787,8 +4818,16 @@ void* rt_realloc(void* ptr, int64_t size) {
 }
 
 void rt_free(void* ptr) {
+    if (rt_mem_guard_is_slot(ptr)) {
+        rt_mem_guard_free_sampled(ptr);
+        return;
+    }
     rt_core_transient_raw_erase(ptr);
     free(ptr);
+}
+
+int64_t rt_mem_guard_stats(void) {
+    return rt_mem_guard_stats_native();
 }
 
 void* rt_memcpy(void* dst, const void* src, int64_t n) {

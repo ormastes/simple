@@ -10,6 +10,8 @@
 #include <string.h>
 #include <limits.h>
 
+#include "runtime_memory_guard.h"
+
 #if defined(_MSC_VER)
 #define RT_MEMORY_THREAD_LOCAL __declspec(thread)
 #else
@@ -231,6 +233,10 @@ static void rt_mem_quarantine_push(uint8_t* user_ptr, uint8_t* base_ptr, size_t 
 /* Scans the quarantine ring for blocks whose bytes are no longer all
  * 0xDE poison -- i.e. something wrote to memory after it was "freed".
  * Returns the number of tampered blocks (not tampered bytes). */
+int64_t rt_mem_guard_stats(void) {
+    return rt_mem_guard_stats_native();
+}
+
 int64_t rt_mem_harden_check_native(void) {
     int64_t tampered = 0;
     for (size_t i = 0; i < RT_MEM_QUARANTINE_SLOTS; i++) {
@@ -248,6 +254,13 @@ int64_t rt_mem_harden_check_native(void) {
 
 uint8_t* rt_alloc(int64_t size) {
     if (size <= 0) return NULL;
+    if (rt_mem_guard_should_sample((size_t)size)) {
+        void* guarded = rt_mem_guard_alloc_sampled((size_t)size);
+        if (guarded != NULL) return (uint8_t*)guarded;
+        /* mmap/mprotect failed (or the slot table is full) -- fall through
+         * to the normal allocator below rather than returning NULL for a
+         * sampling decision that isn't itself an OOM. */
+    }
     if (rt_mem_harden_enabled()) {
         size_t total = (size_t)size + RT_MEM_HARDEN_HEADER_BYTES;
         uint8_t* base = (uint8_t*)calloc(1, total);
@@ -270,6 +283,13 @@ uint8_t* rt_alloc(int64_t size) {
 
 void rt_free(uint8_t* ptr) {
     if (!ptr) return;
+    if (rt_mem_guard_is_slot(ptr)) {
+        /* Guard slots are never transient-scope-owned and never enter the
+         * harden quarantine -- guard_free_sampled already PROT_NONEs the
+         * whole mapping, which is the stronger (page-fault) protection. */
+        rt_mem_guard_free_sampled(ptr);
+        return;
+    }
     if (rt_mem_harden_enabled()) {
         if (rt_mem_quarantine_contains(ptr)) {
             /* Double free of a quarantined block: refused, not acted on. */
