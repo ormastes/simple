@@ -1,0 +1,105 @@
+"""
+# Every Budget Exit Must Name A Site That Actually Exists
+
+## Overview
+
+`40c540fa850` replaced the anonymous `_web_budget_expired()` with
+`_web_budget_expired_at(site)` so that no budget-exhaustion exit could be
+nameless, and enumerated the family as ten `WEB_BUDGET_SITE_*` constants.
+
+The rename reached the layout and paint guards but **missed the style phase**.
+Four call sites in `simple_web_html_layout_renderer_core.spl` (the style
+cascade's outer node loop, the selector-specificity-group loop, the candidate
+declaration loop and the important-declaration loop) kept calling the
+zero-argument `_web_budget_expired()`, which no longer exists anywhere. The four
+`WEB_BUDGET_SITE_STYLE_*` constants were consequently declared and never used.
+
+Two things followed, and both are the "silent" failure this family exists to
+prevent:
+
+1. the unresolved symbol made the JIT drop the **entire style module to the
+   interpreter** (`unresolved external symbol '_web_budget_expired': whole
+   module dropped to the interpreter`), a 100-1000x slowdown on the phase that
+   the budget is meant to bound -- so exhaustion became far more likely;
+2. when a style guard was actually reached, the render died with
+   `error[E1002]: function '_web_budget_expired' not found` instead of degrading.
+
+Existing specs did not catch it because their pages are small enough that the
+render finishes before the interpreter penalty matters, and because a spec that
+only checks "the reason is one of the family" is satisfied by any paint site.
+
+This spec pins the style phase specifically: a style-heavy page on a starved
+budget must degrade **at a style site**, which is only possible if those four
+guards call a function that exists.
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+"""
+
+use std.spec.*
+use lib.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_result,
+    simple_web_layout_software_pixels_presentable,
+    simple_web_layout_software_present_decision}
+
+val W: i32 = 160
+val H: i32 = 120
+
+# Every node carries its own inline declaration block, so the style cascade is
+# the dominant cost and its guards are the first the render reaches.
+fn _style_heavy_page(n: i32) -> text:
+    var s = "<html><body style=\"margin:0\">"
+    var k = 0
+    while k < n:
+        s = s + "<div style=\"color:#101010;background:#eef2ff;border:1px solid #334155;padding:2px;margin:1px;font-size:12px\">n</div>"
+        k = k + 1
+    s + "</body></html>"
+
+val SMALL_PAGE: text = "<html><body style=\"margin:0\"><p style=\"color:#101010;font-size:16px\">ok</p></body></html>"
+
+# The complete enumerated family, including the positive-z absolute paint pass
+# that was previously the one paint loop with no guard at all.
+fn _is_known_site(r: text) -> bool:
+    (r == "style-cascade" or r == "style-selector-groups" or
+        r == "style-candidate-decls" or r == "style-important-decls" or
+        r == "layout-subtree" or r == "paint-backgrounds" or
+        r == "paint-relative-roots" or r == "paint-absolute-low-z" or
+        r == "paint-absolute-high-z" or r == "paint-scrollbars" or
+        r == "paint-text")
+
+describe "budget site family":
+
+    it "degrades at a STYLE site on a style-heavy page, proving the style guards resolve":
+        step("Render a style-heavy page on a 1ms budget")
+        # Before the fix this did not merely report the wrong site: it raised
+        # error[E1002] `_web_budget_expired` not found and the render died.
+        val starved = simple_web_layout_render_html_software_result(_style_heavy_page(120), W, H, 1)
+        expect(starved.render_degraded).to_equal(true)
+        step("The named site is a style site, not a paint site")
+        expect(starved.degrade_reason).to_equal("style-cascade")
+
+    it "names a site from the enumerated family whatever the page":
+        step("A starved style-heavy render names a known site")
+        val heavy = simple_web_layout_render_html_software_result(_style_heavy_page(120), W, H, 1)
+        expect(heavy.degrade_reason == "").to_equal(false)
+        expect(_is_known_site(heavy.degrade_reason)).to_equal(true)
+        step("A starved small render also names a known site")
+        val small = simple_web_layout_render_html_software_result(SMALL_PAGE, W, H, 1)
+        expect(small.render_degraded).to_equal(true)
+        expect(_is_known_site(small.degrade_reason)).to_equal(true)
+
+    it "refuses to present the exhausted style render and names the decline":
+        step("An exhausted render is not presentable")
+        val starved = simple_web_layout_render_html_software_result(_style_heavy_page(120), W, H, 1)
+        expect(simple_web_layout_software_pixels_presentable(starved)).to_equal(false)
+        step("The decision string carries the style site as the concrete reason")
+        val declined = simple_web_layout_software_present_decision(starved)
+        expect(declined).to_start_with("software-oracle:declined:")
+        expect(declined).to_contain("reason=budget-exhausted:")
+        expect(declined).to_contain(starved.degrade_reason)
+
+    it "reports no exhaustion when the budget is adequate (the honest direction)":
+        step("A small page under a generous budget completes and names nothing")
+        val complete = simple_web_layout_render_html_software_result(SMALL_PAGE, W, H, 600000)
+        expect(complete.render_degraded).to_equal(false)
+        expect(complete.degrade_reason).to_equal("")
+        expect(simple_web_layout_software_pixels_presentable(complete)).to_equal(true)
