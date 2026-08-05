@@ -58,6 +58,32 @@ fn _cli_file_remove_impl(path: text) -> bool:
 fn _cli_file_rename_impl(source: text, destination: text) -> bool:
     rename(source, destination)
 
+# Stem (filename without extension) computed with rfind + `>= 0`/`> 0` checks,
+# NOT std.path.stem/extension: those match rfind's raw i64 result against
+# Some(idx)/nil, and under native MIR codegen a bare i64 never matches that
+# Option pattern (crashes with "match expression exhausted... for i64 value
+# N" -- verified live, not hypothesized) even for a genuinely-found index.
+# See the sibling `eq_idx >= 0` workaround a few lines up in this same file.
+fn _cli_native_build_stem(path_text: text) -> text:
+    val slash = path_text.rfind("/")
+    val base = if slash >= 0: path_text.substring(slash + 1) else: path_text
+    val dot = base.rfind(".")
+    if dot > 0:
+        base.substring(0, dot)
+    else:
+        base
+
+# Contained default output resolver for `native-build`/`build`. When no
+# -o/--output was given, the binary goes to build/native/<entry-stem>, never
+# a bare filename in whatever directory the process was launched from (repo
+# root for `bin/simple build`). Explicit -o/--output is returned unchanged.
+# See doc/03_plan/compiler/driver/default_output_dir_containment_plan.md.
+fn cli_native_build_resolve_output(output: text, output_explicit: bool, entry_point: text) -> text:
+    if output_explicit:
+        output
+    else:
+        "build/native/{_cli_native_build_stem(entry_point)}"
+
 fn cli_native_build_is_entry_arg(arg: text) -> bool:
     arg == "--entry" or arg.starts_with("--entry=")
 
@@ -769,7 +795,12 @@ fn cli_native_build(args: [text]) -> i64:
         # Pure Simple path: use CompilerDriver with LLVM lib backend
         # Parse native-build args: --source, --entry, -o, --strip, --no-mangle, etc.
         var entry_point = ""
-        var output = "a.out"
+        # Default resolved below (after entry_point is known) to
+        # build/native/<entry-stem> -- never a bare filename, which would
+        # otherwise land in whatever directory the process was launched from
+        # (see doc/03_plan/compiler/driver/default_output_dir_containment_plan.md).
+        var output = ""
+        var output_explicit = false
         var verbose = false
         var strip = false
         var emit_smf = false
@@ -825,14 +856,18 @@ fn cli_native_build(args: [text]) -> i64:
                 if j + 1 < args.len():
                     j = j + 1
                     output = args[j]
+                    output_explicit = true
             elif a.starts_with("-o"):
                 output = a.substring(2)
+                output_explicit = true
             elif a == "--output":
                 if j + 1 < args.len():
                     j = j + 1
                     output = args[j]
+                    output_explicit = true
             elif a.starts_with("--output="):
                 output = a.substring(9)
+                output_explicit = true
             elif a == "--verbose" or a == "-v":
                 verbose = true
             elif a == "--strip":
@@ -1008,16 +1043,27 @@ fn cli_native_build(args: [text]) -> i64:
             _cli_eprint("Usage: simple native-build --backend=llvm --entry <file.spl> -o <output> [--source <dir>]...")
             return 1
 
+        # Contained default: no explicit -o/--output means the binary goes to
+        # build/native/<entry-stem>, never a bare filename in whatever
+        # directory the process happened to be launched from (repo root for
+        # `bin/simple build`). See default_output_dir_containment_plan.md.
+        output = cli_native_build_resolve_output(output, output_explicit, entry_point)
+
         # A missing --output parent dir previously made the worker fail with a
         # silent exit 1 after the full compile (bug: native_build_missing_output_dir_silent_fail_2026-07-23).
-        # rfind returns a raw i64 (-1 if absent); `?? 0` is a dead no-op on a
-        # non-Optional and would misread a match at the native nil sentinel.
+        # Parent-dir creation is unconditional (not gated on the output
+        # containing "/") so an explicit bare `-o out` still resolves its
+        # (no-op, ".") parent the same way a nested path does. Computed with a
+        # raw rfind + `> 0` check (NOT path.dirname/Option-match on rfind) --
+        # rfind returns a raw i64 (-1 if absent), and matching it as
+        # Some(idx)/nil mis-binds idx=-1 to the Some arm; substring(0, -1)
+        # then truncates instead of no-op'ing to ".". See the sibling
+        # `eq_idx >= 0` workaround a few lines up in this same file.
         val out_slash = output.rfind("/")
-        if out_slash > 0:
-            val out_parent = output.substring(0, out_slash)
-            if not _cli_dir_create_impl(out_parent, true):
-                _cli_eprint("Error: could not create output directory {out_parent} for --output {output}")
-                return 1
+        val out_parent = if out_slash > 0: output.substring(0, out_slash) else: "."
+        if not _cli_dir_create_impl(out_parent, true):
+            _cli_eprint("Error: could not create output directory {out_parent} for --output {output}")
+            return 1
         # Build into a private sibling first. A stale requested output must not
         # satisfy the success check when a driver/linker reports Success without
         # writing its artifact; conversely, a failed build must leave the last

@@ -18,6 +18,30 @@
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
 use compiler.common.driver_core_types.{CompileMode, CompileOptions, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization}
 
+# Stem (filename without extension) computed with rfind + `>= 0`/`> 0`
+# checks, NOT std.path.stem/extension: those match rfind's raw i64 result
+# against Some(idx)/nil, and under native MIR codegen a bare i64 never
+# matches that Option pattern (crashes with "match expression exhausted...
+# for i64 value N" -- verified live, not hypothesized).
+fn _main_default_stem(path_text: text) -> text:
+    val slash = path_text.rfind("/")
+    val base = if slash >= 0: path_text.substring(slash + 1) else: path_text
+    val dot = base.rfind(".")
+    if dot > 0:
+        base.substring(0, dot)
+    else:
+        base
+
+# Mirrors the driver's contained default (driver_aot_pipeline.spl /
+# driver_types.spl) so this status line reports the path the compile
+# actually used rather than a stale literal. See
+# doc/03_plan/compiler/driver/default_output_dir_containment_plan.md.
+fn _main_default_output(input_files: [text]) -> text:
+    if input_files.len() > 0:
+        "build/native/{_main_default_stem(input_files[0])}"
+    else:
+        "build/native/out"
+
 # ------------------------------------------------------------------------------
 # Command Line Interface
 # ------------------------------------------------------------------------------
@@ -587,7 +611,7 @@ fn main() -> i32:
     match result:
         case CompileResult.Success(_):
             if requested_mode_text == "aot":
-                val out_path = options.output_file ?? "a.out"
+                val out_path = options.output_file ?? _main_default_output(options.input_files)
                 print "AOT output written to {out_path}"
             return 0
         case CompileResult.TypeError(errors):

@@ -12,14 +12,35 @@ use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
 use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native, driver_output_format_smf, compile_result_is_success, compile_result_errors)
 use app.cli.bootstrap_identity.{bootstrap_version}
 use app.cli.bootstrap_focused_native_build.{run_exact_stage4_focused_capsule}
-use std.nogc_sync_mut.io_runtime.{env_get, env_set, file_exists, file_size, remove_file_if_exists}
+use std.nogc_sync_mut.io_runtime.{env_get, env_set, file_exists, file_size, remove_file_if_exists, dir_create}
 
 fn native_build_help() -> i64:
     0
 
+# Stem (filename without extension) computed with rfind + `>= 0`/`> 0`
+# checks, NOT std.path.stem/extension: those match rfind's raw i64 result
+# against Some(idx)/nil, and under native MIR codegen a bare i64 never
+# matches that Option pattern (crashes with "match expression exhausted...
+# for i64 value N" -- verified live against this exact bootstrap capsule,
+# not hypothesized). See compile_targets.spl's `_cli_native_build_stem`.
+fn _bootstrap_default_stem(path_text: text) -> text:
+    val slash = path_text.rfind("/")
+    val base = if slash >= 0: path_text.substring(slash + 1) else: path_text
+    val dot = base.rfind(".")
+    if dot > 0:
+        base.substring(0, dot)
+    else:
+        base
+
+# NOTE: this function's name is a hardcoded "known bootstrap builtin" in the
+# Stage3/4 self-hosting capsule lowering (see is_bootstrap_builtin_fn /
+# bootstrap_hir_symbol_for_name in src/compiler/20.hir + 50.mir) -- its
+# (args: [text], i: i64) -> text SIGNATURE must not change, only literal
+# values inside it. The "not specified" sentinel is "" (empty text), resolved
+# to the contained build/native/<entry-stem> default at the call site instead.
 fn bootstrap_output_from_args(args: [text], i: i64) -> text:
     if i >= args.len():
-        "a.out"
+        ""
     elif args[i].starts_with("-o") and args[i].len() == 2 and i + 1 < args.len():
         args[i + 1]
     elif args[i].starts_with("-o") and args[i].len() > 2:
@@ -258,7 +279,14 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     val entry_path = native_build_single_spl_positional(args)
     if entry_path == "":
         return run_rt_native_build(args)
-    val output = bootstrap_output_from_args(args, 0)
+    val output_arg = bootstrap_output_from_args(args, 0)
+    val output = if output_arg != "": output_arg else: "build/native/{_bootstrap_default_stem(entry_path)}"
+    # rfind + `> 0` (not path.dirname/Option-match on rfind): rfind returns a
+    # raw i64 (-1 if absent), and matching it as Some(idx)/nil mis-binds
+    # idx=-1 to the Some arm, corrupting the "no slash" case.
+    val out_slash = output.rfind("/")
+    if out_slash > 0:
+        dir_create(output.substring(0, out_slash), true)
     val backend = native_build_backend_from_args(args, 0)
     # Seed both scalar and array input channels: compiled struct transport can
     # lose input_files. Leave closure discovery enabled so Driver can load the

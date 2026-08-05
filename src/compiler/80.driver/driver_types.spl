@@ -27,6 +27,29 @@ use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 
 extern fn rt_string_free(value: text) -> i64
 
+# Stem (filename without extension) computed with rfind + `>= 0`/`> 0`
+# checks, NOT std.path.stem/extension: those match rfind's raw i64 result
+# against Some(idx)/nil, and under native MIR codegen a bare i64 never
+# matches that Option pattern (crashes with "match expression exhausted...
+# for i64 value N" -- verified live, not hypothesized).
+fn _driver_types_default_stem(path_text: text) -> text:
+    val slash = path_text.rfind("/")
+    val base = if slash >= 0: path_text.substring(slash + 1) else: path_text
+    val dot = base.rfind(".")
+    if dot > 0:
+        base.substring(0, dot)
+    else:
+        base
+
+# Contained default when no output_file was requested: build/native/<stem of
+# the first input file>, never a bare filename in cwd. See
+# doc/03_plan/compiler/driver/default_output_dir_containment_plan.md.
+fn _driver_types_default_output(input_files: [text]) -> text:
+    if input_files.len() > 0:
+        "build/native/{_driver_types_default_stem(input_files[0])}"
+    else:
+        "build/native/out"
+
 # ------------------------------------------------------------------------------
 # Compilation Context
 # ------------------------------------------------------------------------------
@@ -84,7 +107,7 @@ class CompileContext:
                 target_triple_fn: fn(): "native-jit"
             )
         elif selected_mode_text == "aot":
-            val output = options.output_file ?? "a.out"
+            val output = options.output_file ?? _driver_types_default_output(options.input_files)
             val aot_impl = CompilerBackendImpl.aot(output)
             BackendPort(
                 name: "aot",
