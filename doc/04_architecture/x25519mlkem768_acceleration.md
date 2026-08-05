@@ -271,7 +271,7 @@ Any field change invalidates the cache. Backend unavailability, device loss, fai
 - Deterministic inputs are confined to explicit test constructors.
 - Production entropy flows through the canonical entropy owner.
 - GPU contexts must be private/trusted for secret-bearing operations and must clear reusable buffers before release.
-- Zeroization limitations of garbage-collected or copied arrays remain explicit evidence/limitations.
+- Zeroization limitations of garbage-collected or copied arrays remain explicit evidence/limitations. NFR-005 is closed as an **accepted limitation** (2026-08-05, T-10): owner-reachable secret buffers are best-effort wiped and this is verified by `test/01_unit/os/crypto/x25519mlkem768_hybrid_support_spec.spl`; GC/compiler-copy exposure has no canonical non-GC owner primitive and no heap-forensics test capability, so it is documented rather than test-asserted. See `doc/08_tracking/bug/mlkem_gc_secret_zeroization_limit_2026-08-03.md`.
 
 ## Verification architecture
 
