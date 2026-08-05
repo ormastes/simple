@@ -2,6 +2,25 @@
 
 Architecture: `doc/04_architecture/ui/rendering_inside_rendering.md`
 
+## Forward pointer (2026-08-05, not a reversal)
+
+The embedding mechanisms below (offscreen-buffer render + `draw_engine`
+composite for 2D; recursive offscreen paint + blit for Web iframes; IMAGE
+command + `surface_id` blit for GUI/WM nested content frames) are landed and
+remain the correct CURRENT implementation — nothing here changes today.
+`doc/05_design/ui/unified_packed_ui_scene.md` (decision record §0, decision 3,
+and §4.2 PORT) sets a future target for the same-process cases only: GUI
+hosting Web should eventually assign the Web producer's ranges inside the SAME
+physical DrawIR-v3 arena with "zero intermediate structures," rather than
+rendering to a separate offscreen buffer and blitting an IMAGE command.
+Design §4.2 is explicit that "Same-process GUI and Web do **not** use PORT;
+they emit into the common arena" — PORT stays reserved for genuinely
+external/cross-process surfaces (media, other-process apps), closer to what
+this doc's `surface_id`-tagged IMAGE embedding already models for those cases.
+This consolidation is staged behind the L6/L7/L9 lanes in
+`doc/03_plan/ui/unified_packed_ui_scene_agent_lanes.md` and has no runtime
+effect yet.
+
 ## 2D — embedded render target (landed)
 File: `src/lib/gc_async_mut/gpu/engine2d/engine.spl`
 - `fn Engine2D.create_offscreen(w: i32, h: i32) -> Engine2D` — forces the

@@ -21,6 +21,22 @@ Architecture:
 `doc/04_architecture/ui/rendering/draw_ir_backend_native_layout.md`.
 TLDR: `draw_ir_backend_native_refactor_plan_tldr.md`.
 
+## Cross-reference (2026-08-05)
+
+Orthogonal to, and not reversed by,
+`doc/05_design/ui/unified_packed_ui_scene.md` (decision record §0): that
+design's ONE physical DrawIR-v3 scene arena (decision 3) is the same arena
+whose columns this plan makes Vulkan-canonical; S2's accessor seam and S5's
+capacity-stride work sit beneath the design's L5 "session arena + native
+writers" lane. Two v1/v2 axes here are distinct and must not be conflated:
+- `draw_ir.spl` schema v2 (`DrawIrComposition`) — this plan's frozen CPU
+  oracle, unrelated to the port axis below.
+- `PackedDrawPort` (ports) v1 (`draw_ir_v3_ports.spl`, frozen, by-value
+  submission) vs. v2 (`draw_ir_v3_ports_v2.spl`, new, by-reference
+  `PackedSceneRef`) — design decision 6. S1 item 2 below ("any
+  `PackedDrawPort` impl") touches only v1's existing readers/writers for the
+  `formats` u16→u32 widening sweep; it does not create or edit v2.
+
 Goal: v3 DrawIR columns carry Vulkan-canonical values and layouts so the
 Vulkan lane consumes them with zero conversion (direct SFFI to libvulkan,
 packed-record pointer pass); Metal/DX read the same data through remap

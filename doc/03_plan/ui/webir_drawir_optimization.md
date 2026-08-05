@@ -18,6 +18,30 @@ acceptance are now ordered in
 Main parent/image lowering and inert `srcdoc` embedding are implemented;
 legacy caller migration and exact parity remain red.
 
+## Superseded-by/decided (2026-08-05)
+
+`doc/05_design/ui/unified_packed_ui_scene.md` (decision record §0) is now
+authoritative where it overlaps this plan. Phase 0 of that design is
+documentation-only — nothing here changes behavior today.
+
+- **Decision 1 (confirmed, not reversed):** "there is no new `WebIR`" above is
+  exactly design decision 1 — "No nominal `GuiIR`/`WebIR` display-list types,
+  ever." Unchanged.
+- **Decisions 2/3/6 (future target, not yet landed):** the design's
+  longer-term target is Web (and GUI) becoming `UiPackedProducer`
+  implementations (design §2.2) that write directly into ONE physical
+  DrawIR-v3 scene arena — "One arena, zero intermediate structures" — and
+  submit by stable reference (`PackedSceneRef`), not by value. That supersedes
+  `DrawIrComposition` (v2, this plan's target artifact) as the *terminal*
+  shared structure once the L3 (v2→v3 adapter) and L7 (Web producer) lanes in
+  `doc/03_plan/ui/unified_packed_ui_scene_agent_lanes.md` land. Until then this
+  plan's v2-based phases are unaffected and remain the correct near-term work.
+- **Decision 4:** the private per-session semantic/layout state this plan
+  already keeps producer-private (`SimpleWebRenderSession`, the
+  `nodes+styles+boxes` triple) is exactly what design decision 4 confirms
+  stays producer-private forever — it is not, and must never become, a second
+  shared display-list schema, even informally.
+
 ## 1. Current State
 
 ### 2026-07-29 implementation status

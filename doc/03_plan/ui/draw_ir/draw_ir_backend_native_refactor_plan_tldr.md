@@ -3,6 +3,13 @@
 Full plan: `draw_ir_backend_native_refactor_plan.md` · Arch:
 `doc/04_architecture/ui/rendering/draw_ir_backend_native_layout.md`
 
+**Cross-reference (2026-08-05):** orthogonal to, and not reversed by,
+`doc/05_design/ui/unified_packed_ui_scene.md` — this plan's v3 columns are the
+same arena design decision 3 makes canonical (one physical DrawIR-v3 scene
+arena); S1-S5 here are format/accessor work beneath that arena, not a
+competing arena, and do not touch `PackedDrawPort` v1/v2 (design decision 6).
+See the full plan's Cross-reference section for the v1/v2 axis distinction.
+
 **Finding:** DrawIR is NOT Vulkan-optimized today. No DrawIR struct ever
 touches a Vk struct (all `Vk*CreateInfo` built in Rust; FFI = flat scalars);
 rendering is per-primitive compute dispatch with a new descriptor set +

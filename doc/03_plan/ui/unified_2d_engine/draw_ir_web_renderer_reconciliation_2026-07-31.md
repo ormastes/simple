@@ -7,6 +7,38 @@ have no production producer or Engine2D executor. This plan reconciles those
 schemas, Web/GUI producers, Engine2D execution, and GPU backend evidence. It
 supersedes completion claims in older plans where this file is more specific.
 
+## Superseded-by/decided (2026-08-05)
+
+`doc/05_design/ui/unified_packed_ui_scene.md` (decision record §0) is now
+authoritative where it overlaps this plan. This section does not reverse
+R1-R9 today — Phase 0 of the new design is documentation-only, no runtime
+change; the items below are the accepted **target**, staged behind the lanes
+in `doc/03_plan/ui/unified_packed_ui_scene_agent_lanes.md`.
+
+- **Decision 1 (confirmed):** "no new WebIR" is unchanged; `DrawIrComposition`
+  remains the only shared display-list schema for now.
+- **Decisions 2/3/6 (target, not yet landed — genuine tension flagged, not
+  smoothed over):** the Invariant just below ("Production Web and GUI
+  producers lower... to `DrawIrComposition`. One retained Engine2D owner
+  executes that composition") describes the CURRENT v2-by-value production
+  path. The design's target is Web/GUI becoming `UiPackedProducer`
+  implementations (design §2.2) submitting by stable scene reference
+  (`PackedSceneRef`) into ONE physical DrawIR-v3 arena — "One arena, zero
+  intermediate structures." R5 below already anticipates this staging
+  correctly ("Keep v2 as the production oracle until a typed v2/v3 adapter...
+  and exact parity evidence all land"). **Flag:** the Task Ownership line
+  below — "sidecars must not invent parallel producer or font APIs" — was
+  written to block ad hoc parallel producers during R1-R9 and predates the
+  design; read literally it would also forbid the design's `UiPackedProducer`
+  trait, which is not the intent. `UiPackedProducer` is the one canonical
+  producer contract (design decision 2) that supersedes this restriction once
+  the L1/L4/L5/L6/L7 lanes land — it is not a "parallel" producer API, it is
+  THE producer API. This is a real reconciliation gap between the two docs,
+  not fully resolved by this note; a future lane should update the Task
+  Ownership wording once producer-adoption lanes (L6/L7) actually land.
+- **Decision 4:** `SimpleWebRenderSession`/nodes+styles+boxes staying
+  producer-private is unchanged and matches design decision 4 exactly.
+
 ## Invariant
 
 Production Web and GUI producers lower through their semantic/layout owners to
