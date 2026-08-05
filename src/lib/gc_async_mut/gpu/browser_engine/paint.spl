@@ -130,5 +130,207 @@ fn generate_paint_list(layout) -> [PaintCommand]:
 fn paint_tree_to_scene(layout) -> PaintScene:
     paint_commands_to_scene([], 0, 0)
 
+# ============================================================================
+# object-fit / object-position  (CSS Images Level 3, "default sizing algorithm")
+# ============================================================================
+
+# The concrete object size and its placement inside the content box.
+pub class ObjectFitResult:
+    dest_x: f64
+    dest_y: f64
+    dest_width: f64
+    dest_height: f64
+
+# One resolved axis of an `object-position` <position>. A percentage or keyword
+# ALIGNS the object (`(box - dest) * frac`); a length is an absolute offset from
+# the content-box start edge, so the two cases cannot share one field.
+class ObjectPosition:
+    x_frac: f64
+    y_frac: f64
+    x_px: f64
+    y_px: f64
+    x_is_px: bool
+    y_is_px: bool
+
+# Parse `object-position`. Initial value is `50% 50%`. Keywords bind to their own
+# axis; percentages/lengths fill x then y (CSS 2-value <position> grammar).
+fn _parse_object_position(pos: text) -> ObjectPosition:
+    var x_frac = 0.5
+    var y_frac = 0.5
+    var x_px = 0.0
+    var y_px = 0.0
+    var x_is_px = false
+    var y_is_px = false
+    var x_set = false
+    var y_set = false
+    val toks = pos.trim().lower().split(" ")
+    var ti = 0
+    val tc = toks.len()
+    while ti < tc:
+        val tok = toks[ti].trim()
+        ti = ti + 1
+        if tok == "":
+            continue
+        if tok == "left":
+            x_frac = 0.0
+            x_is_px = false
+            x_set = true
+        elif tok == "right":
+            x_frac = 1.0
+            x_is_px = false
+            x_set = true
+        elif tok == "top":
+            y_frac = 0.0
+            y_is_px = false
+            y_set = true
+        elif tok == "bottom":
+            y_frac = 1.0
+            y_is_px = false
+            y_set = true
+        elif tok == "center":
+            if not x_set:
+                x_frac = 0.5
+                x_is_px = false
+                x_set = true
+            else:
+                y_frac = 0.5
+                y_is_px = false
+                y_set = true
+        elif tok.ends_with("%"):
+            val pct = tok.substring(0, tok.len() - 1).to_f64() / 100.0
+            if not x_set:
+                x_frac = pct
+                x_is_px = false
+                x_set = true
+            elif not y_set:
+                y_frac = pct
+                y_is_px = false
+                y_set = true
+        elif tok.ends_with("px"):
+            val len_px = tok.substring(0, tok.len() - 2).to_f64()
+            if not x_set:
+                x_px = len_px
+                x_is_px = true
+                x_set = true
+            elif not y_set:
+                y_px = len_px
+                y_is_px = true
+                y_set = true
+    ObjectPosition(
+        x_frac: x_frac,
+        y_frac: y_frac,
+        x_px: x_px,
+        y_px: y_px,
+        x_is_px: x_is_px,
+        y_is_px: y_is_px
+    )
+
+# Resolve `object-fit` + `object-position` into the concrete object size and its
+# offset inside the content box.
+#
+#   fill        stretch to the box, ignoring the aspect ratio (initial value)
+#   contain     largest box-constrained size that preserves the aspect ratio
+#   cover       smallest size that covers the box, preserving the aspect ratio
+#   none        the natural size
+#   scale-down  whichever of `none` and `contain` is smaller
+#
+# An object with no natural size (either extent <= 0) falls back to the default
+# object size, which for a replaced element is the content box.
+pub fn compute_object_fit(
+    natural_width: f64, natural_height: f64,
+    box_width: f64, box_height: f64,
+    fit: text, position: text
+) -> ObjectFitResult:
+    var dest_width = box_width
+    var dest_height = box_height
+    val has_natural_size = natural_width > 0.0 and natural_height > 0.0
+    if has_natural_size:
+        if fit == "none":
+            dest_width = natural_width
+            dest_height = natural_height
+        elif fit == "contain" or fit == "cover" or fit == "scale-down":
+            val scale_w = box_width / natural_width
+            val scale_h = box_height / natural_height
+            var scale = if scale_w < scale_h: scale_w else: scale_h
+            if fit == "cover":
+                scale = if scale_w > scale_h: scale_w else: scale_h
+            if fit == "scale-down" and scale > 1.0:
+                scale = 1.0
+            dest_width = natural_width * scale
+            dest_height = natural_height * scale
+    # `fill` — and any unrecognised value, which computes to the initial value —
+    # keeps the box dimensions assigned above.
+    val pos = _parse_object_position(position)
+    val dest_x = if pos.x_is_px: pos.x_px else: (box_width - dest_width) * pos.x_frac
+    val dest_y = if pos.y_is_px: pos.y_px else: (box_height - dest_height) * pos.y_frac
+    ObjectFitResult(
+        dest_x: dest_x,
+        dest_y: dest_y,
+        dest_width: dest_width,
+        dest_height: dest_height
+    )
+
+# ============================================================================
+# Scrollbar painting
+# ============================================================================
+
+# UA default vertical scrollbar metrics. 15px matches the width the layout
+# renderer already reserves and paints (fb_vertical_scrollbar_clip).
+val SCROLLBAR_TRACK_WIDTH_PX: f64 = 15.0
+val SCROLLBAR_MIN_THUMB_PX: f64 = 15.0
+val SCROLLBAR_TRACK_COLOR: u32 = 0xFFF1F1F1u32
+val SCROLLBAR_THUMB_COLOR: u32 = 0xFFA3A3A3u32
+
+fn _round_px(v: f64) -> i32:
+    if v < 0.0:
+        return (v - 0.5).to_i64().to_i32()
+    (v + 0.5).to_i64().to_i32()
+
+# Paint the vertical scrollbar of the scrollport at (x, y, width, height).
+#
+# The track always renders and hugs the right edge of the scrollport. A thumb is
+# emitted only when the content actually overflows: a scrollport whose content
+# fits has nothing to scroll, so no thumb is painted. The thumb is proportional —
+# its height is the visible fraction of the content (height * height /
+# content_height), floored at the UA minimum so it stays grabbable — and its
+# travel maps the scroll range onto the leftover track space.
+pub fn paint_scrollbar(
+    x: f64, y: f64, width: f64, height: f64,
+    content_height: f64, scroll_offset: f64
+) -> [PaintCommand]:
+    val track_x = x + width - SCROLLBAR_TRACK_WIDTH_PX
+    val track = PaintCommand.fill_rect(
+        _round_px(track_x),
+        _round_px(y),
+        _round_px(SCROLLBAR_TRACK_WIDTH_PX),
+        _round_px(height),
+        SCROLLBAR_TRACK_COLOR
+    )
+    if height <= 0.0 or content_height <= height:
+        var track_only: [PaintCommand] = [track]
+        return track_only
+    var thumb_height = height * height / content_height
+    if thumb_height < SCROLLBAR_MIN_THUMB_PX:
+        thumb_height = SCROLLBAR_MIN_THUMB_PX
+    if thumb_height > height:
+        thumb_height = height
+    val max_scroll = content_height - height
+    var offset = scroll_offset
+    if offset < 0.0:
+        offset = 0.0
+    if offset > max_scroll:
+        offset = max_scroll
+    val thumb_y = y + (height - thumb_height) * offset / max_scroll
+    val thumb = PaintCommand.fill_rect(
+        _round_px(track_x),
+        _round_px(thumb_y),
+        _round_px(SCROLLBAR_TRACK_WIDTH_PX),
+        _round_px(thumb_height),
+        SCROLLBAR_THUMB_COLOR
+    )
+    var commands: [PaintCommand] = [track, thumb]
+    commands
+
 export PaintCommand, PaintScene, PaintSceneCommand, paint_commands_to_scene
 export generate_paint_list, paint_tree_to_scene
+export ObjectFitResult, compute_object_fit, paint_scrollbar
