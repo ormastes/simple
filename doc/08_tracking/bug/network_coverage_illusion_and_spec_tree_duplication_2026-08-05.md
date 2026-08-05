@@ -47,6 +47,45 @@ literals — not protocol failures. So 46 examples that read as websocket
 end-to-end coverage would stay green through any change that keeps the source
 text intact, and go red on a pure rename that breaks nothing.
 
+> **CORRECTION 2026-08-05 — one of the "3 real socket specs" is itself vacuous.**
+>
+> The sentence below counts `01_unit/lib/nogc_async_mut/io/async_tcp_spec.spl`
+> as one of only three specs in the tree that bind a socket, and cites its
+> `14 total, 14 passed, 0 failed` as a measured result. **It opens no socket and
+> asserts nothing.** All 14 of its example bodies are the literal `0`, with the
+> socket code left commented out. Evidence, on the file:
+>
+> ```
+> $ grep -vcE '^\s*#|^\s*$'  test/01_unit/lib/nogc_async_mut/io/async_tcp_spec.spl   # 42  non-comment lines
+> $ grep -cE  '^\s+0\s*$'    test/01_unit/lib/nogc_async_mut/io/async_tcp_spec.spl   # 14  bodies that are just `0`
+> $ grep -cE  '^\s*(val|var|expect|await)' test/01_unit/lib/nogc_async_mut/io/async_tcp_spec.spl  # 0
+> $ grep -c   '^use '        test/01_unit/lib/nogc_async_mut/io/async_tcp_spec.spl   # 0  — it does not even import a TCP type
+> ```
+>
+> A representative example, verbatim:
+>
+> ```simple
+> it "documents async bind":
+>     # val listener = await AsyncTcpListener.bind("0.0.0.0:8080")?
+>     # expect listener.is_open() == true
+>     0
+> ```
+>
+> So its 14 green examples are the *same* illusion Defect 1 describes, one layer
+> deeper: not "asserts on source text" but "asserts nothing at all". The
+> corrected count is **2** specs that bind a socket, not 3
+> (`host_io/net_async_spec.spl` and `simpleos_riscv_network_gate_spec.spl`);
+> `01_unit/lib/net_server/net_server_spec.spl` is a third that does real
+> loopback TCP with byte-exact oracles and was missed by the original sweep.
+>
+> A replacement with real assertions now exists at
+> `test/01_unit/lib/nogc_async_mut/net/net_tcp_facade_spec.spl`
+> (`Results: 4 total, 4 passed, 0 failed`), proven non-vacuous by sabotage:
+> flipping one expected payload byte yields
+> `Results: 4 total, 3 passed, 1 failed` with
+> `expected [80, 79, 78, 71, 33] to equal [80, 79, 78, 71, 34]` — the reported
+> bytes are the real bytes that crossed the kernel socket.
+
 **Only 3 spec files in the entire `test/` tree bind a socket:**
 `01_unit/lib/nogc_async_mut/io/async_tcp_spec.spl` (measured
 `Results: 14 total, 14 passed, 0 failed`), `host_io/net_async_spec.spl`, and
@@ -65,6 +104,56 @@ text intact, and go red on a pure rename that breaks nothing.
 Per the documented defect, an unregistered `@extern` returns **nil silently**
 under the JIT. So any caller routed through `net/sffi.spl` fails without an
 error. Either register these or delete the declarations — leaving them is a trap.
+
+### Update 2026-08-05 — scope was wider than "lines 17-38", and it is now fixed
+
+Re-derived per-symbol: **all 41** externs in the file were unbacked, not just the
+24 TCP ones. Four names produce grep hits and **none is a registration** —
+`tcp_stream_connect` / `udp_socket_connect` are entries in `security.rs`'s
+ambient-API *policy* table, `http_request` is in `effects.rs` `NET_OPERATIONS`,
+and `bytes_to_string` is an *interpreter-only* dispatch entry (absent from
+`runtime_symbols.rs`, so still silent-nil under JIT/native).
+
+Reach was also wider: `std.net.*` resolves to the **`nogc_async_mut` tier first
+from every tier** (`module_loader_resolve.spl`: "Default app mode is
+nogc_async_mut"), so this one file backed all four tiers' `net/` modules.
+
+Resolution: TCP callers were rerouted onto the registered `rt_io_tcp_*` family
+(`net/tcp.spl` is now a facade over `std.nogc_sync_mut.io.tcp`) and the 24 dead
+TCP externs deleted; `bytes_to_string` / `file_write_bytes` were reimplemented in
+pure Simple over `rt_bytes_to_text` / `rt_file_write_bytes`; the 14 `udp_socket_*`
+plus `http_request` and the three `url_*` remain declared but are now marked
+UNBACKED with TODOs, because live importers exist and **no** runtime symbol
+exists to reroute them to (the registry contains zero `udp`-bearing symbols).
+
+### Do NOT attribute this JIT failure to that fix
+
+`bin/simple run` cannot drive the live TCP classes at all. This predates the
+reroute. Exact reproduction — run both, they fail byte-identically:
+
+```
+# via the new facade
+SIMPLE_TIMEOUT_SECONDS=0 bin/simple run test/04_smoke/net_tcp_facade_jit_probe.spl
+
+# CONTROL: same file, single import line changed to bypass the facade and hit
+# the live implementation directly:
+#     use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+SIMPLE_TIMEOUT_SECONDS=0 bin/simple run /tmp/control_direct.spl
+```
+
+Both print:
+
+```
+Runtime error: Function 'nil.local_addr' not found
+Runtime error: unresolved symbol -- this is a code-generation dispatch gap, not a program error.
+```
+
+i.e. `TcpListener.bind(...)` matched `Ok(l)` but bound `l` to **nil** under the
+JIT. Because the control bypasses the facade entirely and fails the same way,
+the defect is in the JIT's `Result` binding, not in `std.net.tcp`. The
+interpreter path is green (4/4). Note `SIMPLE_TIMEOUT_SECONDS=0` is required —
+otherwise `kill_simple_monitor` kills the run at 60s CPU with exit 143 and no
+verdict line.
 
 ## Defect 3: the spec tree is duplicated
 

@@ -1,269 +1,34 @@
 # TCP Socket Operations
 #
-# TCP server (TcpListener) and client (TcpStream) implementations.
-# Provides reliable, connection-oriented network communication.
+# Compatibility facade: `std.net.tcp` -> `std.nogc_sync_mut.io.tcp`.
 #
-# Components:
-# - TcpListener: TCP server socket for accepting connections
-# - TcpStream: TCP client connection for bidirectional communication
+# History / why this is a facade
+# ------------------------------
+# This module used to define its own `TcpListener` / `TcpStream` on top of the
+# `tcp_listener_*` / `tcp_stream_*` externs in `net/sffi.spl`. NONE of those
+# extern names is registered in `src/compiler_rust/common/src/runtime_symbols.rs`
+# (the two apparent hits, `tcp_stream_connect` and `udp_socket_connect`, are
+# entries in `compiler/src/security.rs`'s ambient-API POLICY table and in
+# `compiler/src/effects.rs`'s NET_OPERATIONS effect table -- name lists, not
+# implementations). An unregistered `@extern` returns nil SILENTLY under the
+# JIT, so every method here failed with no error at all.
 #
-# Features:
-# - Non-blocking I/O with timeout support
-# - IPv4 and IPv6 support
-# - TCP_NODELAY (disable Nagle's algorithm)
-# - Configurable read/write timeouts
-
-use std.error.{SimpleError, error}
-use std.net.sffi.{tcp_listener_bind, tcp_listener_accept, tcp_listener_accept_timeout, tcp_listener_local_addr, tcp_listener_set_nonblocking, tcp_listener_close, tcp_stream_connect, tcp_stream_connect_timeout, tcp_stream_read, tcp_stream_read_exact, tcp_stream_read_line, tcp_stream_write, tcp_stream_write_all, tcp_stream_flush, tcp_stream_peer_addr, tcp_stream_local_addr, tcp_stream_set_read_timeout, tcp_stream_set_write_timeout, tcp_stream_set_nodelay, tcp_stream_set_nonblocking, tcp_stream_close}
-
-# ============================================================================
-# TcpListener - TCP Server Socket
-# ============================================================================
-
-class TcpListener:
-    """TCP server socket.
-
-    Listens for incoming TCP connections.
-
-    Example:
-        val listener = TcpListener.bind("127.0.0.1:8080")?
-        while true:
-            val stream = listener.accept()?
-            handle_client(stream)
-    """
-    handle: [u8]?
-
-    static fn bind(addr: text) -> Result<TcpListener, SimpleError>:
-        """Bind to address and start listening.
-
-        Args:
-            addr: Address in format "host:port"
-
-        Returns:
-            Result with TcpListener or error
-
-        Example:
-            val listener = TcpListener.bind("0.0.0.0:8080")?
-        """
-        tcp_listener_bind(addr)
-
-    fn accept() -> Result<TcpStream, SimpleError>:
-        """Accept incoming connection.
-
-        Returns:
-            Result with TcpStream or error
-
-        Blocks until connection arrives.
-        """
-        tcp_listener_accept(self)
-
-    fn accept_timeout(timeout_ms: i64) -> Result<TcpStream, SimpleError>:
-        """Accept with timeout.
-
-        Args:
-            timeout_ms: Timeout in milliseconds
-
-        Returns:
-            Result with TcpStream or timeout error
-        """
-        tcp_listener_accept_timeout(self, timeout_ms)
-
-    fn local_addr() -> text?:
-        """Get local address.
-
-        Returns:
-            Some(address) or nil
-        """
-        tcp_listener_local_addr(self)
-
-    fn set_nonblocking(nonblocking: bool) -> bool:
-        """Set non-blocking mode.
-
-        Args:
-            nonblocking: true for non-blocking
-
-        Returns:
-            true on success
-        """
-        tcp_listener_set_nonblocking(self, nonblocking)
-
-    me close():
-        """Close listener."""
-        tcp_listener_close(self)
-
-# ============================================================================
-# TcpStream - TCP Connection
-# ============================================================================
-
-class TcpStream:
-    """TCP connection stream.
-
-    Bidirectional TCP connection.
-
-    Example:
-        val stream = TcpStream.connect("example.com:80")?
-        stream.write("GET / HTTP/1.1\r\n\r\n")
-        val response = stream.read(1024)?
-    """
-    handle: [u8]?
-
-    static fn connect(addr: text) -> Result<TcpStream, SimpleError>:
-        """Connect to remote address.
-
-        Args:
-            addr: Address in format "host:port"
-
-        Returns:
-            Result with TcpStream or error
-
-        Example:
-            val stream = TcpStream.connect("127.0.0.1:8080")?
-        """
-        tcp_stream_connect(addr)
-
-    static fn connect_timeout(addr: text, timeout_ms: i64) -> Result<TcpStream, SimpleError>:
-        """Connect with timeout.
-
-        Args:
-            addr: Address in format "host:port"
-            timeout_ms: Timeout in milliseconds
-
-        Returns:
-            Result with TcpStream or timeout error
-        """
-        tcp_stream_connect_timeout(addr, timeout_ms)
-
-    fn read(size: usize) -> Result<[u8], SimpleError>:
-        """Read bytes from stream.
-
-        Args:
-            size: Maximum bytes to read
-
-        Returns:
-            Result with bytes or error
-
-        Blocks until data available.
-        """
-        tcp_stream_read(self, size)
-
-    fn read_exact(size: usize) -> Result<[u8], SimpleError>:
-        """Read exact number of bytes.
-
-        Args:
-            size: Exact bytes to read
-
-        Returns:
-            Result with bytes or error
-
-        Blocks until all bytes read.
-        """
-        tcp_stream_read_exact(self, size)
-
-    fn read_line() -> Result<text, SimpleError>:
-        """Read line from stream.
-
-        Returns:
-            Result with line (including newline) or error
-        """
-        tcp_stream_read_line(self)
-
-    fn write(data: [u8]) -> Result<usize, SimpleError>:
-        """Write bytes to stream.
-
-        Args:
-            data: Bytes to write
-
-        Returns:
-            Result with bytes written or error
-        """
-        tcp_stream_write(self, data)
-
-    fn write_all(data: [u8]) -> Result<(), SimpleError>:
-        """Write all bytes.
-
-        Args:
-            data: Bytes to write
-
-        Returns:
-            Result or error
-
-        Blocks until all bytes written.
-        """
-        tcp_stream_write_all(self, data)
-
-    fn flush() -> Result<(), SimpleError>:
-        """Flush write buffer.
-
-        Returns:
-            Result or error
-        """
-        tcp_stream_flush(self)
-
-    fn peer_addr() -> text?:
-        """Get remote peer address.
-
-        Returns:
-            Some(address) or nil
-        """
-        tcp_stream_peer_addr(self)
-
-    fn local_addr() -> text?:
-        """Get local address.
-
-        Returns:
-            Some(address) or nil
-        """
-        tcp_stream_local_addr(self)
-
-    fn set_read_timeout(timeout_ms: i64?) -> bool:
-        """Set read timeout.
-
-        Args:
-            timeout_ms: Timeout in ms or nil for blocking
-
-        Returns:
-            true on success
-        """
-        tcp_stream_set_read_timeout(self, timeout_ms)
-
-    fn set_write_timeout(timeout_ms: i64?) -> bool:
-        """Set write timeout.
-
-        Args:
-            timeout_ms: Timeout in ms or nil for blocking
-
-        Returns:
-            true on success
-        """
-        tcp_stream_set_write_timeout(self, timeout_ms)
-
-    fn set_nodelay(nodelay: bool) -> bool:
-        """Set TCP_NODELAY (disable Nagle's algorithm).
-
-        Args:
-            nodelay: true to disable Nagle
-
-        Returns:
-            true on success
-        """
-        tcp_stream_set_nodelay(self, nodelay)
-
-    fn set_nonblocking(nonblocking: bool) -> bool:
-        """Set non-blocking mode.
-
-        Args:
-            nonblocking: true for non-blocking
-
-        Returns:
-            true on success
-        """
-        tcp_stream_set_nonblocking(self, nonblocking)
-
-    me close():
-        """Close stream."""
-        tcp_stream_close(self)
-
-# ============================================================================
-# Exports
-# ============================================================================
-
+# The registered, working TCP implementation is `std.nogc_sync_mut.io.tcp`,
+# which is fd-based over `rt_io_tcp_*` (`rt_io_tcp_bind`, `rt_io_tcp_connect`,
+# `rt_io_tcp_read`, ... -- all present in `runtime_symbols.rs`). Re-exporting it
+# reroutes every `use std.net.tcp.{...}` caller onto that live path.
+#
+# NOTE: `std.net.*` resolves to the `nogc_async_mut` tier FIRST from every tier
+# (see `module_loader_resolve.spl`: "Default app mode is nogc_async_mut"), so
+# this single file is what all four `net/tcp.spl` copies actually resolve to.
+#
+# API delta vs. the old dead implementation:
+# - error type is `IoError` (not `SimpleError`); both expose `.message`, which
+#   is all in-tree callers use.
+# - sizes are `i64` (not `usize`).
+# - `local_addr()` / `peer_addr()` return `Result<text, IoError>` (not `text?`).
+# - `set_*` return `Result<(), IoError>` (not `bool`).
+# - `set_nonblocking` is not on the live class; use
+#   `std.nogc_sync_mut.io.tcp.tcp_backend_set_nonblocking(fd, enabled)`.
+
+export use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}

@@ -9,8 +9,15 @@
 # Reference: RFC 854 (Telnet Protocol), RFC 855 (Telnet Option Specs)
 
 use std.error.{SimpleError, error}
-use std.net.sffi.{tcp_stream_connect, tcp_stream_connect_timeout, bytes_to_string}
 use std.net.tcp.{TcpStream}
+
+# Repointed off `net/sffi.spl` (2026-08-05): `tcp_stream_connect_timeout` and
+# `bytes_to_string` were declared there as `@extern` but are NOT registered in
+# `src/compiler_rust/common/src/runtime_symbols.rs`, so under the JIT they
+# returned nil silently and every telnet call failed with no error. They now go
+# through the registered live path: `std.net.tcp.TcpStream` (facade over
+# `std.nogc_sync_mut.io.tcp`, backed by `rt_io_tcp_*`) and `rt_bytes_to_text`.
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 # ============================================================================
 # Telnet Protocol Constants
@@ -127,10 +134,11 @@ fn telnet_connect(host: text, port: i64, timeout_ms: i64) -> Result<TelnetConnec
         val conn = telnet_connect("192.168.1.200", 23, 5000)?
     """
     val addr = "{host}:{port}"
-    val stream_result = tcp_stream_connect_timeout(addr, timeout_ms)
+    val stream_result = TcpStream.connect_timeout(addr, timeout_ms)
     match stream_result:
         Err(e):
-            return Err(e)
+            # live TCP reports IoError; this API contract is SimpleError
+            return Err(error("Telnet connect to {addr} failed: {e.message}"))
         Ok(stream):
             # Set read timeout for negotiation
             stream.set_read_timeout(timeout_ms)
@@ -352,7 +360,7 @@ fn telnet_receive(conn: TelnetConnection, timeout_ms: i64) -> text:
         return ""
 
     val clean = telnet_process_iac(conn, raw)
-    bytes_to_string(clean)
+    rt_bytes_to_text(clean)
 
 fn telnet_send(conn: TelnetConnection, data: text) -> bool:
     """Send text data over telnet connection.

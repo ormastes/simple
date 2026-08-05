@@ -6,7 +6,6 @@
 
 use std.error.{SimpleError, error}
 use std.net.tcp.{TcpStream}
-use std.net.sffi.{tcp_stream_connect}
 use std.nogc_sync_mut.env.variables.{env_get}
 use std.nogc_sync_mut.io.file_ops.{file_read_text, file_write}
 use std.nogc_sync_mut.io.process_ops.{process_run}
@@ -303,7 +302,13 @@ class NetworkEndpoint:
     fn connect(addr: text) -> Result<TcpStream, SimpleError>:
         if self.endpoint != "*" and addr != self.endpoint:
             return Err(error("network endpoint capability denied"))
-        tcp_stream_connect(addr)
+        # `security.rs` names THIS method as the sanctioned replacement for the
+        # raw `tcp_stream_connect` ambient API -- but it used to call that very
+        # extern, which is unregistered and returns nil silently under the JIT.
+        # Now routed through the live `std.net.tcp` facade (`rt_io_tcp_connect`).
+        match TcpStream.connect(addr):
+            case Ok(stream): Ok(stream)
+            case Err(e): Err(error("connect to {addr} failed: {e.message}"))
 
 # Narrowed environment handle for one variable or an explicitly wildcarded variable.
 class EnvVar:

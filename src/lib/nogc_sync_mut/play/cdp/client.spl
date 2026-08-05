@@ -304,13 +304,13 @@ class CdpClient:
 
         val addr = "{host}:{port}"
         val conn_timeout = if timeout_ms > 0: timeout_ms else: 10000
-        val stream_res = tcp_stream_connect_timeout(addr, conn_timeout)
+        val stream_res = TcpStream.connect_timeout(addr, conn_timeout)
         var stream: TcpStream = match stream_res:
             case Ok(s): s
             case Err(e): return Err(play_error_with_detail(ERR_CDP_TRANSPORT, "tcp connect failed", addr))
 
-        tcp_stream_set_read_timeout(stream, 200)
-        tcp_stream_set_nodelay(stream, true)
+        val _srt = stream.set_read_timeout(200)
+        val _snd = stream.set_nodelay(true)
 
         # Send HTTP upgrade
         val key = generate_websocket_key()
@@ -323,10 +323,10 @@ class CdpClient:
             "Sec-WebSocket-Version: 13\r\n" +
             "\r\n"
         val req_bytes = cdp_i64_array_to_u8(cdp_text_to_bytes(req))
-        match tcp_stream_write_all(stream, req_bytes):
+        match stream.write_all(req_bytes):
             case Ok(_): pass_do_nothing
             case Err(e):
-                tcp_stream_close(stream)
+                val _c = stream.close()
                 return Err(play_error(ERR_CDP_TRANSPORT, "websocket handshake write failed"))
 
         # Read the upgrade response line-by-line until blank line
@@ -335,7 +335,7 @@ class CdpClient:
         var header_done = false
         var iters = 0
         while not header_done and iters < 200:
-            match tcp_stream_read_line(stream):
+            match stream.read_line():
                 case Ok(line):
                     resp_text = resp_text + line
                     if line == "\r\n" or line == "\n" or line == "":
@@ -343,12 +343,12 @@ class CdpClient:
                     if line.contains("101"):
                         got_101 = true
                 case Err(e):
-                    tcp_stream_close(stream)
+                    val _c = stream.close()
                     return Err(play_error(ERR_CDP_TRANSPORT, "websocket handshake read failed"))
             iters = iters + 1
 
         if not got_101:
-            tcp_stream_close(stream)
+            val _c = stream.close()
             return Err(play_error_with_detail(ERR_CDP_PROTOCOL, "expected 101 Switching Protocols", resp_text))
 
         val client = CdpClient(
@@ -369,7 +369,7 @@ class CdpClient:
         """Read whatever is currently available, append to buffer, parse any
         complete frames. Returns true if any bytes were read."""
         if self.closed: return false
-        val res = tcp_stream_read(self.stream, 8192)
+        val res = self.stream.read(8192)
         match res:
             case Ok(bytes):
                 val n = bytes.length()
@@ -403,7 +403,7 @@ class CdpClient:
         else:
             if opcode == WS_OP_PING:
                 val pong = cdp_build_pong_frame(payload)
-                tcp_stream_write_all(self.stream, cdp_i64_array_to_u8(pong))
+                val _wp = self.stream.write_all(cdp_i64_array_to_u8(pong))
                 true
             else:
                 if opcode == WS_OP_CLOSE:
@@ -473,7 +473,7 @@ class CdpClient:
             .build()
 
         val frame = cdp_build_text_frame(cmd)
-        match tcp_stream_write_all(self.stream, cdp_i64_array_to_u8(frame)):
+        match self.stream.write_all(cdp_i64_array_to_u8(frame)):
             case Ok(_): pass_do_nothing
             case Err(e):
                 return Err(play_error(ERR_CDP_TRANSPORT, "cdp write failed"))
@@ -510,7 +510,7 @@ class CdpClient:
             .build()
 
         val frame = cdp_build_text_frame(cmd)
-        match tcp_stream_write_all(self.stream, cdp_i64_array_to_u8(frame)):
+        match self.stream.write_all(cdp_i64_array_to_u8(frame)):
             case Ok(_): pass_do_nothing
             case Err(e):
                 return Err(play_error(ERR_CDP_TRANSPORT, "cdp write failed"))
@@ -558,8 +558,8 @@ class CdpClient:
     me close() -> bool:
         if self.closed: return true
         val frame = cdp_build_close_frame(1000)
-        tcp_stream_write_all(self.stream, cdp_i64_array_to_u8(frame))
-        tcp_stream_close(self.stream)
+        val _wf = self.stream.write_all(cdp_i64_array_to_u8(frame))
+        val _cs = self.stream.close()
         self.closed = true
         true
 
@@ -610,15 +610,18 @@ fn _extract_json_string(s: text, key: text) -> text:
     # Re-insert escaped quotes from original
     end.replace("\\\\", "\\")
 
-# Re-export tcp functions that CdpClient depends on (so this file doesn't
-# need std.net.sffi directly). They're already available via std.net.tcp.
-
-extern fn tcp_stream_connect_timeout(addr: text, timeout_ms: i64) -> Result<TcpStream, SimpleError>
-extern fn tcp_stream_read(stream: TcpStream, size: usize) -> Result<[u8], SimpleError>
-extern fn tcp_stream_write_all(stream: TcpStream, data: [u8]) -> Result<(), SimpleError>
-extern fn tcp_stream_read_line(stream: TcpStream) -> Result<text, SimpleError>
-extern fn tcp_stream_set_read_timeout(stream: TcpStream, timeout_ms: i64?) -> bool
-extern fn tcp_stream_set_nodelay(stream: TcpStream, nodelay: bool) -> bool
-extern fn tcp_stream_close(stream: TcpStream)
+# REMOVED 2026-08-05: this file used to declare its own LOCAL copies of seven
+# `tcp_stream_*` externs here. The comment above them claimed "They're already
+# available via std.net.tcp" -- they were not. None of the seven is registered
+# in `src/compiler_rust/common/src/runtime_symbols.rs`, so under the JIT every
+# one returned nil silently and the whole CDP/WebSocket transport failed with no
+# error. Worse, the file already imported the real `TcpStream` (line 18) and was
+# passing that live object into dead externs.
+#
+# All 14 call sites now use the live methods on `std.net.tcp.TcpStream`
+# (a facade over `std.nogc_sync_mut.io.tcp`, backed by the registered
+# `rt_io_tcp_*` family). Note the API delta this crossed: `set_read_timeout` and
+# `set_nodelay` return `Result<(), IoError>` here, not `bool`, so their results
+# are bound and discarded rather than used as conditions.
 
 use std.error.{SimpleError}
