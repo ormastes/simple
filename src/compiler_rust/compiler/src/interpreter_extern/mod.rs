@@ -66,7 +66,6 @@ pub mod io;
 pub mod network;
 pub mod filesystem;
 pub mod file_io;
-pub mod io_file;
 pub mod terminal;
 pub mod torch;
 pub mod atomic;
@@ -83,11 +82,6 @@ pub mod memory;
 pub mod cli;
 pub mod cargo;
 pub mod sdn;
-pub mod sdl2;
-pub mod audio;
-pub mod opengl;
-pub mod oneapi;
-pub mod vulkan;
 pub mod coverage;
 pub mod cranelift;
 #[cfg(not(doctest))]
@@ -206,23 +200,6 @@ fn rt_tls_client_write_stub(_args: &[Value]) -> Result<Value, CompileError> {
 
 /// `rt_tls_client_read` — stub
 fn rt_tls_client_read_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::text(String::new()))
-}
-
-/// `rt_tls_client_connect_address_with_sni_timeout` — stub
-fn rt_tls_client_connect_address_with_sni_timeout_stub(
-    _args: &[Value],
-) -> Result<Value, CompileError> {
-    Ok(Value::Int(-1))
-}
-
-/// `rt_tls_client_write_timeout` — stub
-fn rt_tls_client_write_timeout_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(-1))
-}
-
-/// `rt_tls_client_read_timeout` — stub
-fn rt_tls_client_read_timeout_stub(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::text(String::new()))
 }
 
@@ -536,6 +513,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_alloc", memory::rt_alloc);
     insert_simple!("rt_array_clear", sffi_array::rt_array_clear_fn);
     insert_simple!("rt_array_concat", sffi_array::rt_array_concat_fn);
+    insert_simple!("rt_array_data_ptr_u8", sffi_array::rt_array_data_ptr_u8_fn);
     insert_simple!("rt_array_extend_i64", sffi_array::rt_array_extend_i64_fn);
     insert_simple!("rt_array_free", sffi_array::rt_array_free_fn);
     insert_simple!("rt_array_get", sffi_array::rt_array_get_fn);
@@ -1290,29 +1268,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_extract_smf_dynlib", file_io::rt_file_extract_smf_dynlib);
     insert_simple!("rt_file_write_text_at", file_io::rt_file_write_text_at);
     insert_simple!("rt_file_write_text", file_io::rt_file_write_text);
-    // rt_io_file_* backs std.nogc_sync_mut.io.file (FileHandle/File) -- a
-    // separate family from rt_file_* above with its own fd-based, real-OS-fd
-    // semantics (see io_file.rs module doc). Previously unregistered here,
-    // which made every FileHandle/File call fail closed with "unknown extern
-    // function" under interpret mode even after the native runtime symbols
-    // were implemented -- see
-    // doc/08_tracking/bug/rt_io_file_family_undefined_stubbed_silent_data_loss_2026-08-05.md
-    insert_simple!("rt_io_file_open", io_file::rt_io_file_open);
-    insert_simple!("rt_io_file_read", io_file::rt_io_file_read);
-    insert_simple!("rt_io_file_read_all", io_file::rt_io_file_read_all);
-    insert_simple!("rt_io_file_read_line", io_file::rt_io_file_read_line);
-    insert_simple!("rt_io_file_write", io_file::rt_io_file_write);
-    insert_simple!("rt_io_file_write_all", io_file::rt_io_file_write_all);
-    insert_simple!("rt_io_file_seek", io_file::rt_io_file_seek);
-    insert_simple!("rt_io_file_flush", io_file::rt_io_file_flush);
-    insert_simple!("rt_io_file_close", io_file::rt_io_file_close);
-    insert_simple!("rt_io_file_meta_size", io_file::rt_io_file_meta_size);
-    insert_simple!("rt_io_file_meta_flags", io_file::rt_io_file_meta_flags);
-    insert_simple!("rt_io_file_meta_modified", io_file::rt_io_file_meta_modified);
-    insert_simple!("rt_io_file_meta_created", io_file::rt_io_file_meta_created);
-    insert_simple!("rt_io_file_set_permissions", io_file::rt_io_file_set_permissions);
-    insert_simple!("rt_io_file_exists", io_file::rt_io_file_exists);
-    insert_simple!("rt_io_file_delete", io_file::rt_io_file_delete);
     insert_simple!("rt_free", memory::rt_free);
     insert_simple!("rt_function_not_found", sffi_value::rt_function_not_found_fn);
     insert_simple!("rt_get_concurrent_backend", concurrency::rt_get_concurrent_backend);
@@ -1952,30 +1907,51 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_cmd_set_pipeline", gpu::rt_vulkan_cmd_set_pipeline_fn);
     insert_simple!("rt_vulkan_alloc_buffer", gpu::rt_vulkan_alloc_buffer_fn);
     insert_simple!("rt_vulkan_begin_compute", gpu::rt_vulkan_begin_compute_fn);
+    insert_simple!("rt_vulkan_begin_graphics", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_bind_buffer", gpu::rt_vulkan_bind_buffer_fn);
     insert_simple!("rt_vulkan_bind_descriptors", gpu::rt_vulkan_bind_descriptors_fn);
     insert_simple!("rt_vulkan_bind_pipeline", gpu::rt_vulkan_bind_pipeline_fn);
     insert_simple!("rt_vulkan_copy_to_buffer", gpu::rt_vulkan_copy_to_buffer_fn);
+    insert_simple!("rt_vulkan_copy_to_image", gpu::rt_vulkan_copy_to_image_fn);
+    insert_simple!("rt_vulkan_copy_from_image", gpu::rt_vulkan_copy_from_image_fn);
+    insert_simple!("rt_vulkan_create_render_pass", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!(
         "rt_vulkan_create_offscreen_render_pass",
         gpu::rt_vulkan_graphics_unavailable_fn
     );
+    insert_simple!("rt_vulkan_discard_command", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!(
         "rt_vulkan_discard_graphics_command",
         gpu::rt_vulkan_graphics_unavailable_fn
     );
+    insert_simple!("rt_vulkan_destroy_render_pass", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!(
         "rt_vulkan_destroy_graphics_pipeline",
         gpu::rt_vulkan_graphics_unavailable_fn
     );
+    insert_simple!("rt_vulkan_destroy_image", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_create_sampler", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_create_font_sampler", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_destroy_sampler", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_create_framebuffer", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_destroy_framebuffer", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!(
         "rt_vulkan_begin_render_pass_gfx",
         gpu::rt_vulkan_graphics_unavailable_fn
     );
+    insert_simple!("rt_vulkan_end_render_pass_gfx", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!(
         "rt_vulkan_bind_graphics_pipeline",
         gpu::rt_vulkan_graphics_unavailable_fn
     );
+    insert_simple!("rt_vulkan_bind_vertex_buffer", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_bind_index_buffer", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_bind_texture", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_bind_font_texture", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_set_viewport", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_set_scissor", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_draw", gpu::rt_vulkan_graphics_unavailable_fn);
+    insert_simple!("rt_vulkan_draw_indexed", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_compile_glsl", gpu::rt_vulkan_compile_glsl_fn);
     insert_simple!("rt_vulkan_compile_spirv", gpu::rt_vulkan_compile_spirv_fn);
     insert_simple!("rt_vulkan_read_buffer_bytes", gpu::rt_vulkan_read_buffer_bytes_fn);
@@ -2021,10 +1997,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_vulkan_selected_device_driver_identity_hash",
         gpu::rt_vulkan_selected_device_driver_identity_hash_fn
     );
+    insert_simple!("rt_vulkan_selected_device_name", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_device_type", gpu::rt_vulkan_device_type_fn);
     insert_simple!("rt_vulkan_selected_device_type", gpu::rt_vulkan_selected_device_type_fn);
     insert_simple!("rt_vulkan_dispatch", gpu::rt_vulkan_dispatch_fn);
     insert_simple!("rt_vulkan_end_compute", gpu::rt_vulkan_end_compute_fn);
+    insert_simple!("rt_vulkan_end_graphics", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_free_buffer", gpu::rt_vulkan_free_buffer_fn);
     insert_simple!("rt_vulkan_get_device", gpu::rt_vulkan_get_device_fn);
     insert_simple!(
@@ -2130,6 +2108,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_vulkan_create_font_world_graphics_pipeline",
         gpu::rt_vulkan_graphics_unavailable_fn
     );
+    insert_simple!("rt_vulkan_create_image", gpu::rt_vulkan_create_image_fn);
     insert_simple!("rt_vulkan_end_graphics_frame", gpu::rt_vulkan_end_graphics_frame_fn);
     insert_simple!("rt_vulkan_end_render_pass", gpu::rt_vulkan_end_render_pass_fn);
     insert_simple!("rt_vulkan_graphics_present", gpu::rt_vulkan_graphics_present_fn);
@@ -2291,14 +2270,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // TLS client stubs (interpreter mode — no real TLS)
     insert_simple!("rt_tls_client_connect", rt_tls_client_connect_stub);
     insert_simple!("rt_tls_client_connect_with_sni", rt_tls_client_connect_stub);
-    insert_simple!(
-        "rt_tls_client_connect_address_with_sni_timeout",
-        rt_tls_client_connect_address_with_sni_timeout_stub
-    );
     insert_simple!("rt_tls_client_write", rt_tls_client_write_stub);
-    insert_simple!("rt_tls_client_write_timeout", rt_tls_client_write_timeout_stub);
     insert_simple!("rt_tls_client_read", rt_tls_client_read_stub);
-    insert_simple!("rt_tls_client_read_timeout", rt_tls_client_read_timeout_stub);
     insert_simple!("rt_tls_client_close", rt_tls_client_close_stub);
     insert_simple!("rt_tls_get_protocol_version", rt_tls_get_protocol_version_stub);
     insert_simple!("rt_browser_http_job_start", rt_browser_http_job_start_stub);
@@ -2559,69 +2532,6 @@ pub(crate) fn call_extern_function_with_values(
 
     if name.starts_with("rt_rapier2d_") {
         return rapier2d_sffi::dispatch(name, &evaluated);
-    }
-
-    // The rt_sdl2_* family is implemented in C (src/runtime/runtime_sdl2.c) and
-    // was previously absent from every interpreter path, so any SDL2 call died
-    // with "unknown extern function: rt_sdl2_init". That message is
-    // indistinguishable from "SDL2 is not installed", which made host-WM
-    // dispatch report a missing capability when what was actually missing was
-    // this registration. Route the family to the same C implementation the
-    // native build links, so failures are reported at the SDL2 level instead.
-    if name.starts_with("rt_sdl2_") {
-        return sdl2::dispatch(name, &evaluated);
-    }
-
-    // The rt_audio_* family (31 names) is implemented once, in C, at
-    // src/runtime/runtime_audio.c (a real miniaudio-backed engine). It was
-    // absent from every interpreter path -- not a registration gap alone,
-    // but because runtime_audio.c itself was absent from BOTH C-source lists
-    // that gate linkage: the native-product-build list
-    // (runtime_compiler.spl's `sources` array) and the C sources this
-    // crate's own build script compiles (src/compiler_rust/runtime/build.rs).
-    // Same "source-list-absent" shape as rt_sdl2_*/rt_opengl_*/rt_oneapi_*,
-    // just missing from both lists instead of one. Deliberately excludes
-    // rt_audio_sdl2_* -- a distinct satellite family (census bucket (b),
-    // native def already in the default source list, just unregistered) out
-    // of scope for this lane. See
-    // doc/08_tracking/bug/interpreter_extern_unreachable_names.md bucket (a)
-    // and doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md.
-    if name.starts_with("rt_audio_") && !name.starts_with("rt_audio_sdl2_") {
-        return audio::dispatch(name, &evaluated);
-    }
-
-    // The rt_opengl_* / rt_oneapi_* families are implemented once, in C, at
-    // src/runtime/runtime_native.c (fixed-value capability stubs: no real GL
-    // or oneAPI/SYCL binding exists in the core C runtime). Both were absent
-    // from every interpreter path -- not because of a registration gap alone,
-    // but because runtime_native.c itself was absent from the C sources this
-    // crate's build script compiles (src/compiler_rust/runtime/build.rs),
-    // leaving nothing linked for a dispatcher to call through. That is the
-    // same "source-list-absent" shape the rt_sdl2_* lane found, just against
-    // this crate's build list rather than the native-product-build source
-    // list at runtime_compiler.spl (which already listed runtime_native). See
-    // doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md
-    // lane R2.
-    if name.starts_with("rt_opengl_") {
-        return opengl::dispatch(name, &evaluated);
-    }
-    if name.starts_with("rt_oneapi_") {
-        return oneapi::dispatch(name, &evaluated);
-    }
-
-    // The rt_vulkan_* family was registered, but 24 of its names pointed at
-    // hardcoded constant stubs that shadowed a real implementation linked into
-    // this very binary, and 17 real exports were not registered at all. The
-    // damage was not a missing capability but a fabricated one: the
-    // `-> text` entry point rt_vulkan_selected_device_name was wired to a stub
-    // returning Value::Int(0), so callers read the device name as "0".
-    //
-    // EXTERN_DISPATCH is still consulted first, above, so the handlers in
-    // gpu.rs that do real work (rt_vulkan_is_available probes the loader via
-    // ash) keep winning. Only the constant-stub rows were removed, so this
-    // arm is reached exactly for the names that had no real handler.
-    if name.starts_with("rt_vulkan_") {
-        return vulkan::dispatch(name, &evaluated);
     }
 
     if name.starts_with("rt_host_gpu_lane_") {
@@ -2941,68 +2851,5 @@ mod tests {
         let enums = HashMap::new();
         let impl_methods = HashMap::new();
         assert!(handler(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods).is_err());
-    }
-
-    /// The 24 rerouted `rt_vulkan_*` names must no longer sit in
-    /// `EXTERN_DISPATCH`, and every one of them must be covered by the typed
-    /// table that replaced them.
-    ///
-    /// Those rows were constant stubs (`Ok(Value::Int(0))`) that ignored their
-    /// arguments while shadowing a real implementation linked into this same
-    /// binary. If a row comes back, the stub silently wins again — the table is
-    /// consulted before the prefix arm — so this test pins the routing.
-    #[test]
-    fn rerouted_vulkan_names_are_not_shadowed_by_stub_rows() {
-        const REROUTED: &[&str] = &[
-            "rt_vulkan_begin_graphics",
-            "rt_vulkan_bind_font_texture",
-            "rt_vulkan_bind_index_buffer",
-            "rt_vulkan_bind_texture",
-            "rt_vulkan_bind_vertex_buffer",
-            "rt_vulkan_copy_from_image",
-            "rt_vulkan_copy_to_image",
-            "rt_vulkan_create_font_sampler",
-            "rt_vulkan_create_framebuffer",
-            "rt_vulkan_create_image",
-            "rt_vulkan_create_render_pass",
-            "rt_vulkan_create_sampler",
-            "rt_vulkan_destroy_framebuffer",
-            "rt_vulkan_destroy_image",
-            "rt_vulkan_destroy_render_pass",
-            "rt_vulkan_destroy_sampler",
-            "rt_vulkan_discard_command",
-            "rt_vulkan_draw",
-            "rt_vulkan_draw_indexed",
-            "rt_vulkan_end_graphics",
-            "rt_vulkan_end_render_pass_gfx",
-            "rt_vulkan_selected_device_name",
-            "rt_vulkan_set_scissor",
-            "rt_vulkan_set_viewport",
-        ];
-
-        let still_registered: Vec<&str> =
-            REROUTED.iter().copied().filter(|n| EXTERN_DISPATCH.contains_key(n)).collect();
-        assert!(
-            still_registered.is_empty(),
-            "constant-stub rows are shadowing the linked implementation again: {still_registered:?}"
-        );
-
-        let uncovered: Vec<&str> = REROUTED
-            .iter()
-            .copied()
-            .filter(|n| vulkan::signature_of(n).is_none())
-            .collect();
-        assert!(uncovered.is_empty(), "rerouted but not in VULKAN_FNS: {uncovered:?}");
-    }
-
-    /// `rt_vulkan_is_available` must stay on its real `ash`-based handler.
-    ///
-    /// It probes the Vulkan loader and is a better answer than the runtime
-    /// crate's feature-gated stub, so it must NOT be rerouted along with the
-    /// constant stubs.
-    #[test]
-    fn real_vulkan_handlers_keep_winning() {
-        assert!(EXTERN_DISPATCH.contains_key("rt_vulkan_is_available"));
-        assert!(EXTERN_DISPATCH.contains_key("rt_vulkan_init"));
     }
 }

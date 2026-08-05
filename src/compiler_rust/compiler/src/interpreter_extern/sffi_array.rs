@@ -8,10 +8,10 @@ use simple_runtime::value::RuntimeValue;
 
 // Import actual SFFI functions from runtime
 use simple_runtime::value::{
-    rt_array_clear, rt_array_extend_i64, rt_array_free, rt_array_get, rt_array_len, rt_array_new, rt_array_pop,
-    rt_array_push, rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set, rt_typed_bytes_u8_push,
-    rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set, rt_typed_words_u32_unchecked,
-    rt_typed_words_u64_at, rt_typed_words_u64_unchecked,
+    rt_array_clear, rt_array_data_ptr_u8, rt_array_extend_i64, rt_array_free, rt_array_get, rt_array_len,
+    rt_array_new, rt_array_pop, rt_array_push, rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set,
+    rt_typed_bytes_u8_push, rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set,
+    rt_typed_words_u32_unchecked, rt_typed_words_u64_at, rt_typed_words_u64_unchecked,
 };
 
 fn interpreter_byte_at(value: &Value) -> i64 {
@@ -650,6 +650,40 @@ pub fn rt_array_len_safe_fn(args: &[Value]) -> Result<Value, CompileError> {
     match value {
         Value::Array(items) => Ok(Value::Int(items.len() as i64)),
         Value::Int(raw) => Ok(Value::Int(rt_array_len(RuntimeValue::from_raw(raw as u64)))),
+        _ => Ok(Value::Int(0)),
+    }
+}
+
+/// Get a raw pointer to a `[u8]` array's backing bytes, for passing to
+/// extern/SFFI calls (CUDA driver, Vulkan, font/codec loaders, etc.).
+///
+/// Interpreter-native byte arrays are `Value::Array` (a `Vec<Value>`), not a
+/// contiguous native byte buffer, so there is no existing pointer to hand
+/// back. We materialize a `Vec<u8>` from the element values and leak it —
+/// the same "intentionally leaked, short-lived interpreter process" pattern
+/// used for `Value::Str` -> C string pointers in `dynamic_sffi::value_to_i64`.
+/// Heap-backed arrays (already a raw native pointer/handle, encoded as
+/// `Value::Int`) delegate straight to the native runtime implementation.
+pub fn rt_array_data_ptr_u8_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let value = args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_array_data_ptr_u8 expects 1 argument".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?;
+    let value = value.clone().deref_pointer();
+    match value {
+        Value::Array(items) => {
+            let bytes: Vec<u8> = items.iter().map(|v| interpreter_byte_at(v) as u8).collect();
+            let boxed = bytes.into_boxed_slice();
+            let ptr = boxed.as_ptr() as i64;
+            std::mem::forget(boxed);
+            Ok(Value::Int(ptr))
+        }
+        Value::Int(raw) => {
+            let arr = RuntimeValue::from_raw(raw as u64);
+            Ok(Value::Int(rt_array_data_ptr_u8(arr)))
+        }
         _ => Ok(Value::Int(0)),
     }
 }
