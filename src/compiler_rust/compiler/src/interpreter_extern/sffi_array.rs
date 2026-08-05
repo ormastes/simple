@@ -734,8 +734,8 @@ pub fn rt_array_extend_i64_fn(args: &[Value]) -> Result<Value, CompileError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        interpreter_byte_at, rt_array_concat_fn, rt_array_free_fn, rt_array_len_safe_fn, rt_bytes_u32_le_at_fn,
-        rt_bytes_u64_le_at_fn, rt_bytes_u8_at_fn, rt_bytes_u8_set_fn,
+        interpreter_byte_at, rt_array_concat_fn, rt_array_data_ptr_u8_fn, rt_array_free_fn, rt_array_len_safe_fn,
+        rt_bytes_u32_le_at_fn, rt_bytes_u64_le_at_fn, rt_bytes_u8_at_fn, rt_bytes_u8_set_fn,
     };
     use crate::value::Value;
     use simple_runtime::value::heap::is_registered_heap_ptr;
@@ -765,6 +765,40 @@ mod tests {
         let result = rt_array_len_safe_fn(&[Value::array(vec![Value::Int(1), Value::Int(2)])])
             .expect("safe length should succeed");
         assert_eq!(result, Value::Int(2));
+    }
+
+    /// Regression test for the interpreter gap fixed alongside
+    /// `doc/08_tracking/bug/rt_array_data_ptr_u8_missing_interpreter_adapter_2026-08-05.md`:
+    /// `rt_array_data_ptr_u8` had a real codegen/JIT registration but no
+    /// `interpreter_extern` adapter, so `bin/simple test` (interpreter-only)
+    /// died with `unknown extern function: rt_array_data_ptr_u8` on any
+    /// caller that needs a raw pointer into an interpreter-native `[u8]`
+    /// array (e.g. `CryptoCudaSession.load_module_binary`).
+    #[test]
+    fn rt_array_data_ptr_u8_round_trips_interpreter_native_array() {
+        let bytes = vec![0x10u8, 0x20, 0x30, 0xff];
+        let arr = Value::array(bytes.iter().map(|&b| Value::UInt { value: b as u64, width: 8 }).collect());
+
+        let result = rt_array_data_ptr_u8_fn(&[arr]).expect("pointer materialization should succeed");
+        let ptr = match result {
+            Value::Int(p) => p,
+            other => panic!("expected Value::Int(ptr), got {other:?}"),
+        };
+        assert_ne!(ptr, 0, "materialized array must not report a null pointer");
+
+        // SAFETY: rt_array_data_ptr_u8_fn intentionally leaks a `Vec<u8>` of
+        // exactly `bytes.len()` elements for the lifetime of this process
+        // (the same short-lived-interpreter-process pattern used for
+        // `Value::Str` -> C string pointers), so reading back that many
+        // bytes from the returned pointer is sound here.
+        let round_tripped = unsafe { std::slice::from_raw_parts(ptr as *const u8, bytes.len()) };
+        assert_eq!(round_tripped, bytes.as_slice());
+    }
+
+    #[test]
+    fn rt_array_data_ptr_u8_rejects_missing_argument() {
+        let err = rt_array_data_ptr_u8_fn(&[]).expect_err("missing argument must be a semantic error, not a panic");
+        assert!(err.to_string().contains("rt_array_data_ptr_u8"));
     }
 
     #[test]
