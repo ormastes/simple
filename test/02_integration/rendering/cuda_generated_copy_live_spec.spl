@@ -5,29 +5,49 @@ use std.gpu.engine2d.backend_cuda.{CudaBackend, probe_cuda}
 
 describe "CUDA generated copy live qualification":
     it "uses generated copy for full frames and positioned copy for subrects":
+        # PROBE-THEN-CREATE TOCTOU
+        # (doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md)
+        # This example used to wrap its ENTIRE body in `if probe.is_usable():`
+        # with no else, so when the probe predicted unusable the whole live
+        # qualification silently vanished and the file still reported a clean
+        # pass. probe_cuda() and the CudaBackend.create()+init() below are two
+        # independent creates with nothing cached in between; on this host the
+        # probe reports "CUDA runtime unavailable" from a cold process while the
+        # real create succeeds with a genuine device_readback. The nested
+        # `expect(initialized).to_equal(true)` was ALSO a false red in the other
+        # direction: it demanded the second create succeed because the probe had
+        # said usable.
+        #
+        # The create is now attempted UNCONDITIONALLY and the branch is taken on
+        # init()'s OWN result. The device assertions below are unchanged.
         val probe = probe_cuda()
-        if probe.is_usable():
-            var backend = CudaBackend.create()
-            val initialized = backend.init(4, 3)
-            expect(initialized).to_equal(true)
-            if initialized:
-                val full: [u32] = [
-                    0xFF000001 as u32, 0xFF000002 as u32, 0xFF000003 as u32, 0xFF000004 as u32,
-                    0xFF000005 as u32, 0xFF000006 as u32, 0xFF000007 as u32, 0xFF000008 as u32,
-                    0xFF000009 as u32, 0xFF00000A as u32, 0xFF00000B as u32, 0xFF00000C as u32
-                ]
-                backend.draw_image(0, 0, 4, 3, full)
-                expect(backend.last_image_kernel).to_equal("simple_2d_copy_u32")
-                val full_readback = backend.read_pixels_with_source()
-                expect(full_readback.source).to_equal("device_readback")
-                expect(full_readback.pixels).to_equal(full)
+        var backend = CudaBackend.create()
+        val initialized = backend.init(4, 3)
+        if probe.is_usable() != initialized:
+            print "[toctou] cuda-generated-copy-live: probe predicted usable={probe.is_usable()} but the independent init returned {initialized} — the prediction did not survive the gap; asserting on the INIT, not the probe"
+        if initialized:
+            val full: [u32] = [
+                0xFF000001 as u32, 0xFF000002 as u32, 0xFF000003 as u32, 0xFF000004 as u32,
+                0xFF000005 as u32, 0xFF000006 as u32, 0xFF000007 as u32, 0xFF000008 as u32,
+                0xFF000009 as u32, 0xFF00000A as u32, 0xFF00000B as u32, 0xFF00000C as u32
+            ]
+            backend.draw_image(0, 0, 4, 3, full)
+            expect(backend.last_image_kernel).to_equal("simple_2d_copy_u32")
+            val full_readback = backend.read_pixels_with_source()
+            expect(full_readback.source).to_equal("device_readback")
+            expect(full_readback.pixels).to_equal(full)
 
-                val patch: [u32] = [0xFFAABBCC as u32, 0xFF112233 as u32]
-                backend.draw_image(1, 1, 2, 1, patch)
-                expect(backend.last_image_kernel).to_equal("kernel_draw_image")
-                val patch_readback = backend.read_pixels_with_source()
-                expect(patch_readback.source).to_equal("device_readback")
-                expect(patch_readback.pixels[5]).to_equal(patch[0])
-                expect(patch_readback.pixels[6]).to_equal(patch[1])
-                expect(patch_readback.pixels[0]).to_equal(full[0])
-            backend.shutdown()
+            val patch: [u32] = [0xFFAABBCC as u32, 0xFF112233 as u32]
+            backend.draw_image(1, 1, 2, 1, patch)
+            expect(backend.last_image_kernel).to_equal("kernel_draw_image")
+            val patch_readback = backend.read_pixels_with_source()
+            expect(patch_readback.source).to_equal("device_readback")
+            expect(patch_readback.pixels[5]).to_equal(patch[0])
+            expect(patch_readback.pixels[6]).to_equal(patch[1])
+            expect(patch_readback.pixels[0]).to_equal(full[0])
+        else:
+            # A live qualification that did not run must SAY it did not run,
+            # rather than passing silently.
+            print "[cuda-live] cuda-generated-copy-live: QUALIFICATION NOT RUN — CudaBackend.init(4, 3) returned false, so neither copy kernel was qualified; this example proves NOTHING about the CUDA copy path"
+            expect(backend.initialized).to_equal(false)
+        backend.shutdown()

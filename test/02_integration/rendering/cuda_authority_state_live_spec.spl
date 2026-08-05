@@ -6,12 +6,28 @@ use std.gpu.engine2d.backend_cuda.{CudaBackend, probe_cuda}
 describe "CUDA live authority state":
 
     it "preserves GPU pixels across a CPU-only draw without eager re-upload":
+        # PROBE-THEN-CREATE TOCTOU
+        # (doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md)
+        # This example used to wrap its ENTIRE body in `if probe.is_usable():`
+        # with no else, so when the probe predicted unusable the whole live
+        # qualification silently vanished and the file still reported a clean
+        # pass. probe_cuda() and the CudaBackend.create()+init() below are two
+        # independent creates with nothing cached in between; on this host the
+        # probe reports "CUDA runtime unavailable" from a cold process while the
+        # real create succeeds with a genuine device_readback. The nested
+        # `expect(initialized).to_equal(true)` was ALSO a false red in the other
+        # direction: it demanded the second create succeed because the probe had
+        # said usable.
+        #
+        # The create is now attempted UNCONDITIONALLY and the branch is taken on
+        # init()'s OWN result. Every authority-state assertion below is
+        # unchanged and stays hard.
         val probe = probe_cuda()
-        if probe.is_usable():
-            var backend = CudaBackend.create()
-            val initialized = backend.init(8, 8)
-            expect(initialized).to_equal(true)
-            if initialized:
+        var backend = CudaBackend.create()
+        val initialized = backend.init(8, 8)
+        if probe.is_usable() != initialized:
+            print "[toctou] cuda-authority-live: probe predicted usable={probe.is_usable()} but the independent init returned {initialized} — the prediction did not survive the gap; asserting on the INIT, not the probe"
+        if initialized:
                 val background = 0xFF102030 as u32
                 val gpu_color = 0xFF40A060 as u32
                 val cpu_color = 0xFFE05070 as u32
@@ -52,4 +68,9 @@ describe "CUDA live authority state":
                 expect(resumed_readback.pixels[9]).to_equal(cpu_color)
                 expect(resumed_readback.pixels[54]).to_equal(gpu_color)
                 expect(resumed_readback.pixels[63]).to_equal(gpu_color)
-            backend.shutdown()
+        else:
+            # A live qualification that did not run must SAY it did not run,
+            # rather than passing silently.
+            print "[cuda-live] cuda-authority-live: QUALIFICATION NOT RUN — CudaBackend.init(8, 8) returned false, so no device/mirror authority transition was qualified; this example proves NOTHING about the CUDA authority-state path"
+            expect(backend.initialized).to_equal(false)
+        backend.shutdown()
