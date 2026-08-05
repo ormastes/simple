@@ -19,7 +19,7 @@ Run: `bin/simple test path/to/spec.spl`
 |---------|-------|
 | `.to_equal(expected)` | Equality check |
 | `.to_be(expected)` | Identity/equality |
-| `.to_be_nil` | Nil check |
+| `.to_be_nil()` | Nil check |
 | `.to_contain(item)` | Collection/string contains |
 | `.to_start_with(prefix)` | String prefix |
 | `.to_end_with(suffix)` | String suffix |
@@ -120,7 +120,7 @@ describe "Dashboard":
 ## Doc Generation
 
 ```bash
-bin/simple doc-gen    # Output: doc/06_spec/generated/
+bin/simple spipe-docgen path/to/spec.spl --output doc/06_spec --no-index
 ```
 
 Extracts `"""..."""` docstrings as markdown with metadata, links, and index.

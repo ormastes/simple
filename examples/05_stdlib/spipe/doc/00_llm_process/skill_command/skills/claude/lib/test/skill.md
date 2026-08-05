@@ -100,4 +100,4 @@ Key files: `src/lib/nogc_sync_mut/ui_test/client.spl`, `src/app/ui.test_api/hand
 ## See Also
 
 - `/spipe` skill, `.claude/templates/spipe_template.spl`
-- `doc/07_guide/testing/testing.md`
+- `doc/07_guide/infra/testing.md`

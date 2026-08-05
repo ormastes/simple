@@ -1,7 +1,8 @@
 # Simple Aspect Facets and Demand-Loaded SMF Packs
 
 **Subtitle:** Typed structural AOP, relative aspect packages, variant-aware deployment, and low-overhead lazy activation  
-**Status:** Proposed final research and design  
+**Status:** Proposed final research and design (design-only; no implementation in-tree yet)  
+**Current implementation check:** As of 2026-08-05, the syntax and runtime for typed facets, aspect-pack catalogs, and facet dyn-loading are not yet present in `src/**` or `test/**` (no `bind facet`, `FacetRef`, `AspectCatalog`, `AspectPack`, or `SMF_FLAG_ASPECT_PACK` symbols found in code).
 **Date:** 2026-08-04  
 **Repository examined:** `ormastes/simple`, `main`  
 **Suggested repository destination:** `doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md`
@@ -9,6 +10,13 @@
 ---
 
 ## 1. Executive Decision
+
+Note: This design is forward-looking and should be treated as the target architecture, not existing behavior. The current codebase already contains established `on pc{...} use ...` advice weaving and `dynsmf_*` startup manifests, but it does not yet provide:
+
+- Facet interfaces (`facet interface`) and declarations (`facet impl`)
+- Declarative facet bindings (`bind facet`, `require facet`)
+- Runtime optional facet acquisition (`try_facet`, `FacetRef`) or dynloaded facet activation
+- Aspect pack directory/route sections and packed module chunk loading
 
 Simple should support applying an optional facet interface to existing business objects and business interfaces through AOP, but it must not model the dynamic case as ordinary interface inheritance.
 

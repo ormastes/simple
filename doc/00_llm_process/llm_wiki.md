@@ -230,6 +230,10 @@ aggregate at 49. File and directory scopes are supported; a missing/stale
 mirror, an empty directory scope, machine-output contamination, or a configured
 score/severity failure is not a clean result.
 
+For SPipe rule-level authoring guidance, use `doc/07_guide/infra/testing.md`
+as the canonical workflow source (matchers, docstring style, hooks, generated
+manual flow).
+
 MCP callers use read-only `simple_sspec_scan` for scoring. Reserve the
 conservative write-capable `simple_sspec_maintain` surface for an explicitly
 approved preview/apply, scaffold, or documentize workflow.

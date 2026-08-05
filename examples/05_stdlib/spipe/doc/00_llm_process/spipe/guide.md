@@ -2,7 +2,7 @@
 
 The canonical testing guide lives at:
 
-**[doc/07_guide/testing/testing.md](../../07_guide/testing/testing.md)**
+**[doc/07_guide/infra/testing.md](../../07_guide/infra/testing.md)**
 
 This file (formerly `doc/06_spec/app/compiler/spipe_guide.md`) is kept as a
 pointer because the SPipe rename (2026-04-26) consolidated all skill+doc

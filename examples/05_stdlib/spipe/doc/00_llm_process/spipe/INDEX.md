@@ -9,7 +9,7 @@
 |------|---------|
 | [`skill.md`](skill.md) | Test-writing skill: BDD syntax, matchers, file structure, doc generation |
 | [`loop.md`](loop.md) | Continuous check-and-implement loop (`/spipe_loop`) |
-| [`guide.md`](guide.md) | Pointer to the canonical testing guide at `doc/07_guide/testing/testing.md` |
+| [`guide.md`](guide.md) | Pointer to the canonical testing guide at `doc/07_guide/infra/testing.md` |
 | [`lint_rules.md`](lint_rules.md) | Lint-rules design doc (relocated from `doc/05_design/`) |
 | [`llm_finetune.md`](llm_finetune.md) | LLM fine-tune and retry loop for LLM-backed app/server development |
 | [`llm_model_research.md`](llm_model_research.md) | Base model research and architecture decision checklist |
@@ -50,7 +50,7 @@ old name; do not retroactively rename.
 | `.claude/skills/sspec_loop.md` | `doc/00_llm_process/spipe/loop.md` (+ thin `.claude/skills/spipe.md` and `.claude/skills/spipe_loop.md`) |
 | `.claude/skills/lib/sspec.md` | `doc/00_llm_process/spipe/skill.md` |
 | `doc/05_design/sspec_lint_rules_design.md` | `doc/00_llm_process/spipe/lint_rules.md` |
-| `doc/06_spec/app/compiler/sspec_guide.md` | `doc/00_llm_process/spipe/guide.md` (thin redirect to `doc/07_guide/testing/testing.md`) |
+| `doc/06_spec/app/compiler/sspec_guide.md` | `doc/00_llm_process/spipe/guide.md` (thin redirect to `doc/07_guide/infra/testing.md`) |
 | `tools/claude-plugin/sstack-lang/skills/sspec_loop.md` | `tools/claude-plugin/sstack-lang/skills/spipe_loop.md` |
 | `doc/00_llm_process/skill_command/skills/claude/lib/sspec/` (dir) | `.../lib/spipe/` (dir) |
 | `src/lib/nogc_sync_mut/sspec.spl/.smf` | `src/lib/nogc_sync_mut/spipe.spl/.smf` |
