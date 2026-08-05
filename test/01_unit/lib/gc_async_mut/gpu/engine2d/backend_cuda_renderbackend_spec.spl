@@ -410,6 +410,13 @@ describe "CudaBackend RenderBackend facade":
             expect(probe.fallback_reason).to_contain("kernel_draw_image")
             expect(probe.fallback_reason).to_contain("kernel_draw_gradient_rect")
             expect(probe.fallback_reason).to_contain("kernel_draw_line")
+        else:
+            # Neither recognised shape. Both branches above are claims about the
+            # probe OBJECT (self-consistency), not predictions about a later
+            # create, so they stay hard assertions — but a probe that matches
+            # neither must not slip through as a silent pass.
+            expect(probe.is_usable()).to_equal(probe.status == BackendStatus.Initialized)
+            print "[cuda-2d] cuda-2d-readiness: NEITHER SHAPE MATCHED — status is not Initialized and feature_gate is '{probe.feature_gate}', not 'cuda_2d_render'; this example proves NOTHING about the 2D kernel gap"
 
     it "does not mark CUDA usable when the PTX self-test fails":
         val probe = probe_cuda_2d()
@@ -420,15 +427,48 @@ describe "CudaBackend RenderBackend facade":
             expect(probe.has_graphics).to_equal(false)
             expect(probe.has_present).to_equal(false)
             expect(probe.fallback_reason).to_contain("self-test")
+        else:
+            # The self-test gate was not the one that fired, so the body above
+            # never ran. Disclose it instead of reporting a silent pass.
+            expect(probe.is_usable()).to_equal(probe.status == BackendStatus.Initialized)
+            print "[cuda-2d] cuda-2d-self-test: SELF-TEST GATE NOT EXERCISED — feature_gate is '{probe.feature_gate}', not 'cuda_2d_render_self_test'; this example proves NOTHING about the PTX self-test path"
 
     it "strict Engine2D cuda creation returns typed cuda failure instead of fallback":
+        # PROBE-THEN-CREATE TOCTOU
+        # (doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md)
+        # This example used to read probe_cuda_2d(), gate on
+        # `probe.status != Initialized`, and only THEN run a second, independent
+        # Engine2D.create_with_backend_strict — asserting `result.is_ok()` MUST
+        # be FALSE purely because the probe had predicted failure. Nothing is
+        # cached between the two, so that was a prediction, not a fact, and it
+        # broke in both directions: a create that succeeds where the probe
+        # predicted failure is a FALSE RED, and a probe that reports Initialized
+        # skipped the whole body for a VACUOUS GREEN. On this very host
+        # probe_cuda() reports unusable while create_with_backend_strict("cuda")
+        # succeeds with a genuine device_readback, so the false red is live.
+        #
+        # The create is now attempted UNCONDITIONALLY and every assertion reads
+        # the CREATE's own outcome. The probe is only DISCLOSED.
         val probe = probe_cuda_2d()
-        if probe.status != BackendStatus.Initialized:
-            val result = Engine2D.create_with_backend_strict(4, 4, "cuda")
-            expect(result.is_ok()).to_equal(false)
+        val probe_ready = probe.status == BackendStatus.Initialized
+        val result = Engine2D.create_with_backend_strict(4, 4, "cuda")
+        val created = result.is_ok()
+        if probe_ready != created:
+            print "[toctou] cuda-strict-typed-failure: probe predicted initialized={probe_ready} but the independent create returned ok={created} — the prediction did not survive the gap; asserting on the CREATE, not the probe"
+        if not created:
+            # A strict cuda create that fails must fail STRUCTURALLY: typed
+            # terminal status, the cuda name preserved on every field, and never
+            # a silent cpu/software substitute or a Fallback demotion.
             val diag = result.unwrap_err()
             expect(diag.requested_name).to_equal("cuda")
             expect(diag.selected_name).to_equal("cuda")
             expect(diag.backend_name).to_equal("cuda")
             expect(diag.status == BackendStatus.Unavailable or diag.status == BackendStatus.Failed).to_equal(true)
             expect(diag.status).to_not_equal(BackendStatus.Fallback)
+        else:
+            # The strictness claim still holds on the success path, so this
+            # branch is not a silent skip either.
+            var engine = result.unwrap()
+            expect(engine.backend_name()).to_equal("cuda")
+            engine.shutdown()
+            print "[cuda-2d] cuda-strict-typed-failure: FAILURE PATH NOT EXERCISED — the strict cuda create succeeded, so this example proves NOTHING about the typed-failure path"
