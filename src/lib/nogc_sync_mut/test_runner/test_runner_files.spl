@@ -21,6 +21,44 @@ use std.test_runner.test_runner_coverage.{extract_cover_annotations_for_coverage
 extern fn rt_time_now_unix_micros() -> i64
 
 # =========================================================================
+# Legacy Mirror Exclusion
+# =========================================================================
+#
+# `test/unit/` is a FROZEN legacy mirror of the maintained `test/01_unit/`
+# tree, and both used to be discovered on every directory run. The two never
+# agreed: 874 of the shared pairs differ, sampling found ~33% with differing
+# example counts, and cases where the same spec is GREEN under `01_unit` and
+# RED under `unit`. It carries no unique spec content — the only 3 real specs
+# it still held were migrated in fb742496235 — so discovering it produced
+# duplicate and contradictory verdicts rather than extra coverage.
+#
+# It is excluded from DIRECTORY discovery only. Nothing is deleted, and
+# explicitly naming a path under `test/unit/` still runs it. This mirrors the
+# existing path-based `/fuzz/`, `/chaos/`, `/deploy/` and `/security/`
+# filters: skipped by default, reachable when asked for by name.
+#
+# Both discovery paths must apply this. `discover_test_files` defaults to
+# `discover_test_files_fast`, which filters manifest entries in memory and
+# never reaches the `discover_test_files_slow` walk — so guarding only the
+# walk would leave the exclusion inert on every warm-manifest run.
+#
+# Detail: doc/08_tracking/bug/test_unit_legacy_mirror_divergence_2026-08-04.md
+
+fn is_legacy_mirror_path(path: text) -> bool:
+    """True when `path` lies inside the frozen `test/unit/` legacy mirror.
+
+    Anchored on a whole path segment so an unrelated `.../mytest/unit/` is
+    not swept in by a loose substring match.
+    """
+    path.starts_with("test/unit/") or path.contains("/test/unit/")
+
+fn targets_legacy_mirror(base_path: text) -> bool:
+    """True when the run explicitly names the legacy mirror, or a path inside it."""
+    if is_legacy_mirror_path(base_path):
+        return true
+    base_path == "test/unit" or base_path.ends_with("/test/unit")
+
+# =========================================================================
 # ANSI Stripping
 # =========================================================================
 
@@ -220,11 +258,16 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
 
     # Fast path: filter manifest entries in-memory
     val start = rt_time_now_unix_micros()
+    val keep_legacy_mirror = targets_legacy_mirror(base_path)
     var test_files: [text] = []
 
     for entry in manifest.entries:
         # Path prefix filter
         if not entry.path.starts_with(base_path):
+            continue
+
+        # Legacy mirror is excluded from directory discovery (see above).
+        if not keep_legacy_mirror and is_legacy_mirror_path(entry.path):
             continue
 
         # Level filter
@@ -348,10 +391,15 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
     # Check if we need content-based filtering at all
     # Always need content if filtering slow tests (default behavior)
     val needs_content = options.list_ignored or options.only_slow or options.only_skipped or options.tag != "" or not options.run_all
+    val keep_legacy_mirror = targets_legacy_mirror(base_path)
     var test_files: [text] = []
     for f in all_files:
         if not is_test_file(f):
             continue
+        # Legacy mirror is excluded from directory discovery (see above).
+        if not keep_legacy_mirror and is_legacy_mirror_path(f):
+            continue
+
         if not matches_level(f, options.level):
             continue
         # Read file content once for @skip check and content-based filters
