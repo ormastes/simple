@@ -158,6 +158,25 @@ fn build_vreg_types(
                     }
                 }
                 MirInst::Call { dest: None, .. } => {}
+                // Instance-method calls had NO arm here at all, so a
+                // user-defined `fn getf(..) -> f64` left its dest VReg untyped
+                // and float binops lowered to INTEGER ops on the IEEE-754 bits
+                // (see the matching fix + full write-up in instr/body.rs).
+                // `MethodCallStatic` carries no `return_type` field (unlike
+                // `MethodCallVirtual` / `IndirectCall` just below), so the type
+                // has to be recovered from `function_return_types`, which MIR
+                // keys by the same `"Class.method"` name the instruction uses.
+                MirInst::MethodCallStatic {
+                    dest: Some(dest),
+                    func_name,
+                    ..
+                } => {
+                    if let Some(ty) = function_return_types.get(func_name.as_str()) {
+                        if matches!(ty, &TypeId::F64 | &TypeId::F32) {
+                            types_map.insert(*dest, *ty);
+                        }
+                    }
+                }
                 MirInst::IndirectCall {
                     dest: Some(dest),
                     return_type,

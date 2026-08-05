@@ -298,6 +298,43 @@ pub(super) fn build_vreg_types(
                 {
                     types_map.insert(*d, TypeId::F64);
                 }
+                // USER-DEFINED methods returning f32/f64. The arms above only
+                // cover the hard-coded builtin conversion names; a plain
+                // `class B: fn getf(k: i64) -> f64` fell through to the empty
+                // catch-all and left its dest VReg UNTYPED.
+                //
+                // User functions use a uniform i64 return ABI that carries an
+                // f64 as raw IEEE-754 BITS; consumers must bitcast i64->f64.
+                // `compile_binop` (instr/core.rs) only emits that
+                // `reinterpret_f64` when `vreg_types[vreg]` is F64/F32, so an
+                // untyped method result stayed "an integer" and Add/Sub/Mul/Div
+                // lowered to `iadd`/`isub`/`imul`/`sdiv` ON THE BIT PATTERN.
+                // `a.getf(1) * b.getf(1)` therefore computed
+                // `bits(11.0) * bits(101.0)` mod 2^64 == 0 -> printed `0.0`,
+                // and comparisons INVERTED (`3.0 < 5.0` -> false). Silent wrong
+                // numbers, exit 0.
+                //
+                // Free functions (`MirInst::Call`, just below) and static
+                // methods already consulted `function_return_types`; instance
+                // methods were the only unstamped call form. MIR names class
+                // methods `"B.getf"` — exactly the key `function_return_types`
+                // is populated with in common_backend.rs — so a direct lookup
+                // closes the gap. Stamping is restricted to float returns to
+                // match the existing i64-default behaviour for every other type.
+                // Same family as the 2026-06-21 f64-call-result fix (07d87555f0e),
+                // which stamped free-function results and missed methods.
+                MirInst::MethodCallStatic {
+                    dest: Some(d),
+                    func_name,
+                    ..
+                } if matches!(
+                    function_return_types.get(func_name.as_str()),
+                    Some(&TypeId::F64) | Some(&TypeId::F32)
+                ) =>
+                {
+                    let ty = function_return_types[func_name.as_str()];
+                    types_map.insert(*d, ty);
+                }
                 MirInst::MethodCallStatic { .. } => {}
                 MirInst::Call {
                     dest: Some(d), target, ..
@@ -1379,6 +1416,47 @@ mod tests {
 
         let returns = HashMap::from([("first_f64".to_string(), TypeId::F64)]);
         assert_eq!(build_vreg_types(&func, &returns).get(&result), Some(&TypeId::F64));
+    }
+
+    /// An f64-returning INSTANCE method must be stamped just like a free
+    /// function. Unstamped, `compile_binop` skips the i64->f64 `reinterpret_f64`
+    /// and lowers float arithmetic to INTEGER ops on the IEEE-754 payload bits:
+    /// `a.getf() * b.getf()` returned 0.0 and `a.getf() < 5.0` INVERTED.
+    /// That is what zeroed every cell of `Matrix4.multiply`.
+    /// End-to-end guard: test/01_unit/compiler/codegen/f64_method_return_binop_spec.spl
+    #[test]
+    fn build_vreg_types_stamps_f64_instance_method_returns() {
+        let mut func = MirFunction::new("caller".to_string(), TypeId::BOOL, Visibility::Private);
+        let recv = func.new_vreg();
+        let float_result = func.new_vreg();
+        let int_result = func.new_vreg();
+
+        let entry = func.block_mut(BlockId(0)).unwrap();
+        entry.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(float_result),
+            receiver: recv,
+            func_name: "Box.getf".to_string(),
+            args: vec![],
+        });
+        entry.instructions.push(MirInst::MethodCallStatic {
+            dest: Some(int_result),
+            receiver: recv,
+            func_name: "Box.geti".to_string(),
+            args: vec![],
+        });
+
+        // MIR names class methods "Class.method" -- the same key
+        // `function_return_types` is populated with in common_backend.rs.
+        let returns = HashMap::from([
+            ("Box.getf".to_string(), TypeId::F64),
+            ("Box.geti".to_string(), TypeId::I64),
+        ]);
+        let map = build_vreg_types(&func, &returns);
+
+        assert_eq!(map.get(&float_result), Some(&TypeId::F64));
+        // Non-float returns keep the pre-existing i64-default behaviour, so
+        // this fix stays scoped to the float-reinterpret path.
+        assert_eq!(map.get(&int_result), None);
     }
 
     #[test]
