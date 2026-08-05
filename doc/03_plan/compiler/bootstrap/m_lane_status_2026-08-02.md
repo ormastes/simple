@@ -724,3 +724,103 @@ is seed evidence.
 existing deployed binary only). The native-backend question above would need
 either a scoped native-build probe or a real self-hosted redeploy to answer
 either way — deferred as a follow-up, not attempted here.
+
+---
+
+# Addendum 2026-08-05 — M2 stale-slot and after-sweep UAF fixtures landed
+(native-C guard allocator), sabotage-verified; owner-attribution filed, not
+invented
+
+This addendum supersedes the M2 row's "Remains, concretely" item 2 above
+("Add the stale-slot and after-sweep UAF fixtures"). The native-C guard-page
+allocator itself (`src/runtime/runtime_memory_guard.h`) landed earlier this
+session (`8f3948de5ed`), closing item 1 of the original M2 finding (the
+guard-row-false-on-native bug). This pass adds the two missing fixture
+classes plan §M2's exit criterion names against that mechanism, and files
+the owner-attribution gap rather than inventing a signal handler unreviewed.
+
+**Exit criterion (plan §M2,
+`doc/03_plan/runtime/memory_analysis/memory_infra_next_phase_plan_2026-07-29.md`
+line 32-33):** "seeded UAF fixtures (malloc AND stale-slot AND after-sweep)
+each trapped with attribution." The malloc class was already covered by
+`rt_mem_guard_native_selfcheck.c` (immediate overflow + immediate UAF on the
+same slot). This pass adds the other two:
+
+- `src/runtime/test/rt_mem_guard_stale_slot_selfcheck.c` (new) — frees a
+  slot, then churns 40 unrelated sampled alloc/use/free cycles through the
+  guard mechanism (well under the 256-entry free-ring capacity), then proves
+  the now-*stale* (40-alloc-old) freed slot still `SIGSEGV`s on both read and
+  write — distinguishing "the bounded FIFO ring protects every resident
+  freed slot" from a weaker design that only protects the single
+  most-recently-freed pointer.
+- `src/runtime/test/rt_mem_guard_after_sweep_selfcheck.c` (new) — forces
+  4,500 sampled alloc/free cycles (> the 4,096-entry slot table and >> the
+  256-entry ring), so the free ring must evict ("sweep") repeatedly and
+  reclaim array slots for reuse many times over. Then positively proves the
+  allocator is still fully sound post-sweep: (a) a UAF read on a slot freed
+  immediately after the heavy churn still traps, (b) a fresh allocation made
+  after all that sweeping is still guard-protected (one-byte overflow
+  traps), and (c) `rt_mem_guard_stats()` confirms every single request
+  across the run was actually sampled — no silent fallback to plain
+  `malloc()` from a corrupted/exhausted slot table, which is exactly the
+  failure mode a broken eviction-reclaim path would produce (silently, with
+  no crash of its own).
+
+Both fixtures follow `rt_mem_guard_native_selfcheck.c`'s existing proof
+discipline exactly: every trap-shaped assertion `fork()`s, lets the child
+touch the guarded byte, and asserts the **parent** observes the child die by
+`SIGSEGV` (`WIFSIGNALED` + `WTERMSIG == SIGSEGV`) — never a plain flag a
+sabotaged allocator could satisfy by doing nothing.
+
+**Sabotage-cycle proof.** `runtime_memory_guard.h`'s
+`rt_mem_guard_free_sampled` was edited to `mprotect(..., PROT_READ |
+PROT_WRITE)` in place of `PROT_NONE` (the same sabotage class used to
+originally prove `rt_mem_guard_native_selfcheck.c` non-vacuous), objects
+rebuilt with the exact flags `scripts/check/build-core-c-bootstrap-runtime-capsule.shs`
+uses (`-Os -ffunction-sections -fdata-sections -fno-unwind-tables
+-fno-asynchronous-unwind-tables -fno-stack-protector -fPIC -std=gnu11
+-DSIMPLE_CORE_C_STANDALONE=1`), then reverted:
+
+| fixture | real `PROT_NONE` | sabotaged `PROT_READ\|PROT_WRITE` |
+|---|---|---|
+| `rt_mem_guard_native_selfcheck.c` (malloc class, unchanged) | PASSED (0 failures) | *(not re-run this pass; established prior session)* |
+| `rt_mem_guard_stale_slot_selfcheck.c` | PASSED (0 failures) | **FAILED (2 failures)** — both the stale read and stale write checks flip to FAIL, double-free check stays ok (orthogonal) |
+| `rt_mem_guard_after_sweep_selfcheck.c` | PASSED (0 failures) | **FAILED (1 failure)** — the post-sweep-churn UAF read flips to FAIL; the overflow/canary checks stay ok because they depend on the alloc-time (not free-time) `mprotect`, which the sabotage did not touch — this is why the fixture needed its own dedicated UAF check rather than relying on the overflow check alone |
+
+After reverting, `git diff` against `runtime_memory_guard.h` is empty and
+both fixtures pass clean again on freshly rebuilt objects — confirmed before
+landing.
+
+`scripts/check/build-core-c-bootstrap-runtime-capsule.shs` is updated to
+build, run, and receipt-gate both new fixtures (mirroring the existing
+`rt_mem_guard_native_selfcheck` block exactly: `LOCAL_INPUTS_FILE` entries,
+a build+run+`grep 'SELFCHECK PASSED'` gate with its own `die` reasons, and
+manifest receipt lines). **Not run end-to-end through the pinned script
+itself this pass** — the script hard-requires a byte-clean `git status` on
+all of `src/runtime` (`die "runtime-source-dirty"`), and the shared working
+copy carried unrelated in-flight changes from other lanes
+(`runtime_renderdoc.c`, `runtime_simd_dispatch.c`) at verification time. The
+manual rebuild above used the identical compiler, flags, and source-file set
+the script uses, which is why it is offered as equivalent evidence rather
+than a substitute claim of "ran the pinned script" — an isolated-worktree
+run against `origin/main` was attempted for a true end-to-end pass but this
+repository's `git worktree add` did not complete inside the available
+command budget (large tree, pre-existing loose-object backlog) and was
+abandoned rather than reported as done.
+
+**Owner-attribution — filed, not implemented.** The design doc's §2 also
+promises "owner name from M1" printed on the trap via a
+`sigaction`-installed `mem_guard_fault_handler`. Measured: this handler does
+not exist on **either** side — the Rust `GuardSlot.owner` field is captured
+but `#[allow(dead_code)]` (nothing reads it), and native C's
+`RtMemGuardSlot` has no owner field at all. There is no working mechanism to
+port; building one is an independent, higher-risk piece (process-wide
+signal handler that must coexist with existing crash handling and stay
+async-signal-safe — a bug here is worse than the missing report it would
+fix). Filed as
+`doc/08_tracking/bug/mem_guard_owner_attribution_trap_report_missing_2026-08-05.md`
+rather than landed under this pass's scope.
+
+**Blocked on bootstrap?** No — this is pure C-runtime test/tooling work
+(`src/runtime/test/*.c`, `scripts/check/*.shs`), verified via direct `cc`
+invocation without any bootstrap stage.
