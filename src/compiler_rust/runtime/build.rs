@@ -132,6 +132,21 @@ fn compile_c_runtime_sources() {
         "runtime_font.c",
         "runtime_memtrack.c",
         "runtime_simd_dispatch.c",
+        // rt_opengl_* / rt_oneapi_* (interpreter_extern_registration_lanes.md,
+        // lane R2): both families were entirely absent from this list, so the
+        // interpreter/seed binary had no path to the real (stub) C
+        // definitions -- the same "source-list-absent" shape the rt_sdl2_*
+        // lane found, just against this list instead of the
+        // native-product-build list at runtime_compiler.spl (which already
+        // carries "runtime_native"). The two families live in
+        // runtime_native.c alongside ~470 other symbols, several of which
+        // (rt_host_gpu_lane_*, rt_host_gpu_queue_*) already have real
+        // definitions in this crate's own host_gpu_lane.rs and duplicate-
+        // symbol at link time if the whole translation unit is pulled in.
+        // runtime_native_gpu_stub.c carries a verbatim, comment-linked copy
+        // of only the two families' bodies so this crate can link them
+        // without dragging in the rest of runtime_native.c.
+        "runtime_native_gpu_stub.c",
     ];
     if target_os != "windows" && !native_all_provider {
         c_sources.push("hosted_win32.c");

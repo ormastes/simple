@@ -84,12 +84,9 @@ pub mod cli;
 pub mod cargo;
 pub mod sdn;
 pub mod sdl2;
-pub mod glfw;
-pub mod sdl3;
 pub mod opengl;
 pub mod oneapi;
 pub mod vulkan;
-pub mod capability_gap;
 pub mod coverage;
 pub mod cranelift;
 #[cfg(not(doctest))]
@@ -2574,25 +2571,6 @@ pub(crate) fn call_extern_function_with_values(
         return sdl2::dispatch(name, &evaluated);
     }
 
-    // The rt_glfw_* and rt_sdl3_* families are implemented in C
-    // (src/runtime/runtime_glfw.c, src/runtime/runtime_sdl3.c) and linked
-    // into every native build via the default runtime source list, but the
-    // interpreter runs inside a separate process image (the Rust seed) that
-    // does not compile either file in. Before this registration, any call
-    // died with "unknown extern function: rt_glfw_init" /
-    // "unknown extern function: rt_sdl3_init" — indistinguishable from "not
-    // installed". Route both families to the same C implementation the
-    // native build links, mirroring the rt_sdl2_ satellite-dlopen arm above.
-    // See doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md
-    // lane R1.
-    if name.starts_with("rt_glfw_") {
-        return glfw::dispatch(name, &evaluated);
-    }
-
-    if name.starts_with("rt_sdl3_") {
-        return sdl3::dispatch(name, &evaluated);
-    }
-
     // The rt_opengl_* / rt_oneapi_* families are implemented once, in C, at
     // src/runtime/runtime_native.c (fixed-value capability stubs: no real GL
     // or oneAPI/SYCL binding exists in the core C runtime). Both were absent
@@ -2668,21 +2646,6 @@ pub(crate) fn call_extern_function_with_values(
             return result;
         }
         return Err(common::unknown_function(name));
-    }
-
-    // `rt_webgpu_*`, `rt_vk_*`, `rt_gui_*`, `rt_lyon_*`, `rt_gamepad_*`: M3
-    // capability gap. Unlike rt_sdl2_/rt_vulkan_ above, none of these five
-    // families has a real native implementation anywhere in this tree (no C
-    // translation unit, no linked Rust runtime crate) for a dispatcher to
-    // resolve against. Registering them here cannot conjure an
-    // implementation, so this arm returns an honest, family-named
-    // capability-gap error instead of letting them fall into the generic
-    // "unknown extern function" text below, which is indistinguishable from
-    // a typo or a genuinely unregistered symbol. See capability_gap.rs and
-    // doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md
-    // lane R3. Deliberately excludes rt_vulkan_ (handled above, real family).
-    if capability_gap::matches(name) {
-        return capability_gap::dispatch(name);
     }
 
     if let Some(result) = dynamic_sffi::try_call_dynamic(name, &evaluated) {
