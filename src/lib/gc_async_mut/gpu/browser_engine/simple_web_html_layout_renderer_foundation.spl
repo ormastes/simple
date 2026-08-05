@@ -66,7 +66,7 @@ fn simple_web_backdrop_admission(backdrop: text) -> SimpleWebBackdropAdmission:
 # Default wall-clock budget for one software render, in milliseconds. Sized
 # for AOT/JIT-compiled execution. Under `bin/simple run` (tree-walking
 # interpreter), parse_html/compute_styles/layout for even a small document
-# (see doc header) routinely exceed this, so `_web_budget_expired_at()` (below)
+# (see doc header) routinely exceed this, so `_web_budget_expired()` (below)
 # trips mid-paint and only the canvas-background command survives — a
 # uniform-fill frame that still reports nonzero/varied-looking pixel stats
 # at the framebuffer level but has no real content. This is NOT scaled up
@@ -162,22 +162,6 @@ val WEB_IFRAME_PLACEHOLDER: u32 = 0xFF888888u32
 # Per-render mutable state (reset at the start of every public render entry).
 var _web_render_deadline_us: i64 = 0
 var _web_render_degraded: bool = false
-# Name of the FIRST budget-exhaustion exit that fired in the current render
-# ("" while the render is still complete). First-wins: the earliest phase to
-# stop is the one that explains the missing content, and a later exit in an
-# already-truncated render is a consequence, not the cause.
-#
-# Why this exists: before it, exhaustion produced a correctly-sized, entirely
-# blank framebuffer that was byte-shaped exactly like a successful render. The
-# only signal was the `_web_render_degraded` bool, and it is a MODULE GLOBAL
-# that the NEXT `_web_budget_begin` clears -- so in an oracle-vs-lane
-# comparison (render CPU, render lane, then compare) the flag observed at
-# compare time describes the LAST render, not the oracle's. A comparison could
-# therefore pass by both sides being empty. The reason string here, and the
-# `render_degraded`/`degrade_reason` fields that travel ON the result struct
-# (see SimpleWebLayoutPixelResult), make exhaustion inspectable per-result
-# instead of per-process.
-var _web_render_degrade_reason: text = ""
 
 # Platform budget floor: slow/emulated platforms (e.g. SimpleOS under QEMU
 # TCG, ~30x slower than native) legitimately need more wall-clock than the
@@ -218,28 +202,6 @@ pub fn web_budget_now_and_deadline() -> text:
 pub fn simple_web_layout_last_render_degraded() -> bool:
     _web_render_degraded
 
-# Name of the first budget-exhaustion exit taken by the most recent render, or
-# "" if it completed. One of the WEB_BUDGET_SITE_* names below, so a caller or
-# spec can attribute a blank page to a concrete phase instead of guessing.
-pub fn simple_web_layout_last_render_degrade_reason() -> text:
-    _web_render_degrade_reason
-
-# The complete family of budget-exhaustion exits in the software render path.
-# Every `_web_budget_expired_at` call site names itself with one of these, and
-# `_web_budget_expired_at` is the ONLY way to test the deadline — there is no
-# unattributed variant, so a new exit cannot be added without naming itself.
-val WEB_BUDGET_SITE_STYLE_CASCADE: text = "style-cascade"
-val WEB_BUDGET_SITE_STYLE_SELECTOR_GROUPS: text = "style-selector-groups"
-val WEB_BUDGET_SITE_STYLE_CANDIDATE_DECLS: text = "style-candidate-decls"
-val WEB_BUDGET_SITE_STYLE_IMPORTANT_DECLS: text = "style-important-decls"
-val WEB_BUDGET_SITE_LAYOUT_SUBTREE: text = "layout-subtree"
-val WEB_BUDGET_SITE_PAINT_BACKGROUNDS: text = "paint-backgrounds"
-val WEB_BUDGET_SITE_PAINT_RELATIVE_ROOTS: text = "paint-relative-roots"
-val WEB_BUDGET_SITE_PAINT_ABSOLUTE_LOW_Z: text = "paint-absolute-low-z"
-val WEB_BUDGET_SITE_PAINT_ABSOLUTE_HIGH_Z: text = "paint-absolute-high-z"
-val WEB_BUDGET_SITE_PAINT_SCROLLBARS: text = "paint-scrollbars"
-val WEB_BUDGET_SITE_PAINT_TEXT: text = "paint-text"
-
 # Arm the budget for a fresh render: record the deadline and clear the flag.
 # A budget_ms that is <= 0, or that is still the module default (i.e. the
 # caller went through the public entry point's default arg rather than
@@ -256,7 +218,6 @@ fn _web_budget_begin(budget_ms: i64):
     _web_render_deadline_us = begin_now + floored_ms * 1000
     _web_render_floor_deadline_us = if _web_render_budget_floor_ms > 0: begin_now + _web_render_budget_floor_ms * 1000 else: 0
     _web_render_degraded = false
-    _web_render_degrade_reason = ""
 
 # Re-arm the deadline mid-render to hand the NEXT stage its own slice of the
 # total budget, without ever extending the overall wall-clock past whatever
@@ -267,26 +228,37 @@ fn _web_budget_begin(budget_ms: i64):
 # raises the deadline to a point <= the original total, so if the previous
 # absolute deadline was already in the past, moving it later just grants the
 # next stage its fresh slice; it never un-expires a stage's own past work.
+#
+# The stage slice is computed from render_start, so an EARLIER stage that
+# overran the whole budget handed the next stage a deadline already in the
+# past -- i.e. no slice at all. Every guarded per-node loop in that stage then
+# breaks on its FIRST iteration, so layout and paint emit nothing and the
+# frame comes back blank even though style had resolved every box. That is how
+# one slow text node erased a sibling box that painted correctly on its own:
+# the box was styled and its geometry known, and the paint pass was denied the
+# single iteration it needed to emit the fill. Floor every rearm at a small
+# slice measured from NOW so a stage always gets enough to emit what earlier
+# stages already computed. This does NOT raise the default budget (see
+# WEB_RENDER_BUDGET_MS above) and does not un-expire the current stage --
+# _web_render_degraded stays latched and the overrun is still reported; the
+# extra wall clock is bounded by one constant per stage boundary.
+val WEB_RENDER_STAGE_MIN_SLICE_MS: i64 = 2000
+
 fn _web_budget_rearm(deadline_us: i64):
     if _web_render_deadline_us > 0:
-        _web_render_deadline_us = if _web_render_floor_deadline_us > deadline_us: _web_render_floor_deadline_us else: deadline_us
+        val floored = if _web_render_floor_deadline_us > deadline_us: _web_render_floor_deadline_us else: deadline_us
+        val min_slice_us = rt_time_now_micros() + WEB_RENDER_STAGE_MIN_SLICE_MS * 1000
+        _web_render_deadline_us = if floored > min_slice_us: floored else: min_slice_us
 
-# True once the wall-clock deadline has passed; latches the degraded flag AND
-# records `site` as the exhaustion reason (first-wins) so a truncated render can
-# name the phase that stopped. A deadline of 0 means "not armed" (guards are
-# inert), so any code path that never called _web_budget_begin runs unbounded
-# exactly as before.
-#
-# `site` is mandatory by design. This deliberately has no zero-argument
-# counterpart: an unattributed exit is how exhaustion became invisible in the
-# first place, and a nameless guard would silently reintroduce it.
-fn _web_budget_expired_at(site: text) -> bool:
+# True once the wall-clock deadline has passed; latches the degraded flag so
+# callers can report the render as degraded. A deadline of 0 means "not armed"
+# (guards are inert), so any code path that never called _web_budget_begin runs
+# unbounded exactly as before.
+fn _web_budget_expired() -> bool:
     if _web_render_deadline_us <= 0:
         return false
     if rt_time_now_micros() > _web_render_deadline_us:
         _web_render_degraded = true
-        if _web_render_degrade_reason == "":
-            _web_render_degrade_reason = site
         return true
     false
 

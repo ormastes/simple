@@ -60,12 +60,6 @@ class SimpleWebLayoutEngine2DExecutionResult:
     # (sans-serif/16px), so the reported identity and pixel size describe the
     # default face rather than the document's. Consumers gate on this FIRST.
     render_degraded: bool
-    # The backend that ACTUALLY produced these pixels, as decided by the
-    # execution itself -- not by a caller re-resolving the request name.
-    # "software" whenever an accelerated request was demoted to the CPU
-    # surface (see lane_demoted), so a label derived from this field can
-    # never claim a device that did not render the frame.
-    resolved_backend: text
     vector_font_identity: text
     vector_font_pixel_size: i32
     vector_font_execution_target: text
@@ -84,12 +78,6 @@ class SimpleWebLayoutEngine2DReadbackResult:
     # through so readback consumers can fail closed on a truncated cascade
     # instead of trusting fabricated vector_font_* evidence.
     render_degraded: bool
-    # The backend that ACTUALLY produced these pixels, as decided by the
-    # execution itself -- not by a caller re-resolving the request name.
-    # "software" whenever an accelerated request was demoted to the CPU
-    # surface (see lane_demoted), so a label derived from this field can
-    # never claim a device that did not render the frame.
-    resolved_backend: text
     vector_font_identity: text
     vector_font_pixel_size: i32
     vector_font_execution_target: text
@@ -239,7 +227,6 @@ fn _simple_web_layout_execute_draw_ir_composition(
         # budget break in that pass; the vector_font_* fields below are only
         # trustworthy when this is false.
         render_degraded: simple_web_layout_last_render_degraded() or lane_demoted,
-        resolved_backend: if lane_demoted: "software" else: backend_name,
         vector_font_identity: render.font_identity,
         vector_font_pixel_size:
             _simple_web_draw_ir_last_text_font_pixel_size(
@@ -629,8 +616,22 @@ pub fn simple_web_layout_render_html_engine2d_result_with_images(
 pub fn simple_web_layout_render_html_pixels_engine2d(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     if width <= 0 or height <= 0:
         return []
-    val layout_result = simple_web_layout_render_html_draw_ir_result_with_images(
-        html, width, height, [])
+    # Route through the degraded-retry wrapper (see
+    # _simple_web_layout_draw_ir_with_degraded_retry above), not the raw
+    # single-pass entry: this is the plain-pixels path that
+    # render_html_to_pixels_with_viewport (browser_renderer.spl) resolves to
+    # for any HTML containing <p>/<h1>/<button>/etc, and until this fix it was
+    # the ONE call in this file's public pixel surface that never got the
+    # retry -- every retry_degraded=false sibling below it and the readback
+    # entry (which alone passed retry_degraded=true) bracket it, but this
+    # function bypassed the flag entirely by calling the single-pass helper
+    # directly. A wall-clock budget trip under host load then silently
+    # returned truncated/blank pixels with no second chance, which is exactly
+    # the "seems able but can't" class-selector-drop failure the retry wrapper
+    # exists to catch -- see
+    # doc/08_tracking/bug/web_render_pixels_entry_bypasses_degraded_retry_2026-08-05.md.
+    val layout_result = _simple_web_layout_draw_ir_with_degraded_retry(
+        html, width, height, -1, [], [])
     if (
         web_gpu_paint_enabled() and
         web_gpu_paint_backend_verdict(backend_name) == "gpu-paint-candidate"
@@ -650,8 +651,12 @@ pub fn simple_web_layout_render_html_pixels_engine2d_with_images(
 ) -> [u32]:
     if width <= 0 or height <= 0:
         return []
+    # Same degraded-retry gap as simple_web_layout_render_html_pixels_engine2d
+    # above (render_html_to_pixels_with_viewport_with_images resolves here);
+    # retry_degraded=true so a budget-tripped first pass gets the same
+    # bounded second chance instead of silently publishing truncated pixels.
     val execution = _simple_web_layout_render_html_engine2d_execution(
-        html, width, height, backend_name, -1, [], images, false
+        html, width, height, backend_name, -1, [], images, true
     )
     if execution.render.skipped_command_count != 0:
         return []
@@ -717,7 +722,6 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
             readback: engine2d_readback([], "unavailable"),
             material_fallback: WebRenderMaterialFallbackProvenance.none(),
             render_degraded: false,
-            resolved_backend: "",
             vector_font_identity: "", vector_font_pixel_size: 0,
             vector_font_execution_target: "", vector_font_batch_identity: "",
             vector_font_readback_source: "", vector_font_device_checksum: 0,
@@ -734,7 +738,6 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
             readback: engine2d_readback([], "unavailable"),
             material_fallback: execution.material_fallback,
             render_degraded: execution.render_degraded,
-            resolved_backend: execution.resolved_backend,
             vector_font_identity: execution.vector_font_identity,
             vector_font_pixel_size: execution.vector_font_pixel_size,
             vector_font_execution_target: execution.vector_font_execution_target,
@@ -754,7 +757,6 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
     SimpleWebLayoutEngine2DReadbackResult(
         readback: readback, material_fallback: execution.material_fallback,
         render_degraded: execution.render_degraded,
-        resolved_backend: execution.resolved_backend,
         vector_font_identity: execution.vector_font_identity,
         vector_font_pixel_size: execution.vector_font_pixel_size,
         vector_font_execution_target: execution.vector_font_execution_target,
