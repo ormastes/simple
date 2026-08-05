@@ -11,6 +11,10 @@
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519_MLKEM768_TLS_NAMED_GROUP,
+    X25519_MLKEM768_CLIENT_SHARE_BYTES}
+
 # Local constant copies (canonical defs in handshake13.spl)
 val _HRR_HS_CLIENT_HELLO: u8    = 1
 val _HRR_EXT_SUPPORTED_VERSIONS: u16 = 43
@@ -18,6 +22,9 @@ val _HRR_EXT_KEY_SHARE: u16     = 51
 val _HRR_EXT_COOKIE: u16        = 44
 val _HRR_GROUP_X25519: u16      = 0x001D
 val _HRR_GROUP_SECP256R1: u16   = 0x0017
+# draft-ietf-tls-ecdhe-mlkem-05 X25519MLKEM768 (mirrors
+# X25519_MLKEM768_TLS_NAMED_GROUP in the crypto contract).
+val _HRR_GROUP_X25519MLKEM768: u16 = 0x11EC
 val _HRR_HS_MESSAGE_HASH: u8    = 254
 
 val _HRR_MAGIC_LOCAL: [u8] = [
@@ -297,6 +304,29 @@ fn _build_ext_ks_p256_hrr(p256_pub: [u8]) -> [u8]:
     _append_into_hrr(out, cs)
     out
 
+fn _build_ext_ks_hybrid_hrr(hybrid_share: [u8]) -> [u8]:
+    val entry = _build_ks_entry_hrr(_HRR_GROUP_X25519MLKEM768, hybrid_share)
+    val list_len = _put_u16_be_hrr(entry.len().to_u16())
+    var cs: [u8] = _byte_buf_hrr(entry.len() + 2)
+    _append_into_hrr(cs, list_len)
+    _append_into_hrr(cs, entry)
+    val ext_type = _put_u16_be_hrr(_HRR_EXT_KEY_SHARE)
+    val ext_len = _put_u16_be_hrr(cs.len().to_u16())
+    var out: [u8] = _byte_buf_hrr(cs.len() + 4)
+    _append_into_hrr(out, ext_type)
+    _append_into_hrr(out, ext_len)
+    _append_into_hrr(out, cs)
+    out
+
+fn _hrr_hybrid_contract_error(hybrid_share: [u8]) -> text:
+    """Fail closed unless the mirrored codepoint and share length match the
+    X25519MLKEM768 wire contract (draft-ietf-tls-ecdhe-mlkem-05)."""
+    if _HRR_GROUP_X25519MLKEM768.to_i64() != X25519_MLKEM768_TLS_NAMED_GROUP:
+        return "X25519MLKEM768 named group mirror does not match the contract"
+    if hybrid_share.len().to_i64() != X25519_MLKEM768_CLIENT_SHARE_BYTES:
+        return "X25519MLKEM768 ClientHello2 key share must be 1216 bytes (ML-KEM-768 encapsulation key first, then X25519 public)"
+    ""
+
 fn _build_ch2_common_prefix(random: [u8]) -> [u8]:
     var body: [u8] = _byte_buf_hrr(192)
     body = _push_byte_hrr(body, 0x03)
@@ -332,6 +362,30 @@ fn build_client_hello2_bytes(random: [u8], x25519_pub: [u8], sni_host: text, coo
 
 fn build_client_hello2_bytes_with_p256(random: [u8], x25519_pub: [u8], p256_pub: [u8], sni_host: text, cookie: [u8]) -> [u8]:
     """Build a TLS 1.3 ClientHello2 (X25519 + secp256r1) retrying after HRR."""
+    val ks_ext = if p256_pub.len() > 0 {
+        _build_ext_ks_p256_hrr(p256_pub)
+    } else {
+        _build_ext_ks_x25519_hrr(x25519_pub)
+    }
+    _assemble_ch2(random, ks_ext, sni_host, cookie, false)
+
+fn build_client_hello2_bytes_with_x25519_mlkem768(random: [u8],
+        hybrid_share: [u8], sni_host: text,
+        cookie: [u8]) -> Result<[u8], text>:
+    """Build a ClientHello2 retrying after HRR with X25519MLKEM768 only.
+
+    `hybrid_share` must be a FRESH 1216-byte client key share (ML-KEM-768
+    encapsulation key first, then the X25519 public key); RFC 8446 §4.1.2
+    forbids reusing the CH1 share. Fails closed on any other length.
+    """
+    val contract_error = _hrr_hybrid_contract_error(hybrid_share)
+    if contract_error != "":
+        return Err(contract_error)
+    Ok(_assemble_ch2(random, _build_ext_ks_hybrid_hrr(hybrid_share),
+        sni_host, cookie, true))
+
+fn _assemble_ch2(random: [u8], ks_ext: [u8], sni_host: text, cookie: [u8],
+        offer_x25519_mlkem768: bool) -> [u8]:
     # Build SNI extension inline (no import cycle)
     val _EB2_ASCII: text = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
     var host_bytes: [u8] = []
@@ -372,7 +426,9 @@ fn build_client_hello2_bytes_with_p256(random: [u8], x25519_pub: [u8], p256_pub:
     _append_into_hrr(ext_sa, alg_list)
 
     # supported_groups
-    var sg_bytes: [u8] = _byte_buf_hrr(4)
+    var sg_bytes: [u8] = _byte_buf_hrr(6)
+    if offer_x25519_mlkem768:
+        _append_into_hrr(sg_bytes, _put_u16_be_hrr(_HRR_GROUP_X25519MLKEM768))
     _append_into_hrr(sg_bytes, _put_u16_be_hrr(_HRR_GROUP_X25519))
     _append_into_hrr(sg_bytes, _put_u16_be_hrr(_HRR_GROUP_SECP256R1))
     var sg_list: [u8] = _byte_buf_hrr(sg_bytes.len() + 2)
@@ -383,12 +439,9 @@ fn build_client_hello2_bytes_with_p256(random: [u8], x25519_pub: [u8], p256_pub:
     _append_into_hrr(ext_sg, _put_u16_be_hrr(sg_list.len().to_u16()))
     _append_into_hrr(ext_sg, sg_list)
 
-    var exts: [u8] = _byte_buf_hrr(160)
+    var exts: [u8] = _byte_buf_hrr(ks_ext.len() + 160)
     _append_into_hrr(exts, _build_ext_sv_hrr())
-    if p256_pub.len() > 0:
-        _append_into_hrr(exts, _build_ext_ks_p256_hrr(p256_pub))
-    else:
-        _append_into_hrr(exts, _build_ext_ks_x25519_hrr(x25519_pub))
+    _append_into_hrr(exts, ks_ext)
     _append_into_hrr(exts, ext_sni)
     _append_into_hrr(exts, ext_sa)
     _append_into_hrr(exts, ext_sg)
@@ -414,6 +467,36 @@ fn process_hrr_after_serverhello(
         ch1_offered_x25519: bool,
         ch1_offered_p256: bool) -> HrrFlowResult:
     """Decide CH2 + transcript seed when a ServerHello is actually a HRR."""
+    # Classical entry point: no X25519MLKEM768 state is available here, so a
+    # HRR selecting 0x11EC is rejected rather than answered with a share the
+    # caller cannot decapsulate.
+    process_hrr_after_serverhello_with_x25519_mlkem768(
+        sh_hs_bytes, sh_body, ch1_random, ch1_x25519_pub, ch1_hash,
+        new_x25519_pub, new_p256_pub, [], sni_host, seen_hrr,
+        ch1_offered_x25519, ch1_offered_p256, false, false)
+
+fn process_hrr_after_serverhello_with_x25519_mlkem768(
+        sh_hs_bytes: [u8],
+        sh_body: [u8],
+        ch1_random: [u8],
+        ch1_x25519_pub: [u8],
+        ch1_hash: [u8],
+        new_x25519_pub: [u8],
+        new_p256_pub: [u8],
+        new_x25519_mlkem768_share: [u8],
+        sni_host: text,
+        seen_hrr: bool,
+        ch1_offered_x25519: bool,
+        ch1_offered_p256: bool,
+        ch1_supported_x25519_mlkem768: bool,
+        ch1_offered_x25519_mlkem768: bool) -> HrrFlowResult:
+    """HRR decision that can also answer a X25519MLKEM768 (0x11EC) retry.
+
+    `ch1_supported_x25519_mlkem768` is whether CH1 advertised 0x11EC in
+    supported_groups; `ch1_offered_x25519_mlkem768` is whether CH1 already
+    carried a 0x11EC key_share (which makes selecting it illegal per RFC 8446
+    §4.1.4). `new_x25519_mlkem768_share` must be a FRESH 1216-byte share.
+    """
     if seen_hrr:
         return HrrFlowResult.Reject(reason: "unexpected_message: second HRR in connection")
 
@@ -429,15 +512,32 @@ fn process_hrr_after_serverhello(
         return HrrFlowResult.Reject(reason: "illegal_parameter: HRR selected_group equals CH1 key_share group (X25519)")
     if hrr.selected_group == _HRR_GROUP_SECP256R1 and ch1_offered_p256:
         return HrrFlowResult.Reject(reason: "illegal_parameter: HRR selected_group equals CH1 key_share group (secp256r1)")
+    if (hrr.selected_group == _HRR_GROUP_X25519MLKEM768 and
+            ch1_offered_x25519_mlkem768):
+        return HrrFlowResult.Reject(reason: "illegal_parameter: HRR selected_group equals CH1 key_share group (X25519MLKEM768)")
 
-    if hrr.selected_group != _HRR_GROUP_X25519 and hrr.selected_group != _HRR_GROUP_SECP256R1:
+    val hybrid_selected = hrr.selected_group == _HRR_GROUP_X25519MLKEM768
+    val group_supported = if hybrid_selected {
+        ch1_supported_x25519_mlkem768
+    } else {
+        hrr.selected_group == _HRR_GROUP_X25519 or hrr.selected_group == _HRR_GROUP_SECP256R1
+    }
+    if not group_supported:
         return HrrFlowResult.Reject(reason: "illegal_parameter: HRR selected_group not in client supported_groups")
 
-    val ch2 = if hrr.selected_group == _HRR_GROUP_SECP256R1 {
-        build_client_hello2_bytes_with_p256(ch1_random, [], new_p256_pub, sni_host, hrr.cookie)
-    } else {
-        build_client_hello2_bytes(ch1_random, new_x25519_pub, sni_host, hrr.cookie)
-    }
+    var ch2: [u8] = []
+    if hybrid_selected:
+        # Fail closed: without a fresh, correctly sized hybrid share there is
+        # nothing to send and nothing that could later be decapsulated.
+        match build_client_hello2_bytes_with_x25519_mlkem768(
+                ch1_random, new_x25519_mlkem768_share, sni_host, hrr.cookie):
+            case Ok(value): ch2 = value
+            case Err(reason):
+                return HrrFlowResult.Reject(reason: "internal_error: " + reason)
+    elif hrr.selected_group == _HRR_GROUP_SECP256R1:
+        ch2 = build_client_hello2_bytes_with_p256(ch1_random, [], new_p256_pub, sni_host, hrr.cookie)
+    else:
+        ch2 = build_client_hello2_bytes(ch1_random, new_x25519_pub, sni_host, hrr.cookie)
 
     val synth = build_hrr_synthetic_message_hash(ch1_hash)
     var seed: [u8] = _byte_buf_hrr(synth.len() + sh_hs_bytes.len())

@@ -16,6 +16,7 @@ extern fn rt_bytes_to_text(data: [u8]) -> text
 use os.tls13.handshake13_ext_builders.{
     build_client_hello_bytes,
     build_client_hello_bytes_with_p256,
+    build_client_hello_bytes_with_x25519_mlkem768,
 }
 use os.tls13.handshake13_hrr.{
     HelloRetryRequest13, HrrResult,
@@ -25,7 +26,9 @@ use os.tls13.handshake13_hrr.{
     build_hrr_synthetic_message_hash,
     build_client_hello2_bytes,
     build_client_hello2_bytes_with_p256,
+    build_client_hello2_bytes_with_x25519_mlkem768,
     process_hrr_after_serverhello,
+    process_hrr_after_serverhello_with_x25519_mlkem768,
 }
 
 fn _tls_hs_debug(msg: text):
@@ -87,6 +90,12 @@ val CIPHER_AES_256_GCM_SHA384: u16       = 0x1302
 val CIPHER_CHACHA20_POLY1305_SHA256: u16 = 0x1303
 val GROUP_X25519: u16              = 0x001D
 val GROUP_SECP256R1: u16           = 0x0017
+# draft-ietf-tls-ecdhe-mlkem-05 X25519MLKEM768. Mirrors
+# X25519_MLKEM768_TLS_NAMED_GROUP in the crypto contract.
+val GROUP_X25519_MLKEM768: u16     = 0x11EC
+# Hybrid key_share sizes, ML-KEM part FIRST in both directions.
+val HYBRID_CLIENT_SHARE_BYTES: u64 = 1216
+val HYBRID_SERVER_SHARE_BYTES: u64 = 1120
 val SIG_ED25519: u16               = 0x0807
 val SIG_ECDSA_SECP384R1_SHA384: u16 = 0x0503
 val SIG_ECDSA_SECP521R1_SHA512: u16 = 0x0603
@@ -101,6 +110,10 @@ class ServerHello13:
     cipher_suite: u16
     x25519_pub: [u8]
     p256_pub: [u8]
+    # Selected named group from the ServerHello key_share, 0 when absent.
+    named_group: u16 = 0u16
+    # 1120-byte X25519MLKEM768 share (ML-KEM ciphertext first), empty if absent.
+    x25519_mlkem768_share: [u8] = []
 
 class ParsedHandshake:
     """Raw parsed handshake envelope: type byte + body bytes."""
@@ -237,6 +250,67 @@ fn _serverhello_p256_pub(data: [u8]) -> [u8]:
         offset = offset + ext_len
     []
 
+fn _serverhello_selected_group(data: [u8]) -> u16:
+    """Named group carried in the ServerHello key_share extension, 0 if none."""
+    if data.len() < 40:
+        return 0u16
+    val session_id_len = _u8_at(data, 34).to_u64()
+    var offset = 35u64 + session_id_len + 2u64 + 1u64
+    if offset + 2 > data.len():
+        return 0u16
+    val extensions_len = _u16_be(data, offset).to_u64()
+    offset = offset + 2
+    val extensions_end = offset + extensions_len
+
+    while offset + 4 <= extensions_end and offset + 4 <= data.len():
+        val ext_type = _u16_be(data, offset)
+        offset = offset + 2
+        val ext_len = _u16_be(data, offset).to_u64()
+        offset = offset + 2
+        if offset + ext_len > data.len():
+            return 0u16
+        if ext_type == EXT_KEY_SHARE and ext_len >= 2:
+            return _u16_be(data, offset)
+        offset = offset + ext_len
+    0u16
+
+fn _serverhello_x25519_mlkem768_share(data: [u8]) -> [u8]:
+    """1120-byte X25519MLKEM768 ServerHello share: ML-KEM ciphertext (1088)
+    followed by the X25519 public key (32). Empty unless both the codepoint
+    and the exact length match."""
+    if data.len() < 40:
+        return []
+    val session_id_len = _u8_at(data, 34).to_u64()
+    var offset = 35u64 + session_id_len + 2u64 + 1u64
+    if offset + 2 > data.len():
+        return []
+    val extensions_len = _u16_be(data, offset).to_u64()
+    offset = offset + 2
+    val extensions_end = offset + extensions_len
+
+    while offset + 4 <= extensions_end and offset + 4 <= data.len():
+        val ext_type = _u16_be(data, offset)
+        offset = offset + 2
+        val ext_len = _u16_be(data, offset).to_u64()
+        offset = offset + 2
+        if offset + ext_len > data.len():
+            return []
+        if ext_type == EXT_KEY_SHARE and ext_len >= 4:
+            val group = _u16_be(data, offset)
+            val key_len = _u16_be(data, offset + 2).to_u64()
+            val key_start = offset + 4
+            if (group == GROUP_X25519_MLKEM768 and
+                    key_len == HYBRID_SERVER_SHARE_BYTES and
+                    key_start + key_len <= data.len()):
+                var out: [u8] = _byte_buf(key_len)
+                var i: u64 = 0
+                while i < key_len:
+                    out = _push_byte(out, _u8_at(data, key_start + i).to_u64().to_i64())
+                    i = i + 1
+                return out
+        offset = offset + ext_len
+    []
+
 # ============================================================================
 # Public: Parse Handshake Header
 # ============================================================================
@@ -276,7 +350,9 @@ fn parse_server_hello(data: [u8]) -> ServerHello13:
         random: random,
         cipher_suite: _u16_be(data, 35u64 + session_id_len),
         x25519_pub: _serverhello_x25519_pub(data),
-        p256_pub: _serverhello_p256_pub(data))
+        p256_pub: _serverhello_p256_pub(data),
+        named_group: _serverhello_selected_group(data),
+        x25519_mlkem768_share: _serverhello_x25519_mlkem768_share(data))
 
 # ============================================================================
 # Public: HelloRetryRequest detection

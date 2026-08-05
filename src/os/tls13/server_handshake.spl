@@ -16,8 +16,14 @@
 
 use os.tls13.handshake13.{
     parse_handshake_header, parse_finished_body,
-    HS_CLIENT_HELLO, GROUP_X25519, GROUP_SECP256R1
+    HS_CLIENT_HELLO, GROUP_X25519, GROUP_SECP256R1,
+    GROUP_X25519_MLKEM768, HYBRID_CLIENT_SHARE_BYTES, HYBRID_SERVER_SHARE_BYTES
 }
+use os.tls13.hybrid_handshake.{
+    tls13_hybrid_bytes_to_list, tls13_hybrid_list_to_bytes}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    x25519_mlkem768_default_config}
+use os.crypto.x25519_mlkem768.hybrid.{x25519_mlkem768_encapsulate}
 use os.tls13.key_schedule.{
     tls13_compute_handshake_secrets, tls13_compute_app_secrets,
     tls13_finished_key, tls13_traffic_keys, tls13_verify_data
@@ -189,6 +195,7 @@ fn process_client_hello(body: [u8]) -> ClientHello13:
     var ks_groups: [u16] = []
     var x25519_share: [u8] = []
     var p256_share: [u8] = []
+    var hybrid_share: [u8] = []
     var sni: text = ""
     var has_tls13 = false
 
@@ -242,6 +249,9 @@ fn process_client_hello(body: [u8]) -> ClientHello13:
                     elif grp == GROUP_SECP256R1 and klen == 65u64:
                         p256_share = _h_slice(body, key_start, klen)
                         ks_groups.push(grp)
+                    elif grp == GROUP_X25519_MLKEM768 and klen == HYBRID_CLIENT_SHARE_BYTES:
+                        hybrid_share = _h_slice(body, key_start, klen)
+                        ks_groups.push(grp)
                     kp = key_start + klen
 
         if ext_type == 0u16:
@@ -268,6 +278,7 @@ fn process_client_hello(body: [u8]) -> ClientHello13:
         key_share_groups: ks_groups,
         x25519_key_share: x25519_share,
         p256_key_share: p256_share,
+        x25519_mlkem768_key_share: hybrid_share,
         sni_host: sni,
         has_supported_versions_tls13: has_tls13
     )
@@ -314,7 +325,7 @@ fn select_named_group(client_key_share_groups: [u16], supported: [u16]) -> u16:
     var i: u64 = 0
     while i < supported.len():
         val g = supported[i]
-        if g == GROUP_X25519 or g == GROUP_SECP256R1:
+        if g == GROUP_X25519 or g == GROUP_SECP256R1 or g == GROUP_X25519_MLKEM768:
             if _h_u16_list_contains(client_key_share_groups, g):
                 return g
         i = i + 1u64
@@ -430,6 +441,25 @@ fn prepare_server_handshake_from_client_hello_record(
     server_random: [u8],
     server_scalar: [u8]
 ) -> Tls13ServerHandshakeResult:
+    # No ML-KEM encapsulation randomness available, so X25519MLKEM768 is not
+    # offered on this path — it can never fall through to a partial secret.
+    prepare_server_handshake_from_client_hello_record_with_hybrid(
+        ch_pair, server_config, server_random, server_scalar, [])
+
+fn prepare_server_handshake_from_client_hello_record_with_hybrid(
+    ch_pair: Tls13ClientHelloRecord,
+    server_config: Tls13ServerConfig,
+    server_random: [u8],
+    server_scalar: [u8],
+    server_kem_seed: [u8]
+) -> Tls13ServerHandshakeResult:
+    """Server flow that can also select X25519MLKEM768 (0x11EC).
+
+    `server_kem_seed` is 32 bytes of SECRET ML-KEM-768 encapsulation
+    randomness. It must never be derived from server_random, which is public.
+    When it is absent (or not 32 bytes) the hybrid group is simply not offered
+    and the classical X25519 / secp256r1 behaviour is unchanged.
+    """
     val config_error = _h_validate_server_config(server_config)
     if config_error != "":
         return Tls13ServerHandshakeResult.Failed(config_error)
@@ -449,22 +479,48 @@ fn prepare_server_handshake_from_client_hello_record(
     if cipher == 0u16:
         return Tls13ServerHandshakeResult.Failed("no_shared_cipher_suite")
 
-    val group = select_named_group(ch.key_share_groups, [GROUP_X25519, GROUP_SECP256R1])
+    val hybrid_available = (server_kem_seed.len() == 32u64 and
+        ch.x25519_mlkem768_key_share.len() == HYBRID_CLIENT_SHARE_BYTES)
+    var supported_groups: [u16] = []
+    if hybrid_available:
+        supported_groups.push(GROUP_X25519_MLKEM768)
+    supported_groups.push(GROUP_X25519)
+    supported_groups.push(GROUP_SECP256R1)
+
+    val group = select_named_group(ch.key_share_groups, supported_groups)
     if group == 0u16:
         return Tls13ServerHandshakeResult.Failed("hrr_not_implemented_server_side")
 
     var server_pub: [u8] = []
     var shared_secret: [u8] = []
+    var expected_secret_len: u64 = 32u64
     if group == GROUP_X25519:
         server_pub = x25519_base(server_scalar)
         shared_secret = x25519(server_scalar, ch.x25519_key_share)
     elif group == GROUP_SECP256R1:
         server_pub = p256_keypair_pub(server_scalar)
         shared_secret = p256_ecdh_shared_x(server_scalar, ch.p256_key_share)
+    elif group == GROUP_X25519_MLKEM768:
+        if not hybrid_available:
+            return Tls13ServerHandshakeResult.Failed("server_key_exchange_failed")
+        expected_secret_len = 64u64
+        val encapsulation = match x25519_mlkem768_encapsulate(
+                x25519_mlkem768_default_config(),
+                tls13_hybrid_bytes_to_list(ch.x25519_mlkem768_key_share),
+                server_scalar,
+                tls13_hybrid_bytes_to_list(server_kem_seed)):
+            case Ok(value): value
+            case Err(_):
+                # Fail closed — never continue with a partial hybrid secret.
+                return Tls13ServerHandshakeResult.Failed("server_key_exchange_failed")
+        server_pub = tls13_hybrid_list_to_bytes(encapsulation.server_key_share)
+        shared_secret = tls13_hybrid_list_to_bytes(encapsulation.shared_secret)
+        if server_pub.len() != HYBRID_SERVER_SHARE_BYTES:
+            return Tls13ServerHandshakeResult.Failed("server_key_exchange_failed")
     else:
         return Tls13ServerHandshakeResult.Failed("unsupported_named_group")
 
-    if server_pub.len() == 0u64 or shared_secret.len() != 32u64:
+    if server_pub.len() == 0u64 or shared_secret.len() != expected_secret_len:
         return Tls13ServerHandshakeResult.Failed("server_key_exchange_failed")
 
     val sh = build_server_hello(server_random, cipher, group, server_pub)

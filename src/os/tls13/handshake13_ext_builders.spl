@@ -10,6 +10,10 @@
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519_MLKEM768_TLS_NAMED_GROUP,
+    X25519_MLKEM768_CLIENT_SHARE_BYTES}
+
 # Local constant copies (canonical definitions live in handshake13.spl)
 val _EB_TLS13_ASCII_PRINTABLE: text = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 val _EB_HS_CLIENT_HELLO: u8         = 1
@@ -20,6 +24,9 @@ val _EB_EXT_SUPPORTED_VERSIONS: u16 = 43
 val _EB_EXT_KEY_SHARE: u16          = 51
 val _EB_GROUP_X25519: u16           = 0x001D
 val _EB_GROUP_SECP256R1: u16        = 0x0017
+# draft-ietf-tls-ecdhe-mlkem-05 X25519MLKEM768. Mirrors
+# X25519_MLKEM768_TLS_NAMED_GROUP; _eb_hybrid_contract_error checks the mirror.
+val _EB_GROUP_X25519MLKEM768: u16   = 0x11EC
 val _EB_SIG_ED25519: u16            = 0x0807
 val _EB_SIG_ECDSA_SECP384R1_SHA384: u16 = 0x0503
 val _EB_SIG_ECDSA_SECP521R1_SHA512: u16 = 0x0603
@@ -133,6 +140,44 @@ fn _build_ext_key_share_dual_eb(x25519_pub: [u8], p256_pub: [u8]) -> [u8]:
     out = _append_bytes_eb(out, client_shares)
     out
 
+fn _eb_hybrid_contract_error(hybrid_share: [u8]) -> text:
+    """Fail closed unless the local mirror and the share length match the
+    X25519MLKEM768 wire contract (draft-ietf-tls-ecdhe-mlkem-05)."""
+    if _EB_GROUP_X25519MLKEM768.to_i64() != X25519_MLKEM768_TLS_NAMED_GROUP:
+        return "X25519MLKEM768 named group mirror does not match the contract"
+    if hybrid_share.len().to_i64() != X25519_MLKEM768_CLIENT_SHARE_BYTES:
+        return "X25519MLKEM768 client key share must be 1216 bytes (ML-KEM-768 encapsulation key first, then X25519 public)"
+    ""
+
+fn _build_ext_key_share_triple_eb(hybrid_share: [u8], x25519_pub: [u8],
+        p256_pub: [u8]) -> [u8]:
+    """key_share carrying the hybrid entry first, then the classical entries.
+
+    The hybrid entry leads so a peer that supports X25519MLKEM768 can complete
+    in a single flight; the X25519/secp256r1 entries stay present and keep
+    their existing relative order for peers that do not.
+    """
+    var entries: [u8] = _byte_buf_eb(hybrid_share.len() + 128)
+    entries = _append_bytes_eb(entries,
+        _build_key_share_entry_eb(_EB_GROUP_X25519MLKEM768, hybrid_share))
+    if x25519_pub.len() > 0:
+        entries = _append_bytes_eb(entries,
+            _build_key_share_entry_eb(_EB_GROUP_X25519, x25519_pub))
+    if p256_pub.len() > 0:
+        entries = _append_bytes_eb(entries,
+            _build_key_share_entry_eb(_EB_GROUP_SECP256R1, p256_pub))
+    val list_len = _put_u16_be_eb(entries.len().to_u16())
+    var client_shares: [u8] = _byte_buf_eb(entries.len() + 2)
+    client_shares = _append_bytes_eb(client_shares, list_len)
+    client_shares = _append_bytes_eb(client_shares, entries)
+    val ext_type = _put_u16_be_eb(_EB_EXT_KEY_SHARE)
+    val ext_len = _put_u16_be_eb(client_shares.len().to_u16())
+    var out: [u8] = _byte_buf_eb(client_shares.len() + 4)
+    out = _append_bytes_eb(out, ext_type)
+    out = _append_bytes_eb(out, ext_len)
+    out = _append_bytes_eb(out, client_shares)
+    out
+
 fn _build_ext_sni_eb(host: text) -> [u8]:
     val host_bytes = _text_to_bytes_eb(host)
     val host_len = _put_u16_be_eb(host_bytes.len().to_u16())
@@ -170,11 +215,28 @@ fn _build_ext_sig_algs_eb() -> [u8]:
     out
 
 fn _build_ext_supported_groups_eb() -> [u8]:
+    """Default offer: X25519, secp256r1, then X25519MLKEM768.
+
+    The hybrid codepoint is appended LAST so the classical preference order a
+    current peer negotiates is unchanged; the offer is purely additive.
+    """
+    _encode_ext_supported_groups_eb(false)
+
+fn _build_ext_supported_groups_hybrid_first_eb() -> [u8]:
+    """Hybrid-preferred offer: X25519MLKEM768, X25519, secp256r1."""
+    _encode_ext_supported_groups_eb(true)
+
+fn _encode_ext_supported_groups_eb(hybrid_first: bool) -> [u8]:
     val x25519_be = _put_u16_be_eb(_EB_GROUP_X25519)
     val p256_be = _put_u16_be_eb(_EB_GROUP_SECP256R1)
-    var groups: [u8] = _byte_buf_eb(4)
+    val hybrid_be = _put_u16_be_eb(_EB_GROUP_X25519MLKEM768)
+    var groups: [u8] = _byte_buf_eb(6)
+    if hybrid_first:
+        groups = _append_bytes_eb(groups, hybrid_be)
     groups = _append_bytes_eb(groups, x25519_be)
     groups = _append_bytes_eb(groups, p256_be)
+    if not hybrid_first:
+        groups = _append_bytes_eb(groups, hybrid_be)
     val list_len = _put_u16_be_eb(groups.len().to_u16())
     var group_list: [u8] = _byte_buf_eb(groups.len() + 2)
     group_list = _append_bytes_eb(group_list, list_len)
@@ -237,3 +299,58 @@ fn build_client_hello_bytes_with_p256(random: [u8], x25519_pub: [u8], p256_pub: 
     out = _append_bytes_eb(out, body_len)
     out = _append_bytes_eb(out, body)
     out
+
+fn build_client_hello_bytes_with_x25519_mlkem768(random: [u8],
+        hybrid_share: [u8], x25519_pub: [u8], p256_pub: [u8],
+        sni_host: text) -> Result<[u8], text>:
+    """Encode a ClientHello offering X25519MLKEM768 first, then X25519/secp256r1.
+
+    `hybrid_share` is the 1216-byte client key share produced by
+    x25519_mlkem768_keygen: ML-KEM-768 encapsulation key (1184) followed by the
+    X25519 public key (32). Fails closed on any other length.
+    """
+    val contract_error = _eb_hybrid_contract_error(hybrid_share)
+    if contract_error != "":
+        return Err(contract_error)
+
+    var body: [u8] = _byte_buf_eb(hybrid_share.len() + 256)
+    body = _push_byte_eb(body, 0x03)
+    body = _push_byte_eb(body, 0x03)
+    body = _append_bytes_eb(body, random)
+
+    body = _push_byte_eb(body, 0x20)
+    var i: u64 = 0
+    while i < 32:
+        body = _push_byte_eb(body, 0x00)
+        i = i + 1
+
+    body = _push_byte_eb(body, 0x00)
+    body = _push_byte_eb(body, 0x06)
+    body = _push_byte_eb(body, 0x13)
+    body = _push_byte_eb(body, 0x01)
+    body = _push_byte_eb(body, 0x13)
+    body = _push_byte_eb(body, 0x02)
+    body = _push_byte_eb(body, 0x13)
+    body = _push_byte_eb(body, 0x03)
+
+    body = _push_byte_eb(body, 0x01)
+    body = _push_byte_eb(body, 0x00)
+
+    var exts: [u8] = _byte_buf_eb(hybrid_share.len() + 224)
+    exts = _append_bytes_eb(exts, _build_ext_supported_versions_eb())
+    exts = _append_bytes_eb(exts,
+        _build_ext_key_share_triple_eb(hybrid_share, x25519_pub, p256_pub))
+    exts = _append_bytes_eb(exts, _build_ext_sni_eb(sni_host))
+    exts = _append_bytes_eb(exts, _build_ext_sig_algs_eb())
+    exts = _append_bytes_eb(exts, _build_ext_supported_groups_hybrid_first_eb())
+
+    val exts_len_bytes = _put_u16_be_eb(exts.len().to_u16())
+    body = _append_bytes_eb(body, exts_len_bytes)
+    body = _append_bytes_eb(body, exts)
+
+    val body_len = _put_u24_be_eb(body.len().to_u64())
+    var out: [u8] = _byte_buf_eb(body.len() + 4)
+    out = _push_byte_eb(out, _EB_HS_CLIENT_HELLO)
+    out = _append_bytes_eb(out, body_len)
+    out = _append_bytes_eb(out, body)
+    Ok(out)
