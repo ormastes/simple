@@ -31,6 +31,40 @@ extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 fn mir_expr_env_get(key: text) -> text:
     rt_env_get(key)
 
+# ----------------------------------------------------------------------------
+# Garbage-HirExpr breadcrumb (stage-3 self-host blocker #8, 2026-08-05)
+#
+# An unguarded qualified enum payload match can bind a payload extracted from
+# the WRONG variant -- the header word is handed back as if it were the
+# payload pointer, so a child HirExpr comes out GARBAGE (the recurring
+# 0x1800000007 bit pattern; see hir_lowering/expressions.spl:1777 for the same
+# class caught on the flat bridge). rt_enum_discriminant is a pure registry
+# membership test (runtime_native.c rt_core_as_enum: pointer comparison, never
+# a deref), so it is SAFE on a garbage handle and returns -1 for anything that
+# is not a live boxed enum. That gives a cheap, non-faulting detector.
+#
+# The breadcrumb records the PARENT expression that lower_expr_impl was
+# dispatching when a garbage child was handed down, so the producing match arm
+# can be named from its source location instead of guessed.
+var mir_lower_parent_expr_file: text = ""
+var mir_lower_parent_expr_line: i64 = -1
+var mir_lower_parent_expr_col: i64 = -1
+var mir_lower_parent_expr_disc: i64 = -1
+var mir_lower_garbage_expr_count: i64 = 0
+var mir_lower_garbage_debug_state: i64 = -1
+var mir_lower_disc_table_dumped: bool = false
+
+pub fn mir_lower_garbage_expr_count_value() -> i64:
+    mir_lower_garbage_expr_count
+
+# Pure env read. The RESULT is cached into mir_lower_garbage_debug_state by
+# lower_expr (a method), not here: module-level `var` mutation from a
+# module-level `fn` is not a shape this tree exercises, whereas mutation from a
+# method body is (mir_bounds_check_bailout_count above). Caching matters because
+# this gate sits on the hottest path in MIR lowering -- every expression node.
+fn mir_lower_garbage_debug_enabled() -> bool:
+    (mir_expr_env_get("SIMPLE_MIR_GARBAGE_EXPR_DEBUG") ?? "") == "1"
+
 # SF1 (d), 2026-07-28: bounds-check lowering used to bail out SILENTLY when
 # the indexed base type exposes no len symbol — the access then ran with no
 # check at all and nothing recorded the gap. Count every bailout so the gap
@@ -1668,13 +1702,48 @@ impl MirLowering:
         All recursive descent must go through this name (not
         lower_expr_impl directly) for the stack discipline to hold.
         """
+        # Garbage-child detector + parent breadcrumb, BEFORE the span push
+        # below -- that push already dereferences `expr.span`, so the check has
+        # to come first to stay useful on a wild handle. `expr.kind` that is not
+        # a live boxed enum cannot have come from a real HIR node; it is a
+        # mis-extracted payload. Detect it HERE (the single choke point every
+        # lowered expression passes through) and name the PARENT that handed it
+        # down, because the parent still has a valid span while the garbage
+        # child's `.span` is unreadable.
+        var garbage_saved_file = ""
+        var garbage_saved_line = -1
+        var garbage_saved_col = -1
+        var garbage_saved_disc = -1
+        var garbage_breadcrumb_pushed = false
+        var garbage_expr_here = false
+        if mir_lower_garbage_debug_state < 0:
+            if mir_lower_garbage_debug_enabled():
+                mir_lower_garbage_debug_state = 1
+            else:
+                mir_lower_garbage_debug_state = 0
+        if mir_lower_garbage_debug_state == 1 and expr != nil:
+            val garbage_disc = rt_enum_discriminant(expr.kind)
+            if garbage_disc < 0:
+                garbage_expr_here = true
+                mir_lower_garbage_expr_count = mir_lower_garbage_expr_count + 1
+                eprint("[mir-lower-expr] garbage-expr-kind bits={expr.kind} parent_disc={mir_lower_parent_expr_disc} parent_at={mir_lower_parent_expr_file}:{mir_lower_parent_expr_line}:{mir_lower_parent_expr_col}\n")
+            else:
+                garbage_saved_file = mir_lower_parent_expr_file
+                garbage_saved_line = mir_lower_parent_expr_line
+                garbage_saved_col = mir_lower_parent_expr_col
+                garbage_saved_disc = mir_lower_parent_expr_disc
+                garbage_breadcrumb_pushed = true
+                mir_lower_parent_expr_file = expr.span.file
+                mir_lower_parent_expr_line = expr.span.line
+                mir_lower_parent_expr_col = expr.span.col
+                mir_lower_parent_expr_disc = garbage_disc
         var b_span_save = self.builder
         val saved_span = b_span_save.current_span
         var span_method_name = ""
         # `expr` is defensively nilable here (lower_expr_impl substitutes a
         # synthetic nil_expr when it is) -- guard the same way before the
         # first field deref so a nil expr doesn't crash the span push.
-        if expr != nil:
+        if expr != nil and not garbage_expr_here:
             b_span_save.current_span = Some(expr.span)
             match expr.kind:
                 case MethodCall(_, found_method_name, _, _):
@@ -1683,6 +1752,11 @@ impl MirLowering:
                     ()
         self.builder = b_span_save
         var span_result = self.lower_expr_impl(expr)
+        if garbage_breadcrumb_pushed:
+            mir_lower_parent_expr_file = garbage_saved_file
+            mir_lower_parent_expr_line = garbage_saved_line
+            mir_lower_parent_expr_col = garbage_saved_col
+            mir_lower_parent_expr_disc = garbage_saved_disc
         # A nil LocalId is not representable downstream: every consumer
         # (local_mir_type_of, mir_operand_copy, emit_*) reads `.id` straight
         # away, so a nil here surfaces as `runtime error: field access on nil
@@ -1720,6 +1794,60 @@ impl MirLowering:
         if expr != nil:
             expr_value = expr
 
+        # One-shot exemplar table: rt_enum_discriminant is a name hash, not a
+        # variant index, so a bare `parent_disc=N` in the garbage report cannot
+        # be read back to a variant without this. Printed once per process, only
+        # under SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1.
+        if mir_lower_garbage_debug_state == 1 and not mir_lower_disc_table_dumped:
+            mir_lower_disc_table_dumped = true
+            val ex_block = HirBlock(stmts: [], has: false, value: nil_expr, span: nil_span)
+            val ex_type = nil_expr.type_
+            val ex_empty = ""
+            # Values are bound first and interpolated by NAME on purpose: a
+            # nested string literal inside a `{...}` interpolation is a lexer
+            # hazard in this language (a text literal brace-scans its own body).
+            val d_intlit = rt_enum_discriminant(HirExprKind.IntLit(0, nil))
+            val d_strlit = rt_enum_discriminant(HirExprKind.StringLit(ex_empty, nil))
+            val d_boollit = rt_enum_discriminant(HirExprKind.BoolLit(false))
+            val d_nillit = rt_enum_discriminant(HirExprKind.NilLit)
+            val d_unitlit = rt_enum_discriminant(HirExprKind.UnitLit)
+            val d_arraylit = rt_enum_discriminant(HirExprKind.ArrayLit([], nil))
+            val d_tuplelit = rt_enum_discriminant(HirExprKind.TupleLit([]))
+            val d_setlit = rt_enum_discriminant(HirExprKind.SetLit([], nil))
+            val d_index = rt_enum_discriminant(HirExprKind.Index(nil_expr, nil_expr))
+            val d_tupleindex = rt_enum_discriminant(HirExprKind.TupleIndex(nil_expr, 0))
+            val d_field = rt_enum_discriminant(HirExprKind.Field(nil_expr, ex_empty, nil))
+            val d_optchain = rt_enum_discriminant(HirExprKind.OptionalChain(nil_expr, ex_empty))
+            val d_nullcoalesce = rt_enum_discriminant(HirExprKind.NullCoalesce(nil_expr, nil_expr))
+            val d_existscheck = rt_enum_discriminant(HirExprKind.ExistsCheck(nil_expr))
+            val d_unwrap = rt_enum_discriminant(HirExprKind.Unwrap(nil_expr))
+            val d_binary = rt_enum_discriminant(HirExprKind.Binary(HirBinOp.NotEq, nil_expr, nil_expr))
+            val d_unary = rt_enum_discriminant(HirExprKind.Unary(HirUnaryOp.Not, nil_expr))
+            val d_call = rt_enum_discriminant(HirExprKind.Call(nil_expr, [], []))
+            val d_cast = rt_enum_discriminant(HirExprKind.Cast(nil_expr, ex_type))
+            val d_block = rt_enum_discriminant(HirExprKind.Block(ex_block))
+            val d_if = rt_enum_discriminant(HirExprKind.If(nil_expr, ex_block, nil))
+            val d_while = rt_enum_discriminant(HirExprKind.While(nil_expr, ex_block, nil))
+            val d_loop = rt_enum_discriminant(HirExprKind.Loop(ex_block, nil))
+            val d_matchcase = rt_enum_discriminant(HirExprKind.MatchCase(nil_expr, []))
+            val d_return = rt_enum_discriminant(HirExprKind.Return(nil))
+            val d_try = rt_enum_discriminant(HirExprKind.Try(nil_expr))
+            val d_await = rt_enum_discriminant(HirExprKind.Await(nil_expr))
+            val d_throw = rt_enum_discriminant(HirExprKind.Throw(nil_expr))
+            val d_yield = rt_enum_discriminant(HirExprKind.Yield(nil))
+            val d_range = rt_enum_discriminant(HirExprKind.Range(nil_expr, nil_expr, false, nil))
+            val d_var = rt_enum_discriminant(HirExprKind.Var(SymbolId(id: -1)))
+            val d_namedvar = rt_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ex_empty))
+            val d_arrayrepeat = rt_enum_discriminant(HirExprKind.ArrayRepeat(nil_expr, nil_expr, nil))
+            val d_break = rt_enum_discriminant(HirExprKind.Break(ex_empty, nil))
+            val d_continue = rt_enum_discriminant(HirExprKind.Continue(nil))
+            eprint("[mir-lower-expr] disc-table IntLit={d_intlit} StringLit={d_strlit} BoolLit={d_boollit} NilLit={d_nillit} UnitLit={d_unitlit}\n")
+            eprint("[mir-lower-expr] disc-table ArrayLit={d_arraylit} TupleLit={d_tuplelit} SetLit={d_setlit} Index={d_index} TupleIndex={d_tupleindex}\n")
+            eprint("[mir-lower-expr] disc-table Field={d_field} OptionalChain={d_optchain} NullCoalesce={d_nullcoalesce} ExistsCheck={d_existscheck} Unwrap={d_unwrap}\n")
+            eprint("[mir-lower-expr] disc-table Binary={d_binary} Unary={d_unary} Call={d_call} Cast={d_cast} Block={d_block}\n")
+            eprint("[mir-lower-expr] disc-table If={d_if} While={d_while} Loop={d_loop} MatchCase={d_matchcase} Return={d_return}\n")
+            eprint("[mir-lower-expr] disc-table Try={d_try} Await={d_await} Throw={d_throw} Yield={d_yield} Range={d_range}\n")
+            eprint("[mir-lower-expr] disc-table Var={d_var} NamedVar={d_namedvar} ArrayRepeat={d_arrayrepeat} Break={d_break} Continue={d_continue}\n")
         val expr_disc = rt_enum_discriminant(expr_value.kind)
         val field_disc = rt_enum_discriminant(HirExprKind.Field(nil_expr, "", nil))
         if expr_disc == field_disc:
@@ -3242,7 +3370,18 @@ impl MirLowering:
                 # this file already does (see the B5b Phase 2 pattern arms in
                 # lower_match_case): record the error, hand back a fresh unit
                 # temp, and let the driver report the diagnostic normally.
-                self.error("unsupported MIR expression: {expr_value.kind}", Some(expr_value.span))
+                # `expr_value.span` is only safe to read when the kind is a
+                # LIVE boxed enum. When the kind is garbage (a mis-extracted
+                # payload, see the breadcrumb block in lower_expr above) the
+                # whole node is a wild handle and `.span.file` faults --
+                # SIGSEGV inside lower_expr_impl, which is strictly LESS
+                # diagnosable than the SIGILL it replaced. Gate every span read
+                # on the discriminant probe, which never dereferences.
+                val unsupported_disc = rt_enum_discriminant(expr_value.kind)
+                if unsupported_disc >= 0:
+                    self.error("unsupported MIR expression: {expr_value.kind}", Some(expr_value.span))
+                else:
+                    self.error("MIR lowering received a garbage expression handle (mis-extracted enum payload); the producing match arm is upstream", nil)
                 # Interpolating the kind alone is not diagnosable: a heap enum
                 # renders as an opaque `<enum@0x..>` handle and a value the
                 # runtime cannot classify at all renders as `<value:0x..>`
@@ -3252,7 +3391,10 @@ impl MirLowering:
                 # the runtime discriminant (DefaultHasher(variant-name) & u32,
                 # or -1 when the value is not a boxed enum) plus the source
                 # location, so the kind can be NAMED and the construct FOUND.
-                eprint("[mir-lower-expr] unsupported-expr-kind kind={expr_value.kind} disc={rt_enum_discriminant(expr_value.kind)} at={expr_value.span.file}:{expr_value.span.line}:{expr_value.span.col}\n")
+                if unsupported_disc >= 0:
+                    eprint("[mir-lower-expr] unsupported-expr-kind kind={expr_value.kind} disc={unsupported_disc} at={expr_value.span.file}:{expr_value.span.line}:{expr_value.span.col}\n")
+                else:
+                    eprint("[mir-lower-expr] unsupported-expr-kind kind={expr_value.kind} disc=-1 GARBAGE parent_at={mir_lower_parent_expr_file}:{mir_lower_parent_expr_line}:{mir_lower_parent_expr_col} parent_disc={mir_lower_parent_expr_disc}\n")
                 var b_unsupported = self.builder
                 val t_unsupported = b_unsupported.new_temp(MirType.unit())
                 self.builder = b_unsupported
