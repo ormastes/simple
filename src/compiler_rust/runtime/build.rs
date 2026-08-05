@@ -12,6 +12,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_timestamp.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_pool.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_framebuffer.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_image.c");
+    println!("cargo:rerun-if-changed=../../runtime/startup/common/runtime_log_hosted.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_socket_nonblock.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_directx_core.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_rocm.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_signal.c");
@@ -165,6 +168,22 @@ fn compile_c_runtime_sources() {
         // build (runtime_compiler.spl) does not define this macro and keeps
         // the real implementation.
         "runtime_audio.c",
+        // Remaining bucket (a) "source-list-absent" names after the
+        // rt_audio_* lane above (doc/08_tracking/bug/interpreter_extern_unreachable_names.md):
+        // rt_image_* (6 names, stb_image-backed, no dependency on anything
+        // this crate doesn't compile -- confirmed no other C source here
+        // defines STB_IMAGE_IMPLEMENTATION before landing), the hosted
+        // log-lib fallback (5 names -- this is the deliberate hosted
+        // counterpart to the baremetal src/runtime/startup/baremetal/runtime_log.c,
+        // which is NOT compiled here and never has been, so there is no
+        // duplicate-symbol risk), and the standalone rt_socket_set_nonblocking
+        // extraction (see that file's header comment for why the whole
+        // async_linux_epoll.c it was extracted from is not linked here).
+        // runtime_framebuffer.c (rt_fb_*, 2 names) already appears above in
+        // this same list -- only its interpreter dispatch entry was missing.
+        "runtime_image.c",
+        "startup/common/runtime_log_hosted.c",
+        "runtime_socket_nonblock.c",
     ];
     if target_os != "windows" && !native_all_provider {
         c_sources.push("hosted_win32.c");

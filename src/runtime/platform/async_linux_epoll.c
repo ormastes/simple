@@ -943,6 +943,14 @@ SplArray* rt_epoll_wait(int64_t epfd, int64_t max_events, int64_t timeout_ms) {
     return result;
 }
 
+/* NOTE: this exact function is also defined, verbatim, in
+ * ../runtime_socket_nonblock.c -- a standalone extraction added so hosted
+ * interpreter/native builds can link rt_socket_set_nonblocking without
+ * pulling in this whole epoll-backed file (see that file's header comment
+ * and doc/08_tracking/bug/interpreter_extern_unreachable_names.md bucket
+ * (a)). If this file is ever added to a C-source list that also compiles
+ * runtime_socket_nonblock.c, drop ONE of the two definitions first -- both
+ * are currently safe only because no build target links them together. */
 bool rt_socket_set_nonblocking(int64_t fd, bool enabled) {
     int flags = fcntl((int)fd, F_GETFL, 0);
     if (flags < 0) return false;
