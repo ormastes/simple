@@ -333,10 +333,21 @@ class FileHandle with Read, Write, Seek, Close:
         """
         if not self.open:
             return Err(IoError(kind: IoErrorKind.Other, message: "file handle is closed", source: nil))
-        val meta = rt_io_file_metadata(self.fd)
-        if meta == nil:
+        # Assembled here from scalars rather than marshalled whole from the
+        # runtime: a Rust-side FileMetadata constructor would bake this
+        # struct's field layout into the runtime ABI.
+        val flags = rt_io_file_meta_flags(self.fd)
+        val size = rt_io_file_meta_size(self.fd)
+        if flags < 0 or size < 0:
             return Err(IoError(kind: IoErrorKind.Other, message: "metadata failed", source: nil))
-        Ok(meta)
+        Ok(FileMetadata(
+            size: size,
+            is_file: (flags & 1) != 0,
+            is_dir: (flags & 2) != 0,
+            is_symlink: (flags & 4) != 0,
+            readonly: (flags & 8) != 0,
+            modified: rt_io_file_meta_modified(self.fd),
+            created: rt_io_file_meta_created(self.fd)))
 
     fn size() -> Result<i64, IoError>:
         """Get file size in bytes.
@@ -510,7 +521,10 @@ extern fn rt_io_file_write_all(fd: i64, data: [u8]) -> bool
 extern fn rt_io_file_seek(fd: i64, offset: i64, whence: i64) -> i64
 extern fn rt_io_file_flush(fd: i64) -> bool
 extern fn rt_io_file_close(fd: i64) -> bool
-extern fn rt_io_file_metadata(fd: i64) -> FileMetadata?
+extern fn rt_io_file_meta_size(fd: i64) -> i64
+extern fn rt_io_file_meta_flags(fd: i64) -> i64
+extern fn rt_io_file_meta_modified(fd: i64) -> i64
+extern fn rt_io_file_meta_created(fd: i64) -> i64
 extern fn rt_io_file_set_permissions(fd: i64, readonly: bool) -> bool
 extern fn rt_io_file_exists(path: text) -> bool
 extern fn rt_io_file_delete(path: text) -> bool

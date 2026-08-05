@@ -30,6 +30,7 @@ pub mod metadata;
 pub mod file_ops;
 pub mod directory;
 pub mod descriptor;
+pub mod io_file;
 pub mod mmap;
 pub mod path;
 

@@ -192,6 +192,20 @@ const RT_KEEP: &[&str] = &[
     "future_alloc_ready",
     "future_map",
     "future_then",
+    // TODO(rt_io_file): drop these 12 entries once the deployed runtime carries
+    // the symbols. They are NOT bootstrap placeholders — they are the public
+    // `FileHandle`/`File` API of `src/lib/nogc_sync_mut/io/file.spl`, and while
+    // they sat here undefined every one of them was silently replaced with a
+    // zero-returning stub: `File.write` returned Ok, wrote nothing, and
+    // `File.exists` reported false, all at exit 0. Implementations now exist in
+    // `runtime/src/value/sffi/file_io/io_file.rs` (verified defined via `nm`),
+    // but a native link still resolves against the *deployed*
+    // `target/bootstrap/libsimple_runtime.a`, which predates them. Removing an
+    // entry before that archive is rebuilt turns every native build into a hard
+    // failure, so the removal must follow the runtime redeploy, never precede
+    // it. `rt_io_file_metadata` is already gone from this list: nothing declares
+    // it any more (file.spl now assembles FileMetadata from scalar externs).
+    // See doc/08_tracking/bug/rt_io_file_family_undefined_stubbed_silent_data_loss_2026-08-05.md
     "rt_io_file_open",
     "rt_io_file_read",
     "rt_io_file_read_all",
@@ -202,7 +216,6 @@ const RT_KEEP: &[&str] = &[
     "rt_io_file_flush",
     "rt_io_file_seek",
     "rt_io_file_close",
-    "rt_io_file_metadata",
     "rt_io_file_set_permissions",
     "rt_io_file_exists",
     "rt_io_file_delete",
@@ -230,8 +243,11 @@ const RT_KEEP: &[&str] = &[
     "rt_io_tcp_shutdown",
     "rt_tls_client_connect",
     "rt_tls_client_connect_with_sni",
+    "rt_tls_client_connect_address_with_sni_timeout",
     "rt_tls_client_write",
     "rt_tls_client_read",
+    "rt_tls_client_write_timeout",
+    "rt_tls_client_read_timeout",
     "rt_tls_client_close",
     "rt_tls_get_protocol_version",
     "rt_io_udp_bind",
