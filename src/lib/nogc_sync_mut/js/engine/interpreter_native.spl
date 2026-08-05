@@ -5333,11 +5333,55 @@ impl JsInterpreter:
         val exports_id = match this_val:
             JsValue.Object(id): id
             _: -1
+        # The exports-object binding is only a LAST-RESORT forward. A defined
+        # function (wasm index >= import count) must execute its own body so that
+        # its i32.const / i32.store8 operands reach the host import; forwarding
+        # here first would call the import with the JS-level argument list (empty
+        # for `i.exports.run()`) and skip every store, which is how WASM memory
+        # and dispatch dimensions stopped reaching WebGPU host callbacks.
+        var fallback_bound_import = JsValue.Undefined
         if exports_id >= 0:
             match self.get_object_property(exports_id, "__simple_wasm_single_bound_import"):
-                JsValue.Function(fn_id): bound_import = JsValue.Function(id: fn_id)
+                JsValue.Function(fn_id): fallback_bound_import = JsValue.Function(id: fn_id)
                 _:
                     pass_dn
+        if _get_fn_id(bound_import) >= 0:
+            return self._native_webassembly_invoke_bound_import_function(bound_import, arg_vals)
+        if lookup_fn_id >= 0:
+            var mapped_body_i = 0
+            while mapped_body_i < self.wasm_export_body_fn_ids.len():
+                if self.wasm_export_body_fn_ids.get(mapped_body_i) == lookup_fn_id:
+                    val mapped_module_id = self.wasm_export_body_module_ids.get(mapped_body_i)
+                    val mapped_body_index = self.wasm_export_body_indices.get(mapped_body_i)
+                    val mapped_result = self._native_webassembly_module_function_export_i32_result_with_args_at(mapped_module_id, mapped_body_index, arg_vals)
+                    if mapped_result == -1:
+                        var minus_one_is_value = false
+                        match self.get_object_property(mapped_module_id, "lastWasmI32MinusOneValid"):
+                            JsValue.Boolean(v):
+                                if v:
+                                    minus_one_is_value = true
+                            _:
+                                pass_dn
+                        if minus_one_is_value:
+                            return JsValue.Number(v: -1.0)
+                        break
+                    if mapped_result == -2:
+                        return JsValue.String(v: "wasm-trap:integer-divide-by-zero")
+                    if mapped_result == -3:
+                        return JsValue.String(v: "wasm-trap:unreachable")
+                    if mapped_result == -4:
+                        return JsValue.String(v: "wasm-trap:integer-overflow")
+                    if mapped_result == -5:
+                        return JsValue.String(v: "wasm-trap:out-of-bounds-memory-access")
+                    return JsValue.Number(v: mapped_result.to_f64())
+                mapped_body_i = mapped_body_i + 1
+        if _get_fn_id(fallback_bound_import) >= 0:
+            return self._native_webassembly_invoke_bound_import_function(fallback_bound_import, arg_vals)
+        if const_return >= 0:
+            return JsValue.Number(v: const_return.to_f64())
+        JsValue.Undefined
+
+    me _native_webassembly_invoke_bound_import_function(bound_import: JsValue, arg_vals: [JsValue]) -> JsValue:
         val fn_id = _get_fn_id(bound_import)
         if fn_id >= 0 and fn_id < self.functions.len():
             val import_fn = self.functions.get(fn_id)
@@ -5385,36 +5429,6 @@ impl JsInterpreter:
             self.call_stack.pop()
             self.control_return = saved_return
             return result
-        if lookup_fn_id >= 0:
-            var mapped_body_i = 0
-            while mapped_body_i < self.wasm_export_body_fn_ids.len():
-                if self.wasm_export_body_fn_ids.get(mapped_body_i) == lookup_fn_id:
-                    val mapped_module_id = self.wasm_export_body_module_ids.get(mapped_body_i)
-                    val mapped_body_index = self.wasm_export_body_indices.get(mapped_body_i)
-                    val mapped_result = self._native_webassembly_module_function_export_i32_result_with_args_at(mapped_module_id, mapped_body_index, arg_vals)
-                    if mapped_result == -1:
-                        var minus_one_is_value = false
-                        match self.get_object_property(mapped_module_id, "lastWasmI32MinusOneValid"):
-                            JsValue.Boolean(v):
-                                if v:
-                                    minus_one_is_value = true
-                            _:
-                                pass_dn
-                        if minus_one_is_value:
-                            return JsValue.Number(v: -1.0)
-                        break
-                    if mapped_result == -2:
-                        return JsValue.String(v: "wasm-trap:integer-divide-by-zero")
-                    if mapped_result == -3:
-                        return JsValue.String(v: "wasm-trap:unreachable")
-                    if mapped_result == -4:
-                        return JsValue.String(v: "wasm-trap:integer-overflow")
-                    if mapped_result == -5:
-                        return JsValue.String(v: "wasm-trap:out-of-bounds-memory-access")
-                    return JsValue.Number(v: mapped_result.to_f64())
-                mapped_body_i = mapped_body_i + 1
-        if const_return >= 0:
-            return JsValue.Number(v: const_return.to_f64())
         JsValue.Undefined
 
     me _native_webassembly_table_placeholder(module_id: i64) -> JsValue:
