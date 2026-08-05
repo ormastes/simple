@@ -523,3 +523,204 @@ assertion) rather than `expected 4242 to equal 0` (the stale-id check just above
 it) — both fired. **Count failing examples, not failure messages.** As always,
 bare `assert x == y` in an `it` block is inert; these specs use
 `expect` / `assert_true` / `assert_false` throughout.
+
+---
+
+# Addendum 2026-08-05 — M5 (poison-on-free class) and M7 (gpu row + real-hardware
+fixture) advanced, sabotage/hardware-verified
+
+Scope note: this pass deliberately did NOT attempt a full bootstrap (two
+sibling sessions were already running full-bootstrap attempts concurrently;
+see their own reports for stage-3/4 status, which this pass does not touch).
+Verification below is a scoped `cargo test -p simple-compiler --lib` build
+(Rust seed only, ~4-5 min, no cargo/rustc changes beyond the files listed)
+for M5, and a real-hardware run of the existing deployed seed `bin/simple`
+for M7 — never a from-scratch bootstrap.
+
+## M5 — strict interpreter mode: 2 of 4 defect classes now covered
+
+The original finding (§M5 above) was 1 of 4 (uninit-read only). Reading the
+design doc's own §5 ("what is NOT worth doing") narrows the honest target:
+it explicitly rules out a **separate** GC-tier dangling-survivor mechanism —
+"strict mode implies harden's GC behavior rather than adding a parallel
+path" — so the real remaining scope was always 2 classes, not 3:
+poison-on-free (design §3, "stale-state, not stale-memory") and arena
+provenance at the SFFI boundary (design §4).
+
+**Landed this pass: poison-on-free / stale-state class, via design §3.2**
+("block-env write-back replay" — the `copy_back_block_writes` dirty-names
+invariant, described in the design doc as "a regression lock on the
+invariant that already broke once").
+
+- `src/compiler_rust/compiler/src/value.rs` — `CowEnv::check_dirty_names_invariant()`
+  (new method, ~line 613): returns the first name that is marked dirty but
+  absent from the env's own `overlay`, i.e. exactly the state shape the
+  historical bug ("copying every shared key instead of only `dirty_names`
+  replayed a cloned block env's stale snapshot over values a deeper call had
+  since written") could produce. Also adds a `#[cfg(test)]`-only
+  `test_mark_dirty_without_overlay()` escape hatch to construct that state
+  directly for testing, without needing to reintroduce the historical bug in
+  production code.
+- `src/compiler_rust/compiler/src/interpreter/block_exec.rs` — new
+  `pub(crate) fn assert_dirty_names_invariant(block_env: &Env)`, split out of
+  `copy_back_block_writes` specifically so it is testable without touching
+  the process-global `strict_mem_enabled()` gate (see below); panics naming
+  the offending key when the invariant is violated.
+  `copy_back_block_writes` calls it exactly when `strict_mem_enabled()` is
+  true (off-path cost: one relaxed bool load, matching the design's
+  zero-overhead-when-off requirement).
+- `src/compiler_rust/compiler/src/interpreter/mod.rs` — re-exports
+  `assert_dirty_names_invariant` crate-wide (mirrors the existing
+  `block_exec::{...}` re-export line) so it is reachable from the lib's
+  shared unit-test binary.
+
+**A note on where the test lives, and why (important for anyone extending
+this further):** `strict_mem_enabled()` is backed by a process-global,
+once-set-never-unset `AtomicBool`
+(`STRICT_MEM_FORCED`/`strict_mem_enable()`). The existing M5 uninit-read test
+(`src/compiler_rust/compiler/tests/interpreter_strict_mem_test.rs`) already
+documents this hazard and isolates itself in its **own integration-test
+binary/process** for exactly that reason. This pass's new tests live in the
+`--lib` unit-test binary instead
+(`src/compiler_rust/compiler/src/value_tests_strict_mem.rs`, wired in via
+`value_tests.rs`'s existing `include!` chain) — **and deliberately never call
+`strict_mem_enable()`**, because that binary is shared with ~3,600 other
+`#[cfg(test)]` tests across the crate and flipping a global latch there would
+leak into tests cargo runs in an unspecified order. That is exactly why
+`assert_dirty_names_invariant` was split out of `copy_back_block_writes`: it
+lets the panic-on-violation behavior be exercised directly and unconditionally
+(gate-free), while `copy_back_block_writes` itself still gates the *call* on
+`strict_mem_enabled()`.
+
+**Sabotage-cycle proof (Rust unit level, not a rebuild-and-diff cycle — the
+defect state is constructed directly via the test-only hatch, which is the
+correct level for a mechanism that is entirely Rust-internal bookkeeping, not
+user-visible `.spl` behavior):**
+
+```
+cargo test -p simple-compiler --lib dirty_names -- --test-threads=1
+```
+
+```
+running 6 tests
+test value::tests::assert_dirty_names_invariant_is_silent_when_invariant_holds ... ok
+test value::tests::assert_dirty_names_invariant_traps_on_violation - should panic ... ok
+test value::tests::dirty_names_invariant_catches_the_historical_violation_shape ... ok
+test value::tests::dirty_names_invariant_holds_after_a_real_write ... ok
+test value::tests::dirty_names_invariant_holds_on_a_fresh_env ... ok
+test value::tests::dirty_names_invariant_ignores_a_correctly_written_name_alongside_a_bad_one ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 3636 filtered out
+```
+
+`dirty_names_invariant_catches_the_historical_violation_shape` and
+`assert_dirty_names_invariant_traps_on_violation` are the RED/GREEN pair:
+without the fix (predicate absent, or the panic call removed from
+`copy_back_block_writes`), the exact violation state these tests construct
+would silently propagate a stale value upward instead of trapping — that is
+the pre-fix bug this invariant guards against, by the design doc's own
+account of the bug `block_exec.rs` was already patched for once.
+
+**Still open (unchanged from the original finding): arena provenance +
+generation enforcement at the SFFI boundary (design §4)** — threading a
+`nodes.spl`-minted `(idx, gen)` pair into `interpreter_extern` calls so a
+stale index fails at the boundary. Not attempted this pass; scoped as a
+separate, larger change (touches the SFFI call-site shape, not just
+`value.rs`/`block_exec.rs`). GC-tier stays "satisfied by design's own
+argument, not by new code" per §5 above — restated here rather than left
+implicit, per the original finding's own instruction to do so.
+
+**Blocked on bootstrap?** No — this is Rust-seed-only work, verified without
+a bootstrap (scoped `cargo test -p simple-compiler --lib`, ~4-5 min each of
+two runs this pass). No pure-Simple parity work was attempted for this class
+this pass (the existing uninit-read class already has parity in
+`src/compiler/70.backend/backend/{env,interpreter}.spl`; this new class does
+not yet).
+
+## M7 — GPU lane: `gpu` capability-matrix row added, real-hardware seeded-leak fixture
+
+The original finding: real counters (`gpu.rs` `DEVICE_ALLOCS`/
+`DEVICE_LIVE_BYTES`/`DEVICE_PEAK_BYTES`, wired to
+`rt_cuda_mem_alloc_fn`/`rt_cuda_mem_free_fn`), but no `--mem-infra=` matrix
+row, no fixtures, "nothing has been run on GPU hardware."
+
+**This box has 2 real CUDA devices** (RTX A6000, TITAN RTX;
+`nvidia-smi -L` verified) with a working driver (`libcuda.so.1` present) —
+the same machine the original M7 design doc's author found GPUs on. This
+pass used that hardware directly rather than only reasoning about it.
+
+- `src/lib/common/mem_infra/config.spl` — new `gpu` matrix row
+  (`interpreter: true, cranelift: false, llvm: false`), with an in-line
+  comment recording exactly what was and was not measured (piggybacks on the
+  `attr`/`SIMPLE_MEM_ATTR` gate — not a separate env var; interpreter-only
+  because `gpu.rs` lives under `interpreter_extern` and zero hits for
+  `rt_cuda_mem_alloc`/`rt_gpu_mem_live_bytes` exist anywhere under
+  `src/runtime/*.c`, so native/cranelift/llvm builds have no mirror of this
+  bookkeeping today — conservative `false`, not measured-and-confirmed-false,
+  stated as such). `mem_infra_env_assignments` updated to map `gpu` to the
+  same `SIMPLE_MEM_ATTR=1` assignment as `attr`, deduped so requesting both
+  together does not double-emit it. `config_spec.spl` re-run clean: 13/13
+  (was 12/12 at the original M3 finding — a sibling lane's unrelated addition
+  landed one more test between then and now; unaffected by this row).
+- `test/fixture/mem_infra/gpu_device_leak_workload.spl` (new) +
+  `test/01_unit/lib/mem_infra/gpu_device_leak_spec.spl` (new, 5 examples) —
+  drives the real CUDA driver-API choke points end-to-end on this box's
+  hardware: a balanced alloc+free pair (negative control, must return to 0
+  live bytes) followed by a **deliberately leaked** 1 MiB allocation (never
+  freed). Mirrors the established `mem_guard_rate_spec.spl` pattern exactly
+  (child-process `SIMPLE_MEM_ATTR=1 SIMPLE_EXECUTION_MODE=interpreter`
+  invocation, forced fresh-process because the attribution gate is a
+  `OnceLock` and the test daemon freezes env vars — see that spec's own
+  comment) rather than inventing a new harness shape.
+
+Raw fixture output on this hardware (`SIMPLE_MEM_ATTR=1 SIMPLE_BOOTSTRAP=1
+SIMPLE_EXECUTION_MODE=interpreter bin/simple run
+test/fixture/mem_infra/gpu_device_leak_workload.spl`):
+
+```
+gpu_device_leak_workload: live_before=0
+gpu_device_leak_workload: live_after_balanced=0
+gpu_device_leak_workload: live_after_leak=1048576
+gpu_device_leak_workload: peak_after_leak=1048576
+```
+
+This is the sabotage-style proof required: the "defect" (an unfreed device
+allocation) is real, on real hardware, and the counter reports it exactly
+(1048576 bytes, the requested size, not some other value) while the balanced
+control confirms the counter isn't just monotonically increasing regardless
+of frees. Spec verdict via the deployed (seed) `bin/simple`:
+
+```
+Results: 5 total, 5 passed, 0 failed
+```
+
+**Binary identity caveat, same as the M6/M8 addendum above:** `bin/simple`
+here is the Rust seed
+(`strings bin/simple | grep -c "enum construction: unregistered enum"` = 0).
+This pass did not build or wait on a self-hosted binary — two sibling
+sessions were already running full-bootstrap attempts concurrently, and this
+task's own scoping explicitly said not to duplicate that. All evidence above
+is seed evidence.
+
+**Still open (unchanged from, or narrowed from, the original finding):**
+- Seeded OOB fixture (`compute-sanitizer --tool memcheck` around a kernel
+  overrunning a `cuMemAlloc_v2` buffer) — not attempted this pass; the
+  sanitizer wrapper (`run_under_gpu_sanitizer`) exists and is spec-covered
+  for its no-GPU dispatch paths only.
+- `memory_viz` viewer compatibility — still explicitly unverified in-source
+  (`mem_profile.spl`'s own compatibility note), unchanged.
+- NVML cross-check, per-pool stats (`cudaMallocAsync`/`cuMemPoolGetAttribute`)
+  — not attempted; the design doc's own §2 already notes the pool API is not
+  used anywhere in `gpu.rs` today (every alloc/free is the raw, non-pooled
+  driver call).
+- ROCm/HIP equivalent — not attempted (no AMD GPU on this box either).
+- Whether the counters genuinely move under a **native** (cranelift/llvm)
+  build is unverified either way (see the `config.spl` row comment) — this
+  pass chose conservative-false over an unverified claim rather than
+  investing in a native-build measurement given the harness-contention
+  scoping for this task.
+
+**Blocked on bootstrap?** No for everything landed this pass (seed +
+existing deployed binary only). The native-backend question above would need
+either a scoped native-build probe or a real self-hosted redeploy to answer
+either way — deferred as a follow-up, not attempted here.

@@ -104,7 +104,8 @@ pub(crate) use node_exec::{exec_assignment, exec_augmented_assignment, exec_node
 // Block execution
 mod block_exec;
 pub(crate) use block_exec::{
-    capture_node_scope_shadows, exec_block, exec_block_fn, exec_unsafe_block, restore_block_scope_shadows,
+    assert_dirty_names_invariant, capture_node_scope_shadows, exec_block, exec_block_fn, exec_unsafe_block,
+    restore_block_scope_shadows,
 };
 
 // Public API

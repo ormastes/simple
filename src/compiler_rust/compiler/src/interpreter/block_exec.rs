@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use simple_parser::ast::{Block, ClassDef, Expr, FunctionDef, Node};
 use crate::error::CompileError;
-use crate::value::{Env, Value};
+use crate::value::{strict_mem_enabled, Env, Value};
 
 /// Check if the watchdog timeout has been exceeded (single atomic load, negligible overhead).
 macro_rules! check_timeout {
@@ -164,7 +164,32 @@ pub(crate) fn exec_block(
 /// - forwarded owner-qualified updates -> forwarded onward.
 /// Copying every shared key instead (the old behavior) replays the clone's
 /// stale snapshot over values a deeper call wrote after the clone was taken.
+/// Strict-mem (plan M5 §3.2, "poison-on-free"/stale-state defect class):
+/// regression lock on the `copy_back_block_writes` invariant — a dirty name
+/// with no overlay entry means the write-back is about to replay a
+/// stale/absent clone snapshot upward, exactly the bug this function was
+/// written to fix (copying every shared key instead of only `dirty_names`
+/// once replayed a cloned block env's stale snapshot over values a deeper
+/// call had since written). Split out from `copy_back_block_writes` so it
+/// can be exercised directly by a sabotage-style unit test without touching
+/// the process-global `strict_mem_enabled()` gate (see
+/// `value_tests_strict_mem.rs`).
+pub(crate) fn assert_dirty_names_invariant(block_env: &Env) {
+    if let Some(name) = block_env.check_dirty_names_invariant() {
+        panic!(
+            "strict-mem: dirty-names invariant violated in copy_back_block_writes: \
+             '{name}' is marked dirty but has no overlay entry in the block env \
+             (write-back would replay a stale clone snapshot upward)"
+        );
+    }
+}
+
 pub(crate) fn copy_back_block_writes(block_env: &Env, env: &mut Env) {
+    // Off-path cost: one bool load (see `strict_mem_enabled()`); the check
+    // itself is skipped entirely rather than called-and-short-circuited.
+    if strict_mem_enabled() {
+        assert_dirty_names_invariant(block_env);
+    }
     let dirty: Vec<String> = block_env.dirty_names().cloned().collect();
     for key in dirty {
         if env.contains_key(&key) && !block_env.is_refreshed_global(&key) {

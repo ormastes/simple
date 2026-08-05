@@ -611,6 +611,35 @@ impl CowEnv {
         self.dirty_names.clear();
     }
 
+    /// Strict-mode only (plan M5 §3.2, "poison-on-free"/stale-state class):
+    /// regression lock on the `copy_back_block_writes` invariant that broke
+    /// once already (`block_exec.rs`, historical bug: copying every shared
+    /// key instead of only `dirty_names` replayed a cloned block env's stale
+    /// snapshot over values a deeper call had since written). The invariant
+    /// is: every name recorded dirty must still be present in THIS env's own
+    /// overlay (i.e. actually written by this frame, not merely inherited
+    /// from a clone). Returns the first offending name, or `None` when the
+    /// invariant holds. Callers gate the call itself on `strict_mem_enabled()`
+    /// so the off-path never iterates `dirty_names`.
+    pub fn check_dirty_names_invariant(&self) -> Option<&str> {
+        for name in &self.dirty_names {
+            if !self.overlay.contains_key(name) {
+                return Some(name.as_str());
+            }
+        }
+        None
+    }
+
+    /// Test-only escape hatch (see `value_tests_strict_mem.rs`) to construct
+    /// exactly the violation shape `check_dirty_names_invariant` guards
+    /// against, without needing to actually reintroduce the historical
+    /// `copy_back_block_writes` bug in production code: mark a name dirty
+    /// with no corresponding overlay entry.
+    #[cfg(test)]
+    pub(crate) fn test_mark_dirty_without_overlay(&mut self, name: &str) {
+        self.dirty_names.insert(name.to_string());
+    }
+
     /// Project a subset of names into a fresh env, preserving global-binding
     /// and refreshed-global metadata. Selective lambda capture MUST use this
     /// instead of a plain name->value map: `from_map` demotes an imported

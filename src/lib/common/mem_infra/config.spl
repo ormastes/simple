@@ -27,7 +27,7 @@ struct MemInfraPlan:
     notices: [text]
     errors: [text]
 
-# The seven capability-matrix rows, in feature-doc order.
+# The eight capability-matrix rows, in feature-doc order.
 fn mem_infra_matrix() -> [MemInfraRow]:
     [
         MemInfraRow(name: "attr", interpreter: true, cranelift: true, llvm: true),
@@ -90,7 +90,39 @@ fn mem_infra_matrix() -> [MemInfraRow]:
         MemInfraRow(name: "genarena", interpreter: true, cranelift: true, llvm: true),
         MemInfraRow(name: "strict", interpreter: true, cranelift: false, llvm: false),
         MemInfraRow(name: "asan", interpreter: false, cranelift: false, llvm: true),
-        MemInfraRow(name: "memprof", interpreter: false, cranelift: false, llvm: true)
+        MemInfraRow(name: "memprof", interpreter: false, cranelift: false, llvm: true),
+        # gpu: device-alloc/free byte counters at the CUDA driver-API choke
+        # points (`rt_cuda_mem_alloc_fn`/`rt_cuda_mem_free_fn`,
+        # `src/compiler_rust/compiler/src/interpreter_extern/gpu.rs`), read
+        # via `rt_gpu_mem_live_bytes`/`rt_gpu_mem_peak_bytes`. Verified
+        # behaviourally, on real GPU hardware (2 CUDA devices), not read off
+        # the source tree — see
+        # `test/01_unit/lib/mem_infra/gpu_device_leak_spec.spl`, which drives
+        # a real device allocation, deliberately leaks it, and asserts the
+        # counter reports exactly the leaked size.
+        #
+        # This piggybacks on the SAME `SIMPLE_MEM_ATTR` gate `attr` uses (the
+        # choke points call `rt_mem_attr_enabled()` directly, see gpu.rs) --
+        # NOT a separate env var. Kept as its own named row rather than
+        # folded into `attr` because it is a distinct, GPU-specific
+        # capability claim a caller may want to request/reason about
+        # explicitly (per the plan's per-allocator-model matrix), matching
+        # how `genarena` is a separate row from `attr` despite both being
+        # instrumentation-trait implementations.
+        #
+        # interpreter-only, mirroring `guard`'s precedent: `gpu.rs` lives
+        # under `interpreter_extern`, which is the tree-walk interpreter's
+        # own SFFI implementation. Measured: zero hits for
+        # `rt_cuda_mem_alloc`/`rt_gpu_mem_live_bytes` anywhere under
+        # `src/runtime/*.c` (the C runtime linked by native/cranelift and
+        # llvm builds) -- there is no native-build mirror of this
+        # bookkeeping today. `codegen/runtime_sffi.rs` does declare a link
+        # signature for the raw `rt_cuda_mem_alloc` CUDA call itself (ABI
+        # shape only), which is NOT the same claim as "the counters move
+        # under native builds" -- unverified either way pending a real
+        # native-build run, so this row stays conservative (false) on
+        # cranelift/llvm rather than guessing.
+        MemInfraRow(name: "gpu", interpreter: true, cranelift: false, llvm: false)
     ]
 
 # Row names the `auto` shorthand expands to, given the target backend.
@@ -107,7 +139,7 @@ fn mem_infra_auto_rows(backend: text) -> [text]:
         return ["attr", "guard", "genarena"]
     ["attr", "genarena"]
 
-# True when `name` is one of the seven known capability-matrix rows.
+# True when `name` is one of the eight known capability-matrix rows.
 fn mem_infra_row_known(name: text) -> bool:
     for row in mem_infra_matrix():
         if row.name == name:
@@ -232,8 +264,13 @@ fn resolve_mem_infra(requested: [text], backend: text, strict: bool) -> MemInfra
 fn mem_infra_env_assignments(plan: MemInfraPlan) -> [text]:
     var out: [text] = []
     for name in plan.enabled:
-        if name == "attr":
-            out = out.push("SIMPLE_MEM_ATTR=1")
+        # `attr` and `gpu` share the exact same gate (gpu.rs's device
+        # counters call `rt_mem_attr_enabled()` directly, no separate env
+        # var) -- deduped so requesting `attr,gpu` together does not emit
+        # `SIMPLE_MEM_ATTR=1` twice.
+        if name == "attr" or name == "gpu":
+            if not _mem_infra_contains(out, "SIMPLE_MEM_ATTR=1"):
+                out = out.push("SIMPLE_MEM_ATTR=1")
         else:
             if name == "harden":
                 out = out.push("SIMPLE_MEM_HARDEN=1")

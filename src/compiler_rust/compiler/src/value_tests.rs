@@ -12,4 +12,5 @@ mod tests {
     include!("value_tests_basic.rs");
     include!("value_tests_async.rs");
     include!("value_tests_pointers.rs");
+    include!("value_tests_strict_mem.rs");
 }

@@ -20,6 +20,7 @@ with a one-line notice (or hard-error with `--mem-infra-strict`).
 | `strict`       | yes         | no        | no   | strict interpreter mode (Miri-lite: uninit/UAF/provenance) |
 | `asan`         | no          | no        | yes  | -fsanitize=address instrumentation of native stages |
 | `memprof`      | no          | no        | yes  | -fmemory-profile; PGHO profile out for later feed-back |
+| `gpu`          | yes         | no        | no   | CUDA driver-API device-alloc/free byte counters (interpreter_extern/gpu.rs); piggybacks on the `attr` gate |
 | `hwasan`/`mte` | no          | no        | yes (aarch64) | hardware tagging — WATCH |
 
 Notes:
@@ -62,6 +63,18 @@ CLI flag wiring and capability-matrix resolver library landed (2026-07-30).
 Resolver spec `config_spec.spl` passes 12/12. Blocker: compiler does not
 currently build with llvm feature at all (LLVM codegen row blocked until
 resolved).
+
+## Status (2026-08-05) — `gpu` row added (M7)
+Added the `gpu` capability-matrix row (interpreter-only; piggybacks on the
+`attr`/`SIMPLE_MEM_ATTR` gate, not a separate env var — see `config.spl`'s
+row comment for why it is still a distinct named row). Verified
+behaviourally on real GPU hardware (2 CUDA devices, this box): a real device
+allocation is deliberately leaked and the `rt_gpu_mem_live_bytes` counter is
+shown to report exactly the leaked size, with a balanced alloc+free pair as
+a negative control — `test/01_unit/lib/mem_infra/gpu_device_leak_spec.spl`,
+5/5 passing. Native-backend (cranelift/llvm) coverage stays unverified/false
+per the same conservative posture as `guard`'s pre-2026-08-05 state; see the
+row comment in `config.spl` for the exact measurement.
 
 ## Non-goals
 MSan (needs whole-world instrumentation — strict interpreter mode covers the
