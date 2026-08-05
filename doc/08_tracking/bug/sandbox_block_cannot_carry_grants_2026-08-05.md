@@ -1,7 +1,41 @@
 # `sandbox` block cannot carry `grant:` — grants require a `security gate`
 
-**Status:** open
+**Status:** fixed 2026-08-05
 **Found:** 2026-08-05, while making WASI capability enforcement reachable from the CLI.
+
+## Fix
+
+A standalone `sandbox` block now accepts its own `grant:` child, using the
+same grammar `security gate`'s `grant:` block already accepted. This was a
+parser/HIR-lowering-only change, confirming the "Where" section below:
+
+- Parser: `SandboxPolicy` (`src/compiler_rust/parser/src/ast/aop.rs`) gained a
+  `grants: Vec<String>` field; `parse_sandbox_policy`
+  (`src/compiler_rust/parser/src/stmt_parsing/aop.rs`) now recognises a
+  `grant:` key inside a `sandbox` block and parses it exactly like
+  `parse_security_gate_after_keyword` already does for `security gate`.
+- HIR: `HirSandboxPolicy`
+  (`src/compiler_rust/compiler/src/hir/types/aop.rs`) carries the same
+  `grants` field, populated in `module_pass.rs`'s `Node::SandboxPolicy` arm.
+- Renderer: `src/compiler_rust/compiler/src/security.rs`'s `sandbox_grants`
+  helper now merges grants from a targeting `security gate` **and** the
+  sandbox's own `grants`, deduped, before `render_sandbox_manifest` /
+  `render_sandbox_lowering` emit them. `sandbox_manifest_for_source` /
+  `build_security_inventory_for_source` needed no changes beyond that.
+- Runtime: `WasiCapabilityTable::from_sandbox_lowering_sdn`
+  (`src/compiler_rust/wasm-runtime/src/wasi_env.rs`) needed **no change** —
+  confirmed by running the exact repro through it: it already parses grants by
+  indentation regardless of which surface form produced them.
+
+Verified end to end through the real production seam
+(`build_wasi_env`, not just the renderer) in
+`src/compiler_rust/driver/tests/wasi_capability_enforcement.rs`
+(`bare_sandbox_grant_*` and `bare_sandbox_without_grant_still_denies_everything`)
+and in `src/compiler_rust/compiler/src/security.rs`'s
+`sandbox_manifest_bridge_tests` (`bare_sandbox_grant_block_parses_and_renders_its_grants`,
+`bare_sandbox_without_grant_still_renders_no_capabilities`). A sabotage check
+(reverting the renderer's merge to ignore the sandbox's own `grants`) made the
+new tests fail as expected, then was reverted.
 
 ## Symptom
 

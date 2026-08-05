@@ -46,6 +46,37 @@ fn main() -> i64:
 /// Declares no sandbox at all — the overwhelming majority of modules.
 const NO_SANDBOX: &str = "fn main() -> i64:\n    return 0\n";
 
+/// The bare-`sandbox` counterpart to `GRANTS_REPORTS_ONLY`: no `security gate`
+/// at all, just a standalone `sandbox` block carrying its own `grant:` child.
+/// Exercises the fix for
+/// `doc/08_tracking/bug/sandbox_block_cannot_carry_grants_2026-08-05.md`, which
+/// used to be a parse error (`expected identifier, found Indent`) because only
+/// `security gate` accepted a `grant:` child. Same production bridge as
+/// `GRANTS_REPORTS_ONLY` above.
+const BARE_SANDBOX_GRANTS_REPORTS_ONLY: &str = r#"sandbox reader:
+    backend auto
+    net deny all
+    grant:
+        Env["REPORT_ROOT"]
+        ReadDir["/reports"]
+
+fn main() -> i64:
+    return 0
+"#;
+
+/// Negative control for the fixture above: the identical `sandbox` shape with
+/// no `grant:` child at all must still deny everything -- this is the
+/// pre-existing bare-`sandbox` deny-all case the bug doc confirms already
+/// works, pinned here so a regression in the new `grant:` parsing path cannot
+/// silently turn "no grant" into "allow everything".
+const BARE_SANDBOX_NO_GRANT: &str = r#"sandbox reader:
+    backend auto
+    net deny all
+
+fn main() -> i64:
+    return 0
+"#;
+
 /// Build a `WasiConfig` exactly the way `Runner::run_source_wasm` does: the
 /// compiler renders the module's own policy, the runtime attaches it.
 ///
@@ -143,6 +174,73 @@ fn granted_preopen_still_builds() {
     let config = config_for(GRANTS_REPORTS_ONLY).with_preopen_dir(host.to_str().unwrap(), "/reports");
 
     build(&config).expect("a granted capability must still be allowed");
+}
+
+/// End-to-end proof for
+/// `doc/08_tracking/bug/sandbox_block_cannot_carry_grants_2026-08-05.md`: a
+/// bare `sandbox` block's own `grant:` child, with no `security gate`
+/// anywhere in the source, must render, attach, and actually allow the
+/// granted env var and preopen while still refusing an ungranted one -- the
+/// same real seam (`build_wasi_env`) as every `security gate`-backed test
+/// above.
+#[test]
+fn bare_sandbox_grant_fixture_renders_its_grants() {
+    let manifest = simple_compiler::sandbox_manifest_for_source("<test>", BARE_SANDBOX_GRANTS_REPORTS_ONLY)
+        .expect("bare sandbox with grant: must render a manifest");
+    assert!(manifest.contains("reader:"), "manifest was: {manifest}");
+    assert!(manifest.contains(r#"Env["REPORT_ROOT"]"#), "manifest was: {manifest}");
+    assert!(manifest.contains(r#"ReadDir["/reports"]"#), "manifest was: {manifest}");
+    assert_eq!(
+        simple_wasm_runtime::declared_sandbox_names(&manifest),
+        vec!["reader".to_string()]
+    );
+}
+
+/// The granted env var, offered through a bare `sandbox`'s own `grant:`
+/// block (no `security gate`), must actually be allowed.
+#[test]
+fn bare_sandbox_grant_allows_the_env_var_it_names() {
+    let config = config_for(BARE_SANDBOX_GRANTS_REPORTS_ONLY).with_env("REPORT_ROOT", "/reports");
+
+    build(&config).expect("a bare-sandbox-granted env var must be allowed");
+}
+
+/// The allow direction is not a rubber stamp: an env var the bare `sandbox`
+/// did not grant must still be denied, exactly like the `security gate` case.
+#[test]
+fn bare_sandbox_grant_still_denies_an_ungranted_env_var() {
+    let config = config_for(BARE_SANDBOX_GRANTS_REPORTS_ONLY).with_env("AWS_SECRET_ACCESS_KEY", "wt8s3cr3t");
+
+    let err = build(&config).expect_err("an env var the bare sandbox never granted must be denied");
+    assert!(
+        err.contains("WASI capability denied environment variable 'AWS_SECRET_ACCESS_KEY'"),
+        "expected a capability denial, got: {err}"
+    );
+}
+
+/// The granted preopen dir, offered through a bare `sandbox`'s own `grant:`
+/// block, must actually be allowed.
+#[test]
+fn bare_sandbox_grant_allows_the_preopen_it_names() {
+    let host = existing_host_dir("bare_sandbox_granted");
+    let config = config_for(BARE_SANDBOX_GRANTS_REPORTS_ONLY).with_preopen_dir(host.to_str().unwrap(), "/reports");
+
+    build(&config).expect("a bare-sandbox-granted preopen must be allowed");
+}
+
+/// Negative control: the identical `sandbox reader:` shape with no `grant:`
+/// child at all must still deny everything. This pins the pre-existing
+/// deny-all behavior described in the bug doc, so the new `grant:` grammar
+/// cannot regress "no grant" into "allow everything".
+#[test]
+fn bare_sandbox_without_grant_still_denies_everything() {
+    let config = config_for(BARE_SANDBOX_NO_GRANT).with_env("REPORT_ROOT", "/reports");
+
+    let err = build(&config).expect_err("a bare sandbox with no grant: must still deny everything");
+    assert!(
+        err.contains("WASI capability denied environment variable 'REPORT_ROOT'"),
+        "expected a capability denial, got: {err}"
+    );
 }
 
 /// A module that declares no sandbox gets no table and is not restricted.

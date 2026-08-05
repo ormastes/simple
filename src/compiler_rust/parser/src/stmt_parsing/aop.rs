@@ -755,6 +755,7 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Newline)?;
         self.expect(&TokenKind::Indent)?;
         let mut items = Vec::new();
+        let mut grants = Vec::new();
         while !matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
             self.skip_newlines();
             if matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
@@ -762,6 +763,27 @@ impl<'a> Parser<'a> {
             }
             let item_start = self.current.span;
             let key = self.expect_identifier()?;
+            // A standalone `sandbox` block may carry its own `grant:` child list,
+            // using the same grammar `security gate`'s `grant:` block accepts, so
+            // a module can state what it allows without wrapping the sandbox in a
+            // `security gate` it does not otherwise want.
+            if key == "grant" {
+                self.expect(&TokenKind::Colon)?;
+                self.expect(&TokenKind::Newline)?;
+                self.expect(&TokenKind::Indent)?;
+                while !matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+                    self.skip_newlines();
+                    if matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+                        break;
+                    }
+                    let grant = self.collect_until_line_end();
+                    if !grant.is_empty() {
+                        grants.push(grant);
+                    }
+                }
+                self.expect(&TokenKind::Dedent)?;
+                continue;
+            }
             let value = self.collect_until_line_end();
             if key == "backend" {
                 items.push(SandboxItem::Backend {
@@ -780,6 +802,7 @@ impl<'a> Parser<'a> {
         Ok(SandboxPolicy {
             name,
             items,
+            grants,
             span: self.span_from_start(start),
         })
     }

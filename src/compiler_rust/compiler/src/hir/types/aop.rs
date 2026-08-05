@@ -111,6 +111,9 @@ pub struct HirSecurityGate {
 pub struct HirSandboxPolicy {
     pub name: String,
     pub items: Vec<HirSandboxItem>,
+    /// Capabilities granted directly by this sandbox's own `grant:` child,
+    /// independent of any `security gate` that may also target it.
+    pub grants: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

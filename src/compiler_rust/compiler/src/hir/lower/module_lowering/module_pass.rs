@@ -910,6 +910,7 @@ impl Lowerer {
                                 },
                             })
                             .collect(),
+                        grants: policy.grants.clone(),
                     });
                 }
                 Node::CapabilityPolicy(policy) => {

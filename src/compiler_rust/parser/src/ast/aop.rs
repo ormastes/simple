@@ -230,6 +230,10 @@ pub struct SecurityGate {
 pub struct SandboxPolicy {
     pub name: String,
     pub items: Vec<SandboxItem>,
+    /// Capabilities granted directly by this `sandbox` block's own `grant:`
+    /// child, without requiring a `security gate` to carry them. Parsed with
+    /// the same grammar `security gate`'s `grant:` block already accepts.
+    pub grants: Vec<String>,
     pub span: Span,
 }
 

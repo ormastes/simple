@@ -2245,11 +2245,7 @@ fn render_sandbox_manifest(module: &HirModule, gates: &[HirSecurityGate]) -> Str
                 HirSandboxItem::Rule { key, value } => out.push_str(&format!("    {}: {}\n", key, value)),
             }
         }
-        let grants: Vec<String> = gates
-            .iter()
-            .filter(|gate| gate.sandbox.as_deref() == Some(sandbox.name.as_str()))
-            .flat_map(|gate| gate.grants.clone())
-            .collect();
+        let grants = sandbox_grants(gates, &sandbox.name, &sandbox.grants);
         if !grants.is_empty() {
             out.push_str("    capabilities:\n");
             for grant in grants {
@@ -2272,7 +2268,7 @@ fn render_sandbox_lowering(module: &HirModule, gates: &[HirSecurityGate]) -> Str
         for step in sandbox_enforcement_steps(lowered_backend) {
             out.push_str(&format!("      - {}\n", step));
         }
-        let grants = sandbox_grants(gates, &sandbox.name);
+        let grants = sandbox_grants(gates, &sandbox.name, &sandbox.grants);
         if !grants.is_empty() {
             out.push_str("    capability_handles:\n");
             for grant in grants {
@@ -2393,12 +2389,26 @@ fn sandbox_enforcement_steps(lowered_backend: &str) -> &'static [&'static str] {
     }
 }
 
-fn sandbox_grants(gates: &[HirSecurityGate], sandbox_name: &str) -> Vec<String> {
-    gates
+/// Collect the capabilities granted to `sandbox_name`, from both a
+/// `security gate` that targets it (`gate.sandbox == sandbox_name`) and the
+/// sandbox's own `grant:` child block. Either source alone is sufficient; a
+/// module is not required to invent a `security gate` just to grant
+/// capabilities on a `sandbox` it declares directly. Duplicates (e.g. the same
+/// grant listed on both) are collapsed while preserving first-seen order.
+fn sandbox_grants(gates: &[HirSecurityGate], sandbox_name: &str, own_grants: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for grant in gates
         .iter()
         .filter(|gate| gate.sandbox.as_deref() == Some(sandbox_name))
-        .flat_map(|gate| gate.grants.clone())
-        .collect()
+        .flat_map(|gate| gate.grants.iter().cloned())
+        .chain(own_grants.iter().cloned())
+    {
+        if seen.insert(grant.clone()) {
+            out.push(grant);
+        }
+    }
+    out
 }
 
 fn render_capability_manifest(module: &HirModule) -> String {
@@ -2669,5 +2679,43 @@ sandbox admin_sandbox:
         let manifest = sandbox_manifest_for_source("<t>", source).expect("sandbox policy must render");
         assert!(manifest.contains("admin_sandbox:"), "manifest was: {manifest}");
         assert!(manifest.contains("ReadDir[\"/reports\"]"), "manifest was: {manifest}");
+    }
+
+    /// The bare-`sandbox` counterpart: no `security gate` at all, just a
+    /// standalone `sandbox` block carrying its own `grant:` child. Regression
+    /// test for
+    /// `doc/08_tracking/bug/sandbox_block_cannot_carry_grants_2026-08-05.md`,
+    /// where this shape was a parse error (`expected identifier, found
+    /// Indent`) because only `security gate`'s `grant:` block was accepted.
+    #[test]
+    fn bare_sandbox_grant_block_parses_and_renders_its_grants() {
+        let source = r#"sandbox reader:
+    backend auto
+    net deny all
+    grant:
+        Env["REPORT_ROOT"]
+        ReadDir["/reports"]
+"#;
+
+        let manifest = sandbox_manifest_for_source("<t>", source).expect("bare sandbox with grant: must render");
+        assert!(manifest.contains("reader:"), "manifest was: {manifest}");
+        assert!(manifest.contains("Env[\"REPORT_ROOT\"]"), "manifest was: {manifest}");
+        assert!(manifest.contains("ReadDir[\"/reports\"]"), "manifest was: {manifest}");
+    }
+
+    /// Negative control: the identical bare `sandbox` shape with no `grant:`
+    /// child at all must still render a manifest with no capabilities listed,
+    /// i.e. the pre-existing deny-all behavior is unchanged by adding the
+    /// `grant:` grammar.
+    #[test]
+    fn bare_sandbox_without_grant_still_renders_no_capabilities() {
+        let source = r#"sandbox reader:
+    backend auto
+    net deny all
+"#;
+
+        let manifest = sandbox_manifest_for_source("<t>", source).expect("bare sandbox must still render");
+        assert!(manifest.contains("reader:"), "manifest was: {manifest}");
+        assert!(!manifest.contains("capabilities:"), "manifest was: {manifest}");
     }
 }
