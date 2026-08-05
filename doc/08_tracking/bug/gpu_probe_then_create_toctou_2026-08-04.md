@@ -189,6 +189,70 @@ the leak is in the create/shutdown cycle, not the probe. The spec pre-fix issued
 to clear the threshold — meaning the underlying backend leak is still there and
 will resurface for any spec that creates ~20 vulkan backends in one process.
 
+**FIXED 2026-08-05 — and the "~20" estimate did not reproduce.** Measured on
+TITAN RTX + RTX A6000, the first failing create is **#63** — the 64th device,
+the driver's per-process device ceiling. It is #63 for BOTH shapes: the bare
+`VulkanBackend.create()+init()+shutdown()` loop and the heavier `Engine2D`
+create+clear+draw+readback+present+shutdown cycle. That the two agree is the
+tell: the exhausted resource is the DEVICE COUNT, not any per-device object, so
+the ceiling does not move with what the backend touches between creates. The
+failure mode is `init()` returning false with
+`last_error = "Vulkan shared session initialization failed: runtime-init"` while
+`rt_vulkan_last_error()` is EMPTY and `rt_vulkan_is_available()` still reports 1
+— a silent exhaustion that reads like a host problem. The process then
+segfaults at exit (139) while tearing down 63 stranded devices.
+
+Root cause: `rt_vulkan_init_fn`
+(`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs`) created a fresh
+VkInstance + VkDevice + VkCommandPool on EVERY call and then overwrote the
+`VK_STATE` singleton. `VulkanState` holds raw handles and has no `Drop` impl, so
+the previous instance/device/command pool — and every buffer, shader module,
+compute pipeline, descriptor pool and command buffer recorded in that state —
+were orphaned with no `vkDestroy*` call. Nothing on the `.spl` side compensates:
+`VulkanSession._cleanup()` destroys the shaders and pipelines it owns by handle
+and then merely ZEROES `instance` / `device` / `command_pool` / `pipeline_cache`
+/ `allocator`; it never calls `vulkan_sffi_shutdown()`.
+
+So the answer to "does the probe path call shutdown?" is YES and it was never
+the culprit: `Engine2D.probe_backend`'s vulkan arm does call `b.shutdown()` on
+success. The abandonment was one layer down, in the runtime extern. What the
+probe path DID contribute is cost — a probed lane ran two full create/init
+cycles and therefore stranded two devices.
+
+Fix (not a cap, not a retry — it stops ACQUIRING the duplicate):
+`rt_vulkan_init_fn` now returns the live singleton when `VK_STATE` already holds
+a state with a non-null device, exactly matching the compiled runtime's
+`rt_vulkan_init` (`vulkan_graphics_runtime_core.rs`), which has always
+short-circuited on `state.device.is_some()`. The interpreter extern was the
+divergent sibling of an already-correct implementation. This also removes the
+probe-then-create double cost at the root: probe and create now share one
+instance and one device.
+
+Control-arm evidence that identifies the leaked object set: the same loop with
+an explicit `vulkan_sffi_shutdown()` per iteration ran 200/200 clean and exited
+0 — i.e. the stranded objects are exactly what `rt_vulkan_shutdown` releases.
+
+Provenance is unaffected. `_web_gpu_readback_device_proven` requires
+`source == "device_readback"`, and only `backend_vulkan.spl:823` emits that
+source, from a live session. `backend_handle` stays the per-surface
+`d_framebuffer` (allocated per `init_with_session`, freed in `shutdown`);
+`device_identity` is `session.device`, which reuse makes CONSTANT across engines
+instead of distinct — but the predicate tests `> 0`, never uniqueness, and a
+CPU-produced frame never reaches that arm at all. No new pass path is created.
+
+Family sweep — vulkan was the only offender. CUDA memoizes `cuInit` behind
+`CUDA_INIT_RESULT.get_or_init` (one acquire per process). WebGPU's and OpenCL's
+interpreter externs are inert stubs that return 0 and acquire nothing (which is
+also why OpenCL context creation reports `context=0` on this host). Metal is
+macOS-only and inert on Linux, so it is FLAGGED as unverified here rather than
+claimed clean. Baremetal/virtio_gpu acquire no runtime handles on this path.
+`VK_STATE` is the only `Mutex<Option<...>>` global in the interpreter externs
+that gets replaced rather than reused.
+
+Regression gate: `test/02_integration/rendering/vulkan_instance_reuse_spec.spl`.
+NOTE: the fix lives in the Rust seed, so it is only live in `bin/simple` after a
+seed rebuild + redeploy.
+
 ### The owned-create tooth — do not relax this away
 
 Moving the device-label claim into `_assert_provenance_invariants` makes the

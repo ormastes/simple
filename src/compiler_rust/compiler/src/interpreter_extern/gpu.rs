@@ -3058,9 +3058,41 @@ pub fn rt_oneapi_is_available_fn(_args: &[Value]) -> Result<Value, CompileError>
 }
 
 /// `rt_vulkan_init() -> bool`
+///
+/// IDEMPOTENT BY CONTRACT (leak fix 2026-08-05). This used to create a fresh
+/// VkInstance + VkDevice + VkCommandPool on EVERY call and then overwrite
+/// `VK_STATE` with the new `VulkanState`. `VulkanState` holds raw Vulkan
+/// handles and has no `Drop` impl, so the previous instance/device/command
+/// pool — plus every buffer, shader module, compute pipeline, descriptor pool
+/// and command buffer recorded in that state — were orphaned with no
+/// `vkDestroy*` call. Nothing in the `.spl` layer calls `rt_vulkan_shutdown()`
+/// (`VulkanSession._cleanup()` destroys shaders/pipelines by handle and merely
+/// zeroes `instance`/`device`/`command_pool`), so each
+/// `VulkanBackend.create()+init()+shutdown()` cycle stranded one whole device.
+/// On this host that hit the driver's per-process device ceiling and the 64th
+/// create failed with a bare `runtime-init`, capping GPU testing per process.
+///
+/// The compiled runtime's `rt_vulkan_init` (vulkan_graphics_runtime_core.rs)
+/// has always short-circuited on `state.device.is_some()`; the interpreter
+/// extern was the divergent sibling. Returning the live singleton here makes
+/// the two agree, and it fixes the probe-then-create double cost at the root:
+/// the probe's create/init/shutdown and the subsequent real create now share
+/// one instance and one device instead of stranding one each.
+///
+/// This does NOT swallow genuine failures: `VK_STATE` is only `Some` once
+/// `vkCreateInstance`, `vkCreateDevice` and `vkCreateCommandPool` have all
+/// returned `VK_SUCCESS`, so a host where Vulkan really cannot initialise
+/// still leaves it `None` and still returns `false` on every call.
 pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::*;
     use std::ptr;
+    // Reuse the live singleton rather than stranding it. A state whose device
+    // handle is null is not live, so it is rebuilt below.
+    if let Some(existing) = VK_STATE.lock().unwrap().as_ref() {
+        if !existing.device.is_null() {
+            return Ok(Value::Bool(true));
+        }
+    }
     let fns = match vulkan_dlopen::load_vulkan() {
         Some(f) => f,
         None => return Ok(Value::Bool(false)),
