@@ -1242,6 +1242,20 @@ int main(int argc, char** argv) {
             cmd.arg("-fsanitize=address");
         }
 
+        // M4 (LLVM mem-infra lane): link the MemProfiler runtime
+        // (`libclang_rt.memprof`) when `--memprof`/`--mem-infra=memprof`
+        // requested it. Same backend-only second guard as `sanitize` above —
+        // `codegen/llvm/backend_core.rs::llvm_memprof_enabled` is what runs
+        // the `memprof`/`memprof-module` passes, gated on the LLVM backend
+        // only. `-fmemory-profile` on the driver is confirmed (via `clang
+        // -fmemory-profile ... -###`) to be the flag that makes the C/C++
+        // driver itself add `--whole-archive libclang_rt.memprof-<arch>.a
+        // --no-whole-archive` — same one-flag-does-both shape as
+        // `-fsanitize=address`.
+        if self.config.memprof && self.config.backend == "llvm" {
+            cmd.arg("-fmemory-profile");
+        }
+
         if is_clang_cl {
             cmd.arg(&main_o);
             if let Some(ref init) = init_o {

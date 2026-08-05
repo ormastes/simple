@@ -398,8 +398,8 @@ spec already uses.
 | Lane | Spec found | Code exists | Real status | Bootstrap-blocked |
 |---|---|---|---|---|
 | **M2** guard+harden | yes (plan §M2 + design) | yes — `mem_guard.rs`, `memory.rs`, `runtime_memory.c`, `module_state.spl` | **Partial.** Interpreter guard+harden real and green; C **harden** landed but C **guard page absent** while the matrix claims it (OPEN bug = false safety claim). 1 of 3 required UAF fixture classes. | No (delivery via `--mem-infra` only) |
-| **M4** LLVM asan/memprof | yes (plan §M4 + design) | interface only — matrix rows + `BUILD:*` notice | **Not started.** Zero `-fmemory-profile` hits tree-wide; no asan build path. Prior "blocked on 62 symbols" was a misdiagnosis (seed `--features llvm` builds). | Partly — memprof exit needs stage-2 LLVM link; asan half does not |
-| **M5** strict interp | yes (plan §M5 + design) | yes — seed `value.rs`/`node_exec.rs` + pure-Simple `env.spl`/`interpreter.spl` | **STALE — see 2026-08-05 addenda below.** Design doc §5 supports 3 real defect classes, not 4 (GC dangling-survivor is explicitly out of scope by design, satisfied by M2). Of those 3: **2 done** (uninit-read; poison-on-free/dirty-names invariant), **1 filed as a bug** (arena provenance at the SFFI boundary — no existing call site to instrument, see `doc/08_tracking/bug/m5_arena_provenance_sffi_boundary_no_existing_crossing_2026-08-05.md`). | No |
+| **M4** LLVM asan/memprof | yes (plan §M4 + design) | yes — `backend_core.rs` (asan `sanitize_address` attr + `asan` module pass; memprof `function(memprof),module(memprof-module)` passes), `linker.rs` (`-fsanitize=address`/`-fmemory-profile`), `native_build.rs` (`--sanitize`/`--memprof`), `m4_asan_probe.rs`/`m4_memprof_probe.rs` fixtures | **Both halves wired and fixture-proven, standalone-corpus level only.** asan: real caught stack-buffer-overflow (commit `13348d0fc46`). memprof: real inline shadow-memory instrumentation (confirmed by disassembly) + a linked-and-run binary producing a genuine `memprof.profraw` (correct raw-profile magic bytes). Neither has run through the self-hosted bootstrap — see addendum below. Prior "blocked on 62 symbols" was a misdiagnosis (seed `--features llvm` builds). | Yes, for the plan's actual exit criterion ("profile produced for a **stage-2** compile") — blocked on `doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md`. Standalone-fixture level is not blocked for either half. |
+| **M5** strict interp | yes (plan §M5 + design) | yes — seed `value.rs`/`node_exec.rs` + pure-Simple `env.spl`/`interpreter.spl` | **1 of 4 defect classes.** Uninit-read traps done and green; poison-on-free, per-deref arena provenance, GC dangling-survivor all missing. | No |
 | **M6** gen slotmap | yes (plan §M6) | yes — `gen_arena.spl`, 2 green specs | **Overstated as DONE.** Library real; **zero consumers** — the "migrate one ECS store as proof" exit was never done; release zero-cost unproven. | No |
 | **M7** GPU lane | yes (plan §M7 + design) | yes — `gpu.rs` counters, `mem_profile.spl` sanitizer wrapper | **Counters only.** No `gpu` matrix row, no device fixtures, no pool stats/NVML, `memory_viz` compatibility explicitly unverified in-source. GC row satisfied by absence. | No — blocked on **GPU hardware** |
 | **M8** `simple mem` CLI | yes (plan §M8 + design + requirement) | yes — `src/app/mem/*`, `mem/dump.spl` | **Overstated as COMPLETE.** `trace` and `gpu` verbs **absent** (not stubs); "all help-listed verbs dispatch" is circular; spec bypasses the real dispatch arm. Post-mortem top/diff/snapshot/gate/sample work. | For delivery yes; for implementation no |
@@ -838,61 +838,139 @@ described here); only the commit's own message text is wrong. Left
 uncorrected in git history (no force-push to `main`) — this note is the
 correction of record.
 
----
+## M4 — LLVM lane: memprof half wired and fixture-proven (asan half already landed)
 
-# Addendum 2026-08-05 (second pass) — M5 arena-provenance class: investigated,
-filed rather than implemented; GC dangling-survivor confirmed already
-satisfied by design
+The original finding (top of this section): M4's *interface* (capability-
+matrix rows + `BUILD:asan`/`BUILD:memprof` notice-only markers) existed but
+**neither half did real work** — zero `-fmemory-profile` hits anywhere, no
+asan build path.
 
-This pass picked up M5 where the first 2026-08-05 addendum left off: "Still
-open (unchanged from the original finding): arena provenance + generation
-enforcement at the SFFI boundary (design §4) ... Not attempted this pass;
-scoped as a separate, larger change." This pass attempted it.
+**asan half — landed separately, before this pass, as commit
+`13348d0fc46`** (verified present on `origin/main`): `SIMPLE_MEM_ASAN=1`
+env gate in `codegen/llvm/backend_core.rs` (`llvm_asan_enabled`), the real
+LLVM `asan` module pass appended to the optimization pipeline (empirically
+placed *after* the base pipeline — `asan,default<O1>` left only 2 of 24
+redzone checks standing vs `default<O1>,asan` preserving all of them),
+`-fsanitize=address` at link time in `linker.rs`, `--sanitize`/
+`--mem-infra=asan` in `native_build.rs`, and `m4_asan_probe.rs` — a
+standalone fixture proving a genuine caught
+`AddressSanitizer: stack-buffer-overflow` (not just a clean compile).
 
-**GC dangling-survivor — re-confirmed out of scope, not a real 4th class.**
-Design doc §5 ("What is NOT worth doing") explicitly rules out "a separate
-GC-tier dangling-survivor mechanism": "M2 §3/§5 already scope GC
-poison-on-sweep under the shared `SIMPLE_MEM_HARDEN` gate; strict mode
-implies harden's GC behavior rather than adding a parallel path." The first
-2026-08-05 addendum already restated this once; restated again here because
-this task's own briefing still framed the remaining count as "2 of 4:
-per-deref arena provenance and GC dangling-survivor," which over-counts by
-one against the design doc's own scoping. The design doc's own enumeration
-supports **3** real defect classes for M5 (uninit-read, poison-on-free,
-arena-provenance-at-the-SFFI-boundary), not 4 — GC dangling-survivor is
-satisfied by an existing mechanism outside M5, by design, not by new M5 code.
+**memprof half — this pass.** Same shape, mirrored file-for-file:
 
-**Arena provenance (design §4) — investigated, filed as a bug, not
-implemented.** Grepped every `interpreter_extern/*.rs` file (all ~60,
-including `ast_sffi.rs`) and every `extern fn` declaration reachable from
-`_AstExpr/nodes.spl`/`accessors.spl` for any point where a `nodes.spl`-minted
-arena index is passed into an `interpreter_extern` SFFI call. Result: **no
-such call site exists**. `ast_sffi.rs`'s handles
-(`register_expr`/`register_node`/... via a `NEXT_HANDLE: AtomicI64` counter)
-are minted independently of `nodes.spl`'s parallel-array arena; the two index
-spaces never meet anywhere in the current tree. The one file whose name
-suggested a bridge, `_FlatAstBridge/convert_nodes.spl`, converts the flat
-arena into the pure-Simple `ParserModule`/HIR shape — a third, in-language
-representation that also never calls into `ast_sffi.rs`.
+- `codegen/llvm/backend_core.rs`: `SIMPLE_MEM_MEMPROF=1` env gate
+  (`llvm_memprof_enabled`, same `OnceLock` idiom as `llvm_asan_enabled`).
+  Unlike asan, memprof needs **no per-function attribute** — empirically
+  confirmed with `opt -passes=memprof` on an unattributed function
+  (instruments unconditionally) — so `apply_function_optimization_attrs` was
+  left untouched. `optimize_module_ir` gained a `MEMPROF_PIPELINE` constant,
+  `"function(memprof),module(memprof-module)"`, deliberately **not** the
+  bare `"memprof"` alias: `opt -print-pipeline-passes -passes=memprof`
+  resolves that alias to `function(memprof),verify,print` on this LLVM
+  (18.1.8) — function-scoped only, never emitting `memprof.module_ctor` /
+  `__memprof_init`. The correctly-scoped combination was found by direct
+  experiment against a real `clang -fmemory-profile` reference compile (see
+  below) before being wired into the backend. Placement: appended after the
+  base optimization pipeline, same slot as `asan` — empirically confirmed
+  (unlike asan) that placement doesn't matter here, since a heap
+  malloc/store/load/free pattern survives both `default<O1>,memprof-pipeline`
+  and `memprof-pipeline,default<O1>` orderings intact; kept after-only to
+  avoid a second special case in the code, not because before-placement is
+  unsafe.
+- `pipeline/native_project/mod.rs`: `NativeBuildConfig.memprof` carrier
+  field, sibling to `sanitize`.
+- `pipeline/native_project/linker.rs`: appends `-fmemory-profile` at link
+  time when `memprof && backend == "llvm"` — confirmed via
+  `clang -fmemory-profile <already-compiled-objects> -o bin -###` that the
+  flag alone (no source recompilation needed) makes the driver add
+  `--whole-archive libclang_rt.memprof-<arch>.a --no-whole-archive`, the
+  same one-flag-does-both shape `-fsanitize=address` has.
+- `driver/src/cli/native_build.rs`: `--memprof` and `--mem-infra=memprof`
+  CLI flags, folding to one bool exactly like `--sanitize`/
+  `--mem-infra=asan`, with the same loud non-llvm-backend error (no silent
+  no-op — memprof has no cranelift/interpreter fallback per the matrix).
+- `compiler/examples/m4_memprof_probe.rs` (new): standalone `cargo run
+  --example` fixture (not `#[test]`, same `OnceLock`-is-process-global
+  reason as `m4_asan_probe.rs`). Builds `heap_touch`: `malloc(4)`, store
+  `42` through the returned pointer, load it back, `free`, return the
+  loaded value — a genuine heap allocation/access pattern, not a bug
+  fixture (MemProfiler is a *profiler*, not a bug detector, so there is
+  nothing to "catch" the way asan catches an OOB write).
 
-Implementing the design doc's literal instruction ("thread it as an `(idx,
-gen)` pair ... so a stale index fails at the boundary") would therefore
-require either inventing a call site that doesn't exist today (out of this
-task's scope and its own design implications) or building a fixture around a
-synthetic, non-production crossing — which would satisfy the letter of "a
-fixture that passes normally and traps under strict mode" while proving
-nothing about a real defect, exactly the vacuous-fixture failure mode this
-campaign's own verification-culture notes warn against elsewhere. Filed as
-`doc/08_tracking/bug/m5_arena_provenance_sffi_boundary_no_existing_crossing_2026-08-05.md`
-rather than forced.
+**Evidence, concretely (not just "it compiled"):**
 
-**Net M5 status after this pass:** of the 3 real defect classes the design
-doc supports, **2 of 3 are done** (uninit-read; poison-on-free/dirty-names
-invariant) and the 3rd (arena provenance at the SFFI boundary) is scoped and
-filed, blocked on a design-level decision (does the described crossing exist
-or is it forward-looking?) rather than an implementation gap. This is not "4
-of 4," and is not rounded up to it — see the bug doc for the exact grep
-evidence and the recommended next step.
+1. **LLVM behavior spike, done first, against real `clang`/`opt` (18.1.8
+   `opt`, system `clang` 20.1.8 — same MemProf pass family across both),
+   before writing any Rust:** `clang -fmemory-profile -O0 -S -emit-llvm` on
+   a trivial malloc/store/load/free C function produces IR with inline
+   shadow-memory access-count bumps around the heap access (the
+   `ptrtoint`/`and ...,-64`/`lshr ...,3`/`add` shadow-address computation
+   pattern) plus a `memprof.module_ctor` calling `__memprof_init`. Compiling
+   and linking that C file with `clang -fmemory-profile -O1 <file>.c -o bin`
+   and running it produced a real `memprof.profraw.<pid>` file (or, under
+   `MEMPROF_OPTIONS=log_path=...`, at the requested path) with magic bytes
+   `81 72 66 6f 72 70 6d ff` ("raw memprof" format). This established the
+   ground truth the backend wiring below was checked against.
+2. **Probe run, `SIMPLE_MEM_MEMPROF` off vs on** (`cargo run --example
+   m4_memprof_probe -p simple-compiler --features llvm`):
+   `MEMPROF_SYMBOLS=0` / `INSTRUMENTED=no` / 984-byte object when unset;
+   `MEMPROF_SYMBOLS=3` / `INSTRUMENTED=yes` / 1688-byte object when
+   `SIMPLE_MEM_MEMPROF=1`. `nm` on the "on" object shows real undefined
+   references (`__memprof_init`, `__memprof_shadow_memory_dynamic_address`,
+   `__memprof_version_mismatch_check_v1`) plus a defined
+   `memprof.module_ctor`; the "off" object has zero `memprof` symbols at
+   all.
+3. **Disassembly of the emitted `heap_touch` function** (`objdump -d`) shows
+   the exact inline shadow-memory instrumentation sequence around both the
+   store (`movl $0x2a,(%rdi)`) and the load (`mov (%rdi),%eax`) through the
+   malloc'd pointer — `and $0xffffffffffffffc0,%rax` /
+   `shr $0x3,%rax` / `add %rcx,%rax` / load-increment-store on the shadow
+   cell — byte-for-byte the same pattern as step 1's clang reference
+   output. This is instruction-level proof, not a string/symbol-count
+   inference.
+4. **End-to-end run.** Linked the emitted "on" object plus a two-line C
+   `main` (calls `heap_touch`, prints the result) with
+   `clang -fmemory-profile <objects> -o bin` (pulling in the real
+   `libclang_rt.memprof-x86_64.a`), ran it with `MEMPROF_OPTIONS=log_path=...`,
+   and got: program output `heap_touch returned 42` (0x2a, matching the
+   fixture's literal — correct control flow) plus a genuine 984-byte
+   `.profraw` file with the same magic bytes as step 1's reference. Negative
+   control: linking the same "on" object *without* `-fmemory-profile`
+   fails with `undefined reference to '__memprof_shadow_memory_dynamic_address'`
+   / `__memprof_init` — proving those references are real, not inert.
 
-**Blocked on bootstrap?** No — pure investigation and doc work this pass, no
-Rust or Simple source changed, no build attempted.
+**Scope limit, stated same as asan's:** instrumentation covers heap accesses
+LLVM-compiled Simple code emits directly. It does not cover the pre-built C
+runtime (`rt_alloc`/`rt_ptr_write_i64` and friends in `src/runtime/*.c`),
+which this lane does not recompile.
+
+**What remains blocked, and why — do not read this as more than proven:**
+the plan's actual M4 exit criterion is "memprof profile produced for a
+**stage-2** compile," i.e. a self-hosted `bin/simple` build of real Simple
+source under `--backend=llvm`. That is unreachable today because stage-2/3
+self-hosting runs on Cranelift, not LLVM — LLVM cannot currently link a
+stage-2 native build at all, tracked as
+`doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md`
+(the design doc's own §1 finding, unchanged by this pass). Everything above
+is standalone-fixture-level evidence (`native-build --backend=llvm` of a
+tiny hand-built IR function via the example harness), exactly the scoping
+the M4 design doc prescribes as the only reachable target until that
+stage-2 bug closes. This pass did not attempt to close that bug — it is
+out of scope for M4 and belongs to the bootstrap/LLVM-backend lane instead.
+
+**Config/doc updates in this pass:** `src/lib/common/mem_infra/config.spl`
+— the `memprof` row's comment rewritten from "unchanged, still
+interface-only" to the scoped-done status above (matrix `bool`s themselves
+unchanged: still `interpreter: false, cranelift: false, llvm: true`, which
+was already correct). `mem_infra_env_assignments` (the `BUILD:memprof`
+notice-only marker for the separate, self-hosted `--mem-infra=` resolver
+path) intentionally left untouched, mirroring the asan landing's own
+precedent — that resolver is a different consumer
+(`src/app/cli/_CliMain/main_and_help.spl`) from the Rust-seed
+`native-build` CLI this pass wired, and the asan landing did not touch it
+either.
+
+**Blocked on bootstrap?** Partly, same split as asan: the standalone-fixture
+level (what was actually proven above) is not blocked and needed no
+bootstrap. The plan's literal stage-2-compile exit criterion is blocked on
+the stage-2 LLVM link bug named above.

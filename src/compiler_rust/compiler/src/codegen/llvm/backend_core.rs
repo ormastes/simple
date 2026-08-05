@@ -84,6 +84,23 @@ pub(super) fn llvm_asan_enabled() -> bool {
     *LLVM_ASAN_ENABLED.get_or_init(|| std::env::var("SIMPLE_MEM_ASAN").map(|v| v == "1").unwrap_or(false))
 }
 
+// M4 (LLVM mem-infra lane): `SIMPLE_MEM_MEMPROF=1` gate for LLVM's
+// MemProfiler heap-allocation-profiling instrumentation (`-fmemory-profile`
+// in clang). Same `OnceLock`-cached env-gate idiom as `llvm_asan_enabled`
+// above. Set by `--mem-infra=memprof` via `NativeBuildConfig::memprof`
+// (`pipeline/native_project/mod.rs`). Unlike asan, MemProfiler needs no
+// per-function `sanitize_*` attribute — empirically verified with
+// `opt -passes=memprof` on an unattributed function: it instruments
+// unconditionally. See
+// `doc/05_design/compiler/backend/m4_llvm_mem_infra_design.md` §3.
+#[cfg(feature = "llvm")]
+static LLVM_MEMPROF_ENABLED: OnceLock<bool> = OnceLock::new();
+
+#[cfg(feature = "llvm")]
+pub(super) fn llvm_memprof_enabled() -> bool {
+    *LLVM_MEMPROF_ENABLED.get_or_init(|| std::env::var("SIMPLE_MEM_MEMPROF").map(|v| v == "1").unwrap_or(false))
+}
+
 // Manual Debug implementation since Context/Module/Builder don't implement Debug
 impl std::fmt::Debug for LlvmBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -144,18 +161,36 @@ impl LlvmBackend {
     #[cfg(feature = "llvm")]
     fn optimize_module_ir(&self, module: &Module<'static>, target_machine: &TargetMachine) -> Result<(), CompileError> {
         let asan = llvm_asan_enabled();
+        let memprof = llvm_memprof_enabled();
+        // M4: `memprof` is a bare FunctionPass name plus a separate
+        // `memprof-module` ModulePass — unlike `asan`, which resolves as a
+        // full module-level pipeline alias on its own. Empirically confirmed
+        // via `opt -print-pipeline-passes -passes=memprof` (resolves to
+        // `function(memprof),verify,print` — function-scoped only) and via
+        // `opt -passes=memprof` alone never emitting `memprof.module_ctor`.
+        // The correctly-scoped combination that gets BOTH the inline
+        // shadow-memory access counters AND the ctor/`__memprof_init` is
+        // `function(memprof),module(memprof-module)` — verified against a
+        // real `clang -fmemory-profile` reference compile.
+        const MEMPROF_PIPELINE: &str = "function(memprof),module(memprof-module)";
 
         if matches!(self.opt_level, NativeOptimizationLevel::None) {
-            if !asan {
+            if !asan && !memprof {
                 return Ok(());
             }
             // M4: at -O0 there is no optimization pipeline to append to, but
-            // the `asan` module pass must still run so `sanitize_address`
-            // functions get instrumented — see `llvm_asan_enabled`.
+            // the instrumentation passes must still run — see
+            // `llvm_asan_enabled`/`llvm_memprof_enabled`.
+            let pipeline = match (asan, memprof) {
+                (true, true) => format!("asan,{MEMPROF_PIPELINE}"),
+                (true, false) => "asan".to_string(),
+                (false, true) => MEMPROF_PIPELINE.to_string(),
+                (false, false) => unreachable!("handled by the early return above"),
+            };
             let options = PassBuilderOptions::create();
             return module
-                .run_passes("asan", target_machine, options)
-                .map_err(|e| crate::error::factory::llvm_build_failed("run LLVM ASan instrumentation pass", &e.to_string()));
+                .run_passes(&pipeline, target_machine, options)
+                .map_err(|e| crate::error::factory::llvm_build_failed("run LLVM mem-infra instrumentation passes", &e.to_string()));
         }
 
         let options = PassBuilderOptions::create();
@@ -181,11 +216,21 @@ impl LlvmBackend {
         // `default<O1>,asan` preserved all of them. This matches clang's own
         // pipeline placement (ASan runs near the end, on already-optimized
         // IR) so instrumentation targets the code that is actually emitted.
-        let pipeline = if asan {
-            format!("{base_pipeline},asan")
-        } else {
-            base_pipeline.to_string()
-        };
+        //
+        // `memprof` does not share that constraint — empirically both
+        // `default<O1>,function(memprof),module(memprof-module)` and the
+        // reverse ordering preserve the instrumented heap-access counters
+        // (unlike asan's redzone checks, memprof's shadow-memory bump has
+        // real side effects the optimizer can't fold away once inserted).
+        // Appended after, same slot as asan, purely to keep one pipeline
+        // shape rather than a second empirically-unnecessary special case.
+        let mut pipeline = base_pipeline.to_string();
+        if asan {
+            pipeline = format!("{pipeline},asan");
+        }
+        if memprof {
+            pipeline = format!("{pipeline},{MEMPROF_PIPELINE}");
+        }
         module
             .run_passes(&pipeline, target_machine, options)
             .map_err(|e| crate::error::factory::llvm_build_failed("run LLVM optimization passes", &e.to_string()))
@@ -1296,6 +1341,74 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("sext", &e))?;
         builder
             .build_return(Some(&ext))
+            .map_err(|e| crate::error::factory::llvm_build_failed("return", &e))?;
+
+        Ok(())
+    }
+
+    /// M4 (LLVM mem-infra lane) memprof fixture: builds one function,
+    /// `heap_touch`, that `malloc`s a 4-byte block, writes through the
+    /// returned pointer, reads it back, and `free`s it — a genuine heap
+    /// allocation/access pattern (not a bug fixture like
+    /// `build_m4_asan_probe_function`'s OOB write; MemProfiler is a
+    /// *profiler*, not a bug detector, so there is nothing to "catch"). The
+    /// call-then-store-then-load-then-free sequence through the malloc'd
+    /// pointer is exactly the shape independently verified (via
+    /// `opt -passes="function(memprof),module(memprof-module)"` on
+    /// hand-written IR of this same shape, see
+    /// `doc/05_design/compiler/backend/m4_llvm_mem_infra_design.md` §3) to
+    /// produce real inline shadow-memory access-count instrumentation
+    /// around the load/store through the returned pointer, plus the
+    /// module-level `memprof.module_ctor`/`__memprof_init` — used by
+    /// `codegen/llvm_test_utils/m4_memprof_probe.rs` (an ad-hoc `cargo run
+    /// --example`, not a `#[test]`, for the same `OnceLock`-process-global
+    /// reason `m4_asan_probe.rs` documents).
+    #[cfg(feature = "llvm")]
+    pub fn build_m4_memprof_probe_function(&self, name: &str) -> Result<(), CompileError> {
+        self.create_module("m4_memprof_probe")?;
+        let module = self.module.borrow();
+        let module = module.as_ref().ok_or_else(crate::error::factory::llvm_module_not_created)?;
+        let builder = self.builder.borrow();
+        let builder = builder.as_ref().ok_or_else(crate::error::factory::llvm_module_not_created)?;
+        let ctx = self.context_ref();
+
+        let i32t = ctx.i32_type();
+        let i64t = ctx.i64_type();
+        let void_t = ctx.void_type();
+        let ptr_t = ctx.ptr_type(inkwell::AddressSpace::default());
+
+        // declare ptr @malloc(i64) / declare void @free(ptr) — external
+        // declarations only, no body, mirroring how the real backend
+        // resolves runtime/libc calls it doesn't define itself.
+        let malloc_fn = module.add_function("malloc", ptr_t.fn_type(&[i64t.into()], false), None);
+        let free_fn = module.add_function("free", void_t.fn_type(&[ptr_t.into()], false), None);
+
+        let fn_type = i32t.fn_type(&[], false);
+        let function = module.add_function(name, fn_type, None);
+
+        let entry = ctx.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+        let size = i64t.const_int(4, false);
+        let call = builder
+            .build_call(malloc_fn, &[size.into()], "p")
+            .map_err(|e| crate::error::factory::llvm_build_failed("call malloc", &e))?;
+        let ptr = call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| crate::error::factory::llvm_build_failed("call malloc", "no return value"))?
+            .into_pointer_value();
+        let val = i32t.const_int(42, false);
+        builder
+            .build_store(ptr, val)
+            .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
+        let loaded = builder
+            .build_load(i32t, ptr, "v")
+            .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
+        builder
+            .build_call(free_fn, &[ptr.into()], "")
+            .map_err(|e| crate::error::factory::llvm_build_failed("call free", &e))?;
+        builder
+            .build_return(Some(&loaded))
             .map_err(|e| crate::error::factory::llvm_build_failed("return", &e))?;
 
         Ok(())

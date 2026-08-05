@@ -365,6 +365,17 @@ pub struct NativeBuildConfig {
     /// `libclang_rt.asan`. See
     /// `doc/05_design/compiler/backend/m4_llvm_mem_infra_design.md`.
     pub sanitize: bool,
+    /// M4 (LLVM mem-infra lane): enable MemProfiler heap-allocation-profiling
+    /// instrumentation. `--memprof` / `--mem-infra=memprof` on the CLI. Only
+    /// takes effect on `backend == "llvm"` (the capability matrix's own
+    /// scoping — `src/lib/common/mem_infra/config.spl`); exported as
+    /// `SIMPLE_MEM_MEMPROF=1` for the LLVM backend
+    /// (`codegen/llvm/backend_core.rs::llvm_memprof_enabled`) and threaded to
+    /// the linker (`linker.rs::link_objects`) to link the memprof runtime via
+    /// `-fmemory-profile`. Unlike `sanitize`, this has no `--sanitize`-style
+    /// alias — memprof is a profiler, not a "sanitize" in clang's sense. See
+    /// `doc/05_design/compiler/backend/m4_llvm_mem_infra_design.md`.
+    pub memprof: bool,
     /// Force conservative (memory-safe) compilation parallelism regardless of
     /// backend or host core count. Overrides the LLVM default-parallelism
     /// clamp below with an even tighter single-worker bound. See
@@ -405,6 +416,7 @@ impl Default for NativeBuildConfig {
             emit_archive: false,
             incremental_hardening: false,
             sanitize: false,
+            memprof: false,
             low_memory: false,
         }
     }

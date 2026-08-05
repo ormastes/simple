@@ -115,13 +115,44 @@ fn mem_infra_matrix() -> [MemInfraRow]:
         # with asan too, tracked as a follow-up (see the M4 lane report's
         # "Remains" list).
         MemInfraRow(name: "asan", interpreter: false, cranelift: false, llvm: true),
-        # memprof: UNCHANGED by the M4 lane above — still interface-only
-        # (`BUILD:memprof` notice, no `-fmemory-profile` emission anywhere).
-        # `-fmemory-profile` reuses the same pass family as asan (§3 of the
-        # design doc) so the plumbing this lane added (config carrier, CLI
-        # flag routing, per-function attribute) is reusable, but nothing
-        # wires the memprof pass itself yet. Do not read this row as "done
-        # because asan is done" — it is a separate follow-up.
+        # memprof: M4 lane, memprof half (2026-08-05). `--memprof` /
+        # `--mem-infra=memprof` on the Rust-seed `native-build --backend=llvm`
+        # CLI now does real work, not just the `BUILD:memprof` notice-only
+        # marker: the LLVM backend runs LLVM's real MemProfiler passes
+        # (`codegen/llvm/backend_core.rs::llvm_memprof_enabled`, gated
+        # `SIMPLE_MEM_MEMPROF=1`) — `function(memprof),module(memprof-module)`,
+        # NOT the bare `memprof` alias asan's precedent might suggest; that
+        # alias resolves to a FUNCTION-only pass on this LLVM (empirically
+        # confirmed via `opt -print-pipeline-passes -passes=memprof` ->
+        # `function(memprof),verify,print`, and via `opt -passes=memprof`
+        # alone never emitting `memprof.module_ctor`) — and the linker step
+        # adds `-fmemory-profile` to link the real MemProfiler runtime
+        # (`pipeline/native_project/linker.rs`). Verified with a standalone
+        # `cargo run --example m4_memprof_probe --features llvm` fixture: a
+        # heap malloc/store/load/free pattern compiles with zero memprof
+        # symbols when the env var is unset, and with it set gets real inline
+        # shadow-memory access-count instrumentation (confirmed by
+        # disassembly, not just a symbol-count grep) plus
+        # `__memprof_init`/`__memprof_shadow_memory_dynamic_address`
+        # references and a `memprof.module_ctor`. The instrumented object,
+        # linked against the real `libclang_rt.memprof` runtime and run,
+        # wrote a genuine `memprof.profraw` (correct raw-profile magic bytes,
+        # matching a `clang -fmemory-profile` reference compile byte-for-byte
+        # on the magic) — this is the actual claimed artifact, not just a
+        # clean compile.
+        #
+        # Scope limit, so this row does not overclaim, mirroring `asan`'s:
+        # instrumentation only covers heap accesses LLVM-compiled Simple code
+        # emits directly. It does NOT cover the pre-built C runtime
+        # (`rt_alloc`/`rt_ptr_write_i64` and friends in `src/runtime/*.c`),
+        # which is not recompiled by this lane. And the plan's actual exit
+        # criterion — "memprof profile produced for a **stage-2** compile" —
+        # remains blocked: stage-2/3 self-hosting still runs on Cranelift,
+        # not LLVM (`doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md`),
+        # so this is proven at the standalone-fixture level only, same scoping
+        # discipline the asan half used. See
+        # `doc/03_plan/compiler/bootstrap/m_lane_status_2026-08-02.md` M4
+        # section for the full before/after evidence.
         MemInfraRow(name: "memprof", interpreter: false, cranelift: false, llvm: true),
         # gpu: device-alloc/free byte counters at the CUDA driver-API choke
         # points (`rt_cuda_mem_alloc_fn`/`rt_cuda_mem_free_fn`,

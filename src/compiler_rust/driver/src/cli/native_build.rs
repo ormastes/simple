@@ -110,6 +110,9 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     // spellings of the same request; both fold into one bool. See
     // `NativeBuildConfig::sanitize` and `doc/05_design/compiler/backend/m4_llvm_mem_infra_design.md`.
     let mut sanitize = false;
+    // M4: `--memprof` and `--mem-infra=memprof` are two spellings of the same
+    // request, mirroring `sanitize` above. See `NativeBuildConfig::memprof`.
+    let mut memprof = false;
 
     // Parse arguments
     let mut i = 1; // Skip "native-build"
@@ -240,16 +243,23 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 sanitize = true;
                 i += 1;
             }
+            "--memprof" => {
+                memprof = true;
+                i += 1;
+            }
             other if other.starts_with("--mem-infra=") => {
                 let requested = other.strip_prefix("--mem-infra=").unwrap_or("");
                 // Deliberately NOT expanding "auto" here: that expansion is
                 // backend-conditional (`mem_infra_auto_rows` in
                 // `src/lib/common/mem_infra/config.spl`) and CLI args parse
                 // in one left-to-right pass, so `--mem-infra=auto` could
-                // precede `--backend=`. Only the explicit "asan" row is safe
-                // to act on order-independently.
+                // precede `--backend=`. Only the explicit "asan"/"memprof"
+                // rows are safe to act on order-independently.
                 if requested.split(',').any(|row| row == "asan") {
                     sanitize = true;
+                }
+                if requested.split(',').any(|row| row == "memprof") {
+                    memprof = true;
                 }
                 i += 1;
             }
@@ -535,6 +545,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         // Opt-in safe incremental object reuse (default off): SIMPLE_NATIVE_INCREMENTAL=1.
         incremental_hardening: std::env::var("SIMPLE_NATIVE_INCREMENTAL").as_deref() == Ok("1"),
         sanitize,
+        memprof,
         low_memory,
         ..Default::default()
     };
@@ -574,6 +585,21 @@ pub fn handle_native_build(args: &[String]) -> i32 {
             return 1;
         }
         std::env::set_var("SIMPLE_MEM_ASAN", "1");
+    }
+    if config.memprof {
+        // M4: memprof is LLVM-only per the capability matrix
+        // (`src/lib/common/mem_infra/config.spl` — `MemInfraRow(name:
+        // "memprof", ..., cranelift: false, llvm: true)`). Same loud-error
+        // policy as `sanitize` above: no fallback exists, so a
+        // cranelift/default request errors rather than silently no-op'ing.
+        if config.backend != "llvm" {
+            eprintln!(
+                "error: --memprof/--mem-infra=memprof requires --backend=llvm (got '{}') — memprof has no cranelift fallback",
+                config.backend
+            );
+            return 1;
+        }
+        std::env::set_var("SIMPLE_MEM_MEMPROF", "1");
     }
 
     // Set target override for compile_file_to_object (thread-safe global)
