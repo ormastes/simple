@@ -89,7 +89,39 @@ fn mem_infra_matrix() -> [MemInfraRow]:
         MemInfraRow(name: "harden", interpreter: true, cranelift: true, llvm: false),
         MemInfraRow(name: "genarena", interpreter: true, cranelift: true, llvm: true),
         MemInfraRow(name: "strict", interpreter: true, cranelift: false, llvm: false),
+        # asan: M4 lane (2026-08-05). `--sanitize` / `--mem-infra=asan` on the
+        # Rust-seed `native-build --backend=llvm` CLI now does real work, not
+        # just the `BUILD:asan` notice-only marker: the LLVM backend marks
+        # every defined function `sanitize_address` and runs the real LLVM
+        # `asan` module pass (`codegen/llvm/backend_core.rs::llvm_asan_enabled`,
+        # gated `SIMPLE_MEM_ASAN=1`), and the linker step adds
+        # `-fsanitize=address` to link the ASan runtime
+        # (`pipeline/native_project/linker.rs`). Verified with a standalone
+        # `cargo run --example m4_asan_probe --features llvm` fixture: a
+        # deliberate out-of-bounds stack write compiles clean with zero asan
+        # symbols when the env var is unset, and gets a real
+        # `__asan_report_store1` shadow-memory check inserted when it is set
+        # — see the M4 lane report for exact byte-for-byte before/after
+        # symbol counts and a real linked-and-run ASan trap.
+        #
+        # Scope limit, so this row does not overclaim: the instrumentation
+        # only covers raw memory access LLVM-compiled Simple code emits
+        # directly (locals, GEP/store/load). It does NOT cover accesses that
+        # happen inside the pre-built C runtime (`rt_alloc`/`rt_ptr_write_i64`
+        # and friends in `src/runtime/*.c`) — those are compiled separately,
+        # without `-fsanitize=address`, and are not recompiled by this lane.
+        # `rt_ptr_write_i64`-based OOB (the M2 fixture pattern) is therefore
+        # NOT caught by `asan` yet; that needs the runtime C sources built
+        # with asan too, tracked as a follow-up (see the M4 lane report's
+        # "Remains" list).
         MemInfraRow(name: "asan", interpreter: false, cranelift: false, llvm: true),
+        # memprof: UNCHANGED by the M4 lane above — still interface-only
+        # (`BUILD:memprof` notice, no `-fmemory-profile` emission anywhere).
+        # `-fmemory-profile` reuses the same pass family as asan (§3 of the
+        # design doc) so the plumbing this lane added (config carrier, CLI
+        # flag routing, per-function attribute) is reusable, but nothing
+        # wires the memprof pass itself yet. Do not read this row as "done
+        # because asan is done" — it is a separate follow-up.
         MemInfraRow(name: "memprof", interpreter: false, cranelift: false, llvm: true),
         # gpu: device-alloc/free byte counters at the CUDA driver-API choke
         # points (`rt_cuda_mem_alloc_fn`/`rt_cuda_mem_free_fn`,

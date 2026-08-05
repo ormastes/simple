@@ -1229,6 +1229,19 @@ int main(int argc, char** argv) {
             cmd.arg(format!("-T{}", ls.display()));
         }
 
+        // M4 (LLVM mem-infra lane): link the ASan runtime (`libclang_rt.asan`)
+        // when `--sanitize`/`--mem-infra=asan` requested it. The CLI already
+        // rejects this combination on any backend but llvm (see
+        // `driver/src/cli/native_build.rs`), so the backend check here is a
+        // second, cheap guard against a config built some other way (e.g. a
+        // future direct `NativeProjectBuilder` caller) silently asking the
+        // linker for a runtime whose IR was never actually instrumented —
+        // `codegen/llvm/backend_core.rs::llvm_asan_enabled` is what runs the
+        // `asan` module pass, and it is gated on the LLVM backend only.
+        if self.config.sanitize && self.config.backend == "llvm" {
+            cmd.arg("-fsanitize=address");
+        }
+
         if is_clang_cl {
             cmd.arg(&main_o);
             if let Some(ref init) = init_o {

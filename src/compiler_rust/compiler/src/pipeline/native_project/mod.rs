@@ -356,6 +356,15 @@ pub struct NativeBuildConfig {
     /// whole per-module cache instead of silently reusing a stale object for
     /// module B. Default false preserves the legacy content-only key.
     pub incremental_hardening: bool,
+    /// M4 (LLVM mem-infra lane): enable AddressSanitizer instrumentation.
+    /// `--sanitize` / `--mem-infra=asan` on the CLI. Only takes effect on
+    /// `backend == "llvm"` (the capability matrix's own scoping —
+    /// `src/lib/common/mem_infra/config.spl`); exported as `SIMPLE_MEM_ASAN=1`
+    /// for the LLVM backend (`codegen/llvm/backend_core.rs::llvm_asan_enabled`)
+    /// and threaded to the linker (`linker.rs::link_objects`) to link
+    /// `libclang_rt.asan`. See
+    /// `doc/05_design/compiler/backend/m4_llvm_mem_infra_design.md`.
+    pub sanitize: bool,
     /// Force conservative (memory-safe) compilation parallelism regardless of
     /// backend or host core count. Overrides the LLVM default-parallelism
     /// clamp below with an even tighter single-worker bound. See
@@ -395,6 +404,7 @@ impl Default for NativeBuildConfig {
             opt_level: NativeOptimizationLevel::default_for_native_executable(),
             emit_archive: false,
             incremental_hardening: false,
+            sanitize: false,
             low_memory: false,
         }
     }

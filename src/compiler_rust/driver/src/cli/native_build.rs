@@ -106,6 +106,10 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut linker_script: Option<PathBuf> = None;
     let mut opt_level = NativeOptimizationLevel::default_for_native_executable();
     let mut build_mode = String::from("dynload");
+    // M4 (LLVM mem-infra lane): `--sanitize` and `--mem-infra=asan` are two
+    // spellings of the same request; both fold into one bool. See
+    // `NativeBuildConfig::sanitize` and `doc/05_design/compiler/backend/m4_llvm_mem_infra_design.md`.
+    let mut sanitize = false;
 
     // Parse arguments
     let mut i = 1; // Skip "native-build"
@@ -230,6 +234,23 @@ pub fn handle_native_build(args: &[String]) -> i32 {
             }
             other if other.starts_with("--backend=") => {
                 backend = other.strip_prefix("--backend=").unwrap_or("").to_string();
+                i += 1;
+            }
+            "--sanitize" => {
+                sanitize = true;
+                i += 1;
+            }
+            other if other.starts_with("--mem-infra=") => {
+                let requested = other.strip_prefix("--mem-infra=").unwrap_or("");
+                // Deliberately NOT expanding "auto" here: that expansion is
+                // backend-conditional (`mem_infra_auto_rows` in
+                // `src/lib/common/mem_infra/config.spl`) and CLI args parse
+                // in one left-to-right pass, so `--mem-infra=auto` could
+                // precede `--backend=`. Only the explicit "asan" row is safe
+                // to act on order-independently.
+                if requested.split(',').any(|row| row == "asan") {
+                    sanitize = true;
+                }
                 i += 1;
             }
             "--cpu" => {
@@ -513,6 +534,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         emit_archive,
         // Opt-in safe incremental object reuse (default off): SIMPLE_NATIVE_INCREMENTAL=1.
         incremental_hardening: std::env::var("SIMPLE_NATIVE_INCREMENTAL").as_deref() == Ok("1"),
+        sanitize,
         low_memory,
         ..Default::default()
     };
@@ -536,6 +558,22 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     }
     if let Some(selected_cpu) = cpu {
         std::env::set_var("SIMPLE_NATIVE_CPU", selected_cpu.as_str());
+    }
+    if config.sanitize {
+        // M4: asan is LLVM-only per the capability matrix
+        // (`src/lib/common/mem_infra/config.spl` — `MemInfraRow(name: "asan",
+        // ..., cranelift: false, llvm: true)`). A cranelift/default request
+        // is a silent no-op unless we say so: no fallback exists (unlike
+        // `strict`, which degrades to `harden` on cranelift), so error loudly
+        // rather than pretend coverage that doesn't exist.
+        if config.backend != "llvm" {
+            eprintln!(
+                "error: --sanitize/--mem-infra=asan requires --backend=llvm (got '{}') — asan has no cranelift fallback",
+                config.backend
+            );
+            return 1;
+        }
+        std::env::set_var("SIMPLE_MEM_ASAN", "1");
     }
 
     // Set target override for compile_file_to_object (thread-safe global)

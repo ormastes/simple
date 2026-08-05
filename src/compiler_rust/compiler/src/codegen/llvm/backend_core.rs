@@ -6,6 +6,7 @@ use crate::mir::{MirFunction, MirModule};
 use crate::optimizations::NativeOptimizationLevel;
 use simple_common::target::{Target, TargetArch, TargetCpu, TargetOS};
 use std::cell::RefCell;
+use std::sync::OnceLock;
 
 #[cfg(feature = "llvm")]
 use inkwell::attributes::{Attribute, AttributeLoc};
@@ -67,6 +68,22 @@ pub struct LlvmBackend {
     pub(super) module_prefix: Option<String>,
 }
 
+// M4 (LLVM mem-infra lane): `SIMPLE_MEM_ASAN=1` gate for AddressSanitizer
+// instrumentation of LLVM-backend native builds. Cached once via `OnceLock`,
+// matching the `SIMPLE_MEM_GUARD_RATE` idiom in
+// `interpreter_extern/mem_guard.rs` — zero overhead (one relaxed load) when
+// unset, per the campaign's zero-overhead-when-off rule. Set by
+// `--mem-infra=asan` / `--sanitize` via `NativeBuildConfig::sanitize`
+// (`pipeline/native_project/mod.rs`), which exports this env var before the
+// LLVM backend compiles. See `doc/05_design/compiler/backend/m4_llvm_mem_infra_design.md`.
+#[cfg(feature = "llvm")]
+static LLVM_ASAN_ENABLED: OnceLock<bool> = OnceLock::new();
+
+#[cfg(feature = "llvm")]
+pub(super) fn llvm_asan_enabled() -> bool {
+    *LLVM_ASAN_ENABLED.get_or_init(|| std::env::var("SIMPLE_MEM_ASAN").map(|v| v == "1").unwrap_or(false))
+}
+
 // Manual Debug implementation since Context/Module/Builder don't implement Debug
 impl std::fmt::Debug for LlvmBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -103,6 +120,15 @@ impl LlvmBackend {
             let always_inline = self.context_ref().create_enum_attribute(kind, 0);
             func.add_attribute(AttributeLoc::Function, always_inline);
         }
+        // M4: mark every defined function `sanitize_address` when the ASan
+        // lane is on, mirroring what clang's `-fsanitize=address` does — the
+        // `asan` module pass (run in `optimize_module_ir`) only instruments
+        // functions carrying this attribute.
+        if llvm_asan_enabled() {
+            let kind = Attribute::get_named_enum_kind_id("sanitize_address");
+            let asan_attr = self.context_ref().create_enum_attribute(kind, 0);
+            func.add_attribute(AttributeLoc::Function, asan_attr);
+        }
     }
 
     #[cfg(feature = "llvm")]
@@ -117,8 +143,19 @@ impl LlvmBackend {
 
     #[cfg(feature = "llvm")]
     fn optimize_module_ir(&self, module: &Module<'static>, target_machine: &TargetMachine) -> Result<(), CompileError> {
+        let asan = llvm_asan_enabled();
+
         if matches!(self.opt_level, NativeOptimizationLevel::None) {
-            return Ok(());
+            if !asan {
+                return Ok(());
+            }
+            // M4: at -O0 there is no optimization pipeline to append to, but
+            // the `asan` module pass must still run so `sanitize_address`
+            // functions get instrumented — see `llvm_asan_enabled`.
+            let options = PassBuilderOptions::create();
+            return module
+                .run_passes("asan", target_machine, options)
+                .map_err(|e| crate::error::factory::llvm_build_failed("run LLVM ASan instrumentation pass", &e.to_string()));
         }
 
         let options = PassBuilderOptions::create();
@@ -131,14 +168,26 @@ impl LlvmBackend {
             options.set_merge_functions(true);
         }
 
-        let pipeline = match self.opt_level {
-            NativeOptimizationLevel::None => return Ok(()),
+        let base_pipeline = match self.opt_level {
+            NativeOptimizationLevel::None => unreachable!("handled above"),
             NativeOptimizationLevel::Basic => "default<O1>",
             NativeOptimizationLevel::Standard => "default<O2>",
             NativeOptimizationLevel::Aggressive => "default<O3>",
         };
+        // M4: `asan` must run AFTER the optimization pipeline, not before —
+        // measured empirically with `opt -passes=`: `asan,default<O1>` left
+        // only 2 of 24 redzone checks standing (the optimizer treats
+        // unoptimized ASan's own control flow as foldable), while
+        // `default<O1>,asan` preserved all of them. This matches clang's own
+        // pipeline placement (ASan runs near the end, on already-optimized
+        // IR) so instrumentation targets the code that is actually emitted.
+        let pipeline = if asan {
+            format!("{base_pipeline},asan")
+        } else {
+            base_pipeline.to_string()
+        };
         module
-            .run_passes(pipeline, target_machine, options)
+            .run_passes(&pipeline, target_machine, options)
             .map_err(|e| crate::error::factory::llvm_build_failed("run LLVM optimization passes", &e.to_string()))
     }
 
@@ -1181,6 +1230,75 @@ impl LlvmBackend {
     #[cfg(not(feature = "llvm"))]
     pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
         Err(crate::error::factory::llvm_feature_not_enabled())
+    }
+
+    /// M4 (LLVM mem-infra lane) sabotage fixture: builds one function,
+    /// `oob_store`, doing a genuine out-of-bounds stack write —
+    /// `alloca [4 x i8]`, `getelementptr inbounds` to index 5 (one past the
+    /// end), `store i8 42`, load it back, `sext` to i32, return — entirely
+    /// in raw LLVM IR the way the LLVM backend itself emits locals
+    /// (`LocalAddr`/GEP), independent of any Simple-source-level bounds
+    /// check. This is the exact instruction pattern independently verified
+    /// against `opt -passes=asan` (see
+    /// `doc/05_design/compiler/backend/m4_llvm_mem_infra_design.md` §2 and
+    /// the M4 lane report) to produce a real `__asan_report_store1` shadow
+    /// check when the function carries `sanitize_address` — used by
+    /// `codegen/llvm_test_utils/m4_asan_probe.rs` (an ad-hoc `cargo run
+    /// --example`, not a `#[test]`, because `llvm_asan_enabled()`'s
+    /// `OnceLock` is cached once per process and a single test binary
+    /// running many LLVM tests would race on which one initializes it).
+    #[cfg(feature = "llvm")]
+    pub fn build_m4_asan_probe_function(&self, name: &str) -> Result<(), CompileError> {
+        self.create_module("m4_asan_probe")?;
+        let module = self.module.borrow();
+        let module = module.as_ref().ok_or_else(crate::error::factory::llvm_module_not_created)?;
+        let builder = self.builder.borrow();
+        let builder = builder.as_ref().ok_or_else(crate::error::factory::llvm_module_not_created)?;
+        let ctx = self.context_ref();
+
+        let i8t = ctx.i8_type();
+        let i32t = ctx.i32_type();
+        let i64t = ctx.i64_type();
+        let arr_t = i8t.array_type(4);
+        let fn_type = i32t.fn_type(&[], false);
+        let function = module.add_function(name, fn_type, None);
+
+        // Mirrors `apply_function_optimization_attrs`'s asan-attribute logic
+        // exactly, so this fixture exercises the SAME env-gated production
+        // code path (`llvm_asan_enabled`), not a reimplementation of it.
+        if llvm_asan_enabled() {
+            let kind = Attribute::get_named_enum_kind_id("sanitize_address");
+            let attr = ctx.create_enum_attribute(kind, 0);
+            function.add_attribute(AttributeLoc::Function, attr);
+        }
+
+        let entry = ctx.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+        let buf = builder
+            .build_alloca(arr_t, "buf")
+            .map_err(|e| crate::error::factory::llvm_build_failed("alloca", &e))?;
+        let idx0 = i64t.const_int(0, false);
+        let idx5 = i64t.const_int(5, false); // one past the 4-byte buffer
+        let gep = unsafe {
+            builder
+                .build_in_bounds_gep(arr_t, buf, &[idx0, idx5], "p")
+                .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?
+        };
+        let val = i8t.const_int(42, false);
+        builder
+            .build_store(gep, val)
+            .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
+        let loaded = builder
+            .build_load(i8t, gep, "v")
+            .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
+        let ext = builder
+            .build_int_s_extend(loaded.into_int_value(), i32t, "ext")
+            .map_err(|e| crate::error::factory::llvm_build_failed("sext", &e))?;
+        builder
+            .build_return(Some(&ext))
+            .map_err(|e| crate::error::factory::llvm_build_failed("return", &e))?;
+
+        Ok(())
     }
 }
 
