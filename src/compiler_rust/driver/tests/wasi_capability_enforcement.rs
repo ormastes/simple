@@ -241,23 +241,35 @@ fn wasi_free_module_still_cannot_dodge_its_policy() {
 /// policy must let the run proceed. A control that refuses everything is as
 /// broken as one that refuses nothing.
 ///
-/// This asserts the verdict rather than driving `run_wasm_file` to completion.
-/// Executing the WASI-free fixture aborts the process inside the wasm bridge --
-/// `unsafe precondition(s) violated: ptr::copy requires that both pointer
-/// arguments are aligned and non-null`, SIGABRT, which takes the whole test
-/// binary with it and cannot be caught. That is a pre-existing defect in the
-/// bridge's handling of a module that exports no memory, unrelated to capability
-/// enforcement (the deny case above never reaches it because the policy refuses
-/// first). Recorded in
-/// `doc/08_tracking/bug/wasm_bridge_null_ptr_copy_module_without_memory_2026-08-05.md`;
-/// once that is fixed this test should drive `run_wasm_file` and assert `Ok`.
+/// This used to assert only the policy verdict instead of driving
+/// `run_wasm_file` to completion, because executing the WASI-free fixture
+/// aborted the process: `unsafe precondition(s) violated: ptr::copy requires
+/// that both pointer arguments are aligned and non-null`, SIGABRT, taking the
+/// whole test binary with it. That was fixed at the root cause -- a missing
+/// alignment step in `VMOffsets::precompute` (vendored `wasmer-types`,
+/// `vendor/wasmer-types/src/vmoffsets.rs`), not anything in this crate's own
+/// bridge code; see
+/// `doc/08_tracking/bug/wasm_bridge_null_ptr_copy_module_without_memory_2026-08-05.md`
+/// for the full writeup. Now that the abort is gone, this drives the real run
+/// to completion and asserts on its result, per the doc's "Not related to
+/// capability enforcement" section.
 #[test]
 fn wasi_free_module_is_not_refused_when_nothing_ungranted_is_offered() {
-    let config = config_for(GRANTS_REPORTS_ONLY);
+    let dir = existing_host_dir("nowasi_allow");
+    let wasm_path = dir.join("no_wasi_imports.wasm");
+    std::fs::write(&wasm_path, NO_WASI_IMPORTS_WASM).expect("write fixture module");
 
-    config
-        .validate_capabilities()
-        .expect("a policy-compliant invocation must not be refused");
+    let config = config_for(GRANTS_REPORTS_ONLY);
+    let mut runner = simple_wasm_runtime::WasmRunner::with_config(config).expect("create runner");
+
+    let result = runner
+        .run_wasm_file(&wasm_path, "main", &[])
+        .expect("a policy-compliant invocation must not be refused, and must not abort");
+    assert_eq!(
+        result.as_int(),
+        0,
+        "expected the fixture's `i32.const 0` body to round-trip as 0"
+    );
 }
 
 /// The invocation is what gives the policy something to filter.

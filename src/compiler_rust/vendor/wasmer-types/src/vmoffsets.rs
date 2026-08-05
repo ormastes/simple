@@ -285,36 +285,77 @@ impl VMOffsets {
                 .unwrap()
         }
 
+        // Every `vmctx_*_begin` computed below (other than the signature-ids
+        // array, which always starts at offset 0) marks the start of a region
+        // whose elements contain raw pointers (`VMFunctionImport`,
+        // `VMTableImport`, ..., `VMTableDefinition`, `VMMemoryDefinition`).
+        // The preceding region's byte length is not guaranteed to be a
+        // multiple of `pointer_size` -- `num_signature_ids` in particular is
+        // a count of 4-byte `VMSharedSignatureIndex` entries, so an odd count
+        // leaves the very next region 4-byte-short of pointer alignment.
+        //
+        // `align(..., pointer_size)` here mirrors the alignment this function
+        // already applies to `vmctx_globals_begin` below (there widened to 16
+        // for v128 globals); without it, `InstanceHandle::new`'s `ptr::copy`
+        // calls into these regions receive a misaligned destination pointer.
+        // On x86_64/aarch64 an unaligned pointer-sized copy has always been
+        // silently tolerated by the hardware, so this went unnoticed until
+        // Rust's `ptr::copy` UB check (enabled whenever `debug_assertions` is
+        // on, e.g. every `cargo test`) started rejecting it outright with
+        // "ptr::copy requires that both pointer arguments are aligned and
+        // non-null" -- a non-unwinding panic that aborts the whole process,
+        // even when the copy length is 0. See
+        // doc/08_tracking/bug/wasm_bridge_null_ptr_copy_module_without_memory_2026-08-05.md.
+        let ptr_align = u32::from(self.pointer_size);
+
         self.vmctx_signature_ids_begin = 0;
-        self.vmctx_imported_functions_begin = offset_by(
-            self.vmctx_signature_ids_begin,
-            self.num_signature_ids,
-            u32::from(self.size_of_vmshared_signature_index()),
+        self.vmctx_imported_functions_begin = align(
+            offset_by(
+                self.vmctx_signature_ids_begin,
+                self.num_signature_ids,
+                u32::from(self.size_of_vmshared_signature_index()),
+            ),
+            ptr_align,
         );
-        self.vmctx_imported_tables_begin = offset_by(
-            self.vmctx_imported_functions_begin,
-            self.num_imported_functions,
-            u32::from(self.size_of_vmfunction_import()),
+        self.vmctx_imported_tables_begin = align(
+            offset_by(
+                self.vmctx_imported_functions_begin,
+                self.num_imported_functions,
+                u32::from(self.size_of_vmfunction_import()),
+            ),
+            ptr_align,
         );
-        self.vmctx_imported_memories_begin = offset_by(
-            self.vmctx_imported_tables_begin,
-            self.num_imported_tables,
-            u32::from(self.size_of_vmtable_import()),
+        self.vmctx_imported_memories_begin = align(
+            offset_by(
+                self.vmctx_imported_tables_begin,
+                self.num_imported_tables,
+                u32::from(self.size_of_vmtable_import()),
+            ),
+            ptr_align,
         );
-        self.vmctx_imported_globals_begin = offset_by(
-            self.vmctx_imported_memories_begin,
-            self.num_imported_memories,
-            u32::from(self.size_of_vmmemory_import()),
+        self.vmctx_imported_globals_begin = align(
+            offset_by(
+                self.vmctx_imported_memories_begin,
+                self.num_imported_memories,
+                u32::from(self.size_of_vmmemory_import()),
+            ),
+            ptr_align,
         );
-        self.vmctx_tables_begin = offset_by(
-            self.vmctx_imported_globals_begin,
-            self.num_imported_globals,
-            u32::from(self.size_of_vmglobal_import()),
+        self.vmctx_tables_begin = align(
+            offset_by(
+                self.vmctx_imported_globals_begin,
+                self.num_imported_globals,
+                u32::from(self.size_of_vmglobal_import()),
+            ),
+            ptr_align,
         );
-        self.vmctx_memories_begin = offset_by(
-            self.vmctx_tables_begin,
-            self.num_local_tables,
-            u32::from(self.size_of_vmtable_definition()),
+        self.vmctx_memories_begin = align(
+            offset_by(
+                self.vmctx_tables_begin,
+                self.num_local_tables,
+                u32::from(self.size_of_vmtable_definition()),
+            ),
+            ptr_align,
         );
         self.vmctx_globals_begin = align(
             offset_by(
