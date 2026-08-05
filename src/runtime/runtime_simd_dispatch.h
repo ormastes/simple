@@ -16,7 +16,31 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include <string.h>
+
+/* ================================================================
+ * ML-KEM native SIMD NTT — kernel entry points
+ * ================================================================
+ * Defined in runtime_simd_dispatch.c. These MUST be declared before use:
+ * rt_mlkem_ntt_simd_batch returns a 64-bit pointer, so an implicit
+ * declaration makes C default it to `int`, and the caller truncates the
+ * returned pointer to 32 bits (gcc emits `cltq`) — the dereference then
+ * segfaults. See the header note in
+ * scripts/check/build-mlkem-simd-c-lane.shs.
+ */
+
+#ifndef SPL_ARRAY_FWD_DECLARED
+#define SPL_ARRAY_FWD_DECLARED
+typedef struct SplArray SplArray;
+#endif
+
+SplArray* rt_mlkem_ntt_simd_batch(SplArray* coefficients, bool inverse);
+int64_t   rt_mlkem_ntt_simd_backend(void); /* 0=none, 1=AVX2, 2=NEON, 3=RVV */
+int64_t   rt_mlkem_ntt_simd_hits(void);
+int64_t   rt_mlkem_ntt_simd_observed_rvv_vlen_bits(void);
+int64_t   rt_mlkem_ntt_simd_reset(void);
+int64_t   rt_mlkem_modq_avx2_selfcheck(void);
 
 /* ================================================================
  * Platform Detection Macros

@@ -86,3 +86,87 @@ replaced by a conditional `SIMPLE_RUNTIME_TARGET_AVX2` macro now applied at
 3. Then rebuild from committed sources and confirm the benchmark reproduces.
    **Until step 3 passes, the 1.70x number rests on a binary that cannot be
    regenerated from the tree.**
+
+---
+
+## RESOLVED 2026-08-05 — root cause, both losses, and a reproducible build
+
+**Status: FIXED.** The lane builds from committed sources and reproduces the
+prebuilt binary.
+
+### Root cause: pointer truncation from the missing prototype
+
+`rt_mlkem_ntt_simd_batch` returns `SplArray*`. With no prototype, C defaults the
+return to `int`, so GCC keeps only `eax` and sign-extends it:
+
+```
+call  rt_mlkem_ntt_simd_batch
+test  %eax,%eax          <- 32-bit null check
+cltq                     <- sign-extends the TRUNCATED return
+cmpq  $0x300,0x8(%rax)   <- SIGSEGV here
+```
+
+The working binary at the same call site has `test %rax,%rax` — full 64-bit, no
+`cltq`. Proven by disassembly plus a gdb backtrace to
+`mlkem_ntt_simd_c_test.c:213`, not inferred. Alignment, TLS init and a missing
+`-D` are all eliminated. The other five implicit declarations return `int64_t`
+and would corrupt values; only the pointer one faults.
+
+### Both missing pieces were casualties of the same tree wipe
+
+- `src/runtime/runtime.h` **used to declare all six kernels** at
+  `1c74085cfce:1133-1140`. The test includes `runtime.h`, so the original build
+  had real prototypes. Current `runtime.h`: 0 hits.
+- A build script **`scripts/check/check-x25519mlkem768-cpu-simd.shs` existed**
+  and is gone. Its flags: `-O2 -std=gnu11 -Wall -Wextra -pthread
+  -ffunction-sections -fdata-sections -Isrc/runtime`, linked `-Wl,--gc-sections`.
+
+Both were lost in `118c636ead8` (revert `7f5a55fa46e`). So the build was never
+"ad hoc" — the repo lost its prototypes and its recipe.
+
+`--gc-sections` also explains the only other binary difference: the prebuilt
+binary lacks `dlopen/malloc/calloc/free` dynamic symbols while its `.o` still
+carries 23 OpenCL symbols. The linker dropped them; the source is identical.
+
+**Lineage confirmed, not merely plausible:** both binaries emit the identical
+benchmark checksum `66698556`.
+
+### Fix
+
+- `src/runtime/runtime_simd_dispatch.h` — declares all six entry points with
+  real signatures (`SplArray* rt_mlkem_ntt_simd_batch(SplArray*, bool)`, five
+  `int64_t`), plus `<stdbool.h>` and a guarded `SplArray` forward declaration.
+- `test/09_baselines/crypto/x25519mlkem768/mlkem_ntt_simd_c_test.c` — includes
+  that header.
+- `scripts/check/build-mlkem-simd-c-lane.shs` — builds from committed sources
+  and runs, with **`-Werror=implicit-function-declaration`** so this exact class
+  of failure cannot return silently. Verdict `MLKEM_SIMD_C_LANE: PASS/FAIL/SKIP`,
+  non-zero on failure, `$?` taken from the binary rather than a pipe.
+
+The naive command that previously segfaulted now builds with **0 errors, 0
+implicit warnings** and the binary reports `MLKEM_NTT_SIMD_C_TEST: PASS`,
+`mlkem_ntt_simd_backend=1`.
+
+### The 1.70x figure is CORRECTED to ~1.6x
+
+The earlier 1.70x came from **5 samples — too few**. Measured properly:
+
+| source | n | median | min | max |
+|---|---|---|---|---|
+| rebuilt (alternating A/B) | 15 | 1.608 | 1.196 | 2.529 |
+| prebuilt (alternating A/B) | 15 | 1.667 | 1.470 | 2.608 |
+| rebuilt (independent lane, n=21) | 21 | 1.592 | 1.481 | 2.938 |
+| prebuilt (independent lane, n=21) | 21 | 1.586 | 1.208 | 2.475 |
+
+Rebuilt and prebuilt agree within noise (0.4%–3.7% depending on the run). The
+honest figure is **~1.6x median**, and the metric **scatters 1.2x–2.9x**, so any
+single reading — including a flattering one — is meaningless. Always report a
+median over >=15 repeats with the range.
+
+**Measurement trap recorded:** a first comparison ran all repeats of one binary
+then all of the other, and showed a spurious 12.7% gap. Blocks are not an A/B.
+Alternate the two binaries within the loop, or load drift becomes the result.
+
+Scope is unchanged and remains the binary's own string:
+`mlkem_ntt_benchmark_scope=focused-primitive-mean-not-full-mlkem-promotion` — an
+NTT-primitive speedup, **not** a full ML-KEM speedup and **not** a promotion.

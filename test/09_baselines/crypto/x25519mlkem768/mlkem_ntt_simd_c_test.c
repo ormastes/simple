@@ -10,6 +10,10 @@
 #endif
 
 #include "runtime.h"
+/* Declares the rt_mlkem_* kernel entry points. Without it
+ * rt_mlkem_ntt_simd_batch is implicitly declared `int` and its returned
+ * pointer is truncated to 32 bits, segfaulting at the first deref. */
+#include "runtime_simd_dispatch.h"
 
 #if defined(__riscv) && defined(__riscv_vector)
 #include <riscv_vector.h>
