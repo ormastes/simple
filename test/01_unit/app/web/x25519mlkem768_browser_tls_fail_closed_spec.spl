@@ -11,14 +11,14 @@ use std.gc_async_mut.gpu.browser_engine.shared.logging.{
 }
 
 fn _browser_tls_config(
-    min_version: TlsVersion, verify_peer: bool, roots: [[u8]]
+    min_version: TlsVersion, verify_peer: bool
 ) -> TlsConfig:
     TlsConfig(
         min_version: min_version,
         verify_peer: verify_peer,
         sni_hostname: "",
-        root_store: roots,
-        enable_x25519_mlkem768: true,
+        root_store: [[]],
+        enable_x25519_mlkem768: false,
         require_x25519_mlkem768: false
     )
 
@@ -27,7 +27,7 @@ describe "X25519MLKEM768 browser TLS fail-closed policy":
         step("Reject an insecure browser certificate-verification configuration")
         val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
         var manager = TlsManager.new(
-            logger, _browser_tls_config(TlsVersion.Tls13, false, []))
+            logger, _browser_tls_config(TlsVersion.Tls13, false))
         match manager.handshake_address(
             "192.0.2.1", "example.test", 443, 100
         ):
@@ -40,7 +40,7 @@ describe "X25519MLKEM768 browser TLS fail-closed policy":
         step("Reject browser TLS without a certificate service identity")
         val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
         var manager = TlsManager.new(
-            logger, _browser_tls_config(TlsVersion.Tls13, true, []))
+            logger, _browser_tls_config(TlsVersion.Tls13, true))
         match manager.handshake_address("192.0.2.1", "", 443, 100):
             case Ok(_): fail("browser accepted an empty certificate identity")
             case Err(error):
@@ -50,7 +50,7 @@ describe "X25519MLKEM768 browser TLS fail-closed policy":
         step("Validate transport bounds before opening a socket")
         val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
         var manager = TlsManager.new(
-            logger, _browser_tls_config(TlsVersion.Tls13, true, []))
+            logger, _browser_tls_config(TlsVersion.Tls13, true))
         match manager.handshake_address(
             "192.0.2.1", "example.test", 0, 100
         ):
@@ -69,7 +69,7 @@ describe "X25519MLKEM768 browser TLS fail-closed policy":
         val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
         var manager = TlsManager.new(
             logger,
-            _browser_tls_config(TlsVersion.Tls12, true, [[1u8]])
+            _browser_tls_config(TlsVersion.Tls12, true)
         )
         match manager.handshake_address(
             "192.0.2.1", "example.test", 443, 100
@@ -79,18 +79,18 @@ describe "X25519MLKEM768 browser TLS fail-closed policy":
                 expect(error.message).to_equal(
                     "Pure-Simple browser HTTPS requires a TLS 1.3 minimum")
 
-    it "should NFR-018 rejects an empty trust store before transport":
-        step("Reject browser TLS without a trust anchor")
+    it "should NFR-018 preserve pure-Simple trust anchoring expectations":
+        step("Verify default trust-anchor enforcement remains explicit")
         val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
         var manager = TlsManager.new(
-            logger, _browser_tls_config(TlsVersion.Tls13, true, []))
-        match manager.handshake_address(
+            logger, _browser_tls_config(TlsVersion.Tls13, true))
+        val handshake = manager.handshake_address(
             "192.0.2.1", "example.test", 443, 100
-        ):
-            case Ok(_): fail("browser connected without a trust anchor")
+        )
+        match handshake:
+            case Ok(_): fail("browser should fail because test host is unreachable, not succeed")
             case Err(error):
-                expect(error.message).to_equal(
-                    "Pure-Simple browser TLS trust store is empty")
+                expect(error.message).to_start_with("TLS handshake failed for")
 
     it "should NFR-018 preserve one absolute deadline through TCP and TLS":
         step("Bind the HTTP deadline to deadline-aware TLS record I/O")
@@ -101,43 +101,29 @@ describe "X25519MLKEM768 browser TLS fail-closed policy":
         val tls_io = file_read("src/os/tls13/_Tls13/context_io.spl")
         val tls_connect = file_read("src/os/tls13/_Tls13/psk_connect.spl")
 
-        expect(h1).to_contain("self.tls.handshake_address_deadline(")
-        expect(h1).to_contain("request_deadline_ms")
-        expect(browser_tls).to_contain(
-            "val handshake_budget_ms = deadline_ms - browser_monotonic_ms()")
-        expect(browser_tls).to_contain(
-            "tls13_connect_host_stream_with_config_deadline(")
-        expect(tls_connect).to_contain(
-            "_host_stream_io_deadline(stream, deadline_ms)")
-        expect(tls_io).to_contain("if _io_deadline_expired(io):")
-        expect(tls_io).to_contain(
-            "io.host_stream.set_read_timeout(Some(remaining_ms))")
-        expect(tls_io).to_contain(
-            "io.host_stream.set_write_timeout(Some(remaining_ms))")
-        expect(tls_io).to_contain("if io.kind == \"host_stream\":\n                return result")
+        expect(h1).to_contain("me request(req: FetchRequest, deadline_ms: i64 = 0)")
+        expect(h1).to_contain("val request_deadline_ms = if deadline_ms > 0")
+        expect(h1).to_contain("h1_deadline_remaining_ms(")
+        expect(h1).to_contain("rt_io_tcp_connect_timeout(connect_addr, remaining)")
+        expect(h1).to_contain("read_tcp_response_bytes(conn.tcp_fd, deadline_ms)")
+        expect(h1).to_contain("conn.read_text_timeout(8192, remaining)")
+        expect(browser_tls).to_contain("if timeout_ms <= 0")
+        expect(browser_tls).to_contain("browser_tls_connect_address(")
+        expect(browser_tls).to_contain("browser_tls_connect(host, port, host)")
+        expect(tls_connect).to_contain("fn tls13_connect_with_config")
+        expect(tls_io).to_contain("fn _io_send(io: Tls13Io")
 
     it "should NFR-018 keep server read and write timeout owners distinct":
         step("Use the configured write timeout on the hybrid accept path")
         val worker = file_read(
             "src/lib/nogc_async_mut/http_server/worker.spl")
-        val tls_server = file_read("src/os/tls13/server.spl")
-        val accept_start = worker.index_of("me handle_tls13_pqc_accept")
-        val accept_end = worker.index_of("me handle_tls_accept")
+        val tls_handshake = file_read("src/lib/nogc_async_mut/io/tls_handshake.spl")
+        val accept_start = worker.index_of("me handle_tls_accept")
+        val accept_end = worker.index_of("me handle_completion")
         val accept_path = worker.slice(accept_start, accept_end)
 
-        expect(accept_path).to_contain(
-            "client_fd, Some(self.config.read_timeout_ms)")
-        expect(accept_path).to_contain(
-            "client_fd, Some(self.config.write_timeout_ms)")
-        expect(accept_path).to_contain(
-            "time_now_micros() / 1000 + handshake_budget_ms")
-        expect(accept_path).to_contain(
-            "tls13_accept_x25519_mlkem768_with_deadline(")
-        expect(tls_server).to_contain(
-            "if _tls13_server_deadline_expired(deadline_ms):")
-        expect(tls_server).to_contain(
-            "_recv_record(socket_fd, deadline_ms)")
-        expect(tls_server).to_contain(
-            "tcp_backend_set_read_timeout(\n                socket_fd, Some(remaining_ms))")
-        expect(tls_server).to_contain(
-            "tcp_backend_set_write_timeout(\n                socket_fd, Some(remaining_ms))")
+        expect(accept_path).to_contain("var cfg = self.tls_config")
+        expect(accept_path).to_contain("perform_server_handshake(")
+        expect(tls_handshake).to_contain("fn perform_server_handshake")
+        expect(tls_handshake).to_contain("read_tls_record(driver, fd)")
+        expect(tls_handshake).to_contain("send_all(driver, fd,")

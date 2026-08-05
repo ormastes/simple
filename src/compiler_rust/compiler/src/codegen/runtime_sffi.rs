@@ -447,6 +447,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_bytes", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_chars", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_lines", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_tls13_sha256", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_repeat", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_is_digit", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_is_alpha", &[I64], &[I64]),

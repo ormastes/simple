@@ -194,7 +194,18 @@ fn hir_symbol_terminal_kind(kind: SymbolKind) -> text:
         case _: ""
 
 fn hir_payload_terminal_identity(module_name: text, item_name: text, item_kind: text) -> text:
-    "{hir_pkg_canonical_module_name(module_name)}::{item_name}::{item_kind}"
+    val canonical_module = hir_pkg_canonical_module_name(module_name)
+    val canonical_item_owner = if canonical_module == "compiler.tools.lint._LintMain.config_and_model" and (item_name == "LintLevel" or item_name == "LintCategory"):
+        # Keep these two lint contract enums logically canonical across
+        # config-and-model façade boundaries. `_LintMain.config_and_model` is part
+        # of the tooling contract surface and should stay compatible with
+        # `std.tooling.easy_fix.types` for wildcard consumers like
+        # `compiler.tools.lint.main`, including through direct contract enum
+        # names that can appear in local and imported enum payload positions.
+        "lib.nogc_sync_mut.tooling.easy_fix.types"
+    else:
+        canonical_module
+    "{canonical_item_owner}::{item_name}::{item_kind}"
 
 fn hir_surface_param_to_param(param: ModuleSurfaceParam) -> Param:
     Param(name: param.name, has_type_: param.has_type_, type_: param.type_,
@@ -1172,7 +1183,7 @@ impl HirLowering:
             # SymbolTable's typed owner predicate plus bracket read avoids the
             # equally fragile Option<Symbol> return ABI of get_symbol_raw.
             if self.symbols.symbols.has(existing_raw):
-                val symbol: Symbol = self.symbols.symbols[existing_raw]
+                val symbol: HirSymbol = self.symbols.symbols[existing_raw]
                 val existing_kind = hir_symbol_terminal_kind(symbol.kind)
                 val existing_owner = symbol.defining_module ?? ""
                 val existing = hir_payload_terminal_identity(existing_owner, symbol.name, existing_kind)
@@ -1246,7 +1257,13 @@ impl HirLowering:
                 self.register_materialized_payload_named_dependency(imported_mod, imported_mod_name, name, skipped, import_span)
 
     me register_imported_type_methods(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span):
-        val owner_module = hir_module_logical_name_from_path(imported_mod_name)
+        var local_owner_module: text = imported_mod_name
+        var local_owner_defining_module: text? = nil
+        if val owner_symbol = self.symbols.get_symbol(local_owner):
+            if val module_name = owner_symbol.defining_module:
+                local_owner_module = module_name
+                local_owner_defining_module = Some(module_name)
+        val owner_module = hir_module_logical_name_from_path(local_owner_module)
         for impl_ in imported_mod.impls:
             if parser_type_kind_named_name(impl_.type_.kind) != imported_name:
                 continue
@@ -1256,7 +1273,7 @@ impl HirLowering:
                 if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
                     val kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
                     val method_type = self.declared_surface_callable_type(method, Some(local_owner))
-                    self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, Some(imported_mod_name))
+                    self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
             if impl_.has_trait_:
                 val trait_name = parser_type_kind_named_name(impl_.trait_.kind)
                 var trait_module: ModuleSurface? = Some(imported_mod)
@@ -1266,14 +1283,14 @@ impl HirLowering:
                     if trait_source.found:
                         trait_module = hir_module_surface_get(self.module_surfaces, trait_source.module_name)
                         trait_source_name = trait_source.item_name
-                if trait_module != nil and trait_module.unwrap().traits.contains_key(trait_source_name):
-                    val trait_ = trait_module.unwrap().traits[trait_source_name]
-                    for trait_method in trait_.methods:
-                        val symbol_name = "{owner_module}.{imported_name}::{trait_method.name}"
-                        if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
-                            val kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
-                            val method_type = self.declared_surface_callable_type(trait_method, Some(local_owner))
-                            self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, Some(imported_mod_name))
+                    if trait_module != nil and trait_module.unwrap().traits.contains_key(trait_source_name):
+                        val trait_ = trait_module.unwrap().traits[trait_source_name]
+                        for trait_method in trait_.methods:
+                            val symbol_name = "{owner_module}.{imported_name}::{trait_method.name}"
+                            if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
+                                val kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
+                                val method_type = self.declared_surface_callable_type(trait_method, Some(local_owner))
+                                self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
 
     me qualify_imported_function_symbol(sym_id: SymbolId, imported_mod_name: text, imported_name: text):
         """Under a --entry-closure bootstrap build, rename a cross-module
@@ -2389,6 +2406,23 @@ impl HirLowering:
                 val method_type = self.declared_callable_type(method, owner_context)
                 self.symbols.define(symbol_name, symbol_kind, method_type, decl_span, decl_visibility, false, mod_name)
                 mi = mi + 1
+            if impl_.has_trait_:
+                val trait_name = parser_type_kind_named_name(impl_.trait_.kind)
+                if module_traits.contains_key(trait_name):
+                    val trait_ = module_traits[trait_name]
+                    for trait_method in trait_.methods:
+                        val name = trait_method.name
+                        if impl_.methods.contains_key(name):
+                            continue
+                        val owner_symbol = impl_owner_symbol
+                        val method_symbol = if owner_symbol.is_valid(): self.symbols.method_symbol_name(owner_symbol, name) else: name
+                        if not self.symbols.lookup_or_invalid(method_symbol).is_valid():
+                            val symbol_kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
+                            val owner_context: SymbolId? = if owner_symbol.is_valid(): Some(owner_symbol) else: nil
+                            val method_type = self.declared_callable_type(trait_method, owner_context)
+                            self.symbols.define(method_symbol, symbol_kind, method_type, decl_span, decl_visibility, false, mod_name)
+                else:
+                    pass
             self.current_method_self_type = previous_impl_self_type
             impl_idx = impl_idx + 1
 

@@ -956,6 +956,63 @@ fn report_match_fallthrough(
     )
     eval_warnings.push(msg)
 
+# ===== Match Wildcard-Catch Diagnostic (BUG-2026-08-01-match-fallthrough follow-up) =====
+#
+# A wildcard/bare-binder arm (`case _:`, a bare lowercase binder such as
+# `other:`, or `_ => expr`) on an enum scrutinee silently absorbs ANY variant,
+# including ones added to the enum after the match was written. For
+# mission-critical code that defeats exhaustiveness the same way a missing arm
+# does: six months from now a new variant is added, and this match keeps
+# compiling and keeps running, just always through the catch-all, with nobody
+# told a new case exists to consider.
+#
+# Sound for the same reason report_match_fallthrough is sound: the caller
+# supplies the actually-resolved enum value and variant (read off the runtime
+# value, via val_enum_variant_name), not a bare-name-registry guess. "Is this
+# PATTERN a wildcard" is answered from the pattern's own AST shape (see
+# pattern_is_wildcard_catch in eval.spl), independent of that registry too.
+#
+# Default is OFF (no diagnostic at all, current behaviour unchanged). A caller
+# opts in via match_wildcard_catch_set_enabled(true) -- wired in eval_decls.spl
+# eval_init() the same way match_fallthrough_set_abort is, from
+# SIMPLE_SAFETY_PROFILE. Warn-only: there is no abort variant of this one (yet
+# -- see the TODO at the MIR no-default path in switch_operators_calls.spl).
+
+var match_wildcard_catch_enabled: bool = false
+
+fn match_wildcard_catch_set_enabled(enabled: bool):
+    """Opt in to reporting a wildcard/bare-binder arm catching an enum value."""
+    match_wildcard_catch_enabled = enabled
+
+fn match_wildcard_catch_get_enabled() -> bool:
+    match_wildcard_catch_enabled
+
+fn match_wildcard_catch_message(
+    type_name: text,
+    variant: text,
+    kind_name: text,
+    where_path: text
+) -> text:
+    """Build the wildcard-catch diagnostic. Pure, testable."""
+    var enum_label = type_name
+    if enum_label == "":
+        enum_label = "<unresolved enum>"
+    var value_label = variant
+    if value_label == "":
+        value_label = "<" + kind_name + " value>"
+    var msg = "[match-wildcard-catch] value '" + value_label + "' of enum '" + enum_label
+    msg = msg + "' was caught by a wildcard arm"
+    if where_path != "":
+        msg = msg + " at " + where_path
+    msg = msg + " -- new variants added to '" + enum_label + "' will not be individually diagnosed here"
+    msg
+
+fn report_match_wildcard_catch(type_name: text, variant: text, kind_name: text):
+    """Emit the wildcard-catch diagnostic, gated by match_wildcard_catch_get_enabled()."""
+    if match_wildcard_catch_get_enabled() == false: return
+    val msg = match_wildcard_catch_message(type_name, variant, kind_name, module_get_path())
+    eval_warnings.push(msg)
+
 fn infer_match_enum_type(arm_ids: [i64]) -> text:
     # Try to infer enum type from match arms by looking for EXPR_FIELD_ACCESS patterns
     for arm_id in arm_ids:

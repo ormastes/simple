@@ -22,24 +22,46 @@
 
 static NEXT_TLS_FAKE_HANDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 const TLS_CLIENT_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const TLS_CLIENT_WRITE_MAX: usize = 50 * 1024 * 1024;
+
+fn tls_client_timeout_from_ms(timeout_ms: i64) -> Option<std::time::Duration> {
+    if timeout_ms <= 0 {
+        return None;
+    }
+    Some(std::time::Duration::from_millis(timeout_ms as u64))
+}
 
 fn next_tls_fake_handle() -> i64 {
     NEXT_TLS_FAKE_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-fn connect_tls_client_socket(addr: &str) -> std::io::Result<std::net::TcpStream> {
+fn apply_socket_timeout(
+    stream: &std::net::TcpStream,
+    timeout: std::time::Duration,
+) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    Ok(())
+}
+
+fn connect_tls_client_socket(
+    addr: &str,
+    connect_timeout: std::time::Duration,
+) -> std::io::Result<std::net::TcpStream> {
     let started = std::time::Instant::now();
     let mut last_error = None;
-    let resolve_budget = TLS_CLIENT_IO_TIMEOUT
+    let resolve_budget = connect_timeout
         .checked_sub(started.elapsed())
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "TLS DNS deadline exceeded"))?;
     for socket_addr in resolve_socket_addrs_with_timeout(addr.to_owned(), resolve_budget)? {
-        let remaining = TLS_CLIENT_IO_TIMEOUT
+        let remaining = connect_timeout
             .checked_sub(started.elapsed())
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "TLS connect deadline exceeded"))?;
         match std::net::TcpStream::connect_timeout(&socket_addr, remaining) {
             Ok(stream) => {
-                let io_budget = TLS_CLIENT_IO_TIMEOUT.checked_sub(started.elapsed()).ok_or_else(|| {
+                let io_budget = connect_timeout
+                    .checked_sub(started.elapsed())
+                    .ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::TimedOut, "TLS connect deadline exceeded")
                 })?;
                 stream.set_read_timeout(Some(io_budget))?;
@@ -176,7 +198,12 @@ fn write_bytes_to_stream(handle: i64, data: crate::value::RuntimeValue) -> i64 {
     if err == NetError::Success as i64 { written } else { -err }
 }
 
-fn tls_client_connect_impl(host_str: &str, port: i64, sni_name: &str) -> i64 {
+fn tls_client_connect_impl_with_timeout(
+    host_str: &str,
+    port: i64,
+    sni_name: &str,
+    timeout: std::time::Duration,
+) -> i64 {
     let config = match platform_tls_client_config() {
         Ok(config) => config,
         Err(error) => {
@@ -199,7 +226,7 @@ fn tls_client_connect_impl(host_str: &str, port: i64, sni_name: &str) -> i64 {
         }
     };
     let addr = format!("{}:{}", host_str, port);
-    let tcp_stream = match connect_tls_client_socket(&addr) {
+    let tcp_stream = match connect_tls_client_socket(&addr, timeout) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("rt_tls_client_connect: TCP connect {}: {}", addr, e);
@@ -217,6 +244,11 @@ fn tls_client_connect_impl(host_str: &str, port: i64, sni_name: &str) -> i64 {
         if let Some(arc) = entry_arc {
             let mut entry_guard = arc.lock().unwrap();
             let entry = &mut *entry_guard;
+            if apply_socket_timeout(&entry.stream, timeout).is_err() {
+                drop(entry_guard);
+                TLS_CLIENT_CONNS.lock().unwrap().remove(&handle);
+                return -1;
+            }
             let mut tls_stream = rustls::Stream::new(&mut entry.conn, &mut entry.stream);
             if let Err(e) = std::io::Write::flush(&mut tls_stream) {
                 eprintln!("rt_tls_client_connect: TLS handshake flush: {}", e);
@@ -235,7 +267,7 @@ pub extern "C" fn rt_tls_client_connect(host: crate::value::RuntimeValue, port: 
         return -1;
     };
     let host_str = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr as *const u8, len as usize)) };
-    tls_client_connect_impl(host_str, port, host_str)
+    tls_client_connect_impl_with_timeout(host_str, port, host_str, TLS_CLIENT_IO_TIMEOUT)
 }
 
 #[no_mangle]
@@ -248,13 +280,48 @@ pub extern "C" fn rt_tls_client_connect_with_sni(
     let Some((s_ptr, s_len)) = runtime_text_ptr_len(server_name) else { return -1; };
     let host_str = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(h_ptr as *const u8, h_len as usize)) };
     let sni_str = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(s_ptr as *const u8, s_len as usize)) };
-    tls_client_connect_impl(host_str, port, sni_str)
+    tls_client_connect_impl_with_timeout(host_str, port, sni_str, TLS_CLIENT_IO_TIMEOUT)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_tls_client_connect_address_with_sni_timeout(
+    address: crate::value::RuntimeValue,
+    port: i64,
+    server_name: crate::value::RuntimeValue,
+    timeout_ms: i64,
+) -> i64 {
+    let Some((addr_ptr, addr_len)) = runtime_text_ptr_len(address) else { return -1; };
+    let Some((sni_ptr, sni_len)) = runtime_text_ptr_len(server_name) else { return -1; };
+    let address_str = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(addr_ptr as *const u8, addr_len as usize)) };
+    let sni_str = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(sni_ptr as *const u8, sni_len as usize)) };
+    let timeout = match tls_client_timeout_from_ms(timeout_ms) {
+        Some(t) => t.min(TLS_CLIENT_IO_TIMEOUT),
+        None => return -1,
+    };
+    tls_client_connect_impl_with_timeout(address_str, port, sni_str, timeout)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_tls_client_write(conn: i64, data: crate::value::RuntimeValue) -> i64 {
+    rt_tls_client_write_timeout(conn, data, TLS_CLIENT_IO_TIMEOUT.as_millis() as i64)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_tls_client_write_timeout(
+    conn: i64,
+    data: crate::value::RuntimeValue,
+    timeout_ms: i64,
+) -> i64 {
     let Some((ptr, len)) = runtime_text_ptr_len(data) else { return -1; };
     if ptr == 0 || len < 0 { return -1; }
+    let timeout = match tls_client_timeout_from_ms(timeout_ms) {
+        Some(t) => t.min(TLS_CLIENT_IO_TIMEOUT),
+        None => return -1,
+    };
+    let write_len = len as usize;
+    if write_len > TLS_CLIENT_WRITE_MAX {
+        return -1;
+    }
     let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
     let entry_arc = {
         let guard = TLS_CLIENT_CONNS.lock().unwrap();
@@ -262,16 +329,35 @@ pub extern "C" fn rt_tls_client_write(conn: i64, data: crate::value::RuntimeValu
     };
     let mut entry_guard = entry_arc.lock().unwrap();
     let entry = &mut *entry_guard;
+    if apply_socket_timeout(&entry.stream, timeout).is_err() {
+        return -1;
+    }
     let mut tls_stream = rustls::Stream::new(&mut entry.conn, &mut entry.stream);
     match tls_stream.write_all(slice) {
-        Ok(()) => slice.len() as i64,
+        Ok(()) => {
+            if write_len > i64::MAX as usize { return -1; }
+            write_len as i64
+        }
         Err(_) => -1,
     }
 }
 
 #[no_mangle]
 pub extern "C" fn rt_tls_client_read(conn: i64, max_bytes: i64) -> crate::value::RuntimeValue {
+    rt_tls_client_read_timeout(conn, max_bytes, TLS_CLIENT_IO_TIMEOUT.as_millis() as i64)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_tls_client_read_timeout(
+    conn: i64,
+    max_bytes: i64,
+    timeout_ms: i64,
+) -> crate::value::RuntimeValue {
     if max_bytes <= 0 { return empty_text(); }
+    let timeout = match tls_client_timeout_from_ms(timeout_ms) {
+        Some(t) => t.min(TLS_CLIENT_IO_TIMEOUT),
+        None => return empty_text(),
+    };
     let entry_arc = {
         let guard = TLS_CLIENT_CONNS.lock().unwrap();
         match guard.get(&conn) { Some(a) => a.clone(), None => return empty_text() }
@@ -281,6 +367,9 @@ pub extern "C" fn rt_tls_client_read(conn: i64, max_bytes: i64) -> crate::value:
     let read_result = {
         let mut entry_guard = entry_arc.lock().unwrap();
         let entry = &mut *entry_guard;
+        if apply_socket_timeout(&entry.stream, timeout).is_err() {
+            return empty_text();
+        }
         let mut tls_stream = rustls::Stream::new(&mut entry.conn, &mut entry.stream);
         tls_stream.read(&mut buf)
     };

@@ -196,24 +196,33 @@ pub fn dbd_accept_and_handle_once(listen_fd: i64, server: DbdServer) -> bool:
     val client_fd = _dbd_decode_i64(raw_client)
     if client_fd < 0:
         return false
-    val received = rt_net_recv_bytes(client_fd, DBD_RECV_BOUND_BYTES)
-    var buf = rt_string_from_byte_array(received)
-    if buf.len() == 0:
-        rt_net_close(client_fd)
-        return true
-    var progressed = true
+    var buf = ""
     var handled_any = false
-    while progressed:
-        progressed = false
-        match parse_next_request(buf):
-            case Some(r):
-                val reply = server.handle_command(r.args)
-                rt_net_send_bytes(client_fd, rt_string_to_byte_array(reply))
-                buf = r.rest
-                progressed = true
-                handled_any = true
-            case nil:
-                pass
+    while true:
+        val received = rt_net_recv_bytes(client_fd, DBD_RECV_BOUND_BYTES)
+        val chunk = rt_string_from_byte_array(received)
+        if chunk.len() == 0:
+            break
+        buf = buf + chunk
+        if buf.len() > DBD_MAX_LINE_BYTES:
+            # Prevent unbounded accumulation on malformed/incomplete requests.
+            rt_net_send_bytes(client_fd, rt_string_to_byte_array("-ERR malformed or oversized request\r\n"))
+            rt_net_close(client_fd)
+            return true
+
+        var progressed = true
+        while progressed:
+            progressed = false
+            match parse_next_request(buf):
+                case Some(r):
+                    val reply = server.handle_command(r.args)
+                    rt_net_send_bytes(client_fd, rt_string_to_byte_array(reply))
+                    buf = r.rest
+                    progressed = true
+                    handled_any = true
+                case nil:
+                    pass
+
     if not handled_any:
         # No complete RESP frame arrived within the bounded read: reject
         # cleanly (covers empty/garbage/oversized-without-terminator input).

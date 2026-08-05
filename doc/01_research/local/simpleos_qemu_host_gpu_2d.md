@@ -106,3 +106,44 @@ persistent atlas material, but `MetalDrawIrRenderTarget` returns `nil` font
 evidence. Honest promotion requires recording successful atlas upload facts and
 proving exact post-dispatch device pixels against a canonical software replay
 seeded from the actual pre-dispatch device readback.
+
+## Showcase completion status (2026-08-05)
+
+### Objective split for current lane
+
+- LANE A — Linux QEMU x86_64/AArch64/RV64 with Vulkan-backed DrawIR + ProcessingIR execution and parity evidence:
+  - Contract and parser checks are present in `test/03_system/os/qemu/simpleos_2d_showcase_spec.spl`.
+  - Blocker: no fresh runtime-admitted host compiler and native row build (`TODO548`, and runtime deployment/host-provided toolchain row).
+- LANE B — ARM64 QEMU event/input (mouse, keyboard, ctrl/alt modifiers, sound, font) on shared contracts:
+  - Shared shortcut/input/event source reuse is checked (`src/os/gui/shortcut.spl`, `src/os/gui/input_event.spl`, `scripts/check/check-rv64-display-smoke-qmp-evidence.shs`, `simpleos_2d_showcase_spec.spl`).
+  - Blocker: live ARM64 native build/boot proof still depends on the same compiler/runtime admission path (`TODO548` and Linux/host-native bootstrap continuity).
+- LANE C — macOS HVF lane as emulator-only in this environment:
+  - Showcase and host-GPU parser coverage remain in place as contract-only evidence.
+  - Requirement: do not claim native PASS from this host; maintain `unsupported/blocked` until a prepared macOS host can supply native Metal/GPU artifacts.
+  - Tracked as `TODO660`.
+- LANE D — UNO Q board lane and shared showcase matrix:
+  - Fail-closed board reasons and runner matrix are tracked (`scripts/check/check-simpleos-native-board-gpu-2d.shs`, `TODO658`) and showcase TODO (`TODO659`) keeps this lane in the 4-lane matrix.
+  - Blocker: physical board attached plus board-native adapter readiness.
+
+### Current evidence gate snapshot
+
+- Parser/self-test coverage present: host GPU, audio, rv64 font/input, board gate matrix, and generated 2D matrix (`TODOs 630` lineage in tracker).
+- Live promotion blockers: pure-Simple compiler/runtime admission and host-row native daemon/artifacts continuity (`TODO548`, board-attached run for `TODO658`).
+- No native macOS or physical UNO Q PASS can be claimed from this host.
+
+### Completion targets still required for user objective
+
+1. One successful native-accepted Linux ARM/RV64 x86_64 QEMU Vulkan matrix run with fresh artifacts.
+2. One successful native-accepted macOS prepared-host native pass for the emulator lane only when preparation exists (not on this host).
+3. One successful native-accepted UNO Q board run with board-attached runner and DrawIR/ProcessingIR parity.
+4. One end-to-end showcase run that captures animation-event-sound-font paths under shared contracts and maps them to CPU/SIMD-oracle parity and p95/RSS caps.
+
+### Parallel completion plan (no duplicated logic)
+
+- Lane A: `scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test` + `--self-test-metrics` for parser/matrix/latency.
+- Lane B: `scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test-metrics SIMPLEOS_HOST_GPU_PROCESSING_BACKEND=vulkan` to force Vulkan-only processing.
+- Lane C: `scripts/check/check-simpleos-io-audio-qemu.shs --self-test` for shared input/sound markers.
+- Lane D: `scripts/check/check-rv64-display-smoke-qmp-evidence.shs --self-test-wm-font-input` for font/input markers and event-frame correlation.
+- Board lane remains separate and fail-closed: `scripts/check/check-simpleos-native-board-gpu-2d.shs --self-test` plus native board command once attached.
+
+These lanes must map to the same shared sources (`host_compositor_core`, `check-simpleos-qemu-host-gpu-2d.shs`, `check-simpleos-native-board-gpu-2d.shs`) and produce one merged evidence receipt file set before closing TODO659/661/662/663.

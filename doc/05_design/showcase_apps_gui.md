@@ -51,19 +51,29 @@ the lane to satisfy, currently unverified).
 
 ### Taskbar
 
-- *Present.* The running-app row is **derived from live window state**:
-  `build_taskbar_model` (`src/app/ui.web/taskbar_shell.spl:55`) iterates the
-  `UiWindowSurfaceRegistry`'s `bindings`;
-  `host_taskbar_runtime_taskbar_model` feeds it `session.window_surfaces`.
+- *Present.* The running-app row is **derived from live window state**. There
+  are two such paths, not one:
+  - `build_taskbar_model` (`src/app/ui.web/taskbar_shell.spl:55`) iterates the
+    `UiWindowSurfaceRegistry`'s `bindings`;
+    `host_taskbar_runtime_taskbar_model` feeds it `session.window_surfaces`.
+  - `HostCompositor.taskbar_model()`
+    (`src/os/compositor/host_compositor_core.spl:959`) projects `running`
+    straight from the compositor's own `self.windows`, bypassing the registry.
+    This is the WM-session path: the same window list `render_frame()`
+    composites is the one the taskbar is built from, so a close cannot change
+    one without changing the other. (Added 2026-08-05 — this section
+    previously named only the registry path.)
 - *Present.* Pinned entries and tray items are **caller-supplied**, not derived.
   Pins are encoded by the `SIMPLE_TASKBAR_PINS_V1` line codec
   (`src/lib/common/ui/taskbar_pin_wire.spl`), which is a codec only — the
   runtime owns storage.
 - *Intended.* Opening, minimizing, restoring, and closing a showcase window
   must change the taskbar row within the same frame the window state changes,
-  because the row is a projection of the registry rather than a parallel list.
-  **Not yet verified end-to-end**: the FSM and the derivation exist
-  independently and this doc names no spec that composes them.
+  because the row is a projection of the window list rather than a parallel
+  list. **Verified end-to-end 2026-08-05** by
+  `test/03_system/gui/wm_showcase_session_capture_spec.spl`, which opens three
+  windows, closes one, and requires both the taskbar entry to disappear and
+  the captured desktop checksum to change before restoring it.
 - *Anti-requirement.* A taskbar built from a literal `TaskbarModel` does not
   satisfy this contract. Two literals remain in the tree
   (`src/os/desktop/modern_wm_readiness.spl:606`,

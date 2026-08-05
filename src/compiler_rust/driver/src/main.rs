@@ -311,6 +311,7 @@ fn command_is_pure_simple_tool(name: &str) -> bool {
             | "lsp"
             | "dap"
             | "spipe-docgen"
+            | "spec-to-sspec"
             | "security"
             | "verify"
     )
@@ -750,6 +751,16 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         app_path: "src/app/spipe_docgen/main.spl",
         rust_handler: Handler::Custom(|_| {
             eprintln!("error: pure Simple spipe-docgen app not found or failed to launch");
+            1
+        }),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "spec-to-sspec",
+        app_path: "src/app/spipe_docgen/main.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: pure Simple spec-to-sspec app not found or failed to launch");
             1
         }),
         env_override: "",

@@ -753,6 +753,13 @@ fn eval_match_expr(eid: i64) -> i64:
                 if val_is_truthy(guard_val) == false:
                     env_pop_scope()
                     continue
+            # BUG-2026-08-01-match-fallthrough follow-up: a wildcard/bare-binder
+            # arm absorbs any variant, including ones added later. Report it
+            # (severity-gated, warn-only) using the actually resolved value.
+            if val_is_boxed_enum(scrutinee) and pattern_is_wildcard_catch(pattern_eid):
+                report_match_wildcard_catch(
+                    inferred_type, val_enum_variant_name(scrutinee), val_kind_name(val_get_kind(scrutinee))
+                )
             # Execute arm body
             # Pattern binding: case X as name: — bind scrutinee to name
             val binding_name = arm_get_binding(arm_id)
@@ -777,6 +784,24 @@ fn eval_match_expr(eid: i64) -> i64:
         eval_set_error(eval_warnings[eval_warnings.len() - 1])
         return -1
     val_make_nil()
+
+fn pattern_is_wildcard_catch(pattern_eid: i64) -> bool:
+    """True when a match arm pattern is a catch-all: `_`, `_ => expr` (same
+    pattern AST node, only the arm-body syntax differs), or a bare lowercase
+    binder such as `other:`. Decided purely from the pattern's OWN AST shape --
+    the same branch match_pattern below already takes when it treats an
+    unrecognized EXPR_IDENT as a binding -- never through a "which enum
+    declares this variant name" lookup, so it carries none of the
+    bare-name-collision risk documented in
+    doc/08_tracking/bug/match_enum_fallthrough_silent_2026-08-01.md. Used by
+    the wildcard-catch diagnostic (report_match_wildcard_catch)."""
+    if pattern_eid < 0: return true
+    val e_node = expr_get(pattern_eid)
+    if e_node.tag != EXPR_IDENT: return false
+    val name = e_node.s_val
+    if name == "_": return true
+    if name == "None": return false
+    enum_variant_is_declared(name) == false
 
 fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
     if pattern_eid < 0: return true

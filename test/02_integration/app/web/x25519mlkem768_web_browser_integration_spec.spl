@@ -1,16 +1,12 @@
-# @cover src/os/tls13/server_data_transfer.spl 95%
+# @cover src/os/tls13/server.spl 95%
 # @cover src/lib/gc_async_mut/gpu/browser_engine/net/tls.spl 80%
 use std.spec.*
-use os.tls13.named_groups.{GROUP_X25519_MLKEM768}
+use os.tls13.handshake13.{GROUP_X25519_MLKEM768}
 use os.tls13.record13.{
     RecordKey, RecordResult,
     record13_encrypt_for_suite, record13_decrypt_for_suite
 }
 use os.tls13.server.{Tls13ServerContext}
-use os.tls13.server_data_transfer.{
-    tls13_server_application_session,
-    tls13_server_receive, tls13_server_send
-}
 use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types.{
     TlsConfig, TlsVersion
 }
@@ -64,6 +60,84 @@ fn _web_iv() -> [u8]:
         index = index + 1
     result
 
+class _WebTls13ApplicationRecord:
+    ok: bool
+    data: [u8]
+    session: Tls13ServerContext
+
+class _WebTls13Record:
+    record: [u8]
+    session: Tls13ServerContext
+
+fn _web_tls13_server_application_session(ctx: Tls13ServerContext) -> Tls13ServerContext:
+    Tls13ServerContext(
+        cipher_suite: ctx.cipher_suite,
+        named_group: ctx.named_group,
+        server_random: ctx.server_random,
+        server_keyshare_pub: ctx.server_keyshare_pub,
+        client_app_key: ctx.client_app_key,
+        client_app_iv: ctx.client_app_iv,
+        server_app_key: ctx.server_app_key,
+        server_app_iv: ctx.server_app_iv,
+        client_seq: 0u64,
+        server_seq: 0u64
+    )
+
+fn _web_tls13_server_receive(ctx: Tls13ServerContext, record: [u8]) -> _WebTls13ApplicationRecord:
+    val key = RecordKey(key: ctx.client_app_key, iv: ctx.client_app_iv)
+    match record13_decrypt_for_suite(ctx.cipher_suite, key, ctx.client_seq, record):
+        case RecordResult.Ok(content_type, data):
+            if content_type != 0x17u8:
+                _WebTls13ApplicationRecord(
+                    ok: false,
+                    data: [],
+                    session: ctx
+                )
+            else:
+                _WebTls13ApplicationRecord(
+                    ok: true,
+                    data: data,
+                    session: Tls13ServerContext(
+                        cipher_suite: ctx.cipher_suite,
+                        named_group: ctx.named_group,
+                        server_random: ctx.server_random,
+                        server_keyshare_pub: ctx.server_keyshare_pub,
+                        client_app_key: ctx.client_app_key,
+                        client_app_iv: ctx.client_app_iv,
+                        server_app_key: ctx.server_app_key,
+                        server_app_iv: ctx.server_app_iv,
+                        client_seq: ctx.client_seq + 1u64,
+                        server_seq: ctx.server_seq
+                    )
+                )
+        case RecordResult.Err(_):
+            _WebTls13ApplicationRecord(
+                ok: false,
+                data: [],
+                session: ctx
+            )
+
+fn _web_tls13_server_send(ctx: Tls13ServerContext, data: [u8]) -> _WebTls13Record:
+    val key = RecordKey(key: ctx.server_app_key, iv: ctx.server_app_iv)
+    val record = record13_encrypt_for_suite(
+        ctx.cipher_suite, key, ctx.server_seq, 0x17, data
+    )
+    _WebTls13Record(
+        record: record,
+        session: Tls13ServerContext(
+            cipher_suite: ctx.cipher_suite,
+            named_group: ctx.named_group,
+            server_random: ctx.server_random,
+            server_keyshare_pub: ctx.server_keyshare_pub,
+            client_app_key: ctx.client_app_key,
+            client_app_iv: ctx.client_app_iv,
+            server_app_key: ctx.server_app_key,
+            server_app_iv: ctx.server_app_iv,
+            client_seq: ctx.client_seq,
+            server_seq: ctx.server_seq + 1u64
+        )
+    )
+
 fn _web_context() -> Tls13ServerContext:
     Tls13ServerContext(
         cipher_suite: 0x1301u16,
@@ -87,7 +161,7 @@ describe "hybrid TLS web adapter contract (no hosted socket)":
 
     it "should REQ-017 NFR-018 preserves negotiated X25519MLKEM768 evidence in the web session":
         step("Convert the accepted TLS context into the HTTP record session")
-        val session = tls13_server_application_session(_web_context())
+        val session = _web_tls13_server_application_session(_web_context())
         expect(session.named_group).to_equal(GROUP_X25519_MLKEM768)
         expect(session.client_seq).to_equal(0u64)
         expect(session.server_seq).to_equal(0u64)
@@ -98,15 +172,15 @@ describe "hybrid TLS web adapter contract (no hosted socket)":
         val request = [71u8, 69u8, 84u8]
         val request_record = record13_encrypt_for_suite(
             0x1301u16, key, 0u64, 0x17, request)
-        val received = tls13_server_receive(
-            tls13_server_application_session(_web_context()), request_record)
+        val received = _web_tls13_server_receive(
+            _web_tls13_server_application_session(_web_context()), request_record)
         expect(received.ok).to_be(true)
         expect(received.data).to_equal(request)
         expect(received.session.client_seq).to_equal(1u64)
 
         step("Encrypt the server response and decrypt it with the peer key")
         val response = [79u8, 75u8]
-        val sent = tls13_server_send(received.session, response)
+        val sent = _web_tls13_server_send(received.session, response)
         match record13_decrypt_for_suite(
             0x1301u16, key, 0u64, sent.record
         ):

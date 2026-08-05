@@ -27,13 +27,13 @@ struct Obligation:
     Optionally includes associated type constraints (e.g., Iterator<Item=i64>).
     """
     type_: HirType                  # The type that must implement the trait
-    trait_: Symbol                  # The trait that must be implemented
+    trait_: HirSymbol                  # The trait that must be implemented
     cause: ObligationCause          # Why this obligation was created
     span: Span                      # Source location
     assoc_type_constraints: Dict<text, HirType>  # Associated type constraints
 
 impl Obligation:
-    static fn create(ty: HirType, trait_: Symbol, cause: ObligationCause, span: Span) -> Obligation:
+    static fn create(ty: HirType, trait_: HirSymbol, cause: ObligationCause, span: Span) -> Obligation:
         """Create a new obligation without associated type constraints."""
         Obligation(
             type_: ty,
@@ -43,7 +43,7 @@ impl Obligation:
             assoc_type_constraints: {}
         )
 
-    static fn with_assoc_constraints(ty: HirType, trait_: Symbol, cause: ObligationCause, span: Span, constraints: Dict<text, HirType>) -> Obligation:
+    static fn with_assoc_constraints(ty: HirType, trait_: HirSymbol, cause: ObligationCause, span: Span, constraints: Dict<text, HirType>) -> Obligation:
         """Create an obligation with associated type constraints.
 
         Example: I: Iterator<Item=i64> creates an obligation with
@@ -74,10 +74,10 @@ impl Obligation:
 
 enum ObligationCause:
     """Why an obligation was created (for error messages)."""
-    FunctionCall(Symbol)            # From calling fn<T: Trait>
-    MethodCall(Symbol, text)        # From calling method
-    TraitBound(Symbol)              # From where clause
-    FieldAccess(Symbol, text)       # From accessing field
+    FunctionCall(HirSymbol)            # From calling fn<T: Trait>
+    MethodCall(HirSymbol, text)        # From calling method
+    TraitBound(HirSymbol)              # From where clause
+    FieldAccess(HirSymbol, text)       # From accessing field
     BuiltIn                         # From built-in constraint
 
 impl ObligationCause:
@@ -111,16 +111,16 @@ class TraitSolver:
     3. Cache results to avoid duplicate work
     """
     # All known trait definitions
-    traits: Dict<Symbol, TraitDef>
+    traits: Dict<HirSymbol, TraitDef>
 
     # All known impl blocks (indexed by trait name)
-    impls: Dict<Symbol, [ImplBlock]>
+    impls: Dict<HirSymbol, [ImplBlock]>
 
     # All known impl blocks (indexed by target type symbol)
-    impls_by_type: Dict<Symbol, [ImplBlock]>
+    impls_by_type: Dict<HirSymbol, [ImplBlock]>
 
     # Cache of solved obligations: (type, trait) -> success
-    cache: Dict<(HirType, Symbol), bool>
+    cache: Dict<(HirType, HirSymbol), bool>
 
     # Current obligations to solve
     obligations: [Obligation]
@@ -133,7 +133,7 @@ class TraitSolver:
 
     # Map from method name to all declaring traits (required + default)
     # Used by resolve_strategies for method dispatch
-    trait_methods: Dict<text, [Symbol]>
+    trait_methods: Dict<text, [HirSymbol]>
 
 impl TraitSolver:
     static fn create() -> TraitSolver:
@@ -165,11 +165,11 @@ impl TraitSolver:
 
         var trait_methods = self.trait_methods
         for method in trait_def.methods:
-            var owners: [Symbol] = if trait_methods.has(method.name): trait_methods[method.name] else: []
+            var owners: [HirSymbol] = if trait_methods.has(method.name): trait_methods[method.name] else: []
             owners = owners.push(trait_def.name)
             trait_methods[method.name] = owners
         for default in trait_def.defaults:
-            var owners: [Symbol] = if trait_methods.has(default.name): trait_methods[default.name] else: []
+            var owners: [HirSymbol] = if trait_methods.has(default.name): trait_methods[default.name] else: []
             owners = owners.push(trait_def.name)
             trait_methods[default.name] = owners
         self.trait_methods = trait_methods
@@ -204,7 +204,7 @@ impl TraitSolver:
         # Register with associated type resolver
         self.assoc_resolver.add_impl(impl_block)
 
-    me add_obligation(ty: HirType, trait_: Symbol, cause: ObligationCause, span: Span):
+    me add_obligation(ty: HirType, trait_: HirSymbol, cause: ObligationCause, span: Span):
         """Add an obligation to solve."""
         val obligation = Obligation.create(ty, trait_, cause, span)
         self.obligations = self.obligations.push(obligation)
@@ -283,7 +283,7 @@ impl TraitSolver:
                 self.cache[cache_key] = false
                 Err(TraitError.Unsatisfied(obligation))
 
-    fn find_impl(ty: HirType, trait_: Symbol) -> ImplBlock?:
+    fn find_impl(ty: HirType, trait_: HirSymbol) -> ImplBlock?:
         """Find impl block for type and trait."""
         if not self.impls[trait_].?:
             return nil
@@ -307,7 +307,7 @@ impl TraitSolver:
 
         Ok(())
 
-    me check_supertraits(ty: HirType, trait_: Symbol, span: Span) -> Result<(), TraitError>:
+    me check_supertraits(ty: HirType, trait_: HirSymbol, span: Span) -> Result<(), TraitError>:
         """Check that type implements all supertraits of the given trait."""
         if not self.traits[trait_].?:
             return Ok(())
@@ -350,12 +350,12 @@ impl TraitSolver:
 
         Ok(())
 
-    me add_obligation_with_assoc(ty: HirType, trait_: Symbol, cause: ObligationCause, span: Span, constraints: Dict<text, HirType>):
+    me add_obligation_with_assoc(ty: HirType, trait_: HirSymbol, cause: ObligationCause, span: Span, constraints: Dict<text, HirType>):
         """Add an obligation with associated type constraints."""
         val obligation = Obligation.with_assoc_constraints(ty, trait_, cause, span, constraints)
         self.obligations = self.obligations.push(obligation)
 
-    fn resolve_assoc_type(ty: HirType, trait_: Symbol, assoc_name: text) -> HirType?:
+    fn resolve_assoc_type(ty: HirType, trait_: HirSymbol, assoc_name: text) -> HirType?:
         """Resolve an associated type for a concrete type and trait.
 
         Example: resolve_assoc_type(Range, Iterator, "Item") -> i64
@@ -374,33 +374,33 @@ impl TraitSolver:
         """Normalize a type by resolving all associated type projections."""
         self.assoc_resolver.normalize(ty)
 
-    fn get_trait(name: Symbol) -> TraitDef?:
+    fn get_trait(name: HirSymbol) -> TraitDef?:
         """Get trait definition by name."""
         self.traits[name]
 
-    fn find_trait_for_method(method_name: text) -> Symbol?:
+    fn find_trait_for_method(method_name: text) -> HirSymbol?:
         """Find the first registered trait that declares method_name."""
         if self.trait_methods.has(method_name):
-            val owners: [Symbol] = self.trait_methods[method_name]
+            val owners: [HirSymbol] = self.trait_methods[method_name]
             if owners.len() > 0:
                 return Some(owners[0])
         nil
 
-    fn get_impls_for_type(type_symbol: Symbol) -> [ImplBlock]:
+    fn get_impls_for_type(type_symbol: HirSymbol) -> [ImplBlock]:
         """Get all impl blocks for a given type."""
         if self.impls_by_type[type_symbol].?:
             self.impls_by_type[type_symbol]
         else:
             []
 
-    fn get_impls_for_trait(trait_name: Symbol) -> [ImplBlock]:
+    fn get_impls_for_trait(trait_name: HirSymbol) -> [ImplBlock]:
         """Get all impl blocks for a given trait."""
         if self.impls[trait_name].?:
             self.impls[trait_name]
         else:
             []
 
-    fn find_impl_for_type_and_trait(type_symbol: Symbol, trait_name: Symbol) -> ImplBlock?:
+    fn find_impl_for_type_and_trait(type_symbol: HirSymbol, trait_name: HirSymbol) -> ImplBlock?:
         """Find specific impl block for (type, trait) pair."""
         val impls_for_type = self.get_impls_for_type(type_symbol)
         for impl_block in impls_for_type:
@@ -408,7 +408,7 @@ impl TraitSolver:
                 return Some(impl_block)
         nil
 
-    fn get_default_method(trait_name: Symbol, method_name: text) -> HirFunction?:
+    fn get_default_method(trait_name: HirSymbol, method_name: text) -> HirFunction?:
         """Get a default method implementation from a trait.
 
         Returns the default method body if the trait has one for the given name,
@@ -420,7 +420,7 @@ impl TraitSolver:
         val trait_def = self.traits[trait_name]
         trait_def.get_default_method(method_name)
 
-    fn is_method_required(trait_name: Symbol, method_name: text) -> bool:
+    fn is_method_required(trait_name: HirSymbol, method_name: text) -> bool:
         """Check if a method is required (no default) in a trait.
 
         Returns true if the method exists in the trait and has no default body.

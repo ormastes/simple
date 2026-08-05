@@ -15,6 +15,40 @@ lazy_static::lazy_static! {
 
 static SHA256_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
+fn runtime_byte_array_to_vec(data: RuntimeValue) -> Option<Vec<u8>> {
+    let len = crate::value::collections::rt_array_len(data);
+    if len < 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let value = crate::value::collections::rt_array_get(data, i);
+        if !value.is_int() {
+            return None;
+        }
+        let byte = value.as_int();
+        if !(0..=255).contains(&byte) {
+            return None;
+        }
+        out.push(byte as u8);
+    }
+    Some(out)
+}
+
+fn vec_to_runtime_byte_array(bytes: &[u8]) -> RuntimeValue {
+    let array = crate::value::collections::rt_byte_array_new_len(bytes.len() as u64);
+    if array.is_nil() {
+        return RuntimeValue::NIL;
+    }
+    for (i, byte) in bytes.iter().enumerate() {
+        let ok = crate::value::collections::rt_bytes_u8_set(array, i as i64, *byte as i64);
+        if !ok {
+            return RuntimeValue::NIL;
+        }
+    }
+    array
+}
+
 #[no_mangle]
 pub extern "C" fn rt_sha256_new() -> i64 {
     let handle = SHA256_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -74,6 +108,15 @@ pub fn clear_sha256_registry() {
     SHA256_MAP.lock().unwrap().clear();
 }
 
+#[no_mangle]
+pub extern "C" fn rt_tls13_sha256(data: RuntimeValue) -> RuntimeValue {
+    let Some(bytes) = runtime_byte_array_to_vec(data) else {
+        return RuntimeValue::NIL;
+    };
+    let digest = Sha256::digest(&bytes);
+    vec_to_runtime_byte_array(digest.as_slice())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +140,41 @@ mod tests {
 
         assert_eq!(
             hash_str,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    #[test]
+    fn test_rt_tls13_sha256_basic() {
+        let input = b"hello";
+        let input_arr = crate::value::collections::rt_byte_array_new_len(input.len() as u64);
+        for (i, b) in input.iter().enumerate() {
+            assert!(
+                crate::value::collections::rt_bytes_u8_set(input_arr, i as i64, i64::from(*b)),
+                "failed to set input byte"
+            );
+        }
+
+        assert_eq!(crate::value::collections::rt_array_len(input_arr), 5);
+        let first = crate::value::collections::rt_array_get(input_arr, 0);
+        assert!(first.is_int());
+        assert_eq!(first.as_int(), 104);
+        assert!(runtime_byte_array_to_vec(input_arr).is_some());
+        assert_eq!(runtime_byte_array_to_vec(input_arr).unwrap(), input.to_vec());
+
+        let result = rt_tls13_sha256(input_arr);
+        assert!(!result.is_nil(), "rt_tls13_sha256 returned nil");
+        let mut got = Vec::with_capacity(crate::value::collections::rt_array_len(result) as usize);
+        let len = crate::value::collections::rt_array_len(result);
+        for i in 0..len {
+            let value = crate::value::collections::rt_array_get(result, i);
+            assert!(value.is_int(), "non-int output");
+            let byte = value.as_int();
+            assert!((0..=255).contains(&byte));
+            got.push(byte as u8);
+        }
+        assert_eq!(
+            got.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
     }

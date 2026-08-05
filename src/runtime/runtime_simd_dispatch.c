@@ -295,6 +295,56 @@ bool rt_opencl_is_available(void) {
     return rt_opencl_platform_count() > 0;
 }
 
+/* Honesty probe (lane N3, doc/03_plan/runtime/native_binding/dlopen_conversion_lanes.md):
+ * walks the same dlopen -> platform -> device -> context sequence as
+ * rt_opencl_create_context, but returns a DISTINCT stage code at each honest
+ * outcome instead of collapsing every failure to 0. Passing
+ * RT_OPENCL_PROBE_FORCE_CONTEXT_FAIL deliberately calls clCreateContext with
+ * an empty device list, so the CONTEXT_FAILED branch (with a real CL status
+ * code retrievable via rt_opencl_probe_last_status) is exercisable on any
+ * host, not only one whose ICD happens to reject context creation. */
+#define RT_OPENCL_PROBE_LIB_ABSENT 0
+#define RT_OPENCL_PROBE_NO_PLATFORM 1
+#define RT_OPENCL_PROBE_NO_DEVICE 2
+#define RT_OPENCL_PROBE_CONTEXT_FAILED 3
+#define RT_OPENCL_PROBE_CONTEXT_OK 4
+#define RT_OPENCL_PROBE_FORCE_CONTEXT_FAIL (-999)
+
+static int rt_opencl_probe_last_status_g = 0;
+
+int64_t rt_opencl_probe_stage(int64_t platform_index) {
+    RtOpenClFns* fns = rt_opencl_load_symbols();
+    if (!fns) return RT_OPENCL_PROBE_LIB_ABSENT;
+
+    if (platform_index == RT_OPENCL_PROBE_FORCE_CONTEXT_FAIL) {
+        rt_opencl_context_property properties[] = { 0 };
+        int status = 0;
+        void* context = fns->create_context(properties, 0, NULL, NULL, NULL, &status);
+        if (context && fns->release_context) fns->release_context(context);
+        rt_opencl_probe_last_status_g = status;
+        return RT_OPENCL_PROBE_CONTEXT_FAILED;
+    }
+
+    void* platform_handle = NULL;
+    if (!rt_opencl_platform_at(fns, platform_index, &platform_handle)) return RT_OPENCL_PROBE_NO_PLATFORM;
+    void* device = NULL;
+    if (!rt_opencl_first_non_cpu_device(fns, platform_handle, &device)) return RT_OPENCL_PROBE_NO_DEVICE;
+
+    rt_opencl_context_property properties[] = {
+        RT_OPENCL_CONTEXT_PLATFORM, (rt_opencl_context_property)platform_handle, 0
+    };
+    int status = 0;
+    void* context = fns->create_context(properties, 1, &device, NULL, NULL, &status);
+    rt_opencl_probe_last_status_g = status;
+    if (status != RT_OPENCL_SUCCESS || !context) return RT_OPENCL_PROBE_CONTEXT_FAILED;
+    if (fns->release_context) fns->release_context(context);
+    return RT_OPENCL_PROBE_CONTEXT_OK;
+}
+
+int64_t rt_opencl_probe_last_status(void) {
+    return (int64_t)rt_opencl_probe_last_status_g;
+}
+
 int64_t rt_opencl_create_context(int64_t platform) {
     RtOpenClFns* fns = rt_opencl_load_symbols();
     void* platform_handle = NULL;
@@ -918,34 +968,36 @@ static uint64_t mlkem_ntt_one(int32_t* f, bool inverse, int64_t backend) {
             int32_t zeta = g_mlkem_ntt_zetas[k];
             k += inverse ? -1 : 1;
             int j = start;
-            while (j < start + len) {
-                int remaining = start + len - j;
-                int width = 0;
+            const int end = start + len;
+            while (j < end) {
                 uint64_t executed_chunks = 0;
 #if defined(__x86_64__) || defined(_M_X64)
-                if (backend == 1 && remaining >= 8) {
-                    mlkem_butterfly8_avx2(f + j, f + j + len, zeta, inverse);
-                    width = 8;
-                    executed_chunks = 1;
+                if (backend == 1) {
+                while (j + 8 <= end) {
+                    mlkem_butterfly8_avx2(
+                        f + j, f + j + len, zeta, inverse);
+                    j += 8;
+                    hits += 1;
+                }
                 }
 #elif defined(__aarch64__) || defined(_M_ARM64)
-                if (backend == 2 && remaining >= 4) {
-                    mlkem_butterfly4_neon(f + j, f + j + len, zeta, inverse);
-                    width = 4;
-                    executed_chunks = 1;
+                if (backend == 2) {
+                while (j + 4 <= end) {
+                    mlkem_butterfly4_neon(
+                        f + j, f + j + len, zeta, inverse);
+                    j += 4;
+                    hits += 1;
+                }
                 }
 #elif defined(__riscv) && defined(__riscv_vector)
-                if (backend == 3 && remaining > 0) {
-                    width = (int)mlkem_butterfly_rvv(
-                        f + j, f + j + len, (size_t)remaining, zeta, inverse,
+                if (backend == 3 && j < end) {
+                    j += (int)mlkem_butterfly_rvv(
+                        f + j, f + j + len, (size_t)(end - j), zeta, inverse,
                         &executed_chunks);
-                }
-#endif
-                if (width > 0) {
-                    j += width;
                     hits += executed_chunks;
                     continue;
                 }
+#endif
                 int32_t lo = f[j];
                 int32_t hi = f[j + len];
                 if (inverse) {

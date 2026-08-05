@@ -11,6 +11,8 @@
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
 use compiler.core.enum_discriminant_eval.{eval_enum_discriminant_expr}
 
+extern fn rt_env_get(key: text) -> text
+
 # ===== Declaration Evaluation =====
 
 fn eval_decl(did: i64) -> i64:
@@ -269,6 +271,18 @@ fn eval_module() -> i64:
 
 # ===== Full Initialization =====
 
+# Mirrors the Deny half of safety_pass_severity_for_name in
+# src/compiler/80.driver/driver_safety_severity.spl (critical, and the frozen
+# mission-critical/mission_critical alias). Deliberately duplicated rather
+# than imported: driver_safety_severity.spl's own header says it must not be
+# pulled into a session that also runs parse_full_frontend, and eval_init runs
+# inside exactly that kind of interpreter session — see
+# doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md.
+# robust/reliable resolve to Warn there, not Deny, so they stay non-aborting
+# here too (default warn-only behaviour, unchanged).
+fn match_fallthrough_profile_is_deny(raw: text) -> bool:
+    raw == "critical" or raw == "mission-critical" or raw == "mission_critical"
+
 fn eval_init():
     val_reset()
     env_init()
@@ -277,6 +291,16 @@ fn eval_init():
     mono_cache_init()
     eval_reset()
     module_loader_init()
+    # BUG-2026-08-01-match-fallthrough: promote the warn-only match
+    # fall-through diagnostic to a hard interpreter-tier error when
+    # SIMPLE_SAFETY_PROFILE resolves to Deny severity.
+    val safety_profile_deny = match_fallthrough_profile_is_deny(rt_env_get("SIMPLE_SAFETY_PROFILE") ?? "")
+    match_fallthrough_set_abort(safety_profile_deny)
+    # Same follow-up: surface the wildcard/bare-binder-catch diagnostic under
+    # Deny severity too. Warn-only for now (no abort variant) -- "wild card
+    # use even warning later error for compatibility" per the user request;
+    # the abort escalation is deferred, same as the MIR promotion TODO below.
+    match_wildcard_catch_set_enabled(safety_profile_deny)
 
 # ===== Async/Await Expressions (Basic Stubs) =====
 # TODO [interp][P2]: Full state machine support requires desugaring to state machines

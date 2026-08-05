@@ -9,6 +9,12 @@ Host-only work completed on 2026-07-15:
 
 Postponed until the required lane or hardware is available:
 
+- **TODO658**: UNO Q native GPU board row is physically unavailable in this lane. Add this as the explicit remaining blocker before finalizing the request:
+  - Physical ABX00162/ABX00173 board attached.
+  - Runner command for proof handoff:
+    - `SIMPLE_BIN=<pure-simple-admitted> SIMPLEOS_UNOQ_BOARD_ATTACHED=1 sh scripts/check/check-simpleos-native-board-gpu-2d.shs --board uno-q --strict`
+  - Required retained evidence: board identity and boot/download hashes, native adapter capability, submission/fence path, device identity, DrawIR event/audio/font receipts, device-origin readback, and CPU-SIMD parity.
+
 - Engine2D provider split for Linux Vulkan/CUDA without DirectX/OpenCL/SIMD/font closure dependencies.
 - Native x86 GPU readback and ProcessingIR timing receipts.
 - AArch64 and RISC-V guest compile/boot/render receipts.

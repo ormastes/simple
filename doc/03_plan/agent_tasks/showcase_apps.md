@@ -44,6 +44,7 @@ labelled by its evidence level; nothing here is a shipping claim.
 | Taskbar schema | `src/lib/common/ui/taskbar_model.spl` | **Present, schema-only.** `AppRef`, `WindowRef` (carries `minimized: bool`), `TrayItem`, `TaskbarLaunchError`, `TaskbarModel{pinned,running,tray}`, `empty_taskbar_model()`. It contains **no derivation function** — do not cite it as the live-derivation site. |
 | Live derivation | `src/app/ui.web/taskbar_shell.spl:55` | **Present.** `build_taskbar_model(registry: UiWindowSurfaceRegistry, pinned: [AppRef], tray: [TrayItem]) -> TaskbarModel` materialises `running` by iterating `registry.bindings`, so the running list **is** live window state. `pinned` and `tray` are caller-supplied, not derived. Sibling `build_taskbar_model_with_minimized(...)` at `:82` takes explicit `minimized_surface_ids`. |
 | Session entry point | `src/app/ui.web/_HostTaskbarRuntime/host_taskbar_runtime.spl:144` | **Present.** `host_taskbar_runtime_taskbar_model(session: UISession)` feeds `session.window_surfaces` into the derivation above. |
+| Live derivation (compositor) | `src/os/compositor/host_compositor_core.spl:959` | **Present — this row was missing and the doc was wrong to imply the registry path is the only one.** `HostCompositor.taskbar_model() -> TaskbarModel` projects `running` directly from the compositor's own `self.windows` (focused window sorted last to match host z-order), and `tray` from `self.app_processes`. It does **not** go through `UiWindowSurfaceRegistry`. Free wrapper `host_compositor_taskbar_model(comp)` at `:371`. This is the path a WM *session* derives from, because the compositor's window list — not a registry mirror — is what `render_frame()` composites. Exercised by `test/03_system/gui/wm_showcase_session_capture_spec.spl`. |
 | Pin persistence wire | `src/lib/common/ui/taskbar_pin_wire.spl` | **Present, codec only.** `SIMPLE_TASKBAR_PINS_V1` header plus line encode/decode and field validation. It performs **no storage** — persistence is the runtime's job. |
 | Window lifecycle | `src/lib/common/ui/wm_window_state.spl` | **Present.** Scalar i32 FSM: `NORMAL/MINIMIZED/MAXIMIZED/CLOSING/CLOSED` with `..._minimize / _maximize / _restore / _begin_close / _finish_close / _accepts_input`. No registry, no window list. |
 | Multi-surface demo tree | `src/lib/common/ui/wm_full_stack_demo.spl` | **Present, a demo widget tree — not a WM.** One `wm_full_stack_demo_tree(...)` embedding a 2D surface (handle 101) and a web surface (handle 102). |
@@ -63,8 +64,11 @@ labelled by its evidence level; nothing here is a shipping claim.
   `src/os/desktop/modern_wm_readiness.spl:606` (`_readiness_taskbar_model`) and
   `src/app/wm_compare/production_gui_window_taskbar_widget_shells.spl:148`.
   A "taskbar derived from live window state" claim must name
-  `build_taskbar_model` / `host_taskbar_runtime_taskbar_model` as the path
-  actually taken, not merely that a `TaskbarModel` was rendered.
+  `build_taskbar_model` / `host_taskbar_runtime_taskbar_model` **or
+  `HostCompositor.taskbar_model()`** as the path actually taken, not merely
+  that a `TaskbarModel` was rendered. (Corrected 2026-08-05: the earlier
+  wording listed only the registry path and so would have rejected the
+  compositor's own projection, which is the one a WM session uses.)
 
 ### Correction: the catalog attests ZERO ready surfaces
 

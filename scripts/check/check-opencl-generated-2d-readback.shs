@@ -277,10 +277,102 @@ elif ! generated_2d_have "$CC_TOOL"; then
 else
     if "$OPENCL_RUNTIME_PROBE" >"$BUILD_DIR/opencl_probe.out" 2>"$BUILD_DIR/opencl_probe.err"; then
         cat >"$BUILD_DIR/opencl_generated_2d_readback.c" <<'C_EOF'
-#include <CL/cl.h>
+#include <dlfcn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+/* Runtime-resolved OpenCL binding (no libOpenCL.so at link time — see
+ * doc/03_plan/runtime/native_binding/dlopen_conversion_lanes.md lane N3).
+ * Own minimal type/const definitions so this harness has zero build-time
+ * dependency on OpenCL SDK headers, matching the loader contract in
+ * src/runtime/runtime_simd_dispatch.c. */
+typedef int32_t cl_int;
+typedef uint32_t cl_uint;
+typedef uint64_t cl_device_type;
+typedef uint64_t cl_mem_flags;
+typedef intptr_t cl_context_properties;
+typedef void* cl_platform_id;
+typedef void* cl_device_id;
+typedef void* cl_context;
+typedef void* cl_command_queue;
+typedef void* cl_program;
+typedef void* cl_kernel;
+typedef void* cl_mem;
+
+#define CL_SUCCESS 0
+#define CL_TRUE 1
+#define CL_DEVICE_TYPE_DEFAULT ((cl_device_type)1ULL << 0)
+#define CL_DEVICE_TYPE_GPU ((cl_device_type)1ULL << 2)
+#define CL_MEM_READ_WRITE ((cl_mem_flags)1ULL << 0)
+
+typedef cl_int (*clGetPlatformIDs_fn)(cl_uint, cl_platform_id*, cl_uint*);
+typedef cl_int (*clGetDeviceIDs_fn)(cl_platform_id, cl_device_type, cl_uint, cl_device_id*, cl_uint*);
+typedef cl_context (*clCreateContext_fn)(const cl_context_properties*, cl_uint, const cl_device_id*, void*, void*, cl_int*);
+typedef cl_command_queue (*clCreateCommandQueueWithProperties_fn)(cl_context, cl_device_id, const cl_context_properties*, cl_int*);
+typedef cl_program (*clCreateProgramWithSource_fn)(cl_context, cl_uint, const char**, const size_t*, cl_int*);
+typedef cl_int (*clBuildProgram_fn)(cl_program, cl_uint, const cl_device_id*, const char*, void*, void*);
+typedef cl_kernel (*clCreateKernel_fn)(cl_program, const char*, cl_int*);
+typedef cl_int (*clSetKernelArg_fn)(cl_kernel, cl_uint, size_t, const void*);
+typedef cl_mem (*clCreateBuffer_fn)(cl_context, cl_mem_flags, size_t, void*, cl_int*);
+typedef cl_int (*clEnqueueWriteBuffer_fn)(cl_command_queue, cl_mem, cl_uint, size_t, size_t, const void*, cl_uint, const void*, void*);
+typedef cl_int (*clEnqueueReadBuffer_fn)(cl_command_queue, cl_mem, cl_uint, size_t, size_t, void*, cl_uint, const void*, void*);
+typedef cl_int (*clEnqueueNDRangeKernel_fn)(cl_command_queue, cl_kernel, cl_uint, const size_t*, const size_t*, const size_t*, cl_uint, const void*, void*);
+typedef cl_int (*clFinish_fn)(cl_command_queue);
+
+typedef struct ClFns {
+    clGetPlatformIDs_fn GetPlatformIDs;
+    clGetDeviceIDs_fn GetDeviceIDs;
+    clCreateContext_fn CreateContext;
+    clCreateCommandQueueWithProperties_fn CreateCommandQueueWithProperties;
+    clCreateProgramWithSource_fn CreateProgramWithSource;
+    clBuildProgram_fn BuildProgram;
+    clCreateKernel_fn CreateKernel;
+    clSetKernelArg_fn SetKernelArg;
+    clCreateBuffer_fn CreateBuffer;
+    clEnqueueWriteBuffer_fn EnqueueWriteBuffer;
+    clEnqueueReadBuffer_fn EnqueueReadBuffer;
+    clEnqueueNDRangeKernel_fn EnqueueNDRangeKernel;
+    clFinish_fn Finish;
+} ClFns;
+
+static ClFns g_fns;
+
+/* Ordered soname candidates (same order as src/runtime/runtime_simd_dispatch.c
+ * rt_opencl_load_symbols) — dlopen, then verify EVERY export used below is
+ * actually present before reporting the loader available. A dlopen success
+ * alone is not honesty; naming the missing symbol on failure is. */
+static int cl_load(const char **out_soname, const char **out_missing_symbol) {
+    static const char *candidates[] = { "libOpenCL.so.1", "libOpenCL.so", NULL };
+    void *handle = NULL;
+    const char *used = NULL;
+    for (int i = 0; candidates[i]; i++) {
+        handle = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL);
+        if (handle) { used = candidates[i]; break; }
+    }
+    if (!handle) { *out_soname = NULL; return 0; }
+    *out_soname = used;
+
+#define CL_LOAD(field, name) \
+    g_fns.field = (void*)dlsym(handle, name); \
+    if (!g_fns.field) { *out_missing_symbol = name; return 0; }
+
+    CL_LOAD(GetPlatformIDs, "clGetPlatformIDs")
+    CL_LOAD(GetDeviceIDs, "clGetDeviceIDs")
+    CL_LOAD(CreateContext, "clCreateContext")
+    CL_LOAD(CreateCommandQueueWithProperties, "clCreateCommandQueueWithProperties")
+    CL_LOAD(CreateProgramWithSource, "clCreateProgramWithSource")
+    CL_LOAD(BuildProgram, "clBuildProgram")
+    CL_LOAD(CreateKernel, "clCreateKernel")
+    CL_LOAD(SetKernelArg, "clSetKernelArg")
+    CL_LOAD(CreateBuffer, "clCreateBuffer")
+    CL_LOAD(EnqueueWriteBuffer, "clEnqueueWriteBuffer")
+    CL_LOAD(EnqueueReadBuffer, "clEnqueueReadBuffer")
+    CL_LOAD(EnqueueNDRangeKernel, "clEnqueueNDRangeKernel")
+    CL_LOAD(Finish, "clFinish")
+#undef CL_LOAD
+    return 1;
+}
 
 static const char *kernel_source =
 "__kernel void simple_2d_fill_u32(__global uint* dst, uint value, uint count) {"
@@ -355,9 +447,9 @@ static void fail(const char *reason, cl_int code, uint64_t expected, uint64_t ac
 
 static int set3(cl_kernel k, cl_mem a, cl_mem b, cl_uint c) {
     cl_int err = CL_SUCCESS;
-    err |= clSetKernelArg(k, 0, sizeof(cl_mem), &a);
-    err |= clSetKernelArg(k, 1, sizeof(cl_mem), &b);
-    err |= clSetKernelArg(k, 2, sizeof(cl_uint), &c);
+    err |= g_fns.SetKernelArg(k, 0, sizeof(cl_mem), &a);
+    err |= g_fns.SetKernelArg(k, 1, sizeof(cl_mem), &b);
+    err |= g_fns.SetKernelArg(k, 2, sizeof(cl_uint), &c);
     return err == CL_SUCCESS;
 }
 
@@ -369,32 +461,45 @@ int main(int argc, char **argv) {
     if (count == 0 || count % 8u != 0u) { fail("invalid-count", -1, 0, 0); return 2; }
     size_t bytes = (size_t)count * sizeof(uint32_t);
 
+    const char *loaded_soname = NULL;
+    const char *missing_symbol = NULL;
+    if (!cl_load(&loaded_soname, &missing_symbol)) {
+        if (!loaded_soname) {
+            fail("opencl-lib-absent", -1, 0, 0);
+        } else {
+            printf("opencl_generated_2d_readback_missing_symbol=%s\n", missing_symbol);
+            printf("opencl_generated_2d_readback_loaded_soname=%s\n", loaded_soname);
+            fail("opencl-export-missing", -1, 0, 0);
+        }
+        return 3;
+    }
+
     cl_int err = CL_SUCCESS;
     cl_uint platform_count = 0;
-    err = clGetPlatformIDs(0, NULL, &platform_count);
+    err = g_fns.GetPlatformIDs(0, NULL, &platform_count);
     if (err != CL_SUCCESS || platform_count == 0) { fail("opencl-no-platform", err, 0, 0); return 3; }
     cl_platform_id platform = NULL;
-    err = clGetPlatformIDs(1, &platform, NULL);
+    err = g_fns.GetPlatformIDs(1, &platform, NULL);
     if (err != CL_SUCCESS) { fail("opencl-get-platform", err, 0, 0); return 3; }
     cl_device_id device = NULL;
-    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
-    if (err != CL_SUCCESS) err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_DEFAULT, 1, &device, NULL);
+    err = g_fns.GetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
+    if (err != CL_SUCCESS) err = g_fns.GetDeviceIDs(platform, CL_DEVICE_TYPE_DEFAULT, 1, &device, NULL);
     if (err != CL_SUCCESS) { fail("opencl-no-device", err, 0, 0); return 3; }
-    cl_context context = clCreateContext(NULL, 1, &device, NULL, NULL, &err);
+    cl_context context = g_fns.CreateContext(NULL, 1, &device, NULL, NULL, &err);
     if (err != CL_SUCCESS) { fail("opencl-create-context", err, 0, 0); return 3; }
-    cl_command_queue queue = clCreateCommandQueueWithProperties(context, device, NULL, &err);
+    cl_command_queue queue = g_fns.CreateCommandQueueWithProperties(context, device, NULL, &err);
     if (err != CL_SUCCESS) { fail("opencl-create-queue", err, 0, 0); return 3; }
-    cl_program program = clCreateProgramWithSource(context, 1, &kernel_source, NULL, &err);
+    cl_program program = g_fns.CreateProgramWithSource(context, 1, &kernel_source, NULL, &err);
     if (err != CL_SUCCESS) { fail("opencl-create-program", err, 0, 0); return 3; }
-    err = clBuildProgram(program, 1, &device, "", NULL, NULL);
+    err = g_fns.BuildProgram(program, 1, &device, "", NULL, NULL);
     if (err != CL_SUCCESS) { fail("opencl-build-program", err, 0, 0); return 3; }
-    cl_kernel k_fill = clCreateKernel(program, "simple_2d_fill_u32", &err);
+    cl_kernel k_fill = g_fns.CreateKernel(program, "simple_2d_fill_u32", &err);
     if (err != CL_SUCCESS) { fail("opencl-create-fill-kernel", err, 0, 0); return 3; }
-    cl_kernel k_copy = clCreateKernel(program, "simple_2d_copy_u32", &err);
+    cl_kernel k_copy = g_fns.CreateKernel(program, "simple_2d_copy_u32", &err);
     if (err != CL_SUCCESS) { fail("opencl-create-copy-kernel", err, 0, 0); return 3; }
-    cl_kernel k_alpha = clCreateKernel(program, "simple_2d_alpha_u32", &err);
+    cl_kernel k_alpha = g_fns.CreateKernel(program, "simple_2d_alpha_u32", &err);
     if (err != CL_SUCCESS) { fail("opencl-create-alpha-kernel", err, 0, 0); return 3; }
-    cl_kernel k_scroll = clCreateKernel(program, "simple_2d_scroll_u32", &err);
+    cl_kernel k_scroll = g_fns.CreateKernel(program, "simple_2d_scroll_u32", &err);
     if (err != CL_SUCCESS) { fail("opencl-create-scroll-kernel", err, 0, 0); return 3; }
 
     uint32_t *host = (uint32_t *)calloc(count, sizeof(uint32_t));
@@ -402,23 +507,23 @@ int main(int argc, char **argv) {
     uint32_t *expected_all = (uint32_t *)calloc((size_t)count * 4u, sizeof(uint32_t));
     uint32_t *actual_all = (uint32_t *)calloc((size_t)count * 4u, sizeof(uint32_t));
     if (!host || !expected_buf || !expected_all || !actual_all) { fail("host-alloc-failed", -1, 0, 0); return 3; }
-    cl_mem src = clCreateBuffer(context, CL_MEM_READ_WRITE, bytes, NULL, &err);
+    cl_mem src = g_fns.CreateBuffer(context, CL_MEM_READ_WRITE, bytes, NULL, &err);
     if (err != CL_SUCCESS) { fail("opencl-buffer-src", err, 0, 0); return 3; }
-    cl_mem dst = clCreateBuffer(context, CL_MEM_READ_WRITE, bytes, NULL, &err);
+    cl_mem dst = g_fns.CreateBuffer(context, CL_MEM_READ_WRITE, bytes, NULL, &err);
     if (err != CL_SUCCESS) { fail("opencl-buffer-dst", err, 0, 0); return 3; }
     size_t global = count;
 
     cl_uint count_arg = count;
     cl_uint value_arg = value;
-    err = clSetKernelArg(k_fill, 0, sizeof(cl_mem), &dst);
-    err |= clSetKernelArg(k_fill, 1, sizeof(cl_uint), &value_arg);
-    err |= clSetKernelArg(k_fill, 2, sizeof(cl_uint), &count_arg);
+    err = g_fns.SetKernelArg(k_fill, 0, sizeof(cl_mem), &dst);
+    err |= g_fns.SetKernelArg(k_fill, 1, sizeof(cl_uint), &value_arg);
+    err |= g_fns.SetKernelArg(k_fill, 2, sizeof(cl_uint), &count_arg);
     if (err != CL_SUCCESS) { fail("opencl-fill-args", err, 0, 0); return 3; }
-    err = clEnqueueNDRangeKernel(queue, k_fill, 1, NULL, &global, NULL, 0, NULL, NULL);
+    err = g_fns.EnqueueNDRangeKernel(queue, k_fill, 1, NULL, &global, NULL, 0, NULL, NULL);
     if (err != CL_SUCCESS) { fail("opencl-fill-enqueue", err, 0, 0); return 3; }
-    err = clFinish(queue);
+    err = g_fns.Finish(queue);
     if (err != CL_SUCCESS) { fail("opencl-fill-finish", err, 0, 0); return 3; }
-    err = clEnqueueReadBuffer(queue, dst, CL_TRUE, 0, bytes, host, 0, NULL, NULL);
+    err = g_fns.EnqueueReadBuffer(queue, dst, CL_TRUE, 0, bytes, host, 0, NULL, NULL);
     if (err != CL_SUCCESS) { fail("opencl-fill-readback", err, 0, 0); return 3; }
     uint64_t fill_actual = checksum_u32(host, count);
     uint64_t fill_expected = (uint64_t)value * (uint64_t)count;
@@ -426,14 +531,14 @@ int main(int argc, char **argv) {
     for (unsigned int i = 0; i < count; ++i) { expected_all[i] = value; actual_all[i] = host[i]; }
 
     for (unsigned int i = 0; i < count; ++i) expected_buf[i] = 1000u + i;
-    err = clEnqueueWriteBuffer(queue, src, CL_TRUE, 0, bytes, expected_buf, 0, NULL, NULL);
+    err = g_fns.EnqueueWriteBuffer(queue, src, CL_TRUE, 0, bytes, expected_buf, 0, NULL, NULL);
     if (err != CL_SUCCESS) { fail("opencl-copy-write", err, 0, 0); return 3; }
     if (!set3(k_copy, src, dst, count_arg)) { fail("opencl-copy-args", -1, 0, 0); return 3; }
-    err = clEnqueueNDRangeKernel(queue, k_copy, 1, NULL, &global, NULL, 0, NULL, NULL);
+    err = g_fns.EnqueueNDRangeKernel(queue, k_copy, 1, NULL, &global, NULL, 0, NULL, NULL);
     if (err != CL_SUCCESS) { fail("opencl-copy-enqueue", err, 0, 0); return 3; }
-    err = clFinish(queue);
+    err = g_fns.Finish(queue);
     if (err != CL_SUCCESS) { fail("opencl-copy-finish", err, 0, 0); return 3; }
-    err = clEnqueueReadBuffer(queue, dst, CL_TRUE, 0, bytes, host, 0, NULL, NULL);
+    err = g_fns.EnqueueReadBuffer(queue, dst, CL_TRUE, 0, bytes, host, 0, NULL, NULL);
     if (err != CL_SUCCESS) { fail("opencl-copy-readback", err, 0, 0); return 3; }
     uint64_t copy_actual = checksum_u32(host, count);
     uint64_t copy_expected = checksum_u32(expected_buf, count);
@@ -442,22 +547,22 @@ int main(int argc, char **argv) {
 
     for (unsigned int i = 0; i < count; ++i) expected_buf[i] = 0xff204060u + i;
     for (unsigned int i = 0; i < count; ++i) host[i] = 0xff102030u + i;
-    err = clEnqueueWriteBuffer(queue, src, CL_TRUE, 0, bytes, expected_buf, 0, NULL, NULL);
+    err = g_fns.EnqueueWriteBuffer(queue, src, CL_TRUE, 0, bytes, expected_buf, 0, NULL, NULL);
     if (err != CL_SUCCESS) { fail("opencl-alpha-src-write", err, 0, 0); return 3; }
-    err = clEnqueueWriteBuffer(queue, dst, CL_TRUE, 0, bytes, host, 0, NULL, NULL);
+    err = g_fns.EnqueueWriteBuffer(queue, dst, CL_TRUE, 0, bytes, host, 0, NULL, NULL);
     if (err != CL_SUCCESS) { fail("opencl-alpha-dst-write", err, 0, 0); return 3; }
     cl_uint alpha = 128u;
     for (unsigned int i = 0; i < count; ++i) expected_buf[i] = alpha_pixel(expected_buf[i], host[i], alpha);
-    err = clSetKernelArg(k_alpha, 0, sizeof(cl_mem), &src);
-    err |= clSetKernelArg(k_alpha, 1, sizeof(cl_mem), &dst);
-    err |= clSetKernelArg(k_alpha, 2, sizeof(cl_uint), &alpha);
-    err |= clSetKernelArg(k_alpha, 3, sizeof(cl_uint), &count_arg);
+    err = g_fns.SetKernelArg(k_alpha, 0, sizeof(cl_mem), &src);
+    err |= g_fns.SetKernelArg(k_alpha, 1, sizeof(cl_mem), &dst);
+    err |= g_fns.SetKernelArg(k_alpha, 2, sizeof(cl_uint), &alpha);
+    err |= g_fns.SetKernelArg(k_alpha, 3, sizeof(cl_uint), &count_arg);
     if (err != CL_SUCCESS) { fail("opencl-alpha-args", err, 0, 0); return 3; }
-    err = clEnqueueNDRangeKernel(queue, k_alpha, 1, NULL, &global, NULL, 0, NULL, NULL);
+    err = g_fns.EnqueueNDRangeKernel(queue, k_alpha, 1, NULL, &global, NULL, 0, NULL, NULL);
     if (err != CL_SUCCESS) { fail("opencl-alpha-enqueue", err, 0, 0); return 3; }
-    err = clFinish(queue);
+    err = g_fns.Finish(queue);
     if (err != CL_SUCCESS) { fail("opencl-alpha-finish", err, 0, 0); return 3; }
-    err = clEnqueueReadBuffer(queue, dst, CL_TRUE, 0, bytes, host, 0, NULL, NULL);
+    err = g_fns.EnqueueReadBuffer(queue, dst, CL_TRUE, 0, bytes, host, 0, NULL, NULL);
     if (err != CL_SUCCESS) { fail("opencl-alpha-readback", err, 0, 0); return 3; }
     uint64_t alpha_actual = checksum_u32(host, count);
     uint64_t alpha_expected = checksum_u32(expected_buf, count);
@@ -474,19 +579,19 @@ int main(int argc, char **argv) {
         int sy = (int)y - delta_y;
         expected_buf[i] = (sy < 0 || sy >= (int)height) ? 0u : host[(unsigned int)sy * width + x];
     }
-    err = clEnqueueWriteBuffer(queue, src, CL_TRUE, 0, bytes, host, 0, NULL, NULL);
+    err = g_fns.EnqueueWriteBuffer(queue, src, CL_TRUE, 0, bytes, host, 0, NULL, NULL);
     if (err != CL_SUCCESS) { fail("opencl-scroll-write", err, 0, 0); return 3; }
-    err = clSetKernelArg(k_scroll, 0, sizeof(cl_mem), &src);
-    err |= clSetKernelArg(k_scroll, 1, sizeof(cl_mem), &dst);
-    err |= clSetKernelArg(k_scroll, 2, sizeof(cl_uint), &width);
-    err |= clSetKernelArg(k_scroll, 3, sizeof(cl_uint), &height);
-    err |= clSetKernelArg(k_scroll, 4, sizeof(cl_int), &delta_y);
+    err = g_fns.SetKernelArg(k_scroll, 0, sizeof(cl_mem), &src);
+    err |= g_fns.SetKernelArg(k_scroll, 1, sizeof(cl_mem), &dst);
+    err |= g_fns.SetKernelArg(k_scroll, 2, sizeof(cl_uint), &width);
+    err |= g_fns.SetKernelArg(k_scroll, 3, sizeof(cl_uint), &height);
+    err |= g_fns.SetKernelArg(k_scroll, 4, sizeof(cl_int), &delta_y);
     if (err != CL_SUCCESS) { fail("opencl-scroll-args", err, 0, 0); return 3; }
-    err = clEnqueueNDRangeKernel(queue, k_scroll, 1, NULL, &global, NULL, 0, NULL, NULL);
+    err = g_fns.EnqueueNDRangeKernel(queue, k_scroll, 1, NULL, &global, NULL, 0, NULL, NULL);
     if (err != CL_SUCCESS) { fail("opencl-scroll-enqueue", err, 0, 0); return 3; }
-    err = clFinish(queue);
+    err = g_fns.Finish(queue);
     if (err != CL_SUCCESS) { fail("opencl-scroll-finish", err, 0, 0); return 3; }
-    err = clEnqueueReadBuffer(queue, dst, CL_TRUE, 0, bytes, host, 0, NULL, NULL);
+    err = g_fns.EnqueueReadBuffer(queue, dst, CL_TRUE, 0, bytes, host, 0, NULL, NULL);
     if (err != CL_SUCCESS) { fail("opencl-scroll-readback", err, 0, 0); return 3; }
     uint64_t scroll_actual = checksum_u32(host, count);
     uint64_t scroll_expected = checksum_u32(expected_buf, count);
@@ -532,7 +637,7 @@ int main(int argc, char **argv) {
     return 4;
 }
 C_EOF
-        if ! "$CC_TOOL" -O2 -o "$BUILD_DIR/opencl_generated_2d_readback" "$BUILD_DIR/opencl_generated_2d_readback.c" -lOpenCL >"$BUILD_DIR/cc.out" 2>"$BUILD_DIR/cc.err"; then
+        if ! "$CC_TOOL" -O2 -o "$BUILD_DIR/opencl_generated_2d_readback" "$BUILD_DIR/opencl_generated_2d_readback.c" -ldl >"$BUILD_DIR/cc.out" 2>"$BUILD_DIR/cc.err"; then
             emit_unavailable "opencl-readback-harness-build-failed"
         elif "$BUILD_DIR/opencl_generated_2d_readback" "$OPENCL_ELEMENT_COUNT" "$OPENCL_FILL_VALUE" "$EXPECTED_PIXELS_PATH" "$ACTUAL_PIXELS_PATH" >"$BUILD_DIR/evidence.env" 2>"$BUILD_DIR/run.err"; then
             {

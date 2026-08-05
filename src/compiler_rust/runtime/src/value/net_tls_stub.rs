@@ -23,6 +23,34 @@ pub extern "C" fn rt_tls_client_write(_conn: i64, _data: crate::value::RuntimeVa
 pub extern "C" fn rt_tls_client_read(_conn: i64, _max_bytes: i64) -> crate::value::RuntimeValue { empty_text() }
 
 #[no_mangle]
+pub extern "C" fn rt_tls_client_connect_address_with_sni_timeout(
+    _address: crate::value::RuntimeValue,
+    _port: i64,
+    _server_name: crate::value::RuntimeValue,
+    _timeout_ms: i64,
+) -> i64 {
+    -1
+}
+
+#[no_mangle]
+pub extern "C" fn rt_tls_client_write_timeout(
+    _conn: i64,
+    _data: crate::value::RuntimeValue,
+    _timeout_ms: i64,
+) -> i64 {
+    -1
+}
+
+#[no_mangle]
+pub extern "C" fn rt_tls_client_read_timeout(
+    _conn: i64,
+    _max_bytes: i64,
+    _timeout_ms: i64,
+) -> crate::value::RuntimeValue {
+    empty_text()
+}
+
+#[no_mangle]
 pub extern "C" fn rt_tls_client_close(_conn: i64) -> bool { false }
 
 #[no_mangle]
