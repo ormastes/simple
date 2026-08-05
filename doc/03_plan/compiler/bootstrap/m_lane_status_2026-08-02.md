@@ -399,7 +399,7 @@ spec already uses.
 |---|---|---|---|---|
 | **M2** guard+harden | yes (plan §M2 + design) | yes — `mem_guard.rs`, `memory.rs`, `runtime_memory.c`, `module_state.spl` | **Partial.** Interpreter guard+harden real and green; C **harden** landed but C **guard page absent** while the matrix claims it (OPEN bug = false safety claim). 1 of 3 required UAF fixture classes. | No (delivery via `--mem-infra` only) |
 | **M4** LLVM asan/memprof | yes (plan §M4 + design) | interface only — matrix rows + `BUILD:*` notice | **Not started.** Zero `-fmemory-profile` hits tree-wide; no asan build path. Prior "blocked on 62 symbols" was a misdiagnosis (seed `--features llvm` builds). | Partly — memprof exit needs stage-2 LLVM link; asan half does not |
-| **M5** strict interp | yes (plan §M5 + design) | yes — seed `value.rs`/`node_exec.rs` + pure-Simple `env.spl`/`interpreter.spl` | **1 of 4 defect classes.** Uninit-read traps done and green; poison-on-free, per-deref arena provenance, GC dangling-survivor all missing. | No |
+| **M5** strict interp | yes (plan §M5 + design) | yes — seed `value.rs`/`node_exec.rs` + pure-Simple `env.spl`/`interpreter.spl` | **STALE — see 2026-08-05 addenda below.** Design doc §5 supports 3 real defect classes, not 4 (GC dangling-survivor is explicitly out of scope by design, satisfied by M2). Of those 3: **2 done** (uninit-read; poison-on-free/dirty-names invariant), **1 filed as a bug** (arena provenance at the SFFI boundary — no existing call site to instrument, see `doc/08_tracking/bug/m5_arena_provenance_sffi_boundary_no_existing_crossing_2026-08-05.md`). | No |
 | **M6** gen slotmap | yes (plan §M6) | yes — `gen_arena.spl`, 2 green specs | **Overstated as DONE.** Library real; **zero consumers** — the "migrate one ECS store as proof" exit was never done; release zero-cost unproven. | No |
 | **M7** GPU lane | yes (plan §M7 + design) | yes — `gpu.rs` counters, `mem_profile.spl` sanitizer wrapper | **Counters only.** No `gpu` matrix row, no device fixtures, no pool stats/NVML, `memory_viz` compatibility explicitly unverified in-source. GC row satisfied by absence. | No — blocked on **GPU hardware** |
 | **M8** `simple mem` CLI | yes (plan §M8 + design + requirement) | yes — `src/app/mem/*`, `mem/dump.spl` | **Overstated as COMPLETE.** `trace` and `gpu` verbs **absent** (not stubs); "all help-listed verbs dispatch" is circular; spec bypasses the real dispatch arm. Post-mortem top/diff/snapshot/gate/sample work. | For delivery yes; for implementation no |
@@ -837,3 +837,62 @@ bug doc, and this addendum are all present and byte-identical to what is
 described here); only the commit's own message text is wrong. Left
 uncorrected in git history (no force-push to `main`) — this note is the
 correction of record.
+
+---
+
+# Addendum 2026-08-05 (second pass) — M5 arena-provenance class: investigated,
+filed rather than implemented; GC dangling-survivor confirmed already
+satisfied by design
+
+This pass picked up M5 where the first 2026-08-05 addendum left off: "Still
+open (unchanged from the original finding): arena provenance + generation
+enforcement at the SFFI boundary (design §4) ... Not attempted this pass;
+scoped as a separate, larger change." This pass attempted it.
+
+**GC dangling-survivor — re-confirmed out of scope, not a real 4th class.**
+Design doc §5 ("What is NOT worth doing") explicitly rules out "a separate
+GC-tier dangling-survivor mechanism": "M2 §3/§5 already scope GC
+poison-on-sweep under the shared `SIMPLE_MEM_HARDEN` gate; strict mode
+implies harden's GC behavior rather than adding a parallel path." The first
+2026-08-05 addendum already restated this once; restated again here because
+this task's own briefing still framed the remaining count as "2 of 4:
+per-deref arena provenance and GC dangling-survivor," which over-counts by
+one against the design doc's own scoping. The design doc's own enumeration
+supports **3** real defect classes for M5 (uninit-read, poison-on-free,
+arena-provenance-at-the-SFFI-boundary), not 4 — GC dangling-survivor is
+satisfied by an existing mechanism outside M5, by design, not by new M5 code.
+
+**Arena provenance (design §4) — investigated, filed as a bug, not
+implemented.** Grepped every `interpreter_extern/*.rs` file (all ~60,
+including `ast_sffi.rs`) and every `extern fn` declaration reachable from
+`_AstExpr/nodes.spl`/`accessors.spl` for any point where a `nodes.spl`-minted
+arena index is passed into an `interpreter_extern` SFFI call. Result: **no
+such call site exists**. `ast_sffi.rs`'s handles
+(`register_expr`/`register_node`/... via a `NEXT_HANDLE: AtomicI64` counter)
+are minted independently of `nodes.spl`'s parallel-array arena; the two index
+spaces never meet anywhere in the current tree. The one file whose name
+suggested a bridge, `_FlatAstBridge/convert_nodes.spl`, converts the flat
+arena into the pure-Simple `ParserModule`/HIR shape — a third, in-language
+representation that also never calls into `ast_sffi.rs`.
+
+Implementing the design doc's literal instruction ("thread it as an `(idx,
+gen)` pair ... so a stale index fails at the boundary") would therefore
+require either inventing a call site that doesn't exist today (out of this
+task's scope and its own design implications) or building a fixture around a
+synthetic, non-production crossing — which would satisfy the letter of "a
+fixture that passes normally and traps under strict mode" while proving
+nothing about a real defect, exactly the vacuous-fixture failure mode this
+campaign's own verification-culture notes warn against elsewhere. Filed as
+`doc/08_tracking/bug/m5_arena_provenance_sffi_boundary_no_existing_crossing_2026-08-05.md`
+rather than forced.
+
+**Net M5 status after this pass:** of the 3 real defect classes the design
+doc supports, **2 of 3 are done** (uninit-read; poison-on-free/dirty-names
+invariant) and the 3rd (arena provenance at the SFFI boundary) is scoped and
+filed, blocked on a design-level decision (does the described crossing exist
+or is it forward-looking?) rather than an implementation gap. This is not "4
+of 4," and is not rounded up to it — see the bug doc for the exact grep
+evidence and the recommended next step.
+
+**Blocked on bootstrap?** No — pure investigation and doc work this pass, no
+Rust or Simple source changed, no build attempted.
