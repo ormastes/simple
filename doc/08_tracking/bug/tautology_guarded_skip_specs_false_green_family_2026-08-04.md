@@ -1275,3 +1275,163 @@ Dominant failure shapes in the two red classes, for triage:
   compiler/mdsoc (ConstructCapsule, CrossDimensionQuery) clusters. 7 + 4 files,
   ~275 examples, all-red.
 
+
+## Third pass, 2026-08-05 — the 230 withheld specs, cause-level triage
+
+This pass took the 230 the second pass withheld, starting with the 181 recorded
+as "will not load (stale module/API paths) — 0 examples". **That classification
+was wrong for 112 of the 181.** The bucket is three different populations, and
+only one of them is a load failure.
+
+### Correction 1 — 99 of the 181 are GUTTED files, not load failures
+
+99 of the 181 are 4-to-6-line files containing nothing but the tautology guard.
+There is no commented-out body to restore, so a mechanical restore yields an
+empty file and the runner reports 0 examples. That reads identically to "will
+not load" and is what the second pass recorded.
+
+The real content is recoverable, but **not on the file's own path** — `git log
+--follow` on each path returns a flat 168-263 bytes for its entire history and
+says the content never existed. It survives elsewhere: enumerating every
+`*_spec.spl` blob in the object graph (`git rev-list --all --objects`,
+61,243 blobs) and matching by BASENAME finds a >1KB version for 92 of the 99.
+Sources, in order of frequency: `.claude/worktrees/<name>/…` (24 — a developer
+worktree that was accidentally committed), `.jjconflict-base-0/…` (18 — the
+conflict trees the VCS guards exist to reject), pre-reorg `test/…` paths (4),
+and `.migration_backup_20260111_125136/…` (2).
+
+48 recover from a path whose last two components match the current path exactly
+(e.g. `…/app/lsp/folding_range_spec.spl` -> `test/01_unit/app/lsp/folding_range_spec.spl`)
+and are high-confidence. 44 more recover from a renamed directory
+(`test/unit/app/mcp/` -> `test/01_unit/app/mcp_unit/`) and need per-file
+judgement; at least one (`mcp_spec.spl` from
+`test/03_system/tools/llm/claude_full/cli/handlers/`) is a same-named different
+spec and must not be used. 7 have no content anywhere.
+
+**Restoring the 48 high-confidence ones: 42 of 48 LOAD, giving 385 examples and
+70 failures.** The "will not load" verdict was an artifact of restoring from the
+wrong place.
+
+### Correction 2 — 13 of the 181 already load and always did
+
+13 files are live specs in which INDIVIDUAL `it` blocks were replaced by
+tautology guards (2 to 18 guards per file), not whole-file comment-outs. They
+load and run untouched: **280 examples, 18 failures.** They were recorded as
+0 examples.
+
+The likely cause of the miscount is `tail -1` on the verdict lines. A spec with
+several `describe` blocks prints one verdict per block, and the last one is not
+the total: `remote_riscv32_spec` reads `9 examples, 0 failures` on its last line
+and `85 examples, 7 failures` when all lines are summed — a 9x undercount. Sum
+every `^N examples?, M failures?$` line; never take the last.
+
+### The 69 that genuinely do not load — cause distribution
+
+| Cause | Files |
+|---|---|
+| `Module "compiler" does not export '<mod>'` — flat pre-layer-split import | 39 |
+| `Cannot resolve module: <name>` (module does not exist anywhere) | 22 |
+| Parse error in the restored body | 5 |
+| Other (`use std.ffi` deprecated, no `main`, misc) | 3 |
+
+The 39-file bucket is one cause. `src/compiler/` was reorganised into numbered
+layer directories (`00.common`, `10.frontend`, `20.hir`, …) with unnumbered
+symlinks alongside (`frontend -> 10.frontend`). The canonical import is
+`use compiler.frontend.parser_types` — 38 uses in `src/`. These specs still say
+`use compiler.parser_types` (18 uses in `test/`) or `use compiler.core.parser_types`
+(8 uses), naming a `core` directory that no longer exists.
+
+**Cause-level fix: rewrite `compiler.<mod>` and `compiler.core.<mod>` to
+`compiler.<layer>.<mod>`, resolving each module name to its actual layer
+directory. This unblocked 27 of the 69 specs -> 459 examples, 176 failures.**
+
+The 22 `Cannot resolve module` failures name modules that do not exist in the
+tree at all: `std.test` (4), `std.phantom` (1), `physics.core*` (7 — the real
+path is `lib.nogc_async_mut.engine.physics`), `simple.compiler.monomorphize.note_sdn`
+(2), `app.ffi_gen.types` (1). The last is worth its own note: `src/app/ffi_gen/`
+now contains only 9 `test_*.spl` files — `types.spl`, `module_gen.spl`,
+`enum_gen.spl` and `fn_gen.spl` are all gone, so `module_gen_spec` can never
+load. Its subject was deleted.
+
+### Coupling gate — 9 specs pass, and the gate was fail-open twice first
+
+Gate: rename every top-level `fn` in the production modules the spec imports;
+require the example count to HOLD and failures to RISE (or the failure messages
+to change).
+
+**The gate read UNCOUPLED on all 23 candidates before it worked at all.** Two
+independent resolution bugs, each of which renamed ZERO functions and therefore
+compared a run against itself:
+
+1. `use std.pure.nn.pooling.{...}` was captured with a trailing dot, so the
+   module path became `pure/nn/pooling/` and matched nothing.
+2. `compiler.frontend.parser_types` resolves through the `frontend -> 10.frontend`
+   SYMLINK, and `find` does not follow symlinks, so `*/compiler/frontend/*.spl`
+   never matched a real path. Layer lookup has to go through the numbered name.
+
+Both produced a clean, plausible `UNCOUPLED` verdict with the counts printed.
+The tell is the renamed-function count: it must be reported alongside the
+verdict, and a gate that renamed 0 functions is not a result.
+
+A cheaper structural pre-filter catches most of it without running anything:
+**17 of the 23 green candidates import no production module at all.**
+`runtime_type_check_spec` (33 examples) imports only `std.spec`, then declares
+its own `test_val_kinds` / `TEST_VAL_*` mocks with the comment "In production
+these come from interpreter/value.spl" — it tests a copy of the type checker
+that lives inside the test file. Restoring it would add 33 green examples
+coupled to nothing.
+
+Passing the gate (example count held, failures rose):
+
+| Spec | before | rename | fns renamed |
+|---|---|---|---|
+| `app/mcp_unit/mcp_completions_intensive_spec.spl` | 5 ex, 0 fail | 5 ex, **5 fail** | 38 |
+| `app/mcp_unit/prompts_compiled_spec.spl` | 5 ex, 0 fail | 5 ex, **5 fail** | 38 |
+| `lib/pure/nn/norm_spec.spl` | 27 ex, 0 fail | 27 ex, **27 fail** | 15 |
+| `lib/pure/nn/pooling_spec.spl` | 31 ex, 0 fail | 31 ex, **20 fail** | 13 |
+| `lib/pure/nn/pooling_integration_spec.spl` | 6 ex, 0 fail | 6 ex, **2 fail** | 11 |
+| `lib/common/pure/nn/pooling_integration_spec.spl` | 6 ex, 0 fail | 6 ex, **2 fail** | 11 |
+| `compiler/dependency/visibility_spec.spl` | 20 ex, 0 fail | 20 ex, **20 fail** | 3 |
+| `compiler/di/di_runtime_spec.spl` | 12 ex, 0 fail | 12 ex, **12 fail** | 9 |
+| `compiler/di/di_validation_spec.spl` | 10 ex, 0 fail | 10 ex, **10 fail** | 4 |
+
+Failing the gate, NOT landed: `compiler/native/auto_vectorize_spec.spl` is the
+one to note — 56 examples that stay 56/0 with all 8 functions in its module
+renamed. It would have been the single largest green restore in this pass and it
+proves nothing.
+
+### `pending()` is invisible to the verdict line
+
+The repo's own skip construct is not a way to record an honest non-pass.
+`pending("never implemented")` prints `○ … (skipped)` and calls
+`record_test_result(…, true, true)`, but it also does `BDD_COUNTS.0 += 1` and
+never touches the failure counter. Measured directly:
+
+    describe "PendingProbe":
+        it "real pass":  expect(1).to_equal(1)
+        pending("never implemented")
+    -> 2 examples, 0 failures
+
+So a machine reading the verdict cannot distinguish `pending` from a pass. Any
+plan to convert this family to "explicitly pending" needs a runner change first,
+or it re-creates the same false green under a nicer name.
+
+### Landed this pass
+
+9 specs, coupling-proven, plus their `test/unit` mirrors: **9 vacuous passing
+examples -> 122 real passing examples**, all of which fail when the code they
+name is renamed. No spec was landed on a green-restore alone.
+
+### Still withheld, and why
+
+- **17 specs** restore green with no production import — structurally uncoupled.
+- **8 specs** restore green, import a real module, and survive the rename.
+- **42 specs** now load with failures (385 + 459 examples, 246 failures between
+  the two groups). These are honest reds, but each needs its own triage —
+  production bug vs stale assertion vs never-implemented — before landing; the
+  count-and-failure gate is fail-open when the examples already fail.
+- **42 of the 69** still do not load: 22 name modules that do not exist, 5 fail
+  to parse, the rest are misc.
+- **44 gutted specs** recoverable only from a renamed directory, needing
+  per-file confirmation that the recovered blob is the same spec.
+- **7 gutted specs** with no recoverable content anywhere.
