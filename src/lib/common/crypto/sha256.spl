@@ -195,7 +195,17 @@ extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_tls13_sha256(data: [u8]) -> [u8]
 
 fn sha256_text(data: text) -> text:
-    val digest = rt_tls13_sha256(rt_text_to_bytes(data))
+    val raw = rt_text_to_bytes(data)
+    val digest = rt_tls13_sha256(raw)
+    # rt_tls13_sha256 returns a 0-length array under the Cranelift JIT while
+    # returning the correct 32 bytes interpreted, so the fast path silently
+    # produced the EMPTY digest for every input under `bin/simple run` (which
+    # defaults to the JIT). Anything that is not a full 32-byte digest falls
+    # back to the pure-Simple implementation, which is engine-independent.
+    # See doc/08_tracking/bug/jit_rt_tls13_sha256_returns_empty_2026-08-05.md --
+    # remove this guard only once that defect is fixed and re-measured.
+    if digest.len() != 32u64:
+        return sha256_u8_hex(raw)
     val hex_digits = "0123456789abcdef"
     var out = ""
     var oi = 0
