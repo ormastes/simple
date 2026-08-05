@@ -42,6 +42,9 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_animation_end_ms
 }
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    SimpleWebLayoutEngine2DReadbackResult
+}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
 use std.gc_async_mut.gpu.engine2d.backend_lane.{
@@ -303,23 +306,40 @@ pub fn web_render_html_request_to_pixels(req: WebRenderRequest, full_html: text)
 pub fn web_render_html_request_to_pixels_with_backend(req: WebRenderRequest, full_html: text, backend_name: text) -> [u32]:
     simple_web_render_html_to_pixels_with_engine2d_backend(full_html, req.viewport_w, req.viewport_h, backend_name)
 
+# The backend an artifact is LABELLED with must be the one that actually
+# produced its pixels. These entry points used to resolve the request name
+# themselves and then hand the render a *separately* resolved name, so the label
+# and the renderer could disagree inside a single frame: a request that resolved
+# to "cuda"/"vulkan" here was labelled that way even when the execution demoted
+# to the CPU surface and returned readback_source == "cpu_fallback".
+#
+# `result.resolved_backend` is what the execution used ("software" whenever an
+# accelerated request was demoted), so the label now DERIVES from the render
+# instead of racing it. The independent resolver call survives only as the
+# no-pixels fallback (zero-size viewport), where resolved_backend is "" because
+# nothing was executed and there is no frame to attribute.
+fn _web_render_label_backend(result: SimpleWebLayoutEngine2DReadbackResult, width: i32, height: i32, requested: text) -> text:
+    if result.resolved_backend != "":
+        return result.resolved_backend
+    web_render_resolved_engine2d_backend_name(width, height, requested)
+
 pub fn web_render_request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
-    val backend = web_render_resolved_engine2d_backend_name(req.viewport_w, req.viewport_h, "auto")
-    val result = simple_web_render_html_to_readback_result_with_engine2d_backend(web_render_full_html(req), req.viewport_w, req.viewport_h, backend)
+    val result = simple_web_render_html_to_readback_result_with_engine2d_backend(web_render_full_html(req), req.viewport_w, req.viewport_h, "auto")
+    val backend = _web_render_label_backend(result, req.viewport_w, req.viewport_h, "auto")
     val artifact = web_render_artifact_with_backend_readback_source_evidence(web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), result.readback.pixels), backend), backend, result.readback.source)
     val queued = web_render_artifact_with_runtime_queue_evidence(artifact, backend)
     web_render_artifact_with_material_fallback(queued, result.material_fallback)
 
 pub fn web_render_html_request_to_pixel_artifact(req: WebRenderRequest, full_html: text) -> WebRenderArtifact:
-    val backend = web_render_resolved_engine2d_backend_name(req.viewport_w, req.viewport_h, "auto")
-    val result = simple_web_render_html_to_readback_result_with_engine2d_backend(full_html, req.viewport_w, req.viewport_h, backend)
+    val result = simple_web_render_html_to_readback_result_with_engine2d_backend(full_html, req.viewport_w, req.viewport_h, "auto")
+    val backend = _web_render_label_backend(result, req.viewport_w, req.viewport_h, "auto")
     val artifact = web_render_artifact_with_backend_readback_source_evidence(web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), result.readback.pixels), backend), backend, result.readback.source)
     val queued = web_render_artifact_with_runtime_queue_evidence(artifact, backend)
     web_render_artifact_with_material_fallback(queued, result.material_fallback)
 
 pub fn web_render_html_request_to_pixel_artifact_with_backend(req: WebRenderRequest, full_html: text, backend_name: text) -> WebRenderArtifact:
-    val backend = web_render_resolved_engine2d_backend_name(req.viewport_w, req.viewport_h, backend_name)
     val result = simple_web_render_html_to_readback_result_with_engine2d_backend(full_html, req.viewport_w, req.viewport_h, backend_name)
+    val backend = _web_render_label_backend(result, req.viewport_w, req.viewport_h, backend_name)
     val artifact = web_render_artifact_with_backend_readback_source_evidence(web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), result.readback.pixels), backend), backend, result.readback.source)
     val queued = web_render_artifact_with_runtime_queue_evidence(artifact, backend)
     web_render_artifact_with_material_fallback(queued, result.material_fallback)
