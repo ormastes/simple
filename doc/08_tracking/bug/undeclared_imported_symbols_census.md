@@ -195,6 +195,38 @@ oracle). This is why the static census, not the oracle, is the primary instrumen
 here — but the oracle is strictly better for the wrong-module axis, which the census
 cannot see at all.
 
+### 6b-bis. After deployment and the false-positive fix (2026-08-05)
+
+The oracle is now **deployed** — `strings -a bin/release/x86_64-unknown-linux-gnu/simple
+| grep -c use-warning` went `0` -> `1` — and the `extern fn` false positive is fixed.
+Re-running the same four specs against the deployed binary:
+
+| measure | census (pre-fix, scratch build) | now (deployed, post-fix) |
+|---|---|---|
+| `[use-warning]` lines | 34 | **25** |
+| distinct names | 16 | **15** |
+| census agreements retained | 5 | **5** — all of them |
+| wrong-module names retained | 10 | **10** — all of them |
+| oracle false positives | 1 | **0** |
+| census names the oracle missed | 0 | **0** — unchanged |
+
+The single distinct name that disappeared is `rt_font_glyph_advance`, the false
+positive, and nothing else moved: agreement did not merely improve in aggregate, it
+improved **only** on the axis the fix targeted. Precision for the declared-nowhere
+family on this sample is now 5/15, and every remaining name is a real defect of one
+of the two classes rather than an artifact of the checker.
+
+Per-spec line counts now: `terminal_spec` 14, `animations_wpt_spec` 10,
+`wpt_scorecard_spec` 1, `paint_tree_walker_spec` 0 (still zero — it is the CONCEALED
+case, and blind spot 3 below explains why the oracle cannot see it by construction).
+
+**A check now guards the deployment**, because the oracle vanishing from the build —
+not any flaw in the oracle — is what made it useless for a day:
+`scripts/check/check-use-warning-oracle-deployed.shs`. It runs the deployed binary
+against a committed fixture and scores stderr content rather than exit status. A
+source-presence check would not have caught the original defect: the source was
+correct the entire time.
+
 The oracle emitted **zero** warnings for `paint_tree_walker_spec.spl`, the CONCEALED
 case — confirming blind spot 3 below.
 
@@ -212,9 +244,45 @@ census does not:
    CONCEALED bucket is invisible to it by construction: the module fails to resolve,
    so `provided` is never computed and no warning is possible.
 
-4. **`extern fn` is not counted as provided** (§6b) — the oracle false-positives on
-   every `extern fn` re-export. That is a live defect in the checker itself and
-   should be fixed before the warning is trusted or gated on.
+4. ~~**`extern fn` is not counted as provided** (§6b) — the oracle false-positives on
+   every `extern fn` re-export.~~ **FIXED 2026-08-05**, in the same change that
+   deployed the oracle. `collect_provided_names` now folds in `Node::Extern` and
+   `Node::ExternClass`. Only the extern *class* name is added, matching
+   `Node::Class`, which likewise does not contribute its method names.
+
+### 6c. The wrong-module class: kept separate, and deliberately NOT reclassified
+
+10 of the 16 oracle hits were names that **are** declared in the repo, just not in
+the module they are imported from. That is a different defect from "declared
+nowhere", and the two must not be merged: the remedies have nothing in common. A
+wrong-module import is a one-line fix with a known target — repoint the `use`. A
+declared-nowhere import is an implementation decision about code that was never
+written. Emitting them identically forces every reader to redo the "does this name
+exist anywhere?" search by hand.
+
+**Decision: the loader-time oracle keeps ONE diagnostic and must not try to split
+them.** Reasons, in order of weight:
+
+1. **It cannot prove the distinction.** Saying "declared nowhere" is a claim about
+   the whole repo. The module loader sees one module and its siblings. The nearest
+   existing machinery, `sibling_might_define_requested_names`
+   (`module_loader.rs:262`), is a loose text probe scoped to *sibling files only*,
+   so a name declared three directories away would be reported as "declared
+   nowhere" — an overclaim, and precisely the kind of confident-but-wrong
+   diagnostic that gets a checker switched off.
+2. **The honest wording is already in place, and is worth protecting.** The current
+   message says *"module 'm' does not provide it"* — not *"this name does not
+   exist"*. That statement is exactly true for both classes and overclaims neither.
+   It should stay that way.
+3. **A repo-wide declaration index does not belong on the module-load path.**
+   Splitting the classes correctly needs one, and building it per load is a
+   filesystem sweep on the hot compile path.
+
+So the split is real and stays visible — but it is the job of a **separate
+repo-wide pass** (this census, and `spec_imports_declared_nowhere_2026-08-04.md`
+for the spec axis), not of the loader. The oracle's role is to say "this import is
+wrong"; naming *which* of the two ways it is wrong is a second instrument's job.
+The two classes are counted separately in §6a above and are not to be summed.
 
 Conversely the census cannot see what the oracle can: (a) names the Rust seed injects
 at runtime with no `.spl` declaration — the Rust string-literal cross-check in §5
@@ -255,10 +323,14 @@ named — 10 of the 16 oracle hits were this, so it is not a rare case.
   is the only surviving marker that an API was planned and never built. Deleting
   them silently converts a visible gap into no record at all, and it is a bulk edit
   across 37 files. Left for a per-cluster decision.
-- **The one action that is unambiguously worth taking is redeploying the seed** so
+- ~~**The one action that is unambiguously worth taking is redeploying the seed** so
   `[use-warning]` fires (§6a). Not done here to avoid racing parallel sessions on
   `bin/simple`. Fix the `extern fn` false positive (§6b) in the same change, or the
-  warning will be noisy from day one and get ignored.
+  warning will be noisy from day one and get ignored.~~ **DONE 2026-08-05** — seed
+  rebuilt and redeployed, `extern fn` false positive fixed in the same change, and
+  `scripts/check/check-use-warning-oracle-deployed.shs` added so the deployment
+  cannot silently regress again. Results in §6b-bis. Still nothing fixed in the
+  1,159 undeclared imports themselves; that remains deliberate.
 
 Recommended order of attack, by blast radius:
 

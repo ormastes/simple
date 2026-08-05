@@ -306,6 +306,14 @@ fn locally_defined_names(items: &[Node]) -> Vec<String> {
             Node::Class(c) => names.push(c.name.clone()),
             Node::Struct(s) => names.push(s.name.clone()),
             Node::Enum(e) => names.push(e.name.clone()),
+            // `extern fn name(...)` / `extern class Name:` declare real importable
+            // surface but never reach `module_functions`/`module_classes` (they are
+            // FFI declarations, not evaluated definitions). Omitting them made the
+            // `[use-warning]` oracle report a providing module as not providing.
+            // Only the extern class NAME is surface here, matching `Node::Class`
+            // above, which likewise does not contribute its method names.
+            // SABOTAGE-TEMP: reverted to prove the FP guard goes RED. RESTORE.
+
             Node::Let(stmt) => {
                 if let simple_parser::ast::Pattern::Identifier(name) = &stmt.pattern {
                     names.push(name.clone());
