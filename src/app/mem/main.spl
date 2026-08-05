@@ -2,6 +2,7 @@
 #
 # Usage:
 #   simple mem top --profile <file> [--n N]   Top-N owners/kinds by live bytes
+#   simple mem top --pid <P> [--path F] [--wait-ms N]  Live SIGUSR2 poll (see below)
 #   simple mem diff <a> <b>                    Diff two snapshot files
 #   simple mem snapshot -o <file>              Write an in-process snapshot
 #   simple mem trace <prog.spl> [-o <file>]    Record an attributed profile
@@ -10,9 +11,12 @@
 #   simple mem sample <pid> <out_csv> [ms]     Delegate to the memstat sampler
 #   simple mem help                            Show usage
 #
-# v1 is post-mortem file mode only (no live-process/TUI channel yet — see
-# doc/05_design/app/mem_cli/m8_simple_mem_cli_design.md). Snapshot files are
-# plain TSV, one row per line:
+# v1 is primarily post-mortem file mode, plus one live-process channel: `top
+# --pid <P>` delegates to src/app/mem/live_poll.spl, which sends SIGUSR2 to
+# P and reads back the snapshot P's own install_mem_dump_on_usr2() handler
+# writes (see doc/05_design/app/mem_cli/m8_simple_mem_cli_design.md section
+# 2). There is still no live TUI channel. Snapshot files are plain TSV, one
+# row per line:
 #   simple-mem-snapshot	v1	<timestamp>
 #   KIND	<kind>	<live_bytes>	<peak_bytes>	<allocs>
 #   OWNER	<owner>	<live_bytes>	<peak_bytes>	<allocs>
@@ -105,6 +109,7 @@ fn print_help():
     print ""
     print "Usage:"
     print "  simple mem top --profile <file> [--n N]   Top-N owners/kinds by live bytes"
+    print "  simple mem top --pid <P> [--path F] [--wait-ms N]  Live SIGUSR2 poll of pid P"
     print "  simple mem diff <a> <b>                    Diff two snapshot files"
     print "  simple mem snapshot -o <file>              Write an in-process snapshot"
     print "  simple mem trace <prog.spl> [-o <file>]    Record an attributed profile"
@@ -230,6 +235,9 @@ fn cmd_top(args: [text]) -> i64:
     var profile = ""
     var n = 20
     var once = false
+    var pid: i64 = -1
+    var dump_path = "build/mem_snapshot.tsv"
+    var wait_ms: i64 = 200
     var i = 0
     while i < args.len():
         val a = args[i]
@@ -252,10 +260,51 @@ fn cmd_top(args: [text]) -> i64:
         elif str_eq(a, "--once"):
             once = true
             i = i + 1
+        elif str_eq(a, "--pid") and i + 1 < args.len():
+            pid = parse_dec(args[i + 1])
+            i = i + 2
+        elif a.starts_with("--pid="):
+            pid = parse_dec(a.substring(6))
+            i = i + 1
+        elif str_eq(a, "--path") and i + 1 < args.len():
+            dump_path = args[i + 1]
+            i = i + 2
+        elif a.starts_with("--path="):
+            dump_path = a.substring(7)
+            i = i + 1
+        elif str_eq(a, "--wait-ms") and i + 1 < args.len():
+            val parsed = parse_dec(args[i + 1])
+            if parsed >= 0:
+                wait_ms = parsed
+            i = i + 2
+        elif a.starts_with("--wait-ms="):
+            val parsed = parse_dec(a.substring(10))
+            if parsed >= 0:
+                wait_ms = parsed
+            i = i + 1
         else:
             i = i + 1
+    if pid > 0 and profile == "":
+        # Live-process channel (M8 design doc section 2): delegate the
+        # SIGUSR2 send + wait + read to src/app/mem/live_poll.spl, then feed
+        # the resulting file into the same --profile path below. This is the
+        # thing that was previously an orphan: live_poll.spl existed but no
+        # verb ever called it.
+        val poll_args: [text] = [
+            "run", "src/app/mem/live_poll.spl", "--",
+            "--pid", "{pid}", "--path", dump_path, "--wait-ms", "{wait_ms}"
+        ]
+        val (poll_out, poll_err, poll_code) = process_run(resolve_simple_binary(), poll_args)
+        if poll_code != 0:
+            if poll_out.len() > 0:
+                print poll_out
+            if poll_err.len() > 0:
+                print poll_err
+            print "simple mem top --pid: no live snapshot from pid {pid}"
+            return 1
+        profile = dump_path
     if profile == "":
-        print "simple mem top: missing --profile <file>"
+        print "simple mem top: missing --profile <file> or --pid <P>"
         print_help()
         return 1
     if not file_exists(profile):

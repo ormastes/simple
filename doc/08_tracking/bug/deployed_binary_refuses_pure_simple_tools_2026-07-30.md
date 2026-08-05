@@ -153,13 +153,54 @@ Held back pending a working runner, because it must not land unverified:
 - `test/01_unit/compiler/bootstrap/entry_closure_symlink_physical_source_dedup_spec.spl` (new).
 - `src/app/mem/{live_poll,main}.spl` + `test/03_system/app/mem_cli_spec.spl` —
   ~~`simple mem top --pid` live polling; agent-reported 10/10.~~
-  **DO NOT LAND — verified 2026-07-30 under the seed runner (7/7 green, exit 0),
+  ~~**DO NOT LAND — verified 2026-07-30 under the seed runner (7/7 green, exit 0),
   and the green is meaningless:** the spec has only 7 `it` blocks (so the
   reported "10/10" never existed), contains ZERO references to `pid`/`poll`/
   `live`, and `live_poll.spl` is an orphan standalone utility that `main.spl`
   never calls — `main.spl` only gained a `--once` flag. The `--once` assertion
   is tautological (exit 0 + two substrings that hold whether or not the loop is
-  bypassed). The feature is incomplete, not merely unverified.
+  bypassed). The feature is incomplete, not merely unverified.~~
+  **RESOLVED 2026-08-05.** Re-verified the finding still held (`grep -n
+  "live_poll\|--poll\|live poll" src/app/mem/main.spl` was still empty), then
+  wired it for real: `cmd_top` in `main.spl` gained `--pid <P> [--path F]
+  [--wait-ms N]`, which delegates to `live_poll.spl`'s SIGUSR2 send/wait/read
+  and feeds the result through the same `--profile` path used elsewhere.
+  `test/03_system/app/mem_cli_spec.spl` gained two real assertions: a
+  positive case against `test/fixture/mem_infra/live_poll_target.spl` (a
+  fixture that installs the SIGUSR2 dump handler and pumps
+  `signal_dispatch_pending()` but never dumps on its own, so the snapshot can
+  only appear via a genuine signal round-trip) and a negative control (a bare
+  `sleep` with no handler, proving success isn't a stale file or an
+  always-pass path). Both were confirmed sabotage-provable: neutering the
+  `--pid` dispatch arm in `main.spl` turns both RED; restoring it turns both
+  green again (16/17 in the file, the one remaining red is a pre-existing,
+  unrelated `HostedCompositorBackend`/`blit_pixels` semantic error elsewhere
+  in the CLI's transitive import graph — reproduced directly, confirmed not
+  caused by this change).
+  Two real, load-bearing defects were found and fixed along the way, both
+  scoped to this feature: (1) `use std.io_runtime.{..., thread_sleep}`
+  silently fails to resolve under the interpreter engine (the shim at
+  `src/lib/io_runtime.spl` doesn't re-export it) — fixed by importing
+  `thread_sleep` directly from `std.nogc_sync_mut.io_runtime` in
+  `live_poll.spl` and the new fixture/spec code. (2) The SIGUSR2 handler
+  (`on_mem_dump_usr2` in `src/lib/nogc_sync_mut/mem/dump.spl`) crashed with
+  "unknown extern function: memory_usage" when invoked as a signal callback
+  under the interpreter engine, because the interpreter's `rt_interp_call`
+  callback bridge only resolves `rt_`/`spl_`-prefixed externs (plus a small
+  print-family allowlist) — fixed by splitting the RSS row out into
+  `mem_dump_tsv_no_rss()` and having the SIGUSR2 handler use that (KIND/OWNER
+  rows use `rt_`-prefixed externs and are unaffected; `simple mem snapshot`,
+  a normal top-level call, still gets the real RSS row via `mem_dump_tsv()`).
+  Also documented, not fixed (out of scope — Rust-level, cross-cutting):
+  `rt_signal_install`/`rt_signal_check` are registered as real runtime
+  symbols for JIT/native codegen but are absent from `interpreter_extern`'s
+  dispatch table entirely, so a target process only receives the live
+  SIGUSR2 channel under JIT/native execution, never under
+  `SIMPLE_EXECUTION_MODE=interpret`. The new spec test spawns its fixture
+  with `env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE` to undo the
+  interpreter-forcing that `bin/simple test` otherwise leaks into every
+  spawned subprocess, restoring the JIT default a normal `bin/simple run
+  prog.spl` would already have.
 
 ## Next step
 

@@ -116,13 +116,23 @@ alt-screen/live-refresh wrapper.
 
 ## Open gaps to file as follow-up bugs
 - ~~No SIGUSR2 hook in `signal_handlers.spl` (§2) — blocks `top --pid`~~ — the
-  SIGUSR2 hook landed (`install_sigusr2_handler`/`on_sigusr2`), and
-  `top --pid` (2026-07-30) ships as a **/proc-based poll loop**
-  (`src/app/mem/live_poll.spl`) rather than the signal-dump channel, so it
-  works against any pid without requiring the target to have called
-  `install_mem_dump_on_usr2`. The SIGUSR2 dump+read channel still exists in
-  `live_poll.spl` (`--path <file>`) as the OWNER/KIND channel for
-  cooperating Simple processes, just not wired as `top --pid`'s default.
+  SIGUSR2 hook landed (`install_sigusr2_handler`/`on_sigusr2`). ~~`top --pid`
+  (2026-07-30) ships as a /proc-based poll loop... just not wired as `top
+  --pid`'s default.~~ **That earlier note was itself wrong — `live_poll.spl`
+  was never called from anywhere (see
+  `doc/08_tracking/bug/deployed_binary_refuses_pure_simple_tools_2026-07-30.md`'s
+  "DO NOT LAND" finding). Actually wired 2026-08-05:** `simple mem top --pid
+  <P> [--path F] [--wait-ms N]` in `src/app/mem/main.spl::cmd_top` delegates
+  to `live_poll.spl`'s `send_sigusr2` + wait + read (the signal-dump channel
+  this section originally specified, not a /proc poll), requiring the target
+  to have called `install_mem_dump_on_usr2()` and to be periodically pumping
+  `signal_dispatch_pending()` (a real requirement of the polled-signal
+  primitive in `signal_stubs.spl`, not incidental — see
+  `test/fixture/mem_infra/live_poll_target.spl`). Known limitation: this
+  channel needs the target running under JIT/native codegen —
+  `rt_signal_install`/`rt_signal_check` are not in `interpreter_extern`'s
+  dispatch table, so a target forced into `SIMPLE_EXECUTION_MODE=interpret`
+  never receives the signal.
 - No `Table` TUI widget — v1 workaround only (§5).
 - `gpu --sanitize` re-exec, P2 sampled call-stack attribution: out of scope.
 - TODO: wire `simple mem top --tui` into `src/app/mem/main.spl`'s dispatcher

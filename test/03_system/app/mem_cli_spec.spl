@@ -17,7 +17,11 @@
 # self-hosted redeploy.
 
 use std.spec.*
-use std.io_runtime.{env_get}
+use std.io_runtime.{env_get, process_spawn_async, process_kill, remove_file_if_exists}
+# thread_sleep does not resolve through the std.io_runtime shim under
+# interpreter execution (see src/app/mem/live_poll.spl for the full note) --
+# import it directly so this spec's own waits are real, not silent no-ops.
+use std.nogc_sync_mut.io_runtime.{thread_sleep}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_text}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
@@ -92,6 +96,84 @@ describe "simple mem CLI":
         expect(code).to_equal(0)
         expect(out).to_contain("Snapshot:")
         expect(out).to_contain("app.mem.top")
+
+    it "top --pid triggers a live SIGUSR2 poll and reports the live process's own snapshot":
+        # This exercises the M8 live-process channel that was previously an
+        # orphan: src/app/mem/live_poll.spl existed but no verb ever called
+        # it, and this spec is the fix for that gap.
+        #
+        # The fixture (test/fixture/mem_infra/live_poll_target.spl) ONLY
+        # installs the SIGUSR2 dump handler and pumps signal_dispatch_pending()
+        # -- it never writes a snapshot on its own. So the snapshot file at
+        # dump_path can only appear if `simple mem top --pid` genuinely sends
+        # SIGUSR2 (via src/app/mem/live_poll.spl's send_sigusr2) and the
+        # fixture's handler actually fires. A dropped --pid arm, a broken
+        # send_sigusr2, or a live_poll.spl that stops being invoked all leave
+        # no file behind and this test goes RED rather than passing on a
+        # stale leftover file.
+        # The target's own SIGUSR2 handler (on_mem_dump_usr2 in
+        # src/lib/nogc_sync_mut/mem/dump.spl) always writes to
+        # mem_dump_target_path(), which reads $SIMPLE_MEM_DUMP_PATH -- it has
+        # no way to learn `top --pid`'s --path after the fact. So the two
+        # sides are wired together the same way `simple mem trace` already
+        # does it (main.spl::cmd_trace): export SIMPLE_MEM_DUMP_PATH into the
+        # target's own environment at spawn time via `env`.
+        # dispatch_binary(), NOT simple_binary(): simple_binary() can return
+        # the "/proc/self/exe" fallback, and once `env` is the exec'd program
+        # that path resolves to env(1) itself (see dispatch_binary()'s own
+        # comment above) -- a real filesystem path is required here.
+        #
+        # `env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE`: `bin/simple
+        # test` sets both to force the tree-walk interpreter for the spec
+        # process tree, and Command::spawn() inherits the full parent
+        # environment, so without this the fixture inherits interpreter mode
+        # too. rt_signal_install/rt_signal_check (src/lib/nogc_sync_mut/io/
+        # signal_stubs.spl -- the SIGUSR2 registration this whole channel is
+        # built on) are registered as real runtime symbols for JIT/native
+        # codegen but are NOT in interpreter_extern's dispatch table, so under
+        # an inherited interpreter mode the fixture dies immediately with
+        # "unknown extern function: rt_signal_install" before it can even
+        # install the handler -- confirmed by watching it go zombie within 1s
+        # and by dumping its inherited environment. A real target process
+        # launched normally (`bin/simple run prog.spl`, no override) already
+        # defaults to JIT, so this override just restores that default for a
+        # fixture spawned from inside an interpreter-forced test process.
+        val dump_path = "build/mem_cli_spec_live_snapshot.tsv"
+        remove_file_if_exists(dump_path)
+        val pid = process_spawn_async("env", [
+            "-u", "SIMPLE_EXECUTION_MODE", "-u", "SIMPLE_RUNTIME_MODE",
+            "SIMPLE_MEM_DUMP_PATH={dump_path}",
+            dispatch_binary(), "run", "test/fixture/mem_infra/live_poll_target.spl"
+        ])
+        expect(pid > 0).to_equal(true)
+        thread_sleep(1000)
+        val (out, _err, code) = run_mem_timeout(["top", "--pid", "{pid}", "--path", dump_path, "--wait-ms", "1500"], 30000)
+        process_kill(pid)
+        expect(code).to_equal(0)
+        assert_true(file_exists(dump_path))
+        val content = file_read_text(dump_path)
+        assert_true(content.starts_with("simple-mem-snapshot\tv1"))
+        expect(out).to_contain("Snapshot: {dump_path}")
+        expect(out).to_contain("Kinds by live bytes:")
+
+    it "top --pid fails loudly against a pid that never dumps (no dead-file false positive)":
+        # Negative control for the test above: a bare `sleep` child has no
+        # SIGUSR2 handler installed at all. If this went green too, the
+        # positive test above would be proving nothing (e.g. a stale file,
+        # or a --pid arm that always reports success). SIGUSR2's default
+        # disposition is "ignore", so the process survives and simply times
+        # out with no snapshot -- proving --pid depends on the target
+        # actually cooperating, not merely existing.
+        val dump_path = "build/mem_cli_spec_live_snapshot_negative.tsv"
+        remove_file_if_exists(dump_path)
+        val pid = process_spawn_async("sleep", ["5"])
+        expect(pid > 0).to_equal(true)
+        thread_sleep(300)
+        val (out, _err, code) = run_mem_timeout(["top", "--pid", "{pid}", "--path", dump_path, "--wait-ms", "500"], 30000)
+        process_kill(pid)
+        expect(code).to_equal(1)
+        expect(file_exists(dump_path)).to_equal(false)
+        expect(out).to_contain("no live snapshot from pid")
 
     it "diff prints the biggest-delta owner before the others":
         val (out, _err, code) = run_mem(["diff", SNAP_A, SNAP_B])
