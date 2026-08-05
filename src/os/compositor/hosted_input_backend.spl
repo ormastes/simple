@@ -23,7 +23,16 @@ extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
 extern fn rt_winit_event_get_type(ev: i64) -> i64
 extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
 extern fn rt_winit_event_mouse_moved(ev: i64) -> (i64, i64)
-extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
+# NOTE (2026-08-05, site 22 of doc/04_architecture/ui/wm_host_platform_matrix.md):
+# this was declared `-> (i64, bool)`, matching only the interpreter's synthetic
+# tuple encoding. The compiled native runtime (src/runtime/spl_winit/src/lib.rs)
+# defines `rt_winit_event_mouse_button(ev: i64) -> i64` (button id only, no
+# pressed flag) — under a native build, decoding that single i64 as a 2-tuple
+# reads garbage for `pressed`. Fixed to match the real native signature and
+# decode pressed-ness explicitly via the separate `rt_winit_event_mouse_pressed`
+# accessor, which both engines already define correctly as a plain i64.
+extern fn rt_winit_event_mouse_button(ev: i64) -> i64
+extern fn rt_winit_event_mouse_pressed(ev: i64) -> i64
 extern fn rt_winit_event_free(ev: i64)
 
 # ============================================================================
@@ -49,9 +58,11 @@ val WINIT_KEY_UP: i64 = 38
 val WINIT_KEY_RIGHT: i64 = 39
 val WINIT_KEY_DOWN: i64 = 40
 
-# Mouse button IDs from winit
-val MOUSE_BUTTON_LEFT: i64 = 1
-val MOUSE_BUTTON_RIGHT: i64 = 2
+# Mouse button IDs from winit (mouse_button_to_simple in
+# src/compiler_rust/compiler/src/interpreter_extern/winit_sffi/winit_sffi_input.rs:
+# Left=0, Right=1, Middle=2, Back=3, Forward=4)
+val MOUSE_BUTTON_LEFT: i64 = 0
+val MOUSE_BUTTON_RIGHT: i64 = 1
 
 # ============================================================================
 # Keycode Conversion
@@ -166,6 +177,8 @@ class HostedInputBackend:
     _ctrl_held: bool
     mouse_x: i64
     mouse_y: i64
+    _prev_mouse_x: i64
+    _prev_mouse_y: i64
     _left_pressed: bool
     _right_pressed: bool
     _left_just_pressed: bool
@@ -227,9 +240,8 @@ impl InputBackend for HostedInputBackend:
                 continue
 
             if ev_type == EVENT_MOUSE_BUTTON:
-                val btn = rt_winit_event_mouse_button(ev)
-                val button_id = btn.0
-                val pressed = btn.1
+                val button_id = rt_winit_event_mouse_button(ev)
+                val pressed = rt_winit_event_mouse_pressed(ev) != 0
                 rt_winit_event_free(ev)
 
                 val prev_left = self._left_pressed
@@ -279,9 +291,8 @@ impl InputBackend for HostedInputBackend:
                 return self._build_mouse_event()
 
             if ev_type == EVENT_MOUSE_BUTTON:
-                val btn = rt_winit_event_mouse_button(ev)
-                val button_id = btn.0
-                val pressed = btn.1
+                val button_id = rt_winit_event_mouse_button(ev)
+                val pressed = rt_winit_event_mouse_pressed(ev) != 0
                 rt_winit_event_free(ev)
 
                 val prev_left = self._left_pressed
@@ -438,12 +449,23 @@ impl HostedInputBackend:
             case _: pass_dn
 
     me _build_mouse_event() -> MouseEvent:
-        """Construct a MouseEvent from current buffered mouse state."""
+        """Construct a MouseEvent from current buffered mouse state.
+
+        dx/dy (site 21 of doc/04_architecture/ui/wm_host_platform_matrix.md)
+        used to be hardcoded to 0 regardless of movement. They are now the
+        real delta since the last event this backend built, tracked via
+        _prev_mouse_x/_prev_mouse_y. A button event with no intervening move
+        honestly reports a zero delta because the position did not change.
+        """
+        val dx = self.mouse_x - self._prev_mouse_x
+        val dy = self.mouse_y - self._prev_mouse_y
+        self._prev_mouse_x = self.mouse_x
+        self._prev_mouse_y = self.mouse_y
         val event = MouseEvent(
             x: self.mouse_x,
             y: self.mouse_y,
-            dx: 0,
-            dy: 0,
+            dx: dx,
+            dy: dy,
             left_pressed: self._left_pressed,
             right_pressed: self._right_pressed,
             middle_pressed: false,
@@ -456,6 +478,18 @@ impl HostedInputBackend:
         self._left_just_released = false
         self._right_just_pressed = false
         event
+
+    me record_mouse_position(x: i64, y: i64) -> MouseEvent:
+        """Hardware-free test/embedding seam: update the tracked mouse
+        position and return the resulting event with a real position delta,
+        without requiring a live winit event loop (mirrors the seam pattern
+        already used by Arm64VirtioInputBackend.feed_raw_event). Exercises
+        the exact same delta computation poll_key()/poll_mouse() use for a
+        real EVENT_MOUSE_MOVED event.
+        """
+        self.mouse_x = x
+        self.mouse_y = y
+        self._build_mouse_event()
 
 # ============================================================================
 # Static Constructor
@@ -474,6 +508,8 @@ impl HostedInputBackend:
             _ctrl_held: false,
             mouse_x: 0,
             mouse_y: 0,
+            _prev_mouse_x: 0,
+            _prev_mouse_y: 0,
             _left_pressed: false,
             _right_pressed: false,
             _left_just_pressed: false,

@@ -34,6 +34,17 @@ use os.kernel.arch.arm64.virtio_input.{arm64_virtio_input_poll}
 
 class Arm64VirtioInputBackend:
     poll_event: fn() -> VirtioInputEvent?
+    # Site 25 of doc/04_architecture/ui/wm_host_platform_matrix.md:
+    # rt_arm64_virtio_input_poll (and its sibling rt_arm64_virtio_input_*
+    # accessors) have no native OR interpreter definition anywhere in the
+    # repo, so calling one is a hard "unknown extern function" error at
+    # runtime, not a silent zero default -- there is nothing to probe. A
+    # permanently-unreached poll loop would otherwise be indistinguishable
+    # from a genuinely idle-but-present device. create() sets _available to
+    # the honest static false (see create()'s comment); callers can check
+    # available() to tell "no backend" from "backend present, nothing
+    # queued right now" instead of reading a silent empty queue as healthy.
+    _available: bool
     mouse: VirtioMouseAccum
     pending_key: KeyEvent?
     pending_mouse: MouseEvent?
@@ -88,19 +99,31 @@ class Arm64VirtioInputBackend:
 
 impl Arm64VirtioInputBackend:
     static fn create(screen_width: i64, screen_height: i64) -> Arm64VirtioInputBackend:
+        # Site 25: every rt_arm64_virtio_input_* extern (init, poll, and all
+        # event-field accessors) has no native OR interpreter definition
+        # anywhere in the repo -- there is no honest "-1/unavailable" stub to
+        # probe, unlike hosted_backend_cocoa.spl/hosted_backend_win32.spl's
+        # uses_native_*_symbols() (site 0a/0b), because the symbol does not
+        # exist at all: calling it is a hard "unknown extern function" error,
+        # not a silent zero default. So there is nothing to probe at
+        # runtime; the honest static answer is unavailable, full stop, until
+        # a real ARM64 virtio-input runtime exists to link against.
         Arm64VirtioInputBackend.create_with_poller(
             screen_width,
             screen_height,
-            arm64_virtio_input_poll
+            arm64_virtio_input_poll,
+            false
         )
 
     static fn create_with_poller(
         screen_width: i64,
         screen_height: i64,
-        poll_event: fn() -> VirtioInputEvent?
+        poll_event: fn() -> VirtioInputEvent?,
+        available: bool = true
     ) -> Arm64VirtioInputBackend:
         Arm64VirtioInputBackend(
             poll_event: poll_event,
+            _available: available,
             mouse: VirtioMouseAccum.create(screen_width, screen_height),
             pending_key: nil,
             pending_mouse: nil,
@@ -253,11 +276,27 @@ impl Arm64VirtioInputBackend:
         false
 
     me _pump_until_pending():
+        if not self._available:
+            # Honest refusal (site 25): do not attempt to pump a poller that
+            # never reported real capability — attempting it would only
+            # produce the same silent "empty queue" the dangling extern
+            # always returns, which is exactly the false-idle signal being
+            # fixed here.
+            return
         var budget = 64
         while budget > 0 and self.pending_key == nil and self.pending_mouse == nil:
             budget = budget - 1
             if not self._pump_one():
                 return
+
+    fn available() -> bool:
+        """True only when arm64_virtio_input_init() reported real keyboard +
+        pointer readiness (create()), or a test explicitly injected an
+        available poller (create_with_poller(..., available: true), the
+        default). False means poll_key()/poll_mouse() will never pump —
+        there is no live backend, not merely an idle one.
+        """
+        self._available
 
 impl InputBackend for Arm64VirtioInputBackend:
     me poll_key() -> KeyEvent?:
