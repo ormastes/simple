@@ -197,3 +197,43 @@ describe "Engine2D strict backend probe diagnostics":
             val probe = factory.create_backend(name)
             expect(probe.strict_failure_without_fallback()).to_equal(true)
             expect(probe.selected_name).to_equal(probe.requested_name)
+
+    # ------------------------------------------------------------------
+    # NEGATIVE ARM — this is the example that makes every `to_equal(true)`
+    # above mean something.
+    #
+    # Every other assertion on strict_failure_without_fallback() in this file
+    # feeds it a probe built by StrictBackendFactory, and the factory cannot
+    # produce a violation: BackendProbeResult.create() assigns
+    # `selected_name: name` from the same argument as `requested_name` and no
+    # construction path emits BackendStatus.Fallback. Measured over 28 backend
+    # names (including aliases, whitespace and unknown names) the predicate
+    # returned true 28/28 — so on factory output alone it is a CONSTANT, and
+    # ~30 green assertions across this file, the engine3d twin and the OpenCL
+    # facade spec were resting on a predicate never shown able to go red.
+    #
+    # The predicate itself is NOT broken — it discriminates correctly once it
+    # is handed a violating probe. The two cases below construct exactly the
+    # regressions the invariant exists to catch and pin the predicate to
+    # FALSE. If someone reintroduces a silent CPU-fallback path, the positive
+    # assertions above go red; if someone weakens the predicate into a literal
+    # `true`, this example goes red. Neither half is sufficient alone.
+    it "returns false when a probe was substituted or demoted to Fallback":
+        val factory = StrictBackendFactory.strict()
+
+        # Silent substitution: caller asked for vulkan, was handed cpu.
+        var substituted = factory.create_backend("vulkan")
+        substituted.selected_name = "cpu"
+        expect(substituted.requested_name).to_equal("vulkan")
+        expect(substituted.strict_failure_without_fallback()).to_equal(false)
+
+        # Status demotion: the backend name survived but the status did not.
+        var demoted = factory.create_backend("vulkan")
+        demoted.status = BackendStatus.Fallback
+        expect(demoted.selected_name).to_equal(demoted.requested_name)
+        expect(demoted.strict_failure_without_fallback()).to_equal(false)
+
+        # Control: the untouched probe from the same factory call still passes,
+        # so the two falses above are caused by the injected violation and not
+        # by something ambient about this example.
+        expect(factory.create_backend("vulkan").strict_failure_without_fallback()).to_equal(true)
