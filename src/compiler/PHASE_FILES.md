@@ -34,8 +34,8 @@ respectively, with zero remaining importers.
 
 ## Archived Originals
 
-Original phase files were not preserved under `doc/05_design/phases/` — that directory
-was never populated; removed phase files are recoverable from VCS history only.
+All original phase files (including the 15 removed 2026-08-05) are preserved in
+`doc/05_design/compiler/phases/` for historical reference.
 
 ---
 
