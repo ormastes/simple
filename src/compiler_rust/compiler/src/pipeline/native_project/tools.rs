@@ -2083,6 +2083,48 @@ pub(crate) enum StripError {
     VerificationFailed { sections: Vec<String> },
 }
 
+impl std::fmt::Display for StripError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StripError::ObjcopyNotFound => write!(
+                f,
+                "[LIM-010] no llvm-objcopy/objcopy was found, so LLVM static constructors could not \
+                 be removed from the archive. Linking it unstripped re-registers LLVM's CLI options \
+                 twice and segfaults Stage 3 (exit 139). Install LLVM binutils or put objcopy on PATH."
+            ),
+            StripError::ObjcopyFailed { exit_code, stderr } => write!(
+                f,
+                "[LIM-010] objcopy failed to remove LLVM static constructors (exit {}): {}",
+                match exit_code {
+                    Some(code) => code.to_string(),
+                    None => "signal/spawn-failure".to_string(),
+                },
+                stderr.trim()
+            ),
+            StripError::VerificationFailed { sections } => write!(
+                f,
+                "[LIM-010] the stripped archive still carries constructor section(s) {}. \
+                 Linking it would re-run LLVM's global constructors and segfault Stage 3 (exit 139).",
+                sections.join(", ")
+            ),
+        }
+    }
+}
+
+/// Result of the LIM-010 post-strip post-condition check.
+///
+/// `Unverifiable` exists so that "we could not check" is a distinct value from
+/// "we checked and it was clean". Collapsing the two is the silent fallback this
+/// type was introduced to eliminate: an archive that still carries `.init_array`
+/// is exactly what segfaults Stage 3, and reporting it as verified hides that.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum VerifyOutcome {
+    /// A section-dump tool ran and confirmed no constructor sections remain.
+    Verified,
+    /// No usable section-dump tool, so the post-condition was NOT checked.
+    Unverifiable(String),
+}
+
 /// Find an objdump (or llvm-objdump) tool for archive verification.
 fn find_objdump_tool() -> Option<String> {
     for prefix in &[
@@ -2114,10 +2156,15 @@ fn find_objdump_tool() -> Option<String> {
 }
 
 /// Verify that a stripped archive has no `.init_array` or `.ctors` sections remaining.
-fn verify_stripped_archive(archive_path: &Path) -> Result<(), StripError> {
+pub(crate) fn verify_stripped_archive(archive_path: &Path) -> Result<VerifyOutcome, StripError> {
     let tool = match find_objdump_tool() {
         Some(t) => t,
-        None => return Ok(()), // Can't verify without a tool — assume success
+        // NOT `Ok(())`: with no tool the post-condition is unchecked, not met.
+        None => {
+            return Ok(VerifyOutcome::Unverifiable(
+                "no llvm-objdump, objdump or readelf is available to dump section headers".to_string(),
+            ))
+        }
     };
 
     let output = if tool.contains("readelf") {
@@ -2128,7 +2175,12 @@ fn verify_stripped_archive(archive_path: &Path) -> Result<(), StripError> {
 
     let output = match output {
         Ok(o) => o,
-        Err(_) => return Ok(()), // Tool failed to run — assume success
+        // NOT `Ok(())`: the tool never produced section headers, so nothing was checked.
+        Err(err) => {
+            return Ok(VerifyOutcome::Unverifiable(format!(
+                "`{tool}` could not be run to dump section headers: {err}"
+            )))
+        }
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2141,7 +2193,7 @@ fn verify_stripped_archive(archive_path: &Path) -> Result<(), StripError> {
         .collect();
 
     if remaining.is_empty() {
-        Ok(())
+        Ok(VerifyOutcome::Verified)
     } else {
         Err(StripError::VerificationFailed { sections: remaining })
     }
@@ -2189,7 +2241,28 @@ pub(crate) fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<Pat
         });
     }
 
-    verify_stripped_archive(&filtered)?;
+    // The post-condition may come back "unchecked" rather than "clean". Say so:
+    // an unverified archive that still carries .init_array is precisely what
+    // segfaults Stage 3, and a stripper that reports unchecked as success is the
+    // silent fallback LIM-010 keeps being reintroduced through.
+    //
+    // Both sinks are deliberate. `tracing::warn!` is the structured record, but
+    // the driver's default EnvFilter is `error` (driver/src/log.rs), so on a
+    // normal run it emits nothing at all; `eprintln!` is what the user actually
+    // sees. Dropping either one makes this diagnostic inert.
+    if let VerifyOutcome::Unverifiable(reason) = verify_stripped_archive(&filtered)? {
+        eprintln!(
+            "warning: [LIM-010] stripped archive {} was NOT verified: {}. \
+             Constructor sections may remain; if Stage 3 exits 139, this is why.",
+            filtered.display(),
+            reason
+        );
+        tracing::warn!(
+            archive = %filtered.display(),
+            reason = %reason,
+            "[LIM-010] stripped archive post-condition not verified"
+        );
+    }
 
     Ok(filtered)
 }

@@ -1059,8 +1059,11 @@ int main(int argc, char** argv) {
             // removing them corrupts module creation in the packaged compiler.
             Some((runtime_lib, true)) if std::env::var("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE").as_deref() == Ok("1") => {
                 let filtered = strip_llvm_constructors(&runtime_lib, temp_dir).map_err(|err| {
+                    // Display, not `{:?}`: StripError's Display carries the LIM-010
+                    // tag and the remediation. The debug form printed bare variant
+                    // names and told the user nothing about the Stage 3 segfault.
                     format!(
-                        "failed to strip LLVM constructors from {}: {:?}",
+                        "failed to strip LLVM constructors from {}: {}",
                         runtime_lib.display(),
                         err
                     )

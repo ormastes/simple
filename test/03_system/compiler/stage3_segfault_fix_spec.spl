@@ -29,13 +29,28 @@ compile_stage().
 | strip_llvm_constructors | Function that removes .init_array/.ctors from archives |
 | StripError | New error enum for stripping failure modes |
 | verify_stripped_archive | Post-condition check that constructor sections are gone |
+| VerifyOutcome | Distinguishes "verified clean" from "could not be checked" |
 
 ## Behavior
 
 - strip_llvm_constructors() returns Result<PathBuf, StripError> instead of PathBuf
-- Callers in config.rs use explicit match + warn!() instead of unwrap_or
-- verify_stripped_archive() confirms no constructor sections remain after stripping
+- The strip caller (linker.rs) propagates StripError with `map_err(..)?` and
+  renders it via Display, which carries the LIM-010 tag and the remediation
+- verify_stripped_archive() confirms no constructor sections remain after
+  stripping, and reports Unverifiable — with a LIM-010 warning — rather than
+  reporting success when no section-dump tool is available
 - compile_stage() detects exit code 139 and emits LIM-010 diagnostic
+
+## Correction (2026-08-05)
+
+The original D-6 said "all 4 callsites in config.rs must replace
+unwrap_or(native_all.clone()) with explicit match + warn!()". That describes a
+layout which no longer exists: `strip_llvm_constructors` has exactly one caller
+and it is in linker.rs, not config.rs, and no `unwrap_or(native_all.clone())`
+exists anywhere in the tree. config.rs has no LIM-010 role at all, so the two
+assertions that grepped config.rs for `warn!` and `LIM-010` were unsatisfiable
+except by planting those literals. They now target the file that actually
+implements silent-fallback elimination.
 """
 
 use std.spec.{describe, it, expect}
@@ -57,7 +72,7 @@ describe "Stage3 SEGFAULT Fix — Source Structure":
     it "AC-2: tools.rs exists for strip_llvm_constructors changes":
         expect(file_exists("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")).to_equal(true)
 
-    it "AC-2: config.rs exists for callsite error handling changes":
+    it "AC-2: config.rs exists as the runtime-archive selector":
         expect(file_exists("src/compiler_rust/compiler/src/pipeline/native_project/config.rs")).to_equal(true)
 
     it "AC-3: misc_commands.rs exists for compile_stage diagnostics":
@@ -106,21 +121,41 @@ describe "Stage3 SEGFAULT Fix — StripError and Result Return":
 
 describe "Stage3 SEGFAULT Fix — Silent Fallback Elimination":
     """
-    ## D-6: Explicit Error Handling in config.rs
+    ## D-6: No silent fallback around constructor stripping
 
-    All 4 callsites in config.rs must replace unwrap_or(native_all.clone())
-    with explicit match + warn!() logging.
+    D-6 originally demanded that four `unwrap_or(native_all.clone())` callsites
+    in config.rs become `match` + `warn!()`. Those callsites do not exist. The
+    single caller of strip_llvm_constructors lives in linker.rs and already
+    propagates the failure with `map_err(..)?` — a hard error, strictly stronger
+    than the specified warn-and-continue. config.rs selects runtime archives and
+    has no constructor-stripping role, so tagging anything there LIM-010 would
+    mislabel an unrelated diagnostic.
+
+    The silent fallback that genuinely survived is in tools.rs:
+    verify_stripped_archive() returned Ok(()) when no objdump/readelf could be
+    found, making "post-condition not checked" indistinguishable from "checked
+    and clean" — and an unchecked archive that still carries .init_array is
+    exactly what segfaults Stage 3. That case is now VerifyOutcome::Unverifiable
+    and raises a LIM-010 diagnostic.
+
+    Oracle strength: the two examples below are text assertions over source,
+    which is weak — they cannot tell an executed diagnostic from a comment. The
+    behavioural oracle is the Rust test
+    `verify_stripped_archive_rejects_remaining_constructor_sections` in
+    native_project/tests.rs, which drives the post-condition against a real
+    archive that really does still carry .init_array, plus
+    `strip_error_display_is_tagged_and_actionable`. Both run under
+    `bin/simple build check`.
     """
 
-    it "AC-2: config.rs no longer uses unwrap_or for strip results":
-        val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/config.rs")
-        # After the fix, unwrap_or(native_all.clone()) pattern should be gone
-        # from strip_llvm_constructors calls. The content should contain
-        # explicit match or warn! instead.
+    it "AC-2: strip verification cannot report 'not checked' as success":
+        val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+        # The Unverifiable variant is what makes the two outcomes distinguishable.
+        expect(content).to_contain("VerifyOutcome::Unverifiable")
         expect(content).to_contain("warn!")
 
-    it "AC-2: config.rs contains LIM-010 in warning messages":
-        val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/config.rs")
+    it "AC-2: the unverified-strip fallback diagnostic carries LIM-010":
+        val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
         expect(content).to_contain("LIM-010")
 
 

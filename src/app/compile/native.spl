@@ -112,11 +112,23 @@ fn find_objcopy_for_native_archive() -> text:
             return tool
     ""
 
+# LIM-010: falling back to the UNSTRIPPED native_all archive re-registers LLVM's
+# CLI options at load time and segfaults Stage 3 with exit 139. The fallback is
+# kept -- with no objcopy there is nothing better to do -- but it must never be
+# silent, because the only other symptom is a SIGSEGV nowhere near the cause.
+#
+# Both sinks are deliberate. `warn(..)` is the structured record, but std.log
+# defaults to level `off` when SIMPLE_LOG is unset (see _parse_log_level), so on
+# a normal run it emits nothing; `_cli_eprint` is what the user actually sees.
+# The previous code had `warn(..)` alone AND gated it on `verbose`, so this
+# fallback was doubly invisible.
 fn strip_native_all_constructors(native_lib_path: text, platform: text, verbose: bool) -> text:
     if not should_strip_llvm_constructors_for_platform(platform):
         return native_lib_path
     val objcopy = find_objcopy_for_native_archive()
     if objcopy == "":
+        _cli_eprint("warning: [LIM-010] no llvm-objcopy/objcopy found; linking native_all UNSTRIPPED. LLVM static constructors remain, which can segfault Stage 3 (exit 139). Install LLVM binutils or put objcopy on PATH.")
+        warn("compile", "[LIM-010] objcopy not found; native_all linked unstripped")
         return native_lib_path
     val temp_dir = _get_temp_dir()
     val filtered = "{temp_dir}/libsimple_native_all_stripped_{rt_getpid()}.a"
@@ -126,8 +138,8 @@ fn strip_native_all_constructors(native_lib_path: text, platform: text, verbose:
         if verbose:
             debug("compile", "Stripped LLVM constructors from native_all: {filtered}")
         return filtered
-    if verbose and (out != "" or err != ""):
-        warn("compile", "native_all constructor strip skipped: {out}{err}")
+    _cli_eprint("warning: [LIM-010] constructor strip of {native_lib_path} FAILED (exit {exit_code}); linking it UNSTRIPPED, which can segfault Stage 3 (exit 139): {out}{err}")
+    warn("compile", "[LIM-010] native_all constructor strip failed: {out}{err}")
     native_lib_path
 
 fn find_simple_native_all_library() -> text:

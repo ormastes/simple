@@ -478,6 +478,82 @@ fn build_host_gpu_runtime_authority(root: &Path) -> (PathBuf, PathBuf) {
     (archive, hosted)
 }
 
+/// LIM-010: every stripping failure must explain itself, tagged, in Display.
+/// The link path formats this error into a user-facing message; the old `{:?}`
+/// form printed bare variant names and never mentioned the Stage 3 segfault.
+#[test]
+fn strip_error_display_is_tagged_and_actionable() {
+    use super::tools::StripError;
+
+    let cases = [
+        StripError::ObjcopyNotFound,
+        StripError::ObjcopyFailed {
+            exit_code: Some(1),
+            stderr: "objcopy: bad archive".to_string(),
+        },
+        StripError::VerificationFailed {
+            sections: vec![".init_array".to_string()],
+        },
+    ];
+    for err in &cases {
+        let rendered = err.to_string();
+        assert!(rendered.contains("LIM-010"), "untagged diagnostic: {rendered}");
+        // Not merely the debug form: Display must add prose beyond the variant name.
+        assert!(
+            rendered.len() > format!("{err:?}").len(),
+            "Display adds no explanation over Debug: {rendered}"
+        );
+    }
+    assert!(StripError::ObjcopyNotFound.to_string().contains("objcopy"));
+    assert!(StripError::VerificationFailed {
+        sections: vec![".init_array".to_string()],
+    }
+    .to_string()
+    .contains(".init_array"));
+}
+
+/// LIM-010 post-condition, driven for real: an archive that still carries
+/// `.init_array` must be REJECTED, and a stripped one must come back
+/// `Verified` — not `Unverifiable`, which is the "we did not actually check"
+/// value that used to be indistinguishable from success.
+#[cfg(target_os = "linux")]
+#[test]
+fn verify_stripped_archive_rejects_remaining_constructor_sections() {
+    use super::tools::{strip_llvm_constructors, verify_stripped_archive, StripError, VerifyOutcome};
+
+    let temp = tempfile::tempdir().unwrap();
+    let archive = build_compiler_backfill_test_archive(
+        temp.path(),
+        "verify_post_condition",
+        &[r#"
+__attribute__((constructor)) static void llvm_style_ctor(void) {}
+"#],
+    );
+
+    // Pre-strip: the post-condition must FAIL, and say which section survived.
+    match verify_stripped_archive(&archive) {
+        Err(StripError::VerificationFailed { sections }) => {
+            assert!(
+                sections.iter().any(|s| s == ".init_array"),
+                "expected .init_array among {sections:?}"
+            );
+            assert!(
+                StripError::VerificationFailed { sections }.to_string().contains("LIM-010"),
+                "post-condition failure is untagged"
+            );
+        }
+        other => panic!("unstripped archive must fail the LIM-010 post-condition, got {other:?}"),
+    }
+
+    // Post-strip: genuinely verified, not merely "assumed".
+    let stripped = strip_llvm_constructors(&archive, temp.path()).unwrap();
+    assert_eq!(
+        verify_stripped_archive(&stripped).unwrap(),
+        VerifyOutcome::Verified,
+        "a stripped archive on a host with readelf must be VERIFIED, not assumed"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn strip_llvm_constructors_preserves_priority_non_llvm_constructor() {
