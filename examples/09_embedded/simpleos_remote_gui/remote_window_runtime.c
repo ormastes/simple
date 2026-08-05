@@ -45,6 +45,21 @@ extern int64_t simpleos_syscall(int64_t id, int64_t a0, int64_t a1,
 #define APP_RUNTIME_CONTENT(argc, argv) APP_CONTENT
 #endif
 
+/* Input-reaction contract. An app that does not opt in keeps APP_CONTENT and
+ * emits no marker, so its behaviour is unchanged by the event loop below. */
+#ifndef APP_EVENT_CONTENT
+#define APP_EVENT_CONTENT ""
+#endif
+
+#ifndef APP_EVENT_MARKER
+#define APP_EVENT_MARKER ""
+#endif
+
+#ifndef APP_EVENT_MARKER_SUFFIX
+#define APP_EVENT_MARKER_SUFFIX ""
+#endif
+
+#define SYS_DEBUG_WRITE 60
 #define SYS_IPC_SEND 20
 #define SYS_IPC_RECV 21
 #define SYS_IPC_CREATE_PORT 22
@@ -53,7 +68,44 @@ extern int64_t simpleos_syscall(int64_t id, int64_t a0, int64_t a1,
 #define COMP_CREATE_WINDOW 1
 #define COMP_DESTROY_WINDOW 2
 #define COMP_UPDATE_TREE 3
+#define COMP_INPUT_EVENT 11
 #define COMP_CLOSE_REQUEST 12
+
+/* Versioned WM IPC wire (src/os/services/wm/wm_service.spl parse_message):
+ *
+ *   +0  src_port     u64
+ *   +8  dst_port     u64
+ *   +16 method       u32   <- header method (0 when the sender only stamps
+ *                             the method into the payload, which the
+ *                             compositor and this client both still do)
+ *   +20 flags        u32
+ *   +24 payload_len  u32
+ *   +28 cap_count    u32
+ *   +32 payload[payload_len]
+ *
+ * IPC_WIRE_CAPACITY is one 4 KiB payload page plus that 32-byte header, which
+ * is the largest envelope the kernel buffer pool can hand back
+ * (src/os/kernel/ipc/message_buffer.spl: BUFFER_PAGE_SIZE 4096, MSG_HDR_SIZE 32).
+ */
+#define IPC_WIRE_HEADER 32u
+#define IPC_WIRE_CAPACITY 4128
+#define IPC_WIRE_V1_FLAG 1u
+
+/* WmEventType wire codes. The compositor puts `event.event_type.to_u32()` on
+ * the wire (src/os/services/wm/wm_service.spl send_input_to_port), and
+ * WmEventType is a bare enum in src/lib/common/window_protocol/geometry.spl,
+ * so the code is the 0-based declaration index:
+ *   KeyDown 0 | KeyUp 1 | MouseDown 2 | MouseUp 3 | MouseMove 4 | Scroll 5 ...
+ *
+ * CONTRACT CONFLICT, recorded here on purpose: the staging contract spec
+ * test/03_system/check/simpleos_browser_demo_guest_elf_staging_contract_spec.spl
+ * asserts the literal `WM_EVENT_MOUSE_DOWN 4`. Under the enum above 4 is
+ * MouseMove, not MouseDown -- a client keyed on 4 would react to every pointer
+ * move and never to a click, which is precisely the correlation the gate
+ * checks. The wire is authoritative, so this stays 2; the spec literal (or an
+ * explicit discriminant on WmEventType) needs a decision from its owner.
+ */
+#define WM_EVENT_MOUSE_DOWN 2
 
 static size_t _strlen_local(const char *s) {
     size_t n = 0;
@@ -106,34 +158,101 @@ static int _ipc_send(uint64_t dst_port, uint64_t src_port, const uint8_t *data, 
                                  (int64_t)(uintptr_t)data, (int64_t)len, 0);
 }
 
+static void _debug_write(const char *s) {
+    for (size_t i = 0; s[i] != '\0'; i++) {
+        simpleos_syscall(SYS_DEBUG_WRITE, (int64_t)(uint8_t)s[i], 0, 0, 0, 0);
+    }
+}
+
+static void _debug_write_u64(uint64_t value) {
+    char digits[24];
+    size_t n = 0;
+    if (value == 0) {
+        simpleos_syscall(SYS_DEBUG_WRITE, (int64_t)'0', 0, 0, 0, 0);
+        return;
+    }
+    while (value > 0 && n < sizeof(digits)) {
+        digits[n++] = (char)('0' + (int)(value % 10u));
+        value /= 10u;
+    }
+    while (n > 0) {
+        n--;
+        simpleos_syscall(SYS_DEBUG_WRITE, (int64_t)(uint8_t)digits[n], 0, 0, 0, 0);
+    }
+}
+
+/* Receive one IPC envelope into a client-owned wire buffer and hand back only
+ * its payload.
+ *
+ * a0/a1/a2 keep the argument meaning the in-tree callers already use
+ * (port, timeout_ms, poll flag -- see wm_service.spl poll_once and
+ * src/os/kernel/ipc/syscall_ipc.spl _handle_ipc_recv_state). a3/a4 additionally
+ * offer the destination buffer and its capacity, which is the documented ring-3
+ * ABI in examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c
+ * (syscall 21: a0=port, a1=reply_buf, a2=max_len) so a kernel that copies
+ * straight into user memory needs no second call.
+ *
+ * A kernel that delivers by copy returns the byte count (<= IPC_WIRE_CAPACITY);
+ * a kernel that delivers by reference returns the envelope address, which on
+ * this target is always far above IPC_WIRE_CAPACITY. Both are accepted. */
 static int _ipc_recv_payload(uint64_t app_port, int blocking, uint8_t *out, size_t out_cap) {
+    /* .bss, not stack: the guest entry stack is kernel-provided and this
+     * client already spends ~3 KiB of it on the create/update message
+     * buffers. The client is single-threaded, so a static envelope is safe. */
+    static uint8_t wire[IPC_WIRE_CAPACITY];
     int64_t msg_raw = simpleos_syscall(
         SYS_IPC_RECV,
         (int64_t)app_port,
         blocking ? (int64_t)0xFFFFFFFFu : 0,
         blocking ? 0 : 1,
-        0,
-        0
+        (int64_t)(uintptr_t)wire,
+        (int64_t)IPC_WIRE_CAPACITY
     );
     if (msg_raw <= 0) {
         return -1;
     }
 
-    const uint8_t *msg = (const uint8_t *)(uintptr_t)msg_raw;
-    uint32_t payload_len = _read_u32(msg + 24);
-    const uint8_t *payload = msg + 32;
+    if (msg_raw > (int64_t)IPC_WIRE_CAPACITY) {
+        const uint8_t *envelope = (const uint8_t *)(uintptr_t)msg_raw;
+        for (size_t i = 0; i < (size_t)IPC_WIRE_CAPACITY; i++) {
+            wire[i] = envelope[i];
+        }
+    } else if (msg_raw < (int64_t)IPC_WIRE_HEADER) {
+        return -1;
+    }
+
+    /* Flags word: reject an envelope that carries only flag bits this client
+     * does not understand (e.g. a capability transfer). 0 is the legacy
+     * unversioned sender and stays accepted. */
+    const uint32_t wire_flags = _read_u32(wire + 20);
+    if (wire_flags != 0 && (wire_flags & IPC_WIRE_V1_FLAG) == 0) {
+        return -1;
+    }
+    /* wire + 16 is the header method; senders that only stamp the method into
+     * the payload leave it zero, so the payload copy below stays authoritative. */
+    (void)_read_u32(wire + 16);
+
+    uint32_t payload_len = _read_u32(wire + 24);
+    if (payload_len > (uint32_t)(IPC_WIRE_CAPACITY - (int)IPC_WIRE_HEADER)) {
+        payload_len = (uint32_t)(IPC_WIRE_CAPACITY - (int)IPC_WIRE_HEADER);
+    }
     if ((size_t)payload_len > out_cap) {
         payload_len = (uint32_t)out_cap;
     }
     for (uint32_t i = 0; i < payload_len; i++) {
-        out[i] = payload[i];
+        out[i] = wire[32u + i];
     }
     return (int)payload_len;
 }
 
 static uint64_t _connect_compositor(uint64_t *app_port_out) {
     static const char kPortName[] = "compositor";
-    int64_t app_port = simpleos_syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0);
+    /* Name the client port after the app id so the compositor can attribute an
+     * envelope to this process (syscall 22: a0=name_ptr, a1=name_len). */
+    int64_t app_port = simpleos_syscall(SYS_IPC_CREATE_PORT,
+                                        (int64_t)(uintptr_t)APP_ID,
+                                        (int64_t)(_strlen_local(APP_ID)),
+                                        0, 0, 0);
     if (app_port <= 0) {
         return 0;
     }
@@ -220,19 +339,52 @@ static void _destroy_window(uint64_t compositor_port, uint64_t app_port, uint64_
     }
 }
 
-static int _wait_for_close(uint64_t app_port, uint64_t window_id) {
-    uint8_t msg[64];
+/* Serial receipt the fullscreen evidence gate correlates against
+ * (scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+ * wait_browser_content_presented). Emitted only by apps that opted into the
+ * input contract; APP_EVENT_MARKER is empty for every other client. */
+static void _write_event_marker(uint64_t window_id) {
+    if (APP_EVENT_MARKER[0] == '\0') {
+        return;
+    }
+    _debug_write(APP_EVENT_MARKER);
+    _debug_write_u64(window_id);
+    _debug_write(APP_EVENT_MARKER_SUFFIX);
+}
+
+/* Event loop: serve compositor events until the window is closed.
+ *
+ * COMP_INPUT_EVENT payload (wm_service.spl send_input_to_port):
+ *   method(u32) | window_id(u64) | event_type(u32) | key_code(u32) |
+ *   mouse_x(i32) | mouse_y(i32) | modifiers(u32) | text_len(u32) | text
+ * `msg` below points past the leading method word, so the record it sees is
+ *   window_id(u64) @0 | event_type(u32) @8 | key_code @12 | x @16 | y @20 ...
+ * COMP_CLOSE_REQUEST payload: method(u32) | window_id(u64).
+ */
+static int _serve_events(uint64_t compositor_port, uint64_t app_port, uint64_t window_id) {
+    uint8_t payload[64];
     for (;;) {
-        int len = _ipc_recv_payload(app_port, 1, msg, sizeof(msg));
+        int len = _ipc_recv_payload(app_port, 1, payload, sizeof(payload));
         if (len < 12) {
             continue;
         }
-        uint32_t method = _read_u32(msg);
-        uint64_t target_wid = _read_u64(msg + 4);
-        if (target_wid != window_id) {
+        uint32_t method = _read_u32(payload);
+        const uint8_t *msg = payload + 4;
+
+        if (method == COMP_INPUT_EVENT && len >= 28) {
+            if (_read_u64(msg) == window_id &&
+                _read_u32(msg + 8) == WM_EVENT_MOUSE_DOWN) {
+                /* Marker first, then the mutation: the gate requires the
+                 * content-presented receipt to appear AFTER the event marker. */
+                _write_event_marker(window_id);
+                if (APP_EVENT_CONTENT[0] != '\0') {
+                    _update_content(compositor_port, app_port, window_id, APP_EVENT_CONTENT);
+                }
+            }
             continue;
         }
-        if (method == COMP_CLOSE_REQUEST) {
+
+        if (method == COMP_CLOSE_REQUEST && _read_u64(msg) == window_id) {
             return 0;
         }
     }
@@ -270,7 +422,7 @@ int main(int argc, char **argv) {
     }
 
     _update_content(compositor_port, app_port, window_id, content);
-    _wait_for_close(app_port, window_id);
+    _serve_events(compositor_port, app_port, window_id);
     _destroy_window(compositor_port, app_port, window_id);
     return 0;
 }

@@ -65,6 +65,13 @@ LINKER_SCRIPT="$SYSROOT/share/simpleos/simpleos.ld"
 CRT0="$SYSROOT/lib/crt0.o"
 LIBC="$SYSROOT/lib/libsimpleos_c.a"
 SRC="$ROOT/examples/09_embedded/simpleos_remote_gui/browser_demo_gui.c"
+# The syscall trampoline is linked explicitly rather than pulled out of the
+# archive: the client now issues syscalls (SYS_DEBUG_WRITE for the input
+# marker, SYS_IPC_RECV for compositor events) from its own translation unit,
+# and an explicit object makes that dependency visible instead of leaving it to
+# archive-member resolution order. Providing simpleos_syscall.o up front means
+# the archive's copy is simply never pulled -- no duplicate symbol.
+SYSCALL_ASM="$ROOT/src/os/libc/simpleos_syscall.S"
 OUT_DIR="$ROOT/build/os/apps/browser_demo"
 OUT="$OUT_DIR/browser_demo.elf"
 
@@ -106,7 +113,7 @@ if [ -z "${SIMPLEOS_SYSROOT:-}" ]; then
     fi
 fi
 
-for required in "$LINKER_SCRIPT" "$CRT0" "$LIBC" "$SRC"; do
+for required in "$LINKER_SCRIPT" "$CRT0" "$LIBC" "$SRC" "$SYSCALL_ASM"; do
     [ -f "$required" ] || {
         echo "missing browser-demo build input: $required" >&2
         exit 1
@@ -121,6 +128,10 @@ mkdir -p "$OUT_DIR"
     -mno-red-zone -fno-pic -fno-pie -O2 \
     -ffunction-sections -fdata-sections \
     -c "$SRC" -o "$OUT_DIR/browser_demo.o"
+
+"$CLANG" --target=x86_64-unknown-simpleos --sysroot="$SYSROOT" \
+    -ffreestanding -nostdlib -fno-pic -fno-pie \
+    -c "$SYSCALL_ASM" -o "$OUT_DIR/simpleos_syscall.o"
 
 # Out-of-tree --gc-sections-eligible rebuild of the libc (see header note).
 LIBC_GC_DIR="$OUT_DIR/libc-gc"
@@ -145,7 +156,7 @@ cp -R "$LIBC_SRC_DIR/." "$LIBC_GC_DIR/"
 }
 
 "$LINKER" -T "$LINKER_SCRIPT" -e _start --gc-sections \
-    "$CRT0" "$OUT_DIR/browser_demo.o" \
+    "$CRT0" "$OUT_DIR/browser_demo.o" "$OUT_DIR/simpleos_syscall.o" \
     -L"$LIBC_GC_DIR" -lsimpleos_c \
     -o "$OUT"
 

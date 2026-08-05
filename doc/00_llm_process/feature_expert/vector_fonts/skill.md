@@ -46,9 +46,9 @@ instead of rediscovering them per glyph bug.
   (codegen root causes) and [wm_gui_window_drawing](../wm_gui_window_drawing/skill.md)
   feature expert (Aqua theme + chrome consumer of this pipeline).
 
-## Native-Lane Landmine Classes (2026-07-19 rasterizer campaign, +1 on 2026-08-04)
+## Native-Lane Landmine Classes (2026-07-19 rasterizer campaign, +2 on 2026-08-04/05)
 
-Seven boring-construct recipes, backed by 5 filed compiler bugs (recipes
+Eight boring-construct recipes, backed by 6 filed compiler bugs (recipes
 2-4 share one doc), all specific to `--target x86_64-unknown-none
 --entry-closure --mode dynload` (cranelift); none reproduce under the
 hosted interpreter/JIT. Prefer the boring form over a clever one in any
@@ -113,6 +113,23 @@ code that must run on this lane:
    Locate this class fast: `llvm-symbolizer --obj=<kernel.elf> 0x<rip>` turns
    the bare `[fault] rip=` serial line straight into the Simple function name.
 
+8. **A 3-or-more-operand `text` `+` chain silently drops its operands** —
+   [freestanding_text_concat_chain_drops_operands_2026-08-05.md](../../../../doc/08_tracking/bug/freestanding_text_concat_chain_drops_operands_2026-08-05.md).
+   Measured on the guest with two live locals (`name` len 11, `prop_val`
+   len 3): `a + ":"` → len 12 (**correct**); `a + ":" + b` → len **-1**;
+   `a + ":" + b + "\n"` → len **1** (only the trailing literal survives);
+   `"{a}:{b}\n"` → len 16 (**correct**). No diagnostic, no fault — just a
+   corrupt string. Recipe: **use string interpolation** for any 3+ piece
+   join on this lane; a single two-operand `+` is still safe. Blast radius
+   is wide because the shape is so ordinary: it wiped the entire CSS
+   custom-property table (all 45 entries became a bare `"\n"`), so every
+   `var(...)` in the theme resolved to empty, which silently corrupted the
+   WM's two-layer background and failed the material-provenance gate — a
+   failure that presented three layers away from its cause.
+   Sibling hazard found alongside it: `index_of` on a `substring(...)`
+   slice returns a bogus `0` instead of `-1` (the untagged-slice trap
+   `find_from`'s own docstring warns about) — use `find_from(s, needle, 0)`.
+
 Shares a signature with the general BoxInt `<<3` tag-shift family
 (2026-07-04 seed ANY-channel enum-handle mangling) — same "tagged value
 read at the wrong shift" shape, different call sites.
@@ -120,7 +137,7 @@ read at the wrong shift" shape, different call sites.
 ## Gotchas
 
 - A fix that works hosted (interpreter/JIT) says nothing about the
-  freestanding native lane — all 7 recipes above are freestanding-only.
+  freestanding native lane — all 8 recipes above are freestanding-only.
   Re-probe via serial / gated `_probe_debug()` output after any change to
   this pipeline that must run on SimpleOS baremetal.
 - Two miscompiled reads can cancel and look correct — verify a fix by
