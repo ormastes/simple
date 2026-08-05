@@ -18,10 +18,12 @@
 //! Two build modes, mirroring `cocoa.rs` / `win32.rs`:
 //!
 //! - **Stub mode** (default, every host): functions compile, export, and
-//!   return `false` / `-1`. `rt_webgpu_is_available()` returns `false` so the
-//!   Simple side falls through to its CPU raster path — this is the baseline
-//!   Row 11 / M7 "architecture hook" contract. Linux CI and bootstrap builds
-//!   use this path exclusively.
+//!   return `false` / `-1`, INCLUDING `rt_webgpu_shutdown()` — there is no
+//!   real device to tear down in stub mode, so it does not report success.
+//!   `rt_webgpu_is_available()` returns `false` so the Simple side falls
+//!   through to its CPU raster path — this is the baseline Row 11 / M7
+//!   "architecture hook" contract. Linux CI and bootstrap builds use this
+//!   path exclusively.
 //!
 //! - **Real mode** (`--features webgpu-real`, any host with a working wgpu
 //!   backend): an off-screen wgpu `Device` + per-surface `Texture` +
@@ -78,9 +80,12 @@ mod imp {
     }
 
     pub fn shutdown() -> bool {
-        // Idempotent: even in stub mode we pretend shutdown "succeeded" so
-        // the Simple side's `rt_webgpu_shutdown()` contract (always-ok) holds.
-        true
+        // Honest stub: there is no real WebGPU device to tear down here, so
+        // shutdown did not succeed at anything. Do NOT fabricate `true`.
+        // Callers must tolerate a `false` teardown result (see the crate's
+        // callers swept in webgpu_surface.spl / backend_webgpu.spl — neither
+        // asserts truth on this return value).
+        false
     }
 
     pub fn create_surface(_w: i32, _h: i32) -> i64 {
@@ -499,8 +504,9 @@ mod tests {
             assert!(!rt_webgpu_destroy_surface(1));
             assert!(!rt_webgpu_present(1));
             assert!(!rt_webgpu_compute_draw(1, 0, 0, 0, 1, 1, 0xFFFF_FFFF));
-            // shutdown is idempotent-ok even in stub mode.
-            assert!(rt_webgpu_shutdown());
+            // Honest stub: there is no device to tear down, so shutdown
+            // must NOT report success. Site 26 of the wm-honesty matrix.
+            assert!(!rt_webgpu_shutdown());
         }
     }
 

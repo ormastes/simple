@@ -624,10 +624,9 @@ mod tests {
         // in stub mode the window create returns -1 so Simple can fall back.
         #[cfg(not(all(target_os = "macos", feature = "cocoa-real")))]
         unsafe {
-            assert_eq!(
-                rt_cocoa_window_new(320, 200, std::ptr::null()),
-                COCOA_INVALID_HANDLE
-            );
+            // `title_rv` is a text "resource variant" i64 handle, not a raw
+            // pointer; 0 is its empty/none sentinel.
+            assert_eq!(rt_cocoa_window_new(320, 200, 0), COCOA_INVALID_HANDLE);
             assert!(!rt_cocoa_window_resize(1, 800, 600));
         }
     }
