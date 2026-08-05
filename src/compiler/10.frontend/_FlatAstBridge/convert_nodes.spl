@@ -24,12 +24,9 @@ use compiler.core.ast_expr.*
 use compiler.frontend.core._AstExpr.accessors.*
 use compiler.core.ast_stmt.*
 use compiler.core.ast_stmt.{STMT_GPU_LAUNCH, stmt_get_gpu_grid, stmt_get_gpu_block}
-use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY, TYPE_ANY, TYPE_NIL}
+use compiler.core.types.{fixed_type_tag_name, is_union_base_or_above}
 use compiler.core.types.{span_start, span_end, span_line, span_col, span_is_valid}
-use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
-use compiler.core.types.{TYPE_DICT, TYPE_FN, TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
-use compiler.core.types.{TYPE_RESULT, TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GENERIC_ERASED}
-use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE, TYPE_UNION_BASE, type_tag_name, int_to_str}
+use compiler.core.types.{type_tag_name, int_to_str}
 use compiler.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
 use compiler.core.types.{is_result_tag, result_tag_to_id, result_type_get_ok, result_type_get_err}
 use compiler.core.types.{is_tuple_type_tag, tuple_type_tag_to_id, tuple_type_get_elems}
@@ -245,133 +242,111 @@ fn convert_decl_is_public(idx: i64) -> bool:
 fn convert_flat_type(type_expr_idx: i64) -> Type:
     if type_expr_idx <= 0:
         return Type(kind: TypeKind.Infer, span: make_span())
-    # Stage4 can misread imported TYPE_* module values. Pin the raw fixed-tag
-    # protocol with literal bounds before any imported-value comparison.
-    if type_expr_idx > 0 and type_expr_idx < 2:
-        return Type(kind: TypeKind.Named("bool", []), span: make_span())
-    # Stage4 generic equality tags the parameter but reads TYPE_* module vals
-    # raw (2 became 16 and falsely matched TYPE_OPTION_F64; 4 became TYPE_I16).
-    # Ordered literal bounds keep primitive flat tags on the raw integer path.
-    if type_expr_idx > 0 and type_expr_idx < 2:
-        return Type(kind: TypeKind.Named("bool", []), span: make_span())
-    if type_expr_idx > 1 and type_expr_idx < 3:
-        return Type(kind: TypeKind.Named("i64", []), span: make_span())
-    # Same stage4 module-val misread hazard as the TYPE_I64 guard above, hit
-    # for real on the cranelift stage4 lane: TYPE_I16 (=32) read back as 4,
-    # so a `-> text` return tag (TYPE_TEXT=4) falsely matched the
-    # `== TYPE_I16` comparison below and every declared text return lowered
-    # as Named("i16") -> HIR Int(16) -> i64-typed call results -> print
-    # rendered the text handle as a decimal. Pin f64 (3) and text (4) on the
-    # same ordered-literal-bounds raw path BEFORE any imported-val equality.
-    if type_expr_idx > 2 and type_expr_idx < 4:
-        return Type(kind: TypeKind.Named("f64", []), span: make_span())
-    if type_expr_idx > 3 and type_expr_idx < 5:
-        return Type(kind: TypeKind.Named("text", []), span: make_span())
-    # Stage3 can misread imported TYPE_OPTION* module values just like the
-    # primitive constants above. These are fixed flat-protocol tags (14..18),
-    # so recognize them with ordered literal bounds before any imported-value
-    # equality. Without this, `Span?` (14) and `text?` (17) fall through to
-    # TypeKind.Infer and later abort flat MIR type registration.
-    if type_expr_idx > 13 and type_expr_idx < 15:
-        return Type(kind: TypeKind.Named("Option", []), span: make_span())
-    if type_expr_idx > 14 and type_expr_idx < 16:
-        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("i64", []), span: make_span())]), span: make_span())
-    if type_expr_idx > 15 and type_expr_idx < 17:
-        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("f64", []), span: make_span())]), span: make_span())
-    if type_expr_idx > 16 and type_expr_idx < 18:
-        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("text", []), span: make_span())]), span: make_span())
-    if type_expr_idx > 17 and type_expr_idx < 19:
-        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("bool", []), span: make_span())]), span: make_span())
-    if type_expr_idx > 26 and type_expr_idx < 28:
-        return Type(kind: TypeKind.Named("u8", []), span: make_span())
-    if type_expr_idx > 27 and type_expr_idx < 29:
-        return Type(kind: TypeKind.Named("u16", []), span: make_span())
-    if type_expr_idx > 28 and type_expr_idx < 30:
-        return Type(kind: TypeKind.Named("u32", []), span: make_span())
-    if type_expr_idx > 29 and type_expr_idx < 31:
-        return Type(kind: TypeKind.Named("u64", []), span: make_span())
-    if type_expr_idx > 30 and type_expr_idx < 32:
-        return Type(kind: TypeKind.Named("i8", []), span: make_span())
-    if type_expr_idx > 31 and type_expr_idx < 33:
-        return Type(kind: TypeKind.Named("i16", []), span: make_span())
-    if type_expr_idx > 32 and type_expr_idx < 34:
-        return Type(kind: TypeKind.Named("i32", []), span: make_span())
-    # Same stage3 imported-module-val misread as the guards above, for the
-    # aggregate/erased fixed tags 5..12. Hit for real on the stage3 self-host
-    # lane: `TYPE_ANY` (12) misread, so every `any`-annotated STRUCT FIELD fell
-    # through the whole == chain to the `type_expr_idx < 34 -> TypeKind.Infer`
-    # catch-all at the bottom of this function. HIR then carried
-    # HirTypeKind.Infer into MIR lower_type, whose Infer arm is `error_fatal`
-    # -- so `struct BackendPort { run_fn: any, ... }` aborted the build with
-    # "bootstrap flat MIR type registration failed: unsupported MIR type kind"
-    # (the printed kind is an opaque `<enum@0x..>` handle; its runtime
-    # discriminant 3031551406 = DefaultHasher("Infer") is what identified it).
-    # Ordered literal bounds pin these on the raw integer path, exactly as the
-    # primitive and Option guards above do.
+    # STAGE-3 IMPORTED-MODULE-`val` MISREAD -- root fix for the whole family
+    # (blocker #7, cd81ef3d85df, plus the two earlier pinning rounds).
     #
-    # Family enumeration (fixed low tags 0..33) and why the rest are NOT
-    # guarded here: 0 (TYPE_VOID) is already short-circuited to Infer by the
-    # `<= 0` guard at the top of this function, so its `== TYPE_VOID` arm is
-    # unreachable either way; 10 (TYPE_STRUCT) and 24..26 (UNION/INTERSECTION/
-    # REFINEMENT) have no arm in the == chain at all and reach the same Infer
-    # catch-all whether or not the constant reads back correctly; 13 (TYPE_NIL)
-    # and 19..23 (RESULT/FUTURE/POLL/TASK/GENERIC_ERASED) map to names
-    # ("nil"/"Result"/"Future"/"Poll"/"Task"/"Generic") that the HIR name
-    # resolver (20.hir/hir_lowering/types.spl) does NOT accept, so pinning them
-    # would trade one failure mode for an "unresolved type" diagnostic rather
-    # than fix anything -- they are recorded here, unguarded, on purpose.
-    if type_expr_idx > 4 and type_expr_idx < 6:
-        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("i64", []), span: make_span()), nil), span: make_span())
-    if type_expr_idx > 5 and type_expr_idx < 7:
-        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("text", []), span: make_span()), nil), span: make_span())
-    if type_expr_idx > 6 and type_expr_idx < 8:
-        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("bool", []), span: make_span()), nil), span: make_span())
-    if type_expr_idx > 7 and type_expr_idx < 9:
-        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("Any", []), span: make_span()), nil), span: make_span())
-    if type_expr_idx > 8 and type_expr_idx < 10:
-        return Type(kind: TypeKind.Named("Dict", []), span: make_span())
-    if type_expr_idx > 10 and type_expr_idx < 12:
-        return Type(kind: TypeKind.Named("fn", []), span: make_span())
-    if type_expr_idx > 11 and type_expr_idx < 13:
-        return Type(kind: TypeKind.Named("Any", []), span: make_span())
-    if type_expr_idx == TYPE_VOID:
-        return Type(kind: TypeKind.Named("void", []), span: make_span())
-    if type_expr_idx == TYPE_BOOL:
-        return Type(kind: TypeKind.Named("bool", []), span: make_span())
-    if type_expr_idx == TYPE_I64:
-        return Type(kind: TypeKind.Named("i64", []), span: make_span())
-    if type_expr_idx == TYPE_U8:
-        return Type(kind: TypeKind.Named("u8", []), span: make_span())
-    if type_expr_idx == TYPE_U16:
-        return Type(kind: TypeKind.Named("u16", []), span: make_span())
-    if type_expr_idx == TYPE_U32:
-        return Type(kind: TypeKind.Named("u32", []), span: make_span())
-    if type_expr_idx == TYPE_U64:
-        return Type(kind: TypeKind.Named("u64", []), span: make_span())
-    if type_expr_idx == TYPE_I8:
-        return Type(kind: TypeKind.Named("i8", []), span: make_span())
-    if type_expr_idx == TYPE_I16:
-        return Type(kind: TypeKind.Named("i16", []), span: make_span())
-    if type_expr_idx == TYPE_I32:
-        return Type(kind: TypeKind.Named("i32", []), span: make_span())
-    if type_expr_idx == TYPE_F64:
-        return Type(kind: TypeKind.Named("f64", []), span: make_span())
-    if type_expr_idx == TYPE_TEXT:
-        return Type(kind: TypeKind.Named("text", []), span: make_span())
-    if type_expr_idx == TYPE_ARRAY_I64:
-        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("i64", []), span: make_span()), nil), span: make_span())
-    if type_expr_idx == TYPE_ARRAY_TEXT:
-        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("text", []), span: make_span()), nil), span: make_span())
-    if type_expr_idx == TYPE_ARRAY_BOOL:
-        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("bool", []), span: make_span()), nil), span: make_span())
-    if type_expr_idx == TYPE_ARRAY_ANY:
-        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("Any", []), span: make_span()), nil), span: make_span())
-    if type_expr_idx == TYPE_ANY:
-        return Type(kind: TypeKind.Named("Any", []), span: make_span())
-    if type_expr_idx == TYPE_NIL:
-        return Type(kind: TypeKind.Named("nil", []), span: make_span())
-    if type_expr_idx == TYPE_DICT:
-        return Type(kind: TypeKind.Named("Dict", []), span: make_span())
+    # Every `type_expr_idx == TYPE_<X>` that used to live here read TYPE_<X> as
+    # an IMPORTED module-level `val` (declared in compiler/core/types.spl).
+    # Under the stage-3/4 self-hosted build those cross-module reads come back
+    # wrong, so the comparison silently took the WRONG branch and emitted no
+    # diagnostic. `any` (TYPE_ANY = 12) was the case that stopped the stage-3
+    # self-host: it fell through the entire == chain to the TypeKind.Infer
+    # catch-all at the bottom, HIR carried HirTypeKind.Infer into MIR
+    # lower_type -- whose Infer arm is error_fatal -- and
+    # `struct BackendPort { run_fn: any, ... }` aborted the build with
+    # "bootstrap flat MIR type registration failed: unsupported MIR type kind".
+    # Earlier rounds hit the same thing on TYPE_I64 and TYPE_TEXT.
+    #
+    # The previous workaround was hand-written ordered literal bounds
+    # (`type_expr_idx > 4 and type_expr_idx < 6`) placed ahead of each ==. That
+    # works -- a literal needs no imported read -- but it DUPLICATED
+    # compiler/core/types.spl's tag numbering here with nothing tying the two
+    # copies together (renumber a tag there and these literals would silently
+    # disagree, and because the pins ran first the STALE meaning would win),
+    # and it only ever covered the tags someone had already been bitten by:
+    # 1..9, 11, 12, 14..18, 27..33. Tags 0, 10, 13 and 19..26 stayed exposed.
+    #
+    # Fix the family instead of adding a 34th pin: do the comparison in the
+    # module that DECLARES the constants. `fixed_type_tag_name`
+    # (compiler/core/types.spl) compares against the TYPE_* vals INTRA-module
+    # -- the same reason is_dict_tag/is_result_tag/is_tuple_type_tag below have
+    # always worked on this path -- and returns a canonical name; this file
+    # dispatches on a text literal, exactly as convert_decl_visibility above
+    # already does. Result: no imported-`val` comparison anywhere in this
+    # function, one copy of the numbering, and all of 0..33 covered.
+    #
+    # Per-tag behaviour is deliberately IDENTICAL to before, including for the
+    # tags that map to nothing useful. "struct" (10) and the
+    # Union/Intersection/Refinement markers (24..26) had no arm before and
+    # still resolve to Infer. "nil" (13) and Result/Future/Poll/Task/Generic
+    # (19..23) keep their existing Named(...) mapping even though the HIR name
+    # resolver (20.hir/hir_lowering/types.spl) does not accept those names --
+    # making them loud is a separate decision, not this lane's.
+    val fixed_tag_name = fixed_type_tag_name(type_expr_idx)
+    if fixed_tag_name != "":
+        if fixed_tag_name == "void":
+            return Type(kind: TypeKind.Named("void", []), span: make_span())
+        if fixed_tag_name == "bool":
+            return Type(kind: TypeKind.Named("bool", []), span: make_span())
+        if fixed_tag_name == "i64":
+            return Type(kind: TypeKind.Named("i64", []), span: make_span())
+        if fixed_tag_name == "f64":
+            return Type(kind: TypeKind.Named("f64", []), span: make_span())
+        if fixed_tag_name == "text":
+            return Type(kind: TypeKind.Named("text", []), span: make_span())
+        if fixed_tag_name == "u8":
+            return Type(kind: TypeKind.Named("u8", []), span: make_span())
+        if fixed_tag_name == "u16":
+            return Type(kind: TypeKind.Named("u16", []), span: make_span())
+        if fixed_tag_name == "u32":
+            return Type(kind: TypeKind.Named("u32", []), span: make_span())
+        if fixed_tag_name == "u64":
+            return Type(kind: TypeKind.Named("u64", []), span: make_span())
+        if fixed_tag_name == "i8":
+            return Type(kind: TypeKind.Named("i8", []), span: make_span())
+        if fixed_tag_name == "i16":
+            return Type(kind: TypeKind.Named("i16", []), span: make_span())
+        if fixed_tag_name == "i32":
+            return Type(kind: TypeKind.Named("i32", []), span: make_span())
+        if fixed_tag_name == "[i64]":
+            return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("i64", []), span: make_span()), nil), span: make_span())
+        if fixed_tag_name == "[text]":
+            return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("text", []), span: make_span()), nil), span: make_span())
+        if fixed_tag_name == "[bool]":
+            return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("bool", []), span: make_span()), nil), span: make_span())
+        if fixed_tag_name == "[any]":
+            return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("Any", []), span: make_span()), nil), span: make_span())
+        if fixed_tag_name == "dict":
+            return Type(kind: TypeKind.Named("Dict", []), span: make_span())
+        if fixed_tag_name == "fn":
+            return Type(kind: TypeKind.Named("fn", []), span: make_span())
+        if fixed_tag_name == "any":
+            return Type(kind: TypeKind.Named("Any", []), span: make_span())
+        if fixed_tag_name == "nil":
+            return Type(kind: TypeKind.Named("nil", []), span: make_span())
+        if fixed_tag_name == "Option":
+            return Type(kind: TypeKind.Named("Option", []), span: make_span())
+        if fixed_tag_name == "Option<i64>":
+            return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("i64", []), span: make_span())]), span: make_span())
+        if fixed_tag_name == "Option<f64>":
+            return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("f64", []), span: make_span())]), span: make_span())
+        if fixed_tag_name == "Option<text>":
+            return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("text", []), span: make_span())]), span: make_span())
+        if fixed_tag_name == "Option<bool>":
+            return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("bool", []), span: make_span())]), span: make_span())
+        if fixed_tag_name == "Result":
+            return Type(kind: TypeKind.Named("Result", []), span: make_span())
+        if fixed_tag_name == "Future":
+            return Type(kind: TypeKind.Named("Future", []), span: make_span())
+        if fixed_tag_name == "Poll":
+            return Type(kind: TypeKind.Named("Poll", []), span: make_span())
+        if fixed_tag_name == "Task":
+            return Type(kind: TypeKind.Named("Task", []), span: make_span())
+        if fixed_tag_name == "Generic":
+            return Type(kind: TypeKind.Named("Generic", []), span: make_span())
+        # "struct" (10) and "Union"/"Intersection"/"Refinement" (24..26) had no
+        # arm in the old == chain and reached the Infer catch-all; preserved.
+        return Type(kind: TypeKind.Infer, span: make_span())
     # Dict<K,V> specialization (bug: dicttype): the parser registers each
     # distinct Dict<K,V> annotation's key/value tags and encodes the result
     # as TYPE_DICT_BASE + id (see core.types.dict_type_register). Recover the
@@ -384,20 +359,6 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
         val key_tag = dict_type_get_key(did)
         val value_tag = dict_type_get_value(did)
         return Type(kind: TypeKind.Named("Dict", [convert_flat_type(key_tag), convert_flat_type(value_tag)]), span: make_span())
-    if type_expr_idx == TYPE_FN:
-        return Type(kind: TypeKind.Named("fn", []), span: make_span())
-    if type_expr_idx == TYPE_OPTION:
-        return Type(kind: TypeKind.Named("Option", []), span: make_span())
-    if type_expr_idx == TYPE_OPTION_I64:
-        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("i64", []), span: make_span())]), span: make_span())
-    if type_expr_idx == TYPE_OPTION_F64:
-        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("f64", []), span: make_span())]), span: make_span())
-    if type_expr_idx == TYPE_OPTION_TEXT:
-        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("text", []), span: make_span())]), span: make_span())
-    if type_expr_idx == TYPE_OPTION_BOOL:
-        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("bool", []), span: make_span())]), span: make_span())
-    if type_expr_idx == TYPE_RESULT:
-        return Type(kind: TypeKind.Named("Result", []), span: make_span())
     if is_result_tag(type_expr_idx):
         val rid = result_tag_to_id(type_expr_idx)
         return Type(kind: TypeKind.Named("Result", [convert_flat_type(result_type_get_ok(rid)), convert_flat_type(result_type_get_err(rid))]), span: make_span())
@@ -458,15 +419,7 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
         val pointer_inner_tag = pointer_type_get_inner(pointer_id)
         val pointer_mutable = pointer_type_is_mutable(pointer_id)
         return Type(kind: TypeKind.Pointer(convert_flat_type(pointer_inner_tag), pointer_mutable), span: make_span())
-    if type_expr_idx == TYPE_FUTURE:
-        return Type(kind: TypeKind.Named("Future", []), span: make_span())
-    if type_expr_idx == TYPE_POLL:
-        return Type(kind: TypeKind.Named("Poll", []), span: make_span())
-    if type_expr_idx == TYPE_TASK:
-        return Type(kind: TypeKind.Named("Task", []), span: make_span())
-    if type_expr_idx == TYPE_GENERIC_ERASED:
-        return Type(kind: TypeKind.Named("Generic", []), span: make_span())
-    if type_expr_idx >= TYPE_UNION_BASE:
+    if is_union_base_or_above(type_expr_idx):
         return Type(kind: TypeKind.Named(type_tag_name(type_expr_idx), []), span: make_span())
     # type_expr_idx falls in the tag-space hole (34..TYPE_UNION_BASE-1) here, so
     # it must be a real expr-arena index. It can go stale when it was captured

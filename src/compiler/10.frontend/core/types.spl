@@ -386,6 +386,109 @@ fn is_pointer_tag(tag: i64) -> bool:
 fn pointer_tag_to_id(tag: i64) -> i64:
     tag - TYPE_POINTER_BASE
 
+# Stage-3 imported-module-`val` misread (blocker #7, cd81ef3d85df): a caller in
+# ANOTHER module that writes `tag == TYPE_ANY` reads TYPE_ANY as an IMPORTED
+# module-level `val`, and under the stage-3/4 self-hosted build that read comes
+# back wrong -- the comparison then silently takes the wrong branch with no
+# diagnostic. `is_dict_tag`/`is_result_tag`/`is_tuple_type_tag` above are immune
+# because they compare against the TYPE_* vals from INSIDE this module, where
+# the read is intra-module.
+#
+# `fixed_type_tag_name` extends that immunity to the fixed low tags 0..33: it
+# does the whole comparison here and hands the caller a canonical NAME, so the
+# caller dispatches on a text literal and never reads a TYPE_* val across a
+# module boundary. Returns "" for anything outside 0..33 (registry-encoded and
+# named tags -- the caller keeps using is_dict_tag/is_result_tag/... and
+# type_tag_name for those).
+#
+# The names are the same strings type_tag_name returns for these tags, and are
+# API: `_FlatAstBridge/convert_nodes.spl`'s convert_flat_type switches on them.
+# Keep the two in sync; this is the ONLY place the fixed tag numbering is
+# compared, which is the point -- the previous workaround duplicated the
+# numbering as hand-written literal bounds in convert_nodes.spl with nothing
+# tying the copies together.
+fn fixed_type_tag_name(tag: i64) -> text:
+    if tag < TYPE_VOID:
+        return ""
+    if tag > TYPE_I32:
+        return ""
+    if tag == TYPE_VOID:
+        return "void"
+    if tag == TYPE_BOOL:
+        return "bool"
+    if tag == TYPE_I64:
+        return "i64"
+    if tag == TYPE_F64:
+        return "f64"
+    if tag == TYPE_TEXT:
+        return "text"
+    if tag == TYPE_ARRAY_I64:
+        return "[i64]"
+    if tag == TYPE_ARRAY_TEXT:
+        return "[text]"
+    if tag == TYPE_ARRAY_BOOL:
+        return "[bool]"
+    if tag == TYPE_ARRAY_ANY:
+        return "[any]"
+    if tag == TYPE_DICT:
+        return "dict"
+    if tag == TYPE_STRUCT:
+        return "struct"
+    if tag == TYPE_FN:
+        return "fn"
+    if tag == TYPE_ANY:
+        return "any"
+    if tag == TYPE_NIL:
+        return "nil"
+    if tag == TYPE_OPTION:
+        return "Option"
+    if tag == TYPE_OPTION_I64:
+        return "Option<i64>"
+    if tag == TYPE_OPTION_F64:
+        return "Option<f64>"
+    if tag == TYPE_OPTION_TEXT:
+        return "Option<text>"
+    if tag == TYPE_OPTION_BOOL:
+        return "Option<bool>"
+    if tag == TYPE_RESULT:
+        return "Result"
+    if tag == TYPE_FUTURE:
+        return "Future"
+    if tag == TYPE_POLL:
+        return "Poll"
+    if tag == TYPE_TASK:
+        return "Task"
+    if tag == TYPE_GENERIC_ERASED:
+        return "Generic"
+    if tag == TYPE_UNION:
+        return "Union"
+    if tag == TYPE_INTERSECTION:
+        return "Intersection"
+    if tag == TYPE_REFINEMENT:
+        return "Refinement"
+    if tag == TYPE_U8:
+        return "u8"
+    if tag == TYPE_U16:
+        return "u16"
+    if tag == TYPE_U32:
+        return "u32"
+    if tag == TYPE_U64:
+        return "u64"
+    if tag == TYPE_I8:
+        return "i8"
+    if tag == TYPE_I16:
+        return "i16"
+    if tag == TYPE_I32:
+        return "i32"
+    ""
+
+# Same rationale as fixed_type_tag_name: `tag >= TYPE_UNION_BASE` written in an
+# importing module is one more cross-module `val` read, and it guards the
+# named-type catch-all -- a misread base would divert real expr-arena indices
+# into a bogus Named(type_tag_name(idx)) annotation. Compare here instead.
+fn is_union_base_or_above(tag: i64) -> bool:
+    tag >= TYPE_UNION_BASE
+
 fn type_tag_name(tag: i64) -> text:
     if tag >= TYPE_NAMED_BASE:
         val nid = tag - TYPE_NAMED_BASE
@@ -1293,6 +1396,7 @@ export TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPT
 export TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE
 export TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GENERIC_ERASED
 export TYPE_UNION_BASE, TYPE_INTERSECTION_BASE, TYPE_REFINEMENT_BASE
+export fixed_type_tag_name, is_union_base_or_above
 export TYPE_DICT_BASE, is_dict_tag, dict_tag_to_id
 export dict_type_register, dict_type_get_key, dict_type_get_value
 export TYPE_RESULT_BASE, is_result_tag, result_tag_to_id
