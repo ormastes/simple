@@ -167,6 +167,28 @@ impl<'a> MirLowerer<'a> {
                 });
                 boxed
             })
+        } else if arg_ty == TypeId::BOOL || (arg_ty == TypeId::ANY && matches!(arg_expr.kind, HirExprKind::Bool(_))) {
+            // Bool completes the int/float pair above; without this arm a bool
+            // argument reached an ANY parameter as a RAW 0/1 and every consumer
+            // that assumes a tagged RuntimeValue misread it -- `show(true)` with
+            // `fn show(a: Any)` printed "nil", because raw 1's low 3 bits are
+            // read as a tag and land on SPECIAL_NIL.
+            //
+            // This MUST be a call to `rt_value_bool`, NOT `MirInst::BoxInt`.
+            // Bool is TAG_SPECIAL (0b011) with SPECIAL_TRUE=1/SPECIAL_FALSE=2
+            // (runtime/src/value/tags.rs), i.e. raw 11/19 -- BoxInt would emit a
+            // tagged INT 1 and render "1" instead of "true". There is no
+            // MirInst::BoxBool; that asymmetry is what left this gap open.
+            self.with_func(|func, current_block| {
+                let boxed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(boxed),
+                    target: CallTarget::from_name("rt_value_bool"),
+                    args: vec![arg],
+                });
+                boxed
+            })
         } else {
             Ok(arg)
         }

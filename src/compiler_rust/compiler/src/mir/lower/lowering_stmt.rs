@@ -232,6 +232,70 @@ impl<'a> MirLowerer<'a> {
                     // Emit unit bound check if assigning to a unit type with constraints
                     self.emit_unit_bound_check(effective_declared_ty, vreg)?;
 
+                    // Box a raw scalar initializer into an ANY-declared local, so
+                    // later ANY-typed reads (print/to_text, boxing-aware dispatch)
+                    // see a tagged RuntimeValue instead of a raw scalar whose low
+                    // 3 bits get misread as tag bits. This is the SAME block the
+                    // `HirExprKind::Global` assign arm already runs (see below in
+                    // this file); `HirStmt::Let` was simply missing it, so
+                    //     val x: Any = 42     -> x.to_text() gave a DENORMAL FLOAT
+                    //     val b: Any = true   -> b.to_text() gave "nil"
+                    //     val f: Any = 10.0   -> f.to_text() gave "0"
+                    // while the values themselves stayed intact (`x == 42` is true).
+                    // Text/heap values were already fine: they arrive tagged.
+                    //
+                    // Bool goes through `rt_value_bool`, not BoxInt -- see the
+                    // matching note in lowering_expr_call.rs::box_arg_for_any_param.
+                    let target_is_any = effective_declared_ty == TypeId::ANY;
+                    let needs_int_boxing = target_is_any
+                        && matches!(
+                            value_ty,
+                            TypeId::I8
+                                | TypeId::I16
+                                | TypeId::I32
+                                | TypeId::I64
+                                | TypeId::U8
+                                | TypeId::U16
+                                | TypeId::U32
+                                | TypeId::U64
+                        );
+                    let needs_float_boxing = target_is_any && matches!(value_ty, TypeId::F32 | TypeId::F64);
+                    let needs_bool_boxing = target_is_any && value_ty == TypeId::BOOL;
+                    let vreg = if needs_bool_boxing {
+                        self.with_func(|func, current_block| {
+                            let boxed = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::Call {
+                                dest: Some(boxed),
+                                target: CallTarget::from_name("rt_value_bool"),
+                                args: vec![vreg],
+                            });
+                            boxed
+                        })?
+                    } else if needs_int_boxing {
+                        self.with_func(|func, current_block| {
+                            let boxed = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::BoxInt {
+                                dest: boxed,
+                                value: vreg,
+                            });
+                            boxed
+                        })?
+                    } else if needs_float_boxing {
+                        self.with_func(|func, current_block| {
+                            let boxed = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::BoxFloat {
+                                dest: boxed,
+                                value: vreg,
+                            });
+                            boxed
+                        })?
+                    } else {
+                        vreg
+                    };
+
                     // Track tagged status: if storing a tagged VReg, mark the local as tagged
                     if self.tagged_vregs.contains(&vreg) {
                         self.tagged_locals.insert(local_idx);
