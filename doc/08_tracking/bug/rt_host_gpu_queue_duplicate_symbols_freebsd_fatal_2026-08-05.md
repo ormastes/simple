@@ -108,14 +108,27 @@ already superseded by the time this doc's fix landed.
   present. Sabotage/revert re-verified green (2 examples, 0 failures) and red
   (1 of 2 failed) against this spec directly.
 
-## Verification once fixed
+## Verification once fixed — CONFIRMED on real FreeBSD hardware proxy
 
-Re-run `scripts/check/check-freebsd-wm-seam-refusal.shs` inside the FreeBSD
-QEMU guest (`build/freebsd/vm/`, real BASIC-CLOUDINIT boot, KVM accel, no
-`-kernel`/`isa-debug-exit`) — it previously exited non-zero with
-`refusal=blocked reason=in-guest build did not complete`. A clean link should
-let it reach the real `refusal=yes` verdict against the live
-`wm_host_2d_for("freebsd")` seam. (In-guest re-run launched as part of this
-fix; the in-guest build is a cold ~40-minute budget — see this doc's history
-or the task tracker for the resulting verdict line if it isn't folded in
-here yet.)
+Re-ran `scripts/check/check-freebsd-wm-seam-refusal.shs` inside a real
+FreeBSD 14.4-RELEASE QEMU guest (`build/freebsd/vm/`, real BASIC-CLOUDINIT
+boot, KVM accel, no `-kernel`/`isa-debug-exit`, per
+`.claude/rules/board-runnable.md`). Previously this exited non-zero with
+`refusal=blocked reason=in-guest build did not complete`. This run:
+
+- `cargo build -p simple-driver --bin simple` **linked cleanly in-guest**
+  (`Finished dev profile [unoptimized + debuginfo] target(s) in 4m 39s`) — no
+  duplicate-symbol errors, confirming the fix holds on the real `lld`-default
+  target this bug was filed against, not just under a forced-`lld` simulation
+  on the Linux dev host.
+- The probe then ran the actual in-guest interpreter against the real
+  `wm_host_2d_for("freebsd")` seam and printed:
+  `FREEBSD WM SEAM VERDICT: platform=freebsd refusal=yes reason=VM harness
+  boots but no 2D backend exists for this platform`
+- Final line: `FreeBSD WM seam refusal check PASSED`.
+
+The `refusal=yes reason=... no 2D backend exists` outcome is the correct,
+expected verdict for a separate, already-known non-goal (FreeBSD has no 2D
+compositor backend yet) — not a build failure. Task #60's board-runnable
+blocker from this duplicate-symbol bug is cleared; the WM/GUI/2D lane on
+FreeBSD is unblocked to proceed on its own merits.
