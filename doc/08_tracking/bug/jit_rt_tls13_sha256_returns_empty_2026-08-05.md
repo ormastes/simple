@@ -1,20 +1,96 @@
 # `rt_tls13_sha256` returns an EMPTY digest under the Cranelift JIT — silently
 
-**Status:** FIXED at source (`src/compiler_rust/compiler/src/compilability.rs`,
-`return_type_keeps_boxed()` now has a `Type::Array` arm). Independently
-reproduced: FIPS 180-4 KAT 3/3 PASS on both `jit` and `interpret` engines with
-a rebuilt seed (`cargo build`, not a full `bin/simple build bootstrap`).
-**Not yet deployed** — the live `bin/simple` is the self-hosted binary, not
-this Rust seed, so this fix only takes effect there once the self-hosted
-compiler's own bridge (`src/compiler/80.driver/compilability.spl`, which has
-no equivalent predicate today) gets the same fix or a bootstrap chain from a
-rebuilt seed. Until then, keep the length-guard fallback in
+**Status:** FIXED. Two independent, complementary fixes now both land on
+current `main`, verified together against a freshly rebuilt seed
+(`cargo build -p simple-driver --bin simple` — a scoped seed build, not a
+full `bin/simple build bootstrap`):
+
+1. `src/compiler_rust/compiler/src/compilability.rs::return_type_keeps_boxed()`
+   gained a `Type::Array` arm (landed at commit `cfe0506e336`, already on
+   `main` before this session started). This keeps any `InterpCall` whose
+   declared return type is `[T]` boxed instead of stripped to a raw i64 —
+   the general-shape fix for array-returning `rt_*`/`spl_*` externs still
+   routed through the interpreter bridge.
+2. **Correction to this doc's original root-cause claim:** a re-check during
+   this session found `rt_tls13_sha256` is **no longer** interpreter-table-only.
+   `nm -D` on the freshly built seed shows a genuine global `T rt_tls13_sha256`
+   symbol (same shape as `T rt_text_to_bytes`), because
+   `src/compiler_rust/runtime/src/value/sffi/hash/sha256.rs:112` now defines
+   `pub extern "C" fn rt_tls13_sha256(data: RuntimeValue) -> RuntimeValue`,
+   registered via `RuntimeFuncSpec::new("rt_tls13_sha256", &[I64], &[I64])`
+   (`codegen/runtime_sffi.rs:450`) and `common/src/runtime_symbols.rs:941`.
+   That native implementation landed in the bulk commit `969c1f013c3`
+   ("chore: sync x25519mlkem768 web/browser and runtime migration") —
+   unrelated in its commit message to this bug, but load-bearing for it.
+   **This means the JIT now links `rt_tls13_sha256` as a direct native call
+   and never routes it through `InterpCall`/`compile_interp_call` at all** —
+   fix (1) above is defense-in-depth for other array-returning interpreter-only
+   externs, not the mechanism that actually fixes JIT calls to this specific
+   symbol today. Confirmed by sabotage: temporarily forcing
+   `Type::Array => false` in `return_type_keeps_boxed` and rebuilding the seed
+   had **zero effect** on the probes below — both engines still reported
+   `len=32` — because that code path is no longer reached for this symbol.
+3. **New this session**, narrow defense-in-depth per the "Suggested next
+   step" below:
+   `src/compiler_rust/runtime/src/value/sffi/value_ops.rs::rt_value_raw_i64`
+   now panics (process abort, `extern "C"` panics can't unwind) instead of
+   silently returning `0` when handed a non-float heap-boxed value. This is
+   the exact fallback site that manufactured the original silent `len=0`: had
+   it existed before the `Type::Array` fix, the JIT arm would have crashed
+   loudly instead of printing a false `PROBE VERDICT: PASS` with an empty
+   digest. Proven with a subprocess-based Rust test (`raw_i64_guard_tests` in
+   the same file) that asserts the child process aborts with this message on
+   stderr; scalar/bool/nil unboxing is unaffected (also asserted).
+
+Independently reproduced this session: FIPS 180-4 KAT 3/3 PASS on both `jit`
+and `interpret`, byte-identical first byte `0xba`, via the exact repro
+commands below against the freshly rebuilt seed.
+
+**Not yet deployed to the self-hosted binary** — the live `bin/simple` is the
+self-hosted binary, not this Rust seed, so fix (1)/(2) only take effect there
+once the self-hosted compiler's own bridge
+(`src/compiler/80.driver/compilability.spl`, which has no equivalent predicate
+today) gets the same fix or a bootstrap chain from a rebuilt seed picks it up.
+Until then, **keep the length-guard fallback** in
 `src/lib/common/crypto/sha256.spl:197` — do not remove it on the strength of
-this fix alone.
+this fix alone; only revisit after a real bootstrap redeploy (out of scope
+here).
 **Found:** 2026-08-05
 **Severity:** HIGH — silent wrong-answer in a crypto digest channel, exit 0
 **Component:** `rt_tls13_sha256` runtime binding under the Cranelift JIT;
 surfaces through `src/lib/common/crypto/sha256.spl:197` (`sha256_text`)
+
+## Verification (this session)
+
+```
+SEED=src/compiler_rust/target/debug/simple   # cargo build -p simple-driver --bin simple
+
+SIMPLE_EXECUTION_MODE=interpret $SEED run src/app/test/x25519mlkem768_sha256_extern_probe.spl
+  # PROBE tls13_sha256 len=32 / first_byte=186 / VERDICT: PASS
+SIMPLE_EXECUTION_MODE=jit       $SEED run src/app/test/x25519mlkem768_sha256_extern_probe.spl
+  # PROBE tls13_sha256 len=32 / first_byte=186 / VERDICT: PASS  (was len=0 before)
+
+SIMPLE_EXECUTION_MODE=interpret $SEED run src/app/test/jit_tls13_sha256_fips_kat_probe.spl
+SIMPLE_EXECUTION_MODE=jit       $SEED run src/app/test/jit_tls13_sha256_fips_kat_probe.spl
+  # both: KAT empty/abc/56byte all match published FIPS 180-4 vectors, 3/3 PASS
+```
+
+`cargo test -p simple-runtime` and `cargo test -p simple-compiler` scoped
+suites pass (see this doc's git history / session notes for exact test names:
+`raw_i64_guard_tests::*` in `value_ops.rs`,
+`array_returning_extern_keeps_its_interp_call_result_boxed` in
+`compilability.rs`).
+
+## Blast radius beyond `sha256_text` (checked, not deeply audited)
+
+`src/lib/nogc_async_mut_noalloc/tls/{client,transcript}.spl` and
+`src/os/apps/sshd/ssh_session_kex.spl` call `rt_tls13_sha256` **directly**,
+not through `sha256_text`, so they never had the length-guard fallback and
+would have silently used empty/wrong digests under the JIT for the whole
+lifetime of this bug. They are fixed by the same root-cause fix (the native
+symbol / boxed InterpCall path both now return the correct digest), but were
+not independently re-verified end-to-end (TLS/SSH handshake) in this session —
+flagging honestly rather than claiming full verification.
 
 ## Symptom
 
