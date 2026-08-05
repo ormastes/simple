@@ -880,12 +880,59 @@ describe "famous-site renderer compatibility corpus":
             val samples = build_famous_site_sample_corpus()
             expect(_all_samples_render_non_empty(samples)).to_equal(true)
 
-        slow_it "keeps the normal system font corpus capture pixel-aligned with Chrome":
-            val sample = build_famous_site_sample_corpus()[0]
-            val pixels = simple_web_render_html_to_pixels_with_corpus_fixtures(sample.html, 160, 120)
-            val chrome = _load_p6_ppm_pixels(famous_site_sample_chrome_ppm_path(sample.id), 160, 120)
+        slow_it "routes pinned corpus samples to the fixture oracle and all others to the real renderer":
+            # This example used to be titled "keeps the normal system font
+            # corpus capture pixel-aligned with Chrome" and asserted only that
+            # the fixture oracle equals chrome.ppm. That assertion could not
+            # fail: simple_web_render_html_to_pixels_with_corpus_fixtures LOADS
+            # chrome.ppm for site_0_google (and site_15_twitch) and returns it,
+            # so it compared chrome.ppm to itself and reported a Chrome
+            # compatibility result that no renderer had produced.
+            #
+            # The oracle short-circuit is legitimate -- it pins a reference lane
+            # -- but what needs gating is the ROUTING, which is falsifiable: the
+            # pinned sample must come from the oracle, and a non-pinned sample
+            # must fall through to the production renderer untouched. Chrome
+            # parity itself is asserted by the next example, against the
+            # production renderer, where it means something.
+            val pinned = build_famous_site_sample_corpus()[0]
+            val chrome = _load_p6_ppm_pixels(famous_site_sample_chrome_ppm_path(pinned.id), 160, 120)
             expect(chrome.len()).to_equal(160 * 120)
-            expect(_pixels_equal(pixels, chrome)).to_equal(true)
+            expect(_pixels_equal(
+                simple_web_render_html_to_pixels_with_corpus_fixtures(pinned.html, 160, 120),
+                chrome)).to_equal(true)
+
+            # Fall-through arm: for a sample the oracle does NOT pin, the
+            # wrapper must return exactly what the production renderer returns.
+            # If a future edit widened the short-circuit to more samples, this
+            # arm goes red -- the old assertion would not have noticed.
+            #
+            # The warm-up render below is load-bearing, not decoration. The
+            # FIRST render in a process pays a one-time default-face load
+            # (dlopen plus a ~17MB TTF parse) out of the render budget, trips
+            # its deadline, and returns a truncated frame; the second render of
+            # the same page returns the complete one. Comparing two renders
+            # without warming therefore compares a degraded frame against a
+            # complete one and fails for a reason that has nothing to do with
+            # routing -- verified: this arm fails when it is the first thing a
+            # process does, and passes once the cache is warm. See
+            # doc/04_architecture/ui/chrome_stage_correspondence.md 6.1; the
+            # underlying font-load-inside-the-budget defect is still open.
+            val samples = build_famous_site_sample_corpus()
+            var unpinned_index = -1
+            var i = 0
+            while i < samples.len():
+                if samples[i].id != "site_0_google" and samples[i].id != "site_15_twitch":
+                    unpinned_index = i
+                    i = samples.len()
+                else:
+                    i = i + 1
+            expect(unpinned_index).to_be_greater_than(-1)
+            val unpinned = samples[unpinned_index]
+            simple_web_render_html_to_pixels(unpinned.html, 160, 120)
+            expect(_pixels_equal(
+                simple_web_render_html_to_pixels_with_corpus_fixtures(unpinned.html, 160, 120),
+                simple_web_render_html_to_pixels(unpinned.html, 160, 120))).to_equal(true)
 
         slow_it "keeps production renderer corpus compatibility distinct from fixture-oracle compatibility":
             val sample = build_famous_site_sample_corpus()[0]
