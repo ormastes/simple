@@ -11,6 +11,83 @@ User objective: make Electron, Tauri, and pure Simple web renderer share one web
 
 The requested end state is not true yet. The repo has several converged surfaces, but the web renderer, 2D engine, and WM service layers are still partially parallel.
 
+## Corrections — 2026-08-05, re-verified against code
+
+Four claims below were checked against the tree and are **false or stale**.
+The code wins; the original wording is kept for the record and corrected here.
+
+- **"`backend_cuda.spl` is absent" (Evidence / 2D renderer surfaces) — FALSE.**
+  `src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl` exists. Gap 2 ("add or
+  repair `backend_cuda.spl`") is therefore not an add; at most a conformance
+  check.
+- **"`host_compositor_entry.spl:50-57` defines a local minimal `WmService`"
+  — FALSE.** `src/os/compositor/host_compositor_entry.spl` is a 6-line facade
+  that re-exports `host_compositor_core` and `host_compositor_bootstrap`. There
+  is no `class WmService` or `struct WmService` anywhere under
+  `src/os/compositor/`; the only declaration in the repo is
+  `src/os/services/wm/wm_service.spl:62`. Gap 4 ("replace the host local
+  `WmService` shim") describes a shim that does not exist.
+- **All `host_compositor_entry.spl` line references are stale.** The file is 6
+  lines, so `:13-28`, `:164-178`, `:379-386`, and `:408-410` point at nothing.
+  `render_simple_web_app_content` does not appear anywhere under
+  `src/os/compositor/`.
+- **"`src/os/compositor/display_backend.spl:9-19` defines `CompositorBackend`"
+  — stale.** The trait now lives at
+  `src/os/compositor/display_backend_core.spl:7`, alongside
+  `CompositorGlassCapable` at `:1`. `display_backend.spl` is a compatibility
+  facade holding `GpuCompositorBackend`.
+
+## Measured host/SimpleOS divergence surface — 2026-08-05
+
+Census over 89 WM-scope files (`src/os/compositor/**`, `src/app/play/wm_*`,
+`src/app/io/window_{ffi,sffi}.spl`, `src/app/hosted_apps/compositor/**`,
+`src/app/simple_process_manager/window_registry.spl`), 346 `use` edges:
+
+| class | files | meaning |
+|---|---|---|
+| already shared | 43 | no OS-tier or host-tier import, no FFI |
+| SimpleOS-tier import | 18 | imports `os.{drivers,kernel,services,userlib}` |
+| host FFI | 16 | declares `@extern`/`@sffi` |
+| host-tier import | 8 | imports `std.{fs,process,net,http,env,io,time}` or `nogc_sync_mut.*` |
+| **mixed (both sides)** | **4** | `compositor.spl`, `host_compositor_core.spl`, `browser_backend.spl`, `hosted_wm_capture_evidence.spl` |
+
+**Runtime OS-identity branch predicates in WM code: 0.** There is no
+`if is_simpleos` / `if is_host` / `target_os` test anywhere in the WM scope.
+Divergence here is *structural* — parallel modules selected at import time —
+not conditional. Any plan that proposes "remove the OS conditionals" is
+targeting something that does not exist; the reducible quantity is the number
+of WM modules that name an OS-tier or host-tier module directly.
+
+### Genuinely OS-divergent vs incidentally divergent
+
+- **Genuinely divergent:** presentation surface (virtio-gpu / framebuffer vs
+  SDL2 / winit / cocoa / win32), input transport (PS/2, virtio-input, UART vs
+  host event loop), process/window registry.
+- **Incidentally divergent (same concept, two spellings):** the 8x16 text glyph
+  table, which host WM backends imported from the kernel driver tier. Closed —
+  see below.
+- **Already shared:** `CompositorBackend` / `CompositorGlassCapable`
+  (`display_backend_core.spl`), `GlassPort` (`glass_port.spl`), `WmAction`
+  (`os.services.wm.wm_action`), and the `simpleos_host_gpu_*` protocol.
+
+### Closed: glyph source
+
+`get_glyph_8x16` was defined only in `src/os/drivers/framebuffer/fb_font.spl`
+and pulled in by 8 modules, 6 of them userland WM or host compositor code, plus
+`src/lib/common/ui/window_scene_draw_ir.spl` — a pure `common`-tier file
+importing `os.drivers`. It is now
+`src/lib/common/ui/glyph_bitmap_8x16.spl` (pure data, zero imports, sibling of
+`glyph_bitmap_5x7.spl`), and the framebuffer driver imports it like everyone
+else. Host WM modules naming a kernel driver module for text: **8 before, 0
+after.**
+
+That move also fixed a live defect: `src/os/compositor/hosted_backend.spl`
+declared `use os.drivers.framebuffer.fb_driver.{get_glyph_8x16}`, a symbol
+`fb_driver` never defined — it only imported it. Host WM text rendering
+resolved through the "importing one symbol registers the whole module"
+behaviour rather than through a real declaration. An unresolved `use` is only a
+warning (exit 0), so nothing failed and nothing reported it.
+
 ## Evidence
 
 ### Web renderer surfaces
