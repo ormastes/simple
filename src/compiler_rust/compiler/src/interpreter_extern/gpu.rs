@@ -4840,15 +4840,18 @@ mod renderdoc_dlopen {
         }
         0
     }
+
+    /// Honestly reports whether `RENDERDOC_GetAPI` was actually resolved via
+    /// dlopen -- unlike `num_captures() != u32::MAX`, which conflates "API
+    /// never resolved" (default return `0`) with "available".
+    pub fn available() -> bool {
+        api_ptr().is_some()
+    }
 }
 
 /// `rt_renderdoc_available() -> i64` (1 if the RENDERDOC API resolved)
 pub fn rt_renderdoc_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(if renderdoc_dlopen::num_captures() != u32::MAX {
-        1
-    } else {
-        0
-    }))
+    Ok(Value::Int(if renderdoc_dlopen::available() { 1 } else { 0 }))
 }
 
 /// `rt_renderdoc_start_capture() -> i64` (1 if a frame capture was started)
