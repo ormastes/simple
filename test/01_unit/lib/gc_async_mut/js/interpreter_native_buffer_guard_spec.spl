@@ -1,17 +1,45 @@
-extern fn rt_file_read_text(path: text) -> text
+# @cover src/lib/gc_async_mut/js/engine/interpreter_native.spl
+#
+# This spec used to assert on the *source text* of interpreter_native.spl via
+# rt_file_read_text + to_contain. That proved only that some characters were
+# present in a file; it could not observe the guard actually firing, and it
+# stayed green under any behavioural regression that preserved the source
+# spelling. It is now an executing spec: it runs JavaScript through the real
+# JsInterpreter and asserts on returned values.
 
-fn interpreter_native_source() -> text:
-    rt_file_read_text("src/lib/gc_async_mut/js/engine/interpreter_native.spl") ?? ""
+use std.spec.*
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.engine.parser.{JsParser}
+use std.js.types.js_types.{JsValue}
+use std.gc_async_mut.js.engine.interpreter as gc_js
+use std.gc_async_mut.js.engine.interpreter_native.*
+use std.gc_async_mut.js.engine.interpreter_object.*
+
+fn _eval_js(source: text) -> JsValue:
+    val logger = Logger.new("buffer-guard-spec", LogLevel.Error)
+    val parser = JsParser.new(source, logger)
+    match parser.parse_program():
+        Ok(statements):
+            val interpreter = gc_js.JsInterpreter.new(logger)
+            match interpreter.execute(statements):
+                Ok(v): v
+                _: JsValue.Undefined
+        _: JsValue.Undefined
+
+fn _bool_text(v: JsValue) -> text:
+    match v:
+        JsValue.Boolean(b): if b: "true" else: "false"
+        JsValue.Undefined: "undefined"
+        _: "not-a-boolean"
 
 describe "JS native Buffer argument guards":
-    it "keeps Buffer.isBuffer empty-argument guard before reading arg zero":
-        val source = interpreter_native_source()
-        expect(source).to_contain("me _native_node_buffer_is_buffer(arg_vals: [JsValue]) -> JsValue:")
-        expect(source).to_contain("if arg_vals.len() == 0:")
-        expect(source).to_contain("return JsValue.Boolean(v: false)")
-        expect(source).to_contain("val obj_id = _get_obj_id(arg_vals.get(0))")
+    it "returns false from Buffer.isBuffer when called with no arguments":
+        # The empty-argument guard must fire BEFORE arg zero is read.
+        expect(_bool_text(_eval_js("Buffer.isBuffer()"))).to_equal("false")
 
-    it "keeps WebAssembly payload parsing on safe arg access":
-        val source = interpreter_native_source()
-        expect(source).to_contain("me _native_webassembly_payload_hex(arg_vals: [JsValue]) -> text:")
-        expect(source).to_contain("match arg_vals.get(0):")
+    it "returns false from Buffer.isBuffer for a non-buffer argument":
+        expect(_bool_text(_eval_js("Buffer.isBuffer({})"))).to_equal("false")
+        expect(_bool_text(_eval_js("Buffer.isBuffer(undefined)"))).to_equal("false")
+
+    it "returns true from Buffer.isBuffer for a real buffer":
+        expect(_bool_text(_eval_js("Buffer.isBuffer(Buffer.from('abc'))"))).to_equal("true")
