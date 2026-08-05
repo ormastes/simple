@@ -12,6 +12,8 @@ Complete bidirectional type inference engine supporting:
 Types are defined in bidirectional_types.spl (same directory, no import needed).
 """
 
+use compiler.types.bidirectional_types.{BidirHirType, BidirInferMode}
+
 # ============================================================================
 # Complete Bidirectional Type Inferencer
 # ============================================================================
@@ -26,7 +28,7 @@ class TypeInferencer:
     """
     context: text
     next_var_id: i64
-    expected_return_type: Option<HirType>
+    expected_return_type: Option<BidirHirType>
 
 impl TypeInferencer:
     static fn empty() -> TypeInferencer:
@@ -41,7 +43,7 @@ impl TypeInferencer:
     # Function Type Checking with Return Type
     # ========================================================================
 
-    me infer_function(func: BidirHirFunction) -> HirType:
+    me infer_function(func: BidirHirFunction) -> BidirHirType:
         """
         Infer function type with return type checking
 
@@ -56,25 +58,25 @@ impl TypeInferencer:
                 self.expected_return_type = Option.Some(ret_ty)
 
                 # Check body against declared return type
-                val _body_ty = self.infer_expr(func.body, InferMode.Check(ret_ty))
+                val _body_ty = self.infer_expr(func.body, BidirInferMode.Check(ret_ty))
 
                 # Clear expected return
                 self.expected_return_type = Option.None
 
                 # Return function type
-                HirType.Function(params: param_tys, ret: ret_ty)
+                BidirHirType.Function(params: param_tys, ret: ret_ty)
 
             case nil:
                 # No return type annotation - synthesize from body
-                val inferred_ret = self.infer_expr(func.body, InferMode.Synthesize)
+                val inferred_ret = self.infer_expr(func.body, BidirInferMode.Synthesize)
 
-                HirType.Function(params: param_tys, ret: inferred_ret)
+                BidirHirType.Function(params: param_tys, ret: inferred_ret)
 
     # ========================================================================
     # Main Entry Point (Mode-Aware)
     # ========================================================================
 
-    me infer_expr(expr: BidirHirExpr, mode: InferMode) -> HirType:
+    me infer_expr(expr: BidirHirExpr, mode: BidirInferMode) -> BidirHirType:
         """
         Infer expression type with mode
 
@@ -95,7 +97,7 @@ impl TypeInferencer:
     # Complete Synthesis Mode (Bottom-Up)
     # ========================================================================
 
-    me synthesize_expr(expr: BidirHirExpr) -> HirType:
+    me synthesize_expr(expr: BidirHirExpr) -> BidirHirType:
         """
         Synthesize type from expression structure
 
@@ -103,19 +105,19 @@ impl TypeInferencer:
         from the ground up without expected type hints.
         """
         match expr.kind:
-            case IntLit(_): HirType.Int
-            case BoolLit(_): HirType.Bool
-            case TextLit(_): HirType.Text
-            case Var(_): HirType.Int  # Placeholder
+            case IntLit(_): BidirHirType.Int
+            case BoolLit(_): BidirHirType.Bool
+            case TextLit(_): BidirHirType.Text
+            case Var(_): BidirHirType.Int  # Placeholder
 
             case Lambda(params, body):
                 var param_tys = []
                 for _param in params:
-                    val var_ty = HirType.Var(id: self.next_var_id)
+                    val var_ty = BidirHirType.Var(id: self.next_var_id)
                     self.next_var_id = self.next_var_id + 1
                     param_tys.push(var_ty)
                 val body_ty = self.synthesize_expr(body)
-                HirType.Function(params: param_tys, ret: body_ty)
+                BidirHirType.Function(params: param_tys, ret: body_ty)
 
             case Call(callee, args):
                 val callee_ty = self.synthesize_expr(callee)
@@ -123,16 +125,16 @@ impl TypeInferencer:
                     case Function(param_tys, ret_ty):
                         for i in 0..args.len():
                             if i < param_tys.len():
-                                self.infer_expr(args[i], InferMode.Check(param_tys[i]))
+                                self.infer_expr(args[i], BidirInferMode.Check(param_tys[i]))
                             else:
                                 self.synthesize_expr(args[i])
                         ret_ty
-                    case _: HirType.Unit
+                    case _: BidirHirType.Unit
 
             case Let(_name, type_ann, value, body):
                 match type_ann:
                     case Some(ann):
-                        self.infer_expr(value, InferMode.Check(ann))
+                        self.infer_expr(value, BidirInferMode.Check(ann))
                         self.synthesize_expr(body)
                     case nil:
                         self.synthesize_expr(value)
@@ -141,7 +143,7 @@ impl TypeInferencer:
             case Return(value):
                 match self.expected_return_type:
                     case Some(expected_ret):
-                        self.infer_expr(value, InferMode.Check(expected_ret))
+                        self.infer_expr(value, BidirInferMode.Check(expected_ret))
                     case nil:
                         self.synthesize_expr(value)
 
@@ -150,28 +152,28 @@ impl TypeInferencer:
                 for elem in elems:
                     val elem_ty = self.synthesize_expr(elem)
                     elem_tys.push(elem_ty)
-                HirType.Tuple(elems: elem_tys)
+                BidirHirType.Tuple(elems: elem_tys)
 
             case ArrayLit(elems):
                 if elems.len() == 0:
-                    HirType.Array(elem: HirType.Var(id: self.next_var_id))
+                    BidirHirType.Array(elem: BidirHirType.Var(id: self.next_var_id))
                 else:
                     val first_ty = self.synthesize_expr(elems[0])
                     for i in 1..elems.len():
-                        self.infer_expr(elems[i], InferMode.Check(first_ty))
-                    HirType.Array(elem: first_ty)
+                        self.infer_expr(elems[i], BidirInferMode.Check(first_ty))
+                    BidirHirType.Array(elem: first_ty)
 
             case If(cond, then_expr, else_expr):
-                self.infer_expr(cond, InferMode.Check(HirType.Bool))
+                self.infer_expr(cond, BidirInferMode.Check(BidirHirType.Bool))
                 val then_ty = self.synthesize_expr(then_expr)
-                self.infer_expr(else_expr, InferMode.Check(then_ty))
+                self.infer_expr(else_expr, BidirInferMode.Check(then_ty))
                 then_ty
 
     # ========================================================================
     # Complete Check Mode (Top-Down)
     # ========================================================================
 
-    me check_expr(expr: BidirHirExpr, expected: HirType) -> HirType:
+    me check_expr(expr: BidirHirExpr, expected: BidirHirType) -> BidirHirType:
         """
         Check expression against expected type
 
@@ -182,8 +184,8 @@ impl TypeInferencer:
                 match expected:
                     case Function(param_tys, ret_ty):
                         if params.len() != param_tys.len():
-                            return HirType.Unit
-                        self.infer_expr(body, InferMode.Check(ret_ty))
+                            return BidirHirType.Unit
+                        self.infer_expr(body, BidirInferMode.Check(ret_ty))
                         expected
                     case _:
                         self.synthesize_and_subsume(expr, expected)
@@ -191,21 +193,21 @@ impl TypeInferencer:
             case Let(_name, type_ann, value, body):
                 match type_ann:
                     case Some(ann):
-                        self.infer_expr(value, InferMode.Check(ann))
+                        self.infer_expr(value, BidirInferMode.Check(ann))
                     case nil:
                         self.synthesize_expr(value)
-                self.infer_expr(body, InferMode.Check(expected))
+                self.infer_expr(body, BidirInferMode.Check(expected))
 
             case Return(value):
-                self.infer_expr(value, InferMode.Check(expected))
+                self.infer_expr(value, BidirInferMode.Check(expected))
 
             case Tuple(elems):
                 match expected:
                     case Tuple(expected_elems):
                         if elems.len() != expected_elems.len():
-                            return HirType.Unit
+                            return BidirHirType.Unit
                         for i in 0..elems.len():
-                            self.infer_expr(elems[i], InferMode.Check(expected_elems[i]))
+                            self.infer_expr(elems[i], BidirInferMode.Check(expected_elems[i]))
                         expected
                     case _:
                         self.synthesize_and_subsume(expr, expected)
@@ -214,15 +216,15 @@ impl TypeInferencer:
                 match expected:
                     case Array(elem_ty):
                         for elem in elems:
-                            self.infer_expr(elem, InferMode.Check(elem_ty))
+                            self.infer_expr(elem, BidirInferMode.Check(elem_ty))
                         expected
                     case _:
                         self.synthesize_and_subsume(expr, expected)
 
             case If(cond, then_expr, else_expr):
-                self.infer_expr(cond, InferMode.Check(HirType.Bool))
-                self.infer_expr(then_expr, InferMode.Check(expected))
-                self.infer_expr(else_expr, InferMode.Check(expected))
+                self.infer_expr(cond, BidirInferMode.Check(BidirHirType.Bool))
+                self.infer_expr(then_expr, BidirInferMode.Check(expected))
+                self.infer_expr(else_expr, BidirInferMode.Check(expected))
                 expected
 
             case _:
@@ -232,7 +234,7 @@ impl TypeInferencer:
     # Subsumption (Unification)
     # ========================================================================
 
-    me synthesize_and_subsume(expr: BidirHirExpr, expected: HirType) -> HirType:
+    me synthesize_and_subsume(expr: BidirHirExpr, expected: BidirHirType) -> BidirHirType:
         """
         Synthesize expression type and check it's compatible with expected
 
@@ -245,9 +247,9 @@ impl TypeInferencer:
         if self.subsume(inferred, expected):
             expected
         else:
-            HirType.Unit
+            BidirHirType.Unit
 
-    me subsume(inferred: HirType, expected: HirType) -> bool:
+    me subsume(inferred: BidirHirType, expected: BidirHirType) -> bool:
         """
         Check that inferred type is compatible with expected
 
@@ -256,7 +258,7 @@ impl TypeInferencer:
         """
         self.types_equal(inferred, expected)
 
-    fn types_equal(ty1: HirType, ty2: HirType) -> bool:
+    fn types_equal(ty1: BidirHirType, ty2: BidirHirType) -> bool:
         """Check if two types are structurally equal"""
         match (ty1, ty2):
             case (Unit, Unit): true
