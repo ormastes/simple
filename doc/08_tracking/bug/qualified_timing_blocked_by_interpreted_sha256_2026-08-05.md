@@ -87,7 +87,58 @@ is hashed at least three times, via `x25519_mlkem768_sample_set_sha256`,
 
 Closing this needs one of:
 1. a faster interpreted SHA-256, or
-2. a JIT-capable test path (today the runner forbids it at `:628-629`).
+2. ~~a JIT-capable test path (today the runner forbids it at `:628-629`)~~
+   — **REFUTED, see below.**
 
 A digest-caching shortcut is **not** acceptable — it would change the pinned
 receipts, which are the evidence the campaign exists to produce.
+
+## Correction: a spec body can NEVER reach the JIT, and `:628-629` is not why
+
+Option 2 above was wrong. Removing the forced-interpret lines would change
+nothing. Two independent structural causes, both verified:
+
+1. `src/compiler_rust/driver/src/exec_core.rs` — the doc comment on
+   `run_file_jit` states *"Falls back to interpreter for code without
+   `fn main()`."* A spec file is top-level `describe`/`it` with no `main`.
+2. `describe`/`it`/`expect` are **Rust interpreter intrinsics**
+   (`compiler/src/interpreter_call/bdd.rs`, 6 hits). Grep of
+   `compiler/src/codegen/**` for each returns **0, 0, 0** — no JIT lowering
+   for the BDD surface exists at all.
+
+Paired measurement, `bin/simple run` with the engine set explicitly, identical
+bodies:
+
+| workload | interpret | jit | speedup |
+|---|---|---|---|
+| hot loop, with `fn main` | 63.44 s | **0.17 s** | **373x** |
+| hot loop, spec form (no main) | 56.06 s | 54.12 s | **1.0x — none** |
+| `sha256_text`, with `fn main` | 6.39 s | **1.60 s** | **4.0x**, digest identical |
+| `sha256_text`, spec form | 6.35 s | 7.32 s | **1.0x — none** |
+
+The 373x arm is the positive control: it proves `SIMPLE_EXECUTION_MODE=jit`
+really does engage the JIT. The spec arms then prove the de-JIT is **structural
+and upstream** of `:628-629`.
+
+An opt-in `--engine=jit` flag for specs would therefore be a **false-green
+generator**: a knob that appears to select an engine and measurably does
+nothing, while still costing real blast radius (~15 readers of
+`SIMPLE_RUNTIME_MODE` / `SIMPLE_EXECUTION_MODE`, including `font_registry.spl`,
+`lsp/parser_adapter.spl`, `spec.spl:168-191`, `native_build_main.spl`).
+
+**Leave `:628-629` alone.** Origin is `8d2a12e6270` "test: force interpreter
+execution mode in test runners" (2026-07-25), whose rationale is a code comment
+in the sibling hunk: a child `run <file>` must be interpreted to load the BDD
+intrinsics, otherwise `simple test --mode=interpreter` can dispatch a child in
+*compile* mode and yield parse errors plus zero evidence. Capability, not
+builtin correctness.
+
+### The remaining route
+
+Measure through a `fn main` driver run under `bin/simple run`, which reaches the
+JIT today and gives the real 4.0x on `sha256_text` with a byte-identical digest.
+Assert on it from a spec via the sanctioned
+`src/lib/nogc_sync_mut/spec/engine_probe.spl` pattern — the spec stays
+interpreted and spawns a `fn main` probe under a named engine, asserting on its
+verdict line. Working precedent: `test/01_unit/bugs/text_ordering_cmp_spec.spl`.
+Driver scaffolding already exists under `src/app/test/x25519mlkem768_*`.
