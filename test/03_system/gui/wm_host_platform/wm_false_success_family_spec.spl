@@ -90,6 +90,16 @@ fn baseline_line_count() -> i64:
     val cmd = '/usr/bin/grep -v "^#" ' + baseline_path + ' | /usr/bin/grep -vE "^[[:space:]]*$" | wc -l'
     shell_output(cmd).trim().to_i64()
 
+fn baseline_header_line_count() -> i64:
+    """Count of `#`-prefixed header/comment lines. Unlike the data-line
+    count, this can never legitimately reach 0: the header (source of
+    enumeration, predicate-tag legend, deviations, shrink-only rule) is
+    static prose, not a per-site accounting line, so it stays present even
+    once the last real site has been fixed and the baseline is fully
+    drained."""
+    val cmd = '/usr/bin/grep -c "^#" ' + baseline_path
+    shell_output(cmd).trim().to_i64()
+
 
 # ============================================================================
 # Predicate-family searches (each returns a sorted-unique newline list of
@@ -171,9 +181,20 @@ describe "WM false-success family guard — baseline bookkeeping":
     it "prints the current baseline line count so shrink is visible per run":
         val n = baseline_line_count()
         print "WM_FALSE_SUCCESS_BASELINE_LINE_COUNT: {n}"
-        # NON-VACUITY: fails if the file is empty or unreadable, not just a
-        # cosmetic print. The floor is descriptive (today's count), not
-        # hardcoded to a single magic number the file could drift past
-        # silently in the wrong direction.
-        expect(n > 0).to_equal(true)
+        # NON-VACUITY, split into two independent checks (see
+        # doc/08_tracking/bug/2026-08-05_wm_false_success_family_guard_blocked_by_out_of_scope_gaps.md
+        # section 2): the data-line count `n` legitimately reaches 0 once
+        # every real predicate-tracked site is fixed -- that is the goal
+        # state, not a broken read, so `n` alone can no longer be the
+        # vacuity floor. Instead:
+        #   1. the file's `#`-prefixed HEADER never disappears (it is static
+        #      prose -- enumeration source, predicate-tag legend, deviations,
+        #      shrink-only rule -- not a per-site line), so a broken/empty/
+        #      truncated/unreadable file collapses this to ~0 while a
+        #      genuinely fully-closed baseline still carries dozens of lines;
+        #   2. `n` itself keeps only the real, always-true floor (`>= 0`) and
+        #      the upper bound (never more than the matrix's 31 sites).
+        val header_n = baseline_header_line_count()
+        expect(header_n > 20).to_equal(true)
+        expect(n >= 0).to_equal(true)
         expect(n <= 31).to_equal(true)
