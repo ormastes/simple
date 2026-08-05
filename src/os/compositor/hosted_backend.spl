@@ -12,29 +12,47 @@
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
 use os.compositor.hosted_backend_win32.{HostedWin32Backend}
+use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
 use common.ui.glyph_bitmap_8x16.{get_glyph_8x16}
 
 # ============================================================================
 # Platform Routing (Row 3 / Phase C)
 # ============================================================================
 #
-# `select_hosted_backend()` is the single dispatch site that picks
-# between the cross-platform winit path (this file's
-# `HostedCompositorBackend`), the macOS Cocoa shim
-# (`hosted_backend_cocoa.spl::HostedCocoaBackend`), and the Windows
-# Win32 shim (`hosted_backend_win32.spl::HostedWin32Backend`).
+# `select_hosted_backend()` is the single dispatch site that picks the
+# REAL host surface for this machine: the macOS Cocoa backend
+# (`hosted_backend_cocoa.spl::HostedCocoaBackend`), the Windows Win32
+# backend (`hosted_backend_win32.spl::HostedWin32Backend`), or the SDL2
+# backend (`hosted_backend_sdl2.spl::HostedSdl2Backend`) on Linux/BSD.
 #
-# Selection precedence:
-#   1. `SIMPLE_HOSTED_SURFACE` env var: `winit` | `cocoa` | `win32` | `auto`
-#   2. Host triple from the runtime (when env is `auto` or unset):
-#        - `*-apple-darwin*` -> `cocoa`
-#        - `*-pc-windows-*`  -> `win32`
-#        - everything else   -> `winit`
+# Selection precedence (implemented in `src/runtime/hosted/select.rs`,
+# which is live — the programmatic override wins, then the env var, then
+# the compile-time host triple):
+#   1. `rt_hosted_set_surface_override(sel)` programmatic override
+#   2. `SIMPLE_HOSTED_SURFACE` env var: `winit` | `cocoa` | `win32` | `auto`
+#   3. Host triple from the runtime (when env is `auto` or unset):
+#        - macOS   -> selector 1 -> cocoa
+#        - Windows -> selector 2 -> win32
+#        - other   -> selector 0 -> "winit", read here as SDL2 (see below)
 #
-# The actual host-triple detection lives in `src/runtime/hosted/select.rs`
-# (TODO for the next agent — until that lands, `select_hosted_backend`
-# falls through to the winit path on every host, matching today's
-# behaviour). Document any divergence in the runtime stub.
+# Why selector 0 routes to SDL2 and NOT to this file's
+# `HostedCompositorBackend`: the entire `rt_winit_buffer_*` family
+# declared below has NO native definition anywhere in the repo. Its only
+# implementation is the interpreter extern in
+# `src/compiler_rust/compiler/src/interpreter_extern/winit_sffi/`, which
+# is a `vec![color; w*h]` plus an incrementing counter — it hands back a
+# plausible non-zero handle while opening no OS window at all, and a
+# COMPILED build of that path would fail to link. Treating it as "a real
+# backend is available" is precisely the false success this dispatcher
+# exists to avoid, so `select_hosted_backend` never returns it.
+# `HostedCompositorBackend` remains available for callers that hold real
+# winit handles already (see `new` / `create` below).
+#
+# `select_hosted_backend` returns nil when NO real surface can be brought
+# up. Callers must treat nil as "no real backend" and say so out loud —
+# see `host_compositor_bootstrap.spl::_create_backend_for_kind`, which
+# falls back to the headless backend but prints the fallback and records
+# the backend it ACTUALLY selected on the handle.
 
 # ============================================================================
 # Winit Buffer FFI Declarations
@@ -254,21 +272,77 @@ impl HostedCompositorBackend:
 extern fn rt_hosted_select_surface() -> i64
 extern fn rt_hosted_set_surface_override(sel: i64)
 
-fn select_hosted_backend(window_id: i64, w: i32, h: i32, fill_color: u32) -> CompositorBackend:
-    """Return the right `CompositorBackend` for this host.
+# Selector codes returned by `rt_hosted_select_surface()`. These MUST stay in
+# sync with the constants in `src/runtime/hosted/select.rs`.
+val HOSTED_SURFACE_WINIT: i64 = 0
+val HOSTED_SURFACE_COCOA: i64 = 1
+val HOSTED_SURFACE_WIN32: i64 = 2
+
+fn hosted_surface_selector() -> i64:
+    """Raw host-surface selector for this machine (see `select.rs`)."""
+    rt_hosted_select_surface()
+
+fn hosted_surface_name(sel: i64) -> text:
+    """Human-readable name for a selector code, for disclosure in logs.
+
+    Selector 0 is reported as `sdl2` rather than `winit` because that is the
+    backend this file actually brings up for it — the `rt_winit_buffer_*`
+    family it is named after has no native definition (see the header).
+    """
+    if sel == HOSTED_SURFACE_COCOA:
+        return "cocoa"
+    if sel == HOSTED_SURFACE_WIN32:
+        return "win32"
+    if sel == HOSTED_SURFACE_WINIT:
+        return "sdl2"
+    "unknown"
+
+fn select_hosted_backend(window_id: i64, w: i32, h: i32, title: text, fill_color: u32) -> CompositorBackend?:
+    """Bring up the real host surface for THIS machine, or return nil.
 
     Reads the runtime's `rt_hosted_select_surface()` selector:
-      0 = winit (default / fallback / Linux / BSD / unknown)
-      1 = cocoa (macOS — see `hosted_backend_cocoa.spl`)
-      2 = win32 (Windows — see `hosted_backend_win32.spl`)
+      0 = Linux / BSD / unknown -> SDL2  (`hosted_backend_sdl2.spl`)
+      1 = macOS                 -> Cocoa (`hosted_backend_cocoa.spl`)
+      2 = Windows               -> Win32 (`hosted_backend_win32.spl`)
 
-    The runtime is responsible for honouring `SIMPLE_HOSTED_SURFACE` and
-    falling back to the winit path on probe failure. See the comment at
-    the top of this file for the full precedence rules.
+    Every arm goes through the backend's own `try_create`, which probes the
+    OS and returns nil when the platform shim is the non-native sentinel (the
+    `#ifndef __APPLE__` / `#ifndef _WIN32` builds return -1, and `rt_sdl2_init`
+    returns 0 with no display). So a non-nil result here means a real window
+    was obtained; nil means none was, and the caller must disclose that rather
+    than substitute a headless backend silently.
+
+    Args:
+        window_id: Existing native window handle, or 0 to create one.
+        w: Surface width in pixels.
+        h: Surface height in pixels.
+        title: Window title used when a window has to be created.
+        fill_color: Initial clear color, ARGB (0xAARRGGBB).
     """
     val sel = rt_hosted_select_surface()
-    if sel == 1:
-        return HostedCocoaBackend.create(w, h, "Simple Hosted", fill_color)
-    if sel == 2:
-        return HostedWin32Backend.create(w, h, "Simple Hosted", fill_color)
-    HostedCompositorBackend.create(window_id, w, h, fill_color)
+    if sel == HOSTED_SURFACE_COCOA:
+        val cocoa = HostedCocoaBackend.try_create(window_id, w, h, fill_color)
+        if cocoa != nil:
+            return cocoa
+        return nil
+    if sel == HOSTED_SURFACE_WIN32:
+        val win32 = HostedWin32Backend.try_create(window_id, w, h, fill_color)
+        if win32 != nil:
+            return win32
+        return nil
+    # Selector 0 (Linux / BSD / unknown). SDL2 is the only surface here with
+    # real native definitions (src/runtime/runtime_sdl2.c); the winit buffer
+    # family is interpreter-only, so it is deliberately NOT a fallback.
+    #
+    # KNOWN GAP (measured 2026-08-05, Linux, DISPLAY+WAYLAND_DISPLAY unset):
+    # under the interpreter/JIT tooling binary the `rt_sdl2_*` externs are not
+    # registered, so this arm aborts with `unknown extern function:
+    # rt_sdl2_init` instead of letting `try_create` return nil. A natively
+    # linked build resolves them from runtime_sdl2.c and behaves as documented.
+    # Registering the rt_sdl2_* family in the interpreter extern table is what
+    # would let the loud headless fallback below trigger under tooling too;
+    # that belongs to the runtime lane, not this dispatcher.
+    val sdl = HostedSdl2Backend.try_create(w, h, title)
+    if sdl != nil:
+        return sdl
+    nil
