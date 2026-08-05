@@ -1003,3 +1003,65 @@ Conventions confirmed for `src/os/crypto/ml_kem_ntt.spl`: representative range
    (`SIMPLE_TIMEOUT_SECONDS`) and the 600s daemon clamp, and neither of those
    knobs lifts it. Cleared with `rt_fault_set_execution_limit(0)`, proven
    positionally: run 1 died at 125/217, run 2 passed 150, 175, then finished.
+
+### 768 / multi-block path verified — the last high-value gap is closed
+
+The previous entry named the 768-coefficient path as the most valuable remaining
+check, because `ml_kem_kpke.spl:476/483` calls `provider.forward/inverse` with a
+flattened poly-vector (768 at k=3) and `:505-508` turns a length mismatch into
+`Err`, **not** a fallback. Verified independently, against the landed kernel.
+
+**Semantics** (re-confirmed from the non-SIMD branch beside the SIMD one):
+`_split_poly_vec` :451-464 takes contiguous 256-blocks (`poly[j] = values[i*256+j]`);
+`_vec_ntt_mode` :411-420 transforms **each block independently**; :513 reflattens.
+So the required identity is
+`batch(x, inv) == concat(ntt(x[0..256]), ntt(x[256..512]), ntt(x[512..768]))` —
+**not** a single 768-point transform. That distinction is the real risk: a long
+transform would return 768 values and satisfy every length check while being
+entirely wrong, so only per-block value comparison can catch it.
+
+    ORACLE_MULTIBLOCK verdict=PASS total=116 mismatches=0 backend=1
+      kernel768_checked=80 kernel768_bad=0 kernel768_empty=0
+      ground_truth_768_checks=80 scalar768_vs_truth_bad=0 whole_vs_concat_bad=0
+      multiples_bad=0 nonmultiple_accepted=0
+      chunk_hits_256=80 chunk_hits_512=160 chunk_hits_768=240 chunk_hits_1024=320
+      chunk_hits_linear=yes keygen=identical first_bad=none
+
+- **80 of 80 checks at 768 against an independent per-block O(n^2) evaluator** —
+  not against the kernel, not against scalar alone. The single-long-transform
+  failure mode is excluded: it would have failed every per-block comparison.
+- **Block independence 0/10 bad.** Contrast cases (`zeros|impulse|q-1` and its
+  rotations, AAB/ABA/BAA/AAA, impulse in first/mid/last only), plus
+  `kernel(768) == concat(kernel(256) x3)` on all 10 — the test that would expose
+  a shared accumulator or a zeta index not reset per block. A uniform random
+  corpus can mask exactly that.
+- **512 and 1024 correct** both directions. Non-multiples (1, 255, 257, 300,
+  767) all return **length 0**, so the caller's `Err` fires instead of accepting
+  garbage.
+- **`chunk_hits` scales exactly linearly** with block count: 80/160/240/320.
+  Confirms the implementing lane's 80@256 and 240@768, and that the counter
+  tracks real work rather than being incremented decoratively.
+- **`ml_kem_keygen` vs `ml_kem_keygen_simd` byte-identical** with the gate open
+  (backend=1): ek 1184, dk 2400, `ek_first_diff=-1`, `dk_first_diff=-1`.
+
+Provenance: `simd.spl` md5 `13fd103b9a6b903096e1f1bcb7e418fc` (= the landed
+blob) and `ml_kem_kpke.spl` md5 `f5a165649ab12fd73574c44ef9841f6f`, stamped
+identical before and after every probe.
+
+**Refinement to the earlier `Err` framing:** `ml_kem_kpke.spl:496-497` (and :516)
+reject `len == 0 || len % 256 != 0` with `ml-kem-cpu-ntt-input-size-invalid`
+**before** the kernel is reached. So the non-multiple case is kernel robustness,
+not a live keygen risk — the earlier entry overstated it slightly.
+
+**Still not determined:**
+- The op-limit lift is **unproven for this driver**: the A/B twin with
+  `rt_fault_set_execution_limit(0)` stripped produced a byte-identical PASS, so
+  this run never approached the 10M cap. Both runs did print verdict lines, so
+  no truncation occurred. The earlier positional evidence on the 256-driver
+  (run 1 died at phase6 125/217; run 2 with the disable passed it) stands but
+  was not reproduced here.
+- Keygen exercised with **one** deterministic (d,z) pair; non-multiples
+  forward-only.
+- Everything still ran on the **Rust seed interpreter** — native codegen could
+  diverge, and remains the largest untested axis.
+- Constant-time behaviour still unexamined.
