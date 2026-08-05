@@ -10,6 +10,11 @@ use app.io.mod.{file_create_exclusive, file_exists, file_hash_sha256,
     file_is_regular_no_follow, file_read}
 use app.test.x25519mlkem768_coverage_receipt.{
     x25519_mlkem768_parse_coverage_run_manifest}
+use app.test.x25519mlkem768_coverage_contract.{
+    x25519_mlkem768_coverage_absent_in,
+    x25519_mlkem768_coverage_declared_blocked_paths,
+    x25519_mlkem768_coverage_owner_paths,
+    x25519_mlkem768_coverage_stale_blocked_paths}
 
 val X25519_MLKEM768_CRITICAL_SYMBOLIC_SCHEMA =
     "x25519mlkem768-critical-symbolic-v1"
@@ -36,29 +41,41 @@ fn _critical_owner_ids() -> [text]:
      "server_config", "server_worker", "mlkem_core", "mlkem_kpke",
      "mlkem_ntt"]
 
+# Single source of truth: this list used to be a verbatim copy of the coverage
+# contract's owner paths.  Two hand-maintained copies of a coverage manifest can
+# drift, and a drifted copy is another way to report coverage you do not have,
+# so it now delegates.  The existence gate below therefore covers both.
 fn _critical_owner_paths() -> [text]:
-    ["src/os/crypto/x25519_mlkem768/cache_identity.spl",
-     "src/os/crypto/x25519_mlkem768/artifact_snapshot_admission.spl",
-     "src/os/crypto/x25519_mlkem768/accelerator_cache.spl",
-     "src/os/crypto/x25519_mlkem768/cuda_ntt_provider.spl",
-     "src/os/crypto/x25519_mlkem768/cuda_ntt_unsafe.spl",
-     "src/os/crypto/x25519_mlkem768/metal_ntt_provider.spl",
-     "src/os/crypto/x25519_mlkem768/vulkan_ntt_provider.spl",
-     "src/os/crypto/x25519_mlkem768/execution_policy.spl",
-     "src/os/crypto/x25519_mlkem768/hybrid.spl",
-     "src/os/crypto/x25519_mlkem768/hybrid_support.spl",
-     "src/os/crypto/x25519_mlkem768/gpu_operation_evidence.spl",
-     "src/os/crypto/x25519_mlkem768/simd_operation_evidence.spl",
-     "src/lib/gc_async_mut/crypto_accel/cuda_session.spl",
-     "src/lib/gc_async_mut/crypto_accel/metal_session.spl",
-     "src/lib/gc_async_mut/crypto_accel/vulkan_session.spl",
-     "src/runtime/runtime_simd_dispatch.c",
-     "src/lib/gc_async_mut/gpu/browser_engine/net/tls.spl",
-     "src/lib/gc_async_mut/gpu/browser_engine/net/h1_client.spl",
-     "src/lib/nogc_async_mut/http_server/server.spl",
-     "src/lib/nogc_async_mut/http_server/worker.spl",
-     "src/os/crypto/ml_kem.spl", "src/os/crypto/ml_kem_kpke.spl",
-     "src/os/crypto/ml_kem_ntt.spl"]
+    x25519_mlkem768_coverage_owner_paths()
+
+# --- Manifest existence gate -------------------------------------------------
+#
+# Same rule as the coverage contract: a listed path may only be absent when it
+# is declared blocked there.  The blocked set is imported rather than copied so
+# the two manifests cannot drift apart.
+fn x25519_mlkem768_critical_manifest_paths() -> [text]:
+    var paths: [text] = []
+    for path in _critical_owner_paths(): paths.push(path)
+    paths.push(X25519_MLKEM768_CRITICAL_SYMBOLIC_PATH)
+    paths
+
+fn x25519_mlkem768_critical_manifest_absent_paths() -> [text]:
+    x25519_mlkem768_coverage_absent_in(x25519_mlkem768_critical_manifest_paths())
+
+fn x25519_mlkem768_critical_manifest_gate_report() -> text:
+    val declared = x25519_mlkem768_critical_manifest_paths()
+    val absent = x25519_mlkem768_critical_manifest_absent_paths()
+    val stale = x25519_mlkem768_coverage_stale_blocked_paths()
+    val blocked = x25519_mlkem768_coverage_declared_blocked_paths()
+    val present = declared.len() - absent.len() - blocked.len()
+    var verdict = "PASS"
+    if absent.len() > 0 or stale.len() > 0: verdict = "FAIL"
+    var line = "critical-inventory manifest-existence-gate: " + verdict +
+        " declared={declared.len()} present={present}" +
+        " blocked={blocked.len()} absent={absent.len()} stale_blocked={stale.len()}"
+    if absent.len() > 0: line = line + " absent_paths=" + absent.join(",")
+    if stale.len() > 0: line = line + " stale_blocked_paths=" + stale.join(",")
+    line
 
 fn _critical_uint(value: text, positive: bool = false) -> bool:
     if value == "" or value.len() > 10: return false
@@ -314,6 +331,15 @@ fn main() -> i64:
     if manifest.raw_coverage_path != raw_path or manifest.raw_coverage_sha256 != raw_sha:
         print "status=fail\nreason=raw-coverage-run-binding-stale"
         return 2
+    # Existence gate first: without it a phantom owner path reaches the loop
+    # below and reports the generic `owner-source-not-regular`, which reads like
+    # a permissions problem rather than "this file has never existed".
+    val gate_line = x25519_mlkem768_critical_manifest_gate_report()
+    print gate_line
+    if x25519_mlkem768_critical_manifest_absent_paths().len() > 0 or
+            x25519_mlkem768_coverage_stale_blocked_paths().len() > 0:
+        print "status=fail\nreason=manifest-path-absent"
+        return 2
     var actual_hashes: Dict<text, text> = {}
     var source_texts: Dict<text, text> = {}
     for path in _critical_owner_paths():
@@ -354,3 +380,6 @@ export X25519_MLKEM768_CRITICAL_SYMBOLIC_SCHEMA
 export X25519_MLKEM768_CRITICAL_SYMBOLIC_PATH
 export X25519_MLKEM768_CRITICAL_SYMBOLIC_SHA256
 export x25519_mlkem768_calibrate_critical_inventory_from_text
+export x25519_mlkem768_critical_manifest_paths
+export x25519_mlkem768_critical_manifest_absent_paths
+export x25519_mlkem768_critical_manifest_gate_report

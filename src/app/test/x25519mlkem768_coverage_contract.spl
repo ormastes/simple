@@ -1,6 +1,7 @@
 # Immutable schema and owner contract for X25519MLKEM768 coverage receipts.
 
 use std.test_runner.test_runner_coverage.{CoverageOwnerOutcomeSummary}
+use app.io.mod.{file_exists}
 
 val X25519_MLKEM768_COVERAGE_SCHEMA = "x25519mlkem768-branch-coverage-v2"
 val X25519_MLKEM768_RUN_MANIFEST_SCHEMA = "simple-native-coverage-run-v2"
@@ -140,6 +141,77 @@ fn x25519_mlkem768_coverage_spec_paths() -> [text]:
         "test/02_integration/app/web/x25519mlkem768_web_browser_integration_spec.spl"
     ]
 
+# --- Manifest existence gate -------------------------------------------------
+#
+# A coverage manifest that silently tolerates a path which is not on disk
+# reports coverage it does not have.  AC-8 forbids silent exclusion, so a listed
+# path may only be absent when it is DECLARED BLOCKED here, with a reason.
+# Everything else absent is a hard defect and turns the gate RED.
+#
+# History (2026-08-05): the three GPU accelerator session modules
+# `src/lib/gc_async_mut/crypto_accel/{cuda,metal,vulkan}_session.spl` were listed
+# by both manifests while not existing at all, so the campaign counted three
+# phantom owners.  They were entered here as declared-blocked; the modules then
+# landed the same day and the block was RETIRED, which is what
+# `x25519_mlkem768_coverage_stale_blocked_paths()` exists to force.  The set is
+# empty on purpose — an owner may only leave the coverage denominator by being
+# named here, never by being quietly absent.
+# See doc/08_tracking/bug/crypto_accel_session_modules_do_not_exist_2026-08-05.md
+fn x25519_mlkem768_coverage_declared_blocked_paths() -> [text]:
+    var blocked: [text] = []
+    blocked
+
+# Every path this manifest declares, in one list, so the gate cannot miss a
+# group that a later edit adds.
+fn x25519_mlkem768_coverage_manifest_paths() -> [text]:
+    var paths: [text] = []
+    for path in x25519_mlkem768_coverage_owner_paths(): paths.push(path)
+    for path in x25519_mlkem768_coverage_spec_paths(): paths.push(path)
+    paths.push(X25519_MLKEM768_CRITICAL_SYMBOLIC_PATH)
+    paths.push(X25519_MLKEM768_COVERAGE_COMPOSER_PATH)
+    paths.push(X25519_MLKEM768_COVERAGE_CONTRACT_PATH)
+    paths
+
+# Pure checker: which of `paths` are absent on disk and not declared blocked.
+# Kept separate from the manifest so a spec can prove it goes RED on a known
+# phantom without editing a manifest — an existence gate that cannot be shown
+# to fail is not a gate.
+fn x25519_mlkem768_coverage_absent_in(paths: [text]) -> [text]:
+    val blocked = x25519_mlkem768_coverage_declared_blocked_paths()
+    var absent: [text] = []
+    for path in paths:
+        if not file_exists(path) and not blocked.contains(path):
+            absent.push(path)
+    absent
+
+# Declared-blocked paths that now exist: the block has outlived the gap and must
+# be retired, or the owner would stay excluded from the denominator forever.
+fn x25519_mlkem768_coverage_stale_blocked_paths() -> [text]:
+    var stale: [text] = []
+    for path in x25519_mlkem768_coverage_declared_blocked_paths():
+        if file_exists(path): stale.push(path)
+    stale
+
+fn x25519_mlkem768_coverage_manifest_absent_paths() -> [text]:
+    x25519_mlkem768_coverage_absent_in(x25519_mlkem768_coverage_manifest_paths())
+
+# One-line verdict.  PASS only when nothing is unexpectedly absent and no block
+# is stale.  Blocked paths are always NAMED in the line, never dropped.
+fn x25519_mlkem768_coverage_manifest_gate_report() -> text:
+    val declared = x25519_mlkem768_coverage_manifest_paths()
+    val absent = x25519_mlkem768_coverage_manifest_absent_paths()
+    val stale = x25519_mlkem768_coverage_stale_blocked_paths()
+    val blocked = x25519_mlkem768_coverage_declared_blocked_paths()
+    val present = declared.len() - absent.len() - blocked.len()
+    var verdict = "PASS"
+    if absent.len() > 0 or stale.len() > 0: verdict = "FAIL"
+    var line = "coverage-contract manifest-existence-gate: " + verdict +
+        " declared={declared.len()} present={present}" +
+        " blocked={blocked.len()} absent={absent.len()} stale_blocked={stale.len()}"
+    if absent.len() > 0: line = line + " absent_paths=" + absent.join(",")
+    if stale.len() > 0: line = line + " stale_blocked_paths=" + stale.join(",")
+    line
+
 export X25519_MLKEM768_COVERAGE_SCHEMA, X25519_MLKEM768_RUN_MANIFEST_SCHEMA
 export X25519_MLKEM768_COVERAGE_TARGET_BP
 export X25519_MLKEM768_CRITICAL_SYMBOLIC_PATH
@@ -153,3 +225,9 @@ export x25519_mlkem768_coverage_error
 export x25519_mlkem768_coverage_owner_ids
 export x25519_mlkem768_coverage_owner_paths
 export x25519_mlkem768_coverage_spec_paths
+export x25519_mlkem768_coverage_declared_blocked_paths
+export x25519_mlkem768_coverage_manifest_paths
+export x25519_mlkem768_coverage_absent_in
+export x25519_mlkem768_coverage_stale_blocked_paths
+export x25519_mlkem768_coverage_manifest_absent_paths
+export x25519_mlkem768_coverage_manifest_gate_report
