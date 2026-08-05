@@ -147,6 +147,24 @@ fn compile_c_runtime_sources() {
         // of only the two families' bodies so this crate can link them
         // without dragging in the rest of runtime_native.c.
         "runtime_native_gpu_stub.c",
+        // rt_audio_* (31 names, doc/08_tracking/bug/interpreter_extern_unreachable_names.md
+        // bucket (a)): runtime_audio.c was absent from this list entirely, so
+        // the interpreter/seed binary had no path to the real (miniaudio-
+        // backed) C implementation -- the same "source-list-absent" shape as
+        // rt_opengl_*/rt_oneapi_* above. Unlike runtime_native.c, the whole
+        // file is safe to compile in directly: it defines only rt_audio_*
+        // (checked against this crate's own symbols, including
+        // host_gpu_lane.rs, before landing -- no name collision). One
+        // function, rt_audio_play_pcm_f32, calls spl_array_get/spl_as_float,
+        // which live in runtime.c -- not compiled by this crate (Rust
+        // reimplements that layer). SIMPLE_RUNTIME_AUDIO_STUB_SPLARRAY below
+        // swaps that one function for a trivial stub so the rest of the file
+        // still links; the interpreter refuses that name at the Rust
+        // dispatch layer (interpreter_extern/audio.rs) and never calls
+        // through, so the stub is unreachable from there. The native product
+        // build (runtime_compiler.spl) does not define this macro and keeps
+        // the real implementation.
+        "runtime_audio.c",
     ];
     if target_os != "windows" && !native_all_provider {
         c_sources.push("hosted_win32.c");
@@ -155,6 +173,9 @@ fn compile_c_runtime_sources() {
     let mut build = cc::Build::new();
     build.opt_level(2).warnings(false).cargo_metadata(false);
     build.define("SIMPLE_RUNTIME_OPENCL_ONLY", None);
+    // See the runtime_audio.c comment above: this crate doesn't compile
+    // runtime.c, so spl_array_get/spl_as_float are unavailable here.
+    build.define("SIMPLE_RUNTIME_AUDIO_STUB_SPLARRAY", None);
     if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
         build.flag_if_supported("-std=gnu11");
     }

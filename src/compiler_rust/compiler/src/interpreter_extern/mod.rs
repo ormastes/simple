@@ -84,6 +84,7 @@ pub mod cli;
 pub mod cargo;
 pub mod sdn;
 pub mod sdl2;
+pub mod audio;
 pub mod opengl;
 pub mod oneapi;
 pub mod vulkan;
@@ -2569,6 +2570,24 @@ pub(crate) fn call_extern_function_with_values(
     // native build links, so failures are reported at the SDL2 level instead.
     if name.starts_with("rt_sdl2_") {
         return sdl2::dispatch(name, &evaluated);
+    }
+
+    // The rt_audio_* family (31 names) is implemented once, in C, at
+    // src/runtime/runtime_audio.c (a real miniaudio-backed engine). It was
+    // absent from every interpreter path -- not a registration gap alone,
+    // but because runtime_audio.c itself was absent from BOTH C-source lists
+    // that gate linkage: the native-product-build list
+    // (runtime_compiler.spl's `sources` array) and the C sources this
+    // crate's own build script compiles (src/compiler_rust/runtime/build.rs).
+    // Same "source-list-absent" shape as rt_sdl2_*/rt_opengl_*/rt_oneapi_*,
+    // just missing from both lists instead of one. Deliberately excludes
+    // rt_audio_sdl2_* -- a distinct satellite family (census bucket (b),
+    // native def already in the default source list, just unregistered) out
+    // of scope for this lane. See
+    // doc/08_tracking/bug/interpreter_extern_unreachable_names.md bucket (a)
+    // and doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md.
+    if name.starts_with("rt_audio_") && !name.starts_with("rt_audio_sdl2_") {
+        return audio::dispatch(name, &evaluated);
     }
 
     // The rt_opengl_* / rt_oneapi_* families are implemented once, in C, at

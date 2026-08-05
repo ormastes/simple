@@ -406,6 +406,32 @@ static int64_t audio_play_pcm_owned_locked(
     return handle;
 }
 
+#ifdef SIMPLE_RUNTIME_AUDIO_STUB_SPLARRAY
+/*
+ * rt_audio_play_pcm_f32 is the one rt_audio_* entry point that touches
+ * SplArray (spl_array_get/spl_as_float, both defined in runtime.c). The
+ * interpreter/seed crate (src/compiler_rust/runtime/build.rs) does not
+ * compile runtime.c -- Rust reimplements that layer natively -- so those two
+ * symbols are unavailable there, and linking the real body below fails with
+ * "undefined symbol: spl_array_get". The interpreter refuses this one name
+ * at the Rust dispatch layer instead of ever calling through (see
+ * interpreter_extern/audio.rs: a native SplArray* is not marshallable from
+ * that Value representation without a natively-linked ABI bridge, matching
+ * the rt_sdl2_present_rgba/rt_glfw_present_argb precedent), so this stub
+ * body is never reached from that path -- it exists only to satisfy the
+ * linker. build.rs is the only caller that defines this macro; the native
+ * product build (runtime_compiler.spl) does not, and keeps the real
+ * implementation in the #else branch unchanged.
+ */
+int64_t rt_audio_play_pcm_f32(
+    SplArray* samples,
+    int64_t channels,
+    int64_t sample_rate
+) {
+    (void)samples; (void)channels; (void)sample_rate;
+    return 0;
+}
+#else
 int64_t rt_audio_play_pcm_f32(
     SplArray* samples,
     int64_t channels,
@@ -442,6 +468,7 @@ int64_t rt_audio_play_pcm_f32(
     pthread_mutex_unlock(&g_audio_lock);
     return handle;
 }
+#endif /* SIMPLE_RUNTIME_AUDIO_STUB_SPLARRAY */
 
 int64_t rt_audio_play_pcm_f64_raw(
     int64_t samples_addr,
