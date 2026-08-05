@@ -15,6 +15,10 @@ use std.gc_async_mut.gpu.browser_engine.text_painter.{
     br_famous_site_corpus_layout_lines,
     br_famous_site_corpus_layout_line_widths_sdn}
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result,
+    simple_web_layout_draw_ir_comparable,
+    simple_web_layout_draw_ir_compare_decision}
 use common.ui.draw_ir.{DrawIrCommand}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_text}
 
@@ -200,37 +204,85 @@ pub fn site_corpus_chrome_div_box(metrics: text) -> StructuralLayoutBox:
         _text_after_marker(div, "\"text\": \"")
     )
 
-pub fn site_corpus_simple_div_box(sample: SiteSample, viewport_width: i32, viewport_height: i32) -> StructuralLayoutBox:
-    val composition = web_render_backend("pure_simple", viewport_width, viewport_height).render_html_to_draw_ir(sample.html)
+# A single Simple-side render of one corpus sample, carrying BOTH the extracted
+# div box and the verdict on whether that box means anything.
+#
+# Splitting these apart is what made the failure mode unreadable: when the
+# render is truncated by budget exhaustion the display list holds only the
+# canvas rect, `site_corpus_simple_div_box` finds no div, and its all-zero
+# fallback box was then compared against Chrome as if it were a real geometry —
+# reporting "layout mismatch" for a render that never laid anything out. Worse,
+# had Chrome's box ever been absent or zero the two would have compared EQUAL
+# and the example would have passed while measuring nothing.
+#
+# `decision` is the Draw IR comparability verdict (see
+# simple_web_layout_draw_ir_compare_decision); `div_present` distinguishes
+# "Simple emitted no div" from "Simple emitted a div at 0,0,0x0".
+pub class SiteCorpusSimpleDiv:
+    box: StructuralLayoutBox
+    decision: text
+    comparable: bool
+    div_present: bool
+
+pub fn site_corpus_simple_div(sample: SiteSample, viewport_width: i32, viewport_height: i32) -> SiteCorpusSimpleDiv:
+    val result = simple_web_layout_render_html_draw_ir_result(sample.html, viewport_width, viewport_height)
+    val decision = simple_web_layout_draw_ir_compare_decision(result)
+    val comparable = simple_web_layout_draw_ir_comparable(result)
+    val composition = result.composition
+    val absent = structural_layout_style_box("div", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", "")
     if composition.batches.len() == 0:
-        return structural_layout_style_box("div", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", "")
+        return SiteCorpusSimpleDiv(box: absent, decision: decision, comparable: comparable, div_present: false)
     for command in composition.batches[0].commands:
         if _command_tag(command) == "div":
-            return structural_layout_style_box(
-                "div", command.x, command.y, command.width, command.height,
-                _style_i32(command, "padding-left"),
-                _style_i32(command, "padding-top"),
-                _style_i32(command, "padding-right"),
-                _style_i32(command, "padding-bottom"),
-                _style_i32(command, "border-left-width"),
-                _style_i32(command, "border-top-width"),
-                _style_i32(command, "border-right-width"),
-                _style_i32(command, "border-bottom-width"),
-                _argb_css_rgb(_style_value(command, "background-color")),
-                _site_sample_fixture_text(sample)
+            return SiteCorpusSimpleDiv(
+                box: structural_layout_style_box(
+                    "div", command.x, command.y, command.width, command.height,
+                    _style_i32(command, "padding-left"),
+                    _style_i32(command, "padding-top"),
+                    _style_i32(command, "padding-right"),
+                    _style_i32(command, "padding-bottom"),
+                    _style_i32(command, "border-left-width"),
+                    _style_i32(command, "border-top-width"),
+                    _style_i32(command, "border-right-width"),
+                    _style_i32(command, "border-bottom-width"),
+                    _argb_css_rgb(_style_value(command, "background-color")),
+                    _site_sample_fixture_text(sample)
+                ),
+                decision: decision, comparable: comparable, div_present: true
             )
-    structural_layout_style_box("div", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", "")
+    SiteCorpusSimpleDiv(box: absent, decision: decision, comparable: comparable, div_present: false)
+
+pub fn site_corpus_simple_div_box(sample: SiteSample, viewport_width: i32, viewport_height: i32) -> StructuralLayoutBox:
+    site_corpus_simple_div(sample, viewport_width, viewport_height).box
 
 pub fn build_site_corpus_div_geometry_report(sample: SiteSample, metrics: text, viewport_width: i32, viewport_height: i32) -> text:
     val chrome_box = site_corpus_chrome_div_box(metrics)
-    val simple_box = site_corpus_simple_div_box(sample, viewport_width, viewport_height)
+    val simple = site_corpus_simple_div(sample, viewport_width, viewport_height)
     val report = structural_box_layout_compare(
         "chrome_metrics_div", "simple_renderer_div",
         viewport_width, viewport_height,
-        [chrome_box], [simple_box],
+        [chrome_box], [simple.box],
         "chrome_metrics_sidecar", famous_site_sample_chrome_metrics_path(sample.id)
     )
-    structural_box_layout_report_sdn(report, [chrome_box], [simple_box])
+    # Receipts BEFORE the geometry verdict: a reader must be able to tell a real
+    # geometry disagreement from a render that never produced the artifact. A
+    # "layout_mismatch" against an absent div is not a compatibility finding.
+    var comparable_text = "false"
+    if simple.comparable:
+        comparable_text = "true"
+    var present_text = "false"
+    if simple.div_present:
+        present_text = "true"
+    var ran_text = "false"
+    if simple.comparable and simple.div_present:
+        ran_text = "true"
+    "(site_corpus_div_geometry\n" +
+        "  simple_draw_ir_decision: \"" + simple.decision + "\"\n" +
+        "  simple_draw_ir_comparable: " + comparable_text + "\n" +
+        "  simple_div_present: " + present_text + "\n" +
+        "  comparison_ran: " + ran_text + "\n" +
+        structural_box_layout_report_sdn(report, [chrome_box], [simple.box]) +
+        ")\n"
 
 pub fn build_site_corpus_div_geometry_summary(limit: i32, viewport_width: i32, viewport_height: i32) -> text:
     build_site_corpus_div_geometry_summary_range(0, limit, viewport_width, viewport_height)
