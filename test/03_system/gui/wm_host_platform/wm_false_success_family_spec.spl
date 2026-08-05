@@ -1,0 +1,179 @@
+# @cover doc/08_tracking/wm_false_success_baseline.txt 0%
+# @req REQ-WM-HOST-PLATFORM-003
+"""
+# WM/GUI/GPU False-Success Family Guard (Lane A0)
+
+**Category:** Testing
+**Status:** In Progress
+
+## Purpose and Audience
+
+`doc/04_architecture/ui/wm_host_platform_matrix.md` enumerated 31 false-success
+sites in the WM/GUI/GPU host seam **once, by hand**. A sweep that does not
+enumerate the family leaves siblings behind: the next stub written in the same
+shape lands silently unless something re-runs the sweep on every change. This
+spec is that re-run: it turns five of the matrix's false-success SHAPES into
+anchored, repo-wide, machine-checked searches, and cross-checks every match
+against `doc/08_tracking/wm_false_success_baseline.txt`.
+
+Two directions are both failures:
+- A match with **no baseline line** is a **new sibling** — a false-success
+  site the matrix never saw, or a regression of one that was fixed and came
+  back.
+- A baseline line with **no match** is **stale** — the site it names no
+  longer has the shape the baseline claims, and the owning fix lane must
+  delete the line in the same commit that fixed the site.
+
+This guard fixes nothing. Fixing the 31 sites is lanes A1-A5's job
+(`doc/03_plan/ui/wm_platform_honesty_agent_lanes.md`); this file only freezes
+the enumeration so their progress is measured by baseline shrink and no
+sibling lands unnoticed while they work.
+
+## Scope and Preconditions
+
+Five predicate families, each an anchored search over non-vendored `.spl`
+source (`src/*/vendor/**` and the stb/miniaudio headers excluded):
+
+1. `uses_native_[a-z0-9_]*_symbols()` whose body's first line is the literal
+   `true` — repo-wide.
+2. `readback()` bodies ending in the bare `""` success sentinel, in
+   `src/lib/gc_async_mut/gpu/session/backend_*_adapter.spl`.
+3. `engine2d_readback(.., "cpu_mirror")` as the unconditional, un-guarded body
+   of `read_pixels_with_source()` in `backend_webgpu.spl`.
+4. A counter-handle (`_ctr + 1` / `.len() + 1`) used as a return value, in
+   `src/lib/nogc_async_mut/wm/*.spl`, `src/os/compositor/hosted_backend*.spl`,
+   `src/lib/nogc_async_mut/gpu/dxvk_d3d11.spl`.
+5. `supports_*()` / `supports()` bodies hardcoding `true`, in the same three
+   file sets as predicate 4.
+
+Not every one of the matrix's 31 sites has a shape a five-family regex can
+express (a hardcoded `dx: 0`, a declared-vs-actual ABI mismatch, a Rust match
+arm) — those are recorded in the baseline with predicate-tag `manual` for
+count/shrink tracking, and are NOT cross-checked here; their owning fix lane's
+own gate re-verifies them directly. See the baseline file's header comment for
+the full accounting, including the two documented deviations from a literal
+31-line copy of the matrix (cluster 1 already fixed before this lane
+dispatched; three extra `dxvk_d3d11.spl` counter-handle siblings predicate 4
+found beyond the matrix's single named site).
+
+## Recovery and Troubleshooting
+
+A RED result here means one of:
+- a new false-success site landed matching one of the five shapes (add it to
+  the baseline ONLY if it is being deliberately introduced, which should never
+  happen — otherwise fix it), or
+- a fix lane fixed a baselined site but forgot to delete its baseline line in
+  the same commit.
+
+## Compatibility and Limitations
+
+All five searches are host-independent (pure source-shape checks over `.spl`
+text); they do not depend on which platform is executing the suite.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{shell_output}
+
+val baseline_path = "doc/08_tracking/wm_false_success_baseline.txt"
+
+
+# ============================================================================
+# Baseline access
+# ============================================================================
+
+fn baseline_paths_for_tag(tag: text) -> text:
+    """Sorted-unique list of file paths whose baseline line ends `:<tag>`."""
+    val cmd = '/usr/bin/grep -v "^#" ' + baseline_path + ' | /usr/bin/grep -E ":' + tag + '$" | cut -d: -f1 | sort -u'
+    shell_output(cmd)
+
+fn baseline_line_count() -> i64:
+    val cmd = '/usr/bin/grep -v "^#" ' + baseline_path + ' | /usr/bin/grep -vE "^[[:space:]]*$" | wc -l'
+    shell_output(cmd).trim().to_i64()
+
+
+# ============================================================================
+# Predicate-family searches (each returns a sorted-unique newline list of
+# matching file paths)
+# ============================================================================
+
+fn matched_predicate_1() -> text:
+    # uses_native_*_symbols() body's first line is literal `true`, repo-wide.
+    val cmd = '/usr/bin/grep -rn --include=*.spl -A1 -E "fn uses_native_[a-z0-9_]*_symbols\(\) -> bool:" src/ 2>/dev/null | /usr/bin/grep -v "/vendor/" | /usr/bin/grep -B1 -E "^[^:]+[:-][0-9]+[:-][[:space:]]*true[[:space:]]*$" | /usr/bin/grep -E "uses_native_" | cut -d: -f1 | sort -u'
+    shell_output(cmd)
+
+fn matched_predicate_2() -> text:
+    # readback() body ends in bare "" within 8 lines, session adapters only.
+    val cmd = 'for f in src/lib/gc_async_mut/gpu/session/backend_*_adapter.spl; do if /usr/bin/grep -A8 -E "me readback\(" "$f" 2>/dev/null | /usr/bin/grep -qE "^\s*\"\"\s*$"; then echo "$f"; fi; done | sort -u'
+    shell_output(cmd)
+
+fn matched_predicate_3() -> text:
+    # read_pixels_with_source()'s body is unconditionally engine2d_readback(.., "cpu_mirror").
+    val cmd = '/usr/bin/grep -Hn -A1 -E "fn read_pixels_with_source\(\)" src/lib/gc_async_mut/gpu/engine2d/backend_webgpu.spl | /usr/bin/grep -B1 -E "engine2d_readback\(.*\"cpu_mirror\"" | /usr/bin/grep -E "read_pixels_with_source" | cut -d: -f1 | sort -u'
+    shell_output(cmd)
+
+fn matched_predicate_4() -> text:
+    # _ctr + 1 / .len() + 1 used as a return value, in the wm/hosted-backend/dxvk file sets.
+    val cmd = '/usr/bin/grep -rln -E "_ctr \+ 1|\.len\(\) \+ 1" src/lib/nogc_async_mut/wm/*.spl src/os/compositor/hosted_backend*.spl src/lib/nogc_async_mut/gpu/dxvk_d3d11.spl 2>/dev/null | sort -u'
+    shell_output(cmd)
+
+fn matched_predicate_5() -> text:
+    # supports_*()/supports() body's first line is literal true, same file sets as predicate 4.
+    val cmd = 'for f in src/lib/nogc_async_mut/wm/*.spl src/os/compositor/hosted_backend*.spl src/lib/nogc_async_mut/gpu/dxvk_d3d11.spl; do if /usr/bin/grep -A1 -E "fn supports(_[a-z_]+)?\(\)( -> bool)?:" "$f" 2>/dev/null | /usr/bin/grep -qE "^\s*true\s*$"; then echo "$f"; fi; done | sort -u'
+    shell_output(cmd)
+
+
+# ============================================================================
+# One example per predicate family: matches == baseline, both directions
+# ============================================================================
+
+describe "WM false-success family guard — matches must equal the baseline, both directions":
+
+    it "predicate 1 (uses_native_*_symbols hardcoded true) matches exactly the baselined sites":
+        # RED if a new uses_native_*_symbols() lands anywhere with a literal
+        # `true` body (new sibling), or if hosted_backend_cocoa.spl /
+        # hosted_backend_win32.spl stop matching (stale — site fixed, baseline
+        # line must be deleted by the fixing lane).
+        expect(matched_predicate_1().trim()).to_equal(baseline_paths_for_tag("1").trim())
+
+    it "predicate 2 (adapter readback() returns bare success sentinel) matches exactly the baselined sites":
+        # RED if any session backend adapter's readback() stops or starts
+        # returning bare "".
+        expect(matched_predicate_2().trim()).to_equal(baseline_paths_for_tag("2").trim())
+
+    it "predicate 3 (webgpu cpu_mirror readback is unconditional) matches exactly the baselined sites":
+        # RED if backend_webgpu.spl's read_pixels_with_source gains a guard
+        # (stale) or if the shape reappears after a fix regresses.
+        expect(matched_predicate_3().trim()).to_equal(baseline_paths_for_tag("3").trim())
+
+    it "predicate 4 (counter-handle returned as a value) matches exactly the baselined sites":
+        # Covers service.spl's port/window counters and all four
+        # dxvk_d3d11.spl counter-handle fabrications this guard's own sweep
+        # found (device, swapchain, resource-id, readback handle) — three
+        # more than the matrix's single named site 13.
+        expect(matched_predicate_4().trim()).to_equal(baseline_paths_for_tag("4").trim())
+
+    it "predicate 5 (supports_*/supports hardcoded true) matches exactly the baselined sites":
+        # NON-VACUITY: both sides are currently empty — the wm/hosted-backend/
+        # dxvk file set has no hardcoded-true supports_*() today (the one
+        # matrix site with this shape, backend_metal_adapter.spl:20, is
+        # outside this predicate's file scope and is tagged `manual`
+        # instead). An empty-vs-empty match is still a real oracle: it goes
+        # RED the moment either side gains an entry the other lacks.
+        expect(matched_predicate_5().trim()).to_equal(baseline_paths_for_tag("5").trim())
+
+
+# ============================================================================
+# Baseline-consistency example (6th example; shrink visibility)
+# ============================================================================
+
+describe "WM false-success family guard — baseline bookkeeping":
+
+    it "prints the current baseline line count so shrink is visible per run":
+        val n = baseline_line_count()
+        print "WM_FALSE_SUCCESS_BASELINE_LINE_COUNT: {n}"
+        # NON-VACUITY: fails if the file is empty or unreadable, not just a
+        # cosmetic print. The floor is descriptive (today's count), not
+        # hardcoded to a single magic number the file could drift past
+        # silently in the wrong direction.
+        expect(n > 0).to_equal(true)
+        expect(n <= 31).to_equal(true)
