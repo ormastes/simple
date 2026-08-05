@@ -156,3 +156,55 @@ atomically and needs its own bootstrap-verified change.
 - Measurement discipline: verdicts come from `grep 'Results:'` / artifact
   existence, never from a `tail`, and never from a pipeline's exit code (`| tail`
   masked a SIGSEGV as `EXIT=0` during this very replan).
+
+## Measurement discipline — updated 2026-08-05
+
+The rule above is right but incomplete for this matrix. Three additions, all
+verified against the emitters:
+
+- **`grep 'Results:'` only matches `bin/simple test`**
+  (`src/app/test_runner_new/test_runner_single.spl:225`). `bin/simple run` — the
+  command this matrix uses for the showcase examples — emits a **different**
+  grammar, `N examples, M failures`, singular `1 failure`, and **ANSI-wrapped**
+  (`src/compiler_rust/driver/src/cli/test_output.rs:164`, `:251`). A `Results:`
+  grep against `run` output finds nothing and reads as "no tests". Strip ANSI
+  before anchoring; `^[0-9]+ examples` matches nothing on real output.
+- **Prefer the per-file line landed in `5b57a79f8ba`:**
+  `SPEC FILE VERDICT: <path> declared>=N executed=N passed=N failed=N dropped=N`
+  (`src/compiler_rust/driver/src/cli/basic.rs:144`). One authoritative line per
+  file, on stdout, last — it exists precisely because the per-`describe` line
+  and the stderr failure line together let a red file end its stdout green.
+- **Compare `executed`, not just `failed`.** A module-load failure drops whole
+  `describe` blocks at exit 0, which in this matrix looks identical to a cell
+  that legitimately has fewer examples. The exit-0-with-no-evidence pathology
+  already recorded for Cluster B is the same failure mode seen from outside.
+
+Full trap list, including the coverage-run flags, the waiter anti-patterns, and
+the census/sabotage rules: `.claude/skills/spipe.md` §"Reading the verdict — how
+a spec run lies to you".
+
+## WM showcase lane (added 2026-08-05, docs only)
+
+A separate lane is building a **WM showcase** — the 2D, web, and GUI-widget
+windows managed together with a **taskbar derived from live window state**,
+capture-verified. It is not one of the 7 cells above; it is the composition of
+the Host-WM column into a single surface.
+
+Its live-derivation path exists today
+(`build_taskbar_model`, `src/app/ui.web/taskbar_shell.spl:55`, running list
+built from `UiWindowSurfaceRegistry.bindings`), and the capture contract exists
+(`src/os/compositor/hosted_wm_capture_evidence.spl`). What does **not** exist:
+a unified driver module, and any catalog readiness — all nine
+`showcase_catalog()` readiness bits are `false` and
+`test/01_unit/lib/common/ui/showcase_catalog_spec.spl:55` asserts they are.
+
+**Interaction with this replan:** the Cluster B diagnosis (`examples/**`
+isolation buffers child output; a timeout kill discards it and exits 0, filed as
+`examples_isolation_buffers_output_lost_on_timeout_2026-07-25`) applies directly
+to any WM-showcase run launched through `examples/`. Set
+`SIMPLE_EXAMPLE_ISOLATED_CHILD=1` before concluding a WM-showcase run produced
+no output — that flag turned 2 lines into 169,612 during this replan.
+
+Contract and evidence levels: `doc/03_plan/agent_tasks/showcase_apps.md`
+§"WM showcase lane", `doc/05_design/showcase_apps.md`, and
+`doc/05_design/showcase_apps_gui.md`.
