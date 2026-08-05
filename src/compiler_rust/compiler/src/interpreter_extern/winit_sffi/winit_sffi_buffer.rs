@@ -1,621 +1,355 @@
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+// rt_winit_buffer_* router — dlopen's the spl_winit cdylib (the SAME
+// sibling cdylib gui_renderer.spl:96-144 loads) and forwards every one of
+// the 13 rt_winit_buffer_* calls to its real, surface-backed
+// implementation. Never fabricates success: if the cdylib cannot be
+// dlopen'd, or is missing any of the 13 expected exports, every call
+// reports a structured, honest "unavailable" failure that names the
+// specific function and the reason — never `true`, never a fake id.
+//
+// This crosses via a REAL C ABI, not a Rust-to-Rust dispatch table: dlopen
+// loads the cdylib into this process's OWN address space, so raw pointers
+// built here (Vec::as_ptr, CString::as_ptr) are valid arguments for the
+// cdylib's exported functions. See src/runtime/spl_winit/src/lib.rs for the
+// producer side and its C ABI convention (7 `i64` args, `i64` return).
+
+use std::collections::HashMap;
+use std::ffi::CString;
+use std::os::raw::{c_char, c_void};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::error::CompileError;
 use crate::value::Value;
 
-use super::super::conversion::glyph_8x16;
-use super::{
-    get_i64, get_string, get_pixels, int_value, bool_value, set_last_error, NEXT_BUFFER_ID, PIXEL_BUFFERS, PixelBuffer,
-    EVENT_LOOPS, WINDOW_OWNERS, RuntimeCommand,
-};
+use super::{bool_value, get_i64, get_pixels, get_string, int_value, set_last_error};
 
-#[cfg(target_os = "macos")]
-use super::winit_sffi_thread::macos_pump;
+/// The 13 names this router is authoritative over (also the exact set the
+/// interpreter dispatch table in mod.rs routes here — see mod.rs:403).
+const BUFFER_SYMBOLS: &[&str] = &[
+    "rt_winit_buffer_create",
+    "rt_winit_buffer_fill_rect",
+    "rt_winit_buffer_blit_pixels",
+    "rt_winit_buffer_draw_text",
+    "rt_winit_buffer_present",
+    "rt_winit_buffer_save_bmp",
+    "rt_winit_buffer_read_pixel",
+    "rt_winit_buffer_blend_rect",
+    "rt_winit_buffer_blur",
+    "rt_winit_buffer_gradient_v",
+    "rt_winit_buffer_get_pixels",
+    "rt_winit_buffer_free",
+    "rt_winit_save_pixels_bmp",
+];
+
+#[cfg(unix)]
+extern "C" {
+    fn dlopen(filename: *const c_char, flag: i32) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn dlerror() -> *const c_char;
+}
+
+#[cfg(unix)]
+const RTLD_NOW: i32 = 2;
+#[cfg(unix)]
+const RTLD_LOCAL: i32 = 0;
+
+struct LoadedLib {
+    // Kept only to document ownership of the underlying handle; the handle
+    // itself is intentionally never dlclose'd (resolved once, cached for
+    // process lifetime, exactly like every other dlopen'd cdylib in this
+    // campaign — see dlopen_conversion_lanes.md ground rule 4).
+    path: String,
+    fns: Mutex<HashMap<&'static str, usize>>,
+}
+// Raw fn-pointer addresses (usize) are Send+Sync; the Mutex only guards the
+// HashMap's interior mutability during population, never re-entered after.
+unsafe impl Send for LoadedLib {}
+unsafe impl Sync for LoadedLib {}
+
+fn candidate_paths() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(p) = std::env::var("SIMPLE_SPL_WINIT_PATH") {
+        if !p.is_empty() {
+            out.push(p);
+        }
+    }
+    out.push("build/sffi/libspl_winit.dylib".to_string());
+    out.push("build/sffi/libspl_winit.so".to_string());
+    out.push("build/sffi/libspl_winit.dll".to_string());
+    out
+}
+
+#[cfg(unix)]
+fn load_library() -> Result<LoadedLib, String> {
+    let mut tried = Vec::new();
+    for path in candidate_paths() {
+        let Ok(cpath) = CString::new(path.clone()) else {
+            continue;
+        };
+        let handle = unsafe { dlopen(cpath.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
+        if handle.is_null() {
+            let err = unsafe {
+                let p = dlerror();
+                if p.is_null() {
+                    "dlopen failed".to_string()
+                } else {
+                    std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+                }
+            };
+            tried.push(format!("{path} ({err})"));
+            continue;
+        }
+        // Export-verify pattern (dlopen_conversion_lanes.md loader
+        // contract, step 2): a successful dlopen alone is not "available".
+        let mut fns = HashMap::new();
+        let mut missing = Vec::new();
+        for name in BUFFER_SYMBOLS {
+            let csym = CString::new(*name).expect("static symbol name has no NUL");
+            let sym = unsafe { dlsym(handle, csym.as_ptr()) };
+            if sym.is_null() {
+                missing.push(*name);
+            } else {
+                fns.insert(*name, sym as usize);
+            }
+        }
+        if !missing.is_empty() {
+            return Err(format!(
+                "'{}' loaded but is missing export(s): {} — rebuild with scripts/build/build_spl_winit.shs",
+                path,
+                missing.join(", ")
+            ));
+        }
+        return Ok(LoadedLib {
+            path,
+            fns: Mutex::new(fns),
+        });
+    }
+    Err(format!(
+        "no rt_winit_buffer_* cdylib found (tried: {}) — build one with scripts/build/build_spl_winit.shs or set SIMPLE_SPL_WINIT_PATH",
+        tried.join("; ")
+    ))
+}
+
+#[cfg(not(unix))]
+fn load_library() -> Result<LoadedLib, String> {
+    Err("rt_winit_buffer_* dlopen routing is only implemented for unix hosts".to_string())
+}
+
+static LIB: OnceLock<Result<LoadedLib, String>> = OnceLock::new();
+
+fn get_lib() -> &'static Result<LoadedLib, String> {
+    LIB.get_or_init(load_library)
+}
+
+/// Call a resolved export through the shared 7×i64 -> i64 C ABI (see the
+/// module doc). `args` are padded/truncated by the caller as needed.
+fn call7(sym_addr: usize, a: [i64; 7]) -> i64 {
+    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 =
+        unsafe { std::mem::transmute(sym_addr as *const ()) };
+    unsafe { f(a[0], a[1], a[2], a[3], a[4], a[5], a[6]) }
+}
+
+/// Honest failure value per function, used both when the cdylib cannot be
+/// loaded/verified and (defensively) if a symbol is somehow absent despite
+/// load-time verification. NEVER `true` for rt_winit_buffer_present.
+fn honest_failure_for(name: &str) -> Value {
+    match name {
+        "rt_winit_buffer_create" | "rt_winit_buffer_read_pixel" => int_value(0),
+        "rt_winit_buffer_get_pixels" => Value::Array(Arc::new(vec![])),
+        // free is idempotent (nothing to free either way) even under total
+        // cdylib unavailability — matches the real cdylib's own contract
+        // (rt_winit_buffer_free always reports 1: removing an absent key
+        // from a HashMap is not an error). This is not a lie: "freed" here
+        // only ever means "no longer tracked," which trivially holds.
+        "rt_winit_buffer_free" => bool_value(true),
+        _ => bool_value(false),
+    }
+}
+
+fn unavailable(name: &str, reason: &str) -> Value {
+    set_last_error(format!("{name} unavailable: {reason}"));
+    honest_failure_for(name)
+}
 
 pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, CompileError> {
+    let lib = match get_lib() {
+        Ok(l) => l,
+        Err(e) => return Ok(unavailable(name, e)),
+    };
+    let sym_addr = {
+        let fns = lib.fns.lock().unwrap_or_else(|p| p.into_inner());
+        match fns.get(name) {
+            Some(&addr) => addr,
+            None => {
+                return Ok(unavailable(
+                    name,
+                    &format!("export not found in '{}' (loaded, but symbol table is missing it)", lib.path),
+                ));
+            }
+        }
+    };
+
     match name {
         "rt_winit_buffer_create" => {
-            // rt_winit_buffer_create(width, height, fill_color) -> buffer_id
-            let width = get_i64(args, 0, name)?.max(1) as u32;
-            let height = get_i64(args, 1, name)?.max(1) as u32;
-            let color = get_i64(args, 2, name)? as u32;
-            let id = NEXT_BUFFER_ID.fetch_add(1, Ordering::Relaxed);
-            let buf = PixelBuffer {
-                width,
-                height,
-                pixels: vec![color; (width * height) as usize],
-            };
-            PIXEL_BUFFERS.lock().insert(id, buf);
+            let width = get_i64(args, 0, name)?;
+            let height = get_i64(args, 1, name)?;
+            let color = get_i64(args, 2, name)?;
+            let id = call7(sym_addr, [width, height, color, 0, 0, 0, 0]);
+            if id == 0 {
+                set_last_error(format!("{name}: no live winit surface (headless host or event-loop init failed)"));
+            }
             Ok(int_value(id))
         }
         "rt_winit_buffer_fill_rect" => {
-            // rt_winit_buffer_fill_rect(buffer_id, x, y, w, h, color) -> bool
-            let buf_id = get_i64(args, 0, name)?;
+            let buf = get_i64(args, 0, name)?;
             let x = get_i64(args, 1, name)?;
             let y = get_i64(args, 2, name)?;
             let w = get_i64(args, 3, name)?;
             let h = get_i64(args, 4, name)?;
-            let color = get_i64(args, 5, name)? as u32;
-            let mut bufs = PIXEL_BUFFERS.lock();
-            if let Some(buf) = bufs.get_mut(&buf_id) {
-                let sw = buf.width as i64;
-                let sh = buf.height as i64;
-                for row in 0..h {
-                    let py = y + row;
-                    if py < 0 || py >= sh {
-                        continue;
-                    }
-                    for col in 0..w {
-                        let px = x + col;
-                        if px < 0 || px >= sw {
-                            continue;
-                        }
-                        buf.pixels[(py as usize) * (sw as usize) + (px as usize)] = color;
-                    }
-                }
-                Ok(bool_value(true))
-            } else {
-                set_last_error(format!("invalid buffer handle: {buf_id}"));
-                Ok(bool_value(false))
+            let color = get_i64(args, 5, name)?;
+            let ok = call7(sym_addr, [buf, x, y, w, h, color, 0]);
+            if ok == 0 {
+                set_last_error(format!("invalid buffer handle: {buf}"));
             }
+            Ok(bool_value(ok != 0))
         }
         "rt_winit_buffer_blit_pixels" => {
-            // rt_winit_buffer_blit_pixels(buffer_id, x, y, w, h, pixels) -> bool
-            let buf_id = get_i64(args, 0, name)?;
+            let buf = get_i64(args, 0, name)?;
             let x = get_i64(args, 1, name)?;
             let y = get_i64(args, 2, name)?;
             let w = get_i64(args, 3, name)?;
             let h = get_i64(args, 4, name)?;
             let pixels = get_pixels(args, 5, name)?;
-            let mut bufs = PIXEL_BUFFERS.lock();
-            if let Some(buf) = bufs.get_mut(&buf_id) {
-                let sw = buf.width as i64;
-                let sh = buf.height as i64;
-                let src_w = w.max(0) as usize;
-                let src_h = h.max(0) as usize;
-                let copy_h = src_h.min(pixels.len().saturating_div(src_w.max(1)));
-                for row in 0..copy_h {
-                    let py = y + row as i64;
-                    if py < 0 || py >= sh {
-                        continue;
-                    }
-                    for col in 0..src_w {
-                        let px = x + col as i64;
-                        if px < 0 || px >= sw {
-                            continue;
-                        }
-                        let src_idx = row * src_w + col;
-                        buf.pixels[(py as usize) * (sw as usize) + (px as usize)] = pixels[src_idx];
-                    }
-                }
-                Ok(bool_value(true))
-            } else {
-                set_last_error(format!("invalid buffer handle: {buf_id}"));
-                Ok(bool_value(false))
+            let ptr = pixels.as_ptr() as i64;
+            let len = pixels.len() as i64;
+            let ok = call7(sym_addr, [buf, x, y, w, h, ptr, len]);
+            drop(pixels);
+            if ok == 0 {
+                set_last_error(format!("invalid buffer handle: {buf}"));
             }
+            Ok(bool_value(ok != 0))
         }
         "rt_winit_buffer_draw_text" => {
-            // rt_winit_buffer_draw_text(buffer_id, x, y, text, fg, bg) -> bool
-            let buf_id = get_i64(args, 0, name)?;
+            let buf = get_i64(args, 0, name)?;
             let x = get_i64(args, 1, name)?;
             let y = get_i64(args, 2, name)?;
             let text = get_string(args, 3, name)?;
-            let fg = get_i64(args, 4, name)? as u32;
-            let bg = get_i64(args, 5, name)? as u32;
-            let mut bufs = PIXEL_BUFFERS.lock();
-            if let Some(buf) = bufs.get_mut(&buf_id) {
-                draw_text_into_buffer(buf, x, y, &text, fg, bg);
-                Ok(bool_value(true))
-            } else {
-                set_last_error(format!("invalid buffer handle: {buf_id}"));
-                Ok(bool_value(false))
+            let fg = get_i64(args, 4, name)?;
+            let bg = get_i64(args, 5, name)?;
+            let ctext = CString::new(text).unwrap_or_default();
+            let ptr = ctext.as_ptr() as i64;
+            let ok = call7(sym_addr, [buf, x, y, ptr, fg, bg, 0]);
+            drop(ctext);
+            if ok == 0 {
+                set_last_error(format!("invalid buffer handle: {buf}"));
             }
+            Ok(bool_value(ok != 0))
         }
         "rt_winit_buffer_present" => {
-            // rt_winit_buffer_present(window_id, buffer_id) -> bool
             let window_id = get_i64(args, 0, name)?;
             let buf_id = get_i64(args, 1, name)?;
-            let (width, height, pixels) = {
-                let bufs = PIXEL_BUFFERS.lock();
-                if let Some(buf) = bufs.get(&buf_id) {
-                    (buf.width, buf.height, buf.pixels.clone())
-                } else {
-                    set_last_error(format!("invalid buffer handle: {buf_id}"));
-                    return Ok(bool_value(false));
-                }
-            };
-            let event_loop_id = WINDOW_OWNERS.lock().get(&window_id).copied();
-            if let Some(el_id) = event_loop_id {
-                let (response_tx, response_rx) = crossbeam::channel::bounded(1);
-                {
-                    if let Some(handle) = EVENT_LOOPS.lock().get(&el_id) {
-                        handle
-                            .command_tx
-                            .send(RuntimeCommand::Present {
-                                window_id,
-                                width,
-                                height,
-                                pixels,
-                                response: response_tx,
-                            })
-                            .map_err(|err| super::runtime_error(format!("failed to send present: {err}")))?;
-                    }
-                }
-                #[cfg(target_os = "macos")]
-                for _ in 0..50 {
-                    macos_pump(el_id);
-                    if let Ok(result) = response_rx.try_recv() {
-                        return match result {
-                            Ok(()) => Ok(bool_value(true)),
-                            Err(err) => {
-                                set_last_error(err);
-                                Ok(bool_value(false))
-                            }
-                        };
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                }
-                return match response_rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                    Ok(Ok(())) => Ok(bool_value(true)),
-                    Ok(Err(err)) => {
-                        set_last_error(err);
-                        Ok(bool_value(false))
-                    }
-                    Err(err) => Err(super::runtime_error(format!("present response timeout: {err}"))),
-                };
+            let ok = call7(sym_addr, [window_id, buf_id, 0, 0, 0, 0, 0]);
+            if ok == 0 {
+                set_last_error(format!(
+                    "invalid window handle or buffer handle: window={window_id} buffer={buf_id} (no live window surface)"
+                ));
             }
-            set_last_error(format!("invalid window handle: {window_id}"));
-            Ok(bool_value(false))
+            Ok(bool_value(ok != 0))
         }
         "rt_winit_buffer_save_bmp" => {
-            // rt_winit_buffer_save_bmp(buffer_id, path) -> bool
-            let buf_id = get_i64(args, 0, name)?;
+            let buf = get_i64(args, 0, name)?;
             let path = get_string(args, 1, name)?;
-            let bufs = PIXEL_BUFFERS.lock();
-            if let Some(buf) = bufs.get(&buf_id) {
-                let width = buf.width;
-                let height = buf.height;
-                let row_size = ((width * 3 + 3) / 4) * 4;
-                let pixel_data_size = row_size * height;
-                let file_size = 54 + pixel_data_size;
-                let mut data = Vec::with_capacity(file_size as usize);
-
-                // BMP file header
-                data.extend_from_slice(b"BM");
-                data.extend_from_slice(&file_size.to_le_bytes());
-                data.extend_from_slice(&[0u8; 4]);
-                data.extend_from_slice(&54u32.to_le_bytes());
-                // DIB header
-                data.extend_from_slice(&40u32.to_le_bytes());
-                data.extend_from_slice(&width.to_le_bytes());
-                data.extend_from_slice(&height.to_le_bytes());
-                data.extend_from_slice(&1u16.to_le_bytes());
-                data.extend_from_slice(&24u16.to_le_bytes());
-                data.extend_from_slice(&0u32.to_le_bytes());
-                data.extend_from_slice(&pixel_data_size.to_le_bytes());
-                data.extend_from_slice(&2835u32.to_le_bytes());
-                data.extend_from_slice(&2835u32.to_le_bytes());
-                data.extend_from_slice(&0u32.to_le_bytes());
-                data.extend_from_slice(&0u32.to_le_bytes());
-
-                let pad_bytes = (row_size - width * 3) as usize;
-                for y in (0..height).rev() {
-                    for x in 0..width {
-                        let argb = buf.pixels[(y * width + x) as usize];
-                        data.push((argb & 0xFF) as u8);
-                        data.push(((argb >> 8) & 0xFF) as u8);
-                        data.push(((argb >> 16) & 0xFF) as u8);
-                    }
-                    for _ in 0..pad_bytes {
-                        data.push(0);
-                    }
-                }
-
-                match std::fs::write(&path, &data) {
-                    Ok(()) => Ok(bool_value(true)),
-                    Err(err) => {
-                        set_last_error(format!("BMP write failed: {err}"));
-                        Ok(bool_value(false))
-                    }
-                }
-            } else {
-                set_last_error(format!("invalid buffer handle: {buf_id}"));
-                Ok(bool_value(false))
+            let cpath = CString::new(path).unwrap_or_default();
+            let ptr = cpath.as_ptr() as i64;
+            let ok = call7(sym_addr, [buf, ptr, 0, 0, 0, 0, 0]);
+            drop(cpath);
+            if ok == 0 {
+                set_last_error(format!("invalid buffer handle or BMP write failed: {buf}"));
             }
+            Ok(bool_value(ok != 0))
         }
         "rt_winit_buffer_read_pixel" => {
-            // rt_winit_buffer_read_pixel(buffer_id, x, y) -> i64 (ARGB pixel value)
-            let buf_id = get_i64(args, 0, name)?;
+            let buf = get_i64(args, 0, name)?;
             let x = get_i64(args, 1, name)?;
             let y = get_i64(args, 2, name)?;
-            let bufs = PIXEL_BUFFERS.lock();
-            if let Some(buf) = bufs.get(&buf_id) {
-                let sw = buf.width as i64;
-                let sh = buf.height as i64;
-                if x >= 0 && x < sw && y >= 0 && y < sh {
-                    let idx = (y as usize) * (sw as usize) + (x as usize);
-                    Ok(int_value(buf.pixels[idx] as i64))
-                } else {
-                    Ok(int_value(0))
-                }
-            } else {
-                set_last_error(format!("invalid buffer handle: {buf_id}"));
-                Ok(int_value(0))
-            }
+            let v = call7(sym_addr, [buf, x, y, 0, 0, 0, 0]);
+            Ok(int_value(v))
         }
         "rt_winit_buffer_blend_rect" => {
-            // rt_winit_buffer_blend_rect(buffer_id, x, y, w, h, color, alpha) -> bool
-            let buf_id = get_i64(args, 0, name)?;
+            let buf = get_i64(args, 0, name)?;
             let x = get_i64(args, 1, name)?;
             let y = get_i64(args, 2, name)?;
             let w = get_i64(args, 3, name)?;
             let h = get_i64(args, 4, name)?;
-            let color = get_i64(args, 5, name)? as u32;
-            let alpha = get_i64(args, 6, name)?.clamp(0, 255) as u32;
-            let mut bufs = PIXEL_BUFFERS.lock();
-            if let Some(buf) = bufs.get_mut(&buf_id) {
-                let sw = buf.width as i64;
-                let sh = buf.height as i64;
-                let sr = (color >> 16) & 0xFF;
-                let sg = (color >> 8) & 0xFF;
-                let sb = color & 0xFF;
-                let inv_alpha = 255 - alpha;
-                for row in 0..h {
-                    let py = y + row;
-                    if py < 0 || py >= sh {
-                        continue;
-                    }
-                    for col in 0..w {
-                        let px = x + col;
-                        if px < 0 || px >= sw {
-                            continue;
-                        }
-                        let idx = (py as usize) * (sw as usize) + (px as usize);
-                        let dst = buf.pixels[idx];
-                        let dr = (dst >> 16) & 0xFF;
-                        let dg = (dst >> 8) & 0xFF;
-                        let db = dst & 0xFF;
-                        let r = (sr * alpha + dr * inv_alpha) / 255;
-                        let g = (sg * alpha + dg * inv_alpha) / 255;
-                        let b = (sb * alpha + db * inv_alpha) / 255;
-                        buf.pixels[idx] = 0xFF000000 | (r << 16) | (g << 8) | b;
-                    }
-                }
-                Ok(bool_value(true))
-            } else {
-                set_last_error(format!("invalid buffer handle: {buf_id}"));
-                Ok(bool_value(false))
+            let color = get_i64(args, 5, name)?;
+            let alpha = get_i64(args, 6, name)?;
+            let ok = call7(sym_addr, [buf, x, y, w, h, color, alpha]);
+            if ok == 0 {
+                set_last_error(format!("invalid buffer handle: {buf}"));
             }
+            Ok(bool_value(ok != 0))
         }
         "rt_winit_buffer_blur" => {
-            // rt_winit_buffer_blur(buffer_id, x, y, w, h, radius) -> bool
-            let buf_id = get_i64(args, 0, name)?;
-            let bx = get_i64(args, 1, name)?;
-            let by = get_i64(args, 2, name)?;
-            let bw = get_i64(args, 3, name)?;
-            let bh = get_i64(args, 4, name)?;
-            let radius = get_i64(args, 5, name)?.clamp(1, 50) as usize;
-            let mut bufs = PIXEL_BUFFERS.lock();
-            if let Some(buf) = bufs.get_mut(&buf_id) {
-                let sw = buf.width as i64;
-                let sh = buf.height as i64;
-                // Clamp region
-                let x0 = bx.max(0) as usize;
-                let y0 = by.max(0) as usize;
-                let x1 = (bx + bw).min(sw) as usize;
-                let y1 = (by + bh).min(sh) as usize;
-                let rw = x1.saturating_sub(x0);
-                let rh = y1.saturating_sub(y0);
-                if rw == 0 || rh == 0 {
-                    return Ok(bool_value(true));
-                }
-                let stride = sw as usize;
-                // 3-pass box blur approximation of Gaussian
-                for _ in 0..3 {
-                    // Horizontal pass
-                    let mut temp = vec![0u32; rw * rh];
-                    for row in 0..rh {
-                        for col in 0..rw {
-                            let mut r_sum: u64 = 0;
-                            let mut g_sum: u64 = 0;
-                            let mut b_sum: u64 = 0;
-                            let mut count: u64 = 0;
-                            let c_min = if col >= radius { col - radius } else { 0 };
-                            let c_max = (col + radius + 1).min(rw);
-                            for kc in c_min..c_max {
-                                let px = buf.pixels[(y0 + row) * stride + (x0 + kc)];
-                                r_sum += ((px >> 16) & 0xFF) as u64;
-                                g_sum += ((px >> 8) & 0xFF) as u64;
-                                b_sum += (px & 0xFF) as u64;
-                                count += 1;
-                            }
-                            if count == 0 {
-                                count = 1;
-                            }
-                            let r = (r_sum / count) as u32;
-                            let g = (g_sum / count) as u32;
-                            let b = (b_sum / count) as u32;
-                            temp[row * rw + col] = 0xFF000000 | (r << 16) | (g << 8) | b;
-                        }
-                    }
-                    // Write horizontal back
-                    for row in 0..rh {
-                        for col in 0..rw {
-                            buf.pixels[(y0 + row) * stride + (x0 + col)] = temp[row * rw + col];
-                        }
-                    }
-                    // Vertical pass
-                    for col in 0..rw {
-                        for row in 0..rh {
-                            let mut r_sum: u64 = 0;
-                            let mut g_sum: u64 = 0;
-                            let mut b_sum: u64 = 0;
-                            let mut count: u64 = 0;
-                            let r_min = if row >= radius { row - radius } else { 0 };
-                            let r_max = (row + radius + 1).min(rh);
-                            for kr in r_min..r_max {
-                                let px = buf.pixels[(y0 + kr) * stride + (x0 + col)];
-                                r_sum += ((px >> 16) & 0xFF) as u64;
-                                g_sum += ((px >> 8) & 0xFF) as u64;
-                                b_sum += (px & 0xFF) as u64;
-                                count += 1;
-                            }
-                            if count == 0 {
-                                count = 1;
-                            }
-                            let r = (r_sum / count) as u32;
-                            let g = (g_sum / count) as u32;
-                            let b = (b_sum / count) as u32;
-                            temp[row * rw + col] = 0xFF000000 | (r << 16) | (g << 8) | b;
-                        }
-                    }
-                    // Write vertical back
-                    for row in 0..rh {
-                        for col in 0..rw {
-                            buf.pixels[(y0 + row) * stride + (x0 + col)] = temp[row * rw + col];
-                        }
-                    }
-                }
-                Ok(bool_value(true))
-            } else {
-                set_last_error(format!("invalid buffer handle: {buf_id}"));
-                Ok(bool_value(false))
+            let buf = get_i64(args, 0, name)?;
+            let x = get_i64(args, 1, name)?;
+            let y = get_i64(args, 2, name)?;
+            let w = get_i64(args, 3, name)?;
+            let h = get_i64(args, 4, name)?;
+            let radius = get_i64(args, 5, name)?;
+            let ok = call7(sym_addr, [buf, x, y, w, h, radius, 0]);
+            if ok == 0 {
+                set_last_error(format!("invalid buffer handle: {buf}"));
             }
+            Ok(bool_value(ok != 0))
         }
         "rt_winit_buffer_gradient_v" => {
-            // rt_winit_buffer_gradient_v(buffer_id, x, y, w, h, color1, color2) -> bool
-            let buf_id = get_i64(args, 0, name)?;
-            let gx = get_i64(args, 1, name)?;
-            let gy = get_i64(args, 2, name)?;
-            let gw = get_i64(args, 3, name)?;
-            let gh = get_i64(args, 4, name)?;
-            let c1 = get_i64(args, 5, name)? as u32;
-            let c2 = get_i64(args, 6, name)? as u32;
-            let mut bufs = PIXEL_BUFFERS.lock();
-            if let Some(buf) = bufs.get_mut(&buf_id) {
-                let sw = buf.width as i64;
-                let sh = buf.height as i64;
-                let r1 = ((c1 >> 16) & 0xFF) as i64;
-                let g1 = ((c1 >> 8) & 0xFF) as i64;
-                let b1 = (c1 & 0xFF) as i64;
-                let r2 = ((c2 >> 16) & 0xFF) as i64;
-                let g2 = ((c2 >> 8) & 0xFF) as i64;
-                let b2 = (c2 & 0xFF) as i64;
-                for row in 0..gh {
-                    let py = gy + row;
-                    if py < 0 || py >= sh {
-                        continue;
-                    }
-                    let t = if gh > 1 { row as f64 / (gh - 1) as f64 } else { 0.0 };
-                    let r = (r1 as f64 + (r2 - r1) as f64 * t) as u32;
-                    let g = (g1 as f64 + (g2 - g1) as f64 * t) as u32;
-                    let b = (b1 as f64 + (b2 - b1) as f64 * t) as u32;
-                    let color = 0xFF000000 | (r << 16) | (g << 8) | b;
-                    for col in 0..gw {
-                        let px = gx + col;
-                        if px < 0 || px >= sw {
-                            continue;
-                        }
-                        buf.pixels[(py as usize) * (sw as usize) + (px as usize)] = color;
-                    }
-                }
-                Ok(bool_value(true))
-            } else {
-                set_last_error(format!("invalid buffer handle: {buf_id}"));
-                Ok(bool_value(false))
+            let buf = get_i64(args, 0, name)?;
+            let x = get_i64(args, 1, name)?;
+            let y = get_i64(args, 2, name)?;
+            let w = get_i64(args, 3, name)?;
+            let h = get_i64(args, 4, name)?;
+            let c1 = get_i64(args, 5, name)?;
+            let c2 = get_i64(args, 6, name)?;
+            let ok = call7(sym_addr, [buf, x, y, w, h, c1, c2]);
+            if ok == 0 {
+                set_last_error(format!("invalid buffer handle: {buf}"));
             }
+            Ok(bool_value(ok != 0))
         }
         "rt_winit_buffer_get_pixels" => {
-            // rt_winit_buffer_get_pixels(buffer_id) -> [i64] (pixel array)
-            let buf_id = get_i64(args, 0, name)?;
-            let bufs = PIXEL_BUFFERS.lock();
-            if let Some(buf) = bufs.get(&buf_id) {
-                let values: Vec<Value> = buf.pixels.iter().map(|&p| Value::Int(p as i64)).collect();
-                Ok(Value::Array(Arc::new(values)))
-            } else {
-                set_last_error(format!("invalid buffer handle: {buf_id}"));
-                Ok(Value::Array(Arc::new(vec![])))
+            let buf = get_i64(args, 0, name)?;
+            let count = call7(sym_addr, [buf, 0, 0, 0, 0, 0, 0]);
+            if count <= 0 {
+                set_last_error(format!("invalid buffer handle: {buf}"));
+                return Ok(Value::Array(Arc::new(vec![])));
             }
+            let mut out: Vec<u32> = vec![0u32; count as usize];
+            let ptr = out.as_mut_ptr() as i64;
+            let _ = call7(sym_addr, [buf, ptr, count, 0, 0, 0, 0]);
+            let values: Vec<Value> = out.iter().map(|&p| Value::Int(p as i64)).collect();
+            Ok(Value::Array(Arc::new(values)))
         }
         "rt_winit_buffer_free" => {
-            // rt_winit_buffer_free(buffer_id)
-            let buf_id = get_i64(args, 0, name)?;
-            PIXEL_BUFFERS.lock().remove(&buf_id);
+            let buf = get_i64(args, 0, name)?;
+            let _ = call7(sym_addr, [buf, 0, 0, 0, 0, 0, 0]);
             Ok(bool_value(true))
         }
         "rt_winit_save_pixels_bmp" => {
             let path = get_string(args, 0, name)?;
-            let width = get_i64(args, 1, name)?.max(1) as u32;
-            let height = get_i64(args, 2, name)?.max(1) as u32;
+            let width = get_i64(args, 1, name)?;
+            let height = get_i64(args, 2, name)?;
             let pixels = get_pixels(args, 3, name)?;
-
-            let row_size = ((width * 3 + 3) / 4) * 4; // BMP rows padded to 4-byte boundary
-            let pixel_data_size = row_size * height;
-            let file_size = 54 + pixel_data_size;
-
-            let mut data = Vec::with_capacity(file_size as usize);
-
-            // BMP file header (14 bytes)
-            data.extend_from_slice(b"BM");
-            data.extend_from_slice(&file_size.to_le_bytes());
-            data.extend_from_slice(&[0u8; 4]); // reserved
-            data.extend_from_slice(&54u32.to_le_bytes()); // pixel data offset
-
-            // DIB header (BITMAPINFOHEADER, 40 bytes)
-            data.extend_from_slice(&40u32.to_le_bytes()); // header size
-            data.extend_from_slice(&width.to_le_bytes());
-            data.extend_from_slice(&height.to_le_bytes());
-            data.extend_from_slice(&1u16.to_le_bytes()); // planes
-            data.extend_from_slice(&24u16.to_le_bytes()); // bits per pixel
-            data.extend_from_slice(&0u32.to_le_bytes()); // compression (none)
-            data.extend_from_slice(&pixel_data_size.to_le_bytes());
-            data.extend_from_slice(&2835u32.to_le_bytes()); // h resolution (72 DPI)
-            data.extend_from_slice(&2835u32.to_le_bytes()); // v resolution
-            data.extend_from_slice(&0u32.to_le_bytes()); // colors in palette
-            data.extend_from_slice(&0u32.to_le_bytes()); // important colors
-
-            // Pixel data (bottom-up, BGR)
-            let pad_bytes = (row_size - width * 3) as usize;
-            for y in (0..height).rev() {
-                for x in 0..width {
-                    let idx = (y * width + x) as usize;
-                    let argb = if idx < pixels.len() { pixels[idx] } else { 0 };
-                    let b = (argb & 0xFF) as u8;
-                    let g = ((argb >> 8) & 0xFF) as u8;
-                    let r = ((argb >> 16) & 0xFF) as u8;
-                    data.push(b);
-                    data.push(g);
-                    data.push(r);
-                }
-                for _ in 0..pad_bytes {
-                    data.push(0);
-                }
+            let cpath = CString::new(path).unwrap_or_default();
+            let path_ptr = cpath.as_ptr() as i64;
+            let pixels_ptr = pixels.as_ptr() as i64;
+            let pixels_len = pixels.len() as i64;
+            let ok = call7(sym_addr, [path_ptr, width, height, pixels_ptr, pixels_len, 0, 0]);
+            drop(cpath);
+            drop(pixels);
+            if ok == 0 {
+                set_last_error("failed to write BMP".to_string());
             }
-
-            match std::fs::write(&path, &data) {
-                Ok(()) => Ok(bool_value(true)),
-                Err(err) => {
-                    set_last_error(format!("failed to write BMP: {err}"));
-                    Ok(bool_value(false))
-                }
-            }
+            Ok(bool_value(ok != 0))
         }
         _ => Err(super::unknown_function(name)),
-    }
-}
-
-fn draw_text_into_buffer(buf: &mut PixelBuffer, x: i64, y: i64, text: &str, fg: u32, bg: u32) {
-    let sw = buf.width as i64;
-    let sh = buf.height as i64;
-    let stride = sw as usize;
-    let mut cx = x;
-
-    for ch in text.chars() {
-        if cx < sw && cx + 8 > 0 && y < sh && y + 16 > 0 {
-            let glyph = glyph_8x16(ch as i32);
-            for (row, bits) in glyph.iter().enumerate() {
-                let py = y + row as i64;
-                if py < 0 || py >= sh {
-                    continue;
-                }
-                for col in 0..8 {
-                    let px = cx + col;
-                    if px < 0 || px >= sw {
-                        continue;
-                    }
-                    let mask = 0x80u8 >> col;
-                    let color = if (bits & mask) != 0 { fg } else { bg };
-                    buf.pixels[(py as usize) * stride + (px as usize)] = color;
-                }
-            }
-        }
-        cx = cx.saturating_add(8);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn draw_text_extern_writes_glyph_pixels() {
-        let id = match dispatch_buffer(
-            "rt_winit_buffer_create",
-            &[Value::Int(24), Value::Int(16), Value::Int(0)],
-        )
-        .unwrap()
-        {
-            Value::Int(id) => id,
-            other => panic!("expected buffer id, got {other:?}"),
-        };
-
-        let ok = dispatch_buffer(
-            "rt_winit_buffer_draw_text",
-            &[
-                Value::Int(id),
-                Value::Int(0),
-                Value::Int(0),
-                Value::text("A".to_string()),
-                Value::Int(0xFFFFFFFFu32 as i64),
-                Value::Int(0xFF000000u32 as i64),
-            ],
-        )
-        .unwrap();
-        assert_eq!(ok, Value::Bool(true));
-
-        {
-            let bufs = PIXEL_BUFFERS.lock();
-            let buf = bufs.get(&id).expect("buffer should exist");
-            assert!(buf.pixels.iter().any(|&p| p == 0xFFFFFFFF));
-            assert!(buf.pixels.iter().any(|&p| p == 0xFF000000));
-        }
-
-        let _ = dispatch_buffer("rt_winit_buffer_free", &[Value::Int(id)]).unwrap();
-    }
-
-    #[test]
-    fn blit_pixels_extern_copies_and_clips_pixels() {
-        let id = match dispatch_buffer(
-            "rt_winit_buffer_create",
-            &[Value::Int(4), Value::Int(3), Value::Int(0xFF000000u32 as i64)],
-        )
-        .unwrap()
-        {
-            Value::Int(id) => id,
-            other => panic!("expected buffer id, got {other:?}"),
-        };
-
-        let pixels = Value::Array(Arc::new(vec![
-            Value::Int(0xFF112233u32 as i64),
-            Value::Int(0xFF445566u32 as i64),
-            Value::Int(0xFF778899u32 as i64),
-            Value::Int(0xFF99AABBu32 as i64),
-        ]));
-        let ok = dispatch_buffer(
-            "rt_winit_buffer_blit_pixels",
-            &[
-                Value::Int(id),
-                Value::Int(2),
-                Value::Int(1),
-                Value::Int(2),
-                Value::Int(2),
-                pixels,
-            ],
-        )
-        .unwrap();
-        assert_eq!(ok, Value::Bool(true));
-
-        {
-            let bufs = PIXEL_BUFFERS.lock();
-            let buf = bufs.get(&id).expect("buffer should exist");
-            assert_eq!(buf.pixels[1 * 4 + 2], 0xFF112233);
-            assert_eq!(buf.pixels[1 * 4 + 3], 0xFF445566);
-            assert_eq!(buf.pixels[2 * 4 + 2], 0xFF778899);
-            assert_eq!(buf.pixels[2 * 4 + 3], 0xFF99AABB);
-            assert_eq!(buf.pixels[0], 0xFF000000);
-        }
-
-        let _ = dispatch_buffer("rt_winit_buffer_free", &[Value::Int(id)]).unwrap();
     }
 }

@@ -428,15 +428,24 @@ fn mouse_button_to_simple(button: MouseButton) -> i64 {
 // C-ABI exports (rt_winit_* family)
 // ============================================================================
 
-/// Create the shared event loop. Returns 1 on success, 0 on failure.
+/// Create the shared event loop. Returns 1 on success, 0 on failure — NEVER
+/// aborts the process even when construction is impossible (headless host,
+/// wrong thread): this is an `extern "C" fn`, and a panic that unwinds past
+/// a plain extern boundary is UB, which the Rust runtime turns into an
+/// immediate process abort instead of a catchable failure. `rt_winit_buffer_*`
+/// callers rely on 0 being a normal, structured failure path, so both the
+/// known non-recoverable case (winit's own X11/Wayland main-thread panic —
+/// this router is called from whatever thread the interpreter runs
+/// extern calls on, not necessarily "main") and any other unexpected panic
+/// are caught here rather than allowed to escape.
 /// (One event loop per process — winit only allows one.)
 #[no_mangle]
 pub extern "C" fn rt_winit_event_loop_new() -> i64 {
-    PUMP.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_some() {
-            return 1; // already created
-        }
+    let already = PUMP.with(|cell| cell.borrow().is_some());
+    if already {
+        return 1;
+    }
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut builder = EventLoop::builder();
         #[cfg(target_os = "macos")]
         {
@@ -445,9 +454,30 @@ pub extern "C" fn rt_winit_event_loop_new() -> i64 {
             #[allow(deprecated)]
             builder.with_activate_ignoring_other_apps(true);
         }
-        match builder.build() {
-            Ok(event_loop) => {
-                *borrow = Some(PumpState {
+        // Off-main-thread construction is a hard panic (not an Err) in
+        // winit's X11/Wayland backends unless explicitly opted into via
+        // `any_thread` — this interpreter's extern-call thread is not
+        // guaranteed to be the process main thread. macOS has no such
+        // escape hatch (Cocoa genuinely requires the main thread), so it
+        // relies on the catch_unwind above instead.
+        #[cfg(target_os = "linux")]
+        {
+            use winit::platform::wayland::EventLoopBuilderExtWayland;
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            EventLoopBuilderExtX11::with_any_thread(&mut builder, true);
+            EventLoopBuilderExtWayland::with_any_thread(&mut builder, true);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            builder.with_any_thread(true);
+        }
+        builder.build()
+    }));
+    match built {
+        Ok(Ok(event_loop)) => {
+            PUMP.with(|cell| {
+                *cell.borrow_mut() = Some(PumpState {
                     event_loop,
                     inner: Inner {
                         next_window_id: 0,
@@ -455,11 +485,12 @@ pub extern "C" fn rt_winit_event_loop_new() -> i64 {
                         ..Default::default()
                     },
                 });
-                1
-            }
-            Err(_) => 0,
+            });
+            1
         }
-    })
+        Ok(Err(_)) => 0,
+        Err(_) => 0,
+    }
 }
 
 #[no_mangle]
@@ -934,4 +965,595 @@ fn with_event<T>(ev: i64, f: impl FnOnce(&StoredEvent) -> T) -> Option<T> {
         let e = ps.inner.stored_events.get(&ev)?;
         Some(f(e))
     })
+}
+
+// ============================================================================
+// Software framebuffer (rt_winit_buffer_* family, 13 exports)
+//
+// A pixel buffer is independent of any window (fill/blit/draw/blend/blur/
+// gradient/read/get/free/save-to-file are pure array operations on
+// caller-owned memory), but two operations are load-bearing for honesty:
+//
+//   * rt_winit_buffer_create requires a LIVE winit event loop (the same
+//     shared PUMP this file already drives for real windows). On a headless
+//     host (no DISPLAY/WAYLAND_DISPLAY) that creation genuinely fails, so
+//     buffer creation fails too instead of returning a plausible-looking id
+//     backed by nothing.
+//   * rt_winit_buffer_present requires a REAL WindowSlot (from `windows`
+//     above, populated only by a successful rt_winit_window_new) and blits
+//     into its actual softbuffer surface via buffer_mut()/present() — the
+//     same real presentation path rt_winit_window_present_staged uses. It
+//     can never report success without touching a real surface.
+//
+// C ABI convention (internal to this file + its sole consumer,
+// winit_sffi_buffer.rs's dlopen router — no other caller crosses this
+// boundary, so it is free-form): every export takes exactly 7 `i64`
+// arguments and returns `i64`; unused trailing arguments are ignored. Arrays
+// and C strings cross as a raw pointer + (for arrays) a length, valid
+// in-process because the router dlopen's this cdylib into the SAME address
+// space (never across processes).
+// ============================================================================
+
+struct PixelBuf {
+    width: u32,
+    height: u32,
+    pixels: Vec<u32>,
+}
+
+thread_local! {
+    static BUFFERS: RefCell<HashMap<i64, PixelBuf>> = RefCell::new(HashMap::new());
+    static NEXT_BUFFER_ID: RefCell<i64> = const { RefCell::new(0) };
+}
+
+fn with_buffers<T>(f: impl FnOnce(&mut HashMap<i64, PixelBuf>) -> T) -> T {
+    BUFFERS.with(|b| f(&mut b.borrow_mut()))
+}
+
+fn next_buffer_id() -> i64 {
+    NEXT_BUFFER_ID.with(|c| {
+        let mut v = c.borrow_mut();
+        *v += 1;
+        *v
+    })
+}
+
+fn encode_bmp(width: u32, height: u32, pixels: &[u32]) -> Vec<u8> {
+    let row_size = ((width * 3 + 3) / 4) * 4;
+    let pixel_data_size = row_size * height;
+    let file_size = 54 + pixel_data_size;
+    let mut data = Vec::with_capacity(file_size as usize);
+    data.extend_from_slice(b"BM");
+    data.extend_from_slice(&file_size.to_le_bytes());
+    data.extend_from_slice(&[0u8; 4]);
+    data.extend_from_slice(&54u32.to_le_bytes());
+    data.extend_from_slice(&40u32.to_le_bytes());
+    data.extend_from_slice(&width.to_le_bytes());
+    data.extend_from_slice(&height.to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&24u16.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&pixel_data_size.to_le_bytes());
+    data.extend_from_slice(&2835u32.to_le_bytes());
+    data.extend_from_slice(&2835u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    let pad_bytes = (row_size - width * 3) as usize;
+    for y in (0..height).rev() {
+        for x in 0..width {
+            let idx = (y * width + x) as usize;
+            let argb = if idx < pixels.len() { pixels[idx] } else { 0 };
+            data.push((argb & 0xFF) as u8);
+            data.push(((argb >> 8) & 0xFF) as u8);
+            data.push(((argb >> 16) & 0xFF) as u8);
+        }
+        for _ in 0..pad_bytes {
+            data.push(0);
+        }
+    }
+    data
+}
+
+fn draw_text_into_buffer(buf: &mut PixelBuf, x: i64, y: i64, text: &str, fg: u32, bg: u32) {
+    let sw = buf.width as i64;
+    let sh = buf.height as i64;
+    let stride = sw as usize;
+    let mut cx = x;
+    for ch in text.chars() {
+        if cx < sw && cx + 8 > 0 && y < sh && y + 16 > 0 {
+            let glyph = glyph_8x16(ch as i32);
+            for (row, bits) in glyph.iter().enumerate() {
+                let py = y + row as i64;
+                if py < 0 || py >= sh {
+                    continue;
+                }
+                for col in 0..8 {
+                    let px = cx + col;
+                    if px < 0 || px >= sw {
+                        continue;
+                    }
+                    let mask = 0x80u8 >> col;
+                    let color = if (bits & mask) != 0 { fg } else { bg };
+                    buf.pixels[(py as usize) * stride + (px as usize)] = color;
+                }
+            }
+        }
+        cx = cx.saturating_add(8);
+    }
+}
+
+// Minimal embedded 5x7 font expanded to 8x16, mirroring the seed
+// interpreter's conversion::glyph_8x16 (kept as an independent copy since
+// this cdylib is a separate crate and must not depend on simple-compiler).
+fn glyph_8x16(codepoint: i32) -> [u8; 16] {
+    if codepoint <= 0 || codepoint == 32 {
+        return [0; 16];
+    }
+    let ch = if (0x20..=0x7e).contains(&codepoint) {
+        (codepoint as u8).to_ascii_uppercase()
+    } else {
+        b'?'
+    };
+    let pattern = glyph_5x7_ascii(ch);
+    let mut rows = [0u8; 16];
+    for (src_row, bits) in pattern.iter().enumerate() {
+        let mut expanded = 0u8;
+        for col in 0..5 {
+            if bits & (0b10000 >> col) != 0 {
+                expanded |= 0x40 >> col;
+            }
+        }
+        let row = 1 + src_row * 2;
+        rows[row] = expanded;
+        rows[row + 1] = expanded;
+    }
+    rows
+}
+
+fn glyph_5x7_ascii(ch: u8) -> [u8; 7] {
+    match ch {
+        b'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+        b'B' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110],
+        b'C' => [0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111],
+        b'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
+        b'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
+        b'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
+        b'G' => [0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111],
+        b'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+        b'I' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
+        b'J' => [0b00001, 0b00001, 0b00001, 0b00001, 0b10001, 0b10001, 0b01110],
+        b'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
+        b'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
+        b'M' => [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
+        b'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
+        b'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        b'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
+        b'Q' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
+        b'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
+        b'S' => [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
+        b'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
+        b'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        b'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
+        b'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010],
+        b'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
+        b'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
+        b'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
+        b'0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
+        b'1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+        b'2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
+        b'3' => [0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110],
+        b'4' => [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
+        b'5' => [0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110],
+        b'6' => [0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110],
+        b'7' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
+        b'8' => [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
+        b'9' => [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110],
+        b':' => [0b00000, 0b00100, 0b00100, 0b00000, 0b00100, 0b00100, 0b00000],
+        b'.' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100],
+        b'/' => [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000],
+        b'-' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
+        b'_' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111],
+        b'$' => [0b00100, 0b01111, 0b10100, 0b01110, 0b00101, 0b11110, 0b00100],
+        b'>' => [0b10000, 0b01000, 0b00100, 0b00010, 0b00100, 0b01000, 0b10000],
+        b'<' => [0b00001, 0b00010, 0b00100, 0b01000, 0b00100, 0b00010, 0b00001],
+        b'=' => [0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000],
+        b'?' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100],
+        _ => [0b11111, 0b00001, 0b00010, 0b00100, 0b00100, 0b00000, 0b00100],
+    }
+}
+
+/// Allocate a pixel buffer. Requires a live winit event loop (see module
+/// doc above) — returns 0 on a headless host, never a fake id.
+#[no_mangle]
+pub extern "C" fn rt_winit_buffer_create(width: i64, height: i64, fill_color: i64, _d: i64, _e: i64, _f: i64, _g: i64) -> i64 {
+    if rt_winit_event_loop_new() == 0 {
+        return 0;
+    }
+    let w = width.max(1) as u32;
+    let h = height.max(1) as u32;
+    let id = next_buffer_id();
+    with_buffers(|bufs| {
+        bufs.insert(
+            id,
+            PixelBuf {
+                width: w,
+                height: h,
+                pixels: vec![fill_color as u32; (w as usize) * (h as usize)],
+            },
+        );
+    });
+    id
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_buffer_fill_rect(buf_id: i64, x: i64, y: i64, w: i64, h: i64, color: i64, _g: i64) -> i64 {
+    with_buffers(|bufs| {
+        let Some(buf) = bufs.get_mut(&buf_id) else {
+            return 0;
+        };
+        let sw = buf.width as i64;
+        let sh = buf.height as i64;
+        for row in 0..h {
+            let py = y + row;
+            if py < 0 || py >= sh {
+                continue;
+            }
+            for col in 0..w {
+                let px = x + col;
+                if px < 0 || px >= sw {
+                    continue;
+                }
+                buf.pixels[(py as usize) * (sw as usize) + (px as usize)] = color as u32;
+            }
+        }
+        1
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_buffer_blit_pixels(buf_id: i64, x: i64, y: i64, w: i64, h: i64, pixels_ptr: i64, pixels_len: i64) -> i64 {
+    if pixels_ptr == 0 || pixels_len <= 0 {
+        return 0;
+    }
+    let src: &[u32] = unsafe { std::slice::from_raw_parts(pixels_ptr as usize as *const u32, pixels_len as usize) };
+    with_buffers(|bufs| {
+        let Some(buf) = bufs.get_mut(&buf_id) else {
+            return 0;
+        };
+        let sw = buf.width as i64;
+        let sh = buf.height as i64;
+        let src_w = w.max(0) as usize;
+        if src_w == 0 {
+            return 1;
+        }
+        let src_h = (h.max(0) as usize).min(src.len().saturating_div(src_w.max(1)));
+        for row in 0..src_h {
+            let py = y + row as i64;
+            if py < 0 || py >= sh {
+                continue;
+            }
+            for col in 0..src_w {
+                let px = x + col as i64;
+                if px < 0 || px >= sw {
+                    continue;
+                }
+                let src_idx = row * src_w + col;
+                buf.pixels[(py as usize) * (sw as usize) + (px as usize)] = src[src_idx];
+            }
+        }
+        1
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_buffer_draw_text(buf_id: i64, x: i64, y: i64, text_ptr: i64, fg: i64, bg: i64, _g: i64) -> i64 {
+    if text_ptr == 0 {
+        return 0;
+    }
+    let text = unsafe { CStr::from_ptr(text_ptr as usize as *const c_char) }
+        .to_string_lossy()
+        .into_owned();
+    with_buffers(|bufs| {
+        let Some(buf) = bufs.get_mut(&buf_id) else {
+            return 0;
+        };
+        draw_text_into_buffer(buf, x, y, &text, fg as u32, bg as u32);
+        1
+    })
+}
+
+/// Blit a buffer's pixels into a REAL window surface and present it. Fails
+/// (0) unless `window_id` names a live WindowSlot AND `buf_id` names a live
+/// buffer — never reports success without touching a real surface.
+#[no_mangle]
+pub extern "C" fn rt_winit_buffer_present(window_id: i64, buf_id: i64, _c: i64, _d: i64, _e: i64, _f: i64, _g: i64) -> i64 {
+    let src = with_buffers(|bufs| bufs.get(&buf_id).map(|b| (b.width, b.height, b.pixels.clone())));
+    let Some((bw, bh, pixels)) = src else {
+        return 0;
+    };
+    let ok = PUMP.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(ps) = borrow.as_mut() else {
+            return false;
+        };
+        let Some(slot) = ps.inner.windows.get_mut(&window_id) else {
+            return false;
+        };
+        let size = slot.window.inner_size();
+        let surf_w = size.width.max(1);
+        let surf_h = size.height.max(1);
+        let nz_w = NonZeroU32::new(surf_w).unwrap();
+        let nz_h = NonZeroU32::new(surf_h).unwrap();
+        if slot.surface.resize(nz_w, nz_h).is_err() {
+            return false;
+        }
+        let mut buffer = match slot.surface.buffer_mut() {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        let dst_w = surf_w as usize;
+        let dst_h = surf_h as usize;
+        let src_w = bw.max(1) as usize;
+        let src_h = bh.max(1) as usize;
+        if pixels.len() == dst_w * dst_h {
+            for (dst, src) in buffer.iter_mut().zip(pixels.iter()) {
+                *dst = *src;
+            }
+        } else if pixels.len() == src_w * src_h && src_w > 0 && src_h > 0 {
+            for dy in 0..dst_h {
+                let sy = dy * src_h / dst_h;
+                for dx in 0..dst_w {
+                    let sx = dx * src_w / dst_w;
+                    buffer[dy * dst_w + dx] = pixels[sy * src_w + sx];
+                }
+            }
+        }
+        buffer.present().is_ok()
+    });
+    pump_once(1);
+    if ok {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_buffer_save_bmp(buf_id: i64, path_ptr: i64, _c: i64, _d: i64, _e: i64, _f: i64, _g: i64) -> i64 {
+    if path_ptr == 0 {
+        return 0;
+    }
+    let path = unsafe { CStr::from_ptr(path_ptr as usize as *const c_char) }
+        .to_string_lossy()
+        .into_owned();
+    let data = with_buffers(|bufs| bufs.get(&buf_id).map(|buf| encode_bmp(buf.width, buf.height, &buf.pixels)));
+    match data {
+        Some(bytes) => match std::fs::write(&path, &bytes) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        },
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_buffer_read_pixel(buf_id: i64, x: i64, y: i64, _d: i64, _e: i64, _f: i64, _g: i64) -> i64 {
+    with_buffers(|bufs| {
+        let Some(buf) = bufs.get(&buf_id) else {
+            return 0;
+        };
+        let sw = buf.width as i64;
+        let sh = buf.height as i64;
+        if x >= 0 && x < sw && y >= 0 && y < sh {
+            let idx = (y as usize) * (sw as usize) + (x as usize);
+            buf.pixels[idx] as i64
+        } else {
+            0
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_buffer_blend_rect(buf_id: i64, x: i64, y: i64, w: i64, h: i64, color: i64, alpha: i64) -> i64 {
+    with_buffers(|bufs| {
+        let Some(buf) = bufs.get_mut(&buf_id) else {
+            return 0;
+        };
+        let sw = buf.width as i64;
+        let sh = buf.height as i64;
+        let color = color as u32;
+        let alpha = alpha.clamp(0, 255) as u32;
+        let sr = (color >> 16) & 0xFF;
+        let sg = (color >> 8) & 0xFF;
+        let sb = color & 0xFF;
+        let inv_alpha = 255 - alpha;
+        for row in 0..h {
+            let py = y + row;
+            if py < 0 || py >= sh {
+                continue;
+            }
+            for col in 0..w {
+                let px = x + col;
+                if px < 0 || px >= sw {
+                    continue;
+                }
+                let idx = (py as usize) * (sw as usize) + (px as usize);
+                let dst = buf.pixels[idx];
+                let dr = (dst >> 16) & 0xFF;
+                let dg = (dst >> 8) & 0xFF;
+                let db = dst & 0xFF;
+                let r = (sr * alpha + dr * inv_alpha) / 255;
+                let g = (sg * alpha + dg * inv_alpha) / 255;
+                let b = (sb * alpha + db * inv_alpha) / 255;
+                buf.pixels[idx] = 0xFF000000 | (r << 16) | (g << 8) | b;
+            }
+        }
+        1
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_buffer_blur(buf_id: i64, bx: i64, by: i64, bw: i64, bh: i64, radius: i64, _g: i64) -> i64 {
+    let radius = radius.clamp(1, 50) as usize;
+    with_buffers(|bufs| {
+        let Some(buf) = bufs.get_mut(&buf_id) else {
+            return 0;
+        };
+        let sw = buf.width as i64;
+        let sh = buf.height as i64;
+        let x0 = bx.max(0) as usize;
+        let y0 = by.max(0) as usize;
+        let x1 = (bx + bw).min(sw) as usize;
+        let y1 = (by + bh).min(sh) as usize;
+        let rw = x1.saturating_sub(x0);
+        let rh = y1.saturating_sub(y0);
+        if rw == 0 || rh == 0 {
+            return 1;
+        }
+        let stride = sw as usize;
+        for _ in 0..3 {
+            let mut temp = vec![0u32; rw * rh];
+            for row in 0..rh {
+                for col in 0..rw {
+                    let mut r_sum: u64 = 0;
+                    let mut g_sum: u64 = 0;
+                    let mut b_sum: u64 = 0;
+                    let mut count: u64 = 0;
+                    let c_min = if col >= radius { col - radius } else { 0 };
+                    let c_max = (col + radius + 1).min(rw);
+                    for kc in c_min..c_max {
+                        let px = buf.pixels[(y0 + row) * stride + (x0 + kc)];
+                        r_sum += ((px >> 16) & 0xFF) as u64;
+                        g_sum += ((px >> 8) & 0xFF) as u64;
+                        b_sum += (px & 0xFF) as u64;
+                        count += 1;
+                    }
+                    if count == 0 {
+                        count = 1;
+                    }
+                    let r = (r_sum / count) as u32;
+                    let g = (g_sum / count) as u32;
+                    let b = (b_sum / count) as u32;
+                    temp[row * rw + col] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                }
+            }
+            for row in 0..rh {
+                for col in 0..rw {
+                    buf.pixels[(y0 + row) * stride + (x0 + col)] = temp[row * rw + col];
+                }
+            }
+            let mut temp = vec![0u32; rw * rh];
+            for col in 0..rw {
+                for row in 0..rh {
+                    let mut r_sum: u64 = 0;
+                    let mut g_sum: u64 = 0;
+                    let mut b_sum: u64 = 0;
+                    let mut count: u64 = 0;
+                    let r_min = if row >= radius { row - radius } else { 0 };
+                    let r_max = (row + radius + 1).min(rh);
+                    for kr in r_min..r_max {
+                        let px = buf.pixels[(y0 + kr) * stride + (x0 + col)];
+                        r_sum += ((px >> 16) & 0xFF) as u64;
+                        g_sum += ((px >> 8) & 0xFF) as u64;
+                        b_sum += (px & 0xFF) as u64;
+                        count += 1;
+                    }
+                    if count == 0 {
+                        count = 1;
+                    }
+                    let r = (r_sum / count) as u32;
+                    let g = (g_sum / count) as u32;
+                    let b = (b_sum / count) as u32;
+                    temp[row * rw + col] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                }
+            }
+            for row in 0..rh {
+                for col in 0..rw {
+                    buf.pixels[(y0 + row) * stride + (x0 + col)] = temp[row * rw + col];
+                }
+            }
+        }
+        1
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_buffer_gradient_v(buf_id: i64, gx: i64, gy: i64, gw: i64, gh: i64, c1: i64, c2: i64) -> i64 {
+    with_buffers(|bufs| {
+        let Some(buf) = bufs.get_mut(&buf_id) else {
+            return 0;
+        };
+        let sw = buf.width as i64;
+        let sh = buf.height as i64;
+        let c1 = c1 as u32;
+        let c2 = c2 as u32;
+        let r1 = ((c1 >> 16) & 0xFF) as i64;
+        let g1 = ((c1 >> 8) & 0xFF) as i64;
+        let b1 = (c1 & 0xFF) as i64;
+        let r2 = ((c2 >> 16) & 0xFF) as i64;
+        let g2 = ((c2 >> 8) & 0xFF) as i64;
+        let b2 = (c2 & 0xFF) as i64;
+        for row in 0..gh {
+            let py = gy + row;
+            if py < 0 || py >= sh {
+                continue;
+            }
+            let t = if gh > 1 { row as f64 / (gh - 1) as f64 } else { 0.0 };
+            let r = (r1 as f64 + (r2 - r1) as f64 * t) as u32;
+            let g = (g1 as f64 + (g2 - g1) as f64 * t) as u32;
+            let b = (b1 as f64 + (b2 - b1) as f64 * t) as u32;
+            let color = 0xFF000000 | (r << 16) | (g << 8) | b;
+            for col in 0..gw {
+                let px = gx + col;
+                if px < 0 || px >= sw {
+                    continue;
+                }
+                buf.pixels[(py as usize) * (sw as usize) + (px as usize)] = color;
+            }
+        }
+        1
+    })
+}
+
+/// Two-call protocol: call with `out_ptr == 0` to get the pixel count back
+/// (or -1 for an invalid handle); call again with a caller-allocated buffer
+/// of at least that many u32s to fill it.
+#[no_mangle]
+pub extern "C" fn rt_winit_buffer_get_pixels(buf_id: i64, out_ptr: i64, out_cap: i64, _d: i64, _e: i64, _f: i64, _g: i64) -> i64 {
+    with_buffers(|bufs| {
+        let Some(buf) = bufs.get(&buf_id) else {
+            return -1;
+        };
+        let count = buf.pixels.len() as i64;
+        if out_ptr != 0 && out_cap >= count {
+            let dst = unsafe { std::slice::from_raw_parts_mut(out_ptr as usize as *mut u32, count as usize) };
+            dst.copy_from_slice(&buf.pixels);
+        }
+        count
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_buffer_free(buf_id: i64, _b: i64, _c: i64, _d: i64, _e: i64, _f: i64, _g: i64) -> i64 {
+    with_buffers(|bufs| {
+        bufs.remove(&buf_id);
+    });
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_save_pixels_bmp(path_ptr: i64, width: i64, height: i64, pixels_ptr: i64, pixels_len: i64, _f: i64, _g: i64) -> i64 {
+    if path_ptr == 0 || pixels_ptr == 0 {
+        return 0;
+    }
+    let path = unsafe { CStr::from_ptr(path_ptr as usize as *const c_char) }
+        .to_string_lossy()
+        .into_owned();
+    let w = width.max(1) as u32;
+    let h = height.max(1) as u32;
+    let pixels: &[u32] = unsafe { std::slice::from_raw_parts(pixels_ptr as usize as *const u32, pixels_len.max(0) as usize) };
+    let data = encode_bmp(w, h, pixels);
+    match std::fs::write(&path, &data) {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
 }
