@@ -483,6 +483,195 @@ checkout routinely carries thousands of lines of other sessions' uncommitted
 `src/**`, and `.spl` libraries execute from source. Reproduce in a pristine
 worktree at a named sha before attributing a regression to a commit.
 
+## The gates were RED at origin for one undefined symbol (2026-08-05)
+
+**Every gate figure published in this document before `341efaa3c73` was
+measured after a lane's own local fix, and was false at origin base.**
+
+`simple_web_html_layout_renderer_core.spl` called `_web_budget_expired()` at
+four sites. That zero-arg function is **defined nowhere** — only
+`_web_budget_expired_at(site)` exists, and its own comment states it
+deliberately has no zero-arg counterpart. Any document containing a `<style>`
+block therefore aborted the CPU oracle.
+
+Measured at origin base, the five gates carried **32 failures, every one
+`semantic: _web_budget_expired not found`**:
+
+| gate | at base | after `341efaa3c73` |
+|---|---|---|
+| `web_engine2d_gpu_offload_parity_spec` | 17 total, 8 passed, **9 failed** | 17/17 |
+| `web_gpu_first_present_decision_spec` | 7 total, **5 failed** | 7/7 |
+| `web_gpu_present_paint_coverage_spec` | 23 total, **11 failed** | 23/23 |
+| `web_renderer_gpu_paint_economics_spec` | 9 total, 0 failed | 9/9 |
+| `simple_web_material_witness_spec` | 8 total, **7 failed** | 8/8 |
+
+### Root cause: a revert hiding under an unrelated commit title
+
+`40c540fa850` correctly renamed the symbol and converted all four style
+sites. **`ac54a536bee` rewound exactly those four lines** while
+`foundation.spl` kept the rename, leaving a dangling symbol. Blob trail:
+`c797f9da` → `7c9d7e84` → `be4cb171`. That commit is titled
+*"fix(freestanding): stop text concat chains from silently dropping
+operands"* — nothing in the message suggests it touches the style cascade.
+
+This is the second instance in two days of a semantic revert carried under an
+unrelated title; the first was a `chore(sync)` sweep that rewound a deliberate
+assertion fix one commit after it landed. **Read the diff, not the subject.**
+
+### Why it survived on main
+
+**Every fixture without a `<style>` block is blind to it.** The eight
+examples that passed used inline styles only. A regression here will not be
+caught by inline-style fixtures — any future guard must use a `<style>` block.
+
+It was also invisible to `bin/simple run`, which resolves lazily; only
+`simple test` resolves eagerly and surfaces the missing symbol. Four separate
+lanes hit the symptom independently before the cause was found.
+
+## Four-lane parity matrix (2026-08-05, `4a10c34a0d1`)
+
+`test/02_integration/rendering/web_engine2d_lane_matrix_parity_spec.spl` —
+`Results: 12 total, 12 passed, 0 failed`; **10 COMPARED, 0 SKIP,
+4 GPU-PROVEN**; 10 comparisons ran of 10 declared.
+
+| lane | availability | provenance | sabotage isolates |
+|---|---|---|---|
+| cpu | available | `cpu_mirror` handle=0 | `backend_software:748` → cpu 4800/4800 |
+| cpu_simd | `native_pixel_rows_enabled=true` | `cpu_mirror` | `backend_software:746` → cpu_simd 4800/4800 |
+| vulkan | available | `device_readback` h=1 id=126094883051072 | **GPU-PROVEN** |
+| cuda | available | `device_readback` id=1002905313239842438 | **GPU-PROVEN** |
+
+**Unavailable:** metal (Apple API, not this host), opencl (context create
+fails). **webgpu** constructs but reports `cpu_mirror` — recorded as
+software-by-construction, never asserted as GPU.
+
+The cpu and cpu_simd sabotage arms are mirror images, which is what proves
+they are **distinct code paths rather than aliases**. Note `"software"` is
+the wrong SIMD key: it displays as "Optimized Software (SIMD)" but builds a
+different backend.
+
+**Tolerance: zero, and derived.** The replay pushes the oracle's own pixels
+through `draw_rect_filled` as single-solid-colour runs — one correct value per
+pixel, no interpolation, filtering, blending or float path. Nothing to tune.
+
+**Cross-lane divergence: none.** All four lanes bit-exact against the oracle
+and each other across 4/4 pairwise comparisons, identical row-pair signature.
+Not a vacuous result — the decomposition machinery reports
+`oracle_only=0 lane_only=0 differing=4800` under every sabotage arm.
+
+### Two invariants for anyone extending this matrix
+
+- **Vulkan can never satisfy the strict `device_readback` predicate after
+  `present()`.** `present()` clears `dirty`, routing readback to the
+  host-cache arm. Measured from one create: `present=false → device_readback`,
+  `present=true → host_cache_after_device_present`. A future lane applying the
+  strict predicate post-present will produce a guaranteed false red. Read
+  dirty-first.
+- **`grep -c GPU-PROVEN` over-reports by exactly one** — the verdict line
+  self-matches. Anchor the pattern; the exact rule is stated in the spec.
+
+## Showcase lane targeting (2026-08-05, `039add955ff`)
+
+`web_showcase_full_gpu_offload_spec` reported **13/13 green while executing
+entirely on software**, under a title claiming full GPU offload:
+
+```text
+[backend-resolve] selected cuda
+showcase_capture  resolved=cuda executed=software probe_source= checksum=413538218
+13 examples, 0 failures
+```
+
+The `probe_source=` field printed **empty** — the module-`var` disclosure was
+itself broken, so the pixel caches never memoized either. (Module `var` and
+class fields both read back 0 immediately after a bump in this tree; use
+per-example receipts, never a cross-example counter.)
+
+**The retarget was masking a real routing defect.** `auto` resolved to cuda,
+and every real web frame on cuda returned `source=cpu_fallback handle=0
+identity=0`. Op-bisect at 96×72: clear, fill, sub-blit, full-blit and
+blend-blit all stayed `device_readback` — **the clipped fill flipped it**.
+`CudaBackend.set_clip` only mutates the CPU mirror, and **every page with text
+paints under a clip**. `Engine2D.probe_backend_viable` probed a solid fill
+*only*, so it was fail-open: it certified cuda viable and starved the lanes
+that work.
+
+The probe now requires fill + **clipped** fill + `draw_image` blit, all
+device-proven with 4 disjoint pixel witnesses. `auto` resolves to `qualcomm`;
+the showcase frame is `host_cache_after_device_present handle=1
+identity=140593478957696 pixels=6912`, **bit-identical to the CPU truth**
+(checksum 413538218, unique=18, nonbg=5565) — honest targeting cost no pixel
+evidence.
+
+**Fail-vs-inconclusive is split, not uniform**, and the split is the point:
+
+- resolver names a **CPU** lane → inconclusive, loudly, **green**. A genuine
+  host condition; keeps the suite runnable device-free, which is why deleting
+  the retarget outright would have been wrong.
+- resolver names a **GPU** lane but serves a CPU frame → **hard fail**
+  (`LANE INTEGRITY FAILURE`). Not environment — the resolver broke its own
+  "provably working backend" contract.
+
+Three previously-indistinguishable states now separate: green `13/0` with 13
+DEVICE-SERVED; sabotage (clip coverage removed) **`13 examples, 13 failures`**
+with 13 LANE INTEGRITY; CPU lane `13/0` with 13 CPU LANE.
+
+## Resolver divergence (2026-08-05, `ca75bf0700a`)
+
+Two independent resolvers could answer "which backend" differently within one
+render, via two paths: a local whitelist in `simple_web_renderer.spl` that
+collapsed `baremetal`/`virtio_gpu`/`directx-on-vulkan` to `software`
+**without probing**; and artifact entry points that resolved for the *label*
+while handing the render a separately-resolved name — pinning the label before
+execution decided.
+
+`_resolved_render_backend` is authoritative (it selects device-present vs CPU
+mirror). The whitelist is deleted, `resolved_backend` is carried through the
+pixel cache, and the artifact entries derive the label from it. By value at
+24×16 on `auto`: `artifact.backend=cuda readback_source=cpu_fallback` →
+`artifact.backend=software readback_source=cpu_fallback`. A genuine device is
+untouched. `_web_gpu_readback_device_proven` unchanged; predicate spec 6/6.
+
+Disclosed: the whitelist path is **latent on this host** — a 22-name probe
+shows 0 divergences before and after, because `probe_backend` rejects those
+names here anyway. Removed on reasoning, not on a measured diff.
+
+## Chrome stage correspondence (2026-08-05, `f654ad686ed`, `475cb63a8f9`)
+
+Contract: `doc/04_architecture/ui/chrome_stage_correspondence.md`.
+
+**Simple has two disjoint stacks.** The phase list used throughout this
+document (tokenize→dom→style→layout→paint→tiles→present) is Stack A's
+vocabulary applied to Stack B — and Stack B is what actually renders. Its own
+`[web-phase]` traces read parse→style→layout→compose_shaping→paint.
+
+Boundaries that **do not** correspond to Blink, stated rather than forced:
+
+- **tokenize** — no token stream exists; `parse_html` goes text→`[HNode]`
+  directly. A missing stage, not a missing test.
+- **prepaint / property trees** — no such stage; clip and transform fold into
+  individual draw commands.
+- **composite** — Simple's tiles split raster work; Blink's layers give
+  scroll/animation independence. Same word, different purpose.
+- **raster** — fused into paint; only its output is observable.
+
+Good correspondence: style recalc, layout geometry, display list, present.
+Partial: DOM (flat array, not a tree).
+
+Comparison bounds, each derived: style recalc and box geometry **exact**
+(CSS-specified, no float path — a tolerance would only hide cascade bugs);
+text advance **|ΔW| ≤ N/2**, which follows from `resolved_font_advances` being
+`[i32]` (observed 0.94px against a 6.5px bound); bitmap oracle lane **no
+bound** — `text_advance = 5·glyph_scale` is a uniform advance against a
+proportional font, so family-pin plus ink coverage only.
+
+**The Chrome baselines are unreproducible here.** No Chrome binary exists on
+this host, and the capture scripts the corpus plan names are **not in the
+tree**, so the 132 baselines cannot be regenerated. No Chrome value was
+hand-written. DOM, paint-list and composite have no captured Chrome artifact;
+tokenize and prepaint have no Simple artifact. Two corpus samples
+short-circuited to Chrome's own PPM, making one assertion literally
+`expect(chrome == chrome)` — fixed.
+
 ## Acceptance
 
 The parent plan's gates apply verbatim (§14): byte-matching mutation
