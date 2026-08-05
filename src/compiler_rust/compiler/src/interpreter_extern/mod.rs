@@ -82,6 +82,7 @@ pub mod memory;
 pub mod cli;
 pub mod cargo;
 pub mod sdn;
+pub mod sdl2;
 pub mod coverage;
 pub mod cranelift;
 #[cfg(not(doctest))]
@@ -200,6 +201,23 @@ fn rt_tls_client_write_stub(_args: &[Value]) -> Result<Value, CompileError> {
 
 /// `rt_tls_client_read` — stub
 fn rt_tls_client_read_stub(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::text(String::new()))
+}
+
+/// `rt_tls_client_connect_address_with_sni_timeout` — stub
+fn rt_tls_client_connect_address_with_sni_timeout_stub(
+    _args: &[Value],
+) -> Result<Value, CompileError> {
+    Ok(Value::Int(-1))
+}
+
+/// `rt_tls_client_write_timeout` — stub
+fn rt_tls_client_write_timeout_stub(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(-1))
+}
+
+/// `rt_tls_client_read_timeout` — stub
+fn rt_tls_client_read_timeout_stub(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::text(String::new()))
 }
 
@@ -2269,8 +2287,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // TLS client stubs (interpreter mode — no real TLS)
     insert_simple!("rt_tls_client_connect", rt_tls_client_connect_stub);
     insert_simple!("rt_tls_client_connect_with_sni", rt_tls_client_connect_stub);
+    insert_simple!(
+        "rt_tls_client_connect_address_with_sni_timeout",
+        rt_tls_client_connect_address_with_sni_timeout_stub
+    );
     insert_simple!("rt_tls_client_write", rt_tls_client_write_stub);
+    insert_simple!("rt_tls_client_write_timeout", rt_tls_client_write_timeout_stub);
     insert_simple!("rt_tls_client_read", rt_tls_client_read_stub);
+    insert_simple!("rt_tls_client_read_timeout", rt_tls_client_read_timeout_stub);
     insert_simple!("rt_tls_client_close", rt_tls_client_close_stub);
     insert_simple!("rt_tls_get_protocol_version", rt_tls_get_protocol_version_stub);
     insert_simple!("rt_browser_http_job_start", rt_browser_http_job_start_stub);
@@ -2531,6 +2555,17 @@ pub(crate) fn call_extern_function_with_values(
 
     if name.starts_with("rt_rapier2d_") {
         return rapier2d_sffi::dispatch(name, &evaluated);
+    }
+
+    // The rt_sdl2_* family is implemented in C (src/runtime/runtime_sdl2.c) and
+    // was previously absent from every interpreter path, so any SDL2 call died
+    // with "unknown extern function: rt_sdl2_init". That message is
+    // indistinguishable from "SDL2 is not installed", which made host-WM
+    // dispatch report a missing capability when what was actually missing was
+    // this registration. Route the family to the same C implementation the
+    // native build links, so failures are reported at the SDL2 level instead.
+    if name.starts_with("rt_sdl2_") {
+        return sdl2::dispatch(name, &evaluated);
     }
 
     if name.starts_with("rt_host_gpu_lane_") {
