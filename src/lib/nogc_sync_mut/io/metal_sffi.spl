@@ -15,6 +15,8 @@ extern fn rt_metal_device_name(device: i64) -> text
 extern fn rt_metal_device_memory(device: i64) -> i64
 extern fn rt_metal_create_device(device: i64) -> i64
 extern fn rt_metal_destroy_device(device: i64) -> bool
+extern fn rt_metal_device_identity(device: i64) -> text
+extern fn rt_metal_device_supports_metal3(device: i64) -> bool
 
 # Memory
 extern fn rt_metal_alloc_buffer(device: i64, size: i64) -> i64
@@ -24,6 +26,12 @@ extern fn rt_metal_buffer_download(data: [u8], buffer: i64, size: i64) -> bool
 
 # Compute
 extern fn rt_metal_compile_shader(device: i64, source: text) -> i64
+extern fn rt_metal_load_library_file(device: i64, path: text) -> i64
+extern fn rt_metal_load_library_bytes(device: i64, bytes: [u8]) -> i64
+extern fn rt_metal_load_library_bytes_raw(
+    device: i64, data_ptr: i64, byte_count: i64) -> i64
+extern fn rt_array_data_ptr_u8(bytes: [u8]) -> i64
+extern fn rt_is_interpreter_runtime() -> bool
 extern fn rt_metal_destroy_shader(shader: i64) -> bool
 extern fn rt_metal_create_compute_pipeline(device: i64, shader: i64, entry: text) -> i64
 extern fn rt_metal_destroy_pipeline(pipeline: i64) -> bool
@@ -53,7 +61,6 @@ extern fn rt_metal_set_buffer(encoder: i64, buffer: i64, offset: i64, index: i64
 extern fn rt_metal_set_bytes(encoder: i64, data: [u8], length: i64, index: i64) -> bool
 extern fn rt_metal_get_last_error() -> i64
 extern fn rt_cstring_to_text(cstr: i64) -> text
-extern fn rt_array_data_ptr_u8(values: [u8]) -> i64
 extern fn rt_metal_run_compute_frame(queue: i64, pipeline: i64, buf0: i64, buf1: i64, params_ptr: i64, params_size: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64) -> i64
 
 # Deferred submission ownership. A failed wait can mean a terminal Metal error
@@ -317,6 +324,16 @@ fn metal_sffi_device_count() -> i64:
 fn metal_sffi_create_device(device_id: i64) -> i64:
     rt_metal_create_device(device_id)
 
+fn metal_sffi_device_registry_identity(device: i64) -> text:
+    if device <= 0:
+        return ""
+    rt_metal_device_identity(device)
+
+fn metal_sffi_device_supports_metal3(device: i64) -> bool:
+    if device <= 0:
+        return false
+    rt_metal_device_supports_metal3(device)
+
 fn metal_sffi_destroy_device(device: i64) -> bool:
     rt_metal_destroy_device(device)
 
@@ -328,6 +345,17 @@ fn metal_sffi_free_buffer(buffer: i64) -> bool:
 
 fn metal_sffi_compile_shader(device: i64, source: text) -> i64:
     rt_metal_compile_shader(device, source)
+
+fn metal_sffi_load_library_file(device: i64, path: text) -> i64:
+    rt_metal_load_library_file(device, path)
+
+fn metal_sffi_load_library_bytes(device: i64, bytes: [u8]) -> i64:
+    if bytes.len() == 0:
+        return 0
+    if rt_is_interpreter_runtime():
+        return rt_metal_load_library_bytes(device, bytes)
+    rt_metal_load_library_bytes_raw(
+        device, rt_array_data_ptr_u8(bytes), bytes.len().to_i64())
 
 fn metal_sffi_destroy_shader(shader: i64) -> bool:
     rt_metal_destroy_shader(shader)
@@ -382,7 +410,7 @@ fn metal_sffi_buffer_upload(buffer: i64, data: [u8], size: i64) -> bool:
 
 # reason: positional io metal_sffi API mirrors the frozen runtime ABI
 fn metal_sffi_run_compute_frame(queue: i64, pipeline: i64, buf0: i64, buf1: i64, params: [u8], gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64) -> bool:
-    rt_metal_run_compute_frame(queue, pipeline, buf0, buf1, rt_array_data_ptr_u8(params), params.len(), gx, gy, gz, bx, by, bz) == 1
+    rt_metal_run_compute_frame(queue, pipeline, buf0, buf1, params.data_ptr(), params.len(), gx, gy, gz, bx, by, bz) == 1
 
 fn metal_last_error() -> text:
     val cstr = rt_metal_get_last_error()

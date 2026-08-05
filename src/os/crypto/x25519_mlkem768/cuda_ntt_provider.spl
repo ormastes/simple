@@ -28,6 +28,7 @@ val X25519_MLKEM768_CUDA_NTT_INVERSE_ENTRY: text = "x25519_mlkem768_ntt_inverse"
 val X25519_MLKEM768_CUDA_NTT_SOURCE_SHA256: text =
     "e3201ae10f48e284d703cff81d42a02d9ba7f96e4bcc9b03872094b25a5a26aa"
 val X25519_MLKEM768_CUDA_NTT_MAX_BATCH: i64 = 65535
+val _X25519_MLKEM768_PAIRED_CAPACITY_BYTES: i64 = 6 * 256 * 4
 val _CUDA_NTT_MAX_SOURCE_BYTES: i64 = 16777216
 val _CUDA_NTT_MAX_ARTIFACT_BYTES: i64 = 268435456
 val _CUDA_NTT_ARG_BYTES: i64 = 24
@@ -108,6 +109,10 @@ class X25519MlKem768CudaNttExecutor:
             self.kernel_invocations)
 
     static fn create(kernel_path: text) -> X25519MlKem768CudaNttExecutor:
+        X25519MlKem768CudaNttExecutor.create_for_device(kernel_path, 0)
+
+    static fn create_for_device(kernel_path: text,
+            device_ordinal: i64) -> X25519MlKem768CudaNttExecutor:
         val source_size = file_size(kernel_path)
         val source_admitted = x25519_mlkem768_artifact_size_admitted(
             source_size, _CUDA_NTT_MAX_SOURCE_BYTES)
@@ -122,7 +127,8 @@ class X25519MlKem768CudaNttExecutor:
             ""
         val source_digest = if source == "": "" else: sha256_text(source)
         X25519MlKem768CudaNttExecutor(
-            session: CryptoCudaSession.create(), kernel_path: kernel_path,
+            session: CryptoCudaSession.create_for_device(device_ordinal),
+            kernel_path: kernel_path,
             source: source,
             source_digest: source_digest,
             expected_source_digest: X25519_MLKEM768_CUDA_NTT_SOURCE_SHA256,
@@ -141,6 +147,12 @@ class X25519MlKem768CudaNttExecutor:
 
     static fn create_binary(artifact_path: text,
             expected_artifact_digest: text) -> X25519MlKem768CudaNttExecutor:
+        X25519MlKem768CudaNttExecutor.create_binary_for_device(
+            artifact_path, expected_artifact_digest, 0)
+
+    static fn create_binary_for_device(artifact_path: text,
+            expected_artifact_digest: text,
+            device_ordinal: i64) -> X25519MlKem768CudaNttExecutor:
         val artifact_size = file_size(artifact_path)
         val artifact_admitted = x25519_mlkem768_artifact_size_admitted(
             artifact_size, _CUDA_NTT_MAX_ARTIFACT_BYTES)
@@ -159,7 +171,8 @@ class X25519MlKem768CudaNttExecutor:
         else:
             sha256_u8_hex(artifact_bytes)
         X25519MlKem768CudaNttExecutor(
-            session: CryptoCudaSession.create(), kernel_path: artifact_path,
+            session: CryptoCudaSession.create_for_device(device_ordinal),
+            kernel_path: artifact_path,
             source: "",
             # A compiled binary digest does not prove which source produced it.
             source_digest: "",
@@ -212,6 +225,19 @@ class X25519MlKem768CudaNttExecutor:
     me warmup() -> text:
         """Validate and load the pinned PTX/CUBIN without dispatching work."""
         self._ensure_ready()
+
+    me prepare_paired_measurement(implementation_version: text,
+            profile_version: text, configuration_digest: text) -> text:
+        """Bind, load, and allocate before a paired candidate timer starts."""
+        val cache_reason = self.bind_cache_contract(
+            implementation_version, profile_version, configuration_digest)
+        if cache_reason != "": return cache_reason
+        val ready_reason = self._ensure_ready()
+        if ready_reason != "": return ready_reason
+        if not self._ensure_capacity(
+                _X25519_MLKEM768_PAIRED_CAPACITY_BYTES):
+            return "cuda-ntt-allocation-failed"
+        ""
 
     me _ensure_ready() -> text:
         if self.closed:
@@ -350,6 +376,10 @@ class X25519MlKem768CudaNttExecutor:
 fn _cuda_ntt_execute(
         executor: X25519MlKem768CudaNttExecutor,
         polynomials: list, entry: text) -> X25519MlKem768CudaNttResult:
+    # This flag describes only the latest operation attempt.  A validation
+    # failure after an earlier successful dispatch must not retain stale fence
+    # evidence that a caller could mistake for completion of the failed work.
+    executor.fence_completed = false
     if polynomials.len() == 0 or polynomials.len() % 256 != 0:
         return _cuda_ntt_failure("cuda-ntt-input-size-invalid",
             executor.source_digest, executor.artifact_digest, false, false)

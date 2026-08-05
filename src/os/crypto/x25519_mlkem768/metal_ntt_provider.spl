@@ -26,6 +26,7 @@ val X25519_MLKEM768_METAL_NTT_MAX_BATCH: i64 = 65535
 val _METAL_NTT_MAX_SOURCE_BYTES: i64 = 16777216
 val _METAL_NTT_MAX_ARTIFACT_BYTES: i64 = 268435456
 val _GPU_LIFECYCLE_COUNTER_MAX: i64 = 9223372036854775807
+val _X25519_MLKEM768_PAIRED_CAPACITY_BYTES: i64 = 6 * 256 * 4
 
 fn _metal_i32_bytes(values: list) -> [u8]:
     var out: [u8] = []
@@ -92,6 +93,10 @@ class X25519MlKem768MetalNttExecutor:
             self.kernel_invocations)
 
     static fn create(shader_path: text) -> X25519MlKem768MetalNttExecutor:
+        X25519MlKem768MetalNttExecutor.create_for_device(shader_path, 0)
+
+    static fn create_for_device(shader_path: text,
+            device_ordinal: i64) -> X25519MlKem768MetalNttExecutor:
         val source_size = file_size(shader_path)
         val source_admitted = x25519_mlkem768_artifact_size_admitted(
             source_size, _METAL_NTT_MAX_SOURCE_BYTES)
@@ -106,7 +111,8 @@ class X25519MlKem768MetalNttExecutor:
             ""
         val source_digest = if source == "": "" else: sha256_text(source)
         X25519MlKem768MetalNttExecutor(
-            session: CryptoMetalSession.create(), source: source,
+            session: CryptoMetalSession.create_for_device(device_ordinal),
+            source: source,
             source_digest: source_digest,
             expected_source_digest: X25519_MLKEM768_METAL_NTT_SOURCE_SHA256,
             artifact_path: "", artifact_bytes: [], artifact_digest: "",
@@ -121,6 +127,12 @@ class X25519MlKem768MetalNttExecutor:
 
     static fn create_binary(artifact_path: text,
             expected_artifact_digest: text) -> X25519MlKem768MetalNttExecutor:
+        X25519MlKem768MetalNttExecutor.create_binary_for_device(
+            artifact_path, expected_artifact_digest, 0)
+
+    static fn create_binary_for_device(artifact_path: text,
+            expected_artifact_digest: text,
+            device_ordinal: i64) -> X25519MlKem768MetalNttExecutor:
         val artifact_size = file_size(artifact_path)
         val artifact_admitted = x25519_mlkem768_artifact_size_admitted(
             artifact_size, _METAL_NTT_MAX_ARTIFACT_BYTES)
@@ -139,7 +151,8 @@ class X25519MlKem768MetalNttExecutor:
         else:
             sha256_u8_hex(artifact_bytes)
         X25519MlKem768MetalNttExecutor(
-            session: CryptoMetalSession.create(), source: "",
+            session: CryptoMetalSession.create_for_device(device_ordinal),
+            source: "",
             # A metallib digest is exact binary provenance, not source proof.
             source_digest: "",
             expected_source_digest: X25519_MLKEM768_METAL_NTT_SOURCE_SHA256,
@@ -181,6 +194,17 @@ class X25519MlKem768MetalNttExecutor:
     me warmup() -> text:
         """Validate and load or compile the pinned Metal artifact without dispatch."""
         self._ensure_ready()
+
+    me prepare_paired_measurement(implementation_version: text,
+            profile_version: text, configuration_digest: text) -> text:
+        """Bind, load, and allocate before a paired candidate timer starts."""
+        val cache_reason = self.bind_cache_contract(
+            implementation_version, profile_version, configuration_digest)
+        if cache_reason != "": return cache_reason
+        val ready_reason = self._ensure_ready()
+        if ready_reason != "": return ready_reason
+        self.session.prepare_buffers(
+            _X25519_MLKEM768_PAIRED_CAPACITY_BYTES)
 
     me _terminal_session_reason() -> text:
         # Unknown completion transfers resource ownership to the session's
@@ -237,6 +261,9 @@ class X25519MlKem768MetalNttExecutor:
         ""
 
     me _execute(polynomials: list, inverse: bool) -> Result<list, text>:
+        # Completion belongs to the latest operation attempt, including a
+        # rejected attempt against an already terminal executor.
+        self.fence_completed = false
         if self.closed:
             return Err("metal-ntt-executor-closed")
         if polynomials.len() == 0 or polynomials.len() % 256 != 0:

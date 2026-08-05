@@ -19,6 +19,7 @@ use os.crypto.x25519_mlkem768.gpu_lifecycle_snapshot.{
 
 val X25519_MLKEM768_VULKAN_NTT_ENTRY: text = "main"
 val X25519_MLKEM768_VULKAN_NTT_MAX_BATCH: i64 = 65535
+val _X25519_MLKEM768_PAIRED_CAPACITY_BYTES: i64 = 6 * 256 * 4
 val _VULKAN_NTT_MAX_ARTIFACT_BYTES: i64 = 67108864
 val _GPU_LIFECYCLE_COUNTER_MAX: i64 = 9223372036854775807
 
@@ -142,6 +143,15 @@ class X25519MlKem768VulkanNttExecutor:
             expected_forward_artifact_digest: text,
             inverse_artifact_path: text,
             expected_inverse_artifact_digest: text) -> X25519MlKem768VulkanNttExecutor:
+        X25519MlKem768VulkanNttExecutor.create_binaries_for_device(
+            forward_artifact_path, expected_forward_artifact_digest,
+            inverse_artifact_path, expected_inverse_artifact_digest, 0)
+
+    static fn create_binaries_for_device(forward_artifact_path: text,
+            expected_forward_artifact_digest: text,
+            inverse_artifact_path: text,
+            expected_inverse_artifact_digest: text,
+            device_ordinal: i64) -> X25519MlKem768VulkanNttExecutor:
         val forward_size = file_size(forward_artifact_path)
         val inverse_size = file_size(inverse_artifact_path)
         val extensions_admitted = (
@@ -185,7 +195,7 @@ class X25519MlKem768VulkanNttExecutor:
         val forward_spirv = if admission_reason == "": forward_read else: []
         val inverse_spirv = if admission_reason == "": inverse_read else: []
         X25519MlKem768VulkanNttExecutor(
-            session: CryptoVulkanSession.create(),
+            session: CryptoVulkanSession.create_for_device(device_ordinal),
             forward_artifact_path: forward_artifact_path,
             forward_artifact_digest: if admission_reason == "":
                 current_forward_digest
@@ -231,6 +241,17 @@ class X25519MlKem768VulkanNttExecutor:
         """Validate and load the pinned SPIR-V pair without dispatching work."""
         self._ensure_ready()
 
+    me prepare_paired_measurement(implementation_version: text,
+            profile_version: text, configuration_digest: text) -> text:
+        """Bind, load, and allocate before a paired candidate timer starts."""
+        val cache_reason = self.bind_cache_contract(
+            implementation_version, profile_version, configuration_digest)
+        if cache_reason != "": return cache_reason
+        val ready_reason = self._ensure_ready()
+        if ready_reason != "": return ready_reason
+        self.session.prepare_buffers(
+            _X25519_MLKEM768_PAIRED_CAPACITY_BYTES, self.zeta_bytes)
+
     me _terminal_session_reason() -> text:
         # Unknown completion transfers resource ownership to the session's
         # quarantine. The executor must become terminal immediately so it
@@ -275,9 +296,11 @@ class X25519MlKem768VulkanNttExecutor:
         ""
 
     me _execute(polynomials: list, inverse: bool) -> Result<list, text>:
+        # Completion describes the latest operation attempt, including a
+        # rejected attempt against an already terminal executor.
+        self.fence_completed = false
         if self.closed:
             return Err("vulkan-ntt-executor-closed")
-        self.fence_completed = false
         if polynomials.len() == 0 or polynomials.len() % 256 != 0:
             return Err("vulkan-ntt-input-size-invalid")
         if not _vulkan_i32_values_valid(polynomials):
