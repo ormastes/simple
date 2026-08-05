@@ -1974,11 +1974,28 @@ impl MirLowering:
                     pass
         val cast_disc = rt_enum_discriminant(HirExprKind.Cast(nil_expr, nil_expr.type_))
         if expr_disc == cast_disc:
-            match expr_value.kind:
-                case HirExprKind.Cast(operand, target):
-                    return self.lower_cast_expr(operand, target, expr.span)
-                case _:
-                    pass
+            # Stage-3 blocker #9: the `case HirExprKind.Cast(operand, target)`
+            # match-arm binding decoded slot 1 (`target: HirType`) as nil, so
+            # lower_cast_expr crashed on `target.kind` ("field access on nil
+            # receiver" + ud2/SIGILL) with the variant itself correctly
+            # identified -- the disc guard above had already fired. This is the
+            # same multi-slot payload-decode defect that produced the 24
+            # garbage children under Binary/Block parents, one slot over.
+            #
+            # Decode the payload EXPLICITLY instead of relying on the arm
+            # binding: rt_enum_payload yields the boxed multi-field payload and
+            # rt_tuple_get reads a declared slot by index. This is the identical
+            # shape already proven for Index in lower_index_expr_from_hir above
+            # (and used by hand at hir_lowering/expressions.spl:1777) -- it is a
+            # decode CORRECTION, not a guard: a genuinely absent payload still
+            # reports through error_fatal rather than being silently defaulted.
+            val cast_payload = rt_enum_payload(expr_value.kind)
+            val cast_operand: HirExpr = rt_tuple_get(cast_payload, 0)
+            val cast_target: HirType = rt_tuple_get(cast_payload, 1)
+            if cast_operand == nil or cast_target == nil:
+                self.error_fatal("empty HIR Cast payload", Some(expr_value.span))
+                return self.builder.emit_const_int(0)
+            return self.lower_cast_expr(cast_operand, cast_target, expr.span)
         val call_disc = rt_enum_discriminant(HirExprKind.Call(nil_expr, [], []))
         if expr_disc == call_disc:
             match expr_value.kind:
