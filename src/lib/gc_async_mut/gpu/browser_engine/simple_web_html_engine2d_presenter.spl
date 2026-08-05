@@ -428,7 +428,7 @@ fn present_gpu_paint_readback(frame: WebGpuPaintFrame, backend_name: text, base:
             # "device_readback", ...) is never in its vocabulary, so feeding it
             # one made this flag a constant `true` for every backend that
             # constructed successfully but presented in software.
-            val gpu_backend_used = _web_gpu_readback_device_proven(out, width * height)
+            val gpu_backend_used = _web_gpu_readback_device_proven(out, width.to_i64() * height.to_i64())
             val receipt = "backend={backend_name} dispatch rect={rect_count} gradient=0 blit={blit_count} blit_pixels={blit_pixels} readback_source={out.source} gpu_backend_used={gpu_backend_used} handle={out.backend_handle} device_identity={out.device_identity} pixels={out.pixels.len()}"
             _web_gpu_paint_last_dispatch_receipt = receipt
             print "[web-gpu-paint] {receipt}"
@@ -465,9 +465,22 @@ fn present_layout_pixels_with_engine2d_readback(pixels: [u32], width: i32, heigh
             engine2d_readback(pixels, "cpu_fallback")
     readback
 
-fn _web_gpu_readback_device_proven(readback: Engine2DReadback, expected_pixels: i32) -> bool:
+# `expected_pixels` is i64 on purpose. `width * height` in i32 WRAPS, and a
+# wrapped expectation is not merely wrong, it inverts this predicate: a frame
+# of 65540x65536 wraps to 262144, so a TRUNCATED 262144-pixel readback would
+# satisfy `pixel_count == expected_pixels` and be certified device-proven,
+# while the honest full readback (pixel_count 4295229440, an i64 field) would
+# be rejected. Every caller therefore computes the product with `.to_i64()`.
+fn _web_gpu_readback_device_proven(readback: Engine2DReadback, expected_pixels: i64) -> bool:
     (readback.source == "device_readback" and readback.backend_handle > 0 and
         readback.device_identity > 0 and readback.pixel_count == expected_pixels)
+
+# Public, side-effect-free view of the provenance predicate, so a spec can pin
+# it by value instead of inferring it from a decision string. Takes the frame
+# extent rather than a pixel count so the i64 widening cannot be bypassed by a
+# caller that pre-multiplied in i32.
+pub fn web_gpu_readback_device_proven_for_frame(readback: Engine2DReadback, width: i32, height: i32) -> bool:
+    _web_gpu_readback_device_proven(readback, width.to_i64() * height.to_i64())
 
 fn _web_gpu_pixels_equal(left: [u32], right: [u32]) -> bool:
     if left.len() != right.len():
@@ -592,7 +605,7 @@ fn _sample_web_gpu_paint_choice(frame: WebGpuPaintFrame, backend_name: text, bas
         if state.profile.should_offload:
             val gpu_readback = present_gpu_paint_readback(frame, backend_name, base)
             val gpu_proven = (
-                _web_gpu_readback_device_proven(gpu_readback, frame.width * frame.height) and
+                _web_gpu_readback_device_proven(gpu_readback, frame.width.to_i64() * frame.height.to_i64()) and
                 gpu_readback.device_identity == state.device_identity
             )
             val gpu_match = _web_gpu_pixels_equal(gpu_readback.pixels, expected)
@@ -615,7 +628,7 @@ fn _sample_web_gpu_paint_choice(frame: WebGpuPaintFrame, backend_name: text, bas
         val upload_readback = present_layout_pixels_with_engine2d_readback(
             expected, frame.width, frame.height, backend_name, base)
         if (
-            _web_gpu_readback_device_proven(upload_readback, frame.width * frame.height) and
+            _web_gpu_readback_device_proven(upload_readback, frame.width.to_i64() * frame.height.to_i64()) and
             upload_readback.device_identity == state.device_identity and
             _web_gpu_pixels_equal(upload_readback.pixels, expected)
         ):
@@ -644,11 +657,11 @@ fn _sample_web_gpu_paint_choice(frame: WebGpuPaintFrame, backend_name: text, bas
     )
     state.upload_device_proven = (
         state.upload_device_proven and
-        _web_gpu_readback_device_proven(upload.readback, frame.width * frame.height)
+        _web_gpu_readback_device_proven(upload.readback, frame.width.to_i64() * frame.height.to_i64())
     )
     state.gpu_device_proven = (
         state.gpu_device_proven and
-        _web_gpu_readback_device_proven(gpu.readback, frame.width * frame.height)
+        _web_gpu_readback_device_proven(gpu.readback, frame.width.to_i64() * frame.height.to_i64())
     )
     val pair_identity = if (
         upload.readback.device_identity > 0 and
@@ -806,7 +819,7 @@ fn _present_gpu_first(html: text, width: i32, height: i32, backend_name: text) -
     # carries no device evidence — claiming `gpu-full` there fabricates
     # provenance (see the referenced provenance bug). Fail closed: no device
     # proof, no GPU claim and no `offloaded=` claim.
-    if not _web_gpu_readback_device_proven(readback, economics.frame_pixels):
+    if not _web_gpu_readback_device_proven(readback, width.to_i64() * height.to_i64()):
         val decision = (
             "gpu-first:cpu-presented:offloaded=none:cpu=full-frame" +
             ":reason=readback-not-device-proven" +
