@@ -209,8 +209,17 @@ pub fn handle_int_methods(
                 Value::Int(64 - abs_n.leading_zeros() as i64)
             }
         }
-        "chr" => {
-            // Convert to Unicode character
+        "chr" | "to_char" => {
+            // Convert to Unicode character. `to_char` is an alias for `chr`
+            // (T-07, x25519mlkem768 campaign): the LLVM native-codegen
+            // backend already treats them as synonyms
+            // (`matches!(method, "chr" | "to_char")` in
+            // codegen/llvm/{emitter,functions,functions/calls}.rs), but this
+            // interpreter dispatch — shared by the tree-walk interpreter AND
+            // the Cranelift JIT's unresolved-method fallback — only matched
+            // "chr", so `i64.to_char()` raised "method `to_char` not found
+            // on type `i64`" on both engines. See
+            // doc/08_tracking/bug/i64_to_char_missing_outside_llvm_backend_2026-08-05.md.
             if !(0..=0x10FFFF).contains(&n) {
                 Value::text(String::new())
             } else {

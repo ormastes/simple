@@ -73,21 +73,28 @@ The last two examples assert that a client **fails** when no peer is listening.
 A network spec that passes whether or not the peer exists measures nothing, so
 those examples are load-bearing, not decoration.
 
-## Known gap (not covered here, already red elsewhere)
+## Formerly known gap, now fixed (T-07, x25519mlkem768 campaign, 2026-08-05)
 
-`H1Client` cannot currently complete a request on either engine the repo runs:
-`Url.request_target()` -> `_request_target_component()` calls `i64.to_char()`
-(`net/entity/url_types.spl:44-48`), and that method is implemented only in the
-LLVM backend — the Cranelift JIT (`bin/simple run`) and the spec-runner
-interpreter (`bin/simple test`) both raise
+`H1Client` used to be unable to complete a request on either engine the repo
+runs: `Url.request_target()` -> `_request_target_component()` calls
+`i64.to_char()` (`net/entity/url_types.spl:44-48`), and that method was
+matched only by the LLVM native-codegen backend
+(`codegen/llvm/{emitter,functions,functions/calls}.rs`) — the tree-walk
+interpreter's builtin int-method dispatch
+(`compiler/src/interpreter_method/primitives.rs`, shared by `bin/simple test`
+and by the Cranelift JIT's unresolved-method runtime fallback used by
+`bin/simple run`) matched only `"chr"`, not `"to_char"`, so both raised
 `semantic: method 'to_char' not found on type 'i64' (receiver value: 47)`,
-where 47 is `/`. The pre-existing
+where 47 is `/`. Fixed by adding `"to_char"` as an alias for `"chr"` in that
+one `match` arm — see
+`doc/08_tracking/bug/i64_to_char_missing_outside_llvm_backend_2026-08-05.md`.
+The pre-existing
 `test/01_unit/lib/gc_async_mut/gpu/browser_engine/h1_client_request_spec.spl`
-is already red for exactly this reason (`11 total, 6 passed, 5 failed`).
+went from `11 total, 6 passed, 5 failed` to `11 total, 11 passed, 0 failed`.
 
-TODO: once `i64.to_char` dispatches on the JIT and the interpreter, extend
-`browser H1 module` below with a full status/body/header round trip through
-`browser_h1_get`, matching the `socket_http_get` examples.
+The `browser H1 module` describe block below now includes a full
+status/body/header round trip through `browser_h1_get`, matching the
+`socket_http_get` examples.
 
 ## Scope
 
@@ -224,6 +231,29 @@ describe "browser H1 module opens a real TCP connection to the server":
         val probe = browser_h1_connect("127.0.0.1", 1, 4000)
         assert_false(probe.ok)
         assert_true(probe.error.len() > 0)
+
+    it "completes a full request through the browser's own H1Client":
+        """The browser engine's real HTTP/1.1 client does a full round trip.
+
+        `browser_h1_get` drives `H1Client.request`, which serializes the
+        request line via `Url.request_target()` -> `i64.to_char()` (now fixed,
+        see the spec header), writes it over a real socket
+        (`rt_io_tcp_write_text`), and parses the response read back
+        (`rt_io_tcp_read`). This matches the `socket_http_get` examples above,
+        but through the browser's own client instead of a bare test socket.
+        """
+        var server = start_loopback_server("h1_full", 1)
+        assert_true(server.started)
+
+        val probe = browser_h1_get(server.addr, "/round-trip", 15000)
+        val server_log = server.server_log()
+        server.stop()
+
+        assert_equal(probe.error, "")
+        assert_true(probe.ok)
+        assert_equal(probe.status, 200)
+        assert_contains(probe.body, LOOPBACK_SERVER_BODY)
+        assert_contains(server_log, "SERVER_GOT_REQUEST_LINE GET /round-trip")
 
 describe "negative controls (no peer on the socket)":
 

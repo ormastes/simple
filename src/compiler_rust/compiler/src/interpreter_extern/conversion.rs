@@ -165,12 +165,18 @@ pub fn rt_char_from_code_fn(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_bytes_to_text_fn(args: &[Value]) -> Result<Value, CompileError> {
     match args.first() {
         Some(Value::Array(arr)) => {
+            // `[u8]` array literals (e.g. `111u8`) evaluate to
+            // `Value::UInt { .. }`, not `Value::Int`. A match on `Value::Int`
+            // alone silently filtered every element out of a `[u8]` array,
+            // so `rt_bytes_to_text([111u8, 107u8])` returned "" instead of
+            // "ok" (T-07, x25519mlkem768 campaign: this masked-empty body
+            // broke `H1Client.build_request_bytes` once the unrelated
+            // `i64.to_char()` dispatch bug was fixed and this became
+            // reachable). `Value::as_int()` already handles both `Int` and
+            // `UInt` uniformly; use it instead of a manual match.
             let bytes: Vec<u8> = arr
                 .iter()
-                .filter_map(|v| match v {
-                    Value::Int(i) => Some(*i as u8),
-                    _ => None,
-                })
+                .filter_map(|v| v.as_int().ok().map(|i| i as u8))
                 .collect();
             let text = String::from_utf8_lossy(&bytes).into_owned();
             Ok(Value::text(text))
