@@ -1189,6 +1189,119 @@ pub fn rt_exit(args: &[Value]) -> Result<Value, CompileError> {
     std::process::exit(code);
 }
 
+#[cfg(unix)]
+fn shell_command(cmd: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("/bin/sh");
+    command.arg("-c").arg(cmd);
+    command
+}
+
+#[cfg(windows)]
+fn shell_command(cmd: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("cmd");
+    command.arg("/C").arg(cmd);
+    command
+}
+
+thread_local! {
+    /// Exit code of the most recent `rt_shell_exec` call on this thread.
+    /// Backs the stateful `rt_shell_exec(cmd)` + `rt_shell_exit_code()`
+    /// two-call convention used by test_daemon adapters and the T32 hardware
+    /// helpers (the majority of real `rt_shell_exec` call sites).
+    static LAST_SHELL_EXIT_CODE: std::cell::Cell<i64> = std::cell::Cell::new(0);
+}
+
+/// Execute `cmd` through the platform shell (`sh -c` on Unix, `cmd /C` on
+/// Windows), returning captured stdout as text. The real exit code is
+/// stashed on this thread for a follow-up `rt_shell_exit_code()` call.
+///
+/// Callable from Simple as: `rt_shell_exec(cmd)`.
+///
+/// Shell metacharacters (pipes, redirection, quoting) in `cmd` are honored by
+/// design -- real callers rely on this (e.g. trailing `2>/dev/null`). As with
+/// any shell_exec-style primitive, passing unsanitized/untrusted input as
+/// `cmd` is command injection; that risk is inherent to the primitive's
+/// contract (same shape as `rt_process_run`/the pre-existing `spl_shell`
+/// runtime helper), not something introduced or "fixed" here.
+///
+/// # Returns
+/// * Text - captured stdout (stderr is discarded; see `rt_shell_exec_tuple`
+///   for a variant that also returns stderr)
+pub fn rt_shell_exec(args: &[Value]) -> Result<Value, CompileError> {
+    let cmd = match args.first() {
+        Some(Value::Str(s)) => s.as_ref().clone(),
+        _ => return Err(CompileError::runtime("rt_shell_exec: cmd must be a string")),
+    };
+
+    let mut command = shell_command(&cmd);
+    clear_simple_child_stack_env(&mut command);
+    let output = command.stdin(std::process::Stdio::null()).output();
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let exit_code = out.status.code().unwrap_or(-1) as i64;
+            LAST_SHELL_EXIT_CODE.with(|c| c.set(exit_code));
+            Ok(Value::text(stdout))
+        }
+        Err(_) => {
+            LAST_SHELL_EXIT_CODE.with(|c| c.set(-1));
+            Ok(Value::text(String::new()))
+        }
+    }
+}
+
+/// Return the exit code recorded by the most recent `rt_shell_exec` call on
+/// this thread (0 if `rt_shell_exec` has not been called yet on this
+/// thread).
+///
+/// Callable from Simple as: `rt_shell_exit_code()`.
+pub fn rt_shell_exit_code(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(LAST_SHELL_EXIT_CODE.with(|c| c.get())))
+}
+
+/// Execute `cmd` through the platform shell and capture stdout, stderr, and
+/// exit code as a single atomic tuple -- the convention declared by
+/// `src/lib/nogc_sync_mut/terminal/relay_terminal.spl` and
+/// `src/lib/nogc_sync_mut/terminal/power/{host_power,relay_power}.spl`
+/// (`extern fn rt_shell_exec_tuple(cmd: text) -> (text, text, i64)`).
+///
+/// Kept as a distinct name/registration from `rt_shell_exec` rather than
+/// overloading one dispatch-table entry with two incompatible return shapes
+/// (`text` vs a 3-tuple) -- the interpreter's extern dispatch is by bare
+/// name only, so the two conventions cannot share an entry safely.
+///
+/// # Returns
+/// * Tuple of (stdout: Text, stderr: Text, exit_code: Int)
+pub fn rt_shell_exec_tuple(args: &[Value]) -> Result<Value, CompileError> {
+    let cmd = match args.first() {
+        Some(Value::Str(s)) => s.as_ref().clone(),
+        _ => return Err(CompileError::runtime("rt_shell_exec_tuple: cmd must be a string")),
+    };
+
+    let mut command = shell_command(&cmd);
+    clear_simple_child_stack_env(&mut command);
+    let output = command.stdin(std::process::Stdio::null()).output();
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let exit_code = out.status.code().unwrap_or(-1) as i64;
+            Ok(Value::Tuple(vec![
+                Value::text(stdout),
+                Value::text(stderr),
+                Value::Int(exit_code),
+            ]))
+        }
+        Err(_) => Ok(Value::Tuple(vec![
+            Value::text(String::new()),
+            Value::text(String::new()),
+            Value::Int(-1),
+        ])),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1223,6 +1336,70 @@ mod tests {
         let result = sys_get_args(&[]);
         assert!(result.is_ok());
         // Value type depends on runtime implementation
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_exec_captures_stdout_and_exit_code_via_shell() {
+        let out = rt_shell_exec(&[Value::text("echo hello".to_string())])
+            .expect("rt_shell_exec should succeed");
+        let Value::Str(stdout) = out else {
+            panic!("expected text result, got {out:?}");
+        };
+        assert_eq!(stdout.as_str().trim(), "hello");
+        assert_eq!(
+            rt_shell_exit_code(&[]).unwrap(),
+            Value::Int(0),
+            "rt_shell_exit_code must reflect the last rt_shell_exec call"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_exec_records_nonzero_exit_code() {
+        let _ = rt_shell_exec(&[Value::text("exit 7".to_string())])
+            .expect("rt_shell_exec should succeed even on nonzero exit");
+        assert_eq!(rt_shell_exit_code(&[]).unwrap(), Value::Int(7));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_exec_honors_shell_metacharacters() {
+        // Real callers (e.g. container_adapter.spl) rely on pipes/redirection
+        // being interpreted, not passed literally to argv[1].
+        let out = rt_shell_exec(&[Value::text(
+            "echo one; echo two 1>&2 2>/dev/null".to_string(),
+        )])
+        .expect("rt_shell_exec should succeed");
+        let Value::Str(stdout) = out else {
+            panic!("expected text result, got {out:?}");
+        };
+        assert_eq!(stdout.as_str().trim(), "one");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_exec_tuple_returns_stdout_stderr_and_exit_code_separately() {
+        let result = rt_shell_exec_tuple(&[Value::text(
+            "printf out; printf err 1>&2; exit 3".to_string(),
+        )])
+        .expect("rt_shell_exec_tuple should succeed");
+        let Value::Tuple(parts) = result else {
+            panic!("expected tuple result, got {result:?}");
+        };
+        assert_eq!(parts.len(), 3);
+        let Value::Str(stdout) = &parts[0] else {
+            panic!("expected stdout string");
+        };
+        let Value::Str(stderr) = &parts[1] else {
+            panic!("expected stderr string");
+        };
+        let Value::Int(exit_code) = parts[2] else {
+            panic!("expected exit code int");
+        };
+        assert_eq!(stdout.as_str(), "out");
+        assert_eq!(stderr.as_str(), "err");
+        assert_eq!(exit_code, 3);
     }
 
     #[cfg(unix)]

@@ -1617,6 +1617,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_sha256_new", sha256::rt_sha256_new);
     insert_simple!("rt_sha256_reset", sha256::rt_sha256_reset);
     insert_simple!("rt_sha256_write", sha256::rt_sha256_write);
+    insert_simple!("rt_shell_exec", system::rt_shell_exec);
+    insert_simple!("rt_shell_exec_tuple", system::rt_shell_exec_tuple);
+    insert_simple!("rt_shell_exit_code", system::rt_shell_exit_code);
     insert_simple!("rt_simd_add_f32x4", simd::rt_simd_add_f32x4);
     insert_simple!("rt_simd_add_f32x8", simd::rt_simd_add_f32x8);
     insert_simple!("rt_simd_add_f64x4", simd::rt_simd_add_f64x4);
