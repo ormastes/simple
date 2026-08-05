@@ -6,7 +6,8 @@ use compiler.backend.gpu_portable_compute.{portable_compute_operation_metadata}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
 use std.gpu.engine2d.generated_kernel_dispatch.{generated_2d_operation_provenance}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus, StrictBackendFactory}
-use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+use std.common.ui.ui_frame_clock.{FrameClock}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 
 pub struct HostCommandMeasurement:
     command: text
@@ -120,8 +121,8 @@ fn _percentile_nearest_rank(sorted: [i64], pct: i32) -> i64:
         idx = sorted.len()
     sorted[idx - 1]
 
-fn _positive_elapsed_us(start_us: i64) -> i64:
-    val elapsed = time_now_micros() - start_us
+fn _positive_elapsed_us(start_us: i64, clock: FrameClock) -> i64:
+    val elapsed = clock.now_micros() - start_us
     if elapsed <= 0:
         return 1
     elapsed
@@ -151,7 +152,8 @@ fn _nonzero_pixels(pixels: [u32]) -> i64:
         i = i + 1
     count
 
-pub fn software_render_loop_measurement_sample(opts: SoftwareRenderLoopMeasurementOptions) -> BackendComparisonSample:
+pub fn software_render_loop_measurement_sample(opts: SoftwareRenderLoopMeasurementOptions, clock: FrameClock? = nil) -> BackendComparisonSample:
+    val ck: FrameClock = if clock == nil: default_frame_clock() else: clock
     val html = _software_render_loop_html(opts.fixture_id)
     var warmup = 0
     while warmup < opts.warmup_count:
@@ -161,9 +163,9 @@ pub fn software_render_loop_measurement_sample(opts: SoftwareRenderLoopMeasureme
     var pixels: [u32] = []
     var i = 0
     while i < opts.sample_count:
-        val start_us = time_now_micros()
+        val start_us = ck.now_micros()
         pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, opts.width.to_i32(), opts.height.to_i32(), opts.backend)
-        samples.push(_positive_elapsed_us(start_us))
+        samples.push(_positive_elapsed_us(start_us, ck))
         i = i + 1
     val sorted = _sort_i64(samples)
     val p50 = _percentile_nearest_rank(sorted, 50)

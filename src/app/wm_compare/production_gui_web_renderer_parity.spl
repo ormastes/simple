@@ -16,7 +16,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels_with_engine2d_backend,
     simple_web_resolved_engine2d_backend_name}
 use std.nogc_sync_mut.env.platform.{is_macos}
-use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+use std.common.ui.ui_frame_clock.{FrameClock}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 
 val GENERATED_GUI_RENDER_TIMING_BUDGET_US: i64 = 1000000
 val BACKEND_EXECUTED_RENDER_TIMING_BUDGET_US: i64 = 250000
@@ -126,8 +127,8 @@ var _generated_gui_widget_backend_parity_cache_values: [ProductionGuiWebParityRe
 fn exact_pixel_comparison_match() -> ExactPixelComparison:
     ExactPixelComparison(different_pixels: 0, match_percentage: 10000, max_channel_diff: 0)
 
-fn positive_elapsed_us(start_us: i64) -> i64:
-    val elapsed = time_now_micros() - start_us
+fn positive_elapsed_us(start_us: i64, clock: FrameClock) -> i64:
+    val elapsed = clock.now_micros() - start_us
     if elapsed <= 0:
         return 1
     elapsed
@@ -292,19 +293,20 @@ fn render_reduced_gui_widget_scene_metal(width: i32, height: i32) -> MetalReduce
     metal.shutdown()
     MetalReducedSceneResult(resolved_backend: "metal", pixels: pixels, gpu_frame_complete: complete, gpu_pixels: gpu_pixels, command_queue_handle: command_queue_handle)
 
-fn run_backend_executed_gui_widget_scene_parity(width: i32, height: i32) -> BackendExecutedGuiSceneReport:
-    val total_start_us = time_now_micros()
-    val software_start_us = time_now_micros()
+fn run_backend_executed_gui_widget_scene_parity(width: i32, height: i32, clock: FrameClock? = nil) -> BackendExecutedGuiSceneReport:
+    val ck: FrameClock = if clock == nil: default_frame_clock() else: clock
+    val total_start_us = ck.now_micros()
+    val software_start_us = ck.now_micros()
     val software = render_reduced_gui_widget_scene_software(width, height)
-    val software_elapsed_us = positive_elapsed_us(software_start_us)
+    val software_elapsed_us = positive_elapsed_us(software_start_us, ck)
     reset_simd_hits()
-    val cpu_start_us = time_now_micros()
+    val cpu_start_us = ck.now_micros()
     val cpu_simd = render_reduced_gui_widget_scene_cpu_simd(width, height)
-    val cpu_elapsed_us = positive_elapsed_us(cpu_start_us)
+    val cpu_elapsed_us = positive_elapsed_us(cpu_start_us, ck)
     val hits = simd_hit_counts()
-    val metal_start_us = time_now_micros()
+    val metal_start_us = ck.now_micros()
     val metal_result = render_reduced_gui_widget_scene_metal(width, height)
-    val metal_elapsed_us = positive_elapsed_us(metal_start_us)
+    val metal_elapsed_us = positive_elapsed_us(metal_start_us, ck)
     val metal_backend = metal_result.resolved_backend
     val metal_pixels = metal_result.pixels
     val metal_complete = metal_result.gpu_frame_complete
@@ -321,7 +323,7 @@ fn run_backend_executed_gui_widget_scene_parity(width: i32, height: i32) -> Back
     val backend_readback_source = if device_backend and same_frame_backend_readback: "device_readback" else: "software_reference"
     val total_hits = hits.fill_hits + hits.copy_hits + hits.alpha_hits + hits.blit_hits + hits.scroll_hits
     val rect_idx = 4 + (4 * width)
-    val total_elapsed_us = positive_elapsed_us(total_start_us)
+    val total_elapsed_us = positive_elapsed_us(total_start_us, ck)
     BackendExecutedGuiSceneReport(
         width: width,
         height: height,
@@ -376,8 +378,9 @@ fn run_backend_executed_gui_widget_scene_parity(width: i32, height: i32) -> Back
         timing_budget_reason: timing_budget_reason(total_elapsed_us, BACKEND_EXECUTED_RENDER_TIMING_BUDGET_US)
     )
 
-fn run_generated_gui_widget_backend_parity(width: i32, height: i32) -> ProductionGuiWebParityReport:
-    val total_start_us = time_now_micros()
+fn run_generated_gui_widget_backend_parity(width: i32, height: i32, clock: FrameClock? = nil) -> ProductionGuiWebParityReport:
+    val ck: FrameClock = if clock == nil: default_frame_clock() else: clock
+    val total_start_us = ck.now_micros()
     val cache_key = width.to_string() + "x" + height.to_string()
     var cache_i = 0
     val cache_count = _generated_gui_widget_backend_parity_cache_keys.len()
@@ -385,24 +388,24 @@ fn run_generated_gui_widget_backend_parity(width: i32, height: i32) -> Productio
         if _generated_gui_widget_backend_parity_cache_keys[cache_i] == cache_key:
             return _generated_gui_widget_backend_parity_cache_values[cache_i]
         cache_i = cache_i + 1
-    val html_start_us = time_now_micros()
+    val html_start_us = ck.now_micros()
     val html = generated_gui_widget_html()
-    val html_elapsed_us = positive_elapsed_us(html_start_us)
+    val html_elapsed_us = positive_elapsed_us(html_start_us, ck)
     val software_backend = simple_web_resolved_engine2d_backend_name(width, height, "software")
     val cpu_simd_backend = simple_web_resolved_engine2d_backend_name(width, height, "cpu_simd")
     val metal_backend = simple_web_resolved_engine2d_backend_name(width, height, "metal")
-    val software_start_us = time_now_micros()
+    val software_start_us = ck.now_micros()
     val software = simple_web_render_html_to_pixels_with_engine2d_backend(html, width, height, "software")
-    val software_elapsed_us = positive_elapsed_us(software_start_us)
-    val cpu_start_us = time_now_micros()
+    val software_elapsed_us = positive_elapsed_us(software_start_us, ck)
+    val cpu_start_us = ck.now_micros()
     val cpu_simd = simple_web_render_html_to_pixels_with_engine2d_backend(html, width, height, "cpu_simd")
-    val cpu_elapsed_us = positive_elapsed_us(cpu_start_us)
-    val metal_start_us = time_now_micros()
+    val cpu_elapsed_us = positive_elapsed_us(cpu_start_us, ck)
+    val metal_start_us = ck.now_micros()
     val metal = if metal_backend == software_backend: software else: simple_web_render_html_to_pixels_with_engine2d_backend(html, width, height, "metal")
-    val metal_elapsed_us = positive_elapsed_us(metal_start_us)
+    val metal_elapsed_us = positive_elapsed_us(metal_start_us, ck)
     val cpu_cmp = compare_exact_pixels(software, cpu_simd, width, height)
     val metal_cmp = if metal_backend == software_backend: exact_pixel_comparison_match() else: compare_exact_pixels(software, metal, width, height)
-    val total_elapsed_us = positive_elapsed_us(total_start_us)
+    val total_elapsed_us = positive_elapsed_us(total_start_us, ck)
     val report = ProductionGuiWebParityReport(
         width: width,
         height: height,

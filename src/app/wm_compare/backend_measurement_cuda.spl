@@ -8,7 +8,8 @@ use std.gpu.engine2d.backend_probe.{BackendProbeResult}
 use std.gpu.engine2d.generated_kernel_dispatch.{GENERATED_2D_FILL}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gc_async_mut.cuda.{cuda_available, cuda_memcpy_dtoh, CUDA_SUCCESS}
-use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+use std.common.ui.ui_frame_clock.{FrameClock}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 
 pub struct CudaDeviceMeasurementOptions:
     fixture_id: text
@@ -22,8 +23,8 @@ pub struct CudaDeviceMeasurementOptions:
     baseline_binary_size_bytes: i64
     package_size_bytes: i64
 
-fn _elapsed_us(start_us: i64) -> i64:
-    val elapsed = time_now_micros() - start_us
+fn _elapsed_us(start_us: i64, clock: FrameClock) -> i64:
+    val elapsed = clock.now_micros() - start_us
     if elapsed <= 0:
         return 1
     elapsed
@@ -119,22 +120,23 @@ fn _cuda_unavailable_sample(opts: CudaDeviceMeasurementOptions, reason: text) ->
         _cuda_probe_from_evidence("unavailable", reason)
     )
 
-pub fn cuda_device_buffer_measurement_sample(opts: CudaDeviceMeasurementOptions) -> BackendComparisonSample:
+pub fn cuda_device_buffer_measurement_sample(opts: CudaDeviceMeasurementOptions, clock: FrameClock? = nil) -> BackendComparisonSample:
+    val ck: FrameClock = if clock == nil: default_frame_clock() else: clock
     if opts.width <= 0 or opts.height <= 0:
         return _cuda_unavailable_sample(opts, "invalid CUDA measurement dimensions")
     if not cuda_available():
         return _cuda_unavailable_sample(opts, "CUDA runtime unavailable")
-    val init_start = time_now_micros()
+    val init_start = ck.now_micros()
     val session = CudaSession.create()
     val session_rc = session.init()
-    val init_us = _elapsed_us(init_start)
+    val init_us = _elapsed_us(init_start, ck)
     if session_rc != CUDA_SUCCESS:
         session.shutdown()
         return _cuda_unavailable_sample(opts, "CUDA init/device/context unavailable")
 
-    val load_start = time_now_micros()
+    val load_start = ck.now_micros()
     val module = session.load_module(cuda_2d_ptx_source())
-    val load_us = _elapsed_us(load_start)
+    val load_us = _elapsed_us(load_start, ck)
     if module == 0:
         session.shutdown()
         return _cuda_unavailable_sample(opts, "CUDA generated 2D PTX module load failed")
@@ -142,12 +144,12 @@ pub fn cuda_device_buffer_measurement_sample(opts: CudaDeviceMeasurementOptions)
 
     val count = opts.width * opts.height
     val byte_count = count * 4
-    val alloc_start = time_now_micros()
+    val alloc_start = ck.now_micros()
     val device_buffer = session.alloc(byte_count)
     val readback_ptr = measurement_alloc(byte_count)
     val val_ptr = measurement_alloc(32)
     val args_ptr = measurement_alloc(32)
-    val alloc_us = _elapsed_us(alloc_start)
+    val alloc_us = _elapsed_us(alloc_start, ck)
     if device_buffer == 0 or readback_ptr == 0 or val_ptr == 0 or args_ptr == 0:
         if device_buffer != 0:
             session.free(device_buffer)
@@ -169,9 +171,9 @@ pub fn cuda_device_buffer_measurement_sample(opts: CudaDeviceMeasurementOptions)
     measurement_ptr_write_i64(args_ptr, 16, val_ptr + 16)
     measurement_ptr_write_i64(args_ptr, 24, val_ptr + 24)
 
-    val submit_start = time_now_micros()
+    val submit_start = ck.now_micros()
     val launch_rc = session.launch_generated_2d(GENERATED_2D_FILL, opts.width, opts.height, args_ptr)
-    val submit_us = _elapsed_us(submit_start)
+    val submit_us = _elapsed_us(submit_start, ck)
     if launch_rc != CUDA_SUCCESS:
         session.free(device_buffer)
         measurement_free(readback_ptr, byte_count)
@@ -180,9 +182,9 @@ pub fn cuda_device_buffer_measurement_sample(opts: CudaDeviceMeasurementOptions)
         session.shutdown()
         return _cuda_unavailable_sample(opts, "CUDA generated fill launch failed")
 
-    val sync_start = time_now_micros()
+    val sync_start = ck.now_micros()
     val sync_rc = session.sync()
-    val sync_us = _elapsed_us(sync_start)
+    val sync_us = _elapsed_us(sync_start, ck)
     if sync_rc != CUDA_SUCCESS:
         session.free(device_buffer)
         measurement_free(readback_ptr, byte_count)
@@ -191,9 +193,9 @@ pub fn cuda_device_buffer_measurement_sample(opts: CudaDeviceMeasurementOptions)
         session.shutdown()
         return _cuda_unavailable_sample(opts, "CUDA sync failed")
 
-    val read_start = time_now_micros()
+    val read_start = ck.now_micros()
     val read_rc = cuda_memcpy_dtoh(readback_ptr, device_buffer, byte_count)
-    val read_us = _elapsed_us(read_start)
+    val read_us = _elapsed_us(read_start, ck)
     if read_rc != CUDA_SUCCESS:
         session.free(device_buffer)
         measurement_free(readback_ptr, byte_count)

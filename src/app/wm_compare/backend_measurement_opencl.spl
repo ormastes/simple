@@ -8,7 +8,8 @@ use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gpu.engine2d.generated_kernel_dispatch.{GENERATED_2D_FILL}
 use std.gpu.engine2d.opencl_session.{OpenClSession}
 use std.gpu.engine2d.sffi_opencl.{OpenClFfi}
-use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+use std.common.ui.ui_frame_clock.{FrameClock}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 
 pub struct OpenClDeviceMeasurementOptions:
     fixture_id: text
@@ -22,8 +23,8 @@ pub struct OpenClDeviceMeasurementOptions:
     baseline_binary_size_bytes: i64
     package_size_bytes: i64
 
-fn _elapsed_us(start_us: i64) -> i64:
-    val elapsed = time_now_micros() - start_us
+fn _elapsed_us(start_us: i64, clock: FrameClock) -> i64:
+    val elapsed = clock.now_micros() - start_us
     if elapsed <= 0:
         return 1
     elapsed
@@ -119,7 +120,8 @@ fn _opencl_unavailable_sample(opts: OpenClDeviceMeasurementOptions, reason: text
         _opencl_probe_from_evidence("unavailable", reason)
     )
 
-pub fn opencl_device_buffer_measurement_sample(opts: OpenClDeviceMeasurementOptions) -> BackendComparisonSample:
+pub fn opencl_device_buffer_measurement_sample(opts: OpenClDeviceMeasurementOptions, clock: FrameClock? = nil) -> BackendComparisonSample:
+    val ck: FrameClock = if clock == nil: default_frame_clock() else: clock
     if opts.width <= 0 or opts.height <= 0:
         return _opencl_unavailable_sample(opts, "invalid OpenCL measurement dimensions")
     val maybe_ffi = OpenClFfi.create_dynamic()
@@ -127,27 +129,27 @@ pub fn opencl_device_buffer_measurement_sample(opts: OpenClDeviceMeasurementOpti
         return _opencl_unavailable_sample(opts, "OpenCL ICD library unavailable")
     val ffi = maybe_ffi
     val session = OpenClSession.create_with_ffi(ffi)
-    val init_start = time_now_micros()
+    val init_start = ck.now_micros()
     val init_ev = session.init_evidence()
-    val init_us = _elapsed_us(init_start)
+    val init_us = _elapsed_us(init_start, ck)
     if not init_ev.success:
         session.shutdown()
         return _opencl_unavailable_sample(opts, init_ev.reason)
 
-    val load_start = time_now_micros()
+    val load_start = ck.now_micros()
     val load_ev = session.load_module_evidence(opencl_2d_generated_source())
-    val load_us = _elapsed_us(load_start)
+    val load_us = _elapsed_us(load_start, ck)
     if not load_ev.success:
         session.shutdown()
         return _opencl_unavailable_sample(opts, load_ev.reason)
 
     val count = opts.width * opts.height
     val byte_count = count * 4
-    val alloc_start = time_now_micros()
+    val alloc_start = ck.now_micros()
     val device_buffer = session.alloc(byte_count)
     val readback_ptr = measurement_alloc(byte_count)
     val args_ptr = measurement_alloc(32)
-    val alloc_us = _elapsed_us(alloc_start)
+    val alloc_us = _elapsed_us(alloc_start, ck)
     if device_buffer == 0 or readback_ptr == 0 or args_ptr == 0:
         if device_buffer != 0:
             session.free(device_buffer)
@@ -163,9 +165,9 @@ pub fn opencl_device_buffer_measurement_sample(opts: OpenClDeviceMeasurementOpti
     measurement_ptr_write_i64(args_ptr, 16, opts.height)
     measurement_ptr_write_i64(args_ptr, 24, opts.color)
 
-    val submit_start = time_now_micros()
+    val submit_start = ck.now_micros()
     val launch_ev = session.launch_generated_2d_evidence(GENERATED_2D_FILL, opts.width, opts.height, args_ptr)
-    val submit_us = _elapsed_us(submit_start)
+    val submit_us = _elapsed_us(submit_start, ck)
     if not launch_ev.success:
         session.free(device_buffer)
         measurement_free(readback_ptr, byte_count)
@@ -173,9 +175,9 @@ pub fn opencl_device_buffer_measurement_sample(opts: OpenClDeviceMeasurementOpti
         session.shutdown()
         return _opencl_unavailable_sample(opts, launch_ev.reason)
 
-    val sync_start = time_now_micros()
+    val sync_start = ck.now_micros()
     val sync_ev = session.synchronize_evidence()
-    val sync_us = _elapsed_us(sync_start)
+    val sync_us = _elapsed_us(sync_start, ck)
     if not sync_ev.success:
         session.free(device_buffer)
         measurement_free(readback_ptr, byte_count)
@@ -183,9 +185,9 @@ pub fn opencl_device_buffer_measurement_sample(opts: OpenClDeviceMeasurementOpti
         session.shutdown()
         return _opencl_unavailable_sample(opts, sync_ev.reason)
 
-    val read_start = time_now_micros()
+    val read_start = ck.now_micros()
     val read_ev = session.read_buffer_evidence(device_buffer, readback_ptr, byte_count, 1, 1)
-    val read_us = _elapsed_us(read_start)
+    val read_us = _elapsed_us(read_start, ck)
     if not read_ev.success:
         session.free(device_buffer)
         measurement_free(readback_ptr, byte_count)
