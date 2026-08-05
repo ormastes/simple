@@ -2,7 +2,8 @@
 
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
 use std.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.io.time_ops.{time_now_unix_micros}
+use std.common.ui.ui_frame_clock.{FrameClock}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 
 pub struct BackendCapture:
     backend_name: text
@@ -114,13 +115,14 @@ pub fn backend_capture_ok(backend_name: text, pixels: [u32],
     )
 
 pub fn capture_with_backend(html: text, width: i32, height: i32,
-                            backend_name: text) -> BackendCapture:
+                            backend_name: text, clock: FrameClock? = nil) -> BackendCapture:
     if not _valid_dimensions(width, height):
         return _failed_capture(backend_name, width, height, "invalid dimensions")
-    val start_us = time_now_unix_micros()
+    val ck: FrameClock = if clock == nil: default_frame_clock() else: clock
+    val start_us = ck.now_micros()
     var renderer = BrowserRenderer.create_with_backend(width, height, backend_name)
     val result = renderer.render_html_to_pixels(html)
-    val end_us = time_now_unix_micros()
+    val end_us = ck.now_micros()
     if not result.ok:
         return _failed_capture(renderer.backend_name(), width, height, result.error)
     var capture = backend_capture_ok(renderer.backend_name(), result.pixel_data, width, height)
@@ -136,10 +138,12 @@ pub fn capture_with_effect_engine(html: text, width: i32, height: i32,
 pub fn capture_engine2d_filled_rect(width: i32, height: i32,
                                     backend_name: text,
                                     background: u32,
-                                    rect_color: u32) -> BackendCapture:
+                                    rect_color: u32,
+                                    clock: FrameClock? = nil) -> BackendCapture:
     if not _valid_dimensions(width, height):
         return _failed_capture(backend_name, width, height, "invalid dimensions")
-    val start_us = time_now_unix_micros()
+    val ck: FrameClock = if clock == nil: default_frame_clock() else: clock
+    val start_us = ck.now_micros()
     var engine = Engine2D.create_with_backend(width, height, backend_name)
     engine.clear(background)
     val rect_w = if width > 4: width - 4 else: width
@@ -151,14 +155,15 @@ pub fn capture_engine2d_filled_rect(width: i32, height: i32,
     val pixels = engine.read_pixels()
     val selected = engine.backend_name()
     engine.shutdown()
-    val end_us = time_now_unix_micros()
+    val end_us = ck.now_micros()
     var capture = backend_capture_ok(selected, pixels, width, height)
     capture.elapsed_us = _safe_elapsed_us(start_us, end_us)
     capture
 
 pub fn benchmark_engine2d_filled_rect_capture(width: i32, height: i32,
                                               backend_name: text,
-                                              iterations: i32) -> BackendCapturePerfReport:
+                                              iterations: i32,
+                                              clock: FrameClock? = nil) -> BackendCapturePerfReport:
     if iterations <= 0:
         return BackendCapturePerfReport(
             backend_name: backend_name,
@@ -169,7 +174,8 @@ pub fn benchmark_engine2d_filled_rect_capture(width: i32, height: i32,
             success: false,
             error: "iterations must be positive"
         )
-    val start_us = time_now_unix_micros()
+    val ck: FrameClock = if clock == nil: default_frame_clock() else: clock
+    val start_us = ck.now_micros()
     var aggregate: i64 = 0
     var selected = backend_name
     var pixels_per_iteration = 0
@@ -180,13 +186,14 @@ pub fn benchmark_engine2d_filled_rect_capture(width: i32, height: i32,
             height,
             backend_name,
             0xFFFFFFFFu32,
-            0xFF2563EBu32
+            0xFF2563EBu32,
+            ck
         )
         if not capture.success:
             return BackendCapturePerfReport(
                 backend_name: capture.backend_name,
                 iterations: idx + 1,
-                total_us: _safe_elapsed_us(start_us, time_now_unix_micros()),
+                total_us: _safe_elapsed_us(start_us, ck.now_micros()),
                 pixels_per_iteration: pixels_per_iteration,
                 aggregate_checksum: aggregate,
                 success: false,
@@ -199,7 +206,7 @@ pub fn benchmark_engine2d_filled_rect_capture(width: i32, height: i32,
     BackendCapturePerfReport(
         backend_name: selected,
         iterations: iterations,
-        total_us: _safe_elapsed_us(start_us, time_now_unix_micros()),
+        total_us: _safe_elapsed_us(start_us, ck.now_micros()),
         pixels_per_iteration: pixels_per_iteration,
         aggregate_checksum: aggregate,
         success: true,

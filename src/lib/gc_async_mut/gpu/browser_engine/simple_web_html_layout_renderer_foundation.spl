@@ -9,6 +9,8 @@ use std.common.animation.timing.{parse_timing_function}
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
     html_tree_builder_flat_projection_with_limits
 }
+use std.common.ui.ui_frame_clock.{FrameClock}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 
 # Render budget + CSS quotas (hostile-page hardening)
 # ---------------------------------------------------------------------------
@@ -20,7 +22,14 @@ use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
 # framebuffer is always allocated at width*height before paint). CSS quotas
 # silently drop over-limit rules/declarations so the first, load-bearing rules
 # still win.
-extern fn rt_time_now_micros() -> i64
+#
+# _web_budget_clock is module-level (not per-call injected) because the
+# budget deadline itself (_web_render_deadline_us below) is module-level
+# state shared across every call site in this file and its sibling
+# renderer_core.spl/paint_layout.spl; threading a clock parameter through
+# that whole call graph would be a much larger change for the same effect.
+# Real callers get the identical default host clock as before this tranche.
+var _web_budget_clock: FrameClock = default_frame_clock()
 
 struct SimpleWebBackdropAdmission:
     admitted: bool
@@ -194,7 +203,7 @@ pub fn simple_web_layout_restore_render_budget_floor_ms(ms: i64):
 # Diagnostic: current clock vs armed deadline, as text (safe channel), for
 # budget-break attribution receipts.
 pub fn web_budget_now_and_deadline() -> text:
-    val now = rt_time_now_micros()
+    val now = _web_budget_clock.now_micros()
     "now_us={now} deadline_us={_web_render_deadline_us}"
 
 # True iff the most recent render tripped its wall-clock budget (a phase stopped
@@ -214,7 +223,7 @@ fn _web_budget_begin(budget_ms: i64):
     else:
         budget_ms
     val floored_ms = if ms < _web_render_budget_floor_ms: _web_render_budget_floor_ms else: ms
-    val begin_now = rt_time_now_micros()
+    val begin_now = _web_budget_clock.now_micros()
     _web_render_deadline_us = begin_now + floored_ms * 1000
     _web_render_floor_deadline_us = if _web_render_budget_floor_ms > 0: begin_now + _web_render_budget_floor_ms * 1000 else: 0
     _web_render_degraded = false
@@ -247,7 +256,7 @@ val WEB_RENDER_STAGE_MIN_SLICE_MS: i64 = 2000
 fn _web_budget_rearm(deadline_us: i64):
     if _web_render_deadline_us > 0:
         val floored = if _web_render_floor_deadline_us > deadline_us: _web_render_floor_deadline_us else: deadline_us
-        val min_slice_us = rt_time_now_micros() + WEB_RENDER_STAGE_MIN_SLICE_MS * 1000
+        val min_slice_us = _web_budget_clock.now_micros() + WEB_RENDER_STAGE_MIN_SLICE_MS * 1000
         _web_render_deadline_us = if floored > min_slice_us: floored else: min_slice_us
 
 # True once the wall-clock deadline has passed; latches the degraded flag so
@@ -257,7 +266,7 @@ fn _web_budget_rearm(deadline_us: i64):
 fn _web_budget_expired() -> bool:
     if _web_render_deadline_us <= 0:
         return false
-    if rt_time_now_micros() > _web_render_deadline_us:
+    if _web_budget_clock.now_micros() > _web_render_deadline_us:
         _web_render_degraded = true
         return true
     false

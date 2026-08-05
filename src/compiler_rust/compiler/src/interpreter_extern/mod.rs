@@ -84,8 +84,6 @@ pub mod cli;
 pub mod cargo;
 pub mod sdn;
 pub mod sdl2;
-pub mod glfw;
-pub mod sdl3;
 pub mod opengl;
 pub mod oneapi;
 pub mod vulkan;
@@ -2571,25 +2569,6 @@ pub(crate) fn call_extern_function_with_values(
     // native build links, so failures are reported at the SDL2 level instead.
     if name.starts_with("rt_sdl2_") {
         return sdl2::dispatch(name, &evaluated);
-    }
-
-    // The rt_glfw_* and rt_sdl3_* families are implemented in C
-    // (src/runtime/runtime_glfw.c, src/runtime/runtime_sdl3.c) and linked
-    // into every native build via the default runtime source list, but the
-    // interpreter runs inside a separate process image (the Rust seed) that
-    // does not compile either file in. Before this registration, any call
-    // died with "unknown extern function: rt_glfw_init" /
-    // "unknown extern function: rt_sdl3_init" — indistinguishable from "not
-    // installed". Route both families to the same C implementation the
-    // native build links, mirroring the rt_sdl2_ satellite-dlopen arm above.
-    // See doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md
-    // lane R1.
-    if name.starts_with("rt_glfw_") {
-        return glfw::dispatch(name, &evaluated);
-    }
-
-    if name.starts_with("rt_sdl3_") {
-        return sdl3::dispatch(name, &evaluated);
     }
 
     // The rt_opengl_* / rt_oneapi_* families are implemented once, in C, at

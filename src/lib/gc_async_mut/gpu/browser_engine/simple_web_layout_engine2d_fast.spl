@@ -35,7 +35,8 @@ use std.gc_async_mut.gpu.browser_engine.style.animation.{
     BrowserCssAnimationInstance
 }
 use std.gc_async_mut.io.mod_stub.{env_get}
-use std.gc_async_mut.io.time_ops.{time_now_micros}
+use std.common.ui.ui_frame_clock.{FrameClock}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dDrawIrAdvResult, Engine2dResolvedDrawIrImage,
@@ -48,6 +49,11 @@ use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 use common.ui.draw_ir.{DrawIrComposition}
 use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
+
+# Shared clock for the perf-instrumentation start/end pairs below (phase
+# timing, upload/gpu route timing). Module-level rather than per-call so it
+# is constructed once, not once per timed call.
+var _fast_clock: FrameClock = default_frame_clock()
 
 class SimpleWebLayoutEngine2DExecutionResult:
     render: Engine2dDrawIrAdvResult
@@ -337,12 +343,12 @@ fn _simple_web_layout_render_html_engine2d_execution(
             html, width, height, animation_time_ms, animation_instances,
             image_resources
         )
-    val _phase_paint_start_us = time_now_micros()
+    val _phase_paint_start_us = _fast_clock.now_micros()
     val _phase_execution = _simple_web_layout_execute_draw_ir_composition(
         layout_result.composition, layout_result.material_witness,
         width, height, backend_name, image_resources)
     if _phase_on:
-        print "[web-phase] phase=paint elapsed_ms={(time_now_micros() - _phase_paint_start_us) / 1000}"
+        print "[web-phase] phase=paint elapsed_ms={(_fast_clock.now_micros() - _phase_paint_start_us) / 1000}"
     _phase_execution
 
 fn _web_draw_ir_pixels_equal(left: [u32], right: [u32]) -> bool:
@@ -414,14 +420,14 @@ fn _web_draw_ir_state(key: text, backend_name: text) -> _WebDrawIrRouteState:
 fn _web_draw_ir_upload_route(
     composition: DrawIrComposition, width: i32, height: i32, backend_name: text
 ) -> _WebDrawIrTimedRoute:
-    val start_us = time_now_micros()
+    val start_us = _fast_clock.now_micros()
     _web_draw_ir_route_canonical_submissions = (
         _web_draw_ir_route_canonical_submissions + 1)
     val oracle = _simple_web_layout_render_draw_ir_composition(
         composition, width, height, "software", [])
     val readback = present_layout_pixels_with_engine2d_readback(
         oracle.pixels, width, height, backend_name, 0u32)
-    val end_us = time_now_micros()
+    val end_us = _fast_clock.now_micros()
     val elapsed_us = if start_us > 0 and end_us > start_us:
         end_us - start_us
     else:
@@ -434,7 +440,7 @@ fn _web_draw_ir_gpu_route(
     composition: DrawIrComposition, width: i32, height: i32,
     backend_name: text
 ) -> _WebDrawIrTimedRoute:
-    val start_us = time_now_micros()
+    val start_us = _fast_clock.now_micros()
     _web_draw_ir_route_canonical_submissions = (
         _web_draw_ir_route_canonical_submissions + 1)
     val render = _simple_web_layout_render_draw_ir_composition(
@@ -453,7 +459,7 @@ fn _web_draw_ir_gpu_route(
         device_identity: render.device_identity,
         pixel_count: render.pixels.len().to_i64(),
         checksum: render.readback_checksum)
-    val end_us = time_now_micros()
+    val end_us = _fast_clock.now_micros()
     val elapsed_us = if start_us > 0 and end_us > start_us:
         end_us - start_us
     else:
