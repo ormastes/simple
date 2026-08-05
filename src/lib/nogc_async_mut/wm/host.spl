@@ -54,12 +54,18 @@ WHERE THE REAL BACKENDS ARE
     freebsd   — no backend found. The FreeBSD VM harness boots (verified via
                 scripts/check/check-freebsd-bootstrap-qemu.shs --smoke), but a
                 2D backend for it does not exist.
-    simpleos  — real path is src/os/services/wm/ + fb_backend.spl, which does
-                NOT route through select.rs and has no HostBackendKind arm.
+    simpleos  — ROUTED, and proven on real firmware.
+                src/os/services/wm/wm_host_2d_simpleos.spl implements this trait
+                over the same `FramebufferDriver` that src/os/compositor/
+                fb_backend.spl renders through (hardware LFB writes, readback
+                via `read_pixel` -> `mmio_read32`) and over the PS/2 controller
+                for events. Reach it through `wm_host_2d_for_backed` below.
 
-  Until the dispatch lane lands, `wm_host_2d_for` returns the honest refusal for
-  every one of them. When a backend becomes reachable, its arm changes here and
-  the conformance check's refusal assertion flips — that is the tripwire.
+  `wm_host_2d_for` takes a platform name and nothing else, so it has no surface
+  to hand out, and still returns the honest refusal for every platform —
+  simpleos included. That is not a placeholder; it is the truth about a call
+  with no framebuffer in it. `wm_host_2d_for_backed` is the arm that can say
+  yes, and it says yes only to a backend that declares real backing.
 
 WHAT IS DELIBERATELY *NOT* IN THIS SEAM
 Each is a real host/OS call somewhere in the WM tree, kept out because the WM
@@ -276,8 +282,31 @@ pub fn wm_host_2d_for(platform: text) -> WmHost2dUnavailable:
     if platform == "freebsd":
         return wm_host_2d_unavailable("freebsd", "VM harness boots but no 2D backend exists for this platform")
     if platform == "simpleos":
-        return wm_host_2d_unavailable("simpleos", "real path is os/services/wm + fb_backend.spl, not yet routed through this seam")
+        return wm_host_2d_unavailable("simpleos", "backend is routed (os/services/wm/wm_host_2d_simpleos.spl) but this call supplies no framebuffer — use wm_host_2d_for_backed")
     wm_host_2d_unavailable(platform, "unknown platform")
+
+pub fn wm_host_2d_for_backed(platform: text, backed: WmHost2d, backing_kind: text) -> WmHost2d:
+    """Routing for a platform that has handed in a real, bound backend.
+
+    `backing_kind` is the backend's own statement of what is under it —
+    `"none"` when it cannot draw. A backend reporting `"none"` is refused here
+    rather than passed through, so a struct named after a platform still cannot
+    produce a green frame without something real behind it. Same honesty rule
+    as the rest of this file, applied at the routing edge.
+
+    Only `simpleos` is accepted today, because it is the only platform whose
+    backend this repo can both reach and boot (QEMU under OVMF pflash — see
+    scripts/check/check-simpleos-wm-host-seam-evidence.shs, which boots the
+    real firmware, runs `wm_host_2d_frame` unmodified over the SimpleOS
+    backend, and reads the resulting pixels back out of the framebuffer). The
+    other four fall through to the refusal `wm_host_2d_for` already gives even
+    if a caller hands one in — being handed an object is not evidence.
+    """
+    if backing_kind == "none":
+        return wm_host_2d_unavailable(platform, "backend supplied but reports no real backing")
+    if platform == "simpleos":
+        return backed
+    wm_host_2d_for(platform)
 
 # ============================================================================
 # The WM's host-facing frame step — the single consumer of the seam
