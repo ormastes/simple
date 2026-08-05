@@ -178,15 +178,30 @@ pub fn boxed_return_functions(items: &[Node]) -> HashSet<String> {
 
 /// Whether a return type must stay boxed across the interpreter bridge.
 ///
-/// Conservative on purpose: only unambiguous heap composites — tuples and
-/// `text` — are flipped to boxed. Named/handle types stay unboxed (some externs
-/// return a raw i64 handle typed as a named struct, and boxing those would
-/// regress them); scalars and floats keep their historical raw-i64 unbox
-/// (f64 remains a separate, pre-existing gap). Arrays, options, and generics are
-/// left as a future extension once each has a verified round-trip.
+/// Conservative on purpose: only unambiguous heap composites — tuples, `text`
+/// and arrays — are flipped to boxed. Named/handle types stay unboxed (some
+/// externs return a raw i64 handle typed as a named struct, and boxing those
+/// would regress them); scalars and floats keep their historical raw-i64 unbox
+/// (f64 remains a separate, pre-existing gap). Options and generics are still
+/// left as a future extension until each has a verified round-trip.
+///
+/// `Type::Array` was the missing arm behind
+/// `doc/08_tracking/bug/jit_rt_tls13_sha256_returns_empty_2026-08-05.md`:
+/// `extern fn rt_tls13_sha256(data: [u8]) -> [u8]` has no native `T`-linkage
+/// symbol (it is an interpreter-table-only extern), so the hybrid transform
+/// rewrote every call to it into `InterpCall`. With `boxed_result == false`,
+/// `compile_interp_call` applied `rt_value_raw_i64` to the marshalled heap
+/// array, stripping its tag — the caller then read `len() == 0` for EVERY
+/// input, silently, at exit 0, on the default engine of `bin/simple run`.
+/// The interpreter bridge already marshals `Value::Array` into a real runtime
+/// array (`runtime_bridge.rs::values_to_runtime_array`), so the boxed handle
+/// is exactly what compiled `rt_len`/index reads expect.
 fn return_type_keeps_boxed(ty: &Type) -> bool {
     match ty {
         Type::Tuple(_) => true,
+        // `[u8]`, `[i64]`, `[u8; 32]` — every array spelling parses to
+        // `Type::Array`, and all of them marshal to a heap runtime array.
+        Type::Array { .. } => true,
         Type::Simple(name) => matches!(name.as_str(), "text" | "str" | "string" | "String" | "Str"),
         Type::Capability { inner, .. } => return_type_keeps_boxed(inner),
         _ => false,
@@ -996,6 +1011,49 @@ mod tests {
             status.is_compilable(),
             "array literal helper should compile natively, got {:?}",
             status.reasons()
+        );
+    }
+
+    /// Regression test for
+    /// `doc/08_tracking/bug/jit_rt_tls13_sha256_returns_empty_2026-08-05.md`.
+    ///
+    /// `rt_tls13_sha256` has no native `T`-linkage symbol (it exists only in
+    /// the interpreter's extern table), so the hybrid transform rewrites every
+    /// call to it into `InterpCall`. `return_type_keeps_boxed` had no
+    /// `Type::Array` arm, so `boxed_result` was false and
+    /// `compile_interp_call` unboxed the marshalled heap array with
+    /// `rt_value_raw_i64` — the caller then read a 0-length digest for EVERY
+    /// input under the Cranelift JIT, silently, at exit 0.
+    ///
+    /// This asserts the classification directly. The end-to-end guard that
+    /// scores real FIPS 180-4 digests under each NAMED engine is
+    /// `test/01_unit/bugs/jit_tls13_sha256_fips_kat_spec.spl`.
+    #[test]
+    fn array_returning_extern_keeps_its_interp_call_result_boxed() {
+        let source = "extern fn rt_tls13_sha256(data: [u8]) -> [u8]\n\
+                      extern fn rt_text_lines(s: text) -> [text]\n\
+                      extern fn rt_scalar_handle(s: text) -> i64\n";
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("parse extern declarations");
+        let boxed = boxed_return_functions(&module.items);
+
+        assert!(
+            boxed.contains("rt_tls13_sha256"),
+            "an extern returning `[u8]` must keep its InterpCall result boxed; \
+             unboxing it to a raw i64 strips the array tag and yields len 0. \
+             boxed set was {:?}",
+            boxed
+        );
+        assert!(
+            boxed.contains("rt_text_lines"),
+            "`[text]` is the same array shape as `[u8]`; boxed set was {:?}",
+            boxed
+        );
+        assert!(
+            !boxed.contains("rt_scalar_handle"),
+            "a scalar-returning extern must keep its historical raw-i64 unbox; \
+             boxed set was {:?}",
+            boxed
         );
     }
 

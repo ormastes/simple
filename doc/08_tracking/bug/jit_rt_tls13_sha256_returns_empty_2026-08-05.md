@@ -1,6 +1,16 @@
 # `rt_tls13_sha256` returns an EMPTY digest under the Cranelift JIT — silently
 
-**Status:** OPEN
+**Status:** FIXED at source (`src/compiler_rust/compiler/src/compilability.rs`,
+`return_type_keeps_boxed()` now has a `Type::Array` arm). Independently
+reproduced: FIPS 180-4 KAT 3/3 PASS on both `jit` and `interpret` engines with
+a rebuilt seed (`cargo build`, not a full `bin/simple build bootstrap`).
+**Not yet deployed** — the live `bin/simple` is the self-hosted binary, not
+this Rust seed, so this fix only takes effect there once the self-hosted
+compiler's own bridge (`src/compiler/80.driver/compilability.spl`, which has
+no equivalent predicate today) gets the same fix or a bootstrap chain from a
+rebuilt seed. Until then, keep the length-guard fallback in
+`src/lib/common/crypto/sha256.spl:197` — do not remove it on the strength of
+this fix alone.
 **Found:** 2026-08-05
 **Severity:** HIGH — silent wrong-answer in a crypto digest channel, exit 0
 **Component:** `rt_tls13_sha256` runtime binding under the Cranelift JIT;
