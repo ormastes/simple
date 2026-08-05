@@ -71,6 +71,8 @@ use std.nogc_async_mut.posix.fd_table.{
 use std.nogc_sync_mut.ffi.pe_section_mapper.{pe_map_image}
 use std.nogc_sync_mut.ffi.guest_dlopen.{guest_dlopen, guest_dlsym}
 use std.nogc_async_mut.wm.service.{wm_port_open, wm_window_create}
+use std.nogc_async_mut.wm.host.{wm_host_2d_reference, wm_host_2d_unavailable}
+use std.common.window_protocol.geometry.{Size}
 use std.nogc_async_mut.gpu.vulkan_loader.{vulkan_loader_init}
 use std.nogc_async_mut.esync.esync.{esync_create, esync_signal, esync_wait}
 use std.nogc_async_mut.fsync.fsync.{fsync_mutex_lock, fsync_mutex_unlock}
@@ -200,13 +202,30 @@ describe "SimpleOS Wine/Proton/Steam Implementation — System Spec":
             expect(child).to_not_equal(parent)
 
     describe "AC-5: Renderer/WM — window protocol surface":
-        it "AC-5: wm_port_open returns a valid port handle":
-            val port = wm_port_open()
-            expect(port).to_be_greater_than(0)
+        it "AC-5: wm_port_open refuses honestly on this host — no WM service is actually reachable":
+            # Task #59 honesty fix: wm_port_open no longer fabricates a counter
+            # handle. It only succeeds when handed a live WmHost2d (host.spl).
+            # This system spec has no real display/WM backend on this Linux
+            # host, so the honest, correct answer is refusal (0), not a
+            # fabricated "valid" port.
+            val port = wm_port_open(wm_host_2d_unavailable("simpleos-wine-spec", "no WM host backend wired into this system spec"))
+            expect(port).to_equal(0)
 
-        it "AC-5: wm_window_create on an open port returns a window handle":
-            val port = wm_port_open()
+        it "AC-5: wm_window_create on a refused port also refuses — no window record is fabricated":
+            val port = wm_port_open(wm_host_2d_unavailable("simpleos-wine-spec", "no WM host backend wired into this system spec"))
             val win  = wm_window_create(port, "wine-test", 800, 600)
+            expect(win).to_equal(0)
+
+        it "AC-5: wm_port_open + wm_window_create succeed once genuinely backed by a live 2D seam":
+            # Proves the seam mechanism itself still works end-to-end when a
+            # real backend IS present -- the fix is honest gating, not
+            # breakage. wm_host_2d_reference is the seam's own in-memory
+            # conformance implementation (host.spl), never returned for a
+            # real platform name.
+            val host = wm_host_2d_reference(Size.wh(1920, 1080), [])
+            val port = wm_port_open(host)
+            expect(port).to_be_greater_than(0)
+            val win = wm_window_create(port, "wine-test", 800, 600)
             expect(win).to_be_greater_than(0)
 
     describe "AC-6: Dynamic Loading — dlopen/dlsym surface":

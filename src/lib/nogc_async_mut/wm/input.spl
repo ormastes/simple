@@ -1,4 +1,13 @@
-"""WM Input Protocol — keyboard/mouse/scroll event FIFO queue per window."""
+"""WM Input Protocol — keyboard/mouse/scroll event FIFO queue per window.
+
+HONESTY: this is a plain in-memory FIFO fed by wm_input_push_*; it has no
+event source of its own. `wm_input_poll` requires a `WmHost2d` (host.spl)
+and refuses when it is not genuinely live, instead of reporting a queued
+test/decoder-fed entry as a live event with no real backend behind it. See
+doc/04_architecture/ui/wm_host_platform_matrix.md cluster 2, site 9.
+"""
+
+use nogc_async_mut.wm.host.{WmHost2d, wm_host_2d_live}
 
 class WmKeyEvent:
     window_id: u64
@@ -68,7 +77,9 @@ pub fn wm_input_push_scroll(queue: WmInputQueue, event: WmScrollEvent) -> WmInpu
     entries.push(entry)
     WmInputQueue(entries: entries)
 
-pub fn wm_input_poll(queue: WmInputQueue) -> WmInputPoll:
+pub fn wm_input_poll(queue: WmInputQueue, host: WmHost2d) -> WmInputPoll:
+    if not wm_host_2d_live(host):
+        return WmInputPoll(ok: false, state: "unavailable:no-live-host", queue: queue, entry: _empty_entry())
     if queue.entries.len() == 0:
         return WmInputPoll(ok: false, state: "queue-empty", queue: queue, entry: _empty_entry())
     val entry = queue.entries[0]

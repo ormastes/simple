@@ -3,9 +3,23 @@
 # wm_port_open   — open a connection port to the WM service, returns i64 handle
 # wm_window_create — create a window record on an open port, returns i64 handle
 #
+# HONESTY: this file is an in-memory port/window registry, not a live OS
+# service connection. A port is only ever recorded when the caller passes a
+# `WmHost2d` (src/lib/nogc_async_mut/wm/host.spl) that proves itself live via
+# a real surface acquire/release round trip (`wm_host_2d_live`). On every
+# platform this repo cannot reach today (macOS/Windows/Linux/FreeBSD),
+# `wm_host_2d_for` returns `WmHost2dUnavailable`, which fails that round
+# trip, so `wm_port_open` refuses (returns 0) instead of fabricating a
+# handle. Only a caller holding the seam's own in-memory conformance
+# implementation (`WmHost2dReference`, obtained explicitly — never returned
+# for a platform name) can make this succeed. See
+# doc/04_architecture/ui/wm_host_platform_matrix.md cluster 2, sites 4-6.
+#
 # The spec expects integer handles (> 0 == valid). Internal state uses parallel arrays.
 #
 # @cover wm_service
+
+use nogc_async_mut.wm.host.{WmHost2d, wm_host_2d_live}
 
 # ============================================================================
 # Storage
@@ -24,12 +38,18 @@ var _wm_win_alive:  [bool] = []
 # Public API
 # ============================================================================
 
-pub fn wm_port_open() -> i64:
+pub fn wm_port_open(host: WmHost2d) -> i64:
     """Open a connection port to the WM service.
 
+    `host` must be a real, live 2D seam (see module docstring). Passing a
+    `WmHost2dUnavailable` — what every platform this repo cannot reach today
+    returns — yields a refusal, not a handle.
+
     Returns:
-        Positive integer port handle (> 0), or 0 on failure.
+        Positive integer port handle (> 0) when `host` is live, 0 otherwise.
     """
+    if not wm_host_2d_live(host):
+        return 0
     _wm_port_ctr = _wm_port_ctr + 1
     val id = _wm_port_ctr
     _wm_port_ids.push(id)
@@ -40,8 +60,13 @@ pub fn wm_port_open() -> i64:
 pub fn wm_window_create(port: i64, title: text, width: i64, height: i64) -> i64:
     """Create a new window on the given WM port.
 
+    Honesty: relies on `wm_port_open`'s live-host invariant — every recorded
+    port already proved a real seam round trip, so a window is only ever
+    created against a port that is genuinely backed.
+
     Args:
-        port:   Port handle from wm_port_open()
+        port:   Port handle from wm_port_open(host) — 0/invalid if the host
+                that opened it was not live.
         title:  Window title string
         width:  Width in pixels
         height: Height in pixels

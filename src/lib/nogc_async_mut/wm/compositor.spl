@@ -1,4 +1,15 @@
-"""WM Compositor ECS World — window lifecycle, framebuffer present, input, clipboard, cursor."""
+"""WM Compositor ECS World — window lifecycle, framebuffer present, input, clipboard, cursor.
+
+HONESTY: window lifecycle/geometry/cursor/clipboard bookkeeping below is
+genuine in-memory ECS state and does not claim otherwise. The two methods
+that DO claim to touch a real display (`wm_compositor_window_present`,
+`wm_compositor_poll_input`) require a `WmHost2d` (host.spl) and only report
+success when that seam actually moves bytes / is genuinely live — never on
+arithmetic or a manually test-fed queue alone. See
+doc/04_architecture/ui/wm_host_platform_matrix.md cluster 2, sites 7-8.
+"""
+
+use nogc_async_mut.wm.host.{WmHost2d, wm_host_2d_live}
 
 class WmWindowEntry:
     id: u64
@@ -113,11 +124,25 @@ pub fn wm_compositor_window_focus(compositor: WmCompositor, id: u64) -> WmOpResu
     val c = WmCompositor(windows: compositor.windows, focused_id: id, cursor_name: compositor.cursor_name, clipboard_text: compositor.clipboard_text, input_queue: compositor.input_queue, present_count: compositor.present_count, checksum: compositor.checksum)
     _ok("focused", c, entry.generation, id, compositor.checksum, compositor.cursor_name)
 
-pub fn wm_compositor_window_present(compositor: WmCompositor, id: u64, frame_seed: i64) -> WmOpResult:
+pub fn wm_compositor_window_present(compositor: WmCompositor, id: u64, frame_seed: i64, host: WmHost2d) -> WmOpResult:
+    """Present a window's frame.
+
+    Honesty: "presented" is only reported once bytes actually moved through
+    a live `WmHost2d` seam (acquire -> present -> release). `host` refusing
+    (every platform this repo cannot reach today) makes this refuse too,
+    instead of returning success on checksum arithmetic alone.
+    """
     val entry = _find_window(compositor, id)
     if entry.id == 0:
         return _err("missing-window", compositor)
     val bytes = (entry.width as i64) * (entry.height as i64) * 4
+    val surface = host.surface_acquire(entry.width, entry.height)
+    if not surface.ok:
+        return _err("unavailable:" + surface.state, compositor)
+    val presented = host.surface_present(surface.id, bytes)
+    val _released = host.surface_release(surface.id)
+    if not presented.ok:
+        return _err("unavailable:" + presented.state, compositor)
     val checksum = compositor.checksum + frame_seed + bytes + (id as i64)
     val c = WmCompositor(windows: compositor.windows, focused_id: compositor.focused_id, cursor_name: compositor.cursor_name, clipboard_text: compositor.clipboard_text, input_queue: compositor.input_queue, present_count: compositor.present_count + 1, checksum: checksum)
     _ok("presented", c, entry.generation, compositor.focused_id, checksum, compositor.cursor_name)
@@ -148,7 +173,17 @@ pub fn wm_compositor_push_input(compositor: WmCompositor, event: WmInputEvent) -
     queue.push(event)
     WmCompositor(windows: compositor.windows, focused_id: compositor.focused_id, cursor_name: compositor.cursor_name, clipboard_text: compositor.clipboard_text, input_queue: queue, present_count: compositor.present_count, checksum: compositor.checksum)
 
-pub fn wm_compositor_poll_input(compositor: WmCompositor) -> WmInputPollResult:
+pub fn wm_compositor_poll_input(compositor: WmCompositor, host: WmHost2d) -> WmInputPollResult:
+    """Drain one queued input event.
+
+    Honesty: `input_queue` is fed only by `wm_compositor_push_input` (test
+    code or a real upstream decoder), so draining it alone cannot prove a
+    real event source exists. This gates on `host` being genuinely live
+    (`wm_host_2d_live`) first, so an unbacked platform refuses even if the
+    queue happens to hold test-injected data.
+    """
+    if not wm_host_2d_live(host):
+        return WmInputPollResult(ok: false, state: "unavailable:no-live-host", compositor: compositor, event: _empty_event())
     if compositor.input_queue.len() == 0:
         return WmInputPollResult(ok: false, state: "queue-empty", compositor: compositor, event: _empty_event())
     val event = compositor.input_queue[0]

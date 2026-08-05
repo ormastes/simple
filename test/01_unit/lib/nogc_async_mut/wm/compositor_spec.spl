@@ -19,13 +19,21 @@ use nogc_async_mut.wm.compositor.{
     WmInputEvent,
     WmInputPollResult
 }
+use nogc_async_mut.wm.host.{wm_host_2d_reference, wm_host_2d_unavailable}
+use std.common.window_protocol.geometry.{Size}
+
+fn _live_host():
+    wm_host_2d_reference(Size.wh(1920, 1080), [])
+
+fn _dead_host():
+    wm_host_2d_unavailable("test-host", "no backend wired into this unit spec")
 
 fn _ready_compositor():
     val c0 = wm_compositor_new()
     val r1 = wm_compositor_window_create(c0, 1, "wine-app", "Hello", 640, 480)
     val r2 = wm_compositor_window_configure(r1.compositor, 1, 0, 0, 800, 600)
     val r3 = wm_compositor_window_focus(r2.compositor, 1)
-    val r4 = wm_compositor_window_present(r3.compositor, 1, 42)
+    val r4 = wm_compositor_window_present(r3.compositor, 1, 42, _live_host())
     val r5 = wm_compositor_set_cursor(r4.compositor, "arrow")
     val r6 = wm_compositor_set_clipboard(r5.compositor, "hello-clip")
     wm_compositor_window_destroy(r6.compositor, 1)
@@ -68,13 +76,38 @@ describe "WM Compositor ECS World":
         expect(r2.state).to_equal("focused")
         expect(r2.focused_id).to_equal(5)
 
-    it "records framebuffer present with nonzero checksum evidence":
+    it "records framebuffer present with nonzero checksum evidence when the host is live":
         val c = wm_compositor_new()
         val r1 = wm_compositor_window_create(c, 1, "wine-app", "Win", 10, 10)
-        val r2 = wm_compositor_window_present(r1.compositor, 1, 5)
+        val r2 = wm_compositor_window_present(r1.compositor, 1, 5, _live_host())
         expect(r2.ok).to_equal(true)
         expect(r2.state).to_equal("presented")
         expect(r2.checksum).to_be_greater_than(0)
+
+    it "refuses to present when the host has no reachable backend (no checksum fabricated)":
+        val c = wm_compositor_new()
+        val r1 = wm_compositor_window_create(c, 1, "wine-app", "Win", 10, 10)
+        val r2 = wm_compositor_window_present(r1.compositor, 1, 5, _dead_host())
+        expect(r2.ok).to_equal(false)
+        expect(r2.state).to_contain("unavailable:")
+
+    it "refuses to poll input when the host has no reachable backend, even with events queued":
+        val c0 = wm_compositor_new()
+        val r1 = wm_compositor_window_create(c0, 1, "wine-app", "Win", 10, 10)
+        val ev = WmInputEvent(window_id: 1, kind: "key", key_code: 65, scan_code: 30, modifiers: 0, mouse_x: 0, mouse_y: 0, button: 0, pressed: true)
+        val c1 = wm_compositor_push_input(r1.compositor, ev)
+        val poll = wm_compositor_poll_input(c1, _dead_host())
+        expect(poll.ok).to_equal(false)
+        expect(poll.state).to_contain("unavailable:")
+
+    it "drains a queued input event once the host is live":
+        val c0 = wm_compositor_new()
+        val r1 = wm_compositor_window_create(c0, 1, "wine-app", "Win", 10, 10)
+        val ev = WmInputEvent(window_id: 1, kind: "key", key_code: 65, scan_code: 30, modifiers: 0, mouse_x: 0, mouse_y: 0, button: 0, pressed: true)
+        val c1 = wm_compositor_push_input(r1.compositor, ev)
+        val poll = wm_compositor_poll_input(c1, _live_host())
+        expect(poll.ok).to_equal(true)
+        expect(poll.event.key_code).to_equal(65)
 
     it "tracks cursor and clipboard state":
         val c = wm_compositor_new()
@@ -101,7 +134,7 @@ describe "WM Compositor ECS World":
         expect(rc.state).to_equal("missing-window")
         val rf = wm_compositor_window_focus(c, 99)
         expect(rf.ok).to_equal(false)
-        val rp = wm_compositor_window_present(c, 99, 1)
+        val rp = wm_compositor_window_present(c, 99, 1, _live_host())
         expect(rp.ok).to_equal(false)
         val rd = wm_compositor_window_destroy(c, 99)
         expect(rd.ok).to_equal(false)
