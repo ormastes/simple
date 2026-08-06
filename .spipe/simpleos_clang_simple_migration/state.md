@@ -42,9 +42,15 @@ Plan of record: `doc/03_plan/os/simpleos/toolchain_selfhost_bootstrap_plan.md`.
   no longer needed for a guest-runnable image.
 - AC-3: `bin/release/x86_64-unknown-simpleos/simple` exists as a static ET_EXEC
   ELF64, entry `0x40000000`, proven by `readelf -h`.
-  **BLOCKED** — link needs ~20 `rt_*` symbols; real Simple runtime is not
-  cross-compiled for SimpleOS. See
-  `doc/08_tracking/bug/simpleos_payload_link_missing_20_rt_symbols_2026-08-06.md`.
+  **DONE (STAGING) 2026-08-06** — 2,300,776 B, ELF64 EXEC, entry 0x40000000,
+  0 INTERP segments, 0 undefined `rt_*`, sha256 `190b23528e79cfb436250cd8…`.
+  Built by the Rust bootstrap seed (sha256 `13ebe5dd22f0cabf…`) per the D1
+  route-around, so this is STAGING evidence, NOT self-hosted evidence. The
+  payload is **linked, not run** — running it is AC-6/AC-7, blocked on D6.
+  Required porting the real Simple runtime (17/20 symbols from
+  `src/runtime/runtime_native.c` incl. the whole transient-heap protocol; 3
+  written against the verified `RtCoreArray` layout; 1 libc gap). The cheap
+  "trim the import closure" alternative was tested and REFUTED.
 - AC-4: In-guest compile: fresh OVMF-pflash transcript of `clang -cc1 -triple
   x86_64-unknown-simpleos -emit-obj` producing a byte-exact object, via
   `scripts/os/scp_retrieve_over_ssh_uefi.shs`. (Historical proof exists at commit
@@ -91,6 +97,33 @@ gate scripts `scripts/os/{scp_retrieve_over_ssh_uefi,ssh_lld_link_uefi,
 ssh_simple_hello_uefi}.shs`. Fail-fast placeholders: spec rows for absent hosts
 report `blocked`, never `skip()`. Final reviewer: orchestrator (Opus) before any
 PASS claim; no lane may self-certify a goal-level AC.
+
+## Critical blocker — D6 (gates AC-4 through AC-8)
+
+`vmm_kernel_pml4_phys()` reads 0 after a demonstrably successful `vmm_init`, so
+`create_user_address_space` falls back to the legacy sentinel and EVERY FS-exec
+ring-3 spawn returns `rc=-1`. Found independently by two lanes on the same day.
+Serial proof and candidate mechanisms:
+`doc/08_tracking/bug/simpleos_vmm_kernel_pml4_phys_reads_zero_after_init_2026-08-06.md`.
+
+Nothing has executed in-guest this session. L1-L3 of the OVMF ladder pass, the
+toolchain is built and guest-shaped, and the Simple payload links — but per the
+plan's own 2026-07-14 ground truth this state is **staging-proven, not
+in-guest-run**. AC-4/5/6/7/8 are all downstream of D6.
+
+## Evidence-integrity hazard to respect in every D6 iteration
+
+`config/freestanding_fabricated_stub_baseline.sdn` has ZERO rows for entry
+`simpleos_ssh_ring3_uefi128.elf`, and `stubs.rs:299-314` only WARNS for an
+unbaselined entry (it hard-fails on new fabrications only once baselined). Lane
+B3 proved this channel silently fabricates weak no-op bodies when a source file
+fails to build, yielding a green build with dead code. Consequences:
+- Acceptance for a D6 fix must be the POSITIVE marker `[oo-nvme] persist
+  /hello.o -> OK`, never the absence of the failure line — a stubbed accessor
+  satisfies every absence condition.
+- Diff the `FABRICATED-NEW` symbol set before vs after any kernel change.
+- Baseline the entry on a known-good PRE-fix build to turn the channel into a
+  ratchet.
 
 ## Phase
 
