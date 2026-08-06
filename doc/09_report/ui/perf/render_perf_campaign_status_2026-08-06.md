@@ -29,6 +29,8 @@ reason) · **NEEDS-INVESTIGATION** (open correctness question).
 | W0 CSS O(k) dispatch | Not independently verified this pass | No standalone W0 report found in `doc/09_report` beyond the specs below | Locate/confirm a dedicated W0 report if one exists elsewhere |
 | W1 `ComputedStyleHot` split | **PARTIAL** | Spec exists: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/computed_style_hot_split_spec.spl` (mtime 2026-08-06 10:46) | Confirm pass/fail status directly — not run in this synthesis pass |
 | W2 selector index (+ invalidation sets) | **IN PROGRESS AS OF THIS DOC'S WRITING** | `src/lib/gc_async_mut/gpu/browser_engine/style_block.spl` is **modified and uncommitted** (`git status`: ` M`), mtime **11:13:29**, which is *after* both `style_block_selector_index_spec.spl` (mtime 11:02:14) and the V-lane promotion suite report (mtime 09:01:05). This is strictly newer than every other artifact checked in this pass. **Do not infer outcome** — a concurrent lane is actively editing this file right now | Re-check `git status`/spec verdict once the concurrent edit settles; this doc cannot state whether W2's invalidation-set half landed or whether a JIT-divergence bug was found, because the edit was still open at write time |
+| §7 "DrawIR deltas only for affected components" | **DONE** | Landed `src/lib/common/ui/render_opt/draw_ir_delta.spl` (commit `0502c2b7873`, "feat(ui): DrawIR deltas only for affected components"): selects only chunks whose owner has a real O0 per-node PAINT dirty mark and builds `DrawIrCommand`s for only those, reusing the prior frame's commands for everything else. Spec `test/01_unit/lib/common/ui/render_opt/draw_ir_delta_spec.spl` — 5/5 `it` blocks (proportionality + correctness sabotage tests included) | Closes the last unaddressed §7 item from the plan; none |
+| §7 "shaped-run + glyph caches" | **PARTIAL — split by risk** | `font_renderer.spl` shaped-run cache hit/miss counters (commit `c1e232a9a1e`) landed: pure instrumentation on the pre-existing (2026-07-29) shaped-run cache, stress-tested 12/12 clean on both native/JIT and interpreter, with a sabotage test correctly flipping to 0/12. A **sibling glyph-raster cache was found to hit a `[text]`-array read-back corruption bug under native/JIT and was correctly NOT landed** — see `doc/08_tracking/bug/glyph_raster_cache_text_array_index_corrupt_zero_hit_rate_2026-08-06.md` (root-caused via minimal repro, not landed) | Glyph-raster cache needs the `[text]`-array read-back bug fixed before it can land; shaped-run half is done |
 
 ## C4 — Effect verifier / @noalloc
 
@@ -42,7 +44,7 @@ reason) · **NEEDS-INVESTIGATION** (open correctness question).
 | Item | Status | Evidence | Next step |
 |---|---|---|---|
 | O0/O1 revisions, property trees | Not independently verified this pass | System specs exist: `test/03_system/check/gui_showcase_perf_source_revision_contract_spec.spl`, `gui_web_2d_source_revision_emitters_spec.spl` | Run these specs directly to confirm status; no standalone O0/O1 report found |
-| O2 paint-chunk raster accounting | **PARTIAL / risk flagged** | V-lane suite: `compositor_occlusion_rect_spec.spl` PASS 21/21, but `compositor_occlusion_spec.spl` **CANNOT EXECUTE — timed out (150s), no verdict line** — "a genuine hang/very-slow-path... needs investigation (not performed here)" | Investigate the occlusion-spec hang before counting O2 toward promotion |
+| O2 paint-chunk raster accounting | **DONE** | V-lane suite: `compositor_occlusion_rect_spec.spl` PASS 21/21. `compositor_occlusion_spec.spl` originally showed **CANNOT EXECUTE — timed out (150s)** in Runs 2-3, but this was root-caused as harness contention (test-daemon `simple_binary()` shadowing, see "Cross-cutting open items"), not a real hang — Run 4 shows it passing 10/10 (130.6s runtime) as part of the suite's overall GREEN verdict | None — set the aggregate suite's per-spec timeout to 300-600s for this spec going forward (it is legitimately slow, just not hung) |
 | O3 standalone rasterizer proof | **PARTIAL** | `test/01_unit/lib/common/ui/render_opt/paint_chunk_rasterizer_spec.spl` (2 `it` blocks) and `widget_draw_ir_glyph_run_spec.spl` PASS 4/4 per V-lane suite | Confirm rasterizer spec's own pass/fail directly |
 | Cache-key-is-scene-global-not-per-chunk finding | Not independently re-verified this pass | Referenced in task framing; no standalone doc located confirming or dating the finding in this research pass | Locate the filing doc/bug for this finding before citing it as settled |
 
@@ -77,7 +79,7 @@ reason) · **NEEDS-INVESTIGATION** (open correctness question).
 
 | Item | Status | Evidence | Next step |
 |---|---|---|---|
-| V0/V1 aggregate suite | **PARTIAL — RED verdict, correctly reported as such** | `doc/09_report/ui/perf/render_perf_v_lane_promotion_suite_2026-08-06.md`: 11 specs targeted, 9 fully green, 1 outright red (`render_pixel_bridge_spec.spl`, blocked on `rt_mmio_write_u32` — since fixed, see MMIO section below), 1 **cannot execute at all** (`compositor_occlusion_spec.spl`, 150s timeout, no verdict line, "a genuine hang... needs investigation... not performed here"). Aggregate: **148/150 examples passing across the 10 specs that produced a verdict; explicit VERDICT: RED** at the suite level | `compositor_occlusion_spec.spl`'s hang needs root-causing before V-lane can claim GREEN; re-run the suite now that the MMIO bug is fixed to see if it moves from RED toward GREEN |
+| V0/V1 aggregate suite | **DONE — GREEN verdict (Run 4)** | `doc/09_report/ui/perf/render_perf_v_lane_promotion_suite_2026-08-06.md`: Runs 2-3 were RED (`render_pixel_bridge_spec.spl` blocked on `rt_mmio_write_u32`; `compositor_occlusion_spec.spl` timing out at 150s with no verdict line). **Run 4**, a fresh re-run after the test-daemon debug-seed-binary-shadowing fix (see "Cross-cutting open items" below), reached **VERDICT: GREEN — all 11 specs, 160/160 examples, 0 failures, 0 cannot-execute**. Both blockers were root-caused as harness bugs, not product defects: the MMIO fix (below) and the daemon's `simple_binary()` fallback order (it was silently pinning to the debug-profile seed instead of trying `bin/simple` first, making slow specs blow the daemon's timeout) | None — suite is GREEN. Re-run periodically as a regression guard |
 | Promotion-criteria audit (zero production call sites for SIMD kernels) | **Referenced but not independently reconfirmed in this pass** | Same caveat as the P-lane entry above — could not locate a report explicitly stating this finding's text or confirming/denying that the dispatch-wiring lane closed it | Cross-check directly: grep production render-path source for calls into the registered SIMD kernel functions |
 
 ## MMIO extern fix (Rust-seed infrastructure, not application logic)
@@ -138,5 +140,25 @@ step left to confirm a clean GREEN.
    status report found in this pass** — this doc does not claim they are broken,
    only that their current pass/fail state was not independently reconfirmed here.
    Run them directly before relying on any DONE/PARTIAL label above for those rows.
-6. Re-run the V-lane suite (`render_perf_v_lane_promotion_suite`) now that the
-   MMIO fix has (reportedly) landed, to get an up-to-date RED/GREEN verdict.
+6. ~~Re-run the V-lane suite... to get an up-to-date RED/GREEN verdict~~ —
+   **DONE**: Run 4 (same doc) is GREEN, 160/160 examples, 0 cannot-execute.
+7. **Root cause of most "timeout"/"cannot execute" findings in this campaign
+   (including `compositor_occlusion_spec.spl`'s apparent hang) was a test-daemon
+   bug, now fixed**: `simple_binary()`'s fallback order in
+   `src/app/test_runner_new/test_runner_client.spl`,
+   `src/app/test_daemon/light_daemon.spl`, and `src/app/test_daemon/main.spl`
+   was silently pinning to the debug-profile Rust seed instead of trying
+   `bin/simple` (the deployed pure-Simple self-hosted binary) first — see
+   `doc/08_tracking/bug/test_client_debug_seed_binary_shadowing_timeout_2026-08-06.md`.
+   This retroactively explains several rows above marked NEEDS-INVESTIGATION
+   due to timeouts; re-check those rows against a re-run with the fix in place
+   before treating them as still open.
+8. **Separate, follow-up daemon-lane bug, also fixed same session**: the daemon
+   path (`run_one_via_daemon`) computed its timeout once per batch from the
+   CLI's un-bumped `run.timeout_secs` (120s default) *before* the loop over
+   requested paths, so a spec's own `slow_it` timeout floor
+   (`effective_timeout_secs`) was never consulted for the daemon lane at all —
+   a `slow_it`-marked spec on the default daemon lane could be killed by the
+   daemon's own deadline regardless of `--timeout`. Fixed in
+   `src/app/test_runner_new/test_runner_client.spl` (commit `423c0c46b83`,
+   "fix(test): daemon lane never applied the slow_it timeout floor per file").
