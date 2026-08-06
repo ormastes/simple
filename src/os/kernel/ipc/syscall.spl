@@ -65,7 +65,7 @@ use os.kernel.ipc.syscall_spm
 # that use `use os.kernel.ipc.syscall.{_handle_*}` still resolve.
 use os.kernel.ipc.syscall_ipc.{IpcSyscallState, _handle_ipc_send, _handle_ipc_recv, _handle_ipc_create_port, _handle_ipc_connect, _handle_ipc_send_state, _handle_ipc_recv_state, _handle_ipc_create_port_state, _handle_ipc_connect_state}
 use os.kernel.ipc.syscall_security_debug.{_handle_pledge, _handle_unveil, _handle_cap_grant, _handle_cap_revoke, _handle_debug_write}
-use os.kernel.ipc.syscall_process.{_handle_exit, _handle_yield, _handle_spawn, _handle_wait, _handle_fork, _handle_exec, _handle_waitpid, _handle_pipe, _handle_dup2, _handle_dup, _handle_dlopen, _handle_dlsym, _handle_dlclose, _handle_poll, _handle_fcntl, _handle_getpid, _handle_spawn_binary, dispatch_spawn_binary_direct, dispatch_spawn_binary_direct_state, SpawnBinaryDirectState}
+use os.kernel.ipc.syscall_process.{_handle_exit, _handle_exit_state, _handle_yield, _handle_yield_state, _handle_spawn, _handle_spawn_state, _handle_wait, _handle_wait_state, _handle_fork, _handle_fork_state, _handle_exec, _handle_exec_state, _handle_waitpid, _handle_waitpid_state, _handle_pipe, _handle_dup2, _handle_dup, _handle_dlopen, _handle_dlsym, _handle_dlclose, _handle_poll, _handle_fcntl, _handle_getpid, _handle_spawn_binary, _handle_spawn_binary_state, dispatch_spawn_binary_direct, dispatch_spawn_binary_direct_state, SpawnBinaryDirectState}
 use os.kernel.ipc.syscall_proc_ext.{_handle_list_tasks, _handle_get_task_info, _handle_signal, _handle_set_priority, _handle_schedule, _handle_schedctl, _handle_get_parent_pid, _handle_mount, _handle_unmount}
 use os.kernel.ipc.syscall_device.{_handle_dev_enumerate, _handle_dev_get_info, _handle_device_grant, _handle_map_bar, _handle_alloc_dma, _handle_free_dma, _handle_sync_dma_for_device, _handle_sync_dma_for_cpu, _dma_release_task_allocs}
 use os.kernel.types.device_mem_types.{pci_bdf_bus, pci_bdf_device, pci_bdf_function}
@@ -276,17 +276,44 @@ fn syscall_dispatch(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, kl
     syscall_dispatch_with(result.value, SyscallTrapDisposition.ReturnToCaller)
 
 fn syscall_handler_ipc_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klog: KernelLog) -> IpcSyscallState:
-    """Dispatch IPC syscalls and return updated scheduler/IPC state.
+    """Dispatch IPC + scheduler-mutating process syscalls and return updated
+    scheduler/IPC state.
 
-    This is the state-preserving path used by installed trap runtimes. The
-    legacy result-only syscall_handler remains for tests and call sites that
-    have not yet been converted to explicit runtime-state threading.
+    This is the state-preserving path used by installed trap runtimes.
+    Scheduler instances behave as value-copied across a plain function-call
+    boundary in this codebase (see SpawnBinaryDirectState/IpcSyscallState
+    docstrings), so any syscall whose handler mutates the scheduler (task
+    creation, exec-image replacement, fork, wait, exit, yield) must return its
+    updated Scheduler explicitly and have the caller adopt it — a plain
+    result-only call silently drops the mutation. IPC syscalls (20-23) were
+    the first converted; process syscalls (0,1,2,3,13,57,59,61) are converted
+    here too. The legacy result-only syscall_handler remains for the
+    remaining, non-scheduler-mutating (or not-yet-converted) syscall ids and
+    for existing test/call sites that have not migrated to state threading.
     """
     var sched_for_cap = scheduler
     val caller = sched_for_cap.get_current()
     fd_activate_task(caller.id)
 
     match args.id:
+        case 0:     # Exit (always allowed) — mutates ipc (cap revoke), keeps 3-field state
+            _handle_exit_state(args, scheduler, ipc)
+        case 1:     # Yield (always allowed)
+            val st = _handle_yield_state(scheduler)
+            IpcSyscallState(result: st.result, scheduler: st.scheduler, ipc: ipc)
+        case 2:     # Spawn
+            if not _cap_check(ipc, caller, CapabilityKind.ProcessSpawn):
+                return IpcSyscallState(result: SyscallResult(value: SYSCALL_EPERM), scheduler: scheduler, ipc: ipc)
+            val st = _handle_spawn_state(args, scheduler)
+            IpcSyscallState(result: st.result, scheduler: st.scheduler, ipc: ipc)
+        case 3:     # Wait (always allowed — waiting for own children)
+            val st = _handle_wait_state(args, scheduler)
+            IpcSyscallState(result: st.result, scheduler: st.scheduler, ipc: ipc)
+        case 13:    # SpawnBinary
+            if not _cap_check(ipc, caller, CapabilityKind.ProcessSpawn):
+                return IpcSyscallState(result: SyscallResult(value: SYSCALL_EPERM), scheduler: scheduler, ipc: ipc)
+            val st = _handle_spawn_binary_state(args, scheduler, klog)
+            IpcSyscallState(result: st.result, scheduler: st.scheduler, ipc: ipc)
         case 20:
             if not _cap_check(ipc, caller, CapabilityKind.IpcConnect(port_name: "")):
                 return IpcSyscallState(result: SyscallResult(value: SYSCALL_EPERM), scheduler: scheduler, ipc: ipc)
@@ -303,6 +330,19 @@ fn syscall_handler_ipc_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcMa
             if not _cap_check(ipc, caller, CapabilityKind.IpcConnect(port_name: "")):
                 return IpcSyscallState(result: SyscallResult(value: SYSCALL_EPERM), scheduler: scheduler, ipc: ipc)
             _handle_ipc_connect_state(args, scheduler, ipc)
+        case 57:    # Fork
+            if not _cap_check(ipc, caller, CapabilityKind.ProcessSpawn):
+                return IpcSyscallState(result: SyscallResult(value: SYSCALL_EPERM), scheduler: scheduler, ipc: ipc)
+            val st = _handle_fork_state(args, scheduler)
+            IpcSyscallState(result: st.result, scheduler: st.scheduler, ipc: ipc)
+        case 59:    # Exec
+            if not _cap_check(ipc, caller, CapabilityKind.FileExec(path_prefix: "")):
+                return IpcSyscallState(result: SyscallResult(value: SYSCALL_EPERM), scheduler: scheduler, ipc: ipc)
+            val st = _handle_exec_state(args, scheduler)
+            IpcSyscallState(result: st.result, scheduler: st.scheduler, ipc: ipc)
+        case 61:    # WaitPid (always allowed — own child state)
+            val st = _handle_waitpid_state(args, scheduler)
+            IpcSyscallState(result: st.result, scheduler: st.scheduler, ipc: ipc)
         case _:
             IpcSyscallState(result: syscall_handler(args, scheduler, ipc, klog), scheduler: scheduler, ipc: ipc)
 

@@ -4,13 +4,13 @@
 
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 use os.kernel.ipc.syscall.{_handle_debug_write}
-use os.kernel.ipc.syscall.{_handle_exit}
-use os.kernel.ipc.syscall.{_handle_yield}
+use os.kernel.ipc.syscall.{_handle_exit_state}
+use os.kernel.ipc.syscall.{_handle_yield_state}
 use os.kernel.ipc.syscall.{_handle_getpid}
-use os.kernel.ipc.syscall.{_handle_spawn_binary}
+use os.kernel.ipc.syscall.{_handle_spawn_binary_state}
 use os.kernel.arch.user_entry_bridge.{dispatch_enter_user_blocking}
-use os.kernel.ipc.syscall.{_handle_wait}
-use os.kernel.ipc.syscall.{_handle_spawn}
+use os.kernel.ipc.syscall.{_handle_wait_state}
+use os.kernel.ipc.syscall.{_handle_spawn_state}
 use os.kernel.ipc.syscall.{_handle_list_tasks}
 use os.kernel.ipc.syscall.{_handle_get_task_info}
 use os.kernel.ipc.syscall.{_handle_signal}
@@ -61,9 +61,14 @@ fn spl_handle_exit(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     """
     val args = _make_args(0, a0, a1, a2, a3, a4, a5)
     replay_hook_syscall_enter(0, 0, a0 as i64, a1 as i64, a2 as i64)
-    val result = _handle_exit(args, g_shim_scheduler, g_shim_ipc)
-    replay_hook_syscall_exit(0, 0, result.value)
-    result.value
+    # Scheduler/IpcManager have value semantics across this call boundary
+    # (mirrors IpcSyscallState) — adopt the returned state into the shim
+    # globals so the exit/cap-revoke mutation is not silently dropped.
+    val st = _handle_exit_state(args, g_shim_scheduler, g_shim_ipc)
+    g_shim_scheduler = st.scheduler
+    g_shim_ipc = st.ipc
+    replay_hook_syscall_exit(0, 0, st.result.value)
+    st.result.value
 
 # ===========================================================================
 # syscall 1 — yield   [IMPLEMENTED]
@@ -78,8 +83,9 @@ fn spl_handle_yield(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
     Forwards to _handle_yield() in syscall.spl.
     Syscall number 1: voluntarily yield the CPU to the scheduler.
     """
-    val result = _handle_yield(g_shim_scheduler)
-    result.value
+    val st = _handle_yield_state(g_shim_scheduler)
+    g_shim_scheduler = st.scheduler
+    st.result.value
 
 # ===========================================================================
 # syscall 2 — spawn   [IMPLEMENTED]
@@ -97,8 +103,9 @@ fn spl_handle_spawn(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
     Syscall number 2: create a new task from an in-memory image.
     """
     val args = _make_args(2, a0, a1, a2, a3, a4, a5)
-    val result = _handle_spawn(args, g_shim_scheduler)
-    result.value
+    val st = _handle_spawn_state(args, g_shim_scheduler)
+    g_shim_scheduler = st.scheduler
+    st.result.value
 
 # ===========================================================================
 # syscall 3 — wait   [IMPLEMENTED]
@@ -115,8 +122,9 @@ fn spl_handle_wait(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
     Syscall number 3: block until the specified child task exits.
     """
     val args = _make_args(3, a0, a1, a2, a3, a4, a5)
-    val result = _handle_wait(args, g_shim_scheduler)
-    result.value
+    val st = _handle_wait_state(args, g_shim_scheduler)
+    g_shim_scheduler = st.scheduler
+    st.result.value
 
 # ===========================================================================
 # syscall 4 — getpid   [IMPLEMENTED]
@@ -303,9 +311,10 @@ fn spl_handle_spawn_binary(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64)
     log_raw_println("[shim] spawn_binary enter")
     val args = _make_args(13, a0, a1, a2, a3, a4, a5)
     log_raw_println("[shim] spawn_binary args-ready")
-    val result = _handle_spawn_binary(args, g_shim_scheduler, g_shim_klog)
+    val st = _handle_spawn_binary_state(args, g_shim_scheduler, g_shim_klog)
+    g_shim_scheduler = st.scheduler
     log_raw_println("[shim] spawn_binary return")
-    result.value
+    st.result.value
 
 # ===========================================================================
 # syscall 14 — enter_user_blocking   [IMPLEMENTED]

@@ -279,8 +279,115 @@ than force a risky fix"), this is recorded here undone.
 3. ELF64 loader `read_u*_le` symbol collision — **fixed**, this update.
 4. Process-syscall state threading (spawn/exec/fork/wait/... need an
    `IpcSyscallState`-style wrapper so `Scheduler` mutations survive a
-   `syscall_handler` call) — **open**, newly documented here.
+   `syscall_handler` call) — **fixed**, this update.
 5. Decide whether a fresh `Scheduler.new()`'s id-0 `current` sentinel should
    itself become a real bootable task, or whether every exec-via-syscall spec
    must call `schedule()` after spawning before exec can target the spawned
-   task — **open**, newly documented here.
+   task — **resolved**, this update: the sentinel is intentional, not a bug.
+
+## 2026-08-06 follow-up 2: process-syscall state threading implemented, `execve_spec.spl` now 8/8
+
+Root cause 4 (process-syscall state threading) and root cause 5 (the id-0
+`current` sentinel) are the same underlying gap this doc already diagnosed,
+now fixed.
+
+### State threading: mirrored `IpcSyscallState`/`SpawnBinaryDirectState`
+
+`src/os/kernel/ipc/syscall_process.spl` gained `_handle_X_state` variants for
+every scheduler-mutating process syscall handler: `_handle_exit_state`
+(returns the existing three-field `IpcSyscallState`, since exit also mutates
+`IpcManager` via capability revocation), and `_handle_yield_state`,
+`_handle_spawn_state`, `_handle_wait_state`, `_handle_fork_state`,
+`_handle_exec_state`, `_handle_waitpid_state`, `_handle_spawn_binary_state`
+(all return a new two-field `ProcessSyscallState { result, scheduler }` —
+these don't mutate `IpcManager`, so no throwaway `IpcManager.new()` is
+constructed just to satisfy a three-field signature). Each original
+`_handle_X` name is preserved as a thin legacy wrapper (`_handle_X_state(...).
+result`) so every existing call site keeps compiling unchanged.
+
+`src/os/kernel/ipc/syscall.spl`'s `syscall_handler_ipc_state` (previously
+IPC-only, cases 20-23) now also threads cases 0 (Exit), 1 (Yield), 2 (Spawn),
+3 (Wait), 13 (SpawnBinary), 57 (Fork), 59 (Exec), 61 (WaitPid) — the same
+cap-check gates as the legacy `syscall_handler`, but wrapping the `_state`
+handler's `{result, scheduler}` into the returned `IpcSyscallState` so the
+caller can adopt the mutated `Scheduler`. `syscall_handler` itself is
+unchanged and remains the legacy, result-only path (still used by a handful
+of specs that don't need cross-call scheduler visibility).
+
+Two real dispatch paths were converted to call the new state-threading
+function instead of the legacy one, so the fix is not test-only:
+- `src/os/kernel/arch/x86_64/interrupt.spl`'s `x86_dispatch_installed_syscall`
+  (the x86_64 trap-runtime path) now routes ids 0,1,2,3,57,59,61 through
+  `syscall_handler_ipc_state` and adopts `.scheduler`/`.ipc` into
+  `g_trap_scheduler`/`g_trap_ipc`, same pattern already used for 20-23 and
+  for id 13 via `dispatch_spawn_binary_direct_state`.
+- `src/os/kernel/abi/syscall_shim_process.spl` and `syscall_shim_file.spl`
+  (the `@export("C", ...)` strong overrides that are the actual SimpleOS
+  syscall ABI surface) now call `_handle_exit_state`/`_handle_yield_state`/
+  `_handle_spawn_state`/`_handle_wait_state`/`_handle_spawn_binary_state`/
+  `_handle_fork_state`/`_handle_exec_state`/`_handle_waitpid_state` and adopt
+  the returned scheduler (and ipc, for exit) into `g_shim_scheduler`/
+  `g_shim_ipc`. These shim files could not be exercised by a `.spl` spec in
+  this repo (nothing in `test/` imports them — they're link-time C-ABI
+  overrides for the bare-metal target) so this half of the fix is verified by
+  code inspection/mechanical mirroring of the already-tested `interrupt.spl`
+  pattern, not by a green test run. `syscall_dispatch` (a third, currently
+  uncalled dispatcher in `syscall.spl` — grepped, zero callers outside
+  comments) was intentionally left on the legacy path.
+
+### Sentinel resolution: `TaskId(id: 0)` as `current` is intentional, not a bug
+
+Traced `_ambient_spawn_caller`'s own docstring (`syscall_process.spl:105`):
+*"During boot no user task is current, which yields 0 — the kernel-origin/
+root sentinel the guard and `cap_exec_gate` both use, so the boot path stays
+allowed."* `sched_new_with_topology_impl` (`scheduler_exec.spl:151`) sets
+`current: TaskId(id: 0)` for every fresh `Scheduler`, and nothing except
+`schedule()`/`schedule_on_cpu()` (`scheduler_lifecycle.spl:289-311`) ever
+moves it. This is by design — id 0 is the kernel/root sentinel, not a "task
+0" that should exist as a real `TaskControlBlock`.
+
+The right fix is therefore in the *caller*, not the scheduler: a task must be
+context-switched onto CPU via `schedule()` before it can issue a syscall
+(like exec) targeting itself as `current`. `execve_spec.spl`'s two previously
+red tests ("dispatches exec ..." and "preserves task PID across exec") now
+call `sched.schedule()` after adopting the spawned task's scheduler state and
+before calling exec, mirroring what a real boot/scheduler tick would do
+between spawn and the child's first instruction. They also re-grant the
+`FileExec`/full capability record to the new `current` task id post-schedule,
+since `_capable_ipc_for` in the spec only pre-seeds the caller's id (0) — a
+real system would grant this at spawn time, which is root cause 1, still
+open.
+
+### Verification
+
+- `test/01_unit/os/kernel/ipc/execve_spec.spl`: **8/8** (was 6/8). Sabotage-
+  verified twice: reverting either the `sched.schedule()` call or the
+  `sched = spawn_state.scheduler` adoption independently reproduces the
+  original 6/8 (the same two examples go red both times); restoring either
+  one returns to 8/8.
+- Regression sweep across every other `test/01_unit/os/kernel/ipc/*.spl` and
+  `test/01_unit/os/kernel/scheduler/*.spl` spec that references `Scheduler`:
+  no new failures attributable to this change. Pre-existing, unrelated red
+  specs confirmed by inspection (not caused by this change, since none of
+  them call the new `_state` functions or `syscall_handler_ipc_state`, and
+  the legacy `syscall_handler`'s cap-check code at each touched `case` is
+  byte-identical to before this change):
+  - `spawn_binary_argv_spec.spl`, `ipc_port_create_hosted_spec.spl`,
+    `syscall_spec.spl` — root cause 1 (dead `ipc.cap_manager` gate), as
+    predicted by this doc's own item 4 in the prior update.
+  - `syscall_sosix_share_spec.spl` — unrelated `variable
+    shared_dataset_active not found` (a different, pre-existing gap).
+  - `syscall_fd_spec.spl`, `syscall_mmap_spec.spl`, `scheduler_spec.spl` —
+    mix of missing `rt_volatile_*` interpreter externs and other pre-existing
+    issues, none touching code this change modified.
+
+### Still open
+
+- Root cause 1 (dead `ipc.cap_manager` gate) — unchanged, still the
+  dominant remaining red-test driver across this test family.
+- The C-ABI shim conversion (`syscall_shim_process.spl`/`syscall_shim_file.
+  spl`) has no direct spec coverage in this repo; a board/QEMU boot-and-exec
+  smoke test would be the real verification and was out of scope here.
+- `syscall_dispatch` in `syscall.spl` still calls the legacy `syscall_handler`
+  only and was not converted (zero callers found; low priority, but flagged
+  so it isn't silently assumed fixed).

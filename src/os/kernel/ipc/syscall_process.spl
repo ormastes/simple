@@ -38,6 +38,7 @@ use os.kernel.ipc.syscall_device.{_dma_release_task_allocs}
 use os.kernel.lifecycle.task_cleanup.{task_cleanup}
 use os.kernel.ipc.capability.{_vma_range_readable}
 use os.kernel.types.task_types.{TaskState}
+use os.kernel.ipc.syscall_ipc.{IpcSyscallState}
 use os.ai_cli_js_node_contract.{AiCliManifest, ai_cli_process_spawn_decision}
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_copy_user_byte(ptr_addr: u64) -> u8
@@ -156,14 +157,27 @@ fn _spawn_caps_for(caller: i64) -> CapabilitySet:
     val owner = if caller < 0: 0u64 else: caller.to_u64()
     spawn_authority_spawn_caps(caller, recipe, spawn_recipe_seed_parent_caps(recipe, owner))
 
-fn _handle_exit(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
-    """Exit the current task with the given exit code.
+pub struct ProcessSyscallState:
+    """Explicit two-field runtime-state threading result for process syscalls
+    that mutate the Scheduler but not the IpcManager (mirrors
+    SpawnBinaryDirectState/IpcSyscallState). Callers must adopt the returned
+    `scheduler` — Scheduler instances behave as value-copied across a plain
+    function-call boundary in this codebase, so a mutation made inside one of
+    these handlers is otherwise invisible once the call returns.
 
-    Performs full resource cleanup before marking the task as zombie:
-      1. Clean up kernel resources (notifications, IRQ routes, DMA, BAR mappings)
-      2. Revoke all capabilities granted to the task
-      3. Mark the task as zombie in the scheduler
-    """
+    Handlers that also mutate IpcManager (currently only exit, which revokes
+    capabilities) use the three-field IpcSyscallState instead; everything
+    else takes/returns only a Scheduler so a throwaway IpcManager is never
+    constructed just to satisfy a signature."""
+    result: SyscallResult
+    scheduler: Scheduler
+
+fn _handle_exit_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> IpcSyscallState:
+    """State-threading variant of _handle_exit (mirrors IpcSyscallState).
+
+    Scheduler/IpcManager instances behave as value-copied across this call
+    boundary, so callers must adopt the returned `scheduler`/`ipc` fields
+    rather than relying on in-place mutation of the instances passed in."""
     val code = args.arg0
     var sched = scheduler
     val exiting_task = sched.get_current()
@@ -187,13 +201,48 @@ fn _handle_exit(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> Sys
 
     # exit_task does not return to the caller; the scheduler picks next task.
     # This result is never seen by the exiting task.
-    SyscallResult(value: 0)
+    IpcSyscallState(result: SyscallResult(value: 0), scheduler: sched, ipc: ipc_mgr)
 
-fn _handle_yield(scheduler: Scheduler) -> SyscallResult:
-    """Yield the current task's time slice."""
+fn _handle_exit(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Exit the current task with the given exit code.
+
+    Performs full resource cleanup before marking the task as zombie:
+      1. Clean up kernel resources (notifications, IRQ routes, DMA, BAR mappings)
+      2. Revoke all capabilities granted to the task
+      3. Mark the task as zombie in the scheduler
+
+    Legacy result-only wrapper: callers that need the scheduler/ipc mutations
+    to survive the call must use _handle_exit_state instead."""
+    _handle_exit_state(args, scheduler, ipc).result
+
+fn _handle_yield_state(scheduler: Scheduler) -> ProcessSyscallState:
+    """State-threading variant of _handle_yield (mirrors ProcessSyscallState)."""
     var sched = scheduler
     sched.yield_current()
-    SyscallResult(value: 0)
+    ProcessSyscallState(result: SyscallResult(value: 0), scheduler: sched)
+
+fn _handle_yield(scheduler: Scheduler) -> SyscallResult:
+    """Yield the current task's time slice.
+
+    Legacy result-only wrapper: callers that need the scheduler's yield-state
+    mutation to survive the call must use _handle_yield_state instead."""
+    _handle_yield_state(scheduler).result
+
+fn _handle_spawn_state(args: SyscallArgs, scheduler: Scheduler) -> ProcessSyscallState:
+    """State-threading variant of _handle_spawn (mirrors ProcessSyscallState).
+
+    Callers must adopt the returned `scheduler` — the newly created task only
+    exists in the callee's copy otherwise (mirrors SpawnBinaryDirectState)."""
+    val entry = args.arg0
+    val priority = _u64_to_priority(args.arg1)
+    val caller = _ambient_spawn_caller(scheduler)
+    if _ambient_spawn_denied(caller):
+        return ProcessSyscallState(result: SyscallResult(value: 0 - EACCES as i64), scheduler: scheduler)
+    val caps = _spawn_caps_for(caller)
+
+    var sched = scheduler
+    val task_id = sched.create_task(entry, priority, caps)
+    ProcessSyscallState(result: SyscallResult(value: task_id.id.to_i64()), scheduler: sched)
 
 fn _handle_spawn(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     """Spawn a new task.
@@ -201,22 +250,24 @@ fn _handle_spawn(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     Args:
       arg0: entry point address
       arg1: priority (0=Realtime, 1=High, 2=Normal, 3=Low, 4=Idle)
-    """
-    val entry = args.arg0
-    val priority = _u64_to_priority(args.arg1)
+
+    Legacy result-only wrapper: callers that need the newly created task to
+    be visible afterward must use _handle_spawn_state instead."""
     # Boot/init compat: raw entry-address spawn still needs ambient authority
     # until the AT_SIMPLE_CSPACE injection ABI lands (P3). Route through the
     # named spawn_full() wrapper so the ambient grant stays auditable — the
     # least-authority default lives in spawn_with_cspace (cspace_spawn.spl).
     # Gate 1/3: once bootstrap is sealed only the root task keeps that wrapper.
-    val caller = _ambient_spawn_caller(scheduler)
-    if _ambient_spawn_denied(caller):
-        return SyscallResult(value: 0 - EACCES as i64)
-    val caps = _spawn_caps_for(caller)
+    _handle_spawn_state(args, scheduler).result
 
+fn _handle_wait_state(args: SyscallArgs, scheduler: Scheduler) -> ProcessSyscallState:
+    """State-threading variant of _handle_wait (mirrors ProcessSyscallState)."""
     var sched = scheduler
-    val task_id = sched.create_task(entry, priority, caps)
-    SyscallResult(value: task_id.id.to_i64())
+    val current = sched.get_current()
+    val result = sched.wait_for(current, TaskId(id: args.arg0))
+    if result == -11:
+        return ProcessSyscallState(result: SyscallResult(value: 0), scheduler: sched)
+    ProcessSyscallState(result: SyscallResult(value: result.to_i64()), scheduler: sched)
 
 fn _handle_wait(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     """Wait for a child task to exit.
@@ -226,53 +277,57 @@ fn _handle_wait(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
       arg1: options (bit 0 = WNOHANG)
 
     Blocks the caller until the child exits, then returns the exit code.
-    """
+    Legacy result-only wrapper: callers that need the scheduler's block-state
+    mutation to survive the call must use _handle_wait_state instead."""
+    _handle_wait_state(args, scheduler).result
+
+fn _handle_fork_state(args: SyscallArgs, scheduler: Scheduler) -> ProcessSyscallState:
+    """State-threading variant of _handle_fork (mirrors ProcessSyscallState).
+
+    Callers must adopt the returned `scheduler` — the cloned child task only
+    exists in the callee's copy otherwise."""
+    val _a = args
     var sched = scheduler
-    val current = sched.get_current()
-    val result = sched.wait_for(current, TaskId(id: args.arg0))
-    if result == -11:
-        return SyscallResult(value: 0)
-    SyscallResult(value: result.to_i64())
+    val parent = sched.get_current()
+    val child = sched.clone_task(parent)
+    if child.id == 0:
+        return ProcessSyscallState(result: SyscallResult(value: -12), scheduler: sched)
+    fd_prepare_fork_to_task(child.id)
+    ProcessSyscallState(result: SyscallResult(value: child.id.to_i64()), scheduler: sched)
 
 fn _handle_fork(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     """Fork the current scheduler task.
 
     Args are reserved for future clone flags. Returns the child task ID in the
     parent. Child-side register fixup to return 0 lands with context resume.
-    """
-    val _a = args
-    var sched = scheduler
-    val parent = sched.get_current()
-    val child = sched.clone_task(parent)
-    if child.id == 0:
-        return SyscallResult(value: -12)
-    fd_prepare_fork_to_task(child.id)
-    SyscallResult(value: child.id.to_i64())
+    Legacy result-only wrapper: callers that need the cloned task to be
+    visible afterward must use _handle_fork_state instead."""
+    _handle_fork_state(args, scheduler).result
 
-fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
-    """Execve process-image replacement.
+fn _handle_exec_state(args: SyscallArgs, scheduler: Scheduler) -> ProcessSyscallState:
+    """State-threading variant of _handle_exec (mirrors ProcessSyscallState).
 
-    This kernel-facing ABI accepts arg0=path pointer and arg1=path length.
-    arg2/arg3 are optional userspace char** vectors for argv/envp. Null
-    vectors preserve the legacy path where the image builder seeds argv[0]
-    from the executable path.
-    """
+    Callers must adopt the returned `scheduler` — exec_image's task-image
+    replacement only lands in the callee's copy otherwise, which is exactly
+    why a plain `syscall_handler(...)` call could never make a task spawned
+    earlier in the same sequence visible to a subsequent exec call. See
+    doc/08_tracking/bug/execve_spec_blocked_by_dead_ipc_cap_gate_and_missing_rt_copy_user_byte_2026-08-06.md."""
     if args.arg0 == 0 or args.arg1 == 0:
-        return SyscallResult(value: 0 - EINVAL as i64)
+        return ProcessSyscallState(result: SyscallResult(value: 0 - EINVAL as i64), scheduler: scheduler)
     if args.arg1 > MAX_BINARY_PATH_LEN:
-        return SyscallResult(value: 0 - ENAMETOOLONG as i64)
+        return ProcessSyscallState(result: SyscallResult(value: 0 - ENAMETOOLONG as i64), scheduler: scheduler)
     val path_bytes_result = _copy_user_bytes(args.arg0, args.arg1)
     if path_bytes_result.is_err():
-        return SyscallResult(value: 0 - EFAULT as i64)
+        return ProcessSyscallState(result: SyscallResult(value: 0 - EFAULT as i64), scheduler: scheduler)
 
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
     val grant_errno = _process_grant_errno_for_path(path, KernelLog.new(16))
     if grant_errno < 0:
-        return SyscallResult(value: grant_errno)
+        return ProcessSyscallState(result: SyscallResult(value: grant_errno), scheduler: scheduler)
     val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, CURRENT_EXEC_ARCH)
     if bytes_result.is_err():
-        return SyscallResult(value: -2)
+        return ProcessSyscallState(result: SyscallResult(value: -2), scheduler: scheduler)
 
     val argv_result = vmm_copyin_string_vector(
         args.arg2,
@@ -281,7 +336,7 @@ fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
         MAX_EXEC_TOTAL_STRING_BYTES
     )
     if not vmm_copy_string_vector_result_ok(argv_result):
-        return SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(argv_result) as i64)
+        return ProcessSyscallState(result: SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(argv_result) as i64), scheduler: scheduler)
     val envp_result = vmm_copyin_string_vector(
         args.arg3,
         MAX_EXEC_ENV_COUNT,
@@ -289,7 +344,7 @@ fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
         MAX_EXEC_TOTAL_STRING_BYTES
     )
     if not vmm_copy_string_vector_result_ok(envp_result):
-        return SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(envp_result) as i64)
+        return ProcessSyscallState(result: SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(envp_result) as i64), scheduler: scheduler)
 
     val image_result = build_user_process_image(
         path,
@@ -299,7 +354,7 @@ fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
         vmm_copy_string_vector_result_values(envp_result)
     )
     if image_result.is_err():
-        return SyscallResult(value: -8)
+        return ProcessSyscallState(result: SyscallResult(value: -8), scheduler: scheduler)
 
     var sched = scheduler
     val current = sched.get_current()
@@ -311,7 +366,19 @@ fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
             _ = vmm_teardown_user_space(old_space.unwrap())
         val exec_space = vmm_new_process_space(0, 0)
         register_task_vmspace(current.id.to_u32(), exec_space)
-    SyscallResult(value: result.to_i64())
+    ProcessSyscallState(result: SyscallResult(value: result.to_i64()), scheduler: sched)
+
+fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Execve process-image replacement.
+
+    This kernel-facing ABI accepts arg0=path pointer and arg1=path length.
+    arg2/arg3 are optional userspace char** vectors for argv/envp. Null
+    vectors preserve the legacy path where the image builder seeds argv[0]
+    from the executable path.
+
+    Legacy result-only wrapper: callers that need the exec'd task-image
+    mutation to survive the call must use _handle_exec_state instead."""
+    _handle_exec_state(args, scheduler).result
 
 fn _encode_wait_status(exit_code: i32) -> u32:
     """Encode a normal-exit status compatible with WEXITSTATUS."""
@@ -338,14 +405,8 @@ fn _validate_wait_status_ptr(ptr: u64) -> i64:
         return -14
     0
 
-fn _handle_waitpid(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
-    """Waitpid-compatible wrapper around Scheduler.wait_for.
-
-    Args:
-      arg0: pid, or u64::MAX for any child
-      arg1: status pointer, optional
-      arg2: options (bit 0 = WNOHANG)
-    """
+fn _handle_waitpid_state(args: SyscallArgs, scheduler: Scheduler) -> ProcessSyscallState:
+    """State-threading variant of _handle_waitpid (mirrors ProcessSyscallState)."""
     val any_child = args.arg0 == 0xFFFFFFFFFFFFFFFF
     val selector = if any_child: TaskId(id: 0) else: TaskId(id: args.arg0)
     val nohang = (args.arg2 & 1) != 0
@@ -353,18 +414,30 @@ fn _handle_waitpid(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     val current = sched.get_current()
     val status_ptr_check = _validate_wait_status_ptr(args.arg1)
     if status_ptr_check < 0:
-        return SyscallResult(value: status_ptr_check)
+        return ProcessSyscallState(result: SyscallResult(value: status_ptr_check), scheduler: sched)
     val result = sched.wait_for_collect(current, selector, not nohang)
     val result_error = wait_collect_result_error(result)
     if result_error == -11:
-        return SyscallResult(value: 0)
+        return ProcessSyscallState(result: SyscallResult(value: 0), scheduler: sched)
     if result_error < 0:
-        return SyscallResult(value: result_error.to_i64())
+        return ProcessSyscallState(result: SyscallResult(value: result_error.to_i64()), scheduler: sched)
 
     val status_write = _write_wait_status(args.arg1, wait_collect_result_status(result))
     if status_write < 0:
-        return SyscallResult(value: status_write)
-    SyscallResult(value: wait_collect_result_pid(result).to_i64())
+        return ProcessSyscallState(result: SyscallResult(value: status_write), scheduler: sched)
+    ProcessSyscallState(result: SyscallResult(value: wait_collect_result_pid(result).to_i64()), scheduler: sched)
+
+fn _handle_waitpid(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Waitpid-compatible wrapper around Scheduler.wait_for.
+
+    Args:
+      arg0: pid, or u64::MAX for any child
+      arg1: status pointer, optional
+      arg2: options (bit 0 = WNOHANG)
+
+    Legacy result-only wrapper: callers that need the scheduler's reap-state
+    mutation to survive the call must use _handle_waitpid_state instead."""
+    _handle_waitpid_state(args, scheduler).result
 
 fn _handle_pipe(args: SyscallArgs) -> SyscallResult:
     """Create a POSIX pipe and copy fd[0]/fd[1] to the user array."""
@@ -670,37 +743,31 @@ fn _copy_user_string_vector(vec_ptr: u64, max_count: u64) -> Result<[text], text
         i = i + 1
     Err("string vector not terminated")
 
-fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog) -> SyscallResult:
-    """Spawn a task from a binary path.
-
-    Args:
-      arg0: userspace pointer to path bytes
-      arg1: path length
-      arg2: argv packed-buffer base, or legacy priority
-      arg3: envp packed-buffer base
-      arg4: argv pointer-table offset
-      arg5: envp pointer-table offset
-    """
+fn _handle_spawn_binary_state(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog) -> ProcessSyscallState:
+    """State-threading variant of _handle_spawn_binary (mirrors
+    ProcessSyscallState and dispatch_spawn_binary_direct_state). Callers must
+    adopt the returned `scheduler` — the newly created task only exists in
+    the callee's copy otherwise."""
     log_raw_println("[syscall13] handle_spawn_binary enter")
     if args.arg0 == 0 or args.arg1 == 0:
-        return SyscallResult(value: -22)
+        return ProcessSyscallState(result: SyscallResult(value: -22), scheduler: scheduler)
     val path_bytes_result = _copy_user_bytes(args.arg0, args.arg1)
     if path_bytes_result.is_err():
-        return SyscallResult(value: -22)
+        return ProcessSyscallState(result: SyscallResult(value: -22), scheduler: scheduler)
 
     val path_bytes = path_bytes_result.unwrap()
     val path = _path_bytes_to_text(path_bytes)
     log_raw_println("[syscall13] path decoded")
     val grant_errno = _process_grant_errno_for_path(path, klog)
     if grant_errno < 0:
-        return SyscallResult(value: grant_errno)
+        return ProcessSyscallState(result: SyscallResult(value: grant_errno), scheduler: scheduler)
     val arch = CURRENT_EXEC_ARCH
     val bytes_result = resolve_executable_bytes_from_path_bytes(path_bytes, arch)
     log_raw_println("[syscall13] resolve_executable_bytes returned")
     if bytes_result.is_err():
         var log = klog
         klog_write(log, 3, 1, 0, "spawn_binary rejected unknown binary: {path}")
-        return SyscallResult(value: -2)
+        return ProcessSyscallState(result: SyscallResult(value: -2), scheduler: scheduler)
     var sp_argv: [text] = []
     var sp_envp: [text] = []
     var priority_raw = args.arg2
@@ -713,7 +780,7 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
             MAX_EXEC_TOTAL_STRING_BYTES
         )
         if not vmm_copy_string_vector_result_ok(argv_result):
-            return SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(argv_result) as i64)
+            return ProcessSyscallState(result: SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(argv_result) as i64), scheduler: scheduler)
         val envp_result = vmm_copyin_packed_string_vector(
             args.arg3,
             args.arg5,
@@ -722,7 +789,7 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
             MAX_EXEC_TOTAL_STRING_BYTES
         )
         if not vmm_copy_string_vector_result_ok(envp_result):
-            return SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(envp_result) as i64)
+            return ProcessSyscallState(result: SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(envp_result) as i64), scheduler: scheduler)
         sp_argv = vmm_copy_string_vector_result_values(argv_result)
         sp_envp = vmm_copy_string_vector_result_values(envp_result)
         priority_raw = 0
@@ -734,7 +801,7 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
         # Gate 2/3: sealed bootstrap -> non-root callers get EACCES, not caps.
         val caller = _ambient_spawn_caller(scheduler)
         if _ambient_spawn_denied(caller):
-            return SyscallResult(value: 0 - EACCES as i64)
+            return ProcessSyscallState(result: SyscallResult(value: 0 - EACCES as i64), scheduler: scheduler)
         val caps = _spawn_caps_for(caller)
         var sched = scheduler
         val before_next_task_id = g_scheduler_next_task_id
@@ -746,15 +813,30 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
         else:
             0
         if pid == 0:
-            return SyscallResult(value: -12)
+            return ProcessSyscallState(result: SyscallResult(value: -12), scheduler: sched)
 
         val child_space = vmm_new_process_space(0, 0)
         register_task_vmspace(pid.to_u32(), child_space)
-        return SyscallResult(value: pid.to_i64())
+        return ProcessSyscallState(result: SyscallResult(value: pid.to_i64()), scheduler: sched)
 
     var log = klog
     klog_write(log, 3, 1, 0, "spawn_binary rejected invalid executable: {path}")
-    SyscallResult(value: -8)
+    ProcessSyscallState(result: SyscallResult(value: -8), scheduler: scheduler)
+
+fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog) -> SyscallResult:
+    """Spawn a task from a binary path.
+
+    Args:
+      arg0: userspace pointer to path bytes
+      arg1: path length
+      arg2: argv packed-buffer base, or legacy priority
+      arg3: envp packed-buffer base
+      arg4: argv pointer-table offset
+      arg5: envp pointer-table offset
+
+    Legacy result-only wrapper: callers that need the newly created task to
+    be visible afterward must use _handle_spawn_binary_state instead."""
+    _handle_spawn_binary_state(args, scheduler, klog).result
 
 fn _direct_spawn_app_id_path(app_id: u64) -> text?:
     val canonical = _legacy_app_id_to_name(app_id)
