@@ -1203,4 +1203,48 @@ if [ "$FONT_PTX_PATH" != "" ]; then
     echo "cuda_generated_2d_readback_font_ptx=$FONT_PTX_PATH"
 fi
 cat "$BUILD_DIR/evidence.env"
-[ "$(cuda_env_value cuda_generated_2d_readback_status)" = "pass" ]
+
+# VERDICT LINE — read this, not the two *_pixels_sha256 fields.
+#
+# On 2026-08-06 a guard-wiring audit read
+#   cuda_generated_2d_readback_expected_pixels_sha256=4c069b7d...
+#   cuda_generated_2d_readback_actual_pixels_sha256=2a08b7e9...
+# side by side, saw them DISAGREE next to exit 0, and filed the gate as
+# fail-open. It is not. Those two fields are PROVENANCE hashes of two distinct
+# artifact FILES (expected-u32.json, actual-u32.json). The files are
+# byte-identical except for their `producer` key
+# ("cuda-generated-2d-expected" vs "cuda-generated-2d-readback"), so their
+# whole-file digests differ BY DESIGN and comparing them would be wrong.
+#
+# The pixel comparison that actually gates this script is done element-wise in
+# the CUDA driver helper and reported as expected_checksum / actual_checksum /
+# mismatch_count, which cuda_validate_evidence downgrades status=pass on. The
+# verdict line below states those numbers so the two sha256 fields cannot be
+# mistaken for the comparison again.
+verdict_status="$(cuda_env_value cuda_generated_2d_readback_status)"
+verdict_count="$(cuda_env_value cuda_generated_2d_readback_count)"
+verdict_mismatch="$(cuda_env_value cuda_generated_2d_readback_mismatch_count)"
+verdict_reason="$(cuda_env_value cuda_generated_2d_readback_reason)"
+if [ "$verdict_status" != "pass" ]; then
+    echo "check-cuda-generated-2d-readback: FAIL — status=$verdict_status reason=${verdict_reason:-unset}," \
+         "${verdict_count:-0} pixel(s) compared, ${verdict_mismatch:-unknown} mismatch(es)" >&2
+    exit 1
+fi
+case "${verdict_count:-}" in
+    ""|*[!0-9]*)
+        echo "check-cuda-generated-2d-readback: ERROR — nothing was checked: status=pass but" \
+             "cuda_generated_2d_readback_count is '${verdict_count:-unset}'" >&2
+        exit 2 ;;
+esac
+if [ "$verdict_count" -lt 1 ]; then
+    echo "check-cuda-generated-2d-readback: ERROR — nothing was checked: status=pass with" \
+         "0 pixel(s) compared" >&2
+    exit 2
+fi
+if [ "${verdict_mismatch:-}" != "0" ]; then
+    echo "check-cuda-generated-2d-readback: FAIL — status=pass but ${verdict_mismatch:-unset}" \
+         "pixel mismatch(es) over $verdict_count pixel(s)" >&2
+    exit 1
+fi
+echo "check-cuda-generated-2d-readback: PASS — $verdict_count pixel(s) compared on device," \
+     "0 mismatch(es), reason=$verdict_reason"
