@@ -1,6 +1,11 @@
 use os.drivers.input.ps2_keyboard.{KeyEvent, Key}
 use os.drivers.input.ps2_keyboard.{Ps2Keyboard}
 use os.drivers.input.ps2_mouse.{MouseEvent, Ps2Mouse}
+use os.drivers.input.host_input_adapt.{
+    host_key_event_from_ps2,
+    host_pointer_event_from_ps2,
+}
+use common.ui.host_input_event.{HostInputEvent}
 
 trait InputBackend:
     me poll_key() -> KeyEvent?
@@ -9,6 +14,42 @@ trait InputBackend:
     fn shift_held() -> bool
     fn ctrl_held() -> bool
     fn key_to_char(key: Key) -> text?
+
+    me poll_event() -> HostInputEvent?:
+        """Next input as the ONE ingress type, or nil when nothing is pending.
+
+        This is the method consumers should use; `poll_key`/`poll_mouse` are
+        the driver-shaped legacy pair and remain only because five backends and
+        a dozen spec stubs implement them. Supplying this as a trait DEFAULT is
+        what makes the migration additive: every existing `impl InputBackend`
+        gains it without being edited.
+
+        Ordering is key-before-mouse, matching the order the compositor
+        previously polled the two sources in, so a recorded input sequence
+        replays identically through the queue.
+
+        Modifier state is sampled here, at poll time, exactly as the old
+        compositor sampled it immediately after `poll_key()`."""
+        val key_opt: KeyEvent? = self.poll_key()
+        if val key_event = key_opt:
+            var ch = ""
+            if val Press(pressed_key) = key_event:
+                if val Some(c) = self.key_to_char(pressed_key):
+                    ch = c
+            return host_key_event_from_ps2(
+                key_event,
+                ch,
+                self.shift_held(),
+                self.ctrl_held(),
+                self.alt_held()
+            )
+        # Bind through a typed local so the optional carries a concrete
+        # MouseEvent type into lowering; the trait-dispatched call alone
+        # leaves the receiver erased.
+        val mouse_opt: MouseEvent? = self.poll_mouse()
+        if val mouse_event = mouse_opt:
+            return host_pointer_event_from_ps2(mouse_event)
+        nil
 
 class Ps2InputBackend:
     keyboard: Ps2Keyboard

@@ -1,0 +1,73 @@
+# @tag: unit, os, simpleos, compositor, screen, shell
+"""
+# Boot Screen App Shells
+
+**Feature IDs:** simpleos-config-screen-selection
+**Category:** OS / Compositor / Screen Selection
+**Status:** In Progress
+**Plan:** doc/03_plan/os/simpleos/screens/ws_a_config_screen_selection_detail.md
+
+## Overview
+
+As an operator I want `screen_type=2d` to bring a real shell up, not just name
+one. `launch_screen_app` dispatches a resolved `ScreenSelection` onto the
+matching `screen_app_*` opener; these scenarios drive the dispatch with a nil
+backend so shell identity, liveness and the boot marker are observable without
+any device present.
+"""
+
+use std.spec.*
+use os.compositor.backend_factory.{ScreenSelection}
+use os.compositor.screen_app.{ScreenApp, screen_app_new}
+use os.compositor.screen_app_2d.{screen_app_2d_open}
+use os.compositor.screen_app_web.{screen_app_web_open}
+use os.compositor.screen_app_gui.{screen_app_gui_open}
+use os.compositor.screen_app_launcher.{launch_screen_app}
+
+fn selection_for(shell: text, reason: text) -> ScreenSelection:
+    ScreenSelection(
+        requested: shell,
+        effective: shell,
+        reason: reason,
+        backend: nil,
+        shell: shell
+    )
+
+describe "screen app shells":
+
+    it "opens a shell per screen type with the requested surface size":
+        assert_equal(screen_app_2d_open(800, 600, nil, "none").shell, "2d")
+        assert_equal(screen_app_web_open(800, 600, nil, "none").shell, "web")
+        assert_equal(screen_app_gui_open(800, 600, nil, "none").shell, "gui")
+        val app = screen_app_2d_open(1024, 768, nil, "none")
+        assert_equal(app.width, 1024)
+        assert_equal(app.height, 768)
+
+    it "reports a shell with no surface as not live rather than blank":
+        val app = screen_app_gui_open(640, 480, nil, "unsupported:gui:host-window-server")
+        assert_true(not app.is_live())
+        assert_equal(app.reason, "unsupported:gui:host-window-server")
+
+    it "refuses to paint a boot frame without a surface":
+        assert_true(not screen_app_new("2d", 320, 200, nil, "none").paint_boot_frame())
+
+    it "emits a greppable boot marker naming the effective type":
+        val marker = screen_app_2d_open(1024, 768, nil, "none").marker()
+        assert_true(marker.starts_with("[screen] effective=2d"))
+        assert_true(marker.contains("res=1024x768"))
+
+describe "screen app dispatch":
+
+    it "routes each shell key to its own opener":
+        assert_equal(launch_screen_app(selection_for("2d", ""), 800, 600).shell, "2d")
+        assert_equal(launch_screen_app(selection_for("web", ""), 800, 600).shell, "web")
+        assert_equal(launch_screen_app(selection_for("gui", ""), 800, 600).shell, "gui")
+        assert_equal(launch_screen_app(selection_for("wm", ""), 800, 600).shell, "wm")
+
+    it "falls through an unknown shell key to the wm floor":
+        assert_equal(launch_screen_app(selection_for("quake", ""), 800, 600).shell, "wm")
+
+    it "renders an empty fallback reason as none on the launched shell":
+        assert_equal(launch_screen_app(selection_for("2d", ""), 800, 600).reason, "none")
+        val fell_back = launch_screen_app(selection_for("wm", "unsupported:gui:framebuffer"), 800, 600)
+        assert_equal(fell_back.reason, "unsupported:gui:framebuffer")

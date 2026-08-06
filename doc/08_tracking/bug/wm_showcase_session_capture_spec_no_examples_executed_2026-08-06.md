@@ -333,3 +333,89 @@ as a precise, reproducible, standalone defect rather than attempted.
   cause (stale daemon-cache replay with dropped diagnostics) is generic to
   ANY spec run through the default session-daemon path, it is worth checking
   whether that doc's case also went through an uncleaned daemon cache hit.
+
+---
+
+## RESOLVED — examples now execute (2026-08-06, same session, addendum)
+
+The `slow_it` fix plus a budget large enough for this machine's current load
+produces a real, itemised verdict. **Before/after, verbatim:**
+
+```
+BEFORE (plain `it`, direct path, no explicit budget):
+  error: test-runner: file timed out
+  Results: 1 total, 0 passed, 1 failed
+  Duration: 121162ms          <- killed at the 120s default; 0 examples executed
+
+BEFORE (default session-daemon path, --no-cache --no-cover-check):
+  error: test-runner: no examples executed
+  Results: 1 total, 0 passed, 1 failed
+  Duration: 11991ms
+
+AFTER (`slow_it`, --no-session-daemon --sequential --timeout 1800):
+  Results: 12 total, 6 passed, 6 failed
+  Duration: 879257ms          <- all 12 examples EXECUTED
+```
+
+`1 total / 0 passed` was never an example count — it was the *file* count with
+the spec's body never reached. It is now `12 total`, one per `it`/`slow_it`.
+**The "no examples executed" defect is closed.**
+
+### The assertions are live and non-vacuous — proven by natural failure
+
+No perturbation was needed: six examples failed on their own with concrete,
+value-bearing diffs, and six passed. That is strictly stronger evidence than a
+synthetic oracle flip, because the failures came from the system under test:
+
+```
+wm_showcase_open declared=5 open=5 accepted=4 rejects=2d=external-frame-slot-refused
+  ✗ opens the five declared showcase windows            expected 4 to equal 5
+  ✗ renders every declared window into the composited desktop   expected 4 to equal 5
+  ✓ derives the taskbar from the live window list
+  ✓ drops the taskbar entry when a window is closed
+  ✗ changes the captured desktop when a window is closed        expected 3 to equal 4
+  ✓ restores the taskbar entry when the window re-opens
+  ✗ is sensitive to a scene change that leaves window state untouched
+                                                        assert_true failed: got false
+  ✓ captures a non-degenerate full-size desktop frame    (w=480 h=430 distinct=166)
+  ✗ finds the pinned 2D showcase palette in the captured desktop
+                                                        expected 0 to be greater than 0
+  ✗ moves the pinned 2D palette when the scene moves     expected 0 to be greater than 0
+  ✓ discloses the lane that produced the frame without overclaiming
+  ✓ writes a viewable capture artifact with a provenance sidecar
+```
+
+### NEW, SEPARATE DEFECT exposed by the now-working gate
+
+All six failures share one cause: the **2D Surface Showcase window's frame is
+refused** — `rejects=2d=external-frame-slot-refused`, so `accepted=4` of 5 and
+the pinned 2D palette (`0xFFFFA000`, `0xFF15304A`) is absent from the capture
+(`rect_px=0 field_px=0`). The taskbar still lists all five titles (the taskbar
+is derived from window state, not from frames), which is exactly the
+separation this gate was designed to expose. This is a **real functional
+regression in the WM showcase / external-frame path**, not a runner problem,
+and it was invisible for as long as the spec executed zero examples — the
+precise cost of the false green this bug documents. It needs its own bug doc
+and owner; `src/app/wm_showcase/**` and the compositor frame-slot path were
+being edited by concurrent sessions during this run, so triage should start
+from the current tip rather than from this transcript.
+
+### Note on a concurrent revert
+
+The `it` -> `slow_it` edit was reverted once mid-investigation at 02:45:15 by a
+parallel session writing this same file, and was re-applied. Anyone landing
+this should confirm `grep -c slow_it
+test/03_system/gui/wm_showcase_session_capture_spec.spl` is non-zero before
+pushing.
+
+### Final status
+
+- **"no examples executed" / zero-examples false green: FIXED.** Root cause was
+  a wall-clock timeout, not a swallowed crash, not a dead entry point, not an
+  unresolved `use`, not a stale daemon cache. Fix: `slow_it` on the example
+  that pays for the render.
+- **Still open (unchanged from the section above):** the 600s `slow_it`
+  ceiling is under-provisioned for this spec on a loaded machine (879s needed
+  here), `daemon.spl::execute_test` forwards no `--timeout`, and the session
+  daemon runs children under the debug Rust seed.
+- **New:** `2d=external-frame-slot-refused` — file separately.

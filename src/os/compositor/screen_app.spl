@@ -1,0 +1,85 @@
+# ScreenApp — the running screen behind a resolved `ScreenSelection`.
+#
+# `backend_factory` decides WHICH screen runs and constructs its
+# `CompositorBackend`; a `ScreenApp` is the thing that is actually UP: a shell
+# identity, a surface size, and the backend it paints through. `screen_type=2d`
+# now brings something up instead of naming a shell key with nothing behind it.
+#
+# Why `CompositorBackend` and not `ScreenHost`:
+#   `create_screen_backend` returns a `CompositorBackend?` — that is the value
+#   that exists at boot. `ScreenHost` (`common/ui/screen_host.spl`) takes an
+#   already-produced `DrawIrV3Scene`; nothing in the OS tree produces one yet
+#   (the `ScreenHost` impls are WS-B/B3 work and have not landed), so an
+#   adapter from here to there would today have zero call sites. See
+#   `screen_app_launcher.spl` for the recorded decision.
+#
+# MDSOC: feature dimension, compositor layer
+
+use os.compositor.display_backend_core.{CompositorBackend}
+
+# Boot-frame palette. Two distinct colours, deliberately: the A5 non-blank
+# proof is `screendump_distinct_colors > 1`, and a single-colour clear would
+# be indistinguishable from a blank screen.
+val SCREEN_APP_BG: u32 = 0xFF101820
+val SCREEN_APP_FG: u32 = 0xFFE8F0F8
+val SCREEN_APP_ACCENT: u32 = 0xFF3A7BD5
+
+class ScreenApp:
+    shell: text
+    width: i32
+    height: i32
+    backend: CompositorBackend?
+    reason: text
+
+    me is_live() -> bool:
+        """Whether this shell has a surface it can paint through.
+
+        The `wm` floor is intentionally NOT live here: the kernel keeps its
+        verbatim BGA framebuffer path for `wm` (`_init_display_service`), so a
+        non-live `wm` shell means "the kernel owns the pixels", never "blank".
+        """
+        self.backend != nil
+
+    me marker() -> text:
+        """Single-line greppable boot marker, one per launched shell.
+
+        Serial-log counterpart of the `[screen]` selection line; A5 counts
+        occurrences of `[screen] effective=<T>` in the serial transcript.
+        """
+        "[screen] effective={self.shell} shell_up={self.is_live()} res={self.width}x{self.height}"
+
+    me paint_boot_frame() -> bool:
+        """Paint the shell's first frame and present it.
+
+        Returns false when there is no backend to paint through. Draws a
+        background plus an accent band so the resulting screendump carries more
+        than one distinct colour — the captured, not asserted, non-blank proof.
+        """
+        if self.backend == nil:
+            return false
+        val surface = self.backend.unwrap()
+        surface.clear(SCREEN_APP_BG)
+        val band_h = self.height / 8
+        surface.fill_rect(0, 0, self.width, band_h, SCREEN_APP_ACCENT)
+        surface.draw_text(8, 8, self.shell, SCREEN_APP_FG, SCREEN_APP_ACCENT)
+        surface.present()
+        true
+
+pub fn screen_app_new(
+    shell: text,
+    width: i32,
+    height: i32,
+    backend: CompositorBackend?,
+    reason: text
+) -> ScreenApp:
+    """Construct a shell. Shared by the per-type `screen_app_*` openers."""
+    ScreenApp(
+        shell: shell,
+        width: width,
+        height: height,
+        backend: backend,
+        reason: reason
+    )
+
+export ScreenApp
+export screen_app_new

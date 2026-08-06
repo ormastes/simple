@@ -12,6 +12,8 @@ use os.simpleos_config_matrix.{
     simpleos_multiconfig_live_evidence_from_status_rows,
     simpleos_multiconfig_live_required_evidence_keys,
     simpleos_multiconfig_live_status,
+    simpleos_screen_required_evidence_keys,
+    simpleos_screen_types,
     simpleos_renderdoc_artifact_required_evidence_keys,
     simpleos_wm_renderdoc_required_evidence_keys
 }
@@ -66,6 +68,11 @@ fn evidence_text_or(raw: text, key: text, default_value: text) -> text:
 
 fn evidence_positive_text(value: text) -> bool:
     value != "" and value != "0" and not value.starts_with("-")
+
+fn evidence_gt_one_text(value: text) -> bool:
+    """Non-blank proof for a screendump colour count: a uniform-colour dump has
+    exactly 1 distinct colour, so only >1 passes. Empty/0/1/negative all fail."""
+    value != "" and value != "0" and value != "1" and not value.starts_with("-")
 
 fn evidence_gt_four_text(value: text) -> bool:
     value != "" and value != "0" and value != "1" and value != "2" and value != "3" and value != "4" and not value.starts_with("-")
@@ -278,6 +285,49 @@ fn derived_wm_renderdoc_status(raw: text) -> text:
         return "blocked:missing-structured-wm-compare"
     "pass"
 
+fn derived_screen_type_status(raw: text, screen_type: text) -> text:
+    """Per-screen-type pass rule (WS-A A5), fail-closed on every missing row.
+
+    Pass requires ALL of: `boot_status=pass`, `selected_effective` equal to the
+    requested type, `serial_marker_count >= 1`, a screendump path with a
+    positive byte count, and `screendump_distinct_colors > 1` (the non-blank
+    proof). A `skipped:`/`blocked:` boot status is reported verbatim and is
+    NOT a pass — AC-2 needs all four types painting.
+    """
+    val prefix = "simpleos_screen_" + screen_type + "_"
+    val boot = evidence_text_or(raw, prefix + "boot_status", "missing")
+    if boot != "pass":
+        return "blocked:screen-" + screen_type + ":" + boot
+    val effective = evidence_text_or(raw, prefix + "selected_effective", "missing")
+    if effective != screen_type:
+        return "blocked:screen-" + screen_type + ":wrong-effective:" + effective
+    if not evidence_positive_text(evidence_text_or(raw, prefix + "serial_marker_count", "0")):
+        return "blocked:screen-" + screen_type + ":missing-serial-marker"
+    if evidence_text_or(raw, prefix + "screendump_path", "") == "":
+        return "blocked:screen-" + screen_type + ":missing-screendump-path"
+    if not evidence_positive_text(evidence_text_or(raw, prefix + "screendump_bytes", "0")):
+        return "blocked:screen-" + screen_type + ":empty-screendump"
+    if not evidence_gt_one_text(evidence_text_or(raw, prefix + "screendump_distinct_colors", "0")):
+        return "blocked:screen-" + screen_type + ":blank-screendump"
+    if evidence_text_or(raw, prefix + "fallback_reason", "") == "":
+        return "blocked:screen-" + screen_type + ":missing-fallback-reason"
+    "pass"
+
+fn derived_screen_status(raw: text) -> text:
+    """Aggregate of the four per-type screen verdicts.
+
+    Deliberately NOT overridable by a `simpleos_screen_evidence_status` row in
+    the evidence file: the whole point of A5 is that the rows are captured, so
+    a self-declared pass must not short-circuit the derivation.
+    """
+    if raw == "":
+        return "blocked:missing-screen-evidence"
+    for screen_type in simpleos_screen_types():
+        val status = derived_screen_type_status(raw, screen_type)
+        if status != "pass":
+            return status
+    "pass"
+
 fn live_evidence_from_file(path: text) -> SimpleOsMulticonfigLiveEvidence:
     val defaults = default_blocked_simpleos_multiconfig_live_evidence()
     if path == "":
@@ -291,7 +341,8 @@ fn live_evidence_from_file(path: text) -> SimpleOsMulticonfigLiveEvidence:
         status_or_default(raw, "simpleos_engine2d_vulkan_evidence_status", derived_engine2d_vulkan_status(raw)),
         status_or_default(raw, "simpleos_renderdoc_artifact_evidence_status", derived_renderdoc_artifact_status(raw)),
         status_or_default(raw, "simpleos_wm_structured_compare_evidence_status", derived_wm_structured_compare_status(raw)),
-        status_or_default(raw, "simpleos_wm_renderdoc_evidence_status", derived_wm_renderdoc_status(raw))
+        status_or_default(raw, "simpleos_wm_renderdoc_evidence_status", derived_wm_renderdoc_status(raw)),
+        derived_screen_status(raw)
     )
 
 fn raw_evidence_from_file(path: text) -> text:
@@ -476,6 +527,12 @@ fn main() -> i32:
     print_evidence_row_if_present(raw, "simpleos_wm_renderdoc_qemu_log_backend")
     print_evidence_row_if_present(raw, "simpleos_wm_renderdoc_host_log_backend")
     print "simpleos_wm_renderdoc_evidence_status=" + evidence.wm_renderdoc_status
+    print "simpleos_screen_evidence_status=" + evidence.screen_status
+    print "simpleos_screen_required_evidence_keys=" + join_text(simpleos_screen_required_evidence_keys(), ",")
+    for screen_type in simpleos_screen_types():
+        print "simpleos_screen_" + screen_type + "_evidence_status=" + derived_screen_type_status(raw, screen_type)
+    for screen_key in simpleos_screen_required_evidence_keys():
+        print_evidence_row_if_present(raw, screen_key)
     print_evidence_row_if_present(raw, "simpleos_multiconfig_windows_wrapper")
     print_evidence_row_if_present(raw, "simpleos_multiconfig_windows_wrapper_qemu_exit_code")
     print_evidence_row_if_present(raw, "simpleos_multiconfig_windows_wrapper_fpga_exit_code")

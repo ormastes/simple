@@ -54,7 +54,21 @@ extern fn rt_env_get(key: text) -> text?
 extern fn rt_time_now_unix_micros() -> i64
 
 val HOST_WM_IDLE_SLEEP_MS: i32 = 16
-val HOST_EXTERNAL_WEB_FRAME_MAX_COUNT: i64 = 4
+# Ceiling on how many windows may simultaneously own a top-level external
+# content-frame slot. The slot arrays are plain dynamic arrays (pushed, not
+# preallocated), so this is NOT a fixed-buffer or ABI limit — it exists purely
+# as a guard against unbounded slot growth driven by content clients. Actual
+# memory is bounded independently and per-set by
+# HOST_EXTERNAL_WEB_FRAME_MAX_PIXELS against the aggregate of every slot, so
+# raising this count does not widen the memory envelope.
+#
+# Sized to match the sibling child-frame ceiling below. It was 4, which was
+# silently one short of the 5 windows `wm_showcase_window_specs()` declares
+# once 81f11d167d1 grew that list 3->5; the 5th window was refused a slot and
+# never composited. Keep real headroom above any declared window set so the
+# next added window does not reintroduce that.
+# See doc/08_tracking/bug/wm_showcase_2d_window_refused_external_frame_slot_2026-08-06.md
+val HOST_EXTERNAL_WEB_FRAME_MAX_COUNT: i64 = 32
 val HOST_EXTERNAL_CHILD_FRAME_MAX_COUNT: i64 = 32
 val HOST_EXTERNAL_WEB_FRAME_MAX_PIXELS: i64 = 16777216
 val HOST_WM_MAX_FRAMEBUFFER_PIXELS: i64 = 67108864
@@ -778,6 +792,10 @@ class HostCompositor:
                 _host_empty_external_web_frame()
             )
         else:
+            # A silent capacity refusal here is a bug generator: the caller only
+            # sees `false`, so a window set that outgrows the ceiling ships as a
+            # window that merely never draws. Name the ceiling and the demand.
+            print "[hosted-wm] external-frame-slot-refused reason=capacity window_id={window_id} in_use={self.external_web_window_ids.len()} cap={HOST_EXTERNAL_WEB_FRAME_MAX_COUNT}"
             return false
         self.dirty.add_full_screen(self.width, self.height)
         true
