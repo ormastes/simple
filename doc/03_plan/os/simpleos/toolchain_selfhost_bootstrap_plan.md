@@ -121,6 +121,24 @@ Maximum parallelism at t0: **C1 + S1 + F1 + C2 + B2 + B3** (six independent lane
 ## 3. G2 — clang recheck + in-guest hello smoke
 
 ### Lane C1 — rebuild cross LLVM/clang/lld (LONG POLE, start immediately)
+
+> **C1 is not done when ninja exits.** Stage 2 (`cross`) compiles all of
+> clang/LLVM as `x86_64-unknown-simpleos` *objects*, but its `bin/clang-20`
+> links as a **Linux dynamic ELF** (interp `/lib64/ld-linux-x86-64.so.2`) and
+> CANNOT run on SimpleOS. Producing a guest-runnable clang needs one of:
+> (a) the **FS-exec path** — an ordinary on-disk static
+> `x86_64-unknown-simpleos` ELF at `/usr/bin/clang`, which is the intended
+> design (FR-SOS-020+); or (b) `src/os/port/llvm/clang_static.shs`, a
+> static-relink of the same objects that is **explicitly DEPRECATED** for
+> desktop SimpleOS and kept only as a legacy fallback. Prefer (a); if (b) is
+> used to unblock, label the evidence as legacy-fallback, not the design path.
+> Stage 3 (`compiler-rt`) is also required — it stages target builtins into
+> `build/os/sysroot/lib/clang/<ver>/lib/<triple>/`.
+>
+> **Concurrency hazard:** the cross build links against
+> `build/os/sysroot/lib/`, and `sysroot.shs:266` rewrites `libm.a`. Never
+> regenerate the sysroot while a cross build is linking — stage to a scratch
+> sysroot and swap, or wait for ninja to exit.
 - Pre-step: Lane F1 pin bump (below) so we build fork tip, not `3b33ba807`.
 - Run: `bin/simple run src/os/port/llvm/build.spl` (host needs cmake/ninja/clang/
   python3/git; source tree `/home/ormastes/llvm-project`). Outputs:

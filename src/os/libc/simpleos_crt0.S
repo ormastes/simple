@@ -97,15 +97,27 @@ _start:
 .weak rt_set_args
 
 /*
- * environ: real .bss storage for the POSIX environment pointer that crt0
- * publishes (envp in r14) before running constructors. This was `.weak
- * environ`; with no libc definition it resolved to address 0, so the publish
- * store `mov [environ], r14` faulted writing to NULL (ring-3 #PF at _start,
- * errcode P|W|U, cr2=0). Give it 8 bytes of .bss — zeroed by the BSS clear
- * above, then overwritten with envp.
+ * environ: fallback .bss storage for the POSIX environment pointer that crt0
+ * publishes (envp in r14) before running constructors.
+ *
+ * History, both directions of this trap:
+ *   1. Originally `.weak environ` with NO libc definition anywhere: it resolved
+ *      to address 0, so the publish store `mov [environ], r14` faulted writing
+ *      to NULL (ring-3 #PF at _start, errcode P|W|U, cr2=0). Fixed by giving it
+ *      real storage here.
+ *   2. That fix used `.globl`, which then collided once libc gained its own
+ *      definition (`char **environ = _env_storage;` in simpleos_process.c):
+ *      `ld.lld: error: duplicate symbol: environ`, crt0.o(.bss) vs
+ *      simpleos_process.o(.data). crt0.o is always linked explicitly, so the
+ *      clash was unconditional and broke the lld link of the cross toolchain.
+ *
+ * WEAK is the definition that satisfies both: when libc's process object is
+ * linked its strong definition wins and crt0 publishes envp into the real libc
+ * pointer; when it is not, this storage keeps the publish store off NULL.
+ * Do not promote this back to .globl.
  */
     .bss
     .balign 8
-    .globl environ
+    .weak environ
 environ:
     .quad 0
