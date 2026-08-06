@@ -280,4 +280,19 @@ companion `# @exec_limit` trap live in the
 with the authoritative counts in
 [doc/03_plan/platform/structural_compute/webrender_gpu_offload_plan.md](../../../03_plan/platform/structural_compute/webrender_gpu_offload_plan.md).
 
+## Caller-frame silent interpreter fallback (2026-08-06, OPEN)
+
+The engine's wall-clock cost depends on **which module's frame calls it**,
+not just args/size. `browser_engine_pixels_at(url, 64, 36)` = ~40s CPU when
+called from `render_adapter.spl`'s chain, but >300s CPU (never finished an
+1800s budget, 4 attempts) when called from `gui_window.spl` — a module
+importing the extern/dlopen-heavy `gui_renderer`. Mechanism: JIT lowering
+fails silently for that caller, and the ENTIRE callee tree (all of this
+layer) runs tree-walk. No diagnostic; uniform ~10-50x slowdown from the
+first log line is the signature. Detection: time the same engine call from
+two caller modules — ratio >3x = fallback. Workaround pattern: hoist the
+engine call into a JIT-healthy frame (e.g. the app's `main()`) and pass the
+pixel buffer down as data. Full isolation matrix:
+`doc/08_tracking/bug/gui_window_caller_frame_silent_interp_fallback_2026-08-06.md`.
+
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

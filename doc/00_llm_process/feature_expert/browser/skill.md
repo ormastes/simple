@@ -72,18 +72,28 @@ current handoff notes.
   before it could be committed. Recreated verbatim from the original
   authoring context; land promptly via plumbing CAS next time rather than
   leaving new files uncommitted in the shared tree for long.
-- **Not yet independently spec-tested** as a standalone app (no
-  `test/01_unit/app/browser/` yet — the terminal app itself has none either;
-  verification so far is a standalone `bin/simple run` probe confirming
-  `render_browser_html`/`render_terminal_html` produce real, correctly-shaped
-  HTML output, plus the wm_showcase integration spec, which is a real
-  full-render pixel-parity gate — currently blocked by an UNRELATED,
-  independently-confirmed pre-existing defect, see
-  `doc/08_tracking/bug/wm_showcase_session_capture_spec_no_examples_executed_2026-08-06.md`).
-  Follow-up: add a `render_adapter_spec.spl` mirroring whatever pattern (if
-  any) covers `terminal/render_adapter.spl`.
+- **Spec-tested since 2026-08-06** (supersedes the earlier "not yet
+  spec-tested" note): `test/01_unit/app/browser/browser_render_adapter_spec.spl`
+  (9 examples, pure dispatch/content logic — engine calls deliberately
+  excluded, one alone blows the spec runner's 10M-op budget) and
+  `test/02_integration/app/browser_cli_log_modes_spec.spl` (4 examples,
+  process-spawns the real CLI). The wm_showcase pixel-parity gate remains
+  separately tracked in
+  `doc/08_tracking/bug/wm_showcase_session_capture_spec_no_examples_executed_2026-08-06.md`.
 - Full HTML-window renders in this environment cost 30-50 CPU-minutes each
   (interpreted cascade+layout+paint) — the wm_showcase suite now has 4
   HTML-backed windows (gui, web, browser, terminal) instead of 2, so a full
   `wm_showcase` spec run costs roughly double what it did before this
   change. Budget accordingly; do not run it synchronously inline.
+- **`--open` real-GUI window landed 2026-08-06** (`115e1b522b6` +
+  `88df83a75e5` idle-poll fix + `bb106fcc335` fallback fix):
+  `main.spl --open` opens a real winit window via `GuiRenderer`, presents
+  one engine frame, blocks until close. End-to-end verified under
+  Docker+Xvfb (window on screen with real glyph pixels in 59s); usage guide:
+  `doc/07_guide/app/browser.md`.
+- **Load-bearing structure — do not "clean up"**: `main.spl` renders the
+  pixels and passes them into `run_browser_window_gui(url, w, h, pixels)`.
+  Moving the render into `gui_window.spl` looks tidier but silently drops
+  the entire engine into the tree-walk interpreter (~10-50x, no diagnostic;
+  four 1800s-budget runs never finished before the hoist). Compiler defect:
+  `doc/08_tracking/bug/gui_window_caller_frame_silent_interp_fallback_2026-08-06.md`.
