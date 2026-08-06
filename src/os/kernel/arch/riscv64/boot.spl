@@ -36,7 +36,24 @@ extern fn rt_riscv_noalloc_pmm_init(ram_base: u64, ram_size: u64, reserved_end: 
 @section(".text.entry")
 @naked
 fn _start():
-    asm volatile "mv      s0, a0\nmv      s1, a1\nla      sp, _stack_top\nla      t0, _sbss\nla      t1, _ebss\n.Lrv64_bss_loop:\nbgeu    t0, t1, .Lrv64_bss_done\nsd      zero, 0(t0)\naddi    t0, t0, 8\nj       .Lrv64_bss_loop\n.Lrv64_bss_done:\nmv      a0, s0\nmv      a1, s1\ncall    os__kernel__arch__riscv64__boot__boot_main\n.Lrv64_boot_halt:\nwfi\nj       .Lrv64_boot_halt"
+    # NOTE: the `call` target below must match this build's actual mangled
+    # symbol name for `boot_main`, which depends on the `--source` roots
+    # passed to `native-build`. When more than one `--source` dir is valid,
+    # the compiler relativizes module paths against the *common ancestor* of
+    # all of them (see `source_root_for_file` /
+    # `common_ancestor_of_dirs` in
+    # src/compiler_rust/compiler/src/pipeline/native_project/mod.rs), not
+    # against a single source root — so an unrelated sibling `--source` dir
+    # (e.g. `build/os/generated`) can change every module's mangled prefix.
+    # The riscv64 full-kernel closure build
+    # (`--source build/os/generated --source src/os --source src/lib`) has a
+    # common ancestor of the repo root, giving module path
+    # `src.os.kernel.arch.riscv64.boot` and mangled symbol
+    # `src__os__kernel__arch__riscv64__boot__boot_main`. If the `--source`
+    # flag set for this build ever changes, re-derive this symbol name from
+    # the linker's "undefined symbol" error / `nm` on the compiled boot.spl
+    # object rather than guessing.
+    asm volatile "mv      s0, a0\nmv      s1, a1\nla      sp, _stack_top\nla      t0, _sbss\nla      t1, _ebss\n.Lrv64_bss_loop:\nbgeu    t0, t1, .Lrv64_bss_done\nsd      zero, 0(t0)\naddi    t0, t0, 8\nj       .Lrv64_bss_loop\n.Lrv64_bss_done:\nmv      a0, s0\nmv      a1, s1\ncall    src__os__kernel__arch__riscv64__boot__boot_main\n.Lrv64_boot_halt:\nwfi\nj       .Lrv64_boot_halt"
 
 fn _uart_put(byte: u64):
     rt_riscv_uart_put(byte)

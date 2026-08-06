@@ -245,3 +245,120 @@ riscv64 full-kernel `native-build` command from the 2026-08-06 update above):
   `asm """` blocks containing x86-only mnemonics (`cli|sti|hlt|lgdt|lidt|ltr|
   invlpg|rdmsr|wrmsr|outb|inb|outw|inw|outl|inl|iretq|lretq|mov %cr|swapgs`) —
   `idt.spl`'s `_halt()` was the only match; no known siblings remain.
+
+## FIXED 2026-08-06: `boot_main` "undefined symbol" was a stale hardcoded
+mangled-name mismatch in `boot.spl`, not a link-graph/object-selection bug
+
+Investigated why the kernel's own entry point,
+`os__kernel__arch__riscv64__boot__boot_main`, was reported undefined by
+`ld.lld` even though it is trivially reachable from the entry closure. `nm`
+on every kept object in `.simple/native-objects-*` after a reproduction of
+the exact command above showed the *defined* symbol for `boot_main` was
+`src__os__kernel__arch__riscv64__boot__boot_main` (mod_223.o, `T` binding) —
+i.e. **with** a `src__` prefix — while `simple_asm_blocks.o` (compiled from
+`boot.spl`'s raw `asm volatile` `_start` stub) referenced it **without** that
+prefix. Root cause traced to
+`src/compiler_rust/compiler/src/pipeline/native_project/mod.rs`'s
+`source_root_for_file` / `common_ancestor_of_dirs`: when more than one
+`--source` dir is valid, the compiler relativizes every module's path against
+the **common ancestor** of *all* configured `--source` roots, not against
+whichever root actually contains the file. This build's flags
+(`--source build/os/generated --source src/os --source src/lib`) have a
+common ancestor of the repo root (since `build/` and `src/` diverge at the
+first path component) — so `boot.spl`'s module path becomes
+`src.os.kernel.arch.riscv64.boot`, one segment longer than the `os.kernel...`
+path a single-root build (`--source src` or `--source src/os`) would produce.
+`boot.spl`'s inline asm hardcoded the shorter/older name.
+
+Sibling scan of every riscv/riscv64 boot file with a similar hardcoded
+`call <mangled_name>` in raw asm found **three different prefix conventions**
+already in the tree (evidence this class of bug is systemic, not a one-off):
+`os__kernel__arch__riscv64__fpga_boot__fpga_boot_main` (fpga_boot.spl),
+`kernel__arch__riscv64__boot_hosted_probe__boot_main` (boot_hosted_probe.spl,
+2 segments shorter), `os__kernel__arch__riscv32__boot__boot_main`
+(riscv32/boot.spl) — each was evidently authored/last-verified against a
+different `--source` flag combination. Only `riscv64/boot.spl` (the one this
+task's exact build command uses) was fixed; the siblings are out of scope
+here (not on this build's entry path) but are flagged as the same defect
+class — see "Open: systemic risk" below.
+
+**Fix:** `src/os/kernel/arch/riscv64/boot.spl`'s `_start()` asm now calls
+`src__os__kernel__arch__riscv64__boot__boot_main` (was
+`os__kernel__arch__riscv64__boot__boot_main`), with an inline comment
+explaining the `common_ancestor_of_dirs` mangling dependency so a future
+`--source` flag change doesn't reintroduce this silently.
+
+**Verified:** rebuilt (no Rust changes needed — pure `.spl` fix) and reran
+the exact riscv64 full-kernel `native-build` command. Before: `ld.lld: error:
+undefined symbol: os__kernel__arch__riscv64__boot__boot_main` (plus the
+`rt_enum_id`/`rt_native_cmp`/`rt_string_new_literal` errors below). After:
+that specific error is gone; the link now fails only on genuine runtime-symbol
+gaps (next section) — i.e. the build progressed past the link-graph confusion
+into what is actually the next real blocker.
+
+**Open: systemic risk (not fixed, flagging only).** This class of bug — a raw
+`asm` block hardcoding a module's mangled symbol name, which depends on the
+full `--source` flag set at build time — will recur any time the `--source`
+flags change, for *any* of the sibling files listed above, or for
+`riscv64/boot.spl` itself if this build command's `--source` list is ever
+edited. A more robust fix (e.g. having the compiler substitute a
+placeholder/intrinsic for "this module's own symbol name" instead of forcing
+`.spl` authors to hardcode it) is out of scope for this task but worth its
+own tracked item.
+
+## NEW BLOCKER (not fixed, documented): riscv64 freestanding runtime is
+missing ~16 `rt_*` primitives that the full kernel closure now needs
+
+With the `boot_main` fix above, the link now fails on a different, larger set
+of undefined symbols (lld's default `--error-limit=20` stopped it at exactly
+20; re-running with `--error-limit=0` would likely show more from the same
+family):
+
+```
+rt_native_cmp, rt_array_copy, rt_array_pop, rt_dict_new, rt_dict_remove,
+rt_enum_discriminant, rt_enum_id, rt_load_barrier, rt_string_char_at,
+rt_string_new_literal, rt_string_replace, rt_string_rfind,
+rt_string_to_byte_array, rt_string_to_int_lenient, rt_string_to_lower,
+rt_volatile_read_u32, rt_volatile_read_u64, rt_volatile_write_u32,
+rt_volatile_write_u64
+```
+(plus one unrelated `_parse_lfn_slot` — a reference/definition name mismatch
+in `src/os/kernel/fs/fat32.spl`'s `fat32_parse_lfn_slot`, out of scope: that
+file is under active work by a separate concurrent lane per this task's
+briefing, left untouched.)
+
+Root-cause category: **(a) genuinely missing runtime archive/objects**, not a
+build-flag bug or compiler mangling bug. Confirmed via
+`grep -rln "rt_dict_new\|rt_enum_id\|..." src/runtime`: every one of these 16
+symbols is implemented **only** in the hosted runtime
+(`src/runtime/runtime.c` / `src/runtime/runtime_native.c`), which is not part
+of the freestanding riscv64 build. The freestanding baremetal runtime
+(`src/runtime/startup/baremetal/runtime_minimal.c`) is a much smaller,
+independent reimplementation (~32 `rt_*` functions total) that never grew
+equivalents for dict, several string ops, enum reflection
+(`rt_enum_id`/`rt_enum_discriminant`), `rt_native_cmp`, or the
+`rt_volatile_read/write_u32/u64` MMIO helpers (only `_u8`/`_u16` widths and a
+disjoint symbol set exist there today). This is unlike the earlier
+`_halt()`/`rt_hlt()` fix in this doc, which was a single missing per-arch
+branch in an existing function — here the functions don't exist in the
+freestanding runtime at all, in any arch branch.
+
+**Why not fixed in this pass:** several of the missing symbols
+(`rt_dict_new`, `rt_string_replace`/`rt_string_to_lower`/etc., `rt_enum_id`/
+`rt_native_cmp`) require real design decisions specific to a baremetal
+freestanding context — is there a heap allocator available yet at the point
+these are called from init closures, what backs dict storage without the
+hosted GC/allocator, how is enum-identity/reflection metadata represented
+without the hosted runtime's type tables — that a rushed implementation risks
+getting subtly wrong in kernel code. The `rt_volatile_read/write_u32/u64`
+quartet by contrast look mechanically trivial (single-instruction MMIO
+wrappers, precedent already exists for `_u8`/`_u16` and for the hosted
+`_u32`/`_u64` versions at `runtime_native.c:4883-4906`) and would be a safe
+follow-up, but the other ~12 are the real, larger work item. Needs its own
+tracked item / dedicated pass rather than a rushed subset landing here.
+
+**Evidence:** reproduction command and log excerpt as in the section above;
+`nm` output on `.simple/native-objects-*/mod_223.o` for the mangling
+diagnosis is not preserved (temp build dir), but is trivially reproducible by
+rerunning the exact command in this doc and inspecting the kept objects path
+printed on link failure (`Link failed. Objects kept at: ...`).
