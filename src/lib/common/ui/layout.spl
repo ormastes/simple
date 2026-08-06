@@ -210,10 +210,13 @@ fn layout_hbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32) -> [Widge
             val flex = get_flex(child)
             flex_idx = flex_idx + flex
             # The integer-division remainder goes to the LAST child that
-            # actually takes space, i.e. the last one with flex > 0. Only such
-            # children advance flex_idx, so the first child to push it up to
-            # total_flex is exactly that child, and it is the only one that
-            # satisfies both halves of this guard.
+            # actually takes space, i.e. the last one with flex > 0. get_flex()
+            # clamps at 0, so flex_idx is MONOTONE non-decreasing and only
+            # positive-flex children advance it; the first child to push it up
+            # to total_flex is therefore exactly the last positive-flex child,
+            # and it is the only one that satisfies both halves of this guard.
+            # That clamp is what makes this argument sound — a negative weight
+            # would break monotonicity and re-admit a second award.
             #
             # The `flex > 0` half is load-bearing: adding 0 leaves flex_idx AT
             # total_flex, so without it every TRAILING flex="0" child re-armed
@@ -374,10 +377,18 @@ fn get_fixed_height(node: WidgetNode) -> i32:
             return rows.to_int() ?? 0
     return 0
 
+# A flex weight is a share of the free space, so it is never negative. Clamping
+# here rather than at the call sites keeps `total_flex` and the per-child
+# weights consistent: a negative weight would make layout_hbox's running
+# flex_idx non-monotone, so more than one child could satisfy
+# `flex_idx >= total_flex` and the remainder would be awarded twice again (w=10
+# with weights 5/-2/1 assigned 16px). It would also make flex_unit negative
+# when the weights sum below zero.
 fn get_flex(node: WidgetNode) -> i32:
     val f = node.get_prop("flex")
     if f != "":
-        return f.to_int() ?? 1
+        val v = f.to_int() ?? 1
+        return if v > 0: v else: 0
     return 1
 
 # Optional size constraints. min_* default 0 (no lower bound); max_* default -1
