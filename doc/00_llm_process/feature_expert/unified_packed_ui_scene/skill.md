@@ -35,8 +35,8 @@ Lanes L0-L9 all landed:
 - L8 WM/menubar producer: `ed086bb06d4`
 - L9 reverse event routing (`ui_scene_event_route.spl`): `dcd08e77f22`
 - Cross-producer `host_owner_id` wiring + `component_id`/generation
-  consistency follow-on (this entry's Gotchas below): in progress, this
-  session — closes the gap L9's own landing commit documented (every
+  consistency follow-on (this entry's Gotchas below): landed `dfd465a7125`
+  — closes the gap L9's own landing commit documented (every
   producer wrote `parent_owner_id: DRAW_IR_V3_NO_ID`, so L9's WebView-chain
   gate was only proven against a hand-built fixture, not real nested
   producer output). See `test/02_integration/ui/unified_packed_scene_nesting_spec.spl`.
