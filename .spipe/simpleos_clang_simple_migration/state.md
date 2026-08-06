@@ -98,7 +98,33 @@ ssh_simple_hello_uefi}.shs`. Fail-fast placeholders: spec rows for absent hosts
 report `blocked`, never `skip()`. Final reviewer: orchestrator (Opus) before any
 PASS claim; no lane may self-certify a goal-level AC.
 
-## Critical blocker — D6 (gates AC-4 through AC-8)
+## AC-4 ACHIEVED 2026-08-06 — in-guest clang compile under real firmware
+
+```
+  [ok]   L1 OVMF -> GRUB-EFI app ran
+  [ok]   L2 multiboot handoff -> kernel _start
+  [ok]   L3 sshd ring-3 accept loop (payload overlap fault cleared)
+  [ok]   L4 in-guest clang compiled /hello.o under OVMF
+[VMM] portable VMM published kernel PML4 0x402718720
+[oo-nvme] persist /hello.o -> OK      [syscall] exit status=0
+```
+`build/os/vmm_gate_run.log` + `build/os/scp_retrieve_over_ssh_uefi.serial.log`,
+2026-08-06 05:48. Clang ran as an FS-exec ring-3 process on SimpleOS under OVMF
+pflash (never `-kernel`), KVM-accelerated, and produced the object in-guest.
+L5 (host-side `getfile` retrieval) still returns an empty object — retrieval
+transport, not the ring-3 path.
+
+## RESOLVED — D6 (had gated AC-4 through AC-8)
+
+Root cause was NOT codegen: **two parallel VMM implementations printing
+byte-identical `[VMM]` banners**. The live init (`arch/x86_64/paging.spl:214`)
+wrote its own struct; `vmm_core`'s `vmm_init` has zero callers (dead code); every
+consumer read `vmm_core`'s never-written global. Fixed by
+`vmm_publish_kernel_pml4()` (+35 lines, 2 files), commit `4575b4ce88d`.
+Ruled out first with evidence: one `_vmm_pml4_phys` symbol (no duplicate `.bss`),
+accessor has a real body (not a stub).
+
+## Historical — D6 as originally filed
 
 `vmm_kernel_pml4_phys()` reads 0 after a demonstrably successful `vmm_init`, so
 `create_user_address_space` falls back to the legacy sentinel and EVERY FS-exec
