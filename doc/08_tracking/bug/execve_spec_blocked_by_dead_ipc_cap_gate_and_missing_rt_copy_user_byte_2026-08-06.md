@@ -1,7 +1,9 @@
 # execve_spec 4/8 red: dead IPC capability gate, then a missing `rt_copy_user_byte` intrinsic
 
 **Date:** 2026-08-06
-**Status:** OPEN (spec partially repaired; two production gaps documented, not fixed)
+**Status:** OPEN (root cause 2 fixed same-day by a prior commit; a follow-up ELF64
+loader symbol-collision bug and a scheduler cross-call state-loss bug were
+found and triaged below — see "2026-08-06 follow-up" at the bottom)
 **Severity:** High (the capability gate makes several syscalls dead code on the
 `syscall_handler` path; the missing intrinsic blocks any spec/test from
 exercising `_handle_exec`'s user-pointer copy logic at all)
@@ -154,3 +156,131 @@ green count.
   the extern explicitly declared in the spec file, ruling out a spec-side
   declaration gap; confirmed by the empty `copy_user` grep across
   `src/compiler_rust/`.
+
+## 2026-08-06 follow-up: root cause 2 fixed → new ELF64 loader collision found and fixed → new scheduler state-loss gap found (deferred)
+
+Commit `10b9ccce0166b713143ce6811d6b427db87dad13` implemented + registered
+`rt_copy_user_byte`/`rt_string_from_byte_array`, taking this spec from 4/8 to
+6/8. The remaining 2 failures were re-investigated end to end.
+
+### Fixed: `byte_utils.spl`'s `read_u16_le`/`read_u32_le`/`read_u64_le` collided
+### with `lib.common.compress.utilities`'s same-named, same-arg-type functions
+
+With root cause 2 fixed, the "dispatches exec ... with valid path" test (a
+**valid** synthetic ELF64 fixture) started failing with `expected -8 to equal
+0` — i.e. a well-formed executable was being rejected as ENOEXEC. Root-caused
+by adding a temporary debug print inside `_validate_common_header`
+(`src/os/kernel/loader/elf_loader.spl`) at the `e_type != ET_EXEC` check:
+
+```
+DEBUG_ELF64 e_type=Result::Ok(2) ET_EXEC=2 e_machine=Result::Ok(62) expected_machine=62 datalen=4100
+```
+
+`e_type` printed as `Result::Ok(2)`, not `2`. `os.kernel.loader.byte_utils`
+declares `fn read_u16_le(data: [u8], off: i64) -> i64` (private, no `pub`);
+`src/lib/common/compress/utilities.spl` separately declares
+`pub fn read_u16_le(data: [u8], pos: i64) -> Result<u16, CompressionError>`
+— **identical parameter types**, differing only in name of the second param
+and return type. Once `execve_spec.spl`'s large transitive import graph pulled
+both modules into the same compilation, calls to `read_u16_le`/`read_u32_le`/
+`read_u64_le` from `elf_loader.spl`/`elf64.spl`/`smf.spl` sometimes resolved to
+the *wrong*, `Result`-returning function from the unrelated compress module
+(matches the already-known `compiler_cross_module_private_symbol_collision`
+class of bug — private symbols are not actually private for this resolution
+step). `e_type != ET_EXEC` then compared `Result::Ok(2)` against a raw `2`,
+which is never equal, so `_validate_common_header` returned
+`Err("only ET_EXEC ELF64 images are supported")` for every ELF64 image,
+valid or not — `build_user_process_image` therefore ENOEXEC'd unconditionally.
+
+A smaller, real bug was fixed at the same time: `execve_spec.spl`'s
+`_make_x86_64_exec()` fixture declared `p_filesz: 4` for its PT_LOAD segment
+but only appended 1 byte (`0xC3`) of file-backed data, so
+`byte_utils.in_range(data, 0x1000, 4)` correctly flagged the segment as
+truncated (`0x1000+4=4100 > byte_len=4097`). Padded to 4 bytes
+(`0xC3,0x90,0x90,0x90`) to match the declared `p_filesz`/`p_memsz`.
+
+**Fix:** renamed the three `byte_utils.spl` functions to `lb_read_u16_le` /
+`lb_read_u32_le` / `lb_read_u64_le` (unique prefix, no collision anywhere in
+`src/lib/` or `src/os/`) and updated the three callers
+(`elf_loader.spl`, `elf64.spl`, `smf.spl`). Verified: `elf_loader_spec.spl`
+(10/10), `elf64_spec.spl` (4/4), `smf_spec.spl` (18/18) all still pass, and the
+debug print showed the collision (`Result::Ok(2)`) before the rename and a
+*different* failure (`-10`, see below — no longer ENOEXEC) after.
+
+Files: `src/os/kernel/loader/byte_utils.spl`, `elf_loader.spl`, `elf64.spl`,
+`smf.spl`, `test/01_unit/os/kernel/ipc/execve_spec.spl` (fixture fix only).
+
+### Open, deferred: exec-via-`syscall_handler` can never see a task spawned in
+### the same call sequence, because `Scheduler` mutations don't cross the
+### plain `syscall_handler(args, scheduler, ipc, klog)` call boundary
+
+After the ELF64 fix, "dispatches exec ..." now fails with `expected -10 to
+equal 0` (`-10` = no task-control-block slot found for the exec target), and
+"preserves task PID across exec" fails with
+`expected Option::None to not equal nil` (`sched.get_task(TaskId(id:
+pid_before))` returns `None` immediately after the spawn that supposedly
+produced `pid_before`).
+
+Root-caused with a standalone probe spec
+(`sched.get_current()` before/after a syscall-13 SpawnBinary call, then
+`sched.get_task(sched.get_current())`): the spawn syscall returns a nonzero
+pid (proving the create succeeded *somewhere*), but the caller's own `sched`
+variable never gains the new task — `get_task()` finds nothing, and
+`sched.schedule()` (which would context-switch `current` to a ready task) also
+finds nothing to pick, because the ready-queue enqueue from the spawn never
+lands in the caller's copy of `Scheduler` either.
+
+This matches a constraint already documented in production code, just not
+previously connected to this spec's failure: `SpawnBinaryDirectState`
+(`src/os/kernel/ipc/syscall_process.spl:793`) states outright:
+
+> "Scheduler instances have value semantics across call boundaries, so the
+> task created by create_user_task_pid only exists in the callee's copy.
+> Callers must adopt the returned scheduler (mirrors IpcSyscallState)."
+
+`Scheduler` is declared `pub class Scheduler:`
+(`src/os/kernel/scheduler/scheduler_types.spl:606`), yet a `class` instance
+passed through this codebase's cross-module call chain to
+`syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager,
+klog: KernelLog) -> SyscallResult` (`src/os/kernel/ipc/syscall.spl:309`)
+behaves as if value-copied: the function returns only `SyscallResult`, never
+an updated `Scheduler`, so any spawn/schedule mutation performed inside is
+invisible to the caller once the call returns. `syscall_handler`'s own
+docstring calls it "the legacy result-only... path used for tests and call
+sites that have not yet been converted to explicit runtime-state threading" —
+i.e. this is a known, intentional limitation of that specific entry point, not
+a new defect. IPC syscalls (20-23) already have a state-threading replacement
+(`syscall_handler_ipc_state` → `IpcSyscallState { result, scheduler, ipc }`);
+process syscalls (spawn/exec/fork/wait/...) do not.
+
+Separately (compounding, not the primary cause): a bare `Scheduler.new()`'s
+`current` defaults to `TaskId(id: 0)`, but `scheduler_next_task_id_take()`
+(`src/os/kernel/scheduler/scheduler_types.spl:40`) starts real task-id
+allocation at **1** — so id 0 is a sentinel that is never itself a real
+`TaskControlBlock`. Even with state-threading fixed, calling `syscall_handler`
+for `Exec` against a fresh, never-scheduled `Scheduler` would still need a
+prior `schedule()` to move `current` off the id-0 sentinel onto a real,
+ready task before exec can find a valid slot to replace.
+
+**Why deferred:** fixing this properly means adding a state-threading variant
+for the process syscalls (spawn/exec/fork/wait/...) mirroring
+`IpcSyscallState`/`SpawnBinaryDirectState`, and auditing every call site of
+`syscall_handler` for process ids to see whether the plain entry point is
+*already* silently dead code in production the same way `ipc.cap_manager` was
+(root cause 1 above) — that requires the same kernel-wide, security-adjacent
+scope this doc's own root cause 1 already flagged as out-of-scope for a
+spec/loader-only change. Per this task's escape hatch ("stop honestly rather
+than force a risky fix"), this is recorded here undone.
+
+**What's left to do (updates the earlier list):**
+1. Root cause 1 (dead `ipc.cap_manager` gate) — unchanged, still open.
+2. Root cause 2 (`rt_copy_user_byte`) — **fixed**, commit
+   `10b9ccce0166b713143ce6811d6b427db87dad13`.
+3. ELF64 loader `read_u*_le` symbol collision — **fixed**, this update.
+4. Process-syscall state threading (spawn/exec/fork/wait/... need an
+   `IpcSyscallState`-style wrapper so `Scheduler` mutations survive a
+   `syscall_handler` call) — **open**, newly documented here.
+5. Decide whether a fresh `Scheduler.new()`'s id-0 `current` sentinel should
+   itself become a real bootable task, or whether every exec-via-syscall spec
+   must call `schedule()` after spawning before exec can target the spawned
+   task — **open**, newly documented here.
