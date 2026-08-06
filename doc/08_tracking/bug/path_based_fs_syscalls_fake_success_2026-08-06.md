@@ -2,7 +2,202 @@
 
 Status: PARTIALLY FIXED 2026-08-06 (honesty landed 2026-08-06 AM; kernel-global
 mount + open/stat/mkdir/readdir/unlink/rmdir wiring landed 2026-08-06 PM;
-boot-reachability and read/write-after-open still open — see "Update 2" below)
+read/write-after-open wiring landed 2026-08-06 evening, see "Update 3" below;
+boot-reachability, and a newly-discovered mount-accessor persistence wall,
+still open)
+
+## Update 3 (2026-08-06, this lane): fd read/write reach FAT32 for real — plus a critical, deeper wall found while verifying it
+
+**What's real now.** `_handle_file_open` (`src/os/kernel/ipc/syscall_file.spl`)
+now allocates the fd typed `FD_TYPE_FAT32` (new constant, `src/os/kernel/fd_table.spl`)
+instead of the generic `FD_TYPE_FILE` that `os.kernel.fd_io`'s
+`posix_read`/`posix_write` route to `sosix_sync_read`/`sosix_sync_write` (a
+subsystem with no FAT32 backend — the exact gap "Update 2" flagged). The real
+`Fat32Filesystem.FileHandle` `open_at`/`create_at` returns is registered,
+keyed by `(task_id, fd)`, in a new module `src/os/kernel/fs/fat32_fd_table.spl`
+(`fat32_fd_register`/`fat32_fd_is_registered`/`fat32_fd_clear`/
+`fat32_fd_read_into`/`fat32_fd_write_from`). `_handle_file_read`/
+`_handle_file_write` now check `fd_get_type(fd) == FD_TYPE_FAT32` and, when
+true, call `fat32_fd_read_into`/`fat32_fd_write_from` (real
+`Fat32Filesystem.read`/`.write` calls against the mounted filesystem) instead
+of falling through to `posix_read`/`posix_write`. `_handle_file_close` purges
+the fd's table entry before the fd number is released back to `fd_alloc`, so
+a reused fd cannot observe a stale handle. `_handle_lseek` now explicitly
+returns `-ENOSYS` for `FD_TYPE_FAT32` fds rather than falling through to
+`posix_lseek` (which writes an offset scalar nothing in the FAT32 path reads,
+and whose `SEEK_END` branch sends IPC to the never-spawned "VFS service"
+documented elsewhere in this file — reachable now that FAT32 fds are real,
+so it had to be closed off, not just left as a latent trap).
+
+**Why a separate module.** `os.kernel.ipc.syscall_file` transitively imports
+`os.kernel.ipc.syscall`'s huge dependency graph (scheduler/vmm/pmm/ipc/ELF
+loader/...). The fd-table logic (task-scoped keys, offset-delta
+re-application after a value-type `FileHandle` read, the append-only honesty
+guard below) was split into `os.kernel.fs.fat32_fd_table`, which imports only
+`os.kernel.fs.fat32` — the same import weight as `fat32_mount_and_dir_ops_spec.spl`
+(passes 8/8) — specifically so it could be unit-tested for real instead of
+only reachable through a spec that (see below) cannot currently run.
+
+**Task-scoped, not fd-only, keying.** `os.kernel.fd_table`'s fd numbers are
+per-task-context (`fd_context_*` arrays + `fd_activate_task`): two different
+tasks can legitimately both hold fd 3 for two entirely different files. The
+new table is keyed by `(task_id, fd)`, mirroring `g_cwd_table`'s
+`task_id`-keying in the same file, for exactly this reason — a fd-only key
+would let one task's read/write observe or corrupt another task's handle.
+
+**Append-only honesty guard.** `Fat32Filesystem.write` is APPEND-ONLY — it
+always writes at `h.file_size`, never at an arbitrary tracked read offset.
+That matches POSIX for a fresh/empty file (`offset == file_size == 0`), but
+for an EXISTING non-empty file reopened for write, POSIX expects a plain
+`write()` to overwrite starting at offset 0 — silently calling the
+append-only primitive there would write the right bytes to the WRONG place
+with no error. `fat32_fd_write_from` refuses this with `Err(-ENOSYS)` when
+`handle.offset != handle.file_size` instead of fabricating overwrite support
+`Fat32Filesystem.write` does not have. **Concretely: `open(path, O_CREAT |
+O_WRONLY)` on a path that already exists and is non-empty, followed by
+`write()`, now returns `-ENOSYS` on that write** — the ordinary "create-or-
+overwrite" flow does not work end-to-end for an existing file today. Only
+create-fresh-then-write (or append-after-append, when both writes go through
+without an intervening reopen) is supported.
+
+### Test evidence (real, passing, sabotage-verified)
+
+`test/01_unit/os/kernel/fs/fat32_fd_table_spec.spl` (6/6 passing) covers, via
+the actual `fat32_fd_register`/`fat32_fd_write_from`/`fat32_fd_clear` entry
+points `_handle_file_open`/`_handle_file_write`/`_handle_file_close` call —
+not `Fat32Filesystem` directly:
+
+- a fresh `create_at` + register + write returns the payload's real,
+  disk-backed byte count;
+- `EBADF` (`-9`) on an fd nothing ever registered;
+- clear-on-close makes a reused fd number unable to observe a stale handle;
+- two tasks holding the SAME fd number write to two different files
+  independently, no crash or cross-task collision;
+- the append-only guard both allows the supported case (`offset ==
+  file_size`) and refuses the unsupported one (`offset != file_size` ->
+  `-ENOSYS`), evaluated purely from the registered handle's own fields
+  before any disk I/O is attempted.
+
+**Sabotage-verified this session** (each: broke it, confirmed the specific
+example(s) went red, restored, confirmed green again):
+1. Replacing `fat32_fd_write_from`'s `Ok(bytes.len() as u64)` with `Ok(0u64)`
+   dropped the suite from 6/6 to 4/6 (both the "write returns the real byte
+   count" example AND the "two tasks... independently" example went red,
+   since the latter also checks byte counts).
+2. Replacing the `handle.offset != handle.file_size` guard condition with
+   `false` (never refuse) dropped the suite to 5/6 — the "refuses ENOSYS"
+   example went red (got `Ok` instead of `Err`).
+3. Removing `task_id` from `_fat32_fd_index`'s equality check (comparing `fd`
+   alone) dropped the suite to 5/6 — the "two tasks, same fd number" example
+   went red.
+
+Existing `fat32_write_path_spec.spl` (25/25) and
+`fat32_mount_and_dir_ops_spec.spl` (8/8) still pass unmodified — no
+regression in the primitives/mount-publish infrastructure this change reuses.
+
+### Wall 1 (narrows, does not confirm, "Update 2"'s stated cause): a spec importing `os.kernel.ipc.syscall_file` reproducibly fails `no examples executed` — but NOT because of import weight
+
+"Update 2" attributed this to the size of the `os.kernel.ipc.syscall`
+dependency graph. That attribution is **wrong, or at least incomplete** — a
+trivial one-line spec (`use os.kernel.ipc.syscall_file.{_handle_file_open}`
++ a single `it "reaches this file": assert_true(true)`, nothing else) with
+the IDENTICAL import graph **passed 1/1** on this same deployed binary.
+Narrowed further with a second trivial probe: a spec whose single `it` body
+does nothing but `Scheduler.new()`, `IpcManager.new()`, `pmm_alloc_page_raw()`,
+`vmm_map_page(...)` — the exact userspace-page-mapping recipe
+`syscall_spec.spl` established for calling `_handle_file_*` with real
+arguments — reproduces `error: test-runner: no examples executed` on its
+own, with NO `os.kernel.ipc.syscall_file` import at all. **The actual trigger
+is calling `pmm_alloc_page_raw`/`vmm_map_page`/`Scheduler.new()` (freestanding
+kernel memory/scheduler primitives that assume a running kernel, not a
+userland test process) from inside a spec `it` body**, not the size of any
+import graph. This is why a syscall-DISPATCH-level round-trip test
+(`_handle_file_open` -> `_handle_file_write` -> `_handle_file_close` ->
+reopen -> `_handle_file_read`, with real userspace pages) could not be
+written for this change, or for "Update 2"'s six handlers either — every
+attempt that constructs a real `Scheduler` and maps a real page hits this
+wall. Not something this lane introduced or can fix within its own scope.
+`test/01_unit/os/kernel/abi/syscall_shim_spec.spl`'s own header independently
+documents the same constraint for a sibling module ("These tests verify the
+shim's public surface... They do NOT invoke shims because that requires
+kernel context").
+
+### Wall 2 (NEW, more consequential, found while verifying this change): `fat32_mount_dev()`/`fat32_mount_fs()` do not reliably share write-visible state across two SEPARATE calls
+
+This is the wall that actually blocks a genuine write-then-read round-trip
+test, independent of Wall 1. Reproduced with a throwaway diagnostic spec
+(not committed) against the same `MockDev`-shaped fixture
+`fat32_mount_and_dir_ops_spec.spl`/`fat32_write_path_spec.spl` already use,
+narrowed to four data points on the SAME published mount:
+
+1. `write_sector` via ONE `fat32_mount_dev()` fetch, then `read_sector` via
+   THE SAME held reference — sees the write. PASS.
+2. `write_sector` via `fat32_mount_dev()`, then `read_sector` via the
+   ORIGINAL `dev` variable that was passed INTO `fat32_mount_publish` — does
+   NOT see the write (reads back the pre-write byte). FAIL.
+3. `write_sector` via one `fat32_mount_dev()` call, `read_sector` via a
+   SECOND, separate `fat32_mount_dev()` call — does NOT see the write. FAIL.
+4. The same failure reproduces one level up: `fat32_mount_fs().write(dev,
+   h0, bytes)` (the exact idiom every `_handle_file_*` handler uses:
+   fetch `fs`/`dev` once, write once) followed by reading the sector back
+   through that SAME fetched `dev` — FAILS to see the write, even though
+   data point 1 (bare `write_sector`/`read_sector` on the same reference,
+   no `Fat32Filesystem` in between) passes.
+
+Ruled out: mutating trait methods needing `me` — the mock's
+`read_sector`/`write_sector` were changed from plain `fn` to `me
+read_sector`/`me write_sector` (matching the real `CNvmeBlockAdapterFs`
+implementer's declaration) and re-run; the failure was unchanged. **This is
+reported as OBSERVED BEHAVIOR with an exact reproduction, not a diagnosed
+root cause** — the mechanism (Option<trait> boxing, a copy-on-pass semantics
+gap, or something else in this compiler's trait-object handling) is not
+confirmed and should not be assumed. `BlockDevice`
+(`src/lib/nogc_sync_mut/fs_driver/block_device.spl`) is a `trait`; `fat32.spl`'s
+own module doc for `g_fat32_mount_fs`/`g_fat32_mount_dev` explicitly reasons
+that both are safe as bare `Option`-boxed globals because "`Fat32Filesystem`
+and `BlockDevice` are both reference (class) types" — that reasoning is
+correct for `Fat32Filesystem` (a `class`) but `BlockDevice` is a `trait`, a
+different kind of type this codebase's Option<struct>-landmine family has not
+previously covered.
+
+**Why "Update 2"'s existing tests did not catch this.** The single
+"kernel-global FAT32 mount publish" example in
+`fat32_mount_and_dir_ops_spec.spl` that exercises `fat32_mount_fs()`/
+`fat32_mount_dev()` at all does a READ-ONLY check (`published.stat_at(...)`)
+against pre-seeded data — it never writes through the accessor and rereads.
+Every other example in that file (and in `fat32_write_path_spec.spl`) calls
+`Fat32Filesystem` methods on `fs`/`dev` DIRECTLY, never through
+`fat32_mount_fs()`/`fat32_mount_dev()`. This wall was invisible to every
+FAT32 test written before this session.
+
+**Severity/scope, honestly stated, not resolved:** every `_handle_file_*`
+handler in `syscall_file.spl` (both "Update 2"'s six and this lane's two)
+fetches `fs`/`dev` via `fat32_mount_fs()`/`fat32_mount_dev()` ONCE per
+syscall call and uses that fetch consistently for the rest of the call —
+matching data point 1 above (same reference, self-consistent), not data
+points 2-4. Whether writes done by one syscall call are visible to a LATER,
+separate syscall call (e.g. `write()` then a subsequent `read()`, or
+`mkdir()` then a subsequent `readdir()`) is **UNVERIFIED** and, per data
+point 3, actively suspect: two independent `fat32_mount_dev()` fetches (no
+`Fat32Filesystem` involved at all) fail to share state. It is also
+**unconfirmed whether this threatens a real hardware-backed `BlockDevice`**
+— the mock stores actual sector bytes as struct fields (`sectors: [MockSector]`),
+so a copy diverges real data, whereas the one real implementer inspected,
+`CNvmeBlockAdapterFs` (`src/os/kernel/boot/c_nvme_adapter.spl`), is a thin
+handle (`sector_buf_addr: u64, ready: bool`) and is currently a link-clean
+stub that always returns `Err` — it does no real I/O today either way, and
+`boot_fs_mount_fat32_from_device` still has no caller in the live boot
+sequence (pre-existing gap, "Update 2"). **This must be resolved — ideally
+with a real hardware or QEMU-backed `BlockDevice` round-trip, since the mock
+cannot currently prove it either way — before this FAT32 syscall path can be
+trusted for anything beyond a single self-contained syscall call.**
+
+A second write in a SEPARATE `fat32_fd_write_from` call on the same fd was
+attempted as a spec example and dropped (not committed as a red spec) for
+the identical reason: the second call's freshly-fetched device does not see
+the first call's FAT-table cluster allocation, so `Fat32Filesystem.write`'s
+internal chain re-walk fails. This is Wall 2 manifesting through the actual
+feature this update ships, not just the diagnostic probes above.
 
 ## Update 2 (2026-08-06, this lane): kernel-global mount + six handlers wired for real
 
@@ -104,7 +299,7 @@ every `Fat32Filesystem` primitive they call in isolation instead (see Tests
 above) — a materially weaker guarantee than a dynamic syscall-layer test would
 have been, stated here rather than glossed over.
 
-## Wall discovered this lane: a fd from `_handle_file_open` does not make `read`/`write` reach FAT32
+## Wall discovered this lane: a fd from `_handle_file_open` does not make `read`/`write` reach FAT32 — FIXED, see "Update 3" above
 
 `_handle_file_open` allocates a real fd typed `FD_TYPE_FILE` (same type byte
 `fd_io.spl` uses for the read/write routing table). But
@@ -120,7 +315,13 @@ reach the FAT32 driver until `sosix_sync_read`/`sosix_sync_write` (or the
 This is a genuinely separate integration gap from the one this doc originally
 tracked (that one was "no reachable Fat32Filesystem instance"; this one is
 "two unrelated file-fd subsystems coexist under the same `FD_TYPE_FILE` tag").
-Not fixed here — flagged so it isn't silently assumed solved.
+
+**FIXED 2026-08-06 (later this session) — see "Update 3" above.** `open`
+now allocates the fd typed `FD_TYPE_FAT32` (a dedicated type, not
+`FD_TYPE_FILE`) and `read`/`write` route to `os.kernel.fs.fat32_fd_table`
+instead of `posix_read`/`posix_write`. Real, single-call, sabotage-verified.
+Whether it holds up across SEPARATE syscall calls is exactly Wall 2 in
+Update 3 — unresolved, not silently assumed solved either.
 
 ## Wall discovered this lane: `boot_fs_mount_fat32_from_device` has no caller in the live boot sequence
 
@@ -247,11 +448,17 @@ working unchanged. `readdir`/`unlink`/`rename`/`rmdir` need new
 this landed except `rename` (deliberately, see above) and the fd
 read/write-after-open connection (a separate, newly-discovered gap, see
 above) — the fd this lane's `open` allocates is real but `read`/`write` on it
-still don't reach FAT32. The NEW required next steps are the two walls
-documented above: (1) wire something in the live boot sequence to actually
-call `boot_fs_mount_fat32_from_device`/`fat32_mount_publish`, and (2) teach
-`fd_io.spl`'s `FD_TYPE_FILE` read/write route (or `sosix_sync_read`/
-`sosix_sync_write`) about the FAT32 backend.
+still don't reach FAT32. **UPDATE (later this session, see "Update 3"): the
+read/write connection is now also done.** The required next steps are now:
+(1) wire something in the live boot sequence to actually call
+`boot_fs_mount_fat32_from_device`/`fat32_mount_publish` (still open); (2)
+resolve Wall 2 from "Update 3" — confirm whether writes made by one syscall
+call are visible to a later, separate syscall call against the same mounted
+`fat32_mount_dev()`/`fat32_mount_fs()`, ideally with a real hardware or
+QEMU-backed `BlockDevice`, since the in-memory mock cannot currently prove it
+either way; this is now the single most important open question for whether
+ANY of this doc's "real" claims (open/stat/mkdir/readdir/unlink/rmdir/
+read/write) hold up across more than one syscall.
 
 ## Related, separately-landed honesty fixes in this same change
 

@@ -12,9 +12,12 @@ use os.kernel.memory.vmm.{vmm_verify_user_write}
 use os.kernel.boot.mmio.{mmio_write8}
 use os.kernel.fd_io.{posix_close, posix_read, posix_write, posix_lseek}
 use os.kernel.ipc.syscall.{MAX_BINARY_PATH_LEN, _is_userspace_range}
-use os.kernel.fd_table.{fd_alloc, fd_set, O_CREAT}
+use os.kernel.fd_table.{fd_alloc, fd_set, fd_get_type, O_CREAT, FD_TYPE_FAT32}
 use os.kernel.fs.fat32.{
     fat32_mount_ready, fat32_mount_fs, fat32_mount_dev
+}
+use os.kernel.fs.fat32_fd_table.{
+    fat32_fd_register, fat32_fd_clear, fat32_fd_read_into, fat32_fd_write_from
 }
 
 extern fn rt_copy_user_byte(ptr_addr: u64) -> u8
@@ -240,9 +243,11 @@ fn path_resolve(task_id: u64, raw: [u8]) -> [u8]:
 # `_dev`, see fat32.spl's "Kernel-global mounted filesystem" section), set from
 # `os.kernel.boot.boot_fs_mount.boot_fs_mount_fat32_from_device` after a real
 # `mount()` call. `open`/`stat`/`mkdir`/`readdir`/`unlink`/`rmdir` below now
-# call it directly and return real data/errno instead of ENOSYS. `rename` is
-# still ENOSYS — see its own docstring for why. `readdir`/`unlink`/`rmdir` are
-# backed by new `Fat32Filesystem.readdir_at`/`unlink_at`/`rmdir_at` methods.
+# call it directly and return real data/errno instead of ENOSYS. `rename` now
+# calls `Fat32Filesystem.rename_at` too (link-new-entry + delete-old-entry;
+# see its docstring for the honest non-atomicity note). `readdir`/`unlink`/
+# `rmdir`/`rename` are backed by new `Fat32Filesystem.readdir_at`/
+# `unlink_at`/`rmdir_at`/`rename_at` methods.
 #
 # STILL-OPEN GAP (see doc/08_tracking/bug/path_based_fs_syscalls_fake_success_2026-08-06.md):
 # `boot_fs_mount_fat32_from_device` itself has no caller anywhere in the live
@@ -252,11 +257,24 @@ fn path_resolve(task_id: u64, raw: [u8]) -> [u8]:
 # `fat32_mount_publish` directly with a real disk BlockDevice), these handlers
 # still return -ENOSYS on real hardware/QEMU, honestly, via the
 # `fat32_mount_ready()` guard on every handler below — never a fake success.
-# A second gap: a fd returned by `open` today does not make `read`/`write`
-# reach the FAT32 driver — see the KNOWN GAP note in `_handle_file_open`.
+#
+# UPDATE 2026-08-06 (this lane): the fd-io gap noted above ("a fd returned by
+# `open` does not make `read`/`write` reach FAT32") is CLOSED. `open` now
+# allocates the fd with type `FD_TYPE_FAT32` (not the generic FD_TYPE_FILE
+# that `os.kernel.fd_io`'s `sosix_sync_read`/`sosix_sync_write` route owns)
+# and registers the real `Fat32Filesystem.FileHandle` returned by `open_at`/
+# `create_at`, keyed by (task_id, fd), in `os.kernel.fs.fat32_fd_table` (split
+# into its own module — see that file's header — specifically so it can be
+# unit-tested without the heavy `os.kernel.ipc.syscall` import graph this
+# file itself carries). `_handle_file_read`/`_handle_file_write` below
+# recognise `FD_TYPE_FAT32` and call `fat32_fd_read_into`/`fat32_fd_write_from`
+# instead of falling through to `posix_read`/`posix_write` — those two
+# unrelated file-fd subsystems no longer collide under the same type tag.
+# `_handle_file_close` purges the table entry so a reused fd number cannot
+# see a stale handle. `_handle_lseek` below explicitly refuses FD_TYPE_FAT32
+# rather than silently changing an offset scalar nothing reads (see its own
+# docstring).
 # ============================================================================
-
-val _FD_TYPE_FILE: u8 = 1
 
 fn _open_flags_want_create(flags: u32) -> bool:
     (flags & O_CREAT) != 0
@@ -275,15 +293,16 @@ fn _handle_file_open(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
     `os.kernel.fd_table`. `posix_open` (fd_io.spl) stays dead/unused here —
     it IPC-sends to a "VFS service" that is never spawned in production.
 
-    KNOWN GAP (documented, not papered over): the fd this returns is typed
-    FD_TYPE_FILE like any other file fd, but `posix_read`/`posix_write` route
-    FD_TYPE_FILE through `os.kernel.async_io_rw.sync_read/sync_write` ->
-    `sosix_sync_read/sosix_sync_write`, a wholly separate subsystem from
-    `Fat32Filesystem`. A fd opened here is real (open() itself does real disk
-    I/O and the path really resolves through FAT32), but a subsequent
-    read()/write() syscall on it will NOT reach the FAT32 driver until that
-    separate integration lands — see
-    doc/08_tracking/bug/path_based_fs_syscalls_fake_success_2026-08-06.md.
+    UPDATE 2026-08-06 (this lane): the fd is now typed `FD_TYPE_FAT32`, a
+    dedicated type distinct from the generic `FD_TYPE_FILE` that
+    `os.kernel.fd_io`'s `sosix_sync_read`/`sosix_sync_write` route owns. The
+    real `FileHandle` `open_at`/`create_at` returned is registered, keyed by
+    (task_id, fd), with `os.kernel.fs.fat32_fd_table.fat32_fd_register` (a
+    fd-only key would collide across two different tasks that both happen to
+    hold the same fd NUMBER — fd numbers are per-task-context), so
+    `_handle_file_read`/`_handle_file_write` can find it again and call
+    `fat32_fd_read_into`/`fat32_fd_write_from` — closing the gap this
+    docstring used to describe.
     """
     val path_ptr = args.arg0 as u64
     val path_len = args.arg1 as u64
@@ -315,12 +334,14 @@ fn _handle_file_open(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
     val fd = fd_alloc()
     if fd < 0:
         return SyscallResult(value: fd as i64)
-    # backend_handle carries the fat32 dirent's start_cluster so a future
-    # FAT32 fd-io route can find the handle again; posix_read/write do not
-    # consult it today (see KNOWN GAP above).
-    val set_r = fd_set(fd, _FD_TYPE_FILE, flags, handle.start_cluster as u64)
+    # backend_handle carries the fat32 dirent's start_cluster for diagnostics;
+    # the real per-fd state (offset, file_size, dirent location, ...) lives in
+    # os.kernel.fs.fat32_fd_table, since FileHandle is a whole struct and
+    # fd_table only stores a single u64 scalar per fd.
+    val set_r = fd_set(fd, FD_TYPE_FAT32, flags, handle.start_cluster as u64)
     if set_r < 0:
         return SyscallResult(value: set_r as i64)
+    fat32_fd_register(current.id, fd, handle)
     SyscallResult(value: fd as i64)
 
 fn _handle_file_read(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
@@ -330,7 +351,15 @@ fn _handle_file_read(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
       arg0: file descriptor
       arg1: buffer pointer (userspace)
       arg2: byte count to read
+
+    UPDATE 2026-08-06 (this lane): a FD_TYPE_FAT32 fd (allocated by
+    _handle_file_open above) is routed to
+    `os.kernel.fs.fat32_fd_table.fat32_fd_read_into` — real disk I/O, real
+    cluster-chain walk — instead of falling through to posix_read's
+    sosix_sync_read route, which has no FAT32 backend and would silently
+    short-read/no-op on such a fd.
     """
+    val fd = args.arg0 as i32
     val buf_ptr = args.arg1 as u64
     val count = args.arg2 as u64
     if count == 0:
@@ -339,7 +368,24 @@ fn _handle_file_read(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
         return SyscallResult(value: -14)
     if not vmm_verify_user_write(buf_ptr, count):
         return SyscallResult(value: -14)
-    SyscallResult(value: posix_read(args.arg0 as i32, buf_ptr, count))
+    if fd_get_type(fd) == FD_TYPE_FAT32:
+        var sched = scheduler
+        val current = sched.get_current()
+        var buf: [u8] = []
+        var i: u64 = 0
+        while i < count:
+            buf.push(0u8)
+            i = i + 1
+        val read_r = fat32_fd_read_into(current.id, fd, buf)
+        if read_r.is_err():
+            return SyscallResult(value: read_r.unwrap_err() as i64)
+        val n = read_r.unwrap()
+        var w: u64 = 0
+        while w < n:
+            mmio_write8(buf_ptr + w, buf[w])
+            w = w + 1
+        return SyscallResult(value: n as i64)
+    SyscallResult(value: posix_read(fd, buf_ptr, count))
 
 fn _handle_file_write(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
     """Write to a file descriptor through the active POSIX fd backend.
@@ -348,11 +394,29 @@ fn _handle_file_write(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) 
       arg0: file descriptor
       arg1: buffer pointer (userspace)
       arg2: byte count to write
+
+    UPDATE 2026-08-06 (this lane): a FD_TYPE_FAT32 fd is routed to
+    `os.kernel.fs.fat32_fd_table.fat32_fd_write_from` — see
+    `_handle_file_read`'s docstring for why the generic posix_write route
+    cannot reach FAT32, and that module's docstring for the append-only
+    honesty guard (a plain overwrite-from-offset-0 on a reopened non-empty
+    file is refused with ENOSYS, not silently mis-written as an append).
     """
+    val fd = args.arg0 as i32
     val buf_ptr = args.arg1 as u64
     val count = args.arg2 as u64
     if count == 0:
         return SyscallResult(value: 0)
+    if fd_get_type(fd) == FD_TYPE_FAT32:
+        if not _is_userspace_range(buf_ptr, count):
+            return SyscallResult(value: -14)
+        var sched = scheduler
+        val current = sched.get_current()
+        val bytes = _fs_copy_user_bytes(buf_ptr, count)
+        val write_r = fat32_fd_write_from(current.id, fd, bytes)
+        if write_r.is_err():
+            return SyscallResult(value: write_r.unwrap_err() as i64)
+        return SyscallResult(value: write_r.unwrap() as i64)
     if not _is_userspace_range(buf_ptr, count):
         return SyscallResult(value: -14)
     SyscallResult(value: posix_write(args.arg0 as i32, buf_ptr, count))
@@ -362,8 +426,17 @@ fn _handle_file_close(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) 
 
     Args:
       arg0: file descriptor
+
+    UPDATE 2026-08-06 (this lane): also purges any fat32_fd_table entry for
+    (current task, this fd) BEFORE the fd number is released back to
+    fd_alloc, so a later open() that is handed the same fd number cannot
+    observe a stale FileHandle left over from a previous, unrelated file.
     """
-    SyscallResult(value: posix_close(args.arg0 as i32) as i64)
+    val fd = args.arg0 as i32
+    var sched = scheduler
+    val current = sched.get_current()
+    fat32_fd_clear(current.id, fd)
+    SyscallResult(value: posix_close(fd) as i64)
 
 # -- struct stat layout (src/os/libc/include/sys/stat.h, natural x86_64
 #    alignment): dev_t/ino_t u64 @0/@8, mode_t u32 @16, nlink_t u64 @24
@@ -577,20 +650,21 @@ fn _handle_file_unlink(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager)
     SyscallResult(value: 0)
 
 fn _handle_file_rename(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
-    """Rename a file or directory. STILL ENOSYS — deliberately not attempted
-    in this lane (open/stat/mkdir/readdir/unlink/rmdir were; see the module
-    doc comment above for what changed 2026-08-06).
+    """Rename/move a file or directory against the kernel-global mounted
+    Fat32Filesystem.
 
-    Unlike unlink/rmdir (mark-deleted, a single-byte patch reusing existing
-    `_link_entry`/`resolve_path` machinery) or readdir (pure read enumeration),
-    a real rename must rewrite a directory entry's LFN + 8.3 slots IN PLACE
-    while preserving start_cluster and size — `Fat32Filesystem` has no
-    primitive for that (`_link_entry` only APPENDS new slots; nothing edits
-    or relocates existing ones), and fabricating rename as
-    "create the new name, delete the old" would be observably wrong the
-    moment either half fails partway (a caller can end up with both names,
-    or neither, for what POSIX guarantees is atomic). Left as ENOSYS rather
-    than a fake or partially-correct implementation.
+    Args:
+      arg0: old-path pointer (userspace)
+      arg1: old-path length
+      arg2: new-path pointer (userspace)
+      arg3: new-path length
+
+    UPDATE 2026-08-06: real, no longer ENOSYS-only. Calls
+    `Fat32Filesystem.rename_at`, which links a new directory entry (copying
+    only start_cluster/size — never the file's data) then marks the old
+    entry deleted; see that method's docstring for the honest, documented
+    non-atomicity of the two-step and the destination-exists (EEXIST, no
+    atomic replace) policy.
     """
     val old_ptr = args.arg0 as u64
     val old_len = args.arg1 as u64
@@ -600,7 +674,22 @@ fn _handle_file_rename(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager)
         return SyscallResult(value: _FS_EINVAL)
     if old_len > MAX_BINARY_PATH_LEN or new_len > MAX_BINARY_PATH_LEN:
         return SyscallResult(value: _FS_ENAMETOOLONG)
-    SyscallResult(value: _FS_ENOSYS)
+    if not _is_userspace_range(old_ptr, old_len) or not _is_userspace_range(new_ptr, new_len):
+        return SyscallResult(value: _FS_EFAULT)
+    if not fat32_mount_ready():
+        return SyscallResult(value: _FS_ENOSYS)
+    var sched = scheduler
+    val current = sched.get_current()
+    val old_raw = _fs_copy_user_bytes(old_ptr, old_len)
+    val new_raw = _fs_copy_user_bytes(new_ptr, new_len)
+    val old_resolved = _bytes_to_text(path_resolve(current.id, old_raw))
+    val new_resolved = _bytes_to_text(path_resolve(current.id, new_raw))
+    var fs = fat32_mount_fs()
+    val dev = fat32_mount_dev()
+    val rename_r = fs.rename_at(dev, old_resolved, new_resolved)
+    if rename_r.is_err():
+        return SyscallResult(value: rename_r.unwrap_err() as i64)
+    SyscallResult(value: 0)
 
 fn _handle_file_rmdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
     """Remove a directory against the kernel-global mounted Fat32Filesystem.
@@ -634,8 +723,25 @@ fn _handle_lseek(args: SyscallArgs) -> SyscallResult:
       arg0: file descriptor
       arg1: offset
       arg2: whence (0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END)
+
+    UPDATE 2026-08-06 (this lane): FD_TYPE_FAT32 is explicitly refused with
+    -ENOSYS here rather than falling through to `posix_lseek`. `posix_lseek`
+    writes `os.kernel.fd_table`'s own offset scalar (`fd_set_offset`) — a
+    field `fat32_fd_read_into`/`fat32_fd_write_from` never read (they track
+    offset inside the fat32_fd_table-owned `FileHandle` instead). Falling
+    through would make lseek report success while silently changing nothing
+    a FAT32 read/write ever consults — exactly the fake-success shape this
+    bug doc's HONESTY CONTRACT forbids. Worse, SEEK_END additionally sends a
+    VFS_STAT IPC to a "VFS service" that
+    doc/08_tracking/bug/path_based_fs_syscalls_fake_success_2026-08-06.md
+    already documents as never spawned in production, i.e. it would block
+    the calling task forever. Since `open`/`read`/`write` on a FAT32 fd are
+    now real (this lane), that hang is newly reachable through them and must
+    be refused, not left as a latent trap.
     """
     val fd = args.arg0 as i32
+    if fd_get_type(fd) == FD_TYPE_FAT32:
+        return SyscallResult(value: _FS_ENOSYS)
     val offset = args.arg1 as i64
     val whence = args.arg2 as u32
     SyscallResult(value: posix_lseek(fd, offset, whence))
