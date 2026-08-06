@@ -1,10 +1,14 @@
-# AC-6 rc=70 root cause pinned: `/usr/bin/simple`'s freestanding crt0 never calls `__simple_call_module_inits` — its `.init_array` is empty, so no heap-backed constant global is ever initialized
+# AC-6 rc=70 root cause pinned and FIXED: `/usr/bin/simple`'s freestanding crt0 never called `__simple_call_module_inits` — its `.init_array` is empty, so no heap-backed constant global was ever initialized
 
 - **ID:** simpleos_userspace_crt0_missing_module_init_call_empty_init_array_2026-08-06
-- **Status:** OPEN — root cause pinned via host-side binary forensics (no QEMU
-  boot required for this pass). No fix landed; the correct fix touches shared
-  cross-platform startup code and needs a scoped follow-up, not a same-pass
-  patch.
+- **Status:** FIXED — `src/os/libc/simpleos_crt0.S` now calls
+  `__simple_call_module_inits` (weak-guarded) before `main`, verified by a
+  real end-to-end QEMU-user-mode sabotage test (pre-fix reproduces the bug,
+  post-fix fixes it — see "Fix landed" below). The double-invoke risk that
+  blocked the first pass does not apply: the actual fix locus,
+  `src/os/libc/simpleos_crt0.S`, is a SimpleOS-only file never linked into
+  any of the 7 other (hosted) platforms — see "Correction" below for why the
+  first pass's proposed fix locus was wrong.
 - **Severity:** high — blocks AC-6 (in-guest `/usr/bin/simple` FS-exec) and, by
   the mechanism below, would silently corrupt any freestanding `x86_64-unknown-simpleos`
   binary that reads a `[text]`/`[i64]`/struct-typed module-level constant
@@ -223,70 +227,162 @@ line.
   **generic baremetal crt0** used by non-kernel `x86_64-unknown-simpleos`
   binaries, which never received the equivalent explicit-call wiring.
 
-## Not fixed here
+## Correction (2026-08-06, follow-up pass): the crt0 file this doc named is not the one actually linked into `/usr/bin/simple`
 
-`crt_common.c::__spl_start` is shared verbatim by baremetal AND every hosted
-platform (Linux x86/x86_64/arm64/riscv64, macOS, FreeBSD, Windows). A naive
-fix — add an unconditional `if (__simple_call_module_inits)
-__simple_call_module_inits();` call there, mirroring the kernel crt0's
-pattern — risks **double-invoking** `__module_init_<mod>` on any hosted
-platform where `.init_array` already correctly walks those same functions. If
-that assumption is right, a call-initialized global with side effects (e.g.
-`var counter = increment_and_get()`) would then run its initializer twice on
-those platforms.
+The first pass's file-chain claim —
+`src/compiler/70.backend/baremetal/x86_64/crt0.s` →
+`src/runtime/startup/baremetal/crt_baremetal.c` → `crt_common.c` — was
+plausible from source reading alone but turned out to be **the wrong crt0**
+for this specific artifact. Traced from the actual linker decision instead of
+from source-tree browsing:
 
-**That assumption is NOT verified in this pass, and an attempt to verify it
-came back inconclusive/invalid, which matters for anyone picking this up
-next.** The only "hosted" native binary available on disk,
-`bin/release/x86_64-unknown-linux-gnu/simple`, DOES have a populated
-`.init_array` (`INIT_ARRAY`, `0x20` bytes = 4 entries) — but disassembling
-those 4 entries shows they are **Rust std/mimalloc/rust-ctor constructors**
-(`std::sys::args::unix::imp::ARGV_INIT_ARRAY::init_wrapper`,
-`mi_process_attach`,
-`simple_runtime::register_static_runtime_symbols_with_abi::__ctor`), not any
-`__module_init_<mod>` function — because that binary is the **Rust-seed
-compiler itself** (`cargo build` output, confirmed by the seed-warning banner
-it prints and by its glibc-dynamic-symbol imports), never built via
-`native_project::linker.rs`/`generate_init_caller`/`common_backend.rs::generate_module_init`
-at all. It is not a valid comparison for this question. A genuine same-mechanism
-comparison needs a **self-hosted pure-Simple AOT native-build for a hosted
-target** (e.g. `x86_64-unknown-linux-gnu` via `native-build --backend
-cranelift`, no `--target x86_64-unknown-simpleos`), which this pass tried and
-could not produce cheaply: `native-build`'s default source-dir resolution
-pulled in the full `src/compiler` + `src/lib` tree regardless of `--source .`
-pointed at a 9-line standalone repro file (both run from inside the repo and
-from `/tmp/spl_repro_native` outside it), and errored out before producing a
-binary — a `native-build`-tooling gap in scoping `--source`/`--entry`, not
-part of this bug, and not worked around in this pass.
+- `native_project::linker.rs::link_objects_freestanding` computes
+  `has_simpleos_crt0 = simpleos_user_runtime_paths(cross_target).is_some()`
+  (`linker.rs:2221`). For `TargetOS::SimpleOS` + `TargetArch::X86_64`,
+  `simpleos_user_runtime_paths` (`linker.rs:207-225`) requires
+  `sysroot/lib/crt0.o` + `libsimple_runtime.a` + `libsimpleos_c.a` to all
+  exist, and when they do, that `crt0.o` is what gets used as the link's
+  actual entry object — **not** the generic
+  `src/compiler/70.backend/baremetal/x86_64/crt0.s`.
+- `src/os/port/llvm/sysroot.shs:117` installs `sysroot/lib/crt0.o` by
+  copying `$LIBC_DIR/simpleos_crt0.o` — which is assembled from
+  **`src/os/libc/simpleos_crt0.S`**, a completely different file, owned by
+  the SimpleOS libc shim (`src/os/libc/`, which also builds
+  `libsimpleos_c.a` per `src/os/libc/Makefile`).
+- `simpleos_crt0.S`'s `_start` calls `__libc_init_array` (defined in
+  `src/os/libc/simpleos_cxxabi.c:234-241` — a **separate, from-scratch**
+  `.init_array` walker, not `crt_common.c::run_init`, though functionally
+  identical: same empty-`.init_array` gap applies to it), then calls `main`
+  directly. It never went through `crt_common.c`/`__spl_start`/
+  `__spl_start_bare` at all — those symbols are irrelevant to this specific
+  binary's boot path. The original three-file chain this doc named is real
+  code (it's what a *different* class of freestanding baremetal build, e.g.
+  a raw multiboot2 kernel without an OS-provided loader, would use) but is
+  simply never reached for `x86_64-unknown-simpleos` **userspace** links that
+  have a populated sysroot, which `/usr/bin/simple`'s build does.
 
-So option 1 vs option 2 below is a **still-open** question, not a settled
-call:
-1. Make cranelift's data-object emission for `__module_init_<mod>` actually
-   register into `.init_array` for the `x86_64-unknown-simpleos` freestanding
-   target specifically, so the existing shared `run_init()` path picks it up
-   without any crt0 change, or
-2. Give freestanding-`SimpleOS`-userspace builds their own crt0 (or a
-   target-gated `#ifdef`) that explicitly calls
-   `__simple_call_module_inits`, exactly like the kernel's crt0 does, without
-   touching the hosted platforms' shared path.
+This actually **strengthens** rather than weakens the root-cause finding
+(same empty-`.init_array`, same "no explicit call anywhere" mechanism, same
+symptom) — it only changes which file needs the fix.
 
-Per this pass's scope (root-cause the AC-6 rc=70 blocker, don't speculative-fix
-shared cross-platform startup code), neither is implemented here, and the
-double-invoke risk on hosted platforms — the reason a naive `crt_common.c`
-one-liner was not attempted — is a plausible but **unconfirmed** hypothesis
-pending a valid same-mechanism hosted-AOT comparison binary.
+## Fix landed: `src/os/libc/simpleos_crt0.S`
 
-## Files/artifacts referenced (no source changed this pass)
+Added a weak-guarded call to `__simple_call_module_inits` between
+`__libc_init_array` and `main`, exactly mirroring the pattern the SimpleOS
+kernel's own crt0
+(`examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s:323-328`) and the
+hosted-platform generated main() stub
+(`native_project/linker.rs::compile_main_stub`, the
+`if (__simple_call_module_inits) __simple_call_module_inits();` line) both
+already use:
+
+```asm
+    call    __libc_init_array
+    lea     rax, [rip + __simple_call_module_inits]
+    test    rax, rax
+    jz      .Lmodule_inits_done
+    call    rax
+.Lmodule_inits_done:
+    /* Call main(argc, argv, envp) */
+```
+
+plus `.weak __simple_call_module_inits` alongside the file's other weak
+forward references (`__bss_start`/`__bss_end`/`rt_set_args`), so a link with
+no module-init functions to aggregate (nothing routed through
+`generate_init_caller`) still resolves cleanly, same as those.
+
+### Why this is safe re: the double-invoke risk that blocked the first pass
+
+The first pass's concern was specific to `crt_common.c::__spl_start`, which
+**is** genuinely shared by baremetal and all 7 hosted platforms (Linux
+x86/x86_64/arm64/riscv64, macOS, FreeBSD, Windows) — confirmed by `grep -rl
+__spl_start src/runtime/startup/`. That file was **not touched** by this fix.
+
+The actual fix locus, `src/os/libc/simpleos_crt0.S`, is architecturally
+isolated from every hosted platform, verified two ways, not assumed:
+
+1. **Directory/ownership**: `src/os/libc/` is the SimpleOS libc shim
+   (`simpleos_libc.c`, `simpleos_fs.c`, `simpleos_process.c`, etc.) —
+   entirely SimpleOS-specific, never built for hosted targets.
+2. **Reachability**: `grep -rl __spl_start_bare src/runtime/startup` (the
+   symbol this doc originally worried about) returns only baremetal files;
+   `simpleos_crt0.S` doesn't even call that symbol — it calls `main`
+   directly, a completely separate code path from any hosted platform's
+   `start.S` → `crt_common.c::__spl_start` → (hosted `main()` stub, which
+   already explicitly calls `__simple_call_module_inits` once, per
+   `compile_main_stub`).
+
+So there is no code path, on any of the 8 platforms, that would now call
+`__simple_call_module_inits` twice as a result of this change.
+
+### Empirical end-to-end verification (real crt0.S, real qemu-x86_64 execution, not a mock)
+
+Rather than relying on static reasoning alone, built a real sabotage test
+using the **actual** `src/os/libc/simpleos_crt0.S` (both pre- and post-fix
+versions) linked against a mock `main`/`__libc_init_array`/
+`__simple_call_module_inits`/`__module_init_*` object (mirroring
+`generate_init_caller`'s emitted shape) and a module-level global flag, run
+under `qemu-x86_64` (user-mode emulation, real syscalls):
+
+```
+$ qemu-x86_64 pre_fix.elf     # unmodified simpleos_crt0.S (git show HEAD:...)
+GLOBAL_NOT_READY_BUG
+
+$ qemu-x86_64 post_fix.elf    # fixed simpleos_crt0.S
+MODULE_INIT_RAN
+GLOBAL_WAS_READY_IN_MAIN
+```
+
+Confirms: (a) the bug reproduces exactly as diagnosed with the unmodified
+crt0 — the module initializer never ran, so `main` observed the global as
+never-initialized; (b) the fix resolves it — the initializer runs before
+`main` and the global is observed ready. Also confirmed via `objdump -d` that
+the compiled call sequence is `__libc_init_array` → weak-guarded
+`__simple_call_module_inits` → `main`, matching the source.
+
+### Still open / follow-up
+
+- `src/os/libc/simpleos_crt0_aarch64.S` (the aarch64 counterpart) was not
+  touched — the same gap likely applies there and needs the equivalent fix;
+  out of scope for this pass (task scope was the x86_64 AC-6 blocker).
+- The deeper "why does cranelift never populate `.init_array` for this
+  target" question (option 1 in the original writeup) remains unanswered and
+  is now redundant to fix given this crt0-level fix, but would still be worth
+  understanding if `.init_array` is relied on for anything else on this
+  target.
+- If `.init_array` population for this target is ever separately fixed later
+  (option 1), this crt0 call and that would together double-invoke module
+  inits — whoever does that fix must remove this call or make
+  `__simple_call_module_inits` self-guard against re-entry.
+- Not yet re-verified via a full real `/usr/bin/simple` rebuild + QEMU-system
+  boot (the actual AC-6 FS-exec scenario) — that requires rebuilding
+  `sysroot/lib/crt0.o` (`sh src/os/port/llvm/sysroot.shs` or equivalent) and
+  re-running the SimpleOS-native-build + QEMU FS-exec harness end to end,
+  which is a substantially longer-running verification than this pass's
+  qemu-user-mode sabotage test and was not run here. The sabotage test above
+  demonstrates the mechanism is correct on the exact source file that will be
+  linked; the full-system re-run is the recommended final confirmation before
+  closing AC-6 itself.
+
+## Files/artifacts referenced
 
 - `bin/release/x86_64-unknown-simpleos/simple` (the crashing artifact,
-  inspected via `readelf`/`nm`, not rebuilt)
+  inspected via `readelf`/`nm`, not rebuilt this pass — see "Still open")
 - `build/os/simpleos_ssh_ring3_uefi128_laneb.elf` (control comparison)
-- `src/runtime/startup/common/crt_common.c` (shared `__spl_start`/`run_init`)
-- `src/runtime/startup/baremetal/crt_baremetal.c` (`__spl_start_bare`)
-- `src/compiler/70.backend/baremetal/x86_64/crt0.s` (userspace freestanding
-  entry, no `__simple_call_module_inits` call)
+- `src/os/libc/simpleos_crt0.S` — **fix landed here**: weak-guarded
+  `__simple_call_module_inits` call before `main`
+- `src/os/libc/simpleos_cxxabi.c:234-241` (`__libc_init_array`, the
+  from-scratch `.init_array` walker this crt0 actually uses — separate from
+  `crt_common.c::run_init`)
+- `src/os/port/llvm/sysroot.shs:117` (installs `sysroot/lib/crt0.o` from
+  `simpleos_crt0.S` — traces why this is the real fix locus)
+- `src/runtime/startup/common/crt_common.c`, `src/runtime/startup/baremetal/crt_baremetal.c`,
+  `src/compiler/70.backend/baremetal/x86_64/crt0.s` — the file chain the
+  first pass named; confirmed NOT the one linked into this artifact, but
+  real code used by a different class of freestanding baremetal build (see
+  "Correction")
 - `examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s:323-328` (kernel's
-  own entry, has the explicit call — the working precedent)
+  own entry, has the explicit call — the working precedent this fix mirrors)
 - `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs:822-945`
   (`generate_init_caller`), `:1673` (unconditional call site in
   `link_objects_freestanding`)
