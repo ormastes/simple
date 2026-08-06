@@ -391,3 +391,160 @@ open.
 - `syscall_dispatch` in `syscall.spl` still calls the legacy `syscall_handler`
   only and was not converted (zero callers found; low priority, but flagged
   so it isn't silently assumed fixed).
+
+## 2026-08-06 follow-up 3: root cause 1 resolved as case (b) — dead code marked,
+## not wired into production; a separate, real gate already exists
+
+Investigated whether root cause 1 is (a) a genuine security gap — the
+production spawn path *should* be initializing `TaskCapRecord`s but the wiring
+was simply forgotten — or (b) `ipc.cap_manager` is an intentionally-separate
+system that isn't meant to gate the real spawn path today, in which case the
+dead-code status should just be documented clearly so it stops reading as a
+live boundary.
+
+**Determined: case (b).** Evidence:
+
+1. `CapabilityManager.check()` (`capability.spl:88`) returns `false` whenever
+   `_find_record` finds no record — a pure fail-closed deny, with **no**
+   caller-0/kernel-sentinel bypass anywhere in `syscall.spl`'s `_cap_check` or
+   in `capability.spl`. So this isn't merely unreachable; if the trap path
+   ever does reach it, it denies unconditionally, for every caller including
+   the kernel-origin sentinel.
+2. The scheduler's own task-creation path (`scheduler_exec.spl`,
+   `scheduler_task_mgmt.spl`, `scheduler_arm_bootstrap.spl`) *does* call
+   something named `cap_init_task_record` on every task spawn — this looked
+   at first like it might already wire the gate. It does not:
+   `src/os/kernel/scheduler/capability_bridge.spl`'s `cap_init_task_record`
+   only appends the task id to a private `g_scheduler_cap_task_ids: [u64]`
+   list (its own docstring: "keeps scheduler creation pure Simple... where
+   older split modules expected an extern hook"). It never touches
+   `ipc.cap_manager` or `CapabilityManager.init_task_record`/`.init_task` at
+   all — a second, unrelated bookkeeping structure with a confusingly similar
+   name, not a wiring of root cause 1.
+3. The real production spawn path
+   (`src/os/kernel/loader/fs_exec_spawn.spl`) is independently, actively
+   capability-gated — just not by `ipc.cap_manager`. Every spawn/exec call
+   there runs `spawn_authority_check_spawn()` (bootstrap-window / root-task
+   check, `spawn_authority.spl:178`, backed by `spawn_authority_check_ambient`
+   at line 98 — a real, non-trivial, fail-closed check: sealed bootstrap +
+   non-root caller is denied) and `exec_cap_check()`
+   (`cap_exec_gate.spl:17`, `FileExec`+`ProcessSpawn` check, with an explicit
+   `caller == 0` kernel-sentinel bypass). So real spawns are not
+   capability-unchecked; they're checked by a parallel system that this task
+   was not asked to touch.
+
+**Resolution applied:** left `ipc.cap_manager`/`_cap_check` logic unchanged
+(no behavior change — still correctly fail-closed for the entry point it
+actually guards) and added a status comment directly at `_cap_check`
+(`src/os/kernel/ipc/syscall.spl`) stating plainly that this gate is a no-op on
+the production trap path today, naming the real gate
+(`spawn_authority`/`cap_exec_gate.spl`) callers should look at instead, and
+warning that a passing `_cap_check` in a spec is not evidence the boundary is
+live in production. This doc is the reference the comment points to.
+
+**Not done, and explicitly out of scope for this task:** wiring
+`init_task_record`/`init_task` into `fs_exec_spawn.spl` was considered and
+rejected for this pass — it would duplicate `spawn_authority`'s job and
+requires deciding exactly which `CapabilityKind`s each spawned task should
+receive, a security-sensitive design call this investigation did not have
+enough context to make with confidence. If `_cap_check` on the
+`syscall_handler` trap path is ever meant to become live (e.g. because a real
+ring-3 process starts issuing syscalls through that path instead of through
+`fs_exec_spawn.spl`), that wiring decision needs to be made explicitly then,
+not defaulted into by a mechanical fix now.
+
+### New, separate, tangential finding (not fixed, flagged only): `exec_cap_check` constructs a throwaway `CapabilityManager` per call
+
+While confirming `spawn_authority`/`cap_exec_gate.spl` is the real production
+gate, found that `exec_cap_check()` (`cap_exec_gate.spl:26`) does
+`val mgr = CapabilityManager.new()` — a **fresh, empty** manager on every
+call, not the persistent `ipc.cap_manager` instance. Combined with `check()`'s
+fail-closed-on-no-record behavior, this means `exec_cap_check` can only ever
+pass via its explicit `caller == 0` kernel-sentinel bypass; for any non-zero
+caller it denies unconditionally regardless of what capabilities that caller
+actually holds, because the manager it consults never has any records in it.
+Today this is masked because current production spawns run at caller id 0
+(kernel/root), so the bypass always fires and the effective behavior looks
+correct. This is a distinct, smaller version of the same class of bug as root
+cause 1 (a capability check consulting a manager instance that nothing ever
+populates) and would become a real problem the moment a non-root caller
+legitimately calls exec. Left unfixed — out of scope for this task, which
+was specifically about the `ipc.cap_manager`/`_cap_check` gate in
+`syscall.spl` — but recorded here so it isn't rediscovered from scratch.
+
+## 2026-08-06 follow-up 4: correction to follow-up 3 — the accurate posture is "never runs in production", not "denies everything in production"
+
+Independent second pass over the same question (case (a) vs (b)) reached the
+same verdict, **(b)**, and confirms follow-up 3's reasoning. One factual
+correction, plus the structural framing for whoever eventually lands the fix.
+
+### Correction
+
+Follow-up 3, and the `_cap_check` docstring it added, say those syscalls
+"unconditionally return `SYSCALL_EPERM` for any caller that reaches it through
+`syscall_handler` / `syscall_handler_ipc_state` **in production today**". The
+premise is right; the words "in production" are not. Nothing in production
+reaches those dispatchers. The live ring-3 path is:
+
+```
+arch/x86_64/boot/syscall_entry.s
+  -> rt_syscall_dispatch()        baremetal_stubs.c:17277   (C switch on syscall num)
+     -> spl_handle_spawn_binary() abi/syscall_shim_process.spl:304
+     -> spl_handle_ipc_send()     abi/syscall_shim_ipc.spl:28   (etc.)
+        -> _handle_spawn_binary_state() / _handle_ipc_send()  — the LEAF handlers
+```
+
+The `spl_handle_*` C-ABI overrides call the `_handle_*` leaves directly;
+`syscall_handler_ipc_state`, the only function holding the `_cap_check` arms,
+is not in that chain. The one Simple dispatcher that does hold them,
+`x86_dispatch_installed_syscall(_abi)` (`arch/x86_64/interrupt.spl:236,257`),
+is exported as `spl_x86_dispatch_installed_syscall_abi` (line 285) but a
+substring grep for `installed_syscall` across every file type in the repo
+(excluding `bootstrap/` and `doc/`) finds **no C, assembly, linker-script or
+`.shs` reference** — only `test/01_unit/os/kernel/arch/x86_64_interrupt_spec.spl`
+and `test/03_system/app/os/feature/kernel_mvp_spec.spl`. Same for the riscv64
+and x86_32 twins.
+
+So there are two distinct postures, which must not be collapsed:
+
+- **Production ring-3 path:** the gate never executes. Those syscalls have no
+  capability protection there at all — a weaker posture than "denies".
+- **Trap-bridge / spec path:** the gate executes and denies everything, exactly
+  as follow-up 3 describes.
+
+A one-line correction note was added above `_cap_check` in `syscall.spl`
+(the existing STATUS docstring was left intact), and a matching two-line
+pointer at `exec_cap_check` in `cap_exec_gate.spl` referencing the tangential
+finding above.
+
+### Framing for the eventual fix: this is a two-store split, not just dead code
+
+| store | filled by | read by |
+|---|---|---|
+| `TaskControlBlock.capabilities` | the REAL spawn path — `fs_exec_prepare_spawn_from_bytes` → `spawn_authority_spawn_caps` → `scheduler_create_bootstrap_user_task_pid` (`loader/fs_exec_spawn.spl:276-281`) | nothing on the syscall-gate path |
+| `CapabilityManager.records` | only `init_task_record`/`init_task` (`ipc/capability.spl:362,403`) — zero production callers | `_cap_check`, `_cap_check_file`, `exec_cap_check` |
+
+The fix is therefore **not** "call `init_task_record` at spawn" — that would
+grant every task FileRead/FileWrite/FileCreate/FileExec/ProcessSpawn
+unconditionally (`capability.spl:376-390`), i.e. re-open the ambient-authority
+hole that `doc/04_architecture/os/security/ocap_privilege_architecture.md`
+gap 1 explicitly closes, and that `cspace_spawn.spl:348` already carries a grep
+guard against. It is "make the gate read the store the real spawn path fills,
+on the dispatcher the ring-3 entry actually reaches" — which is that document's
+phase **P1** (`spawn_with_cspace` + `AttenuationSpec`). `_fs_exec_parent_caps`
+already carries the matching `TODO(boot-seal)` for threading the caller's real
+TCB capabilities (`fs_exec_spawn.spl:341`).
+
+Confirms follow-up 3's deferral: forcing (a) in this pass would EPERM the first
+syscall of every ring-3 task once the dispatcher question is resolved, or grant
+blanket ambient authority if seeded naively. No behavior change landed.
+
+### Close-out criteria (what must be true before root cause 1 can be closed)
+
+- One capability store, or an explicit documented bridge between the TCB set
+  and `CapabilityManager.records`, populated by the real spawn path.
+- The gate lives on whichever dispatcher the ring-3 entry actually reaches
+  (today: the `spl_handle_*` shims), not only on the trap bridge.
+- A negative test on the REAL path: a task without the capability is denied,
+  the same task with it granted succeeds — sabotage-verified.
+- `exec_cap_check` either receives a real caller id or is deleted.
