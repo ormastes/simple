@@ -71,7 +71,34 @@ Class 1a is **not** the whole family — it is only the subset that aborts. The
 `config_core/schema.spl:204,216,235`) return `0` on overrun on both engines and
 so corrupt silently instead. They are the same defect with a quieter failure.
 
-## Root causes (outside `src/lib`, filed not fixed)
+## Root causes (outside `src/lib`) — BOTH FIXED 2026-08-06
+
+Both were seed **Cranelift** (default `run`) gaps; the tree-walk interpreter,
+the LLVM backend and the pure-Simple compiler all already did the right thing.
+Evidence binary: `src/compiler_rust/target/bootstrap/simple` (the seed), run
+directly. Fixes:
+
+| root cause | fix site | mechanism |
+|---|---|---|
+| R1 (cast) | `runtime/src/value/sffi/value_ops.rs` `rt_value_as_int` | `char_at` has no `method_return_types` entry so it falls through to `TypeId::ANY` (`hir/lower/expr/mod.rs:920`); `compile_cast`'s ANY→int arm (`codegen/instr/basic_ops.rs:54`) calls `rt_value_as_int`, which was an unconditional `(self.0 as i64) >> 3` — the heap pointer for a text value. Now decodes text: a single codepoint yields that codepoint (the interpreter's documented contract), longer text falls back to the leading-digit-run parse the STRING-typed arm already uses. |
+| R2 (`chr`) | `compiler/src/codegen/instr/calls.rs` qualified-method table | no `chr`/`to_char` arm, so the call fell through to a cross-module import and died as `Function 'i64.chr' not found`. Routed to `text_dot_from_char_code`, the same runtime entry point the LLVM backend already calls. |
+| R2b (fail-open) | `runtime/src/value/collections.rs` `rt_string_char_at` | forward over-run returned `RuntimeValue::NIL` at **two** sites (byte-length fast reject and the real codepoint bound); both now return empty text, matching the interpreter, so `if ch == "": break` terminates. |
+
+`.chr()` was kept, not removed: four independent implementations exist
+(tree-walk interpreter `interpreter_method/primitives.rs:212`, pure-Simple
+interpreter `10.frontend/core/interpreter/_EvalOps/call_method_eval.spl:1056`,
+LLVM ×3, pure-Simple MIR lowering
+`50.mir/_MirLoweringExpr/method_calls_literals.spl:1005`). One missing dispatch
+arm is not grounds for a 100-site migration.
+
+**Residue, filed not fixed:** multi-character text cast to an integer still
+diverges — the interpreter raises `cannot cast str to i64`, the compiled path
+returns the lenient parse. `rt_value_as_int` returns a bare `i64` with no error
+channel, so agreement there needs a wider ABI change.
+
+Contract pinned in `test/01_unit/language/text_char_primitive_engine_contract_spec.spl`
+(interpreter-only by construction — `simple test` has no JIT mode; the JIT half
+is proved by `<seed> run` with/without `SIMPLE_EXECUTION_MODE=interpret`).
 
 ### R1. `char_at(i) as i64` returns a raw pointer on JIT for non-ASCII
 

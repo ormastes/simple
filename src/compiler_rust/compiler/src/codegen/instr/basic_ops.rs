@@ -41,6 +41,10 @@ pub fn compile_cast<M: Module>(
         None => return Err(format!("Cast: source vreg {:?} not found", source)),
     };
 
+    if std::env::var("SIMPLE_DEBUG_CAST_TY").is_ok() {
+        eprintln!("[cast-ty] from={:?} to={:?}", from_ty, to_ty);
+    }
+
     if from_ty == TypeId::ANY {
         match to_ty {
             TypeId::I8

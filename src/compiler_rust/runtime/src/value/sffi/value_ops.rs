@@ -21,6 +21,47 @@ pub extern "C" fn rt_value_nil() -> RuntimeValue {
 }
 #[no_mangle]
 pub extern "C" fn rt_value_as_int(v: RuntimeValue) -> i64 {
+    // TEXT reaching an integer cast must be DECODED, not bit-shifted.
+    //
+    // `as_int()` is an unconditional `(self.0 as i64) >> 3` — correct for a
+    // tagged int, pure garbage for a heap value. This function backs the
+    // `from_ty == ANY -> int` arm of `compile_cast`
+    // (compiler/src/codegen/instr/basic_ops.rs:54), and `char_at` has no
+    // entry in `method_return_types`, so it falls through to `TypeId::ANY`
+    // (hir/lower/expr/mod.rs:920) and every `s.char_at(i) as i64` took this
+    // path. Measured 2026-08-06 on the seed: `"Café".char_at(3) as i64`
+    // yielded 465849835860 — the string's heap pointer >> 3 — on the
+    // compiled path against 233 on the tree-walk interpreter.
+    //
+    // Nothing can depend on the old answer: it was a raw allocation address,
+    // different on every run.
+    //
+    // Single-codepoint text yields THAT CODE POINT, matching the tree-walk
+    // interpreter's documented contract ("only int, float, bool, and
+    // single-char strings can be cast to numeric types",
+    // interpreter/expr/casting.rs). Longer text falls back to the same
+    // leading-digit-run parse the STRING-typed cast arm already uses, so
+    // `int(text)` behaviour (tasks #100/#118) is unchanged in shape. The
+    // engines cannot be made to agree on MULTI-character text here — the
+    // interpreter raises a semantic error and this ABI returns a bare i64
+    // with no error channel; that residue is filed separately.
+    // See doc/08_tracking/bug/text_byte_len_vs_codepoint_index_family_2026-08-06.md.
+    if v.heap_type() == Some(crate::value::heap::HeapObjectType::String) {
+        let len = crate::value::collections::rt_string_len(v);
+        if len > 0 {
+            let data = crate::value::collections::rt_string_data(v);
+            if !data.is_null() {
+                let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    let mut chars = s.chars();
+                    if let (Some(c), None) = (chars.next(), chars.next()) {
+                        return c as i64;
+                    }
+                }
+            }
+        }
+        return crate::value::collections::rt_string_to_int_lenient(v);
+    }
     v.as_int()
 }
 #[no_mangle]
