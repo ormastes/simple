@@ -24,10 +24,23 @@ val SIGV4_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 # --- Byte / hex helpers (self-contained; do not couple to AES utilities) ---
 
 fn _text_to_bytes(s: text) -> list:
+    """UTF-8 bytes of `s`.
+
+    Must iterate `s.bytes()`. The previous version pushed
+    `s.char_code_at(i)` -- a CODE POINT -- while bounding `i` by `s.len()`,
+    which is a BYTE count. For non-ASCII text that is wrong twice over: each
+    multi-byte character contributed one code point instead of its 2-4 UTF-8
+    bytes, and the loop then over-ran the string, where `char_code_at`
+    silently returns 0, appending phantom NUL bytes. Every SigV4 payload hash
+    and HMAC over non-ASCII text was therefore computed over the wrong byte
+    sequence, so the signature was simply wrong. ASCII was unaffected, which
+    is why this survived.
+    """
     var out = []
+    val bs = s.bytes()
     var i = 0
-    while i < s.len():
-        out.push(s.char_code_at(i))
+    while i < bs.len():
+        out.push(bs[i] as i64)
         i = i + 1
     out
 
@@ -61,11 +74,19 @@ fn _hex_byte(b: i64) -> text:
 
 fn sigv4_uri_encode(s: text, encode_slash: bool) -> text:
     """Percent-encode per RFC 3986; uppercase hex; `/` only encoded when requested."""
+    # Percent-encoding is defined per BYTE, so this loop reads bytes only.
+    # It previously mixed units in a single body: `ch = s[i:i+1]` is a BYTE
+    # slice while `code = s.char_code_at(i)` is CODE POINT indexed, under a
+    # BYTE bound. "é" encoded as "%E9%00" (one escape of code point 233 plus a
+    # phantom NUL from the over-run) instead of "%C3%A9". `ch` is only ever
+    # appended for ASCII bytes (unreserved, or an unencoded "/"), so the
+    # one-byte slice is always a whole character on that path.
     var out = ""
+    val bs = s.bytes()
     var i = 0
-    while i < s.len():
+    while i < bs.len():
         val ch = s[i:i + 1]
-        val code = s.char_code_at(i)
+        val code = bs[i] as i64
         val is_alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
         val is_digit = code >= 48 and code <= 57
         val is_unreserved = is_alpha or is_digit or ch == "-" or ch == "_" or ch == "." or ch == "~"
