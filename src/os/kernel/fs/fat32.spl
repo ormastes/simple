@@ -1738,6 +1738,58 @@ impl Fat32Filesystem:
             self.root_dir_data[cache_base] = 0xE5u8
         Ok(())
 
+    fn _unlink_dirent_chain(self, dev: BlockDevice, loc: Fat32DirEntryLoc) -> Result<(), i32>:
+        """Mark a located entry deleted INCLUDING every LFN slot that precedes
+        its 8.3 alias.
+
+        `_mark_dirent_deleted` alone only clears the alias, which leaves the
+        LFN slots live on disk. That is not a cosmetic leak: `_alloc_dirent_slots`
+        treats the single freed alias slot as a reusable run of 1, so the very
+        next entry written there is preceded by the DELETED name's LFN chain —
+        and both readers (`fat32_dir_find_entry` / `fat32_dir_list_entries`)
+        accumulate LFN fragments straight into the following 8.3 entry. The new
+        file is then listed under the deleted file's long name (or under the two
+        names concatenated, when the new name carries LFN slots of its own), and
+        the deleted path stays resolvable. Neither reader validates the LFN
+        checksum byte against the alias, which is why this driver is corrupted
+        by orphan slots where a checksum-checking implementation would merely
+        ignore them.
+
+        Walks backward from the alias while the preceding slot is a live LFN
+        slot. The stop condition tests byte 0 for 0x00/0xE5 BEFORE the 0x0F
+        attribute, because a deleted LFN slot keeps attr 0x0F — only its first
+        byte changes — so an attr-only test would run on into an older,
+        already-deleted entry's slots.
+
+        Order is LFN-slots-first, alias last: a crash midway then leaves the
+        entry reachable under its bare 8.3 short name with no orphan slots,
+        which is strictly safer than the reverse.
+        """
+        val ch_r = self._dir_chain(dev, loc.dir_cluster)
+        if ch_r.is_err():
+            return Err(ch_r.unwrap_err())
+        val chain = ch_r.unwrap()
+        val d_r = self._read_dir_data(dev, loc.dir_cluster)
+        if d_r.is_err():
+            return Err(d_r.unwrap_err())
+        val dd = d_r.unwrap()
+        var flat = loc.entry_offset - 32
+        var walking = true
+        while walking and flat >= 0:
+            if flat + 11 >= dd.len():
+                walking = false
+            else:
+                val fb = dd[flat]
+                if fb == 0x00u8 or fb == 0xE5u8 or dd[flat + 11] != 0x0Fu8:
+                    walking = false
+                else:
+                    val a = self._dirent_addr(chain, flat)
+                    val mr = self._mark_dirent_deleted(dev, a.sector, a.offset)
+                    if mr.is_err():
+                        return Err(mr.unwrap_err())
+                    flat = flat - 32
+        self._mark_dirent_deleted(dev, loc.dirent_sector, loc.dirent_offset)
+
     fn unlink_at(self, dev: BlockDevice, path: text) -> Result<(), i32>:
         """Remove a file: free its whole cluster chain in the FAT, then mark
         its directory entry deleted. Refuses a directory (EISDIR) — use
@@ -1759,7 +1811,7 @@ impl Fat32Filesystem:
                 if fr.is_err():
                     return Err(EIO)
                 ci = ci + 1
-        self._mark_dirent_deleted(dev, loc.dirent_sector, loc.dirent_offset)
+        self._unlink_dirent_chain(dev, loc)
 
     fn rmdir_at(self, dev: BlockDevice, path: text) -> Result<(), i32>:
         """Remove a directory. Refuses ENOTDIR on a file and ENOTEMPTY unless
@@ -1792,7 +1844,7 @@ impl Fat32Filesystem:
                 if fr.is_err():
                     return Err(EIO)
                 ci = ci + 1
-        self._mark_dirent_deleted(dev, loc.dirent_sector, loc.dirent_offset)
+        self._unlink_dirent_chain(dev, loc)
 
     fn rename_at(self, dev: BlockDevice, old_path: text, new_path: text) -> Result<(), i32>:
         """Rename/move a file or directory (real FAT32 primitive, not
@@ -1889,9 +1941,11 @@ impl Fat32Filesystem:
                 return Err(fix_r.unwrap_err())
 
         # Entry now exists at its new name/location; only now remove the old
-        # one. If this step fails or the kernel crashes here, both names
-        # remain live (see the ATOMICITY note above) — never neither.
-        self._mark_dirent_deleted(dev, loc.dirent_sector, loc.dirent_offset)
+        # one — alias AND its LFN slots, otherwise the orphaned slots get
+        # re-adopted by whatever is written into the freed alias slot next.
+        # If this step fails or the kernel crashes here, both names remain
+        # live (see the ATOMICITY note above) — never neither.
+        self._unlink_dirent_chain(dev, loc)
 
     static fn make_for_chain_test(fat_start_sector: u32, bytes_per_sector: u32, data_clusters: u32) -> Fat32Filesystem:
         """Create a pre-configured Fat32Filesystem for read_cluster_chain unit tests.

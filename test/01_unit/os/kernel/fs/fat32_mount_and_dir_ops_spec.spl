@@ -266,3 +266,68 @@ describe "Fat32Filesystem.rmdir_at":
         val r2 = fs2.rmdir_at(dev, "/FILE.O")
         assert_true(r2.is_err())
         expect(r2.unwrap_err()).to_equal(-20)
+
+describe "deleting an LFN-named entry clears its whole slot chain":
+
+    # Deleting a long-named entry must 0xE5 the preceding LFN slots too, not
+    # only the 8.3 alias. _alloc_dirent_slots treats the single freed 8.3 slot
+    # as a reusable run of 1, so an orphaned LFN chain gets re-adopted by the
+    # NEXT short-named entry written into that slot: readdir_at then reports
+    # the deleted file's long name and the new file's real name vanishes.
+
+    # NOTE on the follow-up names below: only an UPPERCASE 8.3 name such as
+    # "A.TXT" occupies a single slot. A lowercase "a.txt" is not representable
+    # as a bare 8.3 short name, so it gets an LFN chain of its own and needs 2
+    # contiguous slots — which would not exercise the single-freed-slot reuse
+    # this scenario is about.
+
+    it "unlink_at: a later 8.3 create does not inherit the deleted long name":
+        val dev = _make_dev()
+        var fs = _fs_from(dev)
+        step("create a name that needs an LFN chain (2 LFN slots + 1 8.3 alias)")
+        assert_true(fs.create_at(dev, "/verylongname.txt").is_ok())
+        val fs1 = _fs_from(dev)
+        step("POSITIVE CONTROL: the long name is really there before the unlink")
+        assert_true(fs1.readdir_at(dev, "/").unwrap().contains("verylongname.txt"))
+        step("unlink it, through a FRESH view")
+        assert_true(fs1.unlink_at(dev, "/verylongname.txt").is_ok())
+        val fs2 = _fs_from(dev)
+        step("POSITIVE CONTROL: the long name is gone right after the unlink")
+        assert_false(fs2.readdir_at(dev, "/").unwrap().contains("verylongname.txt"))
+        step("now create a true 8.3 name — it reuses the single freed alias slot")
+        assert_true(fs2.create_at(dev, "/A.TXT").is_ok())
+        val fs3 = _fs_from(dev)
+        val names = fs3.readdir_at(dev, "/").unwrap()
+        step("the new file must be listed under ITS OWN name")
+        assert_true(names.contains("A.TXT"))
+        step("and the deleted long name must NOT have been re-adopted")
+        assert_false(names.contains("verylongname.txt"))
+        step("a deleted file must not still be stat-able")
+        assert_true(fs3.stat_at(dev, "/verylongname.txt").is_err())
+
+    it "rmdir_at: an LFN-named directory leaves no orphan slots behind":
+        val dev = _make_dev()
+        var fs = _fs_from(dev)
+        assert_true(fs.mkdir_at(dev, "/longdirectory").is_ok())
+        val fs1 = _fs_from(dev)
+        assert_true(fs1.rmdir_at(dev, "/longdirectory").is_ok())
+        val fs2 = _fs_from(dev)
+        assert_true(fs2.create_at(dev, "/B.TXT").is_ok())
+        val fs3 = _fs_from(dev)
+        val names = fs3.readdir_at(dev, "/").unwrap()
+        assert_true(names.contains("B.TXT"))
+        assert_false(names.contains("longdirectory"))
+
+    it "rename_at: the old long name is fully unlinked, not left as an orphan chain":
+        val dev = _make_dev()
+        var fs = _fs_from(dev)
+        assert_true(fs.create_at(dev, "/originallongname.txt").is_ok())
+        val fs1 = _fs_from(dev)
+        assert_true(fs1.rename_at(dev, "/originallongname.txt", "/C.TXT").is_ok())
+        val fs2 = _fs_from(dev)
+        assert_true(fs2.create_at(dev, "/D.TXT").is_ok())
+        val fs3 = _fs_from(dev)
+        val names = fs3.readdir_at(dev, "/").unwrap()
+        assert_true(names.contains("C.TXT"))
+        assert_true(names.contains("D.TXT"))
+        assert_false(names.contains("originallongname.txt"))
