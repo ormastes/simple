@@ -342,6 +342,18 @@ All in `doc/08_tracking/bug/`, all dated `2026-08-06`:
 | `simpleos_image_builder_provenance_asymmetry` | FIXED | trap 7 |
 | `simpleos_llvm_toolchain_guide_claimed_prebuilt_artifacts` | FIXED (D4) | trap 8 |
 | `fs_exec_ring3_fork_unreachable_spawnwait` | impl landed, **in-guest proof not obtained** | fact 6, trap 5 |
+| `b1_witness_guest_clang_heap_exhausts_on_real_tu` | PARTIALLY RESOLVED — SIGABRT root-caused (`operator new(0)` returned NULL: guest `malloc(0)` legally returns NULL but `_Znwm`/`_Znam` in `simpleos_cxxabi.c` didn't special-case size 0, violating C++'s never-null-for-size-0 `operator new` guarantee) and fixed; `-cc1` now compiles the real TU to completion in-guest. Byte-identical win condition still NOT met — post-fix `.text` diverges from the host reference (`.rodata`/`.data`/`.bss` identical) — open follow-up | new trap below |
+
+**New trap:** after editing any `src/os/libc/*.c` file, the B1/B-lane
+harnesses (`SKIP_KERNEL=0`, `SKIP_STAGE=1`) rebuild the **kernel** and
+re-copy the FAT32 payload but never rebuild `build/os/clang_static/bin/clang_static`
+itself — it silently keeps running the OLD, pre-edit `libsimpleos_c.a`. Must
+manually: `cd src/os/libc && make` → `cp libsimpleos_c.a
+../../../build/os/sysroot/lib/libsimpleos_c.a` → `sh
+src/os/port/llvm/clang_static.shs` before rerunning. Verify with `strings
+build/os/clang_static/bin/clang_static | grep -c <new-diagnostic-string>`
+before trusting a "no crash" or "message never fired" result out of a B1
+rerun — a null result from a stale binary reads identically to a real one.
 
 Plus the standing gate defects **D1** (`deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`),
 **D2** (#99 seed-cranelift enum miscompile), **D3** (freestanding landmine family),

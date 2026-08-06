@@ -1,6 +1,17 @@
 # B1 witness: in-guest clang -cc1 aborts (SIGABRT/134) partway through a real TU — heap-size hypothesis DISCONFIRMED
 
-Status: OPEN. Filed 2026-08-06, lane B1 (clang self-compile witness),
+Status: PARTIALLY RESOLVED (2026-08-06, third follow-up round). The SIGABRT
+crash is root-caused and fixed — `-cc1` now compiles `TU1.I` to completion
+in-guest with no abort, every run, 3 for 3. The originally-planned win
+condition (byte-identical `TU1.O` vs the host reference, sha256
+`f71aa3f9545c908c3e0b3bc3eddf4d1b11bde443152e45a04207b8969252cfb4`) is **NOT**
+met: the recompiled object is the right size (10,616 bytes) with identical
+`.rodata`/`.data`/`.bss`, but `.text` differs from the host reference — a
+new, narrower, non-crashing codegen-divergence defect, tracked as an open
+follow-up at the end of this doc. See "Round 3" section below for the full
+instrumentation, root cause, fix, and verification evidence.
+
+Status (historical, rounds 1-2): OPEN. Filed 2026-08-06, lane B1 (clang self-compile witness),
 follow-up to `doc/08_tracking/bug/bare_in_cap_silently_truncates_guest_input_files_2026-08-06.md`.
 **Update 2026-08-06 (same day, follow-up round):** the "undersized 64 MiB
 heap" theory below (§2) was tested and DISCONFIRMED — see
@@ -238,3 +249,176 @@ loop:** instrumenting the guest abort path to print which of the two
 theories from further heap-cap changes; next lane should start there rather
 than trying larger heap sizes again — this experiment shows that axis is
 exhausted as a lever.
+
+## Round 3 (2026-08-06, same day, second follow-up): instrumented, root-caused, fixed
+
+### What each candidate `abort()` site actually guards (verified from source, not guessed)
+
+Read `src/os/libc/simpleos_cxxabi.c` directly. Both of the two sites named in
+Round 2 are `operator new` / `operator new[]` NULL-return aborts — **not**
+stack-guard-page trap handlers, confirming (not just guessing) the doc's own
+"working theory" language from Round 2:
+
+- `_Znwm(unsigned long size)` = `operator new(size_t)`:
+  `void *p = malloc(size); if (!p) abort();`
+- `_Znam(unsigned long size)` = `operator new[](size_t)`: same pattern.
+
+Two other `abort()` sites exist in the same file, both print a message before
+aborting: `__cxa_pure_virtual` ("pure virtual method called") and
+`__stack_chk_fail` ("*** stack smashing detected ***"); `__assert_fail` also
+aborts after an `fprintf`. `abort()` itself
+(`src/os/libc/simpleos_libc.c:724`, `void abort(void) { exit(134); }`) is the
+single implementation reached by all of these and was the only place a raw,
+unattributed `exit(134)` could originate from in this codebase — confirmed by
+grepping every `abort(` call site in `src/os/libc/*.c`.
+
+### Instrumentation added
+
+Added an `fprintf(stderr, ...)` diagnostic (matching the file's existing
+unbuffered `fprintf(stderr,...)`/`write()` convention — `write()` for fd 1/2
+routes byte-by-byte through `simpleos_syscall(60, ...)` i.e. serial
+`DebugWrite`, with **no libc-level buffering**, so nothing is lost even if
+`abort()` fires immediately after) at both `_Znwm` and `_Znam`, printing the
+requested size, plus a second diagnostic at the true `abort()` implementation
+itself (`simpleos_libc.c:724`) printing `__builtin_return_address(0)` so an
+abort reached through any *other*, non-printing path (e.g. a raw internal
+`abort()` call inside libc++/libc++abi/LLVM) could still be symbolized.
+
+### First rebuild/rerun: a real but misleading null result — stale `clang_static`
+
+The first fresh kernel rebuild + OVMF rerun reproduced the exact same
+`exit status=134` at `TU1.I:8061`, but **printed neither new diagnostic** —
+appearing to rule out both named `abort()` sites entirely. Investigation
+before trusting that result: `build/os/clang_static/bin/clang_static`
+(122 MB, statically linked, the guest binary that actually runs `-cc1`)
+had mtime **09:00:26 UTC**, more than 50 minutes **before** the libc edits
+landed (09:53/09:57 UTC) — the harness's `SKIP_KERNEL=0`/`SKIP_STAGE=1`
+knobs rebuild the *kernel* and re-copy an *already-built* `clang_static`
+into the FAT32 payload, but never rebuild `clang_static` itself from source.
+This is the same "stale deployed binary" trap already on record for the
+kernel earlier the same day
+(`src/os/libc/libsimpleos_c.a` was independently confirmed stale too, mtime
+06:21 UTC). **Always rebuild `libsimpleos_c.a` (`cd src/os/libc && make`),
+copy it into `build/os/sysroot/lib/libsimpleos_c.a`, and relink
+`clang_static` (`sh src/os/port/llvm/clang_static.shs`) after any guest-libc
+source edit** — the B1 harness alone does not do this.
+
+### Second rebuild/rerun: root cause found
+
+After rebuilding `libsimpleos_c.a` and relinking `clang_static` (confirmed via
+`strings build/os/clang_static/bin/clang_static | grep -c` showing both new
+diagnostic strings present, count=2) and rerunning under real OVMF UEFI, the
+serial log (`build/os/ssh_b1_witness_uefi.serial.log`) showed, immediately
+after the same 12th `-Wuser-defined-literals` warning at `TU1.I:8061`:
+
+```
+[cxxabi] _Znwm (operator new) abort: malloc(0) returned NULL at simpleos_cxxabi.c:109
+[abort] simpleos_libc.c:724 abort() called, caller ra=0x447d7105
+[syscall] exit status=134
+[spawn] ring3 program exited rc=134 (kernel resumed)
+```
+
+**`_Znwm` (`operator new(size_t)`) fired, with `size=0`.** Neither candidate
+theory from Round 2 (heap exhaustion, stack overflow) was correct — the
+process aborts because clang/libc++ makes a **zero-byte `operator new`
+call** (plausible during Sema/CodeGen bookkeeping for the 12 templated
+`<chrono>` `operator""` literal definitions just parsed) and the guest's
+`operator new` treats that as allocation failure.
+
+**Root cause:** `src/os/libc/simpleos_dlmalloc.c:134`:
+`if (size == 0) return NULL;` — a legal C `malloc(0)` behavior (POSIX permits
+either NULL or a unique valid pointer). But `_Znwm`/`_Znam` in
+`simpleos_cxxabi.c` delegated straight to `malloc(size)` with no size-0
+special case, and C++ `[expr.new]` **requires** `operator new` to never fail
+for a size-0 request — it must return a non-null, distinct pointer. The
+guest's `operator new` was silently violating that guarantee, and this
+particular TU is the first B1-lane input that happens to trigger a
+zero-size `new` during compilation.
+
+### Fix
+
+`src/os/libc/simpleos_cxxabi.c`, `_Znwm` and `_Znam`: added `if (size == 0)
+size = 1;` before the `malloc()` call (the standard idiom — bump to a
+minimal nonzero request so `operator new` always gets a valid, distinct
+pointer for size 0, exactly mirroring how `_ZnwmSt11align_val_t` already
+delegates to the now-fixed `_Znwm`). The nothrow variants
+(`_ZnwmRKSt9nothrow_t`/`_ZnamRKSt9nothrow_t`) were left unchanged — nothrow
+`new` is permitted to return null, and `TU1.I` does not exercise that path.
+
+### Verification
+
+Rebuilt `libsimpleos_c.a`, relinked `clang_static` (0 undefined symbols),
+reran the full harness under real OVMF UEFI (kernel ELF confirmed genuinely
+`ELF64` via `readelf -h | grep Class`, picking up the linker fix from commit
+`7c9609333fd04fc48900c14ca2d60d479fb448e6` landed earlier the same day).
+Result, reproduced twice in a row (`b1_run4`, `b1_run5`):
+
+```
+  [ok]   L4 in-guest clang -cc1 compiled /TU1.O under OVMF
+```
+
+— no abort, `-cc1` runs to completion. Serial log confirms
+`[oo] name=/TU1.O size=10616` and `[oo-nvme] persist /TU1.O -> OK`, matching
+the reference object's exact size. **The SIGABRT crash is fixed.**
+
+### Win condition: NOT fully met — new, narrower, non-crashing defect
+
+The harness's SSH `getfile` retrieval step failed both times
+(`FAIL: retrieved_TU1.O missing or empty (transport failure — see doc §5
+known hazard)`) even though the guest's own log shows the full 10,616 bytes
+were served (`[sshd-session] getfile path=/TU1.O fsize=10616 bytes=10616`) —
+a separate, pre-existing SSH-transport issue, out of scope for this bug.
+Since `/TU1.O` was persisted to the NVMe-backed FAT32 image
+(`build/os/elfexec_b1/fat32-b1.img`) before QEMU exited, it was extracted
+directly from the image (FAT32 BPB parsed: `bytes_per_sector=512`,
+`sectors_per_cluster=64`, `reserved_sectors=32`, `fat_count=1`,
+`sectors_per_fat32=38` → `data_start=35840`, `cluster_size=32768`; `/TU1.O`
+at `cluster=3` per `scripts/os/simpleos_fat32_image_list.spl` →
+`offset=68608`), read as 10,616 bytes, valid `ELF 64-bit LSB relocatable,
+x86-64`.
+
+sha256 of the extracted object: `7b6b6a3db45a3150f362b44d64623b9fd1104b17ae8ba8efcee36146087bfc6f` —
+**does NOT match** the reference `f71aa3f9545c908c3e0b3bc3eddf4d1b11bde443152e45a04207b8969252cfb4`.
+Running `build/os/b1_witness/compare_object.shs` (tier-2 section-by-section
+diff) on the extracted object against the reference:
+
+```
+TIER1 FAIL — not byte-identical. Falling through to tier-2 analysis.
+  .text DIFF  ref=0987ca12bbb8c0d135acd722b802105b45599f4bb0cffa9396b44aa522f7b61f guest=8627904bb4f75b93426dfb598c1ac60d0bcf3e5bdada4f508aed7757ce1fa277
+  .rodata SAME
+  .data SAME
+  .bss SAME
+  .llvm_addrsig SAME
+```
+
+Same size, `.rodata`/`.data`/`.bss`/`.llvm_addrsig` byte-identical — only
+`.text` differs. This is a **new, narrower, non-crashing defect**: the guest
+now compiles the TU to completion but its codegen output diverges from the
+host's for the same flags/TU/compiler build. Candidates, not yet
+investigated: guest-vs-host floating-point/`long double` codegen
+differences (relevant given the crash-adjacent code was `<chrono>`'s
+`long double`-based literal operators), instruction-selection nondeterminism
+tied to the guest's memory layout, or a real remaining guest-specific
+codegen bug. **Not yet root-caused — filed here as the next B1-lane
+follow-up rather than investigated further this round**, to avoid repeating
+the "unbounded investigation loop" this doc's earlier rounds explicitly
+called out.
+
+### Files changed this round
+
+- `src/os/libc/simpleos_cxxabi.c` — `_Znwm`/`_Znam` size-0 fix (the actual
+  bug fix) + diagnostic `fprintf` at both sites.
+- `src/os/libc/simpleos_libc.c` — diagnostic `fprintf` with caller return
+  address at the `abort()` implementation.
+
+### Evidence (this round)
+
+- Serial logs (this session's scratchpad,not committed):
+  `b1_run3.log` (pre-fix, shows the `[cxxabi] _Znwm ... malloc(0)` diagnostic
+  firing), `b1_run4.log`/`b1_run5.log` (post-fix, both show L4 passing).
+- `build/os/ssh_b1_witness_uefi.serial.log` — full transcript of the last
+  (`b1_run5`) run.
+- Extracted post-fix object sha256:
+  `7b6b6a3db45a3150f362b44d64623b9fd1104b17ae8ba8efcee36146087bfc6f`
+  (10,616 bytes, valid ELF64 relocatable) — NOT a match to the win-condition
+  reference; see ".text DIFF" analysis above.

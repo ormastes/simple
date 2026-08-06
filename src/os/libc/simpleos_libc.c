@@ -722,6 +722,13 @@ void exit(int status) {
 }
 
 void abort(void) {
+    /* Diagnostic: identify the caller (return address) so we can symbolize
+     * which function invoked abort() when none of libc's own printing
+     * abort sites (operator new/new[], __stack_chk_fail, __assert_fail,
+     * __cxa_pure_virtual in simpleos_cxxabi.c) fired first — see
+     * doc/08_tracking/bug/b1_witness_guest_clang_heap_exhausts_on_real_tu_2026-08-06.md */
+    void *ra = __builtin_return_address(0);
+    fprintf(stderr, "[abort] simpleos_libc.c:724 abort() called, caller ra=%p\n", ra);
     exit(134);  /* SIGABRT convention */
 }
 

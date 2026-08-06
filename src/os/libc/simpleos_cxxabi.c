@@ -105,14 +105,33 @@ void __cxa_guard_abort(long long *guard) {
  * ==================================================================== */
 
 void *_Znwm(unsigned long size) {
+    /* C++ [expr.new]: operator new for a size-0 request must still return a
+     * non-null, distinct pointer (never fail for size 0). This guest's
+     * malloc(0) deliberately returns NULL (see simpleos_dlmalloc.c:134,
+     * valid under C's malloc(0)-may-return-NULL rule), so operator new must
+     * bump 0 up to a minimal nonzero request before delegating, or every
+     * zero-size `new T[0]`/empty-allocation call spuriously aborts. Root
+     * cause of the B1 witness abort — see
+     * doc/08_tracking/bug/b1_witness_guest_clang_heap_exhausts_on_real_tu_2026-08-06.md */
+    if (size == 0) size = 1;
     void *p = malloc(size);
-    if (!p) abort(); /* new must not return NULL (no exceptions) */
+    if (!p) {
+        /* new must not return NULL (no exceptions) */
+        fprintf(stderr, "[cxxabi] _Znwm (operator new) abort: malloc(%lu) "
+                "returned NULL at simpleos_cxxabi.c:109\n", size);
+        abort();
+    }
     return p;
 }
 
 void *_Znam(unsigned long size) {
+    if (size == 0) size = 1;
     void *p = malloc(size);
-    if (!p) abort();
+    if (!p) {
+        fprintf(stderr, "[cxxabi] _Znam (operator new[]) abort: malloc(%lu) "
+                "returned NULL at simpleos_cxxabi.c:115\n", size);
+        abort();
+    }
     return p;
 }
 
