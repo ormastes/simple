@@ -1,6 +1,6 @@
 # SimpleOS libc defines `struct __simpleos_FILE` twice, with incompatible layouts
 
-Status: OPEN
+Status: FIXED 2026-08-06
 Found: 2026-08-06, while porting the real Simple runtime to SimpleOS
 (`simpleos_payload_link_missing_20_rt_symbols_2026-08-06.md`).
 
@@ -75,8 +75,52 @@ A regression guard belongs with it: the layouts are only comparable at link
 time, so a check that greps for more than one `struct __simpleos_FILE {`
 definition across `src/os/libc/*.c` is the cheap durable version.
 
-## Not fixed here
+## Resolution (2026-08-06)
 
-Out of scope for the runtime-port lane, and it touches stdio init for every
-SimpleOS program, so it wants its own change and its own boot test rather than
-being folded into a link-unblocking commit.
+The 16-byte layout won: `simpleos_libc.c` only ever touched `->fd` (4 sites, all
+offset 0), so 16 bytes is a strict superset and nothing had to shrink.
+
+- New `src/os/libc/simpleos_file_internal.h` holds the single definition plus a
+  `_Static_assert(sizeof(struct __simpleos_FILE) == 16)`. Both TUs include it;
+  both local definitions are gone.
+- The three statics are now `{ fd, 0, 0, mode }` of the unified type.
+- `fclose()` recognises the standard streams by pointer identity
+  (`is_std_stream`) and closes the fd without `free()`ing the static.
+- `Makefile`: the new header is a prerequisite of the `%.o: %.c` pattern rule,
+  so incremental builds cannot keep a stale object.
+
+### Evidence
+
+`readelf -sW simpleos_libc.o | grep _std`, before → after:
+
+```
+before:  _stdin_f  size 4    _stdout_f size 4 (0x08)   _stderr_f size 4 (0x18)
+after:   _stdin_f  size 16   _stdout_f size 16(0x08)   _stderr_f size 16(0x20)
+```
+
+The statics are now genuinely the size every `fread`/`fwrite` writes.
+
+Regression guard is structural, not a grep: a re-added local definition is a
+hard compile error. Verified as a negative control —
+
+```
+.neg_control.c:365:8: error: redefinition of '__simpleos_FILE'
+./simpleos_file_internal.h:24:8: note: previous definition is here
+```
+
+Runnable check: `src/os/libc/test/file_stream_roundtrip.c`, cross-compiled for
+`x86_64-unknown-none-elf` and linked against `build/os/sysroot` (with `-lm`
+ahead of the library group, as on real link lines). The standard-stream half —
+the actual corruption path — runs and passes; the `fopen`/`fread`/`fwrite` half
+needs a SimpleOS kernel and self-skips (see the follow-up below). Not run
+in-guest: another lane owns the QEMU gates.
+
+Both sysroot copies were refreshed — `build/os/sysroot/lib/libsimpleos_c.a` and
+`build/os/sysroot/lib/libm.a`, which is a plain `cp` of it
+(`src/os/port/llvm/sysroot.shs:304`) and is reached first via `-lm`.
+
+## Follow-up found while fixing this
+
+`simpleos_fs_stream_ops_lack_host_fallback_2026-08-06.md` — `fopen`/`fread`/
+`fwrite` call `simpleos_syscall` directly and skip the Linux-host fallback that
+`write()`/`read()` in `simpleos_libc.c` honour.

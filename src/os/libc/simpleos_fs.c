@@ -107,18 +107,13 @@ static int linux_host_stat_syscall(int64_t syscall_id, int64_t arg, struct stat 
 /* ====================================================================
  * FILE struct definition
  *
- * The opaque FILE type (struct __simpleos_FILE) is defined here with
- * additional fields beyond the minimal {fd} in simpleos_libc.c.
- * The existing stdin/stdout/stderr from simpleos_libc.c only use the
- * fd field (which is at offset 0), so they remain compatible.
+ * NOT defined here. The single definition lives in
+ * simpleos_file_internal.h and is shared with simpleos_libc.c, which
+ * allocates the stdin/stdout/stderr statics from the SAME layout. Do not
+ * add a local definition back — see the header for why.
  * ==================================================================== */
 
-struct __simpleos_FILE {
-    int fd;
-    int eof;
-    int error;
-    int mode;
-};
+#include "simpleos_file_internal.h"
 
 /* ====================================================================
  * 1. stat family
@@ -247,14 +242,11 @@ FILE *fopen(const char *path, const char *mode) {
 /*
  * fdopen — wrap an ALREADY-OPEN fd in a FILE.
  *
- * Deliberately defined here, not in simpleos_libc.c: this translation unit
- * owns the 16-byte `struct __simpleos_FILE { fd; eof; error; mode; }` that
- * fopen() malloc()s and that fread/fwrite/feof/ferror read. simpleos_libc.c
- * declares an INCOMPATIBLE 4-byte `{ int fd; }` for its stdin/stdout/stderr
- * statics, so defining fdopen there would hand fread/fwrite a short object.
- * (That pre-existing mismatch is filed separately.)
- *
  * Unlike fopen this opens nothing; it takes ownership of `fd` for fclose.
+ *
+ * (Historically this had to live in this TU because simpleos_libc.c declared an
+ * incompatible 4-byte FILE. That ODR split is fixed — both TUs now share
+ * simpleos_file_internal.h — so the placement is no longer load-bearing.)
  */
 FILE *fdopen(int fd, const char *mode) {
     if (fd < 0) { errno = EBADF; return NULL; }
@@ -287,10 +279,25 @@ FILE *fdopen(int fd, const char *mode) {
     return fp;
 }
 
+/* The three standard streams are STATIC objects owned by simpleos_libc.c, not
+ * malloc()ed ones. free()ing them would corrupt the allocator, so fclose() and
+ * friends must recognise them by identity. */
+static int is_std_stream(FILE *fp) {
+    return fp == stdin || fp == stdout || fp == stderr;
+}
+
 int fclose(FILE *fp) {
     if (!fp) return EOF;
     int fd = fp->fd;
-    free(fp);
+    if (is_std_stream(fp)) {
+        /* Close the descriptor but never free the static object; leave it in a
+         * defined state so a later use is a clean EBADF, not a use-after-free. */
+        fp->fd    = -1;
+        fp->eof   = 0;
+        fp->error = 0;
+    } else {
+        free(fp);
+    }
     int64_t r = simpleos_syscall(33, fd, 0, 0, 0, 0);
     return r < 0 ? EOF : 0;
 }

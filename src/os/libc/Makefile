@@ -48,7 +48,7 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(AR) rcs $@ $^
 
-%.o: %.c simpleos_libc.h
+%.o: %.c simpleos_libc.h simpleos_file_internal.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 %.o: %.S

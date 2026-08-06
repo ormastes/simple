@@ -53,13 +53,16 @@ typedef long off_t;
 #ifndef O_RDONLY
 #define O_RDONLY 0
 #endif
+#ifndef O_WRONLY
+#define O_WRONLY 1   /* must match include/fcntl.h */
+#endif
 #ifndef O_CREAT
 #define O_CREAT 0x0040
 #endif
 
 /* Forward declarations for functions defined in other libc .c files
    or later in this file. Needed because we don't include full headers. */
-struct __simpleos_FILE;
+#include "simpleos_file_internal.h"   /* the ONE definition of struct __simpleos_FILE */
 typedef struct __simpleos_FILE FILE;
 extern void *malloc(size_t);
 extern void free(void *);
@@ -359,11 +362,15 @@ int memcmp(const void *s1, const void *s2, size_t n) {
  * 7. I/O — FILE wrappers + POSIX file syscalls
  * ==================================================================== */
 
-struct __simpleos_FILE { int fd; };
+/* struct __simpleos_FILE is defined once, in simpleos_file_internal.h (included
+ * at the top of this file). Do NOT redeclare it here — the three statics below
+ * must be sized by the same layout that fopen/fread/fwrite in simpleos_fs.c
+ * use, or those writes run past the end of these objects. */
 
-static struct __simpleos_FILE _stdin_f  = { 0 };
-static struct __simpleos_FILE _stdout_f = { 1 };
-static struct __simpleos_FILE _stderr_f = { 2 };
+/* { fd, eof, error, mode } */
+static struct __simpleos_FILE _stdin_f  = { 0, 0, 0, O_RDONLY };
+static struct __simpleos_FILE _stdout_f = { 1, 0, 0, O_WRONLY };
+static struct __simpleos_FILE _stderr_f = { 2, 0, 0, O_WRONLY };
 
 FILE *stdin  = &_stdin_f;
 FILE *stdout = &_stdout_f;
