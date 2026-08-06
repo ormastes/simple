@@ -73,6 +73,24 @@ val _MULTIARCH_RESULT_ROOT: text = "build/multiarch"
 val _OS_BUILD_DEFAULT_TIMEOUT_MS: i64 = 900000
 val _OS_BUILD_DEFAULT_LOG_MODE: text = "on"
 
+# Default timeout for the compiler-discovery/native-build-contract probe run
+# against each candidate `simple` binary in `_find_simple_binary_for_target`.
+# Rationale: this is a CLI liveness probe (invalid-arg rejection, no real
+# codegen), not the real build — but the previous 5000ms hardcoded bound was
+# inconsistent with the 60000ms already budgeted one step earlier in the same
+# validation chain for `_candidate_frontend_smoke` (a real, more expensive
+# native-build), and silently failed every real candidate slower than 5s,
+# making `os build/test --scenario=...` unusable (see
+# doc/08_tracking/bug/os_build_scenario_runner_5s_compiler_probe_timeout_2026-08-06.md).
+# Direct timed runs of the exact probed command against the candidate binary
+# deployed in that investigation's environment measured ~16.8-17.2s (3 runs)
+# to reach its diagnostic. 45_000ms restores consistency with the 60s bound
+# above while staying under it, and gives headroom over that measurement
+# without being unbounded — a truly hung/broken candidate still fails well
+# under a minute. Override with SIMPLE_OS_PROBE_TIMEOUT_MS at runtime when
+# tracing regressions.
+val _OS_PROBE_DEFAULT_TIMEOUT_MS: i64 = 45000
+
 fn _parse_timeout_ms(raw: text, default_ms: i64) -> i64:
     """Parse a positive integer ms value from env, falling back to default on empty/bad input."""
     if raw == "":
@@ -100,6 +118,13 @@ fn _os_build_timeout_ms() -> i64:
     """
     val raw = env_get("SIMPLE_OS_BUILD_TIMEOUT_MS") ?? ""
     _parse_timeout_ms(raw, _OS_BUILD_DEFAULT_TIMEOUT_MS)
+
+fn _os_probe_timeout_ms() -> i64:
+    """Resolve the active compiler-discovery probe timeout, honoring
+    SIMPLE_OS_PROBE_TIMEOUT_MS. See _OS_PROBE_DEFAULT_TIMEOUT_MS for rationale.
+    """
+    val raw = env_get("SIMPLE_OS_PROBE_TIMEOUT_MS") ?? ""
+    _parse_timeout_ms(raw, _OS_PROBE_DEFAULT_TIMEOUT_MS)
 
 fn _normalize_os_log_mode(raw: text) -> text:
     if raw == "off":
