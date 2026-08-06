@@ -69,6 +69,16 @@ class CompileContext:
     bootstrap_entry_hir: HirModule?
     mir_modules: Dict<text, MirModule>
     bootstrap_entry_mir: MirModule?
+    # Dict key under which `bootstrap_entry_mir` was ALSO stored into
+    # `mir_modules`. `bootstrap_entry_mir` is an alias, not an owner: every
+    # lowering branch writes the same MirModule handle into both. Recorded
+    # here so `evict_mir_module` can clear the alias when its target is
+    # evicted (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20,
+    # hazard 1). Empty text means "no entry alias registered". This cannot be
+    # derived from `MirModule.name`: the bootstrap flat lane stores a module
+    # whose `.name` is "" under a real key
+    # (50.mir/_MirLowering/bootstrap_globals.spl:784).
+    bootstrap_entry_mir_name: text
     errors: [text]
     warnings: [text]
     visibility_warnings: [text]  # Visibility warnings (W0401)
@@ -162,6 +172,7 @@ class CompileContext:
             bootstrap_entry_hir: nil,
             mir_modules: {},
             bootstrap_entry_mir: nil,
+            bootstrap_entry_mir_name: "",
             errors: [],
             warnings: [],
             visibility_warnings: [],
@@ -227,9 +238,26 @@ class CompileContext:
         self.hir_modules = {}
         self.bootstrap_entry_hir = nil
 
+    # Register the entry MIR alias together with the `mir_modules` key it was
+    # stored under, so eviction can clear both. Callers that set
+    # `bootstrap_entry_mir` WITHOUT also inserting into `mir_modules` (e.g.
+    # driver_bootstrap.spl's local re-lower path) must not use this.
+    me set_bootstrap_entry_mir(name: text, module: MirModule):
+        self.bootstrap_entry_mir = Some(module)
+        self.bootstrap_entry_mir_name = name
+
     # After codegen writes .o for a module, its MIR can be released.
+    #
+    # `bootstrap_entry_mir` ALIASES `mir_modules[bootstrap_entry_mir_name]` --
+    # removing the dict entry alone left a dangling logical alias that
+    # driver_aot_native_output.spl:587-590 still read back. Clear the alias
+    # alongside its dict entry, mirroring `evict_hir` above which already
+    # clears its `bootstrap_entry_hir` twin.
     me evict_mir_module(name: text):
         self.mir_modules.remove(name)
+        if self.bootstrap_entry_mir_name != "" and self.bootstrap_entry_mir_name == name:
+            self.bootstrap_entry_mir = nil
+            self.bootstrap_entry_mir_name = ""
 
 # ============================================================================
 # Compile Options Hash Helper
