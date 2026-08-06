@@ -2,15 +2,29 @@ extern fn serial_println(msg: text)
 
 use os.compositor.cursor.{CursorState}
 use os.compositor.display_backend_core.{CompositorBackend}
-use os.compositor.input_backend.{InputBackend}
-# Import the SAME MouseEvent the InputBackend trait returns
-# (os.drivers.input.ps2_mouse). A second, unrelated `MouseEvent` exists at
-# os.drivers.input.input_event with a different field set (delta_x/abs_x, no
-# edge-triggered button flags). Same-named types collapse in the global
-# registry (first registration wins), so without this explicit import the
-# field accesses below lower against the wrong type and HIR fails with
-# "struct 'ANY' field 'left_just_pressed'".
-use os.drivers.input.ps2_mouse.{MouseEvent}
+use os.compositor.input_backend.{InputBackend, input_backend_poll_event}
+# The compositor no longer names any driver-shaped event type. It used to have
+# to import `os.drivers.input.ps2_mouse.{MouseEvent}` explicitly, because a
+# SECOND unrelated `MouseEvent` lived at `os.drivers.input.input_event` and
+# same-named types collapse in the global registry (first registration wins) --
+# without the explicit import the field accesses lowered against the wrong type
+# and HIR failed with "struct 'ANY' field 'left_just_pressed'". That duplicate
+# is gone (WS-C C1: `input_event.spl` is now the HostInputEvent queue and
+# declares no event structs), and input arrives here as exactly one type.
+use os.drivers.input.input_event.{InputEventQueue}
+use common.ui.host_input_event.{
+    HostInputEvent,
+    HOST_BTN_LEFT,
+    HOST_BTN_RIGHT,
+    HOST_BTN_MIDDLE,
+    HOST_MOD_SHIFT,
+    HOST_MOD_CTRL,
+    HOST_MOD_ALT,
+}
+
+# Per-frame ceiling on how many events are pulled from a backend into the
+# queue. Fixed so a chatty or stuck backend cannot starve the frame.
+val INPUT_DRAIN_PER_FRAME: i64 = 64
 use os.drivers.framebuffer.fb_driver.{Color}
 use os.kernel.boot.cpu.{port_inb, port_outb}
 use common.window_protocol.geometry.{WindowId}
@@ -110,6 +124,9 @@ class Compositor:
     focused_idx: i32
     backend: CompositorBackend
     input: InputBackend?
+    # The ONE input queue. Every backend event lands here as a HostInputEvent
+    # before any of it reaches compositor state.
+    input_queue: InputEventQueue
     cursor: CursorState
     desktop_bg: Color
     next_id: i32
@@ -184,6 +201,7 @@ class Compositor:
             focused_idx: -1,
             backend: backend,
             input: input,
+            input_queue: InputEventQueue.create(),
             cursor: CursorState(x: width / 2, y: height / 2, visible: true, hotspot_x: 1, hotspot_y: 1),
             desktop_bg: Color.rgb(0, 48, 96),
             next_id: 1,
@@ -948,93 +966,145 @@ class Compositor:
     me handle_input_baremetal_ps2():
         self._handle_input_ps2()
 
-    me _handle_input_backend():
+    me _drain_input_source():
+        """Pump the backend into the single queue.
+
+        Bounded at INPUT_DRAIN_PER_FRAME so a stuck or chatty backend cannot
+        starve the frame. Everything the backend produces -- key or pointer --
+        arrives as one type, `HostInputEvent`."""
         val inp = self.input
         if inp == nil:
             return
-        val key_event = inp.poll_key()
-        if key_event != nil:
-            if inp.alt_held():
-                self.pending_meta_key = 1
-            # KeyEvent is an enum (Press/Release with a key payload) — it has
-            # no `.key` property; extract the key by pattern match. Only
-            # presses produce shortcut characters.
-            if val Press(pressed_key) = key_event:
-                val ctrl = inp.ctrl_held()
-                val shift = inp.shift_held()
-                val alt = inp.alt_held()
-                if val Some(shortcut_char) = inp.key_to_char(pressed_key):
-                    if ctrl and alt:
-                        self.pending_shortcut = shortcut_char
-                    elif (self.focused_idx >= 0 and
-                        self.focused_idx < self.surfaces.len()):
-                        val focused_id = self.surfaces[self.focused_idx].id
-                        self.dispatch_gui_key_event(
-                            focused_id,
-                            shortcut_char,
-                            ctrl,
-                            shift,
-                            alt,
-                            false
-                        )
-                        # Legacy PS/2/virtio/SDL2 adapters expose characters
-                        # through key_to_char. Normalized GLFW/SDL text input
-                        # stays on WINDOW_EVENT_TEXT instead.
-                        if not ctrl and not alt:
-                            self.dispatch_gui_text_event(
-                                focused_id, shortcut_char
-                            )
-        # Bind through a typed local so the optional carries a concrete
-        # MouseEvent type into lowering; the trait-dispatched call alone
-        # leaves the receiver erased.
-        val mouse_opt: MouseEvent? = inp.poll_mouse()
-        if val mouse_event = mouse_opt:
-            var new_x = mouse_event.x.to_i32()
-            var new_y = mouse_event.y.to_i32()
-            if new_x < 0:
-                new_x = 0
-            if new_x >= self.screen_width:
-                new_x = self.screen_width - 1
-            if new_y < 0:
-                new_y = 0
-            if new_y >= self.screen_height:
-                new_y = self.screen_height - 1
-            var cursor_ref = self.cursor
-            cursor_ref.x = new_x
-            cursor_ref.y = new_y
-            self.cursor = cursor_ref
+        var i = 0
+        # cpu-lane-loop-ok: fixed per-frame drain bound, not a data-size loop
+        while i < INPUT_DRAIN_PER_FRAME:
+            val ev = input_backend_poll_event(inp)
+            if ev == nil:
+                return
+            if val host_ev = ev:
+                self.input_queue.push(host_ev)
+            i = i + 1
 
-            var pointer_button_code: i32 = 0
-            var pointer_kind_code: i32 = 3
-            if mouse_event.left_just_pressed:
-                pointer_button_code = 1
-                pointer_kind_code = 1
-            elif mouse_event.right_just_pressed:
-                pointer_button_code = 3
-                pointer_kind_code = 1
-            elif mouse_event.left_just_released:
-                pointer_button_code = 1
-                pointer_kind_code = 2
-            elif mouse_event.middle_pressed:
-                pointer_button_code = 2
-            self.note_pending_wm_pointer_step(
-                new_x,
-                new_y,
-                pointer_button_code,
-                pointer_kind_code
-            )
+    me _handle_input_backend():
+        """Drain the backend into the queue, then apply the queue.
 
-            if mouse_event.left_just_pressed:
-                var hit_idx = -1
-                var wi = 0
-                # cpu-lane-loop-ok: pointer hit test over open window surfaces, once per backend input event; bound is the surface count
-                while wi < self.surfaces.len():
-                    val surface = self.surfaces[wi]
-                    if (new_x >= surface.x and new_x < surface.x + surface.width and new_y >= surface.y and new_y < surface.y + surface.height):
-                        hit_idx = wi
-                    wi = wi + 1
-                if hit_idx >= 0:
-                    self.focus_window(self.surfaces[hit_idx].id)
+        This is the whole of the unified path: ONE event type in the queue, ONE
+        reducer (`_apply_host_event`) behind it."""
+        if self.input == nil:
+            return
+        self._drain_input_source()
+        # EXACTLY ONE event is applied per call, and that is not a throughput
+        # oversight -- it is required for correctness. `note_pending_wm_pointer_step`
+        # writes a SINGLE slot (`pending_wm_pointer_valid/_x/_y/_button_code/
+        # _kind_code`), and the shell event loop consumes one step per frame:
+        # `handle_input()` then `handle_pending_wm_pointer_step()`
+        # (shell.spl:941-942, :1180-1181). Applying a whole drained batch here
+        # would overwrite up to 63 pending steps before the shell could read
+        # one -- a press followed by a move in the same batch would leave
+        # `button=0,kind=3` and the click would never reach the WM; a drag
+        # would arrive as a teleport.
+        #
+        # The queue is what makes this safe: the rest of the burst WAITS in the
+        # ring instead of being dropped at the driver, which is what the legacy
+        # single-poll-per-frame path did to anything beyond the first event.
+        val next = self.input_queue.pop()
+        if val ev = next:
+            self._apply_host_event(ev)
+
+    me _apply_host_event(ev: HostInputEvent):
+        """The single reducer from ingress event to compositor state.
+
+        Behaviour is a straight re-expression of the pre-unification body that
+        read `KeyEvent`/`MouseEvent` directly; the (button_code, kind_code)
+        table below reproduces its branch order edge for edge, and
+        `test/01_unit/os/compositor/compositor_input_unification_spec.spl`
+        pins that equivalence -- it was green against the OLD body before this
+        one was written."""
+        match ev:
+            HostInputEvent.Key(code, ch, down, mods):
+                if (mods & HOST_MOD_ALT) != 0:
+                    self.pending_meta_key = 1
+                # Only presses produce shortcut characters.
+                if not down:
+                    return
+                if ch == "":
+                    return
+                val ctrl = (mods & HOST_MOD_CTRL) != 0
+                val shift = (mods & HOST_MOD_SHIFT) != 0
+                val alt = (mods & HOST_MOD_ALT) != 0
+                if ctrl and alt:
+                    self.pending_shortcut = ch
+                elif (self.focused_idx >= 0 and
+                    self.focused_idx < self.surfaces.len()):
+                    val focused_id = self.surfaces[self.focused_idx].id
+                    self.dispatch_gui_key_event(
+                        focused_id,
+                        ch,
+                        ctrl,
+                        shift,
+                        alt,
+                        false
+                    )
+                    # Legacy PS/2/virtio/SDL2 adapters expose characters
+                    # through key_to_char. Normalized GLFW/SDL text input
+                    # stays on WINDOW_EVENT_TEXT instead.
+                    if not ctrl and not alt:
+                        self.dispatch_gui_text_event(focused_id, ch)
+            HostInputEvent.Pointer(px, py, button, pressed, wheel):
+                var new_x = px
+                var new_y = py
+                if new_x < 0:
+                    new_x = 0
+                if new_x >= self.screen_width:
+                    new_x = self.screen_width - 1
+                if new_y < 0:
+                    new_y = 0
+                if new_y >= self.screen_height:
+                    new_y = self.screen_height - 1
+                var cursor_ref = self.cursor
+                cursor_ref.x = new_x
+                cursor_ref.y = new_y
+                self.cursor = cursor_ref
+
+                # WM pointer codes are their own space and do NOT match
+                # HOST_BTN_* (WM right is 3, middle is 2; HOST_BTN right is 2,
+                # middle is 3). Translate explicitly rather than casting.
+                val left_press = button == HOST_BTN_LEFT and pressed
+                var pointer_button_code: i32 = 0
+                var pointer_kind_code: i32 = 3
+                if left_press:
+                    pointer_button_code = 1
+                    pointer_kind_code = 1
+                elif button == HOST_BTN_RIGHT and pressed:
+                    pointer_button_code = 3
+                    pointer_kind_code = 1
+                elif button == HOST_BTN_LEFT and not pressed:
+                    pointer_button_code = 1
+                    pointer_kind_code = 2
+                elif button == HOST_BTN_MIDDLE:
+                    pointer_button_code = 2
+                self.note_pending_wm_pointer_step(
+                    new_x,
+                    new_y,
+                    pointer_button_code,
+                    pointer_kind_code
+                )
+
+                if left_press:
+                    var hit_idx = -1
+                    var wi = 0
+                    # cpu-lane-loop-ok: pointer hit test over open window surfaces, once per backend input event; bound is the surface count
+                    while wi < self.surfaces.len():
+                        val surface = self.surfaces[wi]
+                        if (new_x >= surface.x and new_x < surface.x + surface.width and new_y >= surface.y and new_y < surface.y + surface.height):
+                            hit_idx = wi
+                        wi = wi + 1
+                    if hit_idx >= 0:
+                        self.focus_window(self.surfaces[hit_idx].id)
+            HostInputEvent.Resize(w, h):
+                # No resize producer reaches this path yet (WS-C C4/C5 wire the
+                # host toolkits). Ignored rather than guessed at.
+                return
 
     me _handle_input_ps2():
         var status = port_inb(0x64)

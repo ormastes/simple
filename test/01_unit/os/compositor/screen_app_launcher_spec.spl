@@ -23,6 +23,70 @@ use os.compositor.screen_app_2d.{screen_app_2d_open}
 use os.compositor.screen_app_web.{screen_app_web_open}
 use os.compositor.screen_app_gui.{screen_app_gui_open}
 use os.compositor.screen_app_launcher.{launch_screen_app}
+use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
+
+# Recording surface. The whole A5 non-blank claim rests on `paint_boot_frame`
+# emitting MORE THAN ONE colour, so that path must be executed, not merely
+# compile-checked against a nil backend.
+#
+# The log is a MODULE-level var, not an instance field: the surface is handed
+# to `ScreenApp` as a `CompositorBackend?` and the value is copied, so writes
+# to instance fields are not observable from the spec. Module state is.
+var g_recorded_colors: [u32] = []
+
+fn reset_recorded_colors():
+    g_recorded_colors = []
+class RecordingSurface:
+    w: i32
+    h: i32
+    colors: [u32]
+    presents: i64
+
+impl CompositorBackend for RecordingSurface:
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        g_recorded_colors.push(color)
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        g_recorded_colors.push(color)
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        g_recorded_colors.push(fg)
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        g_recorded_colors.push(fg)
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        g_recorded_colors.push(color)
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        for p in pixels:
+            g_recorded_colors.push(p)
+
+    me present():
+        self.presents = self.presents + 1
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        self.presents = self.presents + 1
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+fn distinct_count(colors: [u32]) -> i64:
+    var seen: [u32] = []
+    for c in colors:
+        var found = false
+        for k in seen:
+            if k == c:
+                found = true
+        if not found:
+            seen.push(c)
+    seen.len()
 
 fn selection_for(shell: text, reason: text) -> ScreenSelection:
     ScreenSelection(
@@ -50,6 +114,17 @@ describe "screen app shells":
 
     it "refuses to paint a boot frame without a surface":
         assert_true(not screen_app_new("2d", 320, 200, nil, "none").paint_boot_frame())
+
+    it "paints a boot frame carrying more than one colour":
+        reset_recorded_colors()
+        val surface = RecordingSurface(w: 1024, h: 768, colors: [], presents: 0)
+        val app = screen_app_2d_open(1024, 768, surface, "none")
+        assert_true(app.is_live())
+        assert_true(app.paint_boot_frame())
+        # A uniform-colour frame is indistinguishable from a blank screen, so
+        # >1 is the assertion, matching the A5 screendump rule exactly.
+        assert_true(g_recorded_colors.len() >= 2)
+        assert_true(distinct_count(g_recorded_colors) > 1)
 
     it "emits a greppable boot marker naming the effective type":
         val marker = screen_app_2d_open(1024, 768, nil, "none").marker()

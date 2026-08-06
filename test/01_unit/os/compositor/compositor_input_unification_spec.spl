@@ -108,6 +108,16 @@ fn compositor_with_keys(
 ) -> Compositor:
     compositor_with(ScriptedInput.key_script(evs, ch, shift, ctrl, alt))
 
+fn focused_id(c: Compositor) -> i32:
+    """The focused window's ID, not its index.
+
+    `focus_window` RAISES the chosen surface to the end of `surfaces` and then
+    sets `focused_idx = len - 1`, so the index is a stacking artefact and is
+    the same number whichever window you click. Only the ID identifies it."""
+    if c.focused_idx < 0 or c.focused_idx >= c.surfaces.len():
+        return -1
+    c.surfaces[c.focused_idx].id
+
 fn drive(c: Compositor, frames: i64):
     """Run the input path `frames` times.
 
@@ -124,6 +134,11 @@ fn drive(c: Compositor, frames: i64):
 describe "compositor input path — recorded sequence equivalence":
     it "places the cursor at the reported absolute position":
         var c = compositor_with_mice([mouse_at(40, 30)])
+        # Guard against the vacuous run: if the backend did not land in the
+        # compositor's trait-object field, handle_input() falls through to the
+        # PS/2 port path and every assertion below measures a compositor that
+        # received nothing. A first draft of this spec failed exactly that way.
+        expect(c.input != nil).to_equal(true)
         drive(c, 2)
         expect(c.cursor.x).to_equal(40)
         expect(c.cursor.y).to_equal(30)
@@ -184,9 +199,9 @@ describe "compositor input path — recorded sequence equivalence":
         var c = compositor_with_mice([mouse_at(20, 20)])
         val w1 = c.create_window("one", 10, 10, 40, 40)
         val w2 = c.create_window("two", 100, 60, 40, 40)
-        expect(c.focused_idx).to_equal(1)
+        expect(focused_id(c)).to_equal(w2)
         drive(c, 2)
-        expect(c.focused_idx).to_equal(1)
+        expect(focused_id(c)).to_equal(w2)
 
     it "focuses the window under a left press":
         var press = mouse_at(20, 20)
@@ -195,9 +210,9 @@ describe "compositor input path — recorded sequence equivalence":
         var c = compositor_with_mice([press])
         val w1 = c.create_window("one", 10, 10, 40, 40)
         val w2 = c.create_window("two", 100, 60, 40, 40)
-        expect(c.focused_idx).to_equal(1)
+        expect(focused_id(c)).to_equal(w2)
         drive(c, 2)
-        expect(c.focused_idx).to_equal(0)
+        expect(focused_id(c)).to_equal(w1)
 
     it "leaves focus alone for a left press on empty desktop":
         var miss = mouse_at(190, 5)
@@ -207,7 +222,7 @@ describe "compositor input path — recorded sequence equivalence":
         val w1 = c.create_window("one", 10, 10, 40, 40)
         val w2 = c.create_window("two", 100, 60, 40, 40)
         drive(c, 2)
-        expect(c.focused_idx).to_equal(1)
+        expect(focused_id(c)).to_equal(w2)
 
     it "raises pending_meta_key when alt is held during a key event":
         var c = compositor_with_keys(
@@ -218,6 +233,13 @@ describe "compositor input path — recorded sequence equivalence":
         expect(c.pending_meta_key).to_equal(1)
 
     it "captures a ctrl+alt chord into pending_shortcut":
+        # NOT a pure equivalence case: this was RED on the legacy path. The old
+        # body matched `if val Press(pressed_key) = key_event` against an
+        # `KeyEvent?` OPTIONAL without unwrapping it first, so the Press arm
+        # never ran and no chord was ever captured from a backend. The unified
+        # path unwraps the optional in `input_backend_poll_event` before
+        # matching, which fixes it. Recorded here so the change in verdict is a
+        # documented fix, not an unnoticed drift.
         var c = compositor_with_keys(
             [KeyEvent.Press(Key.T)], "t", false, true, true
         )
@@ -242,25 +264,32 @@ describe "compositor input path — recorded sequence equivalence":
         # ...but alt-held still raises the meta flag, as it always did.
         expect(c.pending_meta_key).to_equal(1)
 
-    it "replays a full recorded drag sequence to the same end state":
-        var down = mouse_at(20, 20)
-        down.left_pressed = true
-        down.left_just_pressed = true
-        var m1 = mouse_at(25, 25)
-        m1.left_pressed = true
-        var m2 = mouse_at(30, 30)
-        m2.left_pressed = true
-        var m3 = mouse_at(35, 35)
-        m3.left_pressed = true
-        var up = mouse_at(40, 40)
-        up.left_just_released = true
-
-        var c = compositor_with_mice([down, m1, m2, m3, up])
-        val w = c.create_window("target", 10, 10, 60, 60)
-        drive(c, 6)
-
-        expect(c.cursor.x).to_equal(40)
-        expect(c.cursor.y).to_equal(40)
+    it "applies exactly one event per frame so no pending WM step is lost":
+        # This is the property that makes the queue safe, and it is the one the
+        # first draft of the migration got WRONG. `note_pending_wm_pointer_step`
+        # writes a SINGLE slot, and the shell loop reads one step per frame
+        # (`handle_input()` then `handle_pending_wm_pointer_step()`,
+        # shell.spl:941-942). A batch that applied a whole drained burst in one
+        # call would overwrite every step but the last: a press followed by a
+        # move would leave button=0/kind=3 and the click would never reach the
+        # WM. So a press must still be readable after ONE frame.
+        var press = mouse_at(30, 30)
+        press.left_pressed = true
+        press.left_just_pressed = true
+        var c = compositor_with_mice([press])
+        drive(c, 1)
         expect(c.pending_wm_pointer_button_code).to_equal(1)
-        expect(c.pending_wm_pointer_kind_code).to_equal(2)
-        expect(c.focused_idx).to_equal(0)
+        expect(c.pending_wm_pointer_kind_code).to_equal(1)
+        expect(c.cursor.x).to_equal(30)
+
+    # NOTE — a multi-frame drag is deliberately NOT asserted at this level.
+    # A backend assigned into the compositor's `input: InputBackend?` field is
+    # not aliased to the spec's handle, and a `me` poll that advances an index
+    # does not persist across frames through it, so a scripted multi-event
+    # backend replays its FIRST event forever. That is a harness property, not
+    # a product one: it reproduces IDENTICALLY on the legacy compositor
+    # (both sides fail such an example with "expected 1 to equal 2"), so it can
+    # neither pass nor discriminate here. The drag sequence is covered where it
+    # is actually decided instead -- the adapter mapping in
+    # test/01_unit/os/drivers/input/host_input_adapt_spec.spl and the FIFO
+    # ordering in input_event_queue_spec.spl.
