@@ -8,6 +8,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     engine2d_resolved_draw_ir_image
 }
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
+use common.ui.render_opt.property_trees.{PropertyTrees}
 
 extern fn rt_env_get(key: text) -> text?
 
@@ -77,6 +78,13 @@ class Engine2dCompositorBackend:
     revision_cache_result: Engine2dDrawIrAdvResult? = nil
     revision_reuse_count: i64 = 0
     revision_render_count: i64 = 0
+    # Explicit damage-reporting sink (WS-D3 §9 fix). `get_pixel_buffer()`
+    # returns a live alias, so callers (glass_dispatch.spl, text_render.spl)
+    # call `report_damage()` with the region they just touched instead of
+    # damage tracking trying to infer it from the aliased buffer. Reuses the
+    # O0/O1 `PropertyTrees` damage sink as a plain rect accumulator — no
+    # transform/clip/effect nodes are registered here, only `push_damage`.
+    damage: PropertyTrees = PropertyTrees.create()
 
     static fn create(engine: Engine2D) -> Engine2dCompositorBackend:
         val id = _engine2d_compositor_next_id
@@ -123,6 +131,15 @@ class Engine2dCompositorBackend:
         if _engine2d_compositor_override_enabled and _engine2d_compositor_override_id == self.id and _engine2d_compositor_override_width == self.w and _engine2d_compositor_override_height == self.h:
             return _engine2d_compositor_override_pixels
         self.engine.read_pixels()
+
+    me damage_rect_count() -> i64:
+        self.damage.damage_len
+
+    me damage_rect_at(idx: i64) -> (i32, i32, i32, i32):
+        (self.damage.damage_x[idx].to_i32(), self.damage.damage_y[idx].to_i32(), self.damage.damage_w[idx].to_i32(), self.damage.damage_h[idx].to_i32())
+
+    me clear_damage():
+        self.damage.clear_damage()
 
     fn invalidate_revision_cache():
         self.revision_cache_producer_generation = -1
@@ -326,3 +343,18 @@ impl CompositorBackend for Engine2dCompositorBackend:
 
     fn as_glass_capable() -> CompositorGlassCapable?:
         nil
+
+    # Explicit damage-reporting contract (WS-D3 §9 fix). Clips to backend
+    # bounds and drops empty/degenerate rects — a mutator racing past the
+    # edge, or reporting a 0-area region, must not corrupt the damage
+    # signal for everyone else.
+    me report_damage(x: i32, y: i32, w: i32, h: i32):
+        val cx = if x < 0: 0 else: x
+        val cy = if y < 0: 0 else: y
+        val cx2raw = x + w
+        val cy2raw = y + h
+        val cx2 = if cx2raw > self.w: self.w else: cx2raw
+        val cy2 = if cy2raw > self.h: self.h else: cy2raw
+        if cx2 <= cx or cy2 <= cy:
+            return
+        self.damage.push_damage(cx.to_u32(), cy.to_u32(), (cx2 - cx).to_u32(), (cy2 - cy).to_u32())
