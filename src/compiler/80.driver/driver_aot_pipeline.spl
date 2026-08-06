@@ -64,8 +64,24 @@ impl CompilerDriver:
         if not mir_ok:
             for err in self.ctx.errors:
                 log_error("MIR error: {err}")
-            val first_err = self.ctx.errors.first()
-            val msg = if first_err != nil: first_err else: "MIR lowering failed"
+            # Bug (2026-08-06): builtin `Array.first()` has no MIR method
+            # symbol under native codegen (same gap class as `push`/`map`/
+            # `filter`/`fold` -- see Bug #149's comment a few files over in
+            # method_calls_literals.spl) and lowers to an unresolved-method
+            # placeholder. That placeholder's `call 0` (confirmed via gdb +
+            # objdump: `call rel32` whose displacement resolves to absolute
+            # 0, immediately followed by a nil-check matching this exact
+            # `if X != nil` shape) is a genuine SIGSEGV baked into THIS
+            # compiler's own stage3 binary at self-host build time, not just
+            # a diagnostic gap -- every fatal MIR-lowering error reaching
+            # this branch crashed the compiler process outright instead of
+            # printing "Codegen error: ...". Avoid the broken builtin
+            # entirely with a length-guarded index read (the established
+            # safe substitution pattern in this codebase, see
+            # doc/07_guide/language/dict_native_pitfalls.md for the sibling
+            # Dict case). See
+            # doc/08_tracking/bug/array_first_unresolved_native_codegen_core_dump_2026-08-06.md.
+            val msg = if self.ctx.errors.len() > 0: self.ctx.errors[0] else: "MIR lowering failed"
             return CompileResult.CodegenError(msg)
         log_phase("aot:lower_to_mir:done")
 
