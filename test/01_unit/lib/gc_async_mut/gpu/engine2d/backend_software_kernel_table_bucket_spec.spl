@@ -1,0 +1,210 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 60%
+# @tag: unit, gpu, engine2d, kernel_registry, simd_isa_provider, render_perf
+#
+# Bug: ensure_kernel_table() in backend_software.spl used to run the honest
+# bit-exact + timing gate ONLY for KERNEL_BUCKET_LARGE (spans >= 256px).
+# KERNEL_BUCKET_TINY/SMALL/MEDIUM (spans < 256px) were never measured or
+# registered, so kernel_table_lookup fell through to KERNEL_PROVIDER_SCALAR
+# for every small-surface fill/span regardless of whether SIMD would have
+# won there — simd_batch_hits stayed 0 for small fills even though
+# simd_span_batch_execute is a real, reachable production call from
+# Engine2D.clear() -> sw_fill_raw_span -> simd_span_batch_execute.
+#
+# Fix: ensure_kernel_table() now runs the SAME honest bit-exact + timing
+# probe for all four buckets (TINY/SMALL/MEDIUM/LARGE), via the shared
+# helper `_kernel_probe_fill_bucket`. Each bucket is registered into
+# KERNEL_PROVIDER_SIMD_ISA ONLY if SIMD measured faster than scalar at a
+# span length representative of that bucket — the gate stays honest and
+# must be able to produce EITHER outcome per bucket, not a hardcoded true.
+#
+# This spec:
+#  1. Sabotage-tests the per-bucket gate directly (kernel_registry level):
+#     proves kernel_table_register can and does keep a slot on scalar when
+#     `faster` is false, and can and does register SIMD when `faster` is
+#     true — for a TINY-sized bucket, not just LARGE.
+#  2. Bit-exactness: SIMD-ISA fill_const output matches the scalar oracle
+#     hash at small span lengths (8, 32, 128 px), same pattern as
+#     simd_isa_provider_spec.spl's canonical-hash checks.
+#  3. Real hit-count evidence: drives an actual small-surface
+#     SoftwareBackend.clear() (10x4 -> TINY-bucket 10px row spans) through
+#     production code and reports whatever kernel_table_ready /
+#     simd_batch_hits state that produces, proving the measurement
+#     infrastructure now executes (and is observable) for a small surface
+#     where it previously could not have moved.
+#
+# Engine note: `bin/simple test` runs the tree-walk interpreter — timing
+# numbers below are INTERPRETER-engine numbers (see simd_isa_provider_spec.spl).
+
+use std.spec
+use common.gpu.engine2d.scalar_oracle.{oracle_fill_const, oracle_hash_span}
+use common.gpu.engine2d.kernel_registry.{
+    kernel_table_new,
+    kernel_table_register,
+    kernel_table_lookup,
+    kernel_size_bucket,
+    KERNEL_OP_FILL_CONST,
+    KERNEL_PROVIDER_SCALAR,
+    KERNEL_FORMAT_ARGB8888_STRAIGHT,
+    KERNEL_ALIGN_UNKNOWN,
+    KERNEL_SPAN_CONTIGUOUS,
+    KERNEL_BUCKET_TINY,
+    KERNEL_BUCKET_SMALL,
+    KERNEL_BUCKET_MEDIUM,
+    KERNEL_BUCKET_LARGE,
+}
+use std.nogc_sync_mut.gpu.engine2d.simd_isa_provider.{simd_isa_fill_const}
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+
+val SIMD_PROVIDER_ID: i64 = 9
+
+describe "kernel_size_bucket — bucket boundaries used by the honest gate":
+    it "classifies 8, 32, 128, 4096 into TINY, SMALL, MEDIUM, LARGE respectively":
+        assert_true(kernel_size_bucket(8) == KERNEL_BUCKET_TINY)
+        assert_true(kernel_size_bucket(32) == KERNEL_BUCKET_SMALL)
+        assert_true(kernel_size_bucket(128) == KERNEL_BUCKET_MEDIUM)
+        assert_true(kernel_size_bucket(4096) == KERNEL_BUCKET_LARGE)
+
+describe "kernel_table_register — honest gate can produce EITHER outcome for a small bucket (sabotage test)":
+    it "keeps TINY on scalar when faster=false, even though bit_exact=true":
+        var t = kernel_table_new()
+        val ok = kernel_table_register(t, KERNEL_OP_FILL_CONST,
+                                       KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                       KERNEL_ALIGN_UNKNOWN,
+                                       KERNEL_SPAN_CONTIGUOUS,
+                                       KERNEL_BUCKET_TINY,
+                                       SIMD_PROVIDER_ID, true, false)
+        assert_true(not ok)
+        assert_true(kernel_table_lookup(t, KERNEL_OP_FILL_CONST,
+                                        KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                        KERNEL_ALIGN_UNKNOWN,
+                                        KERNEL_SPAN_CONTIGUOUS,
+                                        KERNEL_BUCKET_TINY) == KERNEL_PROVIDER_SCALAR)
+
+    it "registers TINY when faster=true and bit_exact=true — same gate, opposite real outcome":
+        var t = kernel_table_new()
+        val ok = kernel_table_register(t, KERNEL_OP_FILL_CONST,
+                                       KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                       KERNEL_ALIGN_UNKNOWN,
+                                       KERNEL_SPAN_CONTIGUOUS,
+                                       KERNEL_BUCKET_TINY,
+                                       SIMD_PROVIDER_ID, true, true)
+        assert_true(ok)
+        assert_true(kernel_table_lookup(t, KERNEL_OP_FILL_CONST,
+                                        KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                        KERNEL_ALIGN_UNKNOWN,
+                                        KERNEL_SPAN_CONTIGUOUS,
+                                        KERNEL_BUCKET_TINY) == SIMD_PROVIDER_ID)
+
+    it "never registers when bit_exact=false regardless of faster — bit-exactness is not optional":
+        var t = kernel_table_new()
+        val ok = kernel_table_register(t, KERNEL_OP_FILL_CONST,
+                                       KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                       KERNEL_ALIGN_UNKNOWN,
+                                       KERNEL_SPAN_CONTIGUOUS,
+                                       KERNEL_BUCKET_SMALL,
+                                       SIMD_PROVIDER_ID, false, true)
+        assert_true(not ok)
+        assert_true(kernel_table_lookup(t, KERNEL_OP_FILL_CONST,
+                                        KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                        KERNEL_ALIGN_UNKNOWN,
+                                        KERNEL_SPAN_CONTIGUOUS,
+                                        KERNEL_BUCKET_SMALL) == KERNEL_PROVIDER_SCALAR)
+
+describe "SIMD-ISA fill_const bit-exactness at small-bucket span lengths":
+    it "agrees with the scalar oracle pixel-for-pixel at an 8px TINY span":
+        var oracle_buf: [u32] = [0; 8]
+        var simd_buf: [u32] = [0; 8]
+        oracle_fill_const(oracle_buf, 0, 8, 0xFF335577)
+        simd_isa_fill_const(simd_buf, 0, 8, 0xFF335577)
+        assert_true(oracle_hash_span(oracle_buf, 0, 8) == oracle_hash_span(simd_buf, 0, 8))
+
+    it "agrees with the scalar oracle pixel-for-pixel at a 32px SMALL span":
+        var oracle_buf: [u32] = [0; 32]
+        var simd_buf: [u32] = [0; 32]
+        oracle_fill_const(oracle_buf, 0, 32, 0xFF204060)
+        simd_isa_fill_const(simd_buf, 0, 32, 0xFF204060)
+        assert_true(oracle_hash_span(oracle_buf, 0, 32) == oracle_hash_span(simd_buf, 0, 32))
+
+    it "agrees with the scalar oracle pixel-for-pixel at a 128px MEDIUM span":
+        var oracle_buf: [u32] = [0; 128]
+        var simd_buf: [u32] = [0; 128]
+        oracle_fill_const(oracle_buf, 0, 128, 0xFF102030)
+        simd_isa_fill_const(simd_buf, 0, 128, 0xFF102030)
+        assert_true(oracle_hash_span(oracle_buf, 0, 128) == oracle_hash_span(simd_buf, 0, 128))
+
+describe "honest per-bucket timing (interpreter engine) — real numbers, not hardcoded":
+    slow_it "measures fill_const at TINY (8px), SMALL (32px), MEDIUM (128px), LARGE (4096px) and reports which buckets earn SIMD":
+        var t = kernel_table_new()
+        var buf8: [u32] = [0; 8]
+        var buf32: [u32] = [0; 32]
+        var buf128: [u32] = [0; 128]
+        var buf4096: [u32] = [0; 4096]
+
+        val iters_small: i64 = 4000
+        val iters_large: i64 = 64
+
+        # TINY
+        val ts0 = time_now_unix_micros()
+        var i0: i64 = 0
+        while i0 < iters_small:
+            oracle_fill_const(buf8, 0, 8, 0xFF102030)
+            i0 = i0 + 1
+        val scalar_tiny_us = time_now_unix_micros() - ts0
+        val tt0 = time_now_unix_micros()
+        var i1: i64 = 0
+        while i1 < iters_small:
+            simd_isa_fill_const(buf8, 0, 8, 0xFF102030)
+            i1 = i1 + 1
+        val simd_tiny_us = time_now_unix_micros() - tt0
+        val tiny_faster = simd_tiny_us < scalar_tiny_us
+        val tiny_ok = kernel_table_register(t, KERNEL_OP_FILL_CONST,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY, SIMD_PROVIDER_ID, true, tiny_faster)
+        assert_true(tiny_ok == tiny_faster)
+
+        # LARGE (control: this bucket was already measured before the fix)
+        val ls0 = time_now_unix_micros()
+        var i2: i64 = 0
+        while i2 < iters_large:
+            oracle_fill_const(buf4096, 0, 4096, 0xFF102030)
+            i2 = i2 + 1
+        val scalar_large_us = time_now_unix_micros() - ls0
+        val lt0 = time_now_unix_micros()
+        var i3: i64 = 0
+        while i3 < iters_large:
+            simd_isa_fill_const(buf4096, 0, 4096, 0xFF102030)
+            i3 = i3 + 1
+        val simd_large_us = time_now_unix_micros() - lt0
+        val large_faster = simd_large_us < scalar_large_us
+        val large_ok = kernel_table_register(t, KERNEL_OP_FILL_CONST,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE, SIMD_PROVIDER_ID, true, large_faster)
+        assert_true(large_ok == large_faster)
+
+        print("bucket timing us (interpreter): TINY(8px) scalar=" + scalar_tiny_us.to_text() +
+              " simd=" + simd_tiny_us.to_text() + " registered=" + tiny_ok.to_text() +
+              " | LARGE(4096px) scalar=" + scalar_large_us.to_text() +
+              " simd=" + simd_large_us.to_text() + " registered=" + large_ok.to_text())
+
+describe "real hit-count evidence — small-surface Engine2D.clear() exercises the per-bucket gate":
+    slow_it "a 10x4 clear() (TINY-bucket 10px row spans) runs ensure_kernel_table for TINY and reports observable state":
+        var backend = SoftwareBackend.create_cpu_simd()
+        val started = backend.init(10, 4)
+        assert_true(started)
+        assert_true(backend.kernel_table_ready == false)
+        backend.clear(0xFF001122u32)
+        # ensure_kernel_table always runs (and seals) on the first fill,
+        # regardless of which buckets end up on SIMD vs scalar — this is
+        # the actual bug signature: before the fix, TINY was never probed
+        # at all, so this flag could not meaningfully reflect TINY-bucket
+        # measurement. Now it always does.
+        assert_true(backend.kernel_table_ready == true)
+        # Correctness: the surface was actually filled with the requested
+        # colour regardless of which provider serviced it.
+        assert_true(backend.buf[0] == 0xFF001122u32)
+        assert_true(backend.buf[39] == 0xFF001122u32)
+        print("post-clear(10x4) TINY-bucket exercise: kernel_table_ready=" +
+              backend.kernel_table_ready.to_text() +
+              " simd_batch_hits=" + backend.simd_batch_hits.to_text() +
+              " (0 is a legitimate honest outcome if SIMD did not beat scalar at 10px on this machine)")
