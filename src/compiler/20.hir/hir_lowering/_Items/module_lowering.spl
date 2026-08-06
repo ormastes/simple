@@ -893,6 +893,17 @@ impl HirLowering:
                 if source_mod != nil:
                     self.register_imported_symbol(source_mod.unwrap(), hop.module_name, hop.item_name, local_name, import_span, materialize_enum)
 
+    me report_reexport_chase_stats():
+        """Level-gated (SIMPLE_HIR_REEXPORT_STATS=1, default off) readout for the
+        re-export chase. Emitted every 20k calls so a non-terminating run still
+        shows its work rate; the counters are two i64 increments, so the gate
+        costs nothing beyond one env probe per reporting boundary."""
+        if self.reexport_chase_calls % 20000 != 0:
+            return
+        if (hir_module_env_get("SIMPLE_HIR_REEXPORT_STATS") ?? "") != "1":
+            return
+        eprint("[reexport-chase] calls={self.reexport_chase_calls} memo_hits={self.reexport_chase_memo_hits} memo={self.reexport_miss_memo.keys().len()}\n")
+
     me try_register_bootstrap_global_symbol(name: text, span: Span) -> bool:
         """Resolve one uniquely owned flat-global bootstrap declaration."""
         if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
@@ -1026,6 +1037,45 @@ impl HirLowering:
         register_imported_symbol cannot recurse back in here for that hit."""
         if depth > 8:
             return HirReexportSource(found: false, module_name: "", item_name: "")
+        # RXM1 (2026-08-06): negative memo, mirroring GLB2's fix for the sibling
+        # walker register_glob_imported_symbols_depth. Before this, `depth > 8`
+        # above was this function's ONLY terminator -- exactly the state GLB2
+        # found the glob walker in. The import graph is cyclic (GLB2 measured
+        # 168 directed 2-cycles over 3,026 `use x.*` edges) and this function
+        # has THREE recursive call sites (the import hop, the package-sibling
+        # star hop, and the alias hop), each branching over the facade's whole
+        # import/export list, so a miss re-walks an exponential number of paths
+        # to the depth cap. That made Stage 3 non-terminating: gdb sampling of
+        # the self-host showed 9 nested find_reexport_source frames -- the cap,
+        # fully unrolled -- in every mid-flight sample.
+        #
+        # Only MISSES are memoized. A hit returns immediately and unwinds the
+        # whole stack, so it is already cheap; it is the exhaustive not-found
+        # search that costs. Depth-keyed with GLB2's shallowest-wins rule: a
+        # recorded miss at `seen` only proves failure for arrivals with the SAME
+        # OR LESS budget, so re-explore when we arrive shallower.
+        #
+        # The answer is a pure function of (module_surfaces, facade, wanted,
+        # budget) -- this function reads no per-file state, only
+        # self.module_surfaces -- so the memo is valid for the whole build and
+        # is keyed to the surface COUNT to self-invalidate if that set grows.
+        val surface_total = self.module_surfaces.surfaces.len()
+        if self.reexport_memo_surfaces != surface_total:
+            val reset_memo: {text: i64} = {}
+            self.reexport_miss_memo = reset_memo
+            self.reexport_memo_surfaces = surface_total
+        # Tab separator: module keys and item names are dotted/identifier text
+        # and never contain a tab, so the joined key cannot collide.
+        val memo_key = facade_name + "\t" + wanted
+        if self.reexport_miss_memo.contains_key(memo_key):
+            val seen_depth: i64 = self.reexport_miss_memo[memo_key]
+            if seen_depth <= depth:
+                self.reexport_chase_memo_hits = self.reexport_chase_memo_hits + 1
+                if wanted == (hir_module_env_get("SIMPLE_HIR_REEXPORT_TRACE_NAME") ?? ""):
+                    eprint("[reexport-trace] MEMO-SUPPRESSED wanted={wanted} facade={facade_name} depth={depth} seen={seen_depth}\n")
+                return HirReexportSource(found: false, module_name: "", item_name: "")
+        self.reexport_chase_calls = self.reexport_chase_calls + 1
+        self.report_reexport_chase_stats()
         if facade_mod.export_origins.contains_key(wanted):
             val origin = facade_mod.export_origins[wanted]
             return HirReexportSource(
@@ -1140,6 +1190,17 @@ impl HirLowering:
                                 return alias_source
                 exp_item_idx = exp_item_idx + 1
             exp_idx = exp_idx + 1
+        # RXM1: record the exhaustive miss. Every `return` above this point is a
+        # HIT, so this is the single not-found exit that is worth memoizing (the
+        # `depth > 8` bail is budget exhaustion, not a proven absence, and must
+        # NOT be recorded). Shallowest-wins, matching the read side.
+        val miss_key = facade_name + "\t" + wanted
+        if self.reexport_miss_memo.contains_key(miss_key):
+            val prior_depth: i64 = self.reexport_miss_memo[miss_key]
+            if depth < prior_depth:
+                self.reexport_miss_memo[miss_key] = depth
+        else:
+            self.reexport_miss_memo[miss_key] = depth
         HirReexportSource(found: false, module_name: "", item_name: "")
 
     me resolve_materialized_enum_payload_origin(imported_mod: ModuleSurface, imported_mod_name: text, dependency: text) -> HirMaterializedPayloadOrigin:
