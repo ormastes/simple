@@ -1,0 +1,98 @@
+# Layer-equivalence structural checker (@layer_eq first slice).
+#
+# Proves that a view struct is representation-identical to its target so a
+# conversion can compile to an identity (no copy, no call). Covers proof
+# obligations 1-4 of doc/05_design/language/forwarding/
+# layer_forwarding_and_layer_eq_types.md: field count, total name mapping
+# (same-name inference or @layer_field rename tags — never a partial tag set),
+# field type, and offset/size/total-size.
+#
+# Deliberately self-contained: consumes declared layouts (LayerEqType) so it
+# can be exercised under the seed binary today. Production wiring feeds it the
+# compiler's real layout computation (see design doc §6 TODO 3).
+
+struct LayerEqField:
+    name: text
+    type_name: text
+    offset: i64
+    size: i64
+    mapped_name: text     # "" = infer by same name; else @layer_field(target)
+
+struct LayerEqType:
+    name: text
+    total_size: i64
+    align: i64
+    fields: [LayerEqField]
+
+struct LayerEqVerdict:
+    ok: bool
+    diagnostic: text
+
+fn layer_eq_ok() -> LayerEqVerdict:
+    LayerEqVerdict(ok: true, diagnostic: "")
+
+fn layer_eq_err(msg: text) -> LayerEqVerdict:
+    LayerEqVerdict(ok: false, diagnostic: "error[layer_eq]: " + msg)
+
+# Resolve the view field's target-field name. Implicit and explicit forms both
+# pass through here so they cannot drift.
+fn layer_eq_mapped_name(f: LayerEqField) -> text:
+    if f.mapped_name == "":
+        f.name
+    else:
+        f.mapped_name
+
+fn layer_eq_find_field(target: LayerEqType, name: text) -> i64:
+    var i = 0
+    while i < target.fields.len():
+        if target.fields[i].name == name:
+            return i
+        i = i + 1
+    0 - 1
+
+fn check_layer_eq(view: LayerEqType, target: LayerEqType) -> LayerEqVerdict:
+    # Obligation 1: field count
+    if view.fields.len() != target.fields.len():
+        return layer_eq_err("'" + view.name + "' has " + view.fields.len().to_text()
+            + " fields but @layer_eq target '" + target.name + "' has "
+            + target.fields.len().to_text())
+
+    # Partial-tag-set rule: all fields tagged, or none.
+    var tagged = 0
+    for f in view.fields:
+        if f.mapped_name != "":
+            tagged = tagged + 1
+    if tagged != 0 and tagged != view.fields.len():
+        return layer_eq_err("'" + view.name + "' mixes @layer_field-tagged and "
+            + "untagged fields (" + tagged.to_text() + " of "
+            + view.fields.len().to_text() + " tagged); tag all fields or none")
+
+    # Obligations 2-4 per field.
+    for f in view.fields:
+        val tname = layer_eq_mapped_name(f)
+        val ti = layer_eq_find_field(target, tname)
+        if ti < 0:
+            return layer_eq_err("'" + view.name + "." + f.name
+                + "' maps to '" + tname + "', not a field of '" + target.name + "'")
+        val tf = target.fields[ti]
+        if f.type_name != tf.type_name:
+            return layer_eq_err("'" + view.name + "." + f.name + "': type '"
+                + f.type_name + "' != target '" + target.name + "." + tf.name
+                + "' type '" + tf.type_name + "'")
+        if f.offset != tf.offset or f.size != tf.size:
+            return layer_eq_err("'" + view.name + "." + f.name + "': layout "
+                + f.offset.to_text() + "+" + f.size.to_text() + " != target '"
+                + target.name + "." + tf.name + "' layout "
+                + tf.offset.to_text() + "+" + tf.size.to_text())
+
+    # Obligation 4 (whole type): size and alignment.
+    if view.total_size != target.total_size:
+        return layer_eq_err("'" + view.name + "' size " + view.total_size.to_text()
+            + " != target '" + target.name + "' size " + target.total_size.to_text())
+    if view.align != target.align:
+        return layer_eq_err("'" + view.name + "' align " + view.align.to_text()
+            + " != target '" + target.name + "' align " + target.align.to_text())
+
+    layer_eq_ok()
+
+export LayerEqField, LayerEqType, LayerEqVerdict, check_layer_eq, layer_eq_mapped_name

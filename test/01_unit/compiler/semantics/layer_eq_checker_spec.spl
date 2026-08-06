@@ -1,0 +1,68 @@
+# Spec for the @layer_eq structural-equivalence checker (first slice).
+# Runs under the Rust seed bin/simple — noted per measurement policy.
+
+use std.spec.{describe, it, expect, expect_not, assert_true}
+use compiler.semantics.layer_eq_checker (LayerEqField, LayerEqType, check_layer_eq)
+
+fn f(name: text, ty: text, off: i64, sz: i64) -> LayerEqField:
+    LayerEqField(name: name, type_name: ty, offset: off, size: sz, mapped_name: "")
+
+fn ftag(name: text, ty: text, off: i64, sz: i64, target: text) -> LayerEqField:
+    LayerEqField(name: name, type_name: ty, offset: off, size: sz, mapped_name: target)
+
+fn device_rect() -> LayerEqType:
+    LayerEqType(name: "draw.DeviceRect", total_size: 16, align: 4, fields: [
+        f("x", "i32", 0, 4), f("y", "i32", 4, 4),
+        f("width", "i32", 8, 4), f("height", "i32", 12, 4)])
+
+describe "layer_eq checker":
+    it "accepts a same-name implicit view":
+        val view = LayerEqType(name: "gui.GuiDeviceRect", total_size: 16, align: 4, fields: [
+            f("x", "i32", 0, 4), f("y", "i32", 4, 4),
+            f("width", "i32", 8, 4), f("height", "i32", 12, 4)])
+        val v = check_layer_eq(view, device_rect())
+        assert_true(v.ok)
+        expect(v.diagnostic).to_equal("")
+
+    it "accepts a fully @layer_field-tagged rename view":
+        val view = LayerEqType(name: "gui.GuiBounds", total_size: 16, align: 4, fields: [
+            ftag("left", "i32", 0, 4, "x"), ftag("top", "i32", 4, 4, "y"),
+            ftag("extent_x", "i32", 8, 4, "width"), ftag("extent_y", "i32", 12, 4, "height")])
+        assert_true(check_layer_eq(view, device_rect()).ok)
+
+    it "rejects a size mismatch":
+        val view = LayerEqType(name: "gui.WideRect", total_size: 32, align: 8, fields: [
+            f("x", "i64", 0, 8), f("y", "i64", 8, 8),
+            f("width", "i64", 16, 8), f("height", "i64", 24, 8)])
+        val v = check_layer_eq(view, device_rect())
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("error[layer_eq]"))
+
+    it "rejects a field-type mismatch":
+        val view = LayerEqType(name: "gui.FloatRect", total_size: 16, align: 4, fields: [
+            f("x", "f32", 0, 4), f("y", "i32", 4, 4),
+            f("width", "i32", 8, 4), f("height", "i32", 12, 4)])
+        val v = check_layer_eq(view, device_rect())
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("f32"))
+
+    it "rejects a partial @layer_field tag set":
+        val view = LayerEqType(name: "gui.HalfTagged", total_size: 16, align: 4, fields: [
+            ftag("left", "i32", 0, 4, "x"), f("y", "i32", 4, 4),
+            f("width", "i32", 8, 4), f("height", "i32", 12, 4)])
+        val v = check_layer_eq(view, device_rect())
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("tag all fields or none"))
+
+    it "rejects a field-count mismatch":
+        val view = LayerEqType(name: "gui.Point", total_size: 8, align: 4, fields: [
+            f("x", "i32", 0, 4), f("y", "i32", 4, 4)])
+        expect_not(check_layer_eq(view, device_rect()).ok)
+
+    it "rejects a mapping to a nonexistent target field":
+        val view = LayerEqType(name: "gui.BadMap", total_size: 16, align: 4, fields: [
+            ftag("left", "i32", 0, 4, "x"), ftag("top", "i32", 4, 4, "y"),
+            ftag("extent_x", "i32", 8, 4, "width"), ftag("extent_y", "i32", 12, 4, "depth")])
+        val v = check_layer_eq(view, device_rect())
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("depth"))
