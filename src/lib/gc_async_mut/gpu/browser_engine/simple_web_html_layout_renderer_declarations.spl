@@ -1,6 +1,7 @@
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.*
 export use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.*
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_decl_apply.*
+export use std.gc_async_mut.gpu.browser_engine.simple_web_css_property_id.*
 
 fn sticky_top_inset_value(
     raw: text, parsed: i32, position_sticky: bool
@@ -437,18 +438,13 @@ val _APPLY_DECLS_DISPATCH_PROPS: [text] = [
 ]
 
 fn _decl_tbl_all_dispatch_handled(decl_tbl: [text]) -> bool:
+    # O(k): one interned-id lookup per declaration instead of scanning the
+    # dispatch-prop list per name. css_prop_id() and
+    # _APPLY_DECLS_DISPATCH_PROPS must stay in lockstep; the property-id
+    # spec asserts the two agree entry-for-entry.
     var i = 0
     while i < decl_tbl.len():
-        val prop = decl_tbl[i]
-        var found = false
-        var j = 0
-        while j < _APPLY_DECLS_DISPATCH_PROPS.len():
-            if _APPLY_DECLS_DISPATCH_PROPS[j] == prop:
-                found = true
-                j = _APPLY_DECLS_DISPATCH_PROPS.len()
-            else:
-                j = j + 1
-        if not found:
+        if css_prop_id(decl_tbl[i]) == CSS_PROP_UNKNOWN:
             return false
         i = i + 2
     true
@@ -527,61 +523,90 @@ fn _apply_decls_dispatch(
     st.resolved_font_width = 0
     st.resolved_font_line_height = 0
 
-    val box_sizing = decl_tbl_get(decl_tbl, "box-sizing")
-    if box_sizing.len() > 0:
-        st.border_box = box_sizing == "border-box"
-    val border_collapse = decl_tbl_get(decl_tbl, "border-collapse").trim().lower()
-    if border_collapse == "collapse" or border_collapse == "separate":
-        st.border_collapse = border_collapse
-    elif border_collapse == "initial":
-        st.border_collapse = "separate"
-    val border_radius_shorthand = parse_border_radius_shorthand(
-        decl_tbl_get(decl_tbl, "border-radius"))
-    if border_radius_shorthand.valid:
-        st.border_radius_px = border_radius_shorthand.top_left_px
-    val resolved_radii = resolve_authored_border_radii(
-        decl_tbl, st.border_radius_tl_px, st.border_radius_tr_px,
-        st.border_radius_br_px, st.border_radius_bl_px)
-    if resolved_radii.valid:
-        st.border_radius_tl_px = resolved_radii.top_left_px
-        st.border_radius_tr_px = resolved_radii.top_right_px
-        st.border_radius_br_px = resolved_radii.bottom_right_px
-        st.border_radius_bl_px = resolved_radii.bottom_left_px
-    val col = decl_tbl_get(decl_tbl, "color")
-    if col.len() > 0:
-        val cv = parse_color(col)
-        if cv != 0u32:
-            st.fg = cv
-    val width = decl_tbl_get(decl_tbl, "width")
-    if width.len() > 0:
-        if width.ends_with("%"):
-            val wp = parse_int(width)
-            st.width_px = if wp > 0: 0 - wp else: 0
-        elif width.ends_with("vw"):
-            val wv = parse_int(width)
-            st.width_px = if wv > 0: 0 - wv else: 0
-        else:
-            st.width_px = parse_int(width)
-    val height = decl_tbl_get(decl_tbl, "height")
-    if height.len() > 0:
-        if height.ends_with("%"):
-            val hp = parse_int(height)
-            st.height_px = if hp > 0: 0 - hp else: 0
-        else:
-            st.height_px = parse_int(height)
-    val min_height = decl_tbl_get(decl_tbl, "min-height")
-    if min_height.len() > 0:
-        if min_height.contains("vh"):
-            st.min_height_vh = true
-        else:
-            st.min_height_vh = false
-            st.min_height_px = parse_int(min_height)
+    # Stage 3 (O(k)): one interning pass builds a presence mask; every probe
+    # below is gated on its property actually appearing in this rule, so a
+    # rule with k declarations pays O(k) table scans, not one scan per
+    # dispatch-handled property. Skipping an absent property is
+    # behavior-identical: every block below no-ops on the empty/absent value.
+    val mask = css_prop_mask(decl_tbl)
+    if css_prop_mask_has(mask, CSS_PROP_BOX_SIZING):
+        css_probe_note()
+        val box_sizing = decl_tbl_get(decl_tbl, "box-sizing")
+        if box_sizing.len() > 0:
+            st.border_box = box_sizing == "border-box"
+    if css_prop_mask_has(mask, CSS_PROP_BORDER_COLLAPSE):
+        css_probe_note()
+        val border_collapse = decl_tbl_get(decl_tbl, "border-collapse").trim().lower()
+        if border_collapse == "collapse" or border_collapse == "separate":
+            st.border_collapse = border_collapse
+        elif border_collapse == "initial":
+            st.border_collapse = "separate"
+    if css_prop_mask_has_radius_family(mask):
+        css_probe_note()
+        val border_radius_shorthand = parse_border_radius_shorthand(
+            decl_tbl_get(decl_tbl, "border-radius"))
+        if border_radius_shorthand.valid:
+            st.border_radius_px = border_radius_shorthand.top_left_px
+        val resolved_radii = resolve_authored_border_radii(
+            decl_tbl, st.border_radius_tl_px, st.border_radius_tr_px,
+            st.border_radius_br_px, st.border_radius_bl_px)
+        if resolved_radii.valid:
+            st.border_radius_tl_px = resolved_radii.top_left_px
+            st.border_radius_tr_px = resolved_radii.top_right_px
+            st.border_radius_br_px = resolved_radii.bottom_right_px
+            st.border_radius_bl_px = resolved_radii.bottom_left_px
+    if css_prop_mask_has(mask, CSS_PROP_COLOR):
+        css_probe_note()
+        val col = decl_tbl_get(decl_tbl, "color")
+        if col.len() > 0:
+            val cv = parse_color(col)
+            if cv != 0u32:
+                st.fg = cv
+    if css_prop_mask_has(mask, CSS_PROP_WIDTH):
+        css_probe_note()
+        val width = decl_tbl_get(decl_tbl, "width")
+        if width.len() > 0:
+            if width.ends_with("%"):
+                val wp = parse_int(width)
+                st.width_px = if wp > 0: 0 - wp else: 0
+            elif width.ends_with("vw"):
+                val wv = parse_int(width)
+                st.width_px = if wv > 0: 0 - wv else: 0
+            else:
+                st.width_px = parse_int(width)
+    if css_prop_mask_has(mask, CSS_PROP_HEIGHT):
+        css_probe_note()
+        val height = decl_tbl_get(decl_tbl, "height")
+        if height.len() > 0:
+            if height.ends_with("%"):
+                val hp = parse_int(height)
+                st.height_px = if hp > 0: 0 - hp else: 0
+            else:
+                st.height_px = parse_int(height)
+    if css_prop_mask_has(mask, CSS_PROP_MIN_HEIGHT):
+        css_probe_note()
+        val min_height = decl_tbl_get(decl_tbl, "min-height")
+        if min_height.len() > 0:
+            if min_height.contains("vh"):
+                st.min_height_vh = true
+            else:
+                st.min_height_vh = false
+                st.min_height_px = parse_int(min_height)
     # Cascade order for the margin family mirrors the full-probe body:
     # decl_tbl is source-ordered, so the margin-left longhand only applies
     # when it was declared AFTER the last `margin` shorthand (last-declared
-    # wins per side, both directions).
-    val margin_sh_pos = decl_tbl_last_index(decl_tbl, "margin")
-    val margin = decl_tbl_get(decl_tbl, "margin")
+    # wins per side, both directions). Gated as one family: either member
+    # present pays both position probes so ordering stays exact.
+    val margin_family_present = (
+        css_prop_mask_has(mask, CSS_PROP_MARGIN) or
+        css_prop_mask_has(mask, CSS_PROP_MARGIN_LEFT)
+    )
+    var margin_sh_pos: i32 = -1
+    var margin = ""
+    if margin_family_present:
+        css_probe_note()
+        margin_sh_pos = decl_tbl_last_index(decl_tbl, "margin")
+        margin = decl_tbl_get(decl_tbl, "margin")
     if margin.len() > 0:
         val mtoks = ws_tokens(margin.trim().lower())
         val mn = mtoks.len()
@@ -609,8 +634,12 @@ fn _apply_decls_dispatch(
             st.margin_r = if r_tok == "auto": 0 else: margin_token_px(r_tok)
             st.margin_b = if b_tok == "auto": 0 else: margin_token_vh_px(b_tok)
             st.margin_l = if l_tok == "auto": 0 else: margin_token_px(l_tok)
-    val ml = decl_tbl_get(decl_tbl, "margin-left")
-    val ml_pos = decl_tbl_last_index(decl_tbl, "margin-left")
+    var ml = ""
+    var ml_pos: i32 = -1
+    if css_prop_mask_has(mask, CSS_PROP_MARGIN_LEFT):
+        css_probe_note()
+        ml = decl_tbl_get(decl_tbl, "margin-left")
+        ml_pos = decl_tbl_last_index(decl_tbl, "margin-left")
     if ml.len() > 0 and ml_pos > margin_sh_pos:
         if ml == "auto":
             st.margin_l = 0
@@ -618,18 +647,27 @@ fn _apply_decls_dispatch(
         else:
             st.margin_l = if ml.ends_with("%"): 0 - parse_int(ml) else: parse_int(ml)
             st.margin_l_auto = false
-    val z_index_decl = decl_tbl_get(decl_tbl, "z-index")
-    if z_index_decl.len() > 0:
-        st.z_index = parse_int(z_index_decl)
-    val justify_content_decl = decl_tbl_get(decl_tbl, "justify-content")
-    if justify_content_decl.len() > 0:
-        val normalized_justify_content = normalize_overflow_box_alignment(justify_content_decl)
-        if supports_content_distribution_alignment(normalized_justify_content):
-            st.justify_content = normalized_justify_content
-    val align_items_decl = decl_tbl_get(decl_tbl, "align-items")
-    if align_items_decl.len() > 0:
-        st.align_items = align_items_decl
-    val gap = decl_tbl_get_last_valid_nonnegative_px(decl_tbl, "gap")
+    if css_prop_mask_has(mask, CSS_PROP_Z_INDEX):
+        css_probe_note()
+        val z_index_decl = decl_tbl_get(decl_tbl, "z-index")
+        if z_index_decl.len() > 0:
+            st.z_index = parse_int(z_index_decl)
+    if css_prop_mask_has(mask, CSS_PROP_JUSTIFY_CONTENT):
+        css_probe_note()
+        val justify_content_decl = decl_tbl_get(decl_tbl, "justify-content")
+        if justify_content_decl.len() > 0:
+            val normalized_justify_content = normalize_overflow_box_alignment(justify_content_decl)
+            if supports_content_distribution_alignment(normalized_justify_content):
+                st.justify_content = normalized_justify_content
+    if css_prop_mask_has(mask, CSS_PROP_ALIGN_ITEMS):
+        css_probe_note()
+        val align_items_decl = decl_tbl_get(decl_tbl, "align-items")
+        if align_items_decl.len() > 0:
+            st.align_items = align_items_decl
+    var gap: text? = nil
+    if css_prop_mask_has(mask, CSS_PROP_GAP):
+        css_probe_note()
+        gap = decl_tbl_get_last_valid_nonnegative_px(decl_tbl, "gap")
     if val Some(gap_value) = gap:
         if (
             gap_value == "initial" or gap_value == "unset" or
@@ -643,42 +681,57 @@ fn _apply_decls_dispatch(
             st.gap_px = gv
             st.row_gap_px = gv
             st.column_gap_px = gv
-    val flex_basis_decl = decl_tbl_get(decl_tbl, "flex-basis")
-    if flex_basis_decl.len() > 0:
-        val basis_v = parse_supported_nonnegative_px(flex_basis_decl)
-        if basis_v >= 0:
-            st.flex_basis_px = basis_v
-    val ta = decl_tbl_get(decl_tbl, "text-align")
-    if ta.len() > 0:
-        st.text_align = ta
-    val font_style_decl = decl_tbl_get(decl_tbl, "font-style").trim().lower()
-    if font_style_decl == "normal":
-        st.font_style_italic = false
-    elif font_style_decl == "italic" or font_style_decl == "oblique":
-        st.font_style_italic = true
-    val cursor_decl = decl_tbl_get(decl_tbl, "cursor")
-    if cursor_decl.len() > 0:
-        val cursor_norm = cursor_decl.trim().lower()
-        if cursor_norm.len() > 0:
-            st.cursor = cursor_norm
-    val outline = decl_tbl_get(decl_tbl, "outline")
-    if outline.len() > 0:
-        val ow = parse_supported_outline_shorthand_width_px(outline)
-        if ow >= 0:
-            st.outline_w = ow
-        val oc = parse_color_any(outline)
-        if oc != 0u32:
-            st.outline_color = oc
-        if border_style_disables_paint(outline):
-            st.outline_w = 0
-    val overflow_decl = decl_tbl_get(decl_tbl, "overflow")
-    if overflow_decl.len() > 0:
-        st.overflow_hidden = overflow_decl == "hidden"
-        st.overflow_auto_y = (
-            overflow_decl == "auto" or overflow_decl == "scroll"
-        )
-        st.overflow_scroll_y = overflow_decl == "scroll"
-    val box_shadow_decl = decl_tbl_get(decl_tbl, "box-shadow")
+    if css_prop_mask_has(mask, CSS_PROP_FLEX_BASIS):
+        css_probe_note()
+        val flex_basis_decl = decl_tbl_get(decl_tbl, "flex-basis")
+        if flex_basis_decl.len() > 0:
+            val basis_v = parse_supported_nonnegative_px(flex_basis_decl)
+            if basis_v >= 0:
+                st.flex_basis_px = basis_v
+    if css_prop_mask_has(mask, CSS_PROP_TEXT_ALIGN):
+        css_probe_note()
+        val ta = decl_tbl_get(decl_tbl, "text-align")
+        if ta.len() > 0:
+            st.text_align = ta
+    if css_prop_mask_has(mask, CSS_PROP_FONT_STYLE):
+        css_probe_note()
+        val font_style_decl = decl_tbl_get(decl_tbl, "font-style").trim().lower()
+        if font_style_decl == "normal":
+            st.font_style_italic = false
+        elif font_style_decl == "italic" or font_style_decl == "oblique":
+            st.font_style_italic = true
+    if css_prop_mask_has(mask, CSS_PROP_CURSOR):
+        css_probe_note()
+        val cursor_decl = decl_tbl_get(decl_tbl, "cursor")
+        if cursor_decl.len() > 0:
+            val cursor_norm = cursor_decl.trim().lower()
+            if cursor_norm.len() > 0:
+                st.cursor = cursor_norm
+    if css_prop_mask_has(mask, CSS_PROP_OUTLINE):
+        css_probe_note()
+        val outline = decl_tbl_get(decl_tbl, "outline")
+        if outline.len() > 0:
+            val ow = parse_supported_outline_shorthand_width_px(outline)
+            if ow >= 0:
+                st.outline_w = ow
+            val oc = parse_color_any(outline)
+            if oc != 0u32:
+                st.outline_color = oc
+            if border_style_disables_paint(outline):
+                st.outline_w = 0
+    if css_prop_mask_has(mask, CSS_PROP_OVERFLOW):
+        css_probe_note()
+        val overflow_decl = decl_tbl_get(decl_tbl, "overflow")
+        if overflow_decl.len() > 0:
+            st.overflow_hidden = overflow_decl == "hidden"
+            st.overflow_auto_y = (
+                overflow_decl == "auto" or overflow_decl == "scroll"
+            )
+            st.overflow_scroll_y = overflow_decl == "scroll"
+    var box_shadow_decl = ""
+    if css_prop_mask_has(mask, CSS_PROP_BOX_SHADOW):
+        css_probe_note()
+        box_shadow_decl = decl_tbl_get(decl_tbl, "box-shadow")
     if box_shadow_decl.len() > 0:
         val box_shadow_norm = box_shadow_decl.trim().lower()
         if box_shadow_norm == "none":
@@ -697,14 +750,19 @@ fn _apply_decls_dispatch(
                 st.box_shadow_blur_px = agg.blur
                 st.box_shadow_alpha = agg.alpha
                 st.box_shadow_color = agg.color
-    val (resolved_pad_t, resolved_pad_r, resolved_pad_b, resolved_pad_l) = _resolve_authored_padding(
-        decl_tbl, st.pad_t, st.pad_r, st.pad_b, st.pad_l
-    )
-    st.pad_t = resolved_pad_t
-    st.pad_r = resolved_pad_r
-    st.pad_b = resolved_pad_b
-    st.pad_l = resolved_pad_l
-    val display_decl = decl_tbl_get_last_valid_display(decl_tbl)
+    if css_prop_mask_has(mask, CSS_PROP_PADDING):
+        css_probe_note()
+        val (resolved_pad_t, resolved_pad_r, resolved_pad_b, resolved_pad_l) = _resolve_authored_padding(
+            decl_tbl, st.pad_t, st.pad_r, st.pad_b, st.pad_l
+        )
+        st.pad_t = resolved_pad_t
+        st.pad_r = resolved_pad_r
+        st.pad_b = resolved_pad_b
+        st.pad_l = resolved_pad_l
+    var display_decl = ""
+    if css_prop_mask_has(mask, CSS_PROP_DISPLAY):
+        css_probe_note()
+        display_decl = decl_tbl_get_last_valid_display(decl_tbl)
     if apply_display and display_decl.len() > 0:
         if display_decl == "none":
             st.display = "none"
