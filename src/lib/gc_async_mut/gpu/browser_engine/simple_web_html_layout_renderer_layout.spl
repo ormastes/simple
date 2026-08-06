@@ -3,6 +3,7 @@ use std.gc_async_mut.gpu.browser_engine.layout_table.{
     simple_web_collect_table_rows, simple_web_fixed_table_cell_span,
     simple_web_fixed_table_column_count
 }
+use std.gc_async_mut.gpu.browser_engine.containment.{contain_value_contains_layout}
 
 val SIMPLE_WEB_SUMMARY_MARKER_INLINE_WIDTH: i32 = 16
 
@@ -981,6 +982,75 @@ fn grid_track_span_size(
 fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32]) -> LayoutResult:
     layout_with_style(nodes, styles, child_index, i, x, y, w, viewport_h, bx, by, bw, bh, wrap_starts, wrap_ends, intrinsic_widths, styles[i])
 
+# =========================================================================
+# `contain: layout` fast path for layout_selected. See containment.spl for
+# why this is wired here (array/index-positional) rather than reusing that
+# file's Dict-keyed LayoutContainState.
+#
+# node_contain_layout: reads the node's `contain` attribute the same way
+# every other attribute is read in this file (attr_value(node.attrs_raw,
+# name), e.g. the "width"/"height" reads a few lines above) and checks the
+# "layout" token via containment.spl's shared token matcher.
+# =========================================================================
+
+fn node_contain_layout(node: HNode) -> bool:
+    contain_value_contains_layout(attr_value(node.attrs_raw, "contain"))
+
+fn nearest_contain_layout_ancestor(nodes: [HNode], idx: i32) -> i32:
+    var cur = nodes[idx].parent as i32
+    while cur >= 0:
+        if node_contain_layout(nodes[cur]):
+            return cur
+        cur = nodes[cur].parent as i32
+    -1
+
+# Nearest `contain: layout` ancestor shared by every selected structural id.
+# Returns -1 (no fast path) unless ALL selected ids resolve to the exact
+# same boundary node — a conservative but always-correct restriction: a
+# mutation batch touching two different contained subtrees, or one that
+# isn't contained at all, falls straight through to the full recompute
+# below rather than attempting a partial splice.
+fn layout_contain_boundary(nodes: [HNode], selected_structural_ids: [i64]) -> i32:
+    val node_count = nodes.len() as i32
+    var boundary: i32 = -1
+    var first = true
+    for structural_id in selected_structural_ids:
+        val idx = (structural_id - 1) as i32
+        if idx < 0 or idx >= node_count:
+            return -1
+        val b = nearest_contain_layout_ancestor(nodes, idx)
+        if b < 0:
+            return -1
+        if first:
+            boundary = b
+            first = false
+        elif b != boundary:
+            return -1
+    boundary
+
+# Structural node count of the subtree rooted at `i` (i inclusive). This is
+# an upper bound on how many `layout_with_style` calls the fast path below
+# performs: every recursive call in `layout_with_style` passes a child index
+# drawn from `child_index.first_child`/`next_sibling` of the current node,
+# so the recursion can never step outside this subtree. Used as the
+# proportionality oracle in the spec (subtree size vs. total node count).
+fn subtree_node_count(child_index: HtmlChildIndex, i: i32) -> i32:
+    var total = 1
+    var child = child_index.first_child[i]
+    while child >= 0:
+        total = total + subtree_node_count(child_index, child)
+        child = child_index.next_sibling[child]
+    total
+
+fn layout_contain_boundary_subtree_size(nodes: [HNode], child_index: HtmlChildIndex, selected_structural_ids: [i64]) -> i32:
+    """Public probe for the correctness/proportionality spec: the subtree
+    size a fast-path recompute is bounded by, or the full node count when no
+    `contain: layout` boundary covers the selection (i.e. no savings claimed)."""
+    val boundary = layout_contain_boundary(nodes, selected_structural_ids)
+    if boundary < 0:
+        return nodes.len() as i32
+    subtree_node_count(child_index, boundary)
+
 fn layout_selected(
     nodes: [HNode], styles: [Style], child_index: HtmlChildIndex,
     selected_structural_ids: [i64], width: i32, viewport_h: i32,
@@ -1002,6 +1072,32 @@ fn layout_selected(
         retained.intrinsic_widths.len() != nodes.len()
     ):
         return LayoutSelectedResult(layout: retained, fault: "cpu-layout-retained-shape-mismatch")
+
+    # contain:layout fast path. `contain: layout` promises the boundary
+    # node's own box does not depend on how its subtree is laid out, so a
+    # mutation confined to that subtree can be relaid-out starting from the
+    # boundary, seeded from the previously-RETAINED box arrays everywhere
+    # else, instead of recomputing from the document root. Correctness does
+    # not rely on trusting the `contain` attribute: the recomputed
+    # boundary's own box (bw/bh) is compared against the retained value
+    # afterward, and any mismatch (a lying/violating `contain: layout`, or
+    # any other reason the boundary's box actually changed) falls through
+    # to the unconditional full recompute below, so the fast path can only
+    # ever produce output identical to the full recompute, never wrong
+    # output.
+    if not retained_empty:
+        val boundary = layout_contain_boundary(nodes, selected_structural_ids)
+        if boundary >= 0:
+            val bst = styles[boundary]
+            val sub = layout_with_style(
+                nodes, styles, child_index, boundary,
+                retained.bx[boundary], retained.by[boundary], retained.bw[boundary],
+                viewport_h, retained.bx, retained.by, retained.bw, retained.bh,
+                retained.wrap_starts, retained.wrap_ends, retained.intrinsic_widths, bst
+            )
+            if sub.bw[boundary] == retained.bw[boundary] and sub.bh[boundary] == retained.bh[boundary]:
+                return LayoutSelectedResult(layout: sub, fault: "")
+
     val node_count = nodes.len() as i32
     # Canonical recursion remains the one authority. The selected seam controls
     # which island artifacts the execution port returns; recomputing from the
