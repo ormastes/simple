@@ -1155,3 +1155,163 @@ complete.
   regression that fails if the split moves ahead of the guard. This is one
   bounded contributor, not a claim that transient string ownership or the
   remaining Stage-4 peak is solved.
+
+## UPDATE 2026-08-06: `evict_mir_module()` investigated for a bounded free —
+## NOT fixable at the driver tier. The blocker is NOT the aliasing question the
+## three prior declines named; it is that the C runtime has **no dict-free and
+## no object-free primitive at all**. Four independent aliases found on top.
+## STATIC ANALYSIS ONLY — nothing in this update was build-measured.
+
+**Honesty header.** No code landed in this update. Nothing below was measured
+on a running build: the machine was carrying a live 50+ GB T3 `native-build`
+retry and this session was scoped to micro-probes only, which cannot exercise
+the driver. Every claim below is source-level and carries a `file:line`. The
+one prior *measured* result this relies on is the 2026-07-25 `evict_probe.spl`
+run already recorded above (`delta_evict=2`, zero reclaimed).
+
+### Correction to the 2026-07-25 decline: the primitive it asked for now EXISTS
+
+The 2026-07-25 update closed with "**add a value-level deep-free primitive
+first (scoped to `text` and `[text]`…), then re-attempt**". That primitive was
+subsequently built and is committed:
+
+- `rt_array_free_deep(int64_t value) -> int64_t` — `src/runtime/runtime_native.c:5335`,
+  declared `src/runtime/runtime.h:372`.
+- It is exactly what was asked for: takes a tagged **value**, not a raw sffi
+  pointer; recurses into elements; all-or-nothing (refuses and frees *nothing*
+  rather than half-freeing, `runtime_native.c:5172-5187`); keeps a `seen`
+  pointer set so an internal alias or cycle refuses the whole call
+  (`:5215-5219`); same refuse-biased contract as `rt_string_free`.
+
+Two things keep it from being usable today, and they are separately fixable:
+
+1. **It is unreachable from `.spl`.** No `extern fn rt_array_free_deep` is
+   declared anywhere in `src/` (grep over `--include=*.spl` returns zero).
+   It is also absent from the deployed self-hosted binary — `nm -a` and
+   `strings -a` on `bin/release/x86_64-unknown-linux-gnu/simple` both return
+   **0** matches, i.e. it is currently dead code that no lane links.
+2. **No Rust-runtime twin.** `grep -rn rt_array_free_deep src/compiler_rust/`
+   returns nothing. `rt_string_free` has twins in both runtimes by design
+   (`collections.rs:1814` names itself the "Rust-side twin of `rt_string_free`
+   in `src/runtime/runtime_native.c`"). Any `.spl` caller added today would
+   link on the C-runtime native lane and fail to resolve on the seed/JIT lane.
+
+### The actual blocker for `evict_ast` / `evict_hir` / `evict_mir_module`
+
+Complete inventory of value-level free primitives in the C runtime that the
+self-hosted binary links (`runtime_compiler.spl:284` builds `runtime_native`
+into the archive; `stage4_symbol_closure.spl:178`):
+
+| primitive | shape | site |
+|---|---|---|
+| `rt_string_free` | one string, registry-checked, refuses `SHARED` | `runtime_native.c:5418` |
+| `rt_array_free` | array, **shallow** — strands every heap element | `runtime_native.c:5151` |
+| `rt_array_free_deep` | array, deep, all-or-nothing | `runtime_native.c:5335` |
+
+**There is no `rt_dict_free`, no `rt_object_free`, no `rt_tuple_free` in the C
+runtime.** (The Rust runtime has `rt_dict_free`/`rt_object_free`/`rt_tuple_free`
+— `dict.rs:134`, `objects.rs:159`, `collections.rs:1901` — but the Rust runtime
+is not what the self-hosted binary links, so that does not help.)
+
+Now compare against what the three evict targets actually hold:
+
+- `CompileContext.modules`, `.hir_modules`, `.mir_modules` are all
+  `Dict<text, …Module>` (`driver_types.spl:159-164`).
+- `MirModule` (`50.mir/mir_instruction_graph.spl:357-364`) is **four Dicts of
+  struct objects**: `functions: Dict<SymbolId, MirFunction>`, `statics`,
+  `constants`, `types`.
+- `MirFunction` (`:159-206`) owns `locals: [MirLocal]`, `blocks: [MirBlock]`
+  (arrays **of objects**), `type_bindings: Dict<text, HirType>`, and ~15 text
+  fields.
+- `SymbolId` is a struct wrapping an `i64` (`20.hir/hir_types.spl:71-73`), so
+  even the dict *keys* are heap objects.
+
+Every level is a Dict or an array-of-objects. `rt_array_free_deep` refuses any
+element that is not a registered non-shared string or a registered array
+(`runtime_native.c:5203-5214` explicitly lists dicts and enums/closures as
+refusals, with the reasoning that freeing the buffer would *strand* them).
+`rt_array_free` would free the `[MirBlock]` buffer and strand every block —
+the irreversible leak `runtime_native.c:5178-5185` argues against by name.
+
+So the conclusion is sharper than "non-trivial runtime work": **no sequence of
+driver-tier `.spl` calls over today's primitive set can reclaim a MirModule,
+an HirModule, or an AST module. The gap is a missing dict-free and object-free
+in `runtime_native.c`, not a missing proof about aliasing.** That is why this
+session did not force a patch either — but the next session no longer has to
+re-derive *what* to build.
+
+### Four aliases that must be resolved even after the primitives exist
+
+These were found while checking whether MIR-after-codegen is provably unshared.
+It is not. Ranked:
+
+1. **`ctx.bootstrap_entry_mir` aliases `ctx.mir_modules[entry]`, and
+   `evict_mir_module` does not clear it.** Every lowering branch stores the
+   *same* value into both — `driver_pipeline_lowering.spl:163-165`, `:238-240`,
+   `:269-271`, `:284-286`; `driver_bootstrap.spl:139-140`, `:181-182`.
+   `evict_mir_module` (`driver_types.spl:231-232`) is only
+   `self.mir_modules.remove(name)`, whereas `evict_hir` (`:226-228`) *does*
+   clear `bootstrap_entry_hir`. The alias is read back at
+   `driver_aot_native_output.spl:587-590`. **This asymmetry is a latent bug
+   today even without any free** and is the first thing to fix.
+2. **`_bootstrap_mir_functions: [MirFunction]`** — a module-level global
+   (`50.mir/_MirLowering/bootstrap_globals.spl:113`, pushed `:218`, read
+   `:418-421`, reset only `:175`) retains `MirFunction` values past codegen on
+   the bootstrap/flat lane.
+3. **`output_format == both` + `--low-memory` silently loses SMF output.**
+   `driver_aot_pipeline.spl:143-149` runs `compile_to_native` then
+   `compile_to_smf`, but `driver_aot_smf_output.spl:111-115` and `:131`
+   re-iterate `ctx.mir_modules` after `driver_aot_native_output.spl:338`/`:426`
+   already evicted them. Another latent bug independent of freeing.
+4. **`MirFunction.name` / `export_name` are the *same heap strings* as HIR/AST
+   and the SymbolTable.** `50.mir/_MirLowering/function_lowering.spl:132`
+   assigns `fn_.name` directly; `HirSymbol.name` (`hir_types.spl:82-85`) shares
+   that lineage. Per-function `rt_string_free` on names would dangle the symbol
+   table. (Only method/static names get a fresh string, `:138-139`.)
+
+What is *not* a hazard, checked and cleared: no `.smf` template store holds
+MIR (the SMF linker works on serialized bytes — `smf_reader.spl:259/321/422`,
+`lazy_instantiator.spl:196`; `jit_context.spl:15` holds `TemplateBytes`);
+monomorphization caches store text/i64 ids only (`core/type_erasure.spl:16-18`,
+`monomorphize.spl:17`); codegen takes one module at a time with no cross-module
+MIR reads (`driver_aot_native_output.spl:594-596`); and `ParallelBuilder` is
+**not** actually threaded — `build()` runs `compile_fn` inline in a `while`
+loop in both branches (`driver_build/parallel.spl:300-326`, `:344-395`), so
+there is no cross-thread MIR sharing to reason about.
+
+One more aliasing *producer* worth recording: `driver_pipeline_aop.spl:111` and
+`:126-127` re-wrap modules with `ctx.mir_modules[name] = MirModule(...)` /
+`inject_debug_trace(...)`, reusing the inner dict handles. Struct values are
+handles at runtime, not copies — `llvm_lib_type_mapper.spl:41-50` maps
+`MirTypeKind.Struct` to `ptr_type()`, and `rt_dict_get` returns the bare
+`int64_t` handle (`runtime_native.c:6895`). So the old wrapper leaks and the
+new one aliases its innards.
+
+### Ordered plan to unblock (each step independently landable + probe-testable)
+
+1. Fix hazard 1 and hazard 3 above. Both are latent bugs today, both are
+   small, and neither needs any new runtime primitive.
+2. Add the Rust-runtime twin of `rt_array_free_deep` (mirror
+   `collections.rs:1814`'s twin convention) so both lanes resolve the symbol.
+3. Declare `extern fn rt_array_free_deep` in `.spl` beside `rt_string_free`
+   (`driver_types.spl:28`) **together with its first real caller** — an unused
+   extern is dead code. Verify with an `evict_probe.spl`-style
+   `heap_registry` before/after delta (<10s, no corpus).
+4. Only then add `rt_dict_free` + `rt_object_free`/`rt_free_deep` to
+   `runtime_native.c` under the same refuse-biased, all-or-nothing contract
+   `rt_array_free_deep` already establishes. This is the step that actually
+   unblocks `evict_ast`/`evict_hir`/`evict_mir_module`, and it is the one that
+   needs a runtime rebuild, so it should be scheduled when the machine is not
+   carrying a bootstrap.
+
+Note for whoever picks this up: `src/runtime/runtime_native.c` was dirty in the
+shared working copy during this session (another lane is mid-flight on it), so
+it was deliberately not edited here.
+
+### Still true, unchanged
+
+`reclaim_source_contents()` (`driver_types.spl:198-204`) is real reclamation
+and is wired in at `driver_orchestration.spl:132-134` and
+`driver_hir_pipeline_lowering.spl:161-163`. The 2026-08-02 facade-hint guard
+landed (`20.hir/hir_lowering/module_surface.spl:818`). Neither is affected by
+anything above.
