@@ -970,11 +970,21 @@ impl MirLowering:
         val callee_disc = rt_enum_discriminant(callee.kind)
         if callee_disc == rt_enum_discriminant(HirExprKind.NamedVar(fallback_symbol, "")):
             match callee.kind:
-                case HirExprKind.NamedVar(_, callee_name):
-                    val resolved_symbol = self.symbols.lookup(callee_name)
-                    if resolved_symbol != nil:
-                        return self.try_lower_bitfield_construct_for_symbol(resolved_symbol, args)
-                    return nil
+                case HirExprKind.NamedVar(symbol, _):
+                    # Use the symbol already resolved onto this HIR node --
+                    # do NOT re-resolve by name via self.symbols.lookup(),
+                    # which walks a scope chain (self.scopes/current_scope)
+                    # that the bootstrap flat symbol table
+                    # (bootstrap_flat_symbol_table in bootstrap_globals.spl)
+                    # never populates. On that table self.scopes is `{}` with
+                    # current_scope pointing at scope id 0, so
+                    # self.scopes[0] reads past an empty dict and returns a
+                    # null Scope pointer under native codegen -- the very
+                    # next field read (`scope.symbols`) then SIGSEGVs. See
+                    # lower_call's NamedVar case just below for the same
+                    # documented direct-symbol pattern (bug
+                    # stage3_native_build_segv_generic_codegen_link_path_2026-08-06).
+                    return self.try_lower_bitfield_construct_for_symbol(symbol, args)
                 case _:
                     return nil
         if callee_disc == rt_enum_discriminant(HirExprKind.Var(fallback_symbol)):
