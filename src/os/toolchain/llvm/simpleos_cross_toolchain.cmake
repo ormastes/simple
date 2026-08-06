@@ -92,7 +92,23 @@ if(NOT CMAKE_CXX_FLAGS MATCHES "(^| )-isystem ${SIMPLEOS_SYSROOT}/include( |$)")
 endif()
 
 # Linker flags — use lld and append sysroot runtime archives after target libs.
-set(SIMPLEOS_LINKER_FLAGS "-fuse-ld=lld -nostdlib -Wl,-m,${SIMPLEOS_LLD_EMULATION} -Wl,-no-pie -Wl,--export-dynamic -Wl,--defsym,__bss_end=_end ${SIMPLEOS_SYSROOT}/lib/crt0.o -L${SIMPLEOS_SYSROOT}/lib")
+#
+# `-static` + the SimpleOS userspace linker script are what make the stage-2
+# output actually RUNNABLE ON SIMPLEOS. Without them the link still succeeds,
+# but the host clang driver (which has no SimpleOS ToolChain and defers to gcc
+# for the link step) emits a Linux DYNAMIC ELF carrying
+# `interpreter /lib64/ld-linux-x86-64.so.2` and a default load address — a
+# binary the SimpleOS FS-exec loader cannot run. That is the whole reason the
+# legacy static-relink `src/os/port/llvm/clang_static.shs` existed; with these
+# two flags the cross build produces a guest-runnable image directly, which is
+# the intended FS-exec design (/usr/bin/clang as an ordinary on-disk ELF).
+#
+# Measured on lld and on a minimal C++ program: Type=EXEC,
+# Entry=0x40000000 (the ring-3 link base asserted by the OVMF gates), and zero
+# INTERP segments. Verify with `readelf -h` + `readelf -l | grep -c INTERP`
+# after any change here — a reintroduced INTERP segment is silent until the
+# guest refuses to exec the binary.
+set(SIMPLEOS_LINKER_FLAGS "-fuse-ld=lld -nostdlib -static -Wl,-T,${SIMPLEOS_SYSROOT}/share/simpleos/simpleos.ld -Wl,-m,${SIMPLEOS_LLD_EMULATION} -Wl,-no-pie -Wl,--export-dynamic -Wl,--defsym,__bss_end=_end ${SIMPLEOS_SYSROOT}/lib/crt0.o -L${SIMPLEOS_SYSROOT}/lib")
 set(SIMPLEOS_CXX_LINK_RUNTIME "-Wl,--start-group -lc++ -lsimpleos_c -lm -Wl,--end-group")
 set(SIMPLEOS_BUILTINS_ARCHIVE "${SIMPLEOS_SYSROOT}/lib/libclang_rt.builtins-${SIMPLEOS_COMPILER_RT_ARCH}.a")
 if(EXISTS "${SIMPLEOS_BUILTINS_ARCHIVE}")
