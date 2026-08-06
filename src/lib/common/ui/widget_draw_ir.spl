@@ -37,10 +37,14 @@ use common.ui.draw_ir.{
     draw_ir_rect,
     draw_ir_rect_bounds,
     draw_ir_source_gui_ast,
+    DrawIrGlyphRunPayload,
+    draw_ir_empty_glyph_run_payload,
+    draw_ir_glyph_run_payload,
     draw_ir_text,
     draw_ir_text_resolved_font,
     draw_ir_text_shaped_font
 }
+use common.ui.glyph_bitmap_5x7.{glyph_index_for_char}
 use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
 
@@ -161,6 +165,66 @@ fn _scroll_content_height(node: WidgetNode, viewport_h: i32) -> i32:
     else:
         height
 
+# Height of one shared-5x7 glyph cell. The charset in
+# `common.ui.glyph_bitmap_5x7` is fixed at 7 rows, and every consumer of a v3
+# glyph (scene_raster, engine2d, the browser paint path) treats glyph.y as a
+# BASELINE and derives the cell top as `y - 7`. Emitting `text_top + 7` here is
+# therefore what makes the glyph cell land exactly on the text command's box.
+val _WIDGET_GLYPH_CELL_H: i32 = 7
+
+fn _charset_glyph_run(x: i32, y: i32, value: text, advances: [i32]) -> DrawIrGlyphRunPayload:
+    """Build a glyph run for text the shaper does NOT handle.
+
+    `resolve_font_metrics_with_language` only fills `glyph_run` when the string
+    needs complex-script shaping (font_renderer.spl: `shaping_required:
+    complex_script != 0`), so plain Latin text reached DrawIR v3 with
+    `glyph_count=0` and every glyph consumer skipped it -- no target rendered
+    any text at all. See
+    doc/08_tracking/bug/packed_scene_text_runs_carry_zero_glyphs_2026-08-06.md.
+
+    Glyph ids are charset indices into the shared 5x7 font, which is the id
+    convention the rest of this pipeline already uses (engine2d/glyph.spl,
+    the browser paint primitives, font_rasterizer) -- no second font mapping is
+    invented here. `xs` are absolute pen positions accumulated from
+    `advances`, matching the absolute coordinates the v2->v3 adapter passes
+    through unchanged."""
+    var glyph_ids: [u32] = []
+    var xs: [i32] = []
+    var ys: [i32] = []
+    var clusters: [i64] = []
+    val baseline = y + _WIDGET_GLYPH_CELL_H
+    var pen = x
+    var index = 0
+    for ch in value:
+        if index >= advances.len():
+            # Advance table and character count disagree -- refuse rather than
+            # emit a run whose glyphs would drift out of position.
+            return draw_ir_empty_glyph_run_payload()
+        glyph_ids.push(glyph_index_for_char(ch).to_u32())
+        xs.push(pen)
+        ys.push(baseline)
+        clusters.push(index.to_i64())
+        pen = pen + advances[index]
+        index = index + 1
+    if index != advances.len():
+        return draw_ir_empty_glyph_run_payload()
+    draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, true)
+
+fn _shift_glyph_run_y(run: DrawIrGlyphRunPayload, delta: i32) -> DrawIrGlyphRunPayload:
+    """Move a glyph run vertically by `delta`.
+
+    Callers that re-position a text command AFTER building it (see
+    `_default_text_centered`) must move its glyphs too, otherwise the box moves
+    and the text stays behind."""
+    if not run.valid or delta == 0:
+        return run
+    var ys: [i32] = []
+    var i = 0
+    while i < run.ys.len():
+        ys.push(run.ys[i] + delta)
+        i = i + 1
+    draw_ir_glyph_run_payload(run.glyph_ids, run.xs, ys, run.clusters, true)
+
 fn _default_text(node: WidgetNode, component_id: text, x: i32, y: i32, value: text, color: u32) -> DrawIrCommand:
     val candidate = simpleos_default_font_asset_candidate()
     val language = node.get_prop("lang")
@@ -172,12 +236,22 @@ fn _default_text(node: WidgetNode, component_id: text, x: i32, y: i32, value: te
         return draw_ir_text(component_id, x, y, value, color)
     if metrics.shaping_required:
         return draw_ir_text_shaped_font(component_id, x, y, value, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, 12, metrics.glyph_run)
+    # Non-shaped (Latin/ASCII) text still needs glyphs: the v3 text-run table
+    # carries ONLY glyphs -- it has no string field -- so a run with
+    # glyph_count=0 is unrenderable downstream no matter what the consumer does.
+    val synthesized = _charset_glyph_run(x, y, value, metrics.advances)
+    if synthesized.valid:
+        return draw_ir_text_shaped_font(component_id, x, y, value, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, 12, synthesized)
     draw_ir_text_resolved_font(component_id, x, y, value, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, 12)
 
 fn _default_text_centered(node: WidgetNode, component_id: text, x: i32, legacy_y: i32, box_y: i32, box_h: i32, value: text, color: u32) -> DrawIrCommand:
     var command = _default_text(node, component_id, x, legacy_y, value, color)
     if command.height > 0:
-        command.y = box_y + (box_h - command.height) / 2
+        val centered_y = box_y + (box_h - command.height) / 2
+        # Move the glyphs with the box. Without this the run keeps the
+        # pre-centering baseline and the text renders detached from its widget.
+        command.glyph_run = _shift_glyph_run_y(command.glyph_run, centered_y - command.y)
+        command.y = centered_y
     command
 
 # =========================================================================
