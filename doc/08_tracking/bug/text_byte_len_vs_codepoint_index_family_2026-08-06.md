@@ -58,7 +58,7 @@ Class 1a, the exact signature of the two already-confirmed instances:
 ```
 src/lib/common/ui/theme_package_wire.spl:121,149   value.char_at(i) as i64
 src/lib/common/ui/html_ui/doc_ops.spl:176          s.char_at(i) as i64
-src/lib/common/base_encoding/base32.spl:125        encoded.char_at(i) as i64
+src/lib/common/base_encoding/base32.spl:125        encoded.char_at(i) as i64   [FIXED]
 src/lib/common/base_encoding/base64.spl:97         encoded.char_at(i) as i64   [FIXED]
 src/lib/common/image/ppm_decode.spl:137            header.char_at(hi) as i64
 src/lib/nogc_async_mut/fs_driver/fat32_dir_ops.spl:75,93,177,195,430,448
@@ -99,6 +99,7 @@ reaches it. Either restore `i64.chr` in codegen or sweep the 100 sites.
 |---|---|---|
 | `5b41ee6e580` | `base_encoding.spl` `_char_from_code` | `bytes_to_text` aborted on JIT with `Function 'i64.chr' not found` — for ASCII input too, since the ASCII fast path shares the helper |
 | `a7d5a01955d` | `base_encoding/base64.spl` | `base64_decode` returned `""` **silently** on JIT for all input, ASCII included (R1 via the `char_at` cast), and aborted via R2 once that was fixed |
+| `9b392e37162` | `base_encoding/base32.spl` | `base32_decode` returned an empty `[u8]` **silently** on JIT for all input, ASCII included (R1) |
 
 Both proved by public-API round trip with an ASCII control in the same run,
 2/3/4-byte codepoints (`é`/`€`/`😀`), on both engines, with per-half sabotage.
