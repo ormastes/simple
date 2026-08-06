@@ -13,16 +13,20 @@
 # thread). Headless environments without a display: run under Xvfb (or a
 # container providing one), same as app.ui.browser.
 
-use app.browser.render_adapter.{browser_engine_pixels_at}
 use nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GUI_EVT_NONE, GUI_EVT_CLOSE}
 use nogc_sync_mut.src.time.{sleep_ms}
 
-pub fn run_browser_window_gui(url: text, width: i32, height: i32) -> i64:
-    """Open a real window, paint one real-engine frame into it, and block
-    until the user closes the window. Returns 0 on a clean close, 1 on any
-    window/render failure (GuiRenderer already prints an honest reason)."""
-    val pixels = browser_engine_pixels_at(url, width, height)
-
+pub fn run_browser_window_gui(url: text, width: i32, height: i32, pixels: [u32]) -> i64:
+    """Open a real window, paint one already-rendered real-engine frame into
+    it, and block until the user closes the window. Returns 0 on a clean
+    close, 1 on any window failure (GuiRenderer already prints an honest
+    reason). The caller renders the pixels (main.spl, via
+    browser_engine_pixels_at): rendering inside THIS function ran the whole
+    engine ~10-50x slower — this module's GuiRenderer/extern import chain
+    trips the JIT into a silent tree-walk fallback that poisons every callee,
+    so the same 64x36 render that takes ~45s from main.spl's call chain never
+    finished a 1800s budget from here. Measured 2026-08-06, container + host.
+    Keep the render in the caller until the fallback bug is fixed."""
     val created = GuiRenderer.create("auto", width, height, "Simple Browser - {url}")
     match created:
         case None:
