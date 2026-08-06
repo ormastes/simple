@@ -42,7 +42,7 @@ Lanes L0-L9 all landed:
   producer output). See `test/02_integration/ui/unified_packed_scene_nesting_spec.spl`.
 
 - L6 interactive-widget hit-shape reachability fix (Gotcha 6 below): landed
-  `PENDING_LANDING_HASH`.
+  `b11002b7eeb`.
 
 Not started: a real multi-producer *assembler* module (today, composing
 real producer output is only proven inline in the integration spec above).
