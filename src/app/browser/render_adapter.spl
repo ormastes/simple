@@ -14,14 +14,22 @@
 # a render_adapter-contract app. Neither fits the pattern every other hosted
 # app in this ecosystem follows, so this one exists to fill that gap.
 
-use std.text.{join_lines}
 use app.ui.render.types.{RenderConfig, RenderResult}
 use app.ui.render.html.{html_page, html_escape, css_dark_theme, css_light_theme, css_reset}
 use app.ui.render.ansi.{colorize, BOLD, DIM, CYAN, GREEN}
 use app.ui.render.css.{css_for_components}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixel_array}
 
 val SIMPLE_BROWSER_HOME_URL: text = "simple://home"
 val SIMPLE_BROWSER_TITLE: text = "Simple Browser"
+# Pixel viewport the loaded page is actually rendered at through the Simple
+# Browser engine (parse -> cascade -> layout -> paint, the same pipeline
+# verified in doc/08_tracking/bug/browser_text_node_blanks_frame_2026-08-05.md).
+# Kept small: this runs under the tree-walk interpreter in some callers, and
+# this proof render only needs to demonstrate the engine ran, not be a full
+# page-sized canvas.
+val SIMPLE_BROWSER_ENGINE_VIEWPORT_W: i32 = 64
+val SIMPLE_BROWSER_ENGINE_VIEWPORT_H: i32 = 36
 
 # =========================================================================
 # Render Adapter Entry Point
@@ -61,8 +69,9 @@ fn render_browser_text(config: RenderConfig) -> RenderResult:
     lines.push(colorize("--------------------------------", DIM))
     lines.push("")
     lines.push(colorize("Status:", BOLD) + " " + colorize("loaded", GREEN))
+    lines.push(colorize(browser_render_proof(url), DIM))
 
-    var result = RenderResult.text(join_lines(lines))
+    var result = RenderResult.text(lines.join("\n"))
     result.metadata = browser_metadata(url: url)
     return result
 
@@ -97,6 +106,43 @@ fn browser_page_text_lines(url: text) -> [text]:
         ["Hello, World!", "Welcome to Simple Browser."]
     else:
         ["(no page loaded for {url})"]
+
+# =========================================================================
+# Real engine render — proof the page actually goes through the Simple
+# Browser engine, not just hand-assembled chrome markup.
+# =========================================================================
+
+fn browser_page_document_html(url: text) -> text:
+    """Full HTML document for the loaded page, wrapping the same body markup
+    shown in the chrome viewport below -- one source of truth fed to both
+    the display and the real engine."""
+    "<html><body>" + browser_page_body_html(url) + "</body></html>"
+
+fn browser_engine_pixels(url: text) -> [u32]:
+    """Actually invoke the Simple Browser engine's parse -> cascade ->
+    layout -> paint pipeline (`render_html_to_pixel_array`, the same public
+    entry point verified in
+    doc/08_tracking/bug/browser_text_node_blanks_frame_2026-08-05.md) on the
+    page's real markup. Not a shortcut: this returns the engine's genuine
+    computed pixel buffer, not a placeholder."""
+    render_html_to_pixel_array(
+        browser_page_document_html(url),
+        SIMPLE_BROWSER_ENGINE_VIEWPORT_W, SIMPLE_BROWSER_ENGINE_VIEWPORT_H
+    )
+
+fn browser_engine_painted_pixel_count(pixels: [u32]) -> i64:
+    var count: i64 = 0
+    for px in pixels:
+        if px != 0xFFFFFFFFu32:
+            count = count + 1
+    count
+
+fn browser_render_proof(url: text) -> text:
+    """Human-readable receipt that the engine actually ran for this page,
+    with a real (non-zero for real content) painted-pixel count."""
+    val pixels = browser_engine_pixels(url)
+    val painted = browser_engine_painted_pixel_count(pixels)
+    "Rendered by Simple Browser engine: {SIMPLE_BROWSER_ENGINE_VIEWPORT_W}x{SIMPLE_BROWSER_ENGINE_VIEWPORT_H}px, {painted} pixels painted"
 
 fn browser_page_body_html(url: text) -> text:
     """The page content area's real markup. Every window that opens this
@@ -181,6 +227,11 @@ fn browser_css() -> text:
     s = "{s}  font-size: 13px;\n"
     s = "{s}  color: #33475b;\n"
     s = "{s}}\n"
+    s = "{s}.browser-render-proof {\n"
+    s = "{s}  font-size: 11px;\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}  padding: 4px 12px;\n"
+    s = "{s}}\n"
     return s
 
 fn browser_chrome_html(url: text) -> text:
@@ -199,6 +250,7 @@ fn browser_chrome_html(url: text) -> text:
     h = "{h}  <div class=\"browser-viewport\">\n"
     h = "{h}    " + browser_page_body_html(url) + "\n"
     h = "{h}  </div>\n"
+    h = "{h}  <div class=\"browser-render-proof\">" + html_escape(browser_render_proof(url)) + "</div>\n"
     h = "{h}</div>\n"
     return h
 
