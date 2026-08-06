@@ -73,8 +73,43 @@ Verify `simple.bootstrap-main-stage-2026-08-01.bak` (or a fresh T1 incremental
 build per `.claude/rules/bootstrap.md`) end-to-end against a small test suite
 before considering it for promotion to `bin/simple`.
 
+## Update 2026-08-06 — full T3 bootstrap redeploy attempted, still blocked
+
+Per explicit user authorization this session, a full T3 bootstrap was run
+(escalating past the ad-hoc-incremental-only policy noted above):
+
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy \
+  --output=build/bootstrap-t3-redeploy-20260806 --progress
+```
+
+- Verified no competing bootstrap process was already running before starting
+  (one unrelated, already-finished ad-hoc stage2→stage3 replay from earlier in
+  this session was found and NOT raced — it had already exited by the time it
+  was checked).
+- Rust seed/runtime cargo rebuild **succeeded**, picking up today's HEAD
+  commits (`i64.to_char`, `rt_array_data_ptr_u8`, `rt_io_file_*` interpreter
+  registrations, SIMD FFI alignment fix) — the seed at
+  `src/compiler_rust/target/bootstrap/simple` is no longer stale.
+- Stage 2 (seed → `bootstrap_main.spl`) **passed**.
+- Stage 3 (stage2 self-host) **failed**: `HIR lowering error in
+  src/compiler/driver/cache/cache_validator.spl: unresolved type: ByteOrder`.
+  The wrapper correctly refused to fall back to the seed for the full CLI
+  build/deploy. Full diagnosis, evidence, and next steps filed as a new bug:
+  `doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md`.
+- `bin/simple` / `bin/release/x86_64-unknown-linux-gnu/simple` **remain the
+  Rust seed** — nothing was promoted or deployed. The Rust seed binary was
+  **not** copied to `bin/release/.../simple` (standing prohibition honored).
+  `src/compiler_rust/linker/native_binary/stubs.rs` / `RT_KEEP` was not
+  touched (explicit out-of-scope boundary for this task).
+- Net effect: this remains an OPEN blocker, now with a precise, evidenced
+  root-cause candidate (see the new bug doc) rather than "bootstrap not
+  attempted".
+
 ## Related
 
 - `.claude/rules/bootstrap.md` — stated policy this contradicts
 - `doc/08_tracking/bug/match_enum_fallthrough_silent_2026-08-01.md` — the
   feature whose severity-wiring follow-up this gap affects
+- `doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md`
+  — 2026-08-06 full-bootstrap attempt and the Stage 3 blocker it hit
