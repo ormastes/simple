@@ -1,4 +1,4 @@
-/* nftw/flock stubs. fnmatch is a real minimal impl (glob-style * and ?). */
+/* nftw/ftw stubs. fnmatch is a real minimal impl (glob-style * and ?). */
 #include <errno.h>
 #include <string.h>
 
@@ -20,11 +20,8 @@ int ftw(const char *dirpath, int (*fn)(const char *, const void *, int), int nop
     errno = ENOSYS; return -1;
 }
 
-int flock(int fd, int operation) {
-    (void)fd; (void)operation;
-    /* Single-process OS: no conflict possible — report success. */
-    return 0;
-}
+/* flock() lives in simpleos_filelock.c — defining it here too put TWO 'T flock'
+ * symbols in libsimpleos_c.a, where -z muldefs makes the winner arbitrary. */
 
 /* Minimal fnmatch: only supports '*' (any run incl empty) and '?' (single char). */
 int fnmatch(const char *pattern, const char *string, int flags) {
