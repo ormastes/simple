@@ -1,6 +1,6 @@
 # Browser renders boxes pixel-exact, but any text node blanks the whole frame
 
-**Status:** Defect 1 FIXED 2026-08-06 (see Resolution below); Defect 2 still OPEN
+**Status:** Defect 1 and Defect 2 both FIXED 2026-08-06 (see Resolution below)
 **Found:** 2026-08-05
 **Component:** `src/lib/gc_async_mut/gpu/browser_engine/`
 **Attribution:** Rust bootstrap seed (`bin/simple` prints the seed banner). The
@@ -133,9 +133,32 @@ check -- it does not always return `false`.
   "Hello, World!" page at a normal viewport size renders text and boxes
   together correctly today.
 
-**Not investigated further (out of scope for this fix):** Defect 2 (`<style>`
-class selectors) below, and the pre-existing CSS-bounds failures in the wider
-`browser_renderer_spec.spl` (rule cap / variable expansion / 256-declaration
-limit) -- that spec times out under the tree-walk interpreter within a 5-minute
-budget (a known, separate perf gap; see `.claude/rules/testing.md`) and was not
-re-run to completion here.
+**Not investigated further (out of scope for this fix):** the pre-existing
+CSS-bounds failures in the wider `browser_renderer_spec.spl` (rule cap /
+variable expansion / 256-declaration limit) -- that spec times out under the
+tree-walk interpreter within a 5-minute budget (a known, separate perf gap;
+see `.claude/rules/testing.md`) and was not re-run to completion here.
+
+## Defect 2 follow-up (2026-08-06): also fixed by the same change
+
+Same root cause as Defect 1, confirmed independently: `simple_web_engine2d_render_html_pixels`
+routes to the real layout/paint pipeline whenever `_style_block_has_class_or_id_selector`
+detects a `.class`/`#id` selector in a `<style>` block (`needs_selector_layout`),
+so a class-selector page hit the identical unresolved `_web_budget_expired_at`
+symbol as any text node did.
+
+- Direct reproduction: `.card{background:#123456}` on `<div class='card'>` vs
+  `div{background:#123456}` on plain `<div>` -- both now paint 100/100 matching
+  pixels at 32x24 (class form was 0 before this fix).
+- `browser_renderer_smoke_spec.spl`'s `"renders style block CSS into fallback
+  pixels"` example (the one referenced in the "Measured verdicts" table above
+  as the 1 failure) now passes: full file verdict `Results: 4 total, 4 passed,
+  0 failed`.
+- **Sabotage receipt:** removed `_web_budget_expired_at` and
+  `simple_web_layout_last_render_degrade_reason` from
+  `simple_web_html_layout_renderer_foundation.spl`, reran the Defect 1 repro --
+  got `error[E1002]: function \`_web_budget_expired_at\` not found`, the exact
+  unresolved-symbol failure this doc's root-cause candidate predicted. Restored
+  (diffed byte-identical against the pre-sabotage copy afterward). No separate
+  sabotage was needed for Defect 2 since it shares the identical guarded code
+  path.
