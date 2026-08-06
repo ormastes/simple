@@ -1,0 +1,519 @@
+# Typed v2 -> v3 DrawIR adapter (design `doc/05_design/ui/unified_packed_ui_scene.md`
+# §9; plan `doc/03_plan/ui/unified_packed_ui_scene_agent_lanes.md` lane L3).
+#
+# Translates a `DrawIrComposition` (v2, `draw_ir.spl`) into a `DrawIrV3Scene`
+# (v3, `draw_ir_v3.spl`, frozen/read-only for this lane) by explicit
+# field-by-field construction -- no reinterpret cast, no shared memory layout
+# assumption between the two schemas.
+#
+# SOURCE MODEL (what v2 actually carries, load-bearing for the mapping below):
+#   - A `DrawIrComposition` is a flat list of `DrawIrBatch`.
+#   - Each batch carries an `embedding: DrawIrEmbeddingConfig` with
+#     (x, y, width, height, opacity_milli, clip) -- this is v2's ONLY source
+#     of a translate/clip/opacity transform; a batch's commands are authored
+#     in BATCH-LOCAL coordinates and the embedding is the offset applied at
+#     composite time (`_engine2d_draw_ir_render_batch_embedded`,
+#     `draw_ir_adv.spl`). This is exactly GROUP semantics (design §4.1), so
+#     **every batch becomes one v3 GROUP command** carrying that translation/
+#     clip/opacity, with the batch's commands reparented under it.
+#   - A `DrawIrCommand` of kind `group` (`draw_ir_group_command`) can ALSO
+#     appear inside a batch's command list (nested grouping via `parent_id`
+#     text chains). It carries no geometry/opacity of its own in v2 (all
+#     zero fields) -- it becomes a v3 GROUP command with identity transform/
+#     no clip/no paint, purely as a parent-chain anchor. Real transform data
+#     only ever comes from the enclosing batch's embedding.
+#
+# ID ASSIGNMENT: v2 identifies components by `text` (`component_id`,
+# `parent_id`); v3 identifies them by `u32`. Assignment is a simple linear
+# scan over parallel arrays (`_V2V3IdMap`), not a `Dict` -- native codegen
+# `Dict.len()`/`.get()` are documented-broken for this tier
+# (`doc/07_guide/language/dict_native_pitfalls.md`); corpus-sized scenes make
+# the O(n) scan irrelevant.
+#
+# RESOURCE CONTENT HASH: v2 carries a `text` URI/font-identity; v3 wants a
+# numeric `content_hash: i64`. There is no text-hashing primitive already
+# proven in this tier, so the adapter uses the RESOURCES table's own
+# (deterministic, unique, append-order) row id as the content hash. This
+# preserves identity and de-duplicates repeated URIs/font-identities without
+# inventing a hash algorithm this lane does not own.
+
+use common.ui.draw_ir.{
+    DRAW_IR_COMMAND_EDGE,
+    DRAW_IR_COMMAND_GROUP,
+    DRAW_IR_COMMAND_IMAGE,
+    DRAW_IR_COMMAND_PATH,
+    DRAW_IR_COMMAND_PORT,
+    DRAW_IR_COMMAND_RECT,
+    DRAW_IR_COMMAND_TEXT,
+    DrawIrBatch,
+    DrawIrCommand,
+    DrawIrComposition,
+    DrawIrStyleProp
+}
+use common.ui.draw_ir_v3.{
+    DRAW_IR_V3_FLAG_CLIPPED,
+    DRAW_IR_V3_FLAG_HIT_TESTABLE,
+    DRAW_IR_V3_FLAG_NONE,
+    DRAW_IR_V3_FLAG_TRANSFORMED,
+    DRAW_IR_V3_HIT_RECT,
+    DRAW_IR_V3_KIND_EDGE,
+    DRAW_IR_V3_KIND_GROUP,
+    DRAW_IR_V3_KIND_IMAGE,
+    DRAW_IR_V3_KIND_NONE,
+    DRAW_IR_V3_KIND_PATH,
+    DRAW_IR_V3_KIND_PORT,
+    DRAW_IR_V3_KIND_RECT,
+    DRAW_IR_V3_KIND_TEXT,
+    DRAW_IR_V3_NO_ID,
+    DRAW_IR_V3_RESOURCE_FONT,
+    DRAW_IR_V3_RESOURCE_IMAGE,
+    DrawIrV3Command,
+    DrawIrV3Scene,
+    draw_ir_v3_clip_append,
+    draw_ir_v3_clip_next_id,
+    draw_ir_v3_command,
+    draw_ir_v3_empty_scene,
+    draw_ir_v3_geometry_append,
+    draw_ir_v3_geometry_next_id,
+    draw_ir_v3_glyph_append,
+    draw_ir_v3_glyph_next_id,
+    draw_ir_v3_hit_shape_append,
+    draw_ir_v3_hit_shape_next_id,
+    draw_ir_v3_paint_append,
+    draw_ir_v3_paint_next_id,
+    draw_ir_v3_path_point_append,
+    draw_ir_v3_path_point_next_id,
+    draw_ir_v3_path_span_append,
+    draw_ir_v3_path_span_next_id,
+    draw_ir_v3_resource_append,
+    draw_ir_v3_resource_next_id,
+    draw_ir_v3_scene_push_command,
+    draw_ir_v3_text_run_append,
+    draw_ir_v3_text_run_next_id,
+    draw_ir_v3_transform_append,
+    draw_ir_v3_transform_next_id
+}
+
+# ---------------------------------------------------------------------------
+# Linear text -> u32 id map (no Dict; see header note).
+# ---------------------------------------------------------------------------
+
+struct _V2V3IdMap:
+    keys: [text]
+    ids: [u32]
+
+fn _v2v3_id_map_empty() -> _V2V3IdMap:
+    _V2V3IdMap(keys: [], ids: [])
+
+fn _v2v3_find_text(items: [text], key: text) -> i64:
+    var i: i64 = 0
+    val n = items.len().to_i64()
+    while i < n:
+        if items[i] == key:
+            return i
+        i = i + 1
+    -1
+
+# ---------------------------------------------------------------------------
+# Adapter builder: threads the v3 scene under construction plus the id maps
+# through the (pure, value-returning) translation functions.
+# ---------------------------------------------------------------------------
+
+struct _V2V3Builder:
+    scene: DrawIrV3Scene
+    idmap: _V2V3IdMap
+    image_uris: [text]
+    image_ids: [u32]
+    font_idents: [text]
+    font_ids: [u32]
+
+fn _v2v3_builder_empty(scene_id: u32, generation: u32) -> _V2V3Builder:
+    _V2V3Builder(
+        scene: draw_ir_v3_empty_scene(scene_id, generation),
+        idmap: _v2v3_id_map_empty(),
+        image_uris: [],
+        image_ids: [],
+        font_idents: [],
+        font_ids: []
+    )
+
+# Look up (or assign, on first sight) the v3 id for a v2 identity key.
+# Keys are namespaced by caller (`"cmd:" + component_id`, `"grp:" + batch_id`)
+# so a command id can never collide with a batch-group id.
+fn _v2v3_id_of(b: _V2V3Builder, key: text) -> (_V2V3Builder, u32):
+    val found = _v2v3_find_text(b.idmap.keys, key)
+    if found >= 0:
+        return (b, b.idmap.ids[found])
+    val new_id = b.idmap.keys.len().to_u32()
+    var keys = b.idmap.keys
+    var ids = b.idmap.ids
+    keys.push(key)
+    ids.push(new_id)
+    var out = b
+    out.idmap = _V2V3IdMap(keys: keys, ids: ids)
+    (out, new_id)
+
+fn _v2v3_push_command(b: _V2V3Builder, cmd: DrawIrV3Command) -> _V2V3Builder:
+    var out = b
+    out.scene = draw_ir_v3_scene_push_command(b.scene, cmd)
+    out
+
+fn _v2v3_geometry(b: _V2V3Builder, x: i32, y: i32, w: i32, h: i32) -> (_V2V3Builder, u32):
+    val id = draw_ir_v3_geometry_next_id(b.scene.geometry)
+    val table = draw_ir_v3_geometry_append(b.scene.geometry, x, y, w, h, 0)
+    var scene = b.scene
+    scene.geometry = table
+    var out = b
+    out.scene = scene
+    (out, id)
+
+fn _v2v3_paint(b: _V2V3Builder, fill_color: u32, opacity_milli: i32) -> (_V2V3Builder, u32):
+    val id = draw_ir_v3_paint_next_id(b.scene.paint)
+    val table = draw_ir_v3_paint_append(b.scene.paint, fill_color, 0u32, 0, opacity_milli, 0u16)
+    var scene = b.scene
+    scene.paint = table
+    var out = b
+    out.scene = scene
+    (out, id)
+
+fn _v2v3_clip(b: _V2V3Builder, x: i32, y: i32, w: i32, h: i32) -> (_V2V3Builder, u32):
+    val id = draw_ir_v3_clip_next_id(b.scene.clips)
+    val table = draw_ir_v3_clip_append(b.scene.clips, x, y, w, h, 0, DRAW_IR_V3_NO_ID)
+    var scene = b.scene
+    scene.clips = table
+    var out = b
+    out.scene = scene
+    (out, id)
+
+fn _v2v3_transform(b: _V2V3Builder, dx: i32, dy: i32) -> (_V2V3Builder, u32):
+    val id = draw_ir_v3_transform_next_id(b.scene.transforms)
+    val table = draw_ir_v3_transform_append(b.scene.transforms, 1000, 0, 0, 1000, dx, dy)
+    var scene = b.scene
+    scene.transforms = table
+    var out = b
+    out.scene = scene
+    (out, id)
+
+fn _v2v3_hit_shape(b: _V2V3Builder, x: i32, y: i32, w: i32, h: i32, owner: u32) -> (_V2V3Builder, u32):
+    val id = draw_ir_v3_hit_shape_next_id(b.scene.hit_shapes)
+    val table = draw_ir_v3_hit_shape_append(b.scene.hit_shapes, x, y, w, h, DRAW_IR_V3_HIT_RECT, 0u16, owner)
+    var scene = b.scene
+    scene.hit_shapes = table
+    var out = b
+    out.scene = scene
+    (out, id)
+
+fn _v2v3_image_resource(b: _V2V3Builder, uri: text, width: i32, height: i32) -> (_V2V3Builder, u32):
+    val found = _v2v3_find_text(b.image_uris, uri)
+    if found >= 0:
+        return (b, b.image_ids[found])
+    val id = draw_ir_v3_resource_next_id(b.scene.resources)
+    val table = draw_ir_v3_resource_append(
+        b.scene.resources, DRAW_IR_V3_RESOURCE_IMAGE, 0u32, width.to_u32(), height.to_u32(), id.to_i64()
+    )
+    var scene = b.scene
+    scene.resources = table
+    var out = b
+    out.scene = scene
+    var uris = out.image_uris
+    var ids = out.image_ids
+    uris.push(uri)
+    ids.push(id)
+    out.image_uris = uris
+    out.image_ids = ids
+    (out, id)
+
+fn _v2v3_font_resource(b: _V2V3Builder, identity: text) -> (_V2V3Builder, u32):
+    val found = _v2v3_find_text(b.font_idents, identity)
+    if found >= 0:
+        return (b, b.font_ids[found])
+    val id = draw_ir_v3_resource_next_id(b.scene.resources)
+    val table = draw_ir_v3_resource_append(
+        b.scene.resources, DRAW_IR_V3_RESOURCE_FONT, 0u32, 0u32, 0u32, id.to_i64()
+    )
+    var scene = b.scene
+    scene.resources = table
+    var out = b
+    out.scene = scene
+    var idents = out.font_idents
+    var ids = out.font_ids
+    idents.push(identity)
+    ids.push(id)
+    out.font_idents = idents
+    out.font_ids = ids
+    (out, id)
+
+fn _v2v3_glyph(b: _V2V3Builder, glyph_id: u32, x: i32, y: i32, cluster: i64) -> (_V2V3Builder, u32):
+    val id = draw_ir_v3_glyph_next_id(b.scene.text_runs)
+    val table = draw_ir_v3_glyph_append(b.scene.text_runs, glyph_id, x, y, cluster)
+    var scene = b.scene
+    scene.text_runs = table
+    var out = b
+    out.scene = scene
+    (out, id)
+
+fn _v2v3_text_run(b: _V2V3Builder, glyph_start: u32, glyph_count: u32, font_resource_id: u32, font_size_milli: i32, baseline_x: i32, baseline_y: i32, color: u32) -> (_V2V3Builder, u32):
+    val id = draw_ir_v3_text_run_next_id(b.scene.text_runs)
+    val table = draw_ir_v3_text_run_append(
+        b.scene.text_runs, glyph_start, glyph_count, font_resource_id, font_size_milli, baseline_x, baseline_y, color
+    )
+    var scene = b.scene
+    scene.text_runs = table
+    var out = b
+    out.scene = scene
+    (out, id)
+
+fn _v2v3_path_point(b: _V2V3Builder, x: i32, y: i32, verb: u16) -> (_V2V3Builder, u32):
+    val id = draw_ir_v3_path_point_next_id(b.scene.path_points)
+    val table = draw_ir_v3_path_point_append(b.scene.path_points, x, y, verb)
+    var scene = b.scene
+    scene.path_points = table
+    var out = b
+    out.scene = scene
+    (out, id)
+
+fn _v2v3_path_span(b: _V2V3Builder, point_start: u32, point_count: u32) -> (_V2V3Builder, u32):
+    val id = draw_ir_v3_path_span_next_id(b.scene.path_points)
+    val table = draw_ir_v3_path_span_append(b.scene.path_points, point_start, point_count, 0u16)
+    var scene = b.scene
+    scene.path_points = table
+    var out = b
+    out.scene = scene
+    (out, id)
+
+# ---------------------------------------------------------------------------
+# Style-prop lookup (mirrors the small local helper every draw_ir consumer
+# in this codebase writes for itself; `computed_style` is a flat [key,value]
+# list, not a map).
+# ---------------------------------------------------------------------------
+
+fn _v2v3_style_value(props: [DrawIrStyleProp], key: text) -> text:
+    for prop in props:
+        if prop.key == key:
+            return prop.value
+    ""
+
+# ---------------------------------------------------------------------------
+# Kind mapping (v2 text tag -> v3 u16 kind).
+# ---------------------------------------------------------------------------
+
+fn _v2v3_kind(kind: text) -> u16:
+    if kind == DRAW_IR_COMMAND_RECT:
+        return DRAW_IR_V3_KIND_RECT
+    if kind == DRAW_IR_COMMAND_TEXT:
+        return DRAW_IR_V3_KIND_TEXT
+    if kind == DRAW_IR_COMMAND_EDGE:
+        return DRAW_IR_V3_KIND_EDGE
+    if kind == DRAW_IR_COMMAND_PATH:
+        return DRAW_IR_V3_KIND_PATH
+    if kind == DRAW_IR_COMMAND_IMAGE:
+        return DRAW_IR_V3_KIND_IMAGE
+    if kind == DRAW_IR_COMMAND_GROUP:
+        return DRAW_IR_V3_KIND_GROUP
+    if kind == DRAW_IR_COMMAND_PORT:
+        return DRAW_IR_V3_KIND_PORT
+    DRAW_IR_V3_KIND_NONE
+
+fn _v2v3_kind_wants_geometry(kind: text) -> bool:
+    kind == DRAW_IR_COMMAND_RECT or kind == DRAW_IR_COMMAND_TEXT or
+        kind == DRAW_IR_COMMAND_IMAGE or kind == DRAW_IR_COMMAND_PORT
+
+fn _v2v3_kind_wants_paint(kind: text) -> bool:
+    kind == DRAW_IR_COMMAND_RECT or kind == DRAW_IR_COMMAND_TEXT or
+        kind == DRAW_IR_COMMAND_IMAGE or kind == DRAW_IR_COMMAND_EDGE
+
+# ---------------------------------------------------------------------------
+# Per-command translation.
+# ---------------------------------------------------------------------------
+
+fn _v2v3_text_run_for(b: _V2V3Builder, cmd: DrawIrCommand) -> (_V2V3Builder, u32):
+    var bb = b
+    var glyph_start = DRAW_IR_V3_NO_ID
+    var glyph_count = 0u32
+    if cmd.glyph_run.valid:
+        val n = cmd.glyph_run.glyph_ids.len().to_i64()
+        var gi: i64 = 0
+        var first: i64 = -1
+        while gi < n:
+            val idx = gi.to_i32()
+            var res = _v2v3_glyph(
+                bb, cmd.glyph_run.glyph_ids[idx], cmd.glyph_run.xs[idx],
+                cmd.glyph_run.ys[idx], cmd.glyph_run.clusters[idx]
+            )
+            bb = res.0
+            if first < 0:
+                first = res.1.to_i64()
+            gi = gi + 1
+        if first >= 0:
+            glyph_start = first.to_u32()
+            glyph_count = n.to_u32()
+    val font_ident = _v2v3_style_value(cmd.computed_style, "font-identity")
+    var font_resource_id = DRAW_IR_V3_NO_ID
+    if font_ident.len() > 0:
+        val res = _v2v3_font_resource(bb, font_ident)
+        bb = res.0
+        font_resource_id = res.1
+    val font_size_str = _v2v3_style_value(cmd.computed_style, "font-size")
+    var font_size_milli = 0
+    if font_size_str.len() > 0:
+        font_size_milli = (font_size_str.to_i64() * 1000).to_i32()
+    _v2v3_text_run(bb, glyph_start, glyph_count, font_resource_id, font_size_milli, cmd.x, cmd.y, cmd.color)
+
+fn _v2v3_adapt_command(b: _V2V3Builder, cmd: DrawIrCommand, batch_group_id: u32) -> _V2V3Builder:
+    var bb = b
+    val id_res = _v2v3_id_of(bb, "cmd:{cmd.component_id}")
+    bb = id_res.0
+    val my_id = id_res.1
+
+    var parent_id = batch_group_id
+    # NOTE: `cmd.parent_id != ""` is unreliable here -- a `DrawIrCommand`
+    # reached through `for cmd in batch.commands:` whose `parent_id` field
+    # was left at its default-parameter "" (e.g. every `draw_ir_rect(...)`
+    # call that never passes `parent_id`) reports `cmd.parent_id.len() == -1`
+    # and `cmd.parent_id != ""` as `true` under this engine -- a defaulted
+    # empty-text struct field read through a for-loop iteration variable
+    # does not compare equal to a literal "". `.len() > 0` is the correct,
+    # observed-safe guard (a genuinely assigned parent id measures its real
+    # positive length; see the "in-batch v2 GROUP command" unit spec case).
+    # Filed: doc/08_tracking/bug/defaulted_text_field_len_negative_one_in_for_loop_2026-08-06.md
+    if cmd.parent_id.len() > 0:
+        val p_res = _v2v3_id_of(bb, "cmd:{cmd.parent_id}")
+        bb = p_res.0
+        parent_id = p_res.1
+
+    val kind_v3 = _v2v3_kind(cmd.kind)
+
+    var geometry_id = DRAW_IR_V3_NO_ID
+    if _v2v3_kind_wants_geometry(cmd.kind):
+        val g_res = _v2v3_geometry(bb, cmd.x, cmd.y, cmd.width, cmd.height)
+        bb = g_res.0
+        geometry_id = g_res.1
+
+    var paint_id = DRAW_IR_V3_NO_ID
+    if _v2v3_kind_wants_paint(cmd.kind):
+        val p_res = _v2v3_paint(bb, cmd.color, 1000)
+        bb = p_res.0
+        paint_id = p_res.1
+
+    var text_run_id = DRAW_IR_V3_NO_ID
+    if cmd.kind == DRAW_IR_COMMAND_TEXT:
+        val t_res = _v2v3_text_run_for(bb, cmd)
+        bb = t_res.0
+        text_run_id = t_res.1
+
+    var image_resource_id = DRAW_IR_V3_NO_ID
+    if cmd.kind == DRAW_IR_COMMAND_IMAGE and cmd.image_uri.len() > 0:
+        val r_res = _v2v3_image_resource(bb, cmd.image_uri, cmd.width, cmd.height)
+        bb = r_res.0
+        image_resource_id = r_res.1
+
+    var path_span_id = DRAW_IR_V3_NO_ID
+    if cmd.points.len() > 0:
+        var first_point_id = DRAW_IR_V3_NO_ID
+        var pi = 0
+        val pn = cmd.points.len()
+        while pi < pn:
+            val verb = if pi == 0: 0u16 else: 1u16
+            val pt_res = _v2v3_path_point(bb, cmd.points[pi].x, cmd.points[pi].y, verb)
+            bb = pt_res.0
+            if pi == 0:
+                first_point_id = pt_res.1
+            pi = pi + 1
+        val span_res = _v2v3_path_span(bb, first_point_id, cmd.points.len().to_u32())
+        bb = span_res.0
+        path_span_id = span_res.1
+
+    var clip_id = DRAW_IR_V3_NO_ID
+    if cmd.clip_rect.present:
+        val c_res = _v2v3_clip(bb, cmd.clip_rect.x, cmd.clip_rect.y, cmd.clip_rect.width, cmd.clip_rect.height)
+        bb = c_res.0
+        clip_id = c_res.1
+
+    var hit_shape_id = DRAW_IR_V3_NO_ID
+    if cmd.hit_rect.present:
+        val h_res = _v2v3_hit_shape(bb, cmd.hit_rect.x, cmd.hit_rect.y, cmd.hit_rect.width, cmd.hit_rect.height, my_id)
+        bb = h_res.0
+        hit_shape_id = h_res.1
+
+    # Per-command transforms have no source in v2 (only the enclosing
+    # batch's embedding carries a translation -- see `_v2v3_adapt_batch`),
+    # so every individual command's transform stays NO_ID/identity.
+    val transform_id = DRAW_IR_V3_NO_ID
+
+    var flags = DRAW_IR_V3_FLAG_NONE
+    if clip_id != DRAW_IR_V3_NO_ID:
+        flags = flags | DRAW_IR_V3_FLAG_CLIPPED
+    if transform_id != DRAW_IR_V3_NO_ID:
+        flags = flags | DRAW_IR_V3_FLAG_TRANSFORMED
+    if hit_shape_id != DRAW_IR_V3_NO_ID:
+        flags = flags | DRAW_IR_V3_FLAG_HIT_TESTABLE
+
+    val v3cmd = draw_ir_v3_command(
+        kind: kind_v3, flags: flags, component_id: my_id, component_generation: 0u32, parent_id: parent_id,
+        geometry_id: geometry_id, paint_id: paint_id, text_run_id: text_run_id, image_resource_id: image_resource_id,
+        path_span_id: path_span_id, clip_id: clip_id, transform_id: transform_id, hit_shape_id: hit_shape_id
+    )
+    _v2v3_push_command(bb, v3cmd)
+
+# One v2 `DrawIrBatch` -> one v3 GROUP command carrying the batch's
+# translate/clip/opacity (design §4.1), followed by its commands reparented
+# under that GROUP. This is the ONLY place a real (non-identity) transform
+# is synthesized -- dropping this (emitting identity regardless of
+# `embedding.x`/`embedding.y`) is the lane's documented sabotage target.
+fn _v2v3_adapt_batch(b: _V2V3Builder, batch: DrawIrBatch) -> _V2V3Builder:
+    var bb = b
+    val group_res = _v2v3_id_of(bb, "grp:{batch.batch_id}")
+    bb = group_res.0
+    val group_id = group_res.1
+
+    var transform_id = DRAW_IR_V3_NO_ID
+    if false and (batch.embedding.x != 0 or batch.embedding.y != 0):
+        # SABOTAGE (temporary, L3 gate discipline): dropping the GROUP
+        # transform must turn the WM pixel-parity case red.
+        val t_res = _v2v3_transform(bb, batch.embedding.x, batch.embedding.y)
+        bb = t_res.0
+        transform_id = t_res.1
+
+    var clip_id = DRAW_IR_V3_NO_ID
+    if batch.embedding.clip:
+        val c_res = _v2v3_clip(bb, 0, 0, batch.embedding.width, batch.embedding.height)
+        bb = c_res.0
+        clip_id = c_res.1
+
+    var paint_id = DRAW_IR_V3_NO_ID
+    if batch.embedding.opacity_milli != 1000:
+        val p_res = _v2v3_paint(bb, 0u32, batch.embedding.opacity_milli)
+        bb = p_res.0
+        paint_id = p_res.1
+
+    var flags = DRAW_IR_V3_FLAG_NONE
+    if transform_id != DRAW_IR_V3_NO_ID:
+        flags = flags | DRAW_IR_V3_FLAG_TRANSFORMED
+    if clip_id != DRAW_IR_V3_NO_ID:
+        flags = flags | DRAW_IR_V3_FLAG_CLIPPED
+
+    val group_cmd = draw_ir_v3_command(
+        kind: DRAW_IR_V3_KIND_GROUP, flags: flags, component_id: group_id, component_generation: 0u32, parent_id: DRAW_IR_V3_NO_ID,
+        geometry_id: DRAW_IR_V3_NO_ID, paint_id: paint_id, text_run_id: DRAW_IR_V3_NO_ID, image_resource_id: DRAW_IR_V3_NO_ID,
+        path_span_id: DRAW_IR_V3_NO_ID, clip_id: clip_id, transform_id: transform_id, hit_shape_id: DRAW_IR_V3_NO_ID
+    )
+    bb = _v2v3_push_command(bb, group_cmd)
+
+    for cmd in batch.commands:
+        bb = _v2v3_adapt_command(bb, cmd, group_id)
+    bb
+
+# ---------------------------------------------------------------------------
+# Public entry points.
+# ---------------------------------------------------------------------------
+
+fn draw_ir_v2_to_v3_with_ids(composition: DrawIrComposition, scene_id: u32, generation: u32) -> DrawIrV3Scene:
+    var b = _v2v3_builder_empty(scene_id, generation)
+    for batch in composition.batches:
+        b = _v2v3_adapt_batch(b, batch)
+    b.scene
+
+fn draw_ir_v2_to_v3(composition: DrawIrComposition) -> DrawIrV3Scene:
+    draw_ir_v2_to_v3_with_ids(composition, 0u32, 0u32)
+
+export draw_ir_v2_to_v3, draw_ir_v2_to_v3_with_ids
