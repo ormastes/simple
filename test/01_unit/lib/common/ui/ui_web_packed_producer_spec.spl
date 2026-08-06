@@ -183,6 +183,67 @@ describe "WebPackedProducer WebView nesting (design section 2.2 nesting rule, ga
         expect(after_alloc).to_equal(before_alloc)
         print "l7_web_producer_nesting host_component={host_webview_component_id} alloc_before={before_alloc} alloc_after={after_alloc}"
 
+describe "WebPackedProducer id rebasing under a non-zero assigned range (multi-producer composition)":
+    """Ids embedded in emitted commands (geometry_id, paint_id, ...) are read
+    back as ABSOLUTE indices into the assembled arena's combined per-table
+    array (draw_ir_v3_group_resolve.spl's own accessor convention, and the
+    landed `ranges.<table>.start + cursor()` pattern in
+    draw_ir_v3_emit_full.spl). When this producer is scanned alongside
+    another producer with non-zero counts, its assigned `ranges.geometry`/
+    `ranges.paint` no longer start at 0 -- every id it copies from the v2
+    oracle's locally-numbered scene must be rebased by that start, or a
+    downstream reader indexing the combined arena lands on the wrong row.
+    (The WebView-nesting test above only exercises a non-zero `commands`
+    start; this test exercises geometry/paint too.)"""
+
+    it "keeps geometry_id/paint_id arena-absolute when scanned after a producer with non-zero counts":
+        var dummy_counts = ui_scene_counts_zero()
+        dummy_counts.commands = 2u32
+        dummy_counts.geometry = 2u32
+        dummy_counts.paint = 2u32
+        dummy_counts.text_runs = 1u32
+        dummy_counts.glyphs = 3u32
+        dummy_counts.resources = 1u32
+        dummy_counts.path_spans = 1u32
+        dummy_counts.path_points = 2u32
+        dummy_counts.clips = 1u32
+        dummy_counts.transforms = 1u32
+        dummy_counts.hit_shapes = 1u32
+
+        val producer = WebPackedProducer(id_val: 6u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID)
+        val web_counts = producer.count(1u64, ui_scene_counts_zero())
+
+        val scanned = ui_scene_scan([dummy_counts, web_counts])
+        val web_ranges = scanned[1]
+        assert_true(web_ranges.geometry.start > 0u32)
+        assert_true(web_ranges.paint.start > 0u32)
+
+        var draw = UiSceneNativeWriter.new(web_ranges)
+        var owners = UiSceneNativeOwnerWriter.new(web_ranges.owner_records)
+        var actions = UiSceneNativeActionWriter.new(web_ranges.action_bindings)
+        val result = producer.emit(1u64, web_ranges, draw, owners, actions)
+        match result:
+            UiSceneEmitResult.Emitted(slice):
+                expect(slice.scene_slot).to_equal(6u32)
+            UiSceneEmitResult.Refused(receipt):
+                expect(true).to_equal(false)
+
+        val commands = draw.commands_snapshot()
+        var checked_geometry = 0
+        var checked_paint = 0
+        var i = 0
+        while i < commands.len():
+            if commands[i].geometry_id != DRAW_IR_V3_NO_ID:
+                assert_true(commands[i].geometry_id >= web_ranges.geometry.start)
+                checked_geometry = checked_geometry + 1
+            if commands[i].paint_id != DRAW_IR_V3_NO_ID:
+                assert_true(commands[i].paint_id >= web_ranges.paint.start)
+                checked_paint = checked_paint + 1
+            i = i + 1
+        assert_true(checked_geometry > 0)
+        assert_true(checked_paint > 0)
+        print "l7_web_producer_id_rebasing geometry_start={web_ranges.geometry.start} paint_start={web_ranges.paint.start} checked_geometry={checked_geometry} checked_paint={checked_paint}"
+
 describe "WebPackedProducer parity with the v2 oracle (design section 9, gate d)":
     """The producer adopts the EXISTING renderer
     (`simple_web_layout_render_html_draw_ir` + the landed v2->v3 adapter)

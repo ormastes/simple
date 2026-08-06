@@ -61,6 +61,16 @@ use common.ui.ui_scene_slice.{
 # unset/default one (design section 2.4 "live `semantic_generation`").
 val WEB_HIT_OWNER_GENERATION: u32 = 1u32
 
+# See ui_gui_packed_producer.spl's `_gui_rebase_id` doc comment: table-row-
+# index fields must be rebased to this producer's assigned
+# `ranges.<table>.start` before being written; component_id/parent_id are
+# identities, never rebased.
+fn _web_rebase_id(id: u32, start: u32) -> u32:
+    if id == DRAW_IR_V3_NO_ID:
+        DRAW_IR_V3_NO_ID
+    else:
+        id + start
+
 # `host_parent_id` is DRAW_IR_V3_NO_ID for a standalone (non-nested) render.
 # When a host is hosting this producer as a WebView child (design section
 # 2.2 nesting rule), it passes its own WebView component id here so the
@@ -137,10 +147,22 @@ fn _web_overflow_receipt(v: UiSceneWriteVerdict, producer_kind: u16, producer_id
                 producer_kind: producer_kind, producer_id: producer_id, snapshot_id: snapshot_id
             )
 
-fn _web_write_scene(v3: DrawIrV3Scene, draw: DrawIrV3Writer, owners: UiOwnerWriter):
+fn _web_write_scene(v3: DrawIrV3Scene, ranges: UiSceneRanges, draw: DrawIrV3Writer, owners: UiOwnerWriter):
     var i = 0
     while i < v3.commands.len():
-        draw.put_command(v3.commands[i])
+        val c = v3.commands[i]
+        draw.put_command(DrawIrV3Command(
+            kind: c.kind, flags: c.flags,
+            component_id: c.component_id, component_generation: c.component_generation, parent_id: c.parent_id,
+            geometry_id: _web_rebase_id(c.geometry_id, ranges.geometry.start),
+            paint_id: _web_rebase_id(c.paint_id, ranges.paint.start),
+            text_run_id: _web_rebase_id(c.text_run_id, ranges.text_runs.start),
+            image_resource_id: _web_rebase_id(c.image_resource_id, ranges.resources.start),
+            path_span_id: _web_rebase_id(c.path_span_id, ranges.path_spans.start),
+            clip_id: _web_rebase_id(c.clip_id, ranges.clips.start),
+            transform_id: _web_rebase_id(c.transform_id, ranges.transforms.start),
+            hit_shape_id: _web_rebase_id(c.hit_shape_id, ranges.hit_shapes.start)
+        ))
         i = i + 1
 
     i = 0
@@ -166,7 +188,7 @@ fn _web_write_scene(v3: DrawIrV3Scene, draw: DrawIrV3Writer, owners: UiOwnerWrit
     i = 0
     while i < v3.text_runs.run_glyph_starts.len():
         draw.put_text_run(DrawIrV3TextRun(
-            present: true, glyph_start: v3.text_runs.run_glyph_starts[i],
+            present: true, glyph_start: _web_rebase_id(v3.text_runs.run_glyph_starts[i], ranges.glyphs.start),
             glyph_count: v3.text_runs.run_glyph_counts[i],
             font_resource_id: v3.text_runs.run_font_resource_ids[i],
             font_size_milli: v3.text_runs.run_font_sizes_milli[i],
@@ -197,7 +219,7 @@ fn _web_write_scene(v3: DrawIrV3Scene, draw: DrawIrV3Writer, owners: UiOwnerWrit
     i = 0
     while i < v3.path_points.span_point_starts.len():
         draw.put_path_span(DrawIrV3PathSpan(
-            present: true, point_start: v3.path_points.span_point_starts[i],
+            present: true, point_start: _web_rebase_id(v3.path_points.span_point_starts[i], ranges.path_points.start),
             point_count: v3.path_points.span_point_counts[i],
             fill_rule: v3.path_points.span_fill_rules[i]
         ))
@@ -216,7 +238,7 @@ fn _web_write_scene(v3: DrawIrV3Scene, draw: DrawIrV3Writer, owners: UiOwnerWrit
         draw.put_clip(DrawIrV3Clip(
             present: true, x: v3.clips.xs[i], y: v3.clips.ys[i],
             width: v3.clips.widths[i], height: v3.clips.heights[i],
-            corner_radius: v3.clips.corner_radii[i], parent_id: v3.clips.parent_ids[i]
+            corner_radius: v3.clips.corner_radii[i], parent_id: _web_rebase_id(v3.clips.parent_ids[i], ranges.clips.start)
         ))
         i = i + 1
 
@@ -250,7 +272,7 @@ fn _web_write_scene(v3: DrawIrV3Scene, draw: DrawIrV3Writer, owners: UiOwnerWrit
     i = 0
     while i < v3.provenance.command_indices.len():
         draw.put_provenance(DrawIrV3Provenance(
-            present: true, command_index: v3.provenance.command_indices[i],
+            present: true, command_index: _web_rebase_id(v3.provenance.command_indices[i], ranges.commands.start),
             edge_kind: v3.provenance.edge_kinds[i],
             source_node_id: v3.provenance.source_node_ids[i],
             source_rule_id: v3.provenance.source_rule_ids[i],
@@ -281,7 +303,7 @@ impl UiPackedProducer for WebPackedProducer:
         draw: DrawIrV3Writer, owners: UiOwnerWriter, actions: UiActionWriter
     ) -> UiSceneEmitResult:
         val v3 = _web_build_scene(self.html, self.width, self.height, self.host_parent_id)
-        _web_write_scene(v3, draw, owners)
+        _web_write_scene(v3, ranges, draw, owners)
 
         val draw_verdict = draw.finish()
         if not _web_verdict_is_exact(draw_verdict):

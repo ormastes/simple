@@ -26,6 +26,7 @@ use common.ui.draw_ir_v3.{
     DRAW_IR_V3_NO_ID,
     DRAW_IR_V3_HIT_RECT,
     DrawIrV3Scene,
+    DrawIrV3Command,
     DrawIrV3Geometry,
     DrawIrV3Paint,
     DrawIrV3TextRun,
@@ -60,6 +61,20 @@ use common.ui.ui_scene_slice.{
 # Non-zero so a live owner record is trivially distinguishable from an
 # unset/default one (design section 2.4 "live `semantic_generation`").
 val GUI_INTERACTIVE_GENERATION: u32 = 1u32
+
+# Table-row-index fields (geometry_id, paint_id, ...) are read back as
+# ABSOLUTE indices into the assembled arena's combined per-table array
+# (draw_ir_v3_group_resolve.spl and the L4 `ranges.<table>.start +
+# cursor()` convention agree on this). This producer copies an
+# already-self-consistent LOCAL scene from draw_ir_v2_to_v3 verbatim, so
+# every id it carries must be rebased by this producer's assigned
+# `ranges.<table>.start` before being written -- component_id/parent_id
+# are identities (matched by value, not indexed), never rebased.
+fn _gui_rebase_id(id: u32, start: u32) -> u32:
+    if id == DRAW_IR_V3_NO_ID:
+        DRAW_IR_V3_NO_ID
+    else:
+        id + start
 
 fn _gui_is_interactive_kind(kind: text) -> bool:
     kind == "button" or kind == "checkbox" or kind == "input" or kind == "textfield"
@@ -142,10 +157,22 @@ fn _gui_overflow_receipt(v: UiSceneWriteVerdict, producer_kind: u16, producer_id
 # writers, in table order. Order across DIFFERENT tables is irrelevant (each
 # table has its own writer cursor); what matters is writing exactly the
 # count `_gui_counts_of` reported for each table.
-fn _gui_write_scene(scene: GuiPackedScene, draw: DrawIrV3Writer, owners: UiOwnerWriter):
+fn _gui_write_scene(scene: GuiPackedScene, ranges: UiSceneRanges, draw: DrawIrV3Writer, owners: UiOwnerWriter):
     var i = 0
     while i < scene.v3.commands.len():
-        draw.put_command(scene.v3.commands[i])
+        val c = scene.v3.commands[i]
+        draw.put_command(DrawIrV3Command(
+            kind: c.kind, flags: c.flags,
+            component_id: c.component_id, component_generation: c.component_generation, parent_id: c.parent_id,
+            geometry_id: _gui_rebase_id(c.geometry_id, ranges.geometry.start),
+            paint_id: _gui_rebase_id(c.paint_id, ranges.paint.start),
+            text_run_id: _gui_rebase_id(c.text_run_id, ranges.text_runs.start),
+            image_resource_id: _gui_rebase_id(c.image_resource_id, ranges.resources.start),
+            path_span_id: _gui_rebase_id(c.path_span_id, ranges.path_spans.start),
+            clip_id: _gui_rebase_id(c.clip_id, ranges.clips.start),
+            transform_id: _gui_rebase_id(c.transform_id, ranges.transforms.start),
+            hit_shape_id: _gui_rebase_id(c.hit_shape_id, ranges.hit_shapes.start)
+        ))
         i = i + 1
 
     i = 0
@@ -171,7 +198,7 @@ fn _gui_write_scene(scene: GuiPackedScene, draw: DrawIrV3Writer, owners: UiOwner
     i = 0
     while i < scene.v3.text_runs.run_glyph_starts.len():
         draw.put_text_run(DrawIrV3TextRun(
-            present: true, glyph_start: scene.v3.text_runs.run_glyph_starts[i],
+            present: true, glyph_start: _gui_rebase_id(scene.v3.text_runs.run_glyph_starts[i], ranges.glyphs.start),
             glyph_count: scene.v3.text_runs.run_glyph_counts[i],
             font_resource_id: scene.v3.text_runs.run_font_resource_ids[i],
             font_size_milli: scene.v3.text_runs.run_font_sizes_milli[i],
@@ -202,7 +229,7 @@ fn _gui_write_scene(scene: GuiPackedScene, draw: DrawIrV3Writer, owners: UiOwner
     i = 0
     while i < scene.v3.path_points.span_point_starts.len():
         draw.put_path_span(DrawIrV3PathSpan(
-            present: true, point_start: scene.v3.path_points.span_point_starts[i],
+            present: true, point_start: _gui_rebase_id(scene.v3.path_points.span_point_starts[i], ranges.path_points.start),
             point_count: scene.v3.path_points.span_point_counts[i],
             fill_rule: scene.v3.path_points.span_fill_rules[i]
         ))
@@ -221,7 +248,7 @@ fn _gui_write_scene(scene: GuiPackedScene, draw: DrawIrV3Writer, owners: UiOwner
         draw.put_clip(DrawIrV3Clip(
             present: true, x: scene.v3.clips.xs[i], y: scene.v3.clips.ys[i],
             width: scene.v3.clips.widths[i], height: scene.v3.clips.heights[i],
-            corner_radius: scene.v3.clips.corner_radii[i], parent_id: scene.v3.clips.parent_ids[i]
+            corner_radius: scene.v3.clips.corner_radii[i], parent_id: _gui_rebase_id(scene.v3.clips.parent_ids[i], ranges.clips.start)
         ))
         i = i + 1
 
@@ -247,7 +274,7 @@ fn _gui_write_scene(scene: GuiPackedScene, draw: DrawIrV3Writer, owners: UiOwner
     i = 0
     while i < scene.v3.provenance.command_indices.len():
         draw.put_provenance(DrawIrV3Provenance(
-            present: true, command_index: scene.v3.provenance.command_indices[i],
+            present: true, command_index: _gui_rebase_id(scene.v3.provenance.command_indices[i], ranges.commands.start),
             edge_kind: scene.v3.provenance.edge_kinds[i],
             source_node_id: scene.v3.provenance.source_node_ids[i],
             source_rule_id: scene.v3.provenance.source_rule_ids[i],
@@ -294,7 +321,7 @@ impl UiPackedProducer for GuiPackedProducer:
         draw: DrawIrV3Writer, owners: UiOwnerWriter, actions: UiActionWriter
     ) -> UiSceneEmitResult:
         val scene = _gui_build_scene(self.root, self.width, self.height)
-        _gui_write_scene(scene, draw, owners)
+        _gui_write_scene(scene, ranges, draw, owners)
 
         val draw_verdict = draw.finish()
         if not _gui_verdict_is_exact(draw_verdict):
