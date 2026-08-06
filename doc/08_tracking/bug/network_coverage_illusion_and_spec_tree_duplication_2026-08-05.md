@@ -179,6 +179,78 @@ than deduplicating them, and which tree is authoritative is a decision for the
 owner. Establish that first, then delete in one sweep with the runner's path
 resolution confirmed.
 
+### Update 2026-08-06 — authority established; discovery-guard extended, full deletion NOT yet performed
+
+Re-verified with a fresh directory diff (all files, not just `*_spec.spl`):
+`test/unit` (8,306 files) vs `test/01_unit` (15,036 files) — **8,287 shared
+paths, 0 files unique to `test/unit`**; `test/integration` (978 files) vs
+`test/02_integration` (1,610 files) — **978 shared paths, 0 files unique to
+`test/integration`**. The "old-only" counts in the table above (3 and 0) are
+now stale in the safe direction: the 3 `test/unit`-only specs cited in
+`doc/08_tracking/bug/test_unit_legacy_mirror_divergence_2026-08-04.md` were
+already migrated forward (commit `fb742496235`, before this task started), so
+there is nothing left to triage on that axis for either tree.
+
+**Evidence the numbered trees are authoritative:**
+- `src/lib/nogc_sync_mut/test_runner/test_runner_files.spl` is the sole
+  discovery implementation (`nogc_async_mut` just re-exports it). It already
+  special-cases `test/unit/` as a "FROZEN legacy mirror" excluded from
+  directory discovery — a fix landed one day earlier
+  (`doc/08_tracking/bug/test_unit_legacy_mirror_divergence_2026-08-04.md`,
+  same root cause, same conclusion, independently reached) — but that guard
+  had never been extended to `test/integration/`, so `test/integration/`
+  specs were still being silently discovered and run alongside
+  `test/02_integration/` on every default `bin/simple test` invocation.
+- Every comment, cache-skip rule, and cover-annotation check elsewhere in
+  `src/app/test_runner_new/` refers only to the numbered tree
+  (`test/01_unit/`, `test/02_integration/`, `test/03_system/`); there is no
+  code path anywhere that treats `test/unit/`/`test/integration/` as a first
+  class discovery root.
+- Content check: of 8,287 shared-path files in the unit pair, 884 diverge
+  (matches the 874 figure from the 2026-08-04 doc); of 978 shared-path files
+  in the integration pair, 91 diverge. Every sampled divergent pair (10
+  sampled across both trees, plus the two called out here) shows the numbered
+  tree as an equal-or-larger, syntactically newer successor — e.g.
+  `test/unit/app/branch_coverage_7_spec.spl` still uses `!= nil` where
+  `test/01_unit/.../branch_coverage_7_spec.spl` uses `.?`;
+  `test/integration/app/app_mcp_intensive_spec.spl` loops `0..99` and uses
+  unquoted dict keys where `test/02_integration/.../app_mcp_intensive_spec.spl`
+  loops `0..100`, uses quoted keys, and sets an extra env var. No sample in
+  either direction showed the legacy tree ahead.
+- Git history on `main` could not be used to date the numbered tree's
+  introduction — local history has been rewritten/compacted enough that
+  `git log -- test/01_unit` and `git log -- test/unit` both bottom out at
+  the same 2026-08-05 commit — so the "numbering convention == later
+  reorganization" claim rests on the code/content evidence above, not commit
+  archaeology.
+
+**What was done:** extended `is_legacy_mirror_path`/`targets_legacy_mirror` in
+`src/lib/nogc_sync_mut/test_runner/test_runner_files.spl` to also exclude
+`test/integration/` from directory discovery, mirroring the existing
+`test/unit/` guard exactly (excluded from directory scans only; naming a path
+under either legacy tree explicitly still runs it). This closes the live half
+of Defect 3: `bin/simple test` (or any directory-scoped run) no longer
+double-executes/double-counts `test/integration/` against
+`test/02_integration/`, matching the behavior already shipped for
+`test/unit/` vs `test/01_unit/` a day earlier.
+
+**What was NOT done:** the full deletion of `test/unit/` and
+`test/integration/` (9,284 files combined). The evidence above is
+unambiguous, and the prior 2026-08-04 investigation reached the identical
+conclusion with equally strong evidence — but that session *also* chose the
+conservative discovery-guard step over deletion ("a smaller interim step, if
+deletion is too aggressive"), and this session found the working copy under
+the same conditions that make a ~9k-file deletion risky to land right now:
+heavy concurrent multi-agent load (10+ load average, 165 unrelated dirty
+files from other sessions in `git status` at task start) and this repo's own
+documented history of `main` being wiped to near-zero twice via large/bad
+pushes (`.claude/rules/vcs.md` § Pre-push guards). Recommendation for the
+owner: once the working copy is quiet, delete `test/unit/` and
+`test/integration/` in one sweep (no further triage needed — 0 files are
+unique to either tree), gated by
+`sh scripts/check/check-tree-size-push.shs --expect-files <post-count>` per
+the guard's own instructions.
+
 ## Reproduce
 
 ```
