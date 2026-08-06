@@ -20,18 +20,21 @@ spec instead of only showing up as a missing matrix cell.
 use std.io_runtime.{file_read}
 use std.spec.*
 
-fn expect_headless_lane_contract(script: text, prefix: text):
+fn expect_headless_lane_contract(script: text, prefix: text, compose_call: text, blit_call: text):
     # Gate: headless mode is checked before the window-only SIMPLE_GUI gate,
     # so it never needs GuiRenderer.create / a physical window.
     expect(script).to_contain("SIMPLE_WM_HEADLESS_CAPTURE")
     expect(script).to_contain("run_headless_capture")
     expect(script).to_contain("if (env_get(\"SIMPLE_WM_HEADLESS_CAPTURE\") ?? \"\") == \"1\":")
 
-    # Reuse, not reinvention: same wm-pixel-compositor scene + the same real
-    # showcase child content the windowed lane presents (blit_child_frame_pixels
-    # pulls in the actual child app's rendered frame — never a synthetic fill).
-    expect(script).to_contain("compose_pixels(comp, trace_path)")
-    expect(script).to_contain("blit_child_frame_pixels(base_pixels, comp, child.pixels, child.w, child.h)")
+    # Reuse, not reinvention: same compositor scene + the same real showcase
+    # child content the windowed lane presents (the blit call pulls in the
+    # actual child app's rendered frame — never a synthetic fill). Callers
+    # pass the exact compose/blit call text for their wrapper's lane: the
+    # pixel-array wrappers reuse compose_pixels/blit_child_frame_pixels, the
+    # Engine2D-pipeline wrapper reuses compose_scene/blit_child_frame.
+    expect(script).to_contain(compose_call)
+    expect(script).to_contain(blit_call)
     expect(script).to_contain("wait_for_first_child_frame")
 
     # PPM output goes through the same encoder/writer the child showcase
@@ -84,17 +87,25 @@ describe "Host-WM headless capture lane contract":
     it "widget showcase host-WM wrapper implements the headless capture lane":
         step("Inspect the widget showcase host-WM wrapper source")
         val script = file_read("examples/06_io/ui/wm_widget_showcase_gui.spl")
-        expect_headless_lane_contract(script, "wm_widget_showcase_host_headless")
+        expect_headless_lane_contract(script, "wm_widget_showcase_host_headless", "compose_pixels(comp, trace_path)", "blit_child_frame_pixels(base_pixels, comp, child.pixels, child.w, child.h)")
         expect(script).to_contain("val prefix = \"wm_widget_showcase_host_headless\"")
 
-    it "graphics 2D showcase host-WM wrapper implements the headless capture lane":
+    it "graphics 2D showcase host-WM wrapper implements the headless capture lane via the shared Engine2D pipeline":
         step("Inspect the graphics 2D showcase host-WM wrapper source")
         val script = file_read("examples/06_io/ui/wm_graphics_2d_showcase_gui.spl")
-        expect_headless_lane_contract(script, "wm_graphics_2d_showcase_host_headless")
+        expect_headless_lane_contract(script, "wm_graphics_2d_showcase_host_headless", "compose_scene(b, comp, trace_path)", "blit_child_frame(b, comp, child.pixels, child.w, child.h)")
         expect(script).to_contain("val prefix = \"wm_graphics_2d_showcase_host_headless\"")
+        # Migrated off the hand-rolled [u32] framebuffer onto the shared
+        # Engine2D/DrawIR HAL: chrome via draw_rect_filled, the child app's
+        # already-rendered frame via draw_image, single readback via
+        # read_pixels() feeding both gui.present_rgba and the PPM encoder.
+        expect(script).to_contain('use std.gpu.engine2d.engine.{Engine2D}')
+        expect(script).to_contain("b.draw_rect_filled(")
+        expect(script).to_contain("b.draw_image(win.x + 4, win.y + 28, child_w, child_h, child_pixels)")
+        expect(script).to_contain("b.read_pixels()")
 
     it "web standards showcase host-WM wrapper implements the headless capture lane":
         step("Inspect the web standards showcase host-WM wrapper source")
         val script = file_read("examples/06_io/ui/wm_web_standards_showcase_gui.spl")
-        expect_headless_lane_contract(script, "wm_web_standards_showcase_host_headless")
+        expect_headless_lane_contract(script, "wm_web_standards_showcase_host_headless", "compose_pixels(comp, trace_path)", "blit_child_frame_pixels(base_pixels, comp, child.pixels, child.w, child.h)")
         expect(script).to_contain("val prefix = \"wm_web_standards_showcase_host_headless\"")

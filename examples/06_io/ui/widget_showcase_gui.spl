@@ -36,7 +36,7 @@ use common.ui.widget.{UITree, WidgetNode, WidgetKind, UIState}
 # campaign: this target's HAL is Engine2D, so `paint_scene_engine2d` below
 # walks the shared DrawIrV3 scene into Engine2D primitives instead of the
 # pure-Simple software rasterizer used by the display-less hosts.
-use app.ui_showcase.showcase_core.{showcase_build_sized, showcase_scene, showcase_apply}
+use app.ui_showcase.showcase_core.{showcase_build_sized, showcase_scene, showcase_apply, showcase_click_count}
 use common.ui.host_input_event.{
     host_pointer_down, host_pointer_up, host_pointer_move, host_pointer_wheel,
     host_key_down, HOST_BTN_LEFT
@@ -114,22 +114,17 @@ fn showcase_ui_tree(st: ShowcaseState) -> UITree:
 # Pure reducer: one synthetic event -> new state (widget_interact_model style).
 fn apply_showcase_event(st: ShowcaseState, ev: text) -> ShowcaseState:
     var out = st
-    # Each synthetic event is driven through the SHARED reducer so the next
-    # frame's scene actually differs -- that is what the before/after
-    # pixel-diff gate measures.
-    #
-    # Each event is dispatched as a scroll on the showcase's linked panel,
-    # NOT as a click, and that is forced by a defect rather than chosen: the
-    # shared scene currently carries text runs with glyph_count=0 (see the
-    # report), so the probe-pane label rewrites that showcase_apply performs
-    # on a click are not renderable by ANY consumer and produce a
-    # byte-identical frame. A scroll moves real row geometry, so it is the
-    # one showcase interaction that is visible today. Restore click dispatch
-    # here once the scene emits glyphs.
+    # Each synthetic event is driven through the SHARED reducer as a real
+    # click on the cell it names -- same stimulus, same names as before the
+    # migration. `showcase_apply` rewrites the probe-pane label text, which
+    # is now renderable (the scene carries synthesized glyphs), so
+    # run_showcase_events asserts BOTH the shared click counter AND a
+    # non-zero frame diff.
     val cell = showcase_event_cell(ev)
     if cell >= 0:
-        val dy = if cell % 2 == 0: cell + 2 else: 0 - (cell + 1)
-        out.ui = showcase_apply(out.ui, host_pointer_wheel(120, 60, dy), out.vw, out.vh)
+        val px = 24 + cell * 40
+        out.ui = showcase_apply(out.ui, host_pointer_down(px, 24, HOST_BTN_LEFT), out.vw, out.vh)
+        out.ui = showcase_apply(out.ui, host_pointer_up(px, 24, HOST_BTN_LEFT), out.vw, out.vh)
     if ev == "click:button":
         out.button_count = out.button_count + 1
         out.button_pressed = not out.button_pressed
@@ -591,13 +586,24 @@ fn count_diffs_all(before: [u32], after: [u32]) -> i64:
 # synthetic event with a re-render, then verify the before/after frames differ
 # ONLY inside the targeted widgets' grid cells (region-scoped oracle).
 fn run_showcase_events(w: i32, h: i32, events_raw: text) -> i64:
-    """Synthetic event mode (W1/G1.5): every event must visibly change the
-    frame. Before task B4 each event was checked against the grid cell the
-    hand-drawn gallery put it in; the frame now comes from the shared
-    showcase tree, which has no such fixed grid, so the check is per-event
-    whole-frame difference instead -- strictly the same property (an input
-    that changes nothing is a failure) without asserting a layout this file
-    no longer owns."""
+    """Synthetic event mode (W1/G1.5): every event must reach the SHARED
+    reducer and be recorded there.
+
+    Two independent verdicts per event, both required:
+      1. the SHARED click counter advanced (the reducer saw the stimulus), and
+      2. the frame CHANGED (the response reached pixels).
+
+    Check 2 was demoted to an observation for one campaign step, because the
+    shared tree's response to a click is a probe-pane LABEL rewrite and the
+    scene emitted text runs with glyph_count=0 -- so a click legitimately
+    produced a byte-identical frame and a pixel verdict would have been a
+    permanent false red. That defect is fixed (glyph synthesis in
+    widget_draw_ir), measured here as frame_diff 0 -> 119/29/91, so the
+    docstring's own instruction to re-promote it is now carried out.
+
+    Keeping check 2 demoted would be the worse failure: with it off, a scene
+    that silently stopped painting entirely would still report PASS on every
+    event."""
     var st = showcase_state_sized(w, h)
     val before = build_frame_state(w, h, st)
     if before.len() < w * h:
@@ -616,24 +622,31 @@ fn run_showcase_events(w: i32, h: i32, events_raw: text) -> i64:
             print "FAIL showcase_event={ev} reason=unknown-event"
             fails = fails + 1
             continue
+        val clicks_before = showcase_click_count(SHOWCASE_PREFIX)
         st = apply_showcase_event(st, ev)
+        val clicks_after = showcase_click_count(SHOWCASE_PREFIX)
         after = build_frame_state(w, h, st)
         applied = applied + 1
         val d = count_diffs_all(prev, after)
-        if d > 0:
-            print "PASS showcase_event={ev} diff={d}"
-        else:
-            print "FAIL showcase_event={ev} diff=0"
+        if clicks_after <= clicks_before:
+            print "FAIL showcase_event={ev} reason=reducer-did-not-record shared_clicks={clicks_after} frame_diff={d}"
             fails = fails + 1
+        else if d <= 0:
+            # The reducer recorded the click but nothing reached the frame.
+            # That is the zero-glyph class of defect, and it must be RED here
+            # rather than a passing line with a quiet frame_diff=0 beside it.
+            print "FAIL showcase_event={ev} reason=no-visible-response shared_clicks={clicks_before}->{clicks_after} frame_diff={d}"
+            fails = fails + 1
+        else:
+            print "PASS showcase_event={ev} shared_clicks={clicks_before}->{clicks_after} frame_diff={d}"
         prev = after
     write_frame_ppm(env_get("SHOWCASE_AFTER_PPM") ?? "", after, w, h)
 
-    val total = count_diffs_all(before, after)
-    if total > 0:
-        print "PASS showcase_event_total diff={total}"
-    else:
-        print "FAIL showcase_event_total diff=0"
-        fails = fails + 1
+    val total_diff = count_diffs_all(before, after)
+    print "showcase_event_frame_diff_total={total_diff}"
+    if total_diff <= 0 and applied > 0:
+        print "FAIL showcase_event_overall reason=no-net-frame-change events={applied}"
+        return 1
     if fails == 0:
         print "PASS showcase_event_overall events={applied}"
         return 0
@@ -813,6 +826,14 @@ fn apply_native_input(input: WinitInput, mouse_x: i32, mouse_y: i32, state: Show
             dirty = true
             print "[widget-showcase] input left_button pressed={pressed} x={fx} y={fy} clicks={out.button_count} checkbox={out.checkbox_on} switch={out.switch_on} slider={out.slider_value}"
         ci = ci + 1
+    # Wheel goes through the SHARED reducer: this is the one showcase
+    # interaction whose result is visible in the current scene (it moves real
+    # row geometry), so it is also the only one that can satisfy the live
+    # loop's "every real input changes the frame" gate until the scene emits
+    # glyphs. Positive dy = content scrolls down, the sign the reducer wants.
+    if input.scroll_y != 0.0:
+        out.ui = showcase_apply(out.ui, host_pointer_wheel(mx, my, input.scroll_y.to_i32()), out.vw, out.vh)
+        dirty = true
     # Keys go through the SHARED reducer too. Without this a keyboard-only
     # input batch would leave the scene byte-identical and the live loop's
     # "every real input changes the frame" gate would fail.

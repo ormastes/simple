@@ -7,6 +7,7 @@
 #     examples/06_io/ui/wm_graphics_2d_showcase_gui.spl
 
 use std.nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GuiEvent, GUI_EVT_NONE, GUI_EVT_CLOSE, GUI_EVT_KEYBOARD, GUI_EVT_MOUSE_BUTTON, GUI_EVT_MOUSE_MOVED}
+use std.gpu.engine2d.engine.{Engine2D}
 use std.io_runtime.{env_get, file_exists, file_read, file_read_bytes, file_write, file_write_bytes, dir_create_all, getpid, time_now_unix_micros}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 use std.common.image.ppm_decode.{decode_ppm_to_argb, encode_ppm_p6}
@@ -173,31 +174,27 @@ fn resolve_repo_root() -> text:
         return here
     "."
 
-fn fill_rect_pixels(pixels: [u32], x: i32, y: i32, w: i32, h: i32, color: u32) -> [u32]:
-    var out = pixels
-    var yy = 0
-    while yy < h:
-        val dy = y + yy
-        if dy >= 0 and dy < H:
-            var xx = 0
-            while xx < w:
-                val dx = x + xx
-                if dx >= 0 and dx < W:
-                    out[dy * W + dx] = color
-                xx = xx + 1
-        yy = yy + 1
-    out
+# wm-chrome compositing goes through the shared Engine2D pipeline (the same
+# HAL every migrated showcase host renders through): draw_rect_filled for
+# every chrome rectangle, draw_image for the child app's already-rendered
+# frame, read_pixels() for the single readback that feeds gui.present_rgba /
+# the headless PPM encoder. Only Engine2D creation + GuiRenderer stay as
+# direct HAL calls; no hand-rolled [u32] framebuffer writes remain.
+fn showcase_wm_backend_key() -> text:
+    val raw = (env_get("SIMPLE_GUI_BACKEND") ?? "").trim()
+    if raw == "":
+        return "cpu_simd"
+    raw
 
-fn draw_taskbar_pixels(pixels: [u32], comp: HostCompositor) -> [u32]:
-    var out = pixels
+fn draw_taskbar(mut b: Engine2D, comp: HostCompositor) -> Engine2D:
     val theme = wm_chrome_theme()
     val count = comp.windows.len().to_i32()
     if count <= 0:
-        return out
+        return b
     val dock_w = host_taskbar_dock_width(W, count)
     val dock_x = (W - dock_w) / 2
     val dock_y = H - 62
-    out = fill_rect_pixels(out, dock_x, dock_y, dock_w, 44, theme.taskbar)
+    b.draw_rect_filled(dock_x, dock_y, dock_w, 44, theme.taskbar)
     val item_w = host_taskbar_item_width(W, count)
     var i = 0
     while i < count:
@@ -208,44 +205,42 @@ fn draw_taskbar_pixels(pixels: [u32], comp: HostCompositor) -> [u32]:
             color = theme.accent
         elif win.minimized:
             color = theme.host_window_body
-        out = fill_rect_pixels(out, ix + 2, dock_y + 6, item_w - 4, 32, theme.command_lane)
-        out = fill_rect_pixels(out, ix + 4, dock_y + 8, item_w - 8, 28, color)
-        out = fill_rect_pixels(out, ix + 12, dock_y + 14, 12, 12, theme.text_primary)
+        b.draw_rect_filled(ix + 2, dock_y + 6, item_w - 4, 32, theme.command_lane)
+        b.draw_rect_filled(ix + 4, dock_y + 8, item_w - 8, 28, color)
+        b.draw_rect_filled(ix + 12, dock_y + 14, 12, 12, theme.text_primary)
         if win.focused and not win.minimized:
-            out = fill_rect_pixels(out, ix + 8, dock_y + 35, item_w - 16, 2, theme.text_primary)
+            b.draw_rect_filled(ix + 8, dock_y + 35, item_w - 16, 2, theme.text_primary)
         i = i + 1
-    out
+    b
 
-fn compose_pixels(comp: HostCompositor, trace_path: text) -> [u32]:
+fn compose_scene(mut b: Engine2D, comp: HostCompositor, trace_path: text) -> Engine2D:
     write_wm_trace(trace_path, "compose_theme_start")
     val theme = wm_chrome_theme()
-    write_wm_trace(trace_path, "compose_alloc_start")
-    val pixel_count = W * H
-    var out: [u32] = [0u32 for fill_idx in 0..pixel_count]
     write_wm_trace(trace_path, "compose_bg_start")
-    out = fill_rect_pixels(out, 0, 0, W, H, theme.compositor_bg)
+    b.clear(theme.compositor_bg)
+    b.draw_rect_filled(0, 0, W, H, theme.compositor_bg)
     write_wm_trace(trace_path, "compose_windows_start")
-    out = fill_rect_pixels(out, 0, 0, W, 38, theme.command_lane)
+    b.draw_rect_filled(0, 0, W, 38, theme.command_lane)
     var i = 0
     while i < comp.windows.len():
         val win = comp.windows[i]
         if not win.minimized:
-            out = fill_rect_pixels(out, win.x + 7, win.y + 7, win.w, win.h, theme.window_shadow)
-            out = fill_rect_pixels(out, win.x, win.y, win.w, win.h, theme.host_window_body)
+            b.draw_rect_filled(win.x + 7, win.y + 7, win.w, win.h, theme.window_shadow)
+            b.draw_rect_filled(win.x, win.y, win.w, win.h, theme.host_window_body)
             val title_color = if win.focused: theme.accent else: theme.title_unfocused
-            out = fill_rect_pixels(out, win.x, win.y, win.w, 24, title_color)
-            out = fill_rect_pixels(out, win.x + win.w - 24, win.y, 24, 24, theme.close_button)
-            out = fill_rect_pixels(out, win.x + win.w - 17, win.y + 7, 10, 10, theme.text_primary)
-            out = fill_rect_pixels(out, win.x + 4, win.y + 28, win.w - 8, win.h - 32, theme.compositor_bg)
+            b.draw_rect_filled(win.x, win.y, win.w, 24, title_color)
+            b.draw_rect_filled(win.x + win.w - 24, win.y, 24, 24, theme.close_button)
+            b.draw_rect_filled(win.x + win.w - 17, win.y + 7, 10, 10, theme.text_primary)
+            b.draw_rect_filled(win.x + 4, win.y + 28, win.w - 8, win.h - 32, theme.compositor_bg)
         i = i + 1
     write_wm_trace(trace_path, "compose_taskbar_start")
-    out = draw_taskbar_pixels(out, comp)
+    b = draw_taskbar(b, comp)
     write_wm_trace(trace_path, "compose_locator_start")
-    out = fill_rect_pixels(out, 0, 0, W, 3, LOCATOR)
-    out = fill_rect_pixels(out, 0, H - 3, W, 3, LOCATOR)
-    out = fill_rect_pixels(out, 0, 0, 3, H, LOCATOR)
-    out = fill_rect_pixels(out, W - 3, 0, 3, H, LOCATOR)
-    out
+    b.draw_rect_filled(0, 0, W, 3, LOCATOR)
+    b.draw_rect_filled(0, H - 3, W, 3, LOCATOR)
+    b.draw_rect_filled(0, 0, 3, H, LOCATOR)
+    b.draw_rect_filled(W - 3, 0, 3, H, LOCATOR)
+    b
 
 fn load_child_frame(frame_path: text) -> ChildFrame:
     if frame_path == "" or not file_exists(frame_path):
@@ -300,29 +295,16 @@ fn validate_child_frame_receipt(frame_path: text, requested_backend: text, annou
     print "[wm-graphics-2d] frame_receipt_valid event_seq={receipt.event_seq} frame_seq={receipt.frame_seq} backend={receipt.backend} readback_source={receipt.readback_source} backend_handle={receipt.backend_handle} device_identity={receipt.device_identity} pixel_count={receipt.pixel_count} checksum={receipt.checksum}"
     ChildFrameValidation(status: "valid", frame: child, event_seq: receipt.event_seq, frame_seq: receipt.frame_seq)
 
-fn blit_child_frame_pixels(base_pixels: [u32], comp: HostCompositor, child_pixels: [u32], child_w: i32, child_h: i32) -> [u32]:
-    var out = base_pixels
+fn blit_child_frame(mut b: Engine2D, comp: HostCompositor, child_pixels: [u32], child_w: i32, child_h: i32) -> Engine2D:
+    if child_pixels.len() == 0 or child_w <= 0 or child_h <= 0:
+        return b
     var i = 0
     while i < comp.windows.len():
         val win = comp.windows[i]
         if not win.minimized:
-            val cx = win.x + 4
-            val cy = win.y + 28
-            var y = 0
-            while y < child_h:
-                val dy = cy + y
-                if dy >= 0 and dy < H:
-                    var x = 0
-                    while x < child_w:
-                        val dx = cx + x
-                        val sidx = y * child_w + x
-                        val didx = dy * W + dx
-                        if dx >= 0 and dx < W and sidx >= 0 and sidx < child_pixels.len() and didx >= 0 and didx < out.len():
-                            out[didx] = child_pixels[sidx]
-                        x = x + 1
-                y = y + 1
+            b.draw_image(win.x + 4, win.y + 28, child_w, child_h, child_pixels)
         i = i + 1
-    out
+    b
 
 fn pack_pixels(pixels: [u32]) -> [i64]:
     var packed = alloc_i64(pixels.len().to_i64())
@@ -332,18 +314,19 @@ fn pack_pixels(pixels: [u32]) -> [i64]:
         i = i + 1
     packed
 
-fn render_and_present(gui: GuiRenderer, comp: HostCompositor, frame_w: i32, frame_h: i32, child: ChildFrame, state: text, trace_path: text) -> bool:
+fn render_and_present(gui: GuiRenderer, mut b: Engine2D, comp: HostCompositor, frame_w: i32, frame_h: i32, child: ChildFrame, state: text, trace_path: text) -> (Engine2D, bool):
     write_wm_trace(trace_path, "render_compose_start")
-    val base_pixels = compose_pixels(comp, trace_path)
+    b = compose_scene(b, comp, trace_path)
     write_wm_trace(trace_path, "render_compose_done")
-    if base_pixels.len() < W * H:
-        print "[wm-graphics-2d] present state={state} FAIL compose_short={base_pixels.len()} want={W * H}"
-        return false
-    var present_pixels = base_pixels
     if child.ok:
-        present_pixels = blit_child_frame_pixels(base_pixels, comp, child.pixels, child.w, child.h)
+        b = blit_child_frame(b, comp, child.pixels, child.w, child.h)
     else:
         print "[wm-graphics-2d] child_frame_not_validated reason={child.reason}"
+    b.present()
+    val present_pixels = b.read_pixels()
+    if present_pixels.len() < W * H:
+        print "[wm-graphics-2d] present state={state} FAIL compose_short={present_pixels.len()} want={W * H}"
+        return (b, false)
     write_wm_trace(trace_path, "render_pack_start")
     val packed = pack_pixels(present_pixels)
     write_wm_trace(trace_path, "render_pack_done")
@@ -352,7 +335,7 @@ fn render_and_present(gui: GuiRenderer, comp: HostCompositor, frame_w: i32, fram
     write_wm_trace(trace_path, "render_gui_present_done")
     if state != "hold":
         print "[wm-graphics-2d] present state={state} dims={W}x{H} child_frame=from-filesystem renderer=wm-pixel-compositor requested_child={frame_w}x{frame_h}"
-    true
+    (b, true)
 
 fn child_local_at(comp: HostCompositor, fx: i32, fy: i32, frame_w: i32, frame_h: i32, require_inside: bool) -> ChildLocalHit:
     var i = comp.windows.len() - 1
@@ -665,13 +648,16 @@ fn run_headless_capture(repo_root: text) -> i64:
         headless_status(prefix, "reason", "child-frame-timeout:{child.reason}")
         process_kill(child_pid)
         return 1
-    val base_pixels = compose_pixels(comp, trace_path)
+    var b = Engine2D.create_with_backend_fast(W, H, showcase_wm_backend_key())
+    b = compose_scene(b, comp, trace_path)
+    b = blit_child_frame(b, comp, child.pixels, child.w, child.h)
+    b.present()
+    val present_pixels = b.read_pixels()
     process_kill(child_pid)
-    if base_pixels.len() < W * H:
+    if present_pixels.len() < W * H:
         headless_status(prefix, "status", "fail")
         headless_status(prefix, "reason", "compose-short")
         return 1
-    val present_pixels = blit_child_frame_pixels(base_pixels, comp, child.pixels, child.w, child.h)
     val metrics = headless_capture_metrics(present_pixels)
     # NOT `env_get(...) ?? fallback`: std.io_runtime's env_get returns plain
     # `text` (io_runtime.spl:174), not `text?`, so it yields "" — never nil —
@@ -818,8 +804,11 @@ fn main() -> i64:
     if comp.windows.len() != 1:
         cleanup(child_pid, gui)
         return 1
+    var b = Engine2D.create_with_backend_fast(W, H, showcase_wm_backend_key())
     write_wm_trace(trace_path, "before_first_present")
-    if not render_and_present(gui, comp, frame_w, frame_h, validated_child, "launched", trace_path):
+    val (b1, ok1) = render_and_present(gui, b, comp, frame_w, frame_h, validated_child, "launched", trace_path)
+    b = b1
+    if not ok1:
         cleanup(child_pid, gui)
         return 1
     write_wm_trace(trace_path, "loop_start")
@@ -866,7 +855,9 @@ fn main() -> i64:
             cleanup(child_pid, gui)
             return 1
         if state.dirty:
-            if not render_and_present(gui, state.comp, frame_w, frame_h, validated_child, "hold", trace_path):
+            val (b2, ok2) = render_and_present(gui, b, state.comp, frame_w, frame_h, validated_child, "hold", trace_path)
+            b = b2
+            if not ok2:
                 cleanup(child_pid, gui)
                 return 1
             state.dirty = false

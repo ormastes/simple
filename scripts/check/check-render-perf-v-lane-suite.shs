@@ -1,0 +1,85 @@
+#!/bin/sh
+# V-lane correctness/promotion suite for the render-perf redesign campaign
+# (doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md).
+#
+# Runs every spec landed by lanes F0-F4, W0, C4, O0-O2, P0, G0, U0b together
+# and reports an honest aggregate pass/fail. Any spec that cannot execute
+# (times out or exits non-zero with no verdict) is counted, never dropped.
+#
+# Usage: sh scripts/check/check-render-perf-v-lane-suite.shs [--timeout SECS]
+
+set -u
+cd "$(dirname "$0")/../.." || exit 2
+
+TIMEOUT="${1:-150}"
+if [ "${1:-}" = "--timeout" ]; then
+    TIMEOUT="${2:-150}"
+fi
+
+SPECS="
+test/01_unit/lib/common/gpu/engine2d/scalar_oracle_spec.spl
+test/01_unit/lib/common/ui/render_opt/render_opt_invalidation_spec.spl
+test/01_unit/compiler/semantics/layer_eq_checker_spec.spl
+test/01_unit/compiler/semantics/effect_verifier_spec.spl
+test/01_unit/lib/common/memory/packed_span_spec.spl
+test/01_unit/lib/common/ui/widget_draw_ir_glyph_run_spec.spl
+test/01_unit/os/compositor/hosted_input_sdl2_spec.spl
+test/01_unit/os/compositor/compositor_occlusion_spec.spl
+test/01_unit/os/compositor/compositor_occlusion_rect_spec.spl
+test/01_unit/compiler/class_reference_semantics_spec.spl
+test/01_unit/os/render_pixel_bridge_spec.spl
+"
+
+TOTAL_EXAMPLES=0
+TOTAL_PASSED=0
+TOTAL_FAILED=0
+CANNOT_EXECUTE=0
+SPEC_COUNT=0
+RED=0
+
+for spec in $SPECS; do
+    [ -z "$spec" ] && continue
+    SPEC_COUNT=$((SPEC_COUNT + 1))
+    LOG=$(mktemp)
+    timeout "$TIMEOUT" bin/simple test "$spec" --no-cache --no-cover-check >"$LOG" 2>&1
+    rc=$?
+    verdict=$(grep -o 'declared>=[0-9]* executed=[0-9]* passed=[0-9]* failed=[0-9]*' "$LOG" | tail -1)
+    if [ -z "$verdict" ]; then
+        echo "CANNOT_EXECUTE: $spec (exit=$rc, no verdict line — timeout or crash)"
+        if grep -q 'Process timed out' "$LOG"; then
+            echo "  reason: process timed out after ${TIMEOUT}s"
+        fi
+        CANNOT_EXECUTE=$((CANNOT_EXECUTE + 1))
+        RED=1
+        rm -f "$LOG"
+        continue
+    fi
+    executed=$(echo "$verdict" | sed -n 's/.*executed=\([0-9]*\).*/\1/p')
+    passed=$(echo "$verdict" | sed -n 's/.*passed=\([0-9]*\).*/\1/p')
+    failed=$(echo "$verdict" | sed -n 's/.*failed=\([0-9]*\).*/\1/p')
+    TOTAL_EXAMPLES=$((TOTAL_EXAMPLES + executed))
+    TOTAL_PASSED=$((TOTAL_PASSED + passed))
+    TOTAL_FAILED=$((TOTAL_FAILED + failed))
+    if [ "$failed" -gt 0 ]; then
+        RED=1
+        echo "FAIL: $spec ($passed/$executed passed)"
+    else
+        echo "PASS: $spec ($passed/$executed passed)"
+    fi
+    rm -f "$LOG"
+done
+
+echo ""
+echo "=== V-LANE AGGREGATE ==="
+echo "specs covered:    $SPEC_COUNT"
+echo "cannot execute:   $CANNOT_EXECUTE"
+echo "total examples:   $TOTAL_EXAMPLES"
+echo "total passed:     $TOTAL_PASSED"
+echo "total failed:     $TOTAL_FAILED"
+
+if [ "$RED" -ne 0 ]; then
+    echo "VERDICT: RED"
+    exit 1
+fi
+echo "VERDICT: GREEN"
+exit 0

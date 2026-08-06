@@ -1,6 +1,6 @@
 # @cover src/lib/common/ui/render_opt/revisions.spl 80%
 # @cover src/lib/common/ui/render_opt/property_trees.spl 80%
-# @tag: unit, ui, render_perf, render_opt, o0, o1
+# @tag: unit, ui, render_perf, render_opt, o0, o1, o2
 
 use std.spec
 use common.ui.render_opt.revisions.{
@@ -21,7 +21,9 @@ use common.ui.render_opt.revisions.{
 use common.ui.render_opt.property_trees.{
     PropertyTrees,
     PaintChunks,
+    RasterStats,
     paint_chunks_sync,
+    paint_chunks_raster,
     PT_TRANSFORM,
     PT_CLIP,
     PT_EFFECT,
@@ -206,3 +208,71 @@ describe "O1 transform-only move: update + damage, no chunk rebuild":
         assert_true(t.set_translate(1, 10, 20) == PT_OK)
         assert_true(t.damage_len == 0)
         assert_true(t.revision(PT_TRANSFORM) == 0)
+
+# --- gate (c): O2 raster skip is damage-proportional, not scene-proportional -
+
+describe "O2 paint_chunks_raster skips chunks whose cache key is unchanged":
+    it "rasters every chunk once, then skips all of them once primed":
+        val t = make_scene()
+        val c = PaintChunks.create()
+        c.add_chunk_sized(1, 1, 2, 3, 0, 7, 0, 1000)
+        c.add_chunk_sized(2, 1, 2, 3, 0, 7, 1, 1000)
+        c.add_chunk_sized(3, 1, 2, 3, 0, 8, 2, 1000)
+        c.add_chunk_sized(4, 1, 2, 3, 0, 8, 3, 1000)
+        c.add_chunk_sized(5, 1, 2, 3, 0, 9, 4, 1000)
+        val r = RenderRevisions.create(4)
+
+        val first: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(first.rastered_count == 5)
+        assert_true(first.skipped_count == 0)
+        assert_true(first.bytes_painted == 5000)
+
+        # three more "frames" with nothing damaged: whole-scene rework would
+        # keep rastering all 5; damage-proportional skip rasters none.
+        val f2: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(f2.rastered_count == 0)
+        assert_true(f2.skipped_count == 5)
+        assert_true(f2.bytes_painted == 0)
+        val f3: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(f3.rastered_count == 0)
+        assert_true(f3.skipped_count == 5)
+        val f4: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(f4.rastered_count == 0)
+        assert_true(f4.skipped_count == 5)
+
+    it "one small changed region rasters proportional to its own area, not the scene":
+        val t = make_scene()
+        val c = PaintChunks.create()
+        c.add_chunk_sized(1, 1, 2, 3, 0, 7, 0, 1000)
+        c.add_chunk_sized(2, 1, 2, 3, 0, 7, 1, 1000)
+        c.add_chunk_sized(3, 1, 2, 3, 0, 8, 2, 1000)
+        c.add_chunk_sized(4, 1, 2, 3, 0, 8, 3, 1000)
+        c.add_chunk_sized(5, 1, 2, 3, 0, 9, 4, 1000)
+        val r = RenderRevisions.create(4)
+        val primed: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(primed.rastered_count == 5)
+
+        # a small new region of content arrives (one 200-byte chunk); the
+        # other five chunks' keys are untouched — no global revision moved.
+        c.add_chunk_sized(6, 1, 2, 3, 0, 7, 5, 200)
+        val changed: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(changed.rastered_count == 1)
+        assert_true(changed.skipped_count == 5)
+        assert_true(changed.bytes_painted == 200)
+
+        # subsequent frames: the new chunk is now primed too, so the scene
+        # is fully quiescent again — proof the skip persists across frames.
+        val settled: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(settled.rastered_count == 0)
+        assert_true(settled.skipped_count == 6)
+        assert_true(settled.bytes_painted == 0)
+
+    it "a real regroup (clip change) rasters the whole scene, not just one chunk":
+        val t = make_scene()
+        val c = make_chunks()
+        val r = RenderRevisions.create(4)
+        assert_true(prime(c, t, r) == 3)
+        assert_true(t.set_payload(2, 5, 5) == PT_OK)
+        val stats: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(stats.rastered_count == 3)
+        assert_true(stats.skipped_count == 0)

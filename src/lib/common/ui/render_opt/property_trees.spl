@@ -199,6 +199,10 @@ class PaintChunks:
     key_scale_rev: [u32]
     key_viewport_gen: [u32]
     key_capability_gen: [u32]
+    # raster cost proxy for this chunk (e.g. bytes/pixels its content covers).
+    # Set by the caller at add_chunk time; used only to size the skip proof,
+    # never to decide staleness.
+    chunk_area: [i64]
     chunk_count: i64
     # in-band regression counter: total chunk rebuilds over this instance's
     # life. The transform-move gate asserts this does not move at all.
@@ -210,11 +214,17 @@ class PaintChunks:
             surface: [], resource_set: [], order: [],
             key_component_gen: [], key_grouping_rev: [], key_property_rev: [],
             key_theme_rev: [], key_scale_rev: [], key_viewport_gen: [],
-            key_capability_gen: [],
+            key_capability_gen: [], chunk_area: [],
             chunk_count: 0, rebuild_count: 0)
 
     me add_chunk(owner_id: u32, transform: i64, clip: i64, effect: i64,
                  surface_id: u32, resources: u32, paint_order: u32) -> i64:
+        self.add_chunk_sized(owner_id, transform, clip, effect, surface_id,
+                              resources, paint_order, 0)
+
+    me add_chunk_sized(owner_id: u32, transform: i64, clip: i64, effect: i64,
+                 surface_id: u32, resources: u32, paint_order: u32,
+                 area: i64) -> i64:
         val idx = self.chunk_count
         self.owner.push(owner_id)
         self.transform_node.push(transform as u32)
@@ -230,6 +240,7 @@ class PaintChunks:
         self.key_scale_rev.push(0)
         self.key_viewport_gen.push(0)
         self.key_capability_gen.push(0)
+        self.chunk_area.push(area)
         self.chunk_count = idx + 1
         idx
 
@@ -283,3 +294,63 @@ fn paint_chunks_sync(chunks: PaintChunks, trees: PropertyTrees,
             rebuilt = rebuilt + 1
         i = i + 1
     rebuilt
+
+# LANE O2: the retained-scene raster-skip gate. Consumes the same
+# cache-key vocabulary as `paint_chunks_sync` but, instead of only
+# resyncing keys, reports what a chunk-rasterizer would actually have
+# to do this frame: `rastered_count`/`bytes_painted` cover only chunks
+# whose key changed since the last call, `skipped_count` covers the
+# rest. This function owns no external pixel buffer and reads no
+# aliased state outside `chunks`/`trees`/`revs` — it is a pure
+# accounting layer a real rasterizer can gate on, not a rasterizer
+# itself, so it carries none of the live-alias hazard documented for
+# the compositor present path (see
+# `doc/03_plan/os/simpleos/screens/ws_d3_damage_present_investigation.md`
+# §9).
+class RasterStats:
+    rastered_count: i64
+    skipped_count: i64
+    bytes_painted: i64
+
+fn paint_chunks_raster(chunks: PaintChunks, trees: PropertyTrees,
+                       revs: RenderRevisions, component_gen: u32,
+                       theme_rev: u32, scale_rev: u32, viewport_gen: u32,
+                       capability_gen: u32) -> RasterStats:
+    val grouping = revisions_chunk_grouping_rev(revs)
+    val prop = paint_chunks_property_rev(trees)
+    var rastered: i64 = 0
+    var skipped: i64 = 0
+    var bytes_painted: i64 = 0
+    var i: i64 = 0
+    while i < chunks.chunk_count:
+        var stale = false
+        if chunks.key_component_gen[i] != component_gen:
+            stale = true
+        if chunks.key_grouping_rev[i] != grouping:
+            stale = true
+        if chunks.key_property_rev[i] != prop:
+            stale = true
+        if chunks.key_theme_rev[i] != theme_rev:
+            stale = true
+        if chunks.key_scale_rev[i] != scale_rev:
+            stale = true
+        if chunks.key_viewport_gen[i] != viewport_gen:
+            stale = true
+        if chunks.key_capability_gen[i] != capability_gen:
+            stale = true
+        if stale:
+            chunks.key_component_gen[i] = component_gen
+            chunks.key_grouping_rev[i] = grouping
+            chunks.key_property_rev[i] = prop
+            chunks.key_theme_rev[i] = theme_rev
+            chunks.key_scale_rev[i] = scale_rev
+            chunks.key_viewport_gen[i] = viewport_gen
+            chunks.key_capability_gen[i] = capability_gen
+            chunks.rebuild_count = chunks.rebuild_count + 1
+            rastered = rastered + 1
+            bytes_painted = bytes_painted + chunks.chunk_area[i]
+        else:
+            skipped = skipped + 1
+        i = i + 1
+    RasterStats(rastered_count: rastered, skipped_count: skipped,
+                bytes_painted: bytes_painted)

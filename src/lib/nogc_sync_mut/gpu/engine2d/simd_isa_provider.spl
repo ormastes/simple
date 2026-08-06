@@ -1,0 +1,141 @@
+"""x86_64 SIMD ISA provider for the per-op kernel registry (lane: SIMD provider).
+
+@tag:stdlib
+@tag:gpu
+
+Wraps the existing native row kernels (`rt_engine2d_simd_fill_row_u32`,
+`rt_engine2d_simd_blend_row_u32` in src/runtime/runtime_simd_dispatch.c,
+dispatched there to real AVX2/SSE2 intrinsics behind a CPUID probe — see
+`rt_simd_has_avx2`/`rt_simd_has_sse`) as a `fill_const` / `src_over_const`
+provider measured against `common.gpu.engine2d.scalar_oracle`.
+
+Why extern and not pure Simple: Simple has no packed-SIMD-lane intrinsics,
+inline asm, or `_mm256_*`-equivalent builtins (grepped src/lib, src/compiler,
+src/runtime for `simd`/`avx`/`sse`/`__m128`/`vector<` — the only place packed
+x86 lanes actually appear is `src/runtime/runtime_simd_dispatch.c`, guarded by
+`__attribute__((target("avx2")))`). `src.lib.nogc_sync_mut.simd.vector` is a
+structural trait/marker (C2 §1.1), not a lowering — nothing in the compiler
+turns it into vector instructions. So a *hardware-access primitive* (issuing
+real AVX2/SSE2 instructions) is genuinely inexpressible in pure Simple today;
+this module reuses the extern channel the tree already established for that
+exact reason (`simd_kernels.spl`), rather than introducing a new one.
+
+Honesty note carried over from kernel_registry.spl's own docstring: the
+native-row path this wraps was PREVIOUSLY measured slower than scalar at 8K
+(1282.2 ms vs 909.5 ms, fill_const) and was filed for corrupt colours on
+src_over_image. This module does its own bit-exactness and timing pass
+per-op instead of assuming that verdict carries over; see
+test/01_unit/lib/nogc_sync_mut/gpu/engine2d/simd_isa_provider_spec.spl for the
+actual numbers this run produced.
+"""
+
+use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{
+    engine2d_simd_fill_row_u32,
+    engine2d_simd_blend_row_u32,
+}
+use common.gpu.engine2d.scalar_oracle.{
+    oracle_modulate_alpha,
+}
+
+# --- fill_const --------------------------------------------------------------
+
+fn simd_isa_fill_const(mut dst: [u32], offset: i64, count: i64, colour: i64):
+    """fill_const via the native row kernel. Same contract as
+    oracle_fill_const: a verbatim store, no blending."""
+    if count <= 0:
+        return
+    val row = engine2d_simd_fill_row_u32(count, colour as u32)
+    if row.len() != count.to_i32():
+        # Native kernel under-produced (allocation failure or size mismatch) —
+        # fall back to a scalar store rather than write a partial/garbage row.
+        var i: i64 = 0
+        while i < count:
+            dst[(offset + i).to_i32()] = colour as u32
+            i = i + 1
+        return
+    var j: i64 = 0
+    while j < count:
+        dst[(offset + j).to_i32()] = row[j.to_i32()]
+        j = j + 1
+
+# --- src_over_const ------------------------------------------------------
+
+fn simd_isa_src_over_const(mut dst: [u32], offset: i64, count: i64, colour: i64):
+    """src_over_const via the native blend-row kernel: build a constant-colour
+    src row and blend it against the gathered dst row, matching
+    oracle_src_over_const (sa==0 no-op included)."""
+    if count <= 0:
+        return
+    val sa = (colour >> 24) & 0xFF
+    if sa == 0:
+        return
+    val n = count.to_i32()
+    var dst_row: [u32] = [0; n]
+    var src_row: [u32] = [0; n]
+    var i: i64 = 0
+    while i < count:
+        dst_row[i.to_i32()] = dst[(offset + i).to_i32()]
+        src_row[i.to_i32()] = colour as u32
+        i = i + 1
+    val blended = engine2d_simd_blend_row_u32(dst_row, src_row)
+    if blended.len() != n:
+        return
+    var j: i64 = 0
+    while j < count:
+        dst[(offset + j).to_i32()] = blended[j.to_i32()]
+        j = j + 1
+
+# --- src_over_image --------------------------------------------------------
+
+fn simd_isa_src_over_image(mut dst: [u32], dst_offset: i64, src: [u32],
+                           src_offset: i64, count: i64):
+    """src_over_image via the native blend-row kernel: gather real dst/src
+    rows (not a constant colour) and blend, matching oracle_src_over_image
+    pixel-for-pixel including the sa==0 no-op carried by oracle_src_over
+    itself (the kernel leaves such pixels untouched, same as the oracle)."""
+    if count <= 0:
+        return
+    val n = count.to_i32()
+    var dst_row: [u32] = [0; n]
+    var src_row: [u32] = [0; n]
+    var i: i64 = 0
+    while i < count:
+        dst_row[i.to_i32()] = dst[(dst_offset + i).to_i32()]
+        src_row[i.to_i32()] = src[(src_offset + i).to_i32()]
+        i = i + 1
+    val blended = engine2d_simd_blend_row_u32(dst_row, src_row)
+    if blended.len() != n:
+        return
+    var j: i64 = 0
+    while j < count:
+        dst[(dst_offset + j).to_i32()] = blended[j.to_i32()]
+        j = j + 1
+
+# --- mask_src_over -----------------------------------------------------------
+
+fn simd_isa_mask_src_over(mut dst: [u32], dst_offset: i64, colour: i64,
+                          mask: [u32], mask_offset: i64, count: i64):
+    """mask_src_over via the native blend-row kernel: pre-modulate the
+    constant colour's alpha by each pixel's coverage (oracle_modulate_alpha,
+    pure Simple — coverage scales alpha only, RGB rides through untouched)
+    into a per-pixel src row, then blend. A coverage of 0 modulates alpha to
+    0, and the blend kernel's sa==0 path leaves dst untouched — matching the
+    oracle's explicit `if m > 0` skip without a separate branch here."""
+    if count <= 0:
+        return
+    val n = count.to_i32()
+    var dst_row: [u32] = [0; n]
+    var src_row: [u32] = [0; n]
+    var i: i64 = 0
+    while i < count:
+        val m = mask[(mask_offset + i).to_i32()] as i64
+        dst_row[i.to_i32()] = dst[(dst_offset + i).to_i32()]
+        src_row[i.to_i32()] = oracle_modulate_alpha(colour, m) as u32
+        i = i + 1
+    val blended = engine2d_simd_blend_row_u32(dst_row, src_row)
+    if blended.len() != n:
+        return
+    var j: i64 = 0
+    while j < count:
+        dst[(dst_offset + j).to_i32()] = blended[j.to_i32()]
+        j = j + 1

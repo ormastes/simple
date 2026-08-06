@@ -82,10 +82,12 @@ describe "apply_decls stage-2 dispatch/probe-fallback equivalence":
     outline, overflow, box-shadow, padding, and margin to the dispatch
     set. margin/margin-left is the one pair here where BOTH sides are
     dispatched (unlike stage 1's box-sizing/color/etc, which have no
-    dispatched sibling) -- the dispatch arms must apply margin (shorthand)
-    strictly before margin-left (longhand), matching the full-probe body's
-    fixed processing order (not a source-position comparison, unlike the
-    background shorthand). Padding/margin field values below use the
+    dispatched sibling) -- the dispatch arms must resolve margin vs
+    margin-left by SOURCE POSITION (decl_tbl_last_index), the same as the
+    full-probe body and the same as the background shorthand: whichever of
+    the two was declared last in source order wins, and the margin
+    shorthand resets margin-left when it wins. Padding/margin field values
+    below use the
     fields simple_web_layout_debug_style_by_id already exposes
     (margin_l, pad_l, pad_r); cursor/outline/overflow/box-shadow/gap/
     justify-content/align-items/text-align are not exposed by that helper,
@@ -98,7 +100,7 @@ describe "apply_decls stage-2 dispatch/probe-fallback equivalence":
         val html = "<html><head><style>#e1{margin:15px;}</style></head><body><div id=\"e1\">x</div></body></html>"
         expect(simple_web_layout_debug_style_by_id(html, "e1", "margin_l")).to_equal("15")
 
-    it "dispatch path: margin shorthand followed by margin-left longhand (longhand wins, matches fixed processing order)":
+    it "dispatch path: margin shorthand followed by margin-left longhand (longhand wins, later in source order)":
         val html = "<html><head><style>#e2{margin:15px;margin-left:40px;}</style></head><body><div id=\"e2\">x</div></body></html>"
         expect(simple_web_layout_debug_style_by_id(html, "e2", "margin_l")).to_equal("40")
 
@@ -106,25 +108,26 @@ describe "apply_decls stage-2 dispatch/probe-fallback equivalence":
         val html = "<html><head><style>#e3{margin:15px;margin-left:40px;border-left:2px solid #000;}</style></head><body><div id=\"e3\">x</div></body></html>"
         expect(simple_web_layout_debug_style_by_id(html, "e3", "margin_l")).to_equal("40")
 
-    it "dispatch path: margin-left BEFORE margin in source order still has margin-left win -- fixed code order, NOT source order (see bug doc finding)":
-        # Verified against pristine origin's fixed-order semantics before
-        # pinning: margin (shorthand) is always processed before
-        # margin-left (longhand) in the full-probe body's CODE order,
-        # regardless of which one appears later in the CSS SOURCE. That
-        # means margin-left always wins when both are present, even when
-        # it appears BEFORE margin in the stylesheet -- the opposite of
-        # standard CSS "last declaration in source order wins" cascade
-        # semantics. This is surprising, existing, pre-existing behavior;
-        # pinned here as a contract test for THIS dispatch/fallback
-        # equivalence perf change, not endorsed as correct CSS semantics.
-        # See "Pre-existing non-standard margin/margin-left ordering" in
-        # the bug doc for the correctness finding (filed, not fixed, here).
+    it "dispatch path: margin-left BEFORE margin in source order has margin (shorthand) win -- standard source-order cascade":
+        # This used to pin a non-standard "fixed code order" behavior where
+        # margin-left always won regardless of source position (see
+        # "Pre-existing non-standard margin/margin-left ordering" in the bug
+        # doc, filed 2026-07-29). That has since been fixed: both the
+        # full-probe body (simple_web_html_layout_renderer_decl_apply.spl,
+        # around the "Cascade order within the margin family" comment) and
+        # the dispatch path (simple_web_html_layout_renderer_declarations.spl,
+        # around the "Cascade order for the margin family mirrors the
+        # full-probe body" comment) now compare decl_tbl source positions via
+        # decl_tbl_last_index, so the LAST declaration in source order wins
+        # per side -- standard CSS cascade semantics. Here margin-left(40)
+        # appears before margin(15) in source, so the margin shorthand
+        # (later, and it resets margin-left too) wins: margin_l is 15.
         val html = "<html><head><style>#e4{margin-left:40px;margin:15px;}</style></head><body><div id=\"e4\">x</div></body></html>"
-        expect(simple_web_layout_debug_style_by_id(html, "e4", "margin_l")).to_equal("40")
+        expect(simple_web_layout_debug_style_by_id(html, "e4", "margin_l")).to_equal("15")
 
     it "fallback path: same margin-left-before-margin case plus one unhandled property gives the same result":
         val html = "<html><head><style>#e5{margin-left:40px;margin:15px;border-left:2px solid #000;}</style></head><body><div id=\"e5\">x</div></body></html>"
-        expect(simple_web_layout_debug_style_by_id(html, "e5", "margin_l")).to_equal("40")
+        expect(simple_web_layout_debug_style_by_id(html, "e5", "margin_l")).to_equal("15")
 
     it "dispatch path: padding shorthand expands to all four sides with 2-value form":
         val html = "<html><head><style>#e6{padding:10px 20px;}</style></head><body><div id=\"e6\">x</div></body></html>"
