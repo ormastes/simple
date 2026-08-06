@@ -1632,3 +1632,174 @@ measured against the **C runtime directly**, which is what the self-hosted
 binary links, so the probe is independent of whether the `.spl` bridge has
 landed. It does mean that a future session should not assume the extern is
 callable from `.spl` without re-checking `origin/main` first.
+
+## UPDATE 2026-08-06 (fourth session): hazard 4 FIXED as a USE-AFTER-FREE
+## correctness bug — NOT as a memory win. Hazard 2 investigated and DECLINED
+## with a reason. Eviction is STILL blocked and this update does not change the
+## ~65GB peak.
+
+**Scope honesty, stated first.** This session did not unblock eviction and does
+not claim to. Per `94b77d8007c` (sibling lane, measured), the real unblock is
+making class instances runtime-identifiable — a codegen/representation change.
+Hazards 2 and 4 are prerequisites, not the fix. Fixing hazard 4 reclaims **zero
+bytes**; it is landed purely because shared name strings are a live
+use-after-free hazard that the runtime cannot detect.
+
+**Correction to this file's own earlier framing.** Previous updates leaned on
+`rt_array_free_deep` being refuse-biased, and treated "it would refuse on the
+alias" as the reason eviction is a no-op. That safety net **does not exist for
+these shapes**, and this session reproduced it firsthand rather than taking it
+on report:
+
+- The `seen` set spans only the nodes the traversal visits. An alias held from
+  OUTSIDE the freed structure — which is exactly the MIR-name <-> HIR / AST /
+  SymbolTable case, and exactly the `_bootstrap_mir_functions` case — is
+  **undetectable by construction**.
+- Measured: an array containing a string that is still live in the caller's
+  frame frees with **verdict=1** (ACCEPTED, reported as success), and the
+  caller's surviving handle then reads `.len() == -1`. Probe:
+  `external_alias_probe.spl`, seed `src/compiler_rust/target/debug/simple`.
+- The sibling lane's matching result: class instances come from `rt_alloc`
+  (`aggregate_intrinsics.spl:107` -> `runtime_native.c:4756`), a bare `malloc`
+  pointer with no tag and no registry entry, so
+  `rt_core_deep_free_classify` (`runtime_native.c:5331`) returns **LEAF, not
+  REFUSE** — the free accepts and silently strands the objects. See
+  `src/runtime/test/rt_driver_eviction_reclaim_selfcheck.c`.
+
+So the correct reading of hazard 4 is inverted from the original entry: it is
+not "a reason the deep-free refuses", it is "a silent use-after-free of a
+SymbolTable string the moment any MIR deep-free is wired up". That raises its
+stakes and it is why it is fixed here even though it saves nothing.
+
+`MirFunction` has ~15 text fields and this update makes only **two** of them
+MIR-owned; the other thirteen still alias and are still latent UAF.
+
+### The alias oracle (this is what made RED->GREEN possible at all)
+
+`rt_array_free_deep` keeps a `seen` pointer set and refuses the WHOLE call when
+two elements are the same heap pointer (`runtime_native.c:5215-5219`). That
+turns it into a pointer-identity test on `text`:
+
+    rt_array_free_deep([a, b]) == 1  =>  a and b are DISTINCT heap strings
+    rt_array_free_deep([a, b]) == 0  =>  they ALIAS ... or the oracle is dead
+
+This is a pointer-identity test ONLY for two handles placed in the SAME array.
+It is NOT a safety net for a real free — see the correction above: an alias held
+outside the traversed structure is accepted, not refused.
+
+The "oracle is dead" clause is not theoretical. **Two separate dead-oracle modes
+were hit in this session**, and either one would have faked a RED:
+
+1. The deployed `bin/simple` predates the extern and answers 0 for everything
+   (already recorded in the previous update).
+2. **Driving the real `MirLowering` in-process forces a JIT bail to the
+   interpreter**, where an array is a Rust `Vec` with no runtime heap object, so
+   *every* call returns 0 — including the distinct-string control. Measured:
+   `MirLowering.new` fails Cranelift codegen with `unresolved constructor call
+   'MirLowering.new'`, the run falls back to the interpreter, and
+   `control_distinct` reads **0**. An end-to-end probe that lowered real source
+   and reported "verdict=0, aliased" would have been reporting the lane, not the
+   compiler.
+
+Consequence: every verdict below is gated on a positive control (two
+dynamically-built distinct strings must read 1) in the SAME process, and the
+spec models the struct-FIELD shape of the lowering site rather than calling it.
+The field shape is what the aliasing depends on, and it is reachable on the JIT
+lane where the oracle is live.
+
+### Hazard 4 — FIXED
+
+Two sites in `src/compiler/50.mir/_MirLowering/function_lowering.spl`:
+
+- `:132` `var mir_fn_name = fn_.name` -> `fn_.name + ""`
+- `:408` `fn_result.export_name = ea.export_name` -> `ea.export_name + ""`
+
+**RED->GREEN, measured**, one process, seed `src/compiler_rust/target/debug/simple`:
+
+| case | verdict | reading |
+|---|---|---|
+| control: two distinct heap strings | **1** | oracle is LIVE |
+| control: same handle twice | **0** | oracle detects aliasing |
+| RED — pre-fix `= fn_.name` shape | **0** | MIR name ALIASES the HIR string |
+| RED — pre-fix `= ea.export_name` shape | **0** | same for export_name |
+| GREEN — landed `+ ""` shape | **1** | MIR owns its name |
+| GREEN — landed export_name shape | **1** | MIR owns its export_name |
+
+The sabotage check is structural rather than a source revert: the pre-fix and
+post-fix shapes are both present as `lower_aliasing` / `lower_owning` in the
+regression spec and execute in the same run against the same live oracle, so
+the RED cannot silently stop being red.
+
+**Why `+ ""` and not interpolation.** `"{s}"` on a whole string does NOT
+allocate — measured verdict **0**, i.e. it returns the same handle and would
+have silently reintroduced the hazard. `s + ""` and `s.replace("::", ".")` both
+read **1**. The `.replace` result also retroactively confirms the previous
+update's claim that the method/static path (`:139`) was never part of hazard 4,
+including when the pattern does not match.
+
+**Measured cost.** One extra string copy per lowered function (two when
+`@export("C")`). Upper bound over the whole tree: 117,610 `fn` declarations in
+`src/`, mean name length 16.9 bytes = ~1.99 MB of names, ~5.7 MB with per-string
+heap headers. Against the ~65 GB peak that is ~0.01%. The tradeoff is not close.
+
+**Regression spec**: `test/01_unit/compiler/mir/mir_owns_its_name_strings_spec.spl`.
+Its header states in those terms that it guards a use-after-free and not RSS.
+Every assertion is an implication gated on the positive control, the same
+lane-honesty convention `test/01_unit/runtime/array_free_deep_spec.spl` already
+established — an unconditional assertion here would pass or fail on which lane
+ran rather than on correctness.
+
+### Hazard 2 — investigated, DECLINED, with the reason
+
+`_bootstrap_mir_functions` (`50.mir/_MirLowering/bootstrap_globals.spl:113`)
+**is genuinely load-bearing** and cannot be scoped to the lowering state:
+
+- The LLVM object emitter iterates the FLAT accumulator BY INDEX, across module
+  boundaries — `70.backend/backend/_MirToLlvm/core_codegen.spl:351/397`, plus
+  `aggregate_intrinsics.spl`, `asm_constraints_helpers.spl` and `class_def.spl`,
+  which all import `bootstrap_mir_function_count/at/name_at`.
+- The entry module lowers first and every `--entry-closure` module APPENDS to
+  the same accumulator (`bootstrap_globals.spl:792` docstring). That docstring
+  records that NOT appending is what previously produced "undefined symbol" for
+  cross-module closure calls (bug
+  `bootstrap_stage2_empty_mir_bodies_2026-07-05`).
+- So "store names/ids instead of `MirFunction` references" fails outright: the
+  emitter needs the actual function to emit a body.
+
+The only remaining shape is release-after-last-consumer. **That is declined, and
+the reason is the hazard-3 shape this file already burned a session on:**
+`driver_bootstrap.spl:432` re-reads `bootstrap_mir_function_count() > 0` not as
+a diagnostic but as the *branch selector* between the real-LLVM emitter, the
+`ctx.bootstrap_entry_mir` path, and the stub fallback. A release inside
+`bootstrap_emit_real_llvm_object` would make any second call to
+`bootstrap_compile_to_native` — `--output-format both` being the obvious one,
+the same format that caused hazard 3 — silently take the stub branch. That is a
+correctness regression traded for zero measured bytes.
+
+"Zero measured bytes" is the second reason, and it is independent of the first:
+there is no GC and no refcounting, so clearing the accumulator drops
+*reachability* only. And per `94b77d8007c` a `rt_free_deep` per `MirFunction`
+would not reclaim either — it would ACCEPT and strand the class instances. The
+global's aliases are likewise invisible to the planner, so hazard 2 is a latent
+use-after-free of the same family as hazard 4, just one nobody can currently
+trigger because no MIR free is wired.
+
+**What would make hazard 2 landable**, for whoever picks it up: give the release
+its own explicit flag so the branch selector at `driver_bootstrap.spl:432` stops
+being derived from the accumulator length (mirroring how hazard 1 was fixed by
+recording `bootstrap_entry_mir_name` rather than inferring the alias), THEN
+release after the last consumer, and gate it through
+`driver_mir_eviction_enabled()` so the `both` rule is enforced in one place.
+Do that only once a `MirFunction` deep-free can actually reclaim, or it buys
+nothing.
+
+### Status after this update
+
+- Hazard 1: fixed (previous session).
+- Hazard 2: **open, declined with reason** — see above.
+- Hazard 3: fixed (previous session).
+- Hazard 4: **fixed for `name` and `export_name` as a use-after-free fix; the
+  other ~13 text fields of `MirFunction` are untouched and still alias.**
+- What actually gates eviction is NOT this update and NOT step 4's primitives:
+  it is making class instances runtime-identifiable so the deep-free planner can
+  see them (`94b77d8007c`). The ~65 GB peak is unchanged by this update.

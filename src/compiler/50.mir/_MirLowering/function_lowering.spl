@@ -129,7 +129,18 @@ impl MirLowering:
             print "[mir-lower] real-lower:begin {fn_.name}"
         if trace_enabled:
             print "[mir-lower] lower_function:begin-function {fn_.name}"
-        var mir_fn_name = fn_.name
+        # MIR must OWN its name strings. `= fn_.name` stores the SAME heap
+        # string handle as HIR/AST/SymbolTable, so a MIR deep-free would free a
+        # string the symbol table still points at (hazard 4,
+        # bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md).
+        # The runtime CANNOT catch that: rt_array_free_deep's seen-set spans
+        # only the nodes it traverses, so an alias held from OUTSIDE the freed
+        # structure is ACCEPTED (measured verdict=1) and the surviving handle
+        # then reads .len() == -1. This is a use-after-free guard, not a memory
+        # optimisation -- it reclaims nothing on its own.
+        # `+ ""` is the fresh-copy idiom proven by the alias oracle; plain
+        # interpolation "{s}" does NOT copy (measured verdict=0).
+        var mir_fn_name = fn_.name + ""
         # Static impl methods (`static fn` — is_static, NOT is_method) need the
         # same owner qualification: two impls each declaring `static fn code()`
         # otherwise both emit a bare `code` symbol and llc rejects the module
@@ -405,7 +416,9 @@ impl MirLowering:
             case Some(ea):
                 if ea.is_export_c:
                     fn_result.is_export_c = true
-                    fn_result.export_name = ea.export_name
+                    # Fresh copy, same MIR-owns-its-names rule as mir_fn_name
+                    # above (hazard 4).
+                    fn_result.export_name = ea.export_name + ""
             case None:
                 ()
 
