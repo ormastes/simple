@@ -75,7 +75,7 @@ describe "WebPackedProducer count/emit exactness (design section 2.2, lane L7)":
 
     it "reports and emits exactly the reserved rows for a real HTML page":
         step("A page with two absolutely-positioned boxes")
-        val producer = WebPackedProducer(id_val: 1u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID)
+        val producer = WebPackedProducer(id_val: 1u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID, host_owner_id: DRAW_IR_V3_NO_ID)
         val counts = producer.count(1u64, ui_scene_counts_zero())
         expect(counts.commands).to_be_greater_than(0u32)
         expect(counts.geometry).to_be_greater_than(0u32)
@@ -96,7 +96,7 @@ describe "WebPackedProducer count/emit exactness (design section 2.2, lane L7)":
         print "l7_web_producer_exactness commands={counts.commands} hit_shapes={counts.hit_shapes} owners={counts.owner_records}"
 
     it "reports the same counts twice for the same page (count is repeatable)":
-        val producer = WebPackedProducer(id_val: 2u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID)
+        val producer = WebPackedProducer(id_val: 2u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID, host_owner_id: DRAW_IR_V3_NO_ID)
         val first = producer.count(5u64, ui_scene_counts_zero())
         val second = producer.count(5u64, ui_scene_counts_zero())
         expect(first.commands).to_equal(second.commands)
@@ -105,11 +105,16 @@ describe "WebPackedProducer count/emit exactness (design section 2.2, lane L7)":
 
 describe "WebPackedProducer owner records (design section 2.4, gate b)":
     """Every HIT_SHAPES row this producer emits gets exactly one
-    OWNER_RECORDS row, tagged `producer_kind==WEB` with a live (non-zero)
-    `semantic_generation`, correlated by `component_id == semantic_id`."""
+    OWNER_RECORDS row, tagged `producer_kind==WEB`, correlated by
+    `component_id == semantic_id`. `semantic_generation` is 0u32,
+    matching draw_ir_v2_to_v3's adapter (which sets `component_generation:
+    0u32` unconditionally on every command it emits) -- ui_scene_event_route.spl's
+    recycled-slot check compares these two fields for EQUALITY, so the owner
+    must mirror whatever generation the backing command actually carries,
+    not an arbitrary nonzero constant."""
 
-    it "emits one owner record per hit-shape row, tagged WEB with a live generation":
-        val producer = WebPackedProducer(id_val: 3u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID)
+    it "emits one owner record per hit-shape row, tagged WEB with the oracle's generation":
+        val producer = WebPackedProducer(id_val: 3u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID, host_owner_id: DRAW_IR_V3_NO_ID)
         val counts = producer.count(1u64, ui_scene_counts_zero())
         val ranges = ui_scene_scan([counts])[0]
         var draw = UiSceneNativeWriter.new(ranges)
@@ -130,10 +135,39 @@ describe "WebPackedProducer owner records (design section 2.4, gate b)":
         while i < records.len():
             val rec = records[i]
             expect(rec.producer_kind).to_equal(UI_PRODUCER_WEB)
-            assert_true(rec.semantic_generation != 0u32)
+            expect(rec.semantic_generation).to_equal(0u32)
             expect(hit_shapes[i].component_id).to_equal(rec.semantic_id)
             i = i + 1
         print "l7_web_producer_owners hit_shapes={hit_shapes.len()} owners={records.len()}"
+
+describe "WebPackedProducer host_owner_id reparenting (cross-producer owner-chain wiring)":
+    """When this producer is nested inside a host (e.g. a GUI WebView-host
+    widget), the host passes its own OWNER_RECORDS absolute index as
+    `host_owner_id`, and every owner record this producer emits -- one per
+    hit-shape row, all flat/root within its own scope -- gets re-parented
+    onto it, closing the cross-producer chain
+    ui_scene_event_route.spl's own routing walks."""
+
+    it "re-parents every owner record onto host_owner_id when nested":
+        val host_owner_id = 77u32
+        val producer = WebPackedProducer(id_val: 7u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID, host_owner_id: host_owner_id)
+        val counts = producer.count(1u64, ui_scene_counts_zero())
+        val ranges = ui_scene_scan([counts])[0]
+        var draw = UiSceneNativeWriter.new(ranges)
+        var owners = UiSceneNativeOwnerWriter.new(ranges.owner_records)
+        var actions = UiSceneNativeActionWriter.new(ranges.action_bindings)
+        val result = producer.emit(1u64, ranges, draw, owners, actions)
+        match result:
+            UiSceneEmitResult.Emitted(slice):
+                val records = owners.records_snapshot()
+                expect(records.len()).to_be_greater_than(0)
+                var i = 0
+                while i < records.len():
+                    expect(records[i].parent_owner_id).to_equal(host_owner_id)
+                    i = i + 1
+                print "l7_web_producer_host_owner_id owners={records.len()} parent={host_owner_id}"
+            UiSceneEmitResult.Refused(receipt):
+                expect(true).to_equal(false)
 
 describe "WebPackedProducer WebView nesting (design section 2.2 nesting rule, gate c/d)":
     """A host hosting this producer as a WebView child: the child's root
@@ -148,7 +182,7 @@ describe "WebPackedProducer WebView nesting (design section 2.2 nesting rule, ga
         val arena = UiSceneArena.new(capacity)
         val before_alloc = arena.alloc_count()
 
-        val web = WebPackedProducer(id_val: 20u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: host_webview_component_id)
+        val web = WebPackedProducer(id_val: 20u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: host_webview_component_id, host_owner_id: DRAW_IR_V3_NO_ID)
         val web_counts = web.count(1u64, ui_scene_counts_zero())
 
         var host_counts = ui_scene_counts_zero()
@@ -210,7 +244,7 @@ describe "WebPackedProducer id rebasing under a non-zero assigned range (multi-p
         dummy_counts.transforms = 1u32
         dummy_counts.hit_shapes = 1u32
 
-        val producer = WebPackedProducer(id_val: 6u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID)
+        val producer = WebPackedProducer(id_val: 6u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID, host_owner_id: DRAW_IR_V3_NO_ID)
         val web_counts = producer.count(1u64, ui_scene_counts_zero())
 
         val scanned = ui_scene_scan([dummy_counts, web_counts])
@@ -255,7 +289,7 @@ describe "WebPackedProducer parity with the v2 oracle (design section 9, gate d)
     it "matches simple_web_layout_render_html_draw_ir + draw_ir_v2_to_v3 on commands, geometry and paint":
         val oracle_v3 = draw_ir_v2_to_v3(simple_web_layout_render_html_draw_ir(L7_CORPUS_HTML, 100, 70))
 
-        val producer = WebPackedProducer(id_val: 4u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID)
+        val producer = WebPackedProducer(id_val: 4u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID, host_owner_id: DRAW_IR_V3_NO_ID)
         val counts = producer.count(1u64, ui_scene_counts_zero())
         val ranges = ui_scene_scan([counts])[0]
         var draw = UiSceneNativeWriter.new(ranges)

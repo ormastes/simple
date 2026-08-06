@@ -105,7 +105,7 @@ describe "GuiPackedProducer count/emit exactness (design section 2.2, lane L6)":
 
     it "reports and emits exactly the reserved rows for a real widget-tree scene":
         step("A corpus with two panels and one button")
-        val producer = GuiPackedProducer(id_val: 1u32, root: _l6_corpus_root(), width: 200, height: 150)
+        val producer = GuiPackedProducer(id_val: 1u32, root: _l6_corpus_root(), width: 200, height: 150, host_owner_id: DRAW_IR_V3_NO_ID)
         val counts = producer.count(1u64, ui_scene_counts_zero())
         expect(counts.commands).to_be_greater_than(0u32)
         expect(counts.geometry).to_be_greater_than(0u32)
@@ -126,7 +126,7 @@ describe "GuiPackedProducer count/emit exactness (design section 2.2, lane L6)":
         print "l6_gui_producer_exactness commands={counts.commands} hit_shapes={counts.hit_shapes} owners={counts.owner_records}"
 
     it "reports the same counts twice for the same unchanged tree (count is repeatable)":
-        val producer = GuiPackedProducer(id_val: 2u32, root: _l6_corpus_root(), width: 200, height: 150)
+        val producer = GuiPackedProducer(id_val: 2u32, root: _l6_corpus_root(), width: 200, height: 150, host_owner_id: DRAW_IR_V3_NO_ID)
         val first = producer.count(5u64, ui_scene_counts_zero())
         val second = producer.count(5u64, ui_scene_counts_zero())
         expect(first.commands).to_equal(second.commands)
@@ -139,7 +139,7 @@ describe "GuiPackedProducer owner records (design section 2.4, gate b)":
     `semantic_generation`, correlated by `component_id == semantic_id`."""
 
     it "emits one owner record per hit-shape row, tagged GUI with a live generation":
-        val producer = GuiPackedProducer(id_val: 3u32, root: _l6_corpus_root(), width: 200, height: 150)
+        val producer = GuiPackedProducer(id_val: 3u32, root: _l6_corpus_root(), width: 200, height: 150, host_owner_id: DRAW_IR_V3_NO_ID)
         val counts = producer.count(1u64, ui_scene_counts_zero())
         val ranges = ui_scene_scan([counts])[0]
         var draw = UiSceneNativeWriter.new(ranges)
@@ -164,6 +164,53 @@ describe "GuiPackedProducer owner records (design section 2.4, gate b)":
             expect(hit_shapes[i].component_id).to_equal(rec.semantic_id)
             i = i + 1
         print "l6_gui_producer_owners hit_shapes={hit_shapes.len()} owners={records.len()}"
+
+describe "GuiPackedProducer host_owner_id reparenting (cross-producer owner-chain wiring)":
+    """When this producer is nested inside a host (e.g. a WM window), the
+    host passes its own OWNER_RECORDS absolute index as `host_owner_id`,
+    and every owner record this producer emits -- currently all flat/root
+    within its own scope -- gets re-parented onto it, closing the
+    cross-producer chain ui_scene_event_route.spl's own routing walks."""
+
+    it "leaves parent_owner_id as NO_ID when host_owner_id is NO_ID (standalone, non-nested render)":
+        val producer = GuiPackedProducer(id_val: 7u32, root: _l6_corpus_root(), width: 200, height: 150, host_owner_id: DRAW_IR_V3_NO_ID)
+        val counts = producer.count(1u64, ui_scene_counts_zero())
+        val ranges = ui_scene_scan([counts])[0]
+        var draw = UiSceneNativeWriter.new(ranges)
+        var owners = UiSceneNativeOwnerWriter.new(ranges.owner_records)
+        var actions = UiSceneNativeActionWriter.new(ranges.action_bindings)
+        val result = producer.emit(1u64, ranges, draw, owners, actions)
+        match result:
+            UiSceneEmitResult.Emitted(slice):
+                val records = owners.records_snapshot()
+                expect(records.len()).to_be_greater_than(0)
+                var i = 0
+                while i < records.len():
+                    expect(records[i].parent_owner_id).to_equal(DRAW_IR_V3_NO_ID)
+                    i = i + 1
+            UiSceneEmitResult.Refused(receipt):
+                expect(true).to_equal(false)
+
+    it "re-parents every owner record onto host_owner_id when nested":
+        val host_owner_id = 99u32
+        val producer = GuiPackedProducer(id_val: 8u32, root: _l6_corpus_root(), width: 200, height: 150, host_owner_id: host_owner_id)
+        val counts = producer.count(1u64, ui_scene_counts_zero())
+        val ranges = ui_scene_scan([counts])[0]
+        var draw = UiSceneNativeWriter.new(ranges)
+        var owners = UiSceneNativeOwnerWriter.new(ranges.owner_records)
+        var actions = UiSceneNativeActionWriter.new(ranges.action_bindings)
+        val result = producer.emit(1u64, ranges, draw, owners, actions)
+        match result:
+            UiSceneEmitResult.Emitted(slice):
+                val records = owners.records_snapshot()
+                expect(records.len()).to_be_greater_than(0)
+                var i = 0
+                while i < records.len():
+                    expect(records[i].parent_owner_id).to_equal(host_owner_id)
+                    i = i + 1
+                print "l6_gui_producer_host_owner_id owners={records.len()} parent={host_owner_id}"
+            UiSceneEmitResult.Refused(receipt):
+                expect(true).to_equal(false)
 
 describe "GuiPackedProducer nested-child containment (design section 2.2 nesting rule)":
     """count-in-count, emit-in-ranges: a host's counts and a nested stub
@@ -243,7 +290,7 @@ describe "GuiPackedProducer id rebasing under a non-zero assigned range (multi-p
         dummy_counts.transforms = 1u32
         dummy_counts.hit_shapes = 1u32
 
-        val producer = GuiPackedProducer(id_val: 6u32, root: _l6_corpus_root(), width: 200, height: 150)
+        val producer = GuiPackedProducer(id_val: 6u32, root: _l6_corpus_root(), width: 200, height: 150, host_owner_id: DRAW_IR_V3_NO_ID)
         val gui_counts = producer.count(1u64, ui_scene_counts_zero())
 
         val scanned = ui_scene_scan([dummy_counts, gui_counts])
@@ -287,7 +334,7 @@ describe "GuiPackedProducer parity with the v2 oracle (design section 9, gate d)
         val root = _l6_corpus_root()
         val oracle_v3 = draw_ir_v2_to_v3(widget_tree_to_draw_ir_cpu(root, 200, 150))
 
-        val producer = GuiPackedProducer(id_val: 4u32, root: root, width: 200, height: 150)
+        val producer = GuiPackedProducer(id_val: 4u32, root: root, width: 200, height: 150, host_owner_id: DRAW_IR_V3_NO_ID)
         val counts = producer.count(1u64, ui_scene_counts_zero())
         val ranges = ui_scene_scan([counts])[0]
         var draw = UiSceneNativeWriter.new(ranges)

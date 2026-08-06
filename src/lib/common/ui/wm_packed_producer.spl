@@ -43,8 +43,10 @@ use common.ui.window_surface_registry.{UiWindowSurfaceRegistry}
 use common.ui.taskbar_model.{TaskbarModel}
 use common.ui.window_scene.{
     BackgroundSpec,
+    SharedWmWindow,
     shared_wm_scene_from_window_manager,
-    shared_wm_scene_resolve_background
+    shared_wm_scene_resolve_background,
+    shared_wm_visible_windows
 }
 use common.ui.window_scene_draw_ir.{shared_wm_scene_draw_ir_composition}
 use common.ui.draw_ir_v2_to_v3.{draw_ir_v2_to_v3}
@@ -165,13 +167,38 @@ fn _wm_patch_background_color(v3: DrawIrV3Scene, color: u32) -> DrawIrV3Scene:
         transforms: v3.transforms, hit_shapes: v3.hit_shapes, provenance: v3.provenance
     )
 
-fn _wm_build_scene(p: WmPackedProducer) -> DrawIrV3Scene:
+struct WmPackedScene:
+    v3: DrawIrV3Scene
+    visible_windows: [SharedWmWindow]
+
+fn _wm_build_scene(p: WmPackedProducer) -> WmPackedScene:
     var scene = shared_wm_scene_from_window_manager(p.manager, p.registry, p.width, p.height)
     scene.background = p.background
     val composition = shared_wm_scene_draw_ir_composition(scene, p.taskbar, p.backend_target, p.dpi_scale_milli, p.clock_label, p.right_icon_count)
     val v3_raw = draw_ir_v2_to_v3(composition)
     val resolution = shared_wm_scene_resolve_background(p.background, p.width, p.height, 0i64)
-    _wm_patch_background_color(v3_raw, resolution.color)
+    val v3 = _wm_patch_background_color(v3_raw, resolution.color)
+    WmPackedScene(v3: v3, visible_windows: shared_wm_visible_windows(scene))
+
+# One owner record per visible window represents that window as a semantic
+# node in its own right -- the anchor a nested GUI producer's `host_owner_id`
+# points at (design section 4.1/research section 7 nested-WebView-chain
+# hierarchy: ... -> GUI window-content root -> WM window). No corresponding
+# hit_shape/command: not every ownership node needs to be independently
+# clickable (mirrors L9's own owner-chain fixture ancestors). Chosen right
+# after the menubar's own component-id range so it can never collide with
+# an existing v3 command's component_id or the menubar group/items.
+fn _wm_window_owner_base(v3: DrawIrV3Scene) -> u32:
+    v3.commands.len().to_u32() + 1u32 + WM_MENUBAR_MAX_ITEMS
+
+# Deterministic query for an assembler/test that needs to learn which
+# semantic_id this producer will assign to visible window `window_index`
+# (0-based, in `shared_wm_visible_windows` order) -- read the owner record
+# back by this value rather than guessing the write-order arithmetic
+# directly (see ui_scene_event_route.spl's own doc on cross-producer
+# wiring).
+fn wm_packed_producer_window_owner_semantic_id(p: WmPackedProducer, window_index: u32) -> u32:
+    _wm_window_owner_base(_wm_build_scene(p).v3) + window_index
 
 fn _wm_active_menu_snapshot(p: WmPackedProducer) -> AppMenuSnapshot:
     if val s = p.menu_registry.lookup(p.active_app_id):
@@ -202,8 +229,10 @@ fn _wm_menubar_items(snapshot: AppMenuSnapshot, registry: AppMenuRegistry) -> [W
         i = i + 1u32
     out
 
-fn _wm_counts_of(v3: DrawIrV3Scene) -> UiSceneCounts:
+fn _wm_counts_of(scene: WmPackedScene) -> UiSceneCounts:
+    val v3 = scene.v3
     val n_wm_hit = v3.hit_shapes.xs.len().to_u32()
+    val n_windows = scene.visible_windows.len().to_u32()
     UiSceneCounts(
         commands: v3.commands.len().to_u32() + 1u32 + WM_MENUBAR_MAX_ITEMS,
         geometry: v3.geometry.xs.len().to_u32() + 1u32 + WM_MENUBAR_MAX_ITEMS,
@@ -217,7 +246,7 @@ fn _wm_counts_of(v3: DrawIrV3Scene) -> UiSceneCounts:
         transforms: v3.transforms.m11s.len().to_u32(),
         hit_shapes: n_wm_hit + WM_MENUBAR_MAX_ITEMS,
         provenance_edges: v3.provenance.command_indices.len().to_u32(),
-        owner_records: n_wm_hit + WM_MENUBAR_MAX_ITEMS,
+        owner_records: n_wm_hit + WM_MENUBAR_MAX_ITEMS + n_windows,
         action_bindings: WM_MENUBAR_MAX_ITEMS,
         prepared_batches: 0u32,
         dirty_ranges: 0u32
@@ -250,7 +279,8 @@ fn _wm_overflow_receipt(v: UiSceneWriteVerdict, producer_kind: u16, producer_id:
                 producer_kind: producer_kind, producer_id: producer_id, snapshot_id: snapshot_id
             )
 
-fn _wm_write_scene(v3: DrawIrV3Scene, snapshot: AppMenuSnapshot, menubar_items: [WmMenubarItem], width: i32, ranges: UiSceneRanges, draw: DrawIrV3Writer, owners: UiOwnerWriter, actions: UiActionWriter):
+fn _wm_write_scene(scene: WmPackedScene, snapshot: AppMenuSnapshot, menubar_items: [WmMenubarItem], width: i32, ranges: UiSceneRanges, draw: DrawIrV3Writer, owners: UiOwnerWriter, actions: UiActionWriter):
+    val v3 = scene.v3
     var i = 0
     while i < v3.commands.len():
         val c = v3.commands[i]
@@ -356,7 +386,11 @@ fn _wm_write_scene(v3: DrawIrV3Scene, snapshot: AppMenuSnapshot, menubar_items: 
 
     # Every existing WM hit-shape row gets exactly one owner record
     # (symmetric with L7's rule: the oracle, not this lane, decides what's
-    # hit-testable for the compositor's own commands).
+    # hit-testable for the compositor's own commands). These commands are
+    # copied through verbatim above (line ~289, component_generation
+    # preserved), and draw_ir_v2_to_v3 sets component_generation: 0u32
+    # unconditionally -- so the owner must use 0u32 too, not
+    # WM_OWNER_GENERATION, or L9's recycled-slot check never matches.
     i = 0
     while i < v3.hit_shapes.xs.len():
         val comp_id = v3.hit_shapes.component_ids[i]
@@ -368,7 +402,7 @@ fn _wm_write_scene(v3: DrawIrV3Scene, snapshot: AppMenuSnapshot, menubar_items: 
         ))
         owners.put_owner_record(UiOwnerRecord(
             producer_kind: UI_PRODUCER_WM, event_policy: UI_SCENE_EVENT_POLICY_HIT_OPAQUE,
-            semantic_id: comp_id, semantic_generation: WM_OWNER_GENERATION,
+            semantic_id: comp_id, semantic_generation: 0u32,
             parent_owner_id: DRAW_IR_V3_NO_ID, action_binding_id: DRAW_IR_V3_NO_ID
         ))
         i = i + 1
@@ -425,10 +459,16 @@ fn _wm_write_scene(v3: DrawIrV3Scene, snapshot: AppMenuSnapshot, menubar_items: 
             shape_kind: DRAW_IR_V3_HIT_RECT, hit_flags: 0u16, component_id: item_component_id
         ))
 
+        # Minted content: this lane owns both the command and the owner
+        # record at this one write site, so both must carry the SAME
+        # generation (WM_OWNER_GENERATION) for L9's recycled-slot check to
+        # match -- unlike the copied hit-shapes above, whose command
+        # generation comes from the oracle (always 0u32) and can't be
+        # chosen here.
         val item_flags = if item.visible: DRAW_IR_V3_FLAG_HIT_TESTABLE else: DRAW_IR_V3_FLAG_HIDDEN
         draw.put_command(DrawIrV3Command(
             kind: DRAW_IR_V3_KIND_RECT, flags: item_flags,
-            component_id: item_component_id, component_generation: 0u32, parent_id: group_component_id,
+            component_id: item_component_id, component_generation: WM_OWNER_GENERATION, parent_id: group_component_id,
             geometry_id: item_geometry_id, paint_id: item_paint_id,
             text_run_id: DRAW_IR_V3_NO_ID, image_resource_id: DRAW_IR_V3_NO_ID, path_span_id: DRAW_IR_V3_NO_ID,
             clip_id: DRAW_IR_V3_NO_ID, transform_id: DRAW_IR_V3_NO_ID, hit_shape_id: item_hit_shape_id
@@ -447,6 +487,18 @@ fn _wm_write_scene(v3: DrawIrV3Scene, snapshot: AppMenuSnapshot, menubar_items: 
         ))
         ii = ii + 1
 
+    # One owner record per visible window (see _wm_window_owner_base's doc):
+    # the anchor a nested GUI producer's `host_owner_id` points at.
+    val window_owner_base = _wm_window_owner_base(v3)
+    var wi = 0
+    while wi < scene.visible_windows.len():
+        owners.put_owner_record(UiOwnerRecord(
+            producer_kind: UI_PRODUCER_WM, event_policy: UI_SCENE_EVENT_POLICY_HIT_OPAQUE,
+            semantic_id: window_owner_base + wi.to_u32(), semantic_generation: WM_OWNER_GENERATION,
+            parent_owner_id: DRAW_IR_V3_NO_ID, action_binding_id: DRAW_IR_V3_NO_ID
+        ))
+        wi = wi + 1
+
 impl UiPackedProducer for WmPackedProducer:
     me producer_kind() -> u16:
         UI_PRODUCER_WM
@@ -461,10 +513,10 @@ impl UiPackedProducer for WmPackedProducer:
         snapshot_id: u64, ranges: UiSceneRanges,
         draw: DrawIrV3Writer, owners: UiOwnerWriter, actions: UiActionWriter
     ) -> UiSceneEmitResult:
-        val v3 = _wm_build_scene(self)
+        val scene = _wm_build_scene(self)
         val snapshot = _wm_active_menu_snapshot(self)
         val menubar_items = _wm_menubar_items(snapshot, self.menu_registry)
-        _wm_write_scene(v3, snapshot, menubar_items, self.width, ranges, draw, owners, actions)
+        _wm_write_scene(scene, snapshot, menubar_items, self.width, ranges, draw, owners, actions)
 
         val draw_verdict = draw.finish()
         if not _wm_verdict_is_exact(draw_verdict):
@@ -483,4 +535,4 @@ impl UiPackedProducer for WmPackedProducer:
             root_component_id: DRAW_IR_V3_NO_ID, ranges: ranges
         ))
 
-export WmPackedProducer, WM_MENUBAR_MAX_ITEMS
+export WmPackedProducer, WM_MENUBAR_MAX_ITEMS, wm_packed_producer_window_owner_semantic_id

@@ -4,6 +4,12 @@ Status: plan (dispatch document). Design authority:
 `doc/05_design/ui/unified_packed_ui_scene.md` (read it before starting any lane).
 Research: `doc/01_research/local/unified_packed_ui_scene.md`.
 
+**Status update (2026-08-06): lanes L0-L9 below are all landed** (L6
+`1e0a4c18b0b`, L7 `721bc3f579b`, L8 `ed086bb06d4`, L9 `dcd08e77f22`, plus a
+cross-producer `host_owner_id`/generation-consistency follow-on). Current
+handoff notes and known gotchas:
+`doc/00_llm_process/feature_expert/unified_packed_ui_scene/skill.md`.
+
 ## Ground rules for every lane (non-negotiable)
 
 1. **File ownership is exclusive.** A lane writes ONLY the paths in its "Owns"

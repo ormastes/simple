@@ -57,9 +57,13 @@ use common.ui.ui_scene_slice.{
     UiPackedProducer
 }
 
-# Non-zero so a live owner record is trivially distinguishable from an
-# unset/default one (design section 2.4 "live `semantic_generation`").
-val WEB_HIT_OWNER_GENERATION: u32 = 1u32
+# Matches `draw_ir_v2_to_v3`'s adapter, which sets `component_generation:
+# 0u32` unconditionally at both of its command-construction sites. L9's
+# "recycled slot" check in ui_scene_event_route.spl compares this owner
+# field against the hit command's own component_generation for EQUALITY,
+# not non-zero-ness — every Web hit_shape is copied from an adapter
+# command, so this must be 0 to ever pass that check.
+val WEB_HIT_OWNER_GENERATION: u32 = 0u32
 
 # See ui_gui_packed_producer.spl's `_gui_rebase_id` doc comment: table-row-
 # index fields must be rebased to this producer's assigned
@@ -147,7 +151,7 @@ fn _web_overflow_receipt(v: UiSceneWriteVerdict, producer_kind: u16, producer_id
                 producer_kind: producer_kind, producer_id: producer_id, snapshot_id: snapshot_id
             )
 
-fn _web_write_scene(v3: DrawIrV3Scene, ranges: UiSceneRanges, draw: DrawIrV3Writer, owners: UiOwnerWriter):
+fn _web_write_scene(v3: DrawIrV3Scene, host_owner_id: u32, ranges: UiSceneRanges, draw: DrawIrV3Writer, owners: UiOwnerWriter):
     var i = 0
     while i < v3.commands.len():
         val c = v3.commands[i]
@@ -265,7 +269,7 @@ fn _web_write_scene(v3: DrawIrV3Scene, ranges: UiSceneRanges, draw: DrawIrV3Writ
         owners.put_owner_record(UiOwnerRecord(
             producer_kind: UI_PRODUCER_WEB, event_policy: UI_SCENE_EVENT_POLICY_HIT_OPAQUE,
             semantic_id: comp_id, semantic_generation: WEB_HIT_OWNER_GENERATION,
-            parent_owner_id: DRAW_IR_V3_NO_ID, action_binding_id: DRAW_IR_V3_NO_ID
+            parent_owner_id: host_owner_id, action_binding_id: DRAW_IR_V3_NO_ID
         ))
         i = i + 1
 
@@ -287,6 +291,14 @@ struct WebPackedProducer:
     width: i32
     height: i32
     host_parent_id: u32
+    # DRAW_IR_V3_NO_ID for a standalone (non-nested) render. When a host
+    # (e.g. a GUI producer's WebView-host widget owner, see
+    # ui_gui_packed_producer.spl's own `host_owner_id`) is hosting this
+    # producer, it passes its own OWNER_RECORDS absolute index here so
+    # every owner record this producer emits -- one per hit-shape row, all
+    # flat/root within its own scope -- gets re-parented onto it (see
+    # ui_scene_event_route.spl's cross-producer wiring follow-on note).
+    host_owner_id: u32
 
 impl UiPackedProducer for WebPackedProducer:
     me producer_kind() -> u16:
@@ -303,7 +315,7 @@ impl UiPackedProducer for WebPackedProducer:
         draw: DrawIrV3Writer, owners: UiOwnerWriter, actions: UiActionWriter
     ) -> UiSceneEmitResult:
         val v3 = _web_build_scene(self.html, self.width, self.height, self.host_parent_id)
-        _web_write_scene(v3, ranges, draw, owners)
+        _web_write_scene(v3, self.host_owner_id, ranges, draw, owners)
 
         val draw_verdict = draw.finish()
         if not _web_verdict_is_exact(draw_verdict):

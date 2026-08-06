@@ -60,6 +60,19 @@ use common.ui.ui_scene_slice.{
 
 # Non-zero so a live owner record is trivially distinguishable from an
 # unset/default one (design section 2.4 "live `semantic_generation`").
+#
+# NOTE: unlike L7/L8, this value is never checked against a real command's
+# component_generation, because these synthetic interactive-widget hit
+# shapes and owners have NO backing command -- no command in this
+# producer's output sets hit_shape_id to point at them (the widget-tree
+# oracle never emits one; see module doc "give every hit_shape row an
+# owner, decide interactivity per-oracle"). That means
+# draw_ir_v3_group_resolve_hit_test, which only considers commands whose
+# own hit_shape_id is set, can never hit-test these rows at all -- GUI's
+# interactive widgets are not reachable through ui_scene_event_route.spl
+# today. Documented, not silently patched: fixing it needs a real
+# synthetic command + cross-reference, not a generation tweak. See
+# doc/00_llm_process/feature_expert/unified_packed_ui_scene/skill.md.
 val GUI_INTERACTIVE_GENERATION: u32 = 1u32
 
 # Table-row-index fields (geometry_id, paint_id, ...) are read back as
@@ -157,7 +170,7 @@ fn _gui_overflow_receipt(v: UiSceneWriteVerdict, producer_kind: u16, producer_id
 # writers, in table order. Order across DIFFERENT tables is irrelevant (each
 # table has its own writer cursor); what matters is writing exactly the
 # count `_gui_counts_of` reported for each table.
-fn _gui_write_scene(scene: GuiPackedScene, ranges: UiSceneRanges, draw: DrawIrV3Writer, owners: UiOwnerWriter):
+fn _gui_write_scene(scene: GuiPackedScene, host_owner_id: u32, ranges: UiSceneRanges, draw: DrawIrV3Writer, owners: UiOwnerWriter):
     var i = 0
     while i < scene.v3.commands.len():
         val c = scene.v3.commands[i]
@@ -296,7 +309,7 @@ fn _gui_write_scene(scene: GuiPackedScene, ranges: UiSceneRanges, draw: DrawIrV3
         owners.put_owner_record(UiOwnerRecord(
             producer_kind: UI_PRODUCER_GUI, event_policy: UI_SCENE_EVENT_POLICY_HIT_OPAQUE,
             semantic_id: comp_id, semantic_generation: GUI_INTERACTIVE_GENERATION,
-            parent_owner_id: DRAW_IR_V3_NO_ID, action_binding_id: DRAW_IR_V3_NO_ID
+            parent_owner_id: host_owner_id, action_binding_id: DRAW_IR_V3_NO_ID
         ))
         oi = oi + 1
 
@@ -305,6 +318,14 @@ struct GuiPackedProducer:
     root: WidgetNode
     width: i32
     height: i32
+    # DRAW_IR_V3_NO_ID for a standalone (non-nested) render. When a host
+    # (e.g. a WM window, see wm_packed_producer.spl's per-window owner
+    # records) is hosting this producer's content, it passes its own
+    # OWNER_RECORDS absolute index here so every one of this producer's own
+    # owner records -- currently all flat/root within its own scope, see
+    # module doc -- gets re-parented onto it (cross-producer owner-chain
+    # wiring, ui_scene_event_route.spl's own follow-on note).
+    host_owner_id: u32
 
 impl UiPackedProducer for GuiPackedProducer:
     me producer_kind() -> u16:
@@ -321,7 +342,7 @@ impl UiPackedProducer for GuiPackedProducer:
         draw: DrawIrV3Writer, owners: UiOwnerWriter, actions: UiActionWriter
     ) -> UiSceneEmitResult:
         val scene = _gui_build_scene(self.root, self.width, self.height)
-        _gui_write_scene(scene, ranges, draw, owners)
+        _gui_write_scene(scene, self.host_owner_id, ranges, draw, owners)
 
         val draw_verdict = draw.finish()
         if not _gui_verdict_is_exact(draw_verdict):
