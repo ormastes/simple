@@ -98,6 +98,42 @@ ssh_simple_hello_uefi}.shs`. Fail-fast placeholders: spec rows for absent hosts
 report `blocked`, never `skip()`. Final reviewer: orchestrator (Opus) before any
 PASS claim; no lane may self-certify a goal-level AC.
 
+## AC-5 ACHIEVED 2026-08-06 — GOAL 2 EXIT CRITERION MET
+
+Hello world **compiled, linked, and run entirely inside SimpleOS**, under OVMF
+pflash (never `-kernel`) + KVM:
+
+```
+LLD 20.0.0 (github.com/ormastes/llvm-project 5961220) (compatible with GNU linkers)
+[oo-nvme] persist /HELLO.ELF -> OK
+[fs-exec] heap:stream-open-ok path=/HELLO.ELF len=39576
+hello, world
+[syscall] exit status=7
+[spawn] ring3 program exited rc=7 (kernel resumed)
+PASS: in-guest lld linked and ran /HELLO.ELF under OVMF (board proxy)
+```
+Evidence `build/os/c4_lld_ladder.log`. Commit `7dd587ba2f5`.
+
+Root cause of the last blocker was NOT the getfile transport (the stated
+premise was wrong — that code was never reached): `rt_user_heap_init` set
+`_bare_exec_halt_on_exit`, so the exit path fell to `outb(0xF4)`, which under
+OVMF has no `isa-debug-exit` device and silently parks the CPU. A fixed variant
+`rt_user_heap_init_returning` already existed with ZERO callers, and a unit test
+pinned the spawn path to the broken one.
+
+**Standing gaps (not hidden):** `outb(0xF4)` remains the exit path for non-heap
+bare-exec and is NOT board-runnable; the fabricated-stub baseline is keyed on
+output FILENAME, so renaming an entry defeats that ratchet.
+
+## AC-3 upgraded — payload is now NON-SEED built
+
+`compiler=build/bootstrap/stage2/...`, `backend=cranelift`,
+`artifact_sha256=58b65147…` matches, stamp never hand-written; passes BOTH
+provenance guards. Scope limit: non-seed BY STAMP, but stage2's machine code was
+emitted upstream in the bootstrap chain — a legitimate non-seed build, NOT a
+fixpoint-proven self-host. Also: the payload is not bit-reproducible (two runs,
+two digests).
+
 ## AC-4 ACHIEVED 2026-08-06 — in-guest clang compile under real firmware
 
 ```
