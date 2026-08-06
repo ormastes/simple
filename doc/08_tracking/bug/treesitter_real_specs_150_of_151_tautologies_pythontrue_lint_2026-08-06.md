@@ -21,9 +21,10 @@ not mocks". Measured verdict lines, one file per `bin/simple test` invocation:
 | `test/01_unit/compiler/parser/treesitter_tokenkind_real_spec.spl` | `declared>=38 executed=38 passed=38 failed=0 dropped=0` | 38 / 38 |
 | `test/01_unit/compiler/parser/treesitter_tree_real_spec.spl` | `declared>=33 executed=33 passed=33 failed=0 dropped=0` | 33 / 33 |
 
-**150 of 151 reported-passing examples are the literal statement `expect true`.** Two of the four
-files are 100% tautology — they contain no other assertion of any kind. The real bodies are present
-but commented out:
+**150 of 151 reported-passing examples are the literal statement `expect true`.** The right-hand
+column is `expect true` count over **total** `expect` count, so **three** of the four files
+(`parser`, `tokenkind`, `tree`) are 100% tautology — they contain no other assertion of any kind.
+The real bodies are present but commented out:
 
 ```
     it "tokenizes fn keyword":
@@ -129,9 +130,11 @@ Top remaining tautology files after the treesitter cluster:
 ### Two prior-baseline claims that did NOT reproduce
 
 - **"A spec containing `fn main` makes the runner DROP every describe/it block."** Not reproduced
-  for the `simple test` path. All 8 specs containing both `fn main` and `describe` were run
-  individually; every one reported `dropped=0` with `executed` equal to `declared`. The claim may
-  still hold for `simple run`, which is a different code path and was not exercised here.
+  for the `simple test` path. Nine specs in the live trees contain both `fn main` and `describe`;
+  **8 of the 9 were measured** individually and every one reported `dropped=0` with `executed`
+  equal to `declared`. `test/03_system/feature/usage/cli_args_modspl_spec.spl` is **unmeasured** —
+  the batch did not reach it — so this is 8-of-9, not full coverage of the shape. The claim may
+  also still hold for `simple run`, which is a different code path and was not exercised here.
 - **"~15% of spec examples are vacuous."** Not supported by the tautology/`nil` shapes: 533
   vacuous examples across 48 files is far below 15% of the corpus. An earlier pass of this census
   produced a "55,511 examples with no assertion" figure; that number is a **classifier artifact**
@@ -140,10 +143,20 @@ Top remaining tautology files after the treesitter cluster:
 
 ### Duplicate spec trees
 
-`test/unit/` is a 5,097-file subset of `test/01_unit/` with byte-identical contents on the files
-sampled (only 1 file is unique to `test/unit/`; 6,751 are unique to `test/01_unit/`). The same
-pattern holds for `test/system/` vs `test/03_system/` and `test/integration/` vs
-`test/02_integration/`. Fixing a spec in one tree therefore leaves a live sibling unfixed.
+Every `.spl` file under each legacy tree was MD5-compared against its counterpart in the numbered
+tree:
+
+| pair | common paths | byte-identical | only in legacy | only in numbered |
+|------|--------------|----------------|----------------|------------------|
+| `test/unit` vs `test/01_unit` | 5,097 | 4,212 | 2 | 6,752 |
+| `test/system` vs `test/03_system` | 349 | 289 | 1,593 | 3,710 |
+| `test/integration` vs `test/02_integration` | 633 | 542 | 0 | 575 |
+
+So the legacy trees are **not** clean subsets: 885 of the 5,097 shared `test/unit` paths have
+already **diverged** from their `test/01_unit` twin, and `test/system` holds 1,593 files with no
+counterpart at all. Fixing a spec in one tree therefore leaves a live, and possibly already
+different, sibling unfixed — and a divergent pair means the two copies can disagree about what the
+subject is supposed to do.
 
 ### Superseded vacuous crypto spec
 
