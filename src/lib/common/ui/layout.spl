@@ -59,11 +59,18 @@ fn compute_layout(node: WidgetNode, x: i32, y: i32, w: i32, h: i32, scale_permil
         inner_w = sw - 2
         inner_h = sh - 2
 
-    # Scroll container clips inner height to max_height
+    # Scroll container clips inner height to max_height.
+    #
+    # inner_h is in DEVICE units (it derives from sh). `max_height` is authored
+    # by the caller in LOGICAL units — builder.scroll(id, max_height, ...) takes
+    # a plain i32 from code with no scale knowledge, the same units as the
+    # x/y/w/h handed to compute_layout. Scale it here, at the same place and
+    # exactly once, or the two sides of the comparison below are in different
+    # units and the clip is meaningless at any non-identity scale.
     if node.kind_name() == "scroll":
         val max_h_str = node.get_prop("max_height")
         if max_h_str != "":
-            val max_h = max_h_str.to_int() ?? 0
+            val max_h = _apply_scale(max_h_str.to_int() ?? 0, scale_permille)
             if max_h > 0 and inner_h > max_h:
                 inner_h = max_h
 
@@ -113,7 +120,7 @@ fn layout_vbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32) -> [Widge
         return rects
 
     # Calculate sizes: fixed-height items first, then distribute remaining
-    # TODO: vbox does not honour the `flex` prop at all — it counts children
+    # TODO: [ui][P2] vbox does not honour the `flex` prop at all — it counts children
     # without a fixed height and divides equally, so with_flex(n, 3) is
     # silently dropped here and with_flex(n, 0) still gets an equal share
     # instead of zero. layout_hbox weights by get_flex(); the two axes agree
@@ -374,9 +381,17 @@ fn get_flex(node: WidgetNode) -> i32:
     return 1
 
 # Optional size constraints. min_* default 0 (no lower bound); max_* default -1
-# meaning "unset" (no upper bound). max_height doubles as the scroll clip height
-# already, so capping to it is a no-op for scroll containers and a genuine cap
-# elsewhere.
+# meaning "unset" (no upper bound). max_height doubles as the scroll clip
+# height, so capping to it is a no-op for scroll containers at identity scale
+# and a genuine cap elsewhere.
+#
+# TODO: [ui][P2] these accessors return LOGICAL units, but layout_vbox/layout_hbox
+# compare them against an already-scaled actual_h/actual_w, so the clamp is a
+# unit mismatch at any non-identity scale — the same class of defect as the
+# scroll clip fixed in compute_layout(). It is not fixed here because
+# layout_vbox/layout_hbox take no scale_permille argument, so correcting it
+# means changing their signatures and every recursive call site. Until then
+# the "no-op for scroll containers" claim above only holds at scale 1000.
 fn get_min_width(node: WidgetNode) -> i32:
     val v = node.get_prop("min_width")
     if v != "":

@@ -11,7 +11,7 @@
 
 use std.spec.{describe, it, expect, assert_true}
 use common.ui.widget.{WidgetNode, WidgetKind}
-use common.ui.builder.{column, button}
+use common.ui.builder.{column, button, label, scroll}
 use common.ui.layout.{compute_layout, find_rect}
 use common.ui.form_factor.{compute_form_factor}
 use common.ui.viewport.{new_viewport}
@@ -108,6 +108,40 @@ describe "compute_layout scale_permille":
                 expect(c.y).to_equal(21)
                 expect(c.w).to_equal(98)
                 expect(c.h).to_equal(48)
+            case _: assert_true(false)
+
+    it "scales a scroll container's max_height clip into device units":
+        # REGRESSION: the scroll branch clipped the ALREADY-SCALED inner_h
+        # against a max_height parsed straight off the prop, i.e. unscaled.
+        # At any non-identity scale the two sides of `inner_h > max_h` were in
+        # different units, so the comparison was meaningless: at 2.0x the
+        # content area was clipped to the 1x pixel count and a scroll view
+        # showed half as much as it was asked to.
+        #
+        # `scroll(id, max_height, ...)` takes a plain i32 from a caller with no
+        # scale knowledge — the same logical units as the x/y/w/h handed to
+        # compute_layout, which this function scales. So max_height is scaled
+        # here too, at the same place and exactly once.
+        #
+        # h=50 -> sh=100; max_height 20 -> 40 at 2.0x, so the single flex child
+        # of the scroll's vbox fills 40, not 20.
+        val sc = scroll("scale_scroll_root", 20, [label("scale_scroll_kid", "K")])
+        val rects_2x = compute_layout(sc, 0, 0, 100, 50, 2000)
+        match find_rect(rects_2x, "scale_scroll_kid"):
+            case Some(c):
+                expect(c.h).to_equal(40)
+            case _: assert_true(false)
+
+    it "leaves the scroll clip untouched at identity scale (control)":
+        # Discriminating control: at scale 1000 the scaled and unscaled
+        # max_height are the same number, so this must hold both before and
+        # after the fix — a green above cannot come from the oracle passing
+        # wholesale.
+        val sc = scroll("scale_scroll_id_root", 20, [label("scale_scroll_id_kid", "K")])
+        val rects_1x = compute_layout(sc, 0, 0, 100, 50, 1000)
+        match find_rect(rects_1x, "scale_scroll_id_kid"):
+            case Some(c):
+                expect(c.h).to_equal(20)
             case _: assert_true(false)
 
 describe "FormFactorProfile.scale_permille":
