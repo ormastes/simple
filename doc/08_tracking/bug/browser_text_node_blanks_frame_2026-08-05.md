@@ -1,6 +1,6 @@
 # Browser renders boxes pixel-exact, but any text node blanks the whole frame
 
-**Status:** OPEN
+**Status:** Defect 1 FIXED 2026-08-06 (see Resolution below); Defect 2 still OPEN
 **Found:** 2026-08-05
 **Component:** `src/lib/gc_async_mut/gpu/browser_engine/`
 **Attribution:** Rust bootstrap seed (`bin/simple` prints the seed banner). The
@@ -86,3 +86,56 @@ again (0).
 Ceilings hit while measuring: two runs died at a 10-minute wall clock (exit
 143/144) at load 24-49; they completed only when relaunched with `setsid nohup`
 and polled.
+
+## Resolution (2026-08-06)
+
+**Defect 1 (severe, box disappearing) is fixed.** The root cause was NOT the
+"`text_painter.spl` unreferenced" candidate above -- the real production entry
+point (`render_html_to_pixels_with_viewport` ->
+`simple_web_engine2d_renderer.spl`'s `simple_web_engine2d_render_html_pixels`)
+routes any HTML containing `<p`/`<h1`/etc. straight to
+`simple_web_layout_render_html_pixels_engine2d`, the real parse -> style ->
+layout -> paint pipeline in `simple_web_html_layout_renderer_*.spl`. That
+pipeline's paint pass calls a per-call-site budget guard,
+`_web_budget_expired_at(WEB_BUDGET_SITE_*)`, at 7 call sites across
+`simple_web_html_layout_renderer_layout.spl` and
+`..._paint_layout.spl` -- but neither that function nor the `WEB_BUDGET_SITE_*`
+constants it needs existed in `simple_web_html_layout_renderer_foundation.spl`.
+Every render that reached the real layout/paint pipeline (any page with a text
+tag, i.e. every real page) hit an unresolved symbol and came back blank --
+including sibling boxes whose geometry had already been correctly computed.
+This is what "box disappears when a `<p>` is added" actually was.
+
+Fixed by adding `_web_budget_expired_at(site: i32) -> bool` (delegating to the
+existing `_web_budget_expired()`) and the seven `WEB_BUDGET_SITE_*` constants to
+`simple_web_html_layout_renderer_foundation.spl`, plus the previously-missing
+`simple_web_layout_last_render_degrade_reason()` accessor another call site
+needed. No shortcuts: `site` is threaded through for future per-site
+diagnostics, not stubbed away, and the guard still performs a real wall-clock
+check -- it does not always return `false`.
+
+**Verified, not mocked:**
+- `browser_renderer_smoke_spec.spl`: was `4 total, 3 passed, 1 failed`
+  (per the table above), now `4 total, 4 passed, 0 failed`.
+- Direct pixel reproduction of this doc's own repro case, via
+  `render_html_to_pixel_array`, at the SAME 32x24 viewport used above:
+  `box only -> nonbg=120` (unchanged), `<p>Hello, World!</p>` alone ->
+  `nonbg=57` (was 0), `box + <p>Hello, World!</p>` combined -> `nonbg=120`
+  (box fully preserved; was 0 -- the severe "box disappears" failure mode is
+  gone).
+- The combined case's text itself does not appear at 32x24 with default `<p>`
+  margins -- this is genuine box-model layout, not a bug: a `<p>` carries
+  browser-default top/bottom margin, and 6px box + margins pushes the text's
+  content box below the 24px-tall viewport (`y >= fbh` at the paint-pass
+  guard, `simple_web_html_layout_renderer_paint_layout.spl:996`). Confirmed by
+  re-rendering the same combined HTML at 200x100 (`nonbg=430`, text visible)
+  and at 32x24 with `margin:0` applied (`nonbg=232`, text visible). A real
+  "Hello, World!" page at a normal viewport size renders text and boxes
+  together correctly today.
+
+**Not investigated further (out of scope for this fix):** Defect 2 (`<style>`
+class selectors) below, and the pre-existing CSS-bounds failures in the wider
+`browser_renderer_spec.spl` (rule cap / variable expansion / 256-declaration
+limit) -- that spec times out under the tree-walk interpreter within a 5-minute
+budget (a known, separate perf gap; see `.claude/rules/testing.md`) and was not
+re-run to completion here.

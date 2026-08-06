@@ -36,23 +36,45 @@ struct SimpleWebBackdropAdmission:
     realized_blur_px: i64
     realized_saturation_milli: i64
 
+fn _simple_web_backdrop_rejected() -> SimpleWebBackdropAdmission:
+    SimpleWebBackdropAdmission(
+        admitted: false, realized_blur_px: 0, realized_saturation_milli: 0)
+
+# `blur(Npx)` alone is legitimate CSS (`saturate(...)` is not required
+# alongside `backdrop-filter: blur(...)`) — this admits that single-term
+# form, defaulting realized saturation to 100% (no-op), in addition to the
+# already-admitted two-term `blur(Npx) saturate(M%)` form. See
+# doc/08_tracking/bug/2026-08-05_wm_content_frame_web_provenance_unreachable_via_widget_panel.md
+# — before this, every one-term `blur(...)`-only declaration in
+# glass_css_components.spl (17 of 21 `backdrop-filter:` declarations,
+# including `.widget-panel`, the WM content wrapper's own class) was
+# unconditionally rejected, making the canonical WM content-frame wrapper
+# unreachable end to end regardless of caller content.
 fn simple_web_backdrop_admission(backdrop: text) -> SimpleWebBackdropAdmission:
     val terms = backdrop.split(" ")
-    if terms.len() != 2:
+    if terms.len() == 1:
+        val blur_term = terms[0]
+        if not blur_term.starts_with("blur(") or not blur_term.ends_with("px)"):
+            return _simple_web_backdrop_rejected()
+        val blur_text = blur_term.slice(5, blur_term.len() - 3)
+        val blur = blur_text.to_i64()
+        if blur == nil or blur < 0 or blur > 1000000:
+            return _simple_web_backdrop_rejected()
+        if backdrop != "blur({blur}px)":
+            return _simple_web_backdrop_rejected()
         return SimpleWebBackdropAdmission(
-            admitted: false, realized_blur_px: 0,
-            realized_saturation_milli: 0)
+            admitted: true,
+            realized_blur_px: if blur > 4: 4 else: blur,
+            realized_saturation_milli: 1000)
+    if terms.len() != 2:
+        return _simple_web_backdrop_rejected()
     val blur_term = terms[0]
     val saturation_term = terms[1]
     if not blur_term.starts_with("blur(") or not blur_term.ends_with("px)"):
-        return SimpleWebBackdropAdmission(
-            admitted: false, realized_blur_px: 0,
-            realized_saturation_milli: 0)
+        return _simple_web_backdrop_rejected()
     if (not saturation_term.starts_with("saturate(") or
         not saturation_term.ends_with("%)")):
-        return SimpleWebBackdropAdmission(
-            admitted: false, realized_blur_px: 0,
-            realized_saturation_milli: 0)
+        return _simple_web_backdrop_rejected()
     val blur_text = blur_term.slice(5, blur_term.len() - 3)
     val saturation_text = saturation_term.slice(9, saturation_term.len() - 2)
     val blur = blur_text.to_i64()
@@ -60,13 +82,9 @@ fn simple_web_backdrop_admission(backdrop: text) -> SimpleWebBackdropAdmission:
     if (blur == nil or saturation_percent == nil or blur < 0 or
         blur > 1000000 or saturation_percent < 0 or
         saturation_percent > 300):
-        return SimpleWebBackdropAdmission(
-            admitted: false, realized_blur_px: 0,
-            realized_saturation_milli: 0)
+        return _simple_web_backdrop_rejected()
     if backdrop != "blur({blur}px) saturate({saturation_percent}%)":
-        return SimpleWebBackdropAdmission(
-            admitted: false, realized_blur_px: 0,
-            realized_saturation_milli: 0)
+        return _simple_web_backdrop_rejected()
     SimpleWebBackdropAdmission(
         admitted: true,
         realized_blur_px: if blur > 4: 4 else: blur,
@@ -211,6 +229,19 @@ pub fn web_budget_now_and_deadline() -> text:
 pub fn simple_web_layout_last_render_degraded() -> bool:
     _web_render_degraded
 
+# Short diagnostic suffix for the degrade_reason field callers append to their
+# "reason=budget-exhausted:" receipt string (see simple_web_html_layout_renderer.spl).
+# Until 2026-08-05 this function did not exist at all -- both call sites
+# referenced an undefined symbol, so any render that took the degraded-result
+# branch (which the _web_budget_expired_at fix above now reaches whenever the
+# wall-clock budget actually trips) failed to compile/resolve. Empty when the
+# last render was not degraded, matching simple_web_layout_last_render_degraded().
+pub fn simple_web_layout_last_render_degrade_reason() -> text:
+    if _web_render_degraded:
+        "deadline-exceeded"
+    else:
+        ""
+
 # Arm the budget for a fresh render: record the deadline and clear the flag.
 # A budget_ms that is <= 0, or that is still the module default (i.e. the
 # caller went through the public entry point's default arg rather than
@@ -270,6 +301,38 @@ fn _web_budget_expired() -> bool:
         _web_render_degraded = true
         return true
     false
+
+# Per-call-site identifiers for the budget guard below. Every layout/paint
+# pass in simple_web_html_layout_renderer_layout.spl and
+# simple_web_html_layout_renderer_paint_layout.spl names its own guard call
+# site so a degraded-render diagnosis can attribute which pass broke on the
+# deadline. Values only need to be distinct.
+val WEB_BUDGET_SITE_LAYOUT_SUBTREE: i32 = 1
+val WEB_BUDGET_SITE_PAINT_BACKGROUNDS: i32 = 2
+val WEB_BUDGET_SITE_PAINT_RELATIVE_ROOTS: i32 = 3
+val WEB_BUDGET_SITE_PAINT_ABSOLUTE_LOW_Z: i32 = 4
+val WEB_BUDGET_SITE_PAINT_ABSOLUTE_HIGH_Z: i32 = 5
+val WEB_BUDGET_SITE_PAINT_SCROLLBARS: i32 = 6
+val WEB_BUDGET_SITE_PAINT_TEXT: i32 = 7
+
+# Site-tagged wrapper the layout/paint passes above actually call. Until
+# 2026-08-05 this function and the WEB_BUDGET_SITE_* constants above did not
+# exist at all -- every _web_budget_expired_at(SITE) call site (7 of them,
+# added across simple_web_html_layout_renderer_layout.spl and
+# simple_web_html_layout_renderer_paint_layout.spl to fix an earlier "one slow
+# text node erases a sibling box" budget bug, see the comment on
+# _web_budget_rearm above and on the paint-pass-2 guard below) referenced an
+# undefined function/undefined constants. Any render that reached this file's
+# layout or paint pass (i.e. any HTML containing a tag the fast heuristic
+# route does not recognize, including a bare <p> text node) hit this
+# unresolved symbol and produced a blank frame -- including sibling boxes
+# that had already laid out and would otherwise have painted correctly. See
+# doc/08_tracking/bug/browser_text_node_blanks_frame_2026-08-05.md Defect 1.
+# `site` is accepted for future per-site diagnostics/partial-budget
+# attribution; the expiry check itself is the single shared wall-clock
+# deadline armed by _web_budget_begin/_web_budget_rearm above.
+fn _web_budget_expired_at(site: i32) -> bool:
+    _web_budget_expired()
 
 # ---------------------------------------------------------------------------
 # Flat node arena
