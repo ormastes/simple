@@ -1,0 +1,116 @@
+# Packed span ABI (F2) — validated, generation-checked views over packed
+# buffers, per doc plan §4.2 ("Simple WM/GUI/Web/2D Rendering Performance").
+#
+# `BufferSpanRef` is a safe HANDLE, never a raw host pointer. A registry
+# resolves a ref against the registered backing object exactly once per
+# submitted batch; a stale generation or any bounds/stride mismatch REFUSES
+# with a typed code. FAIL-CLOSED: there is no silent fallback path — a
+# caller that cannot obtain a valid resolution must route to the scalar
+# oracle explicitly and must not claim packed/SIMD execution.
+#
+# Interpreter note: the tree-walk interpreter cannot expose a raw packed
+# pointer for `[u32]` storage. This module therefore validates the VIEW
+# (slot, generation, bounds, stride) in pure Simple; a native (C, never
+# Rust) resolve that turns an OK verdict into `void*` base + byte length is
+# a later, separate runtime addition. Until it exists, an OK verdict means
+# "the window is valid for checked indexed access", nothing more.
+
+# Verdict codes (plain integers — see the enum-match engine-divergence bugs
+# filed 2026-08-06; integer codes behave identically on every engine).
+val PACKED_SPAN_OK: i64 = 0
+val PACKED_SPAN_STALE_GENERATION: i64 = 1
+val PACKED_SPAN_BAD_SLOT: i64 = 2
+val PACKED_SPAN_OUT_OF_BOUNDS: i64 = 3
+val PACKED_SPAN_BAD_STRIDE: i64 = 4
+val PACKED_SPAN_EMPTY: i64 = 5
+
+struct BufferSpanRef:
+    object_slot: u32
+    object_generation: u32
+    byte_offset: u32
+    byte_length: u32
+    element_count: u32
+    element_stride: u32
+
+# Registry of packed backing objects. One per session. Every column is a
+# top-level field (parallel arrays) — no nested class fields, per the
+# verified interpreter class-field value-copy divergence documented in
+# `ui_scene_arena.spl`.
+class PackedSpanRegistry:
+    slot_byte_len: [u32]
+    slot_generation: [u32]
+    slot_live: [u32]
+    slot_count: i64
+
+    static fn create(capacity: i64) -> PackedSpanRegistry:
+        var lens: [u32] = []
+        var gens: [u32] = []
+        var live: [u32] = []
+        var i = 0
+        while i < capacity:
+            lens.push(0)
+            gens.push(0)
+            live.push(0)
+            i = i + 1
+        PackedSpanRegistry(slot_byte_len: lens, slot_generation: gens, slot_live: live, slot_count: capacity)
+
+    # Register a backing object of `byte_length` bytes. Returns the slot, or
+    # -1 when the registry is full (fail closed — never overwrite a live slot).
+    me register(byte_length: u32) -> i64:
+        var i = 0
+        while i < self.slot_count:
+            if self.slot_live[i] == 0:
+                self.slot_byte_len[i] = byte_length
+                self.slot_generation[i] = self.slot_generation[i] + 1
+                self.slot_live[i] = 1
+                return i
+            i = i + 1
+        -1
+
+    me generation_of(slot: i64) -> u32:
+        if slot < 0 or slot >= self.slot_count:
+            return 0
+        self.slot_generation[slot]
+
+    # Invalidate a slot: every outstanding ref against it becomes stale.
+    me invalidate(slot: i64) -> bool:
+        if slot < 0 or slot >= self.slot_count:
+            return false
+        if self.slot_live[slot] == 0:
+            return false
+        self.slot_live[slot] = 0
+        self.slot_generation[slot] = self.slot_generation[slot] + 1
+        true
+
+    # The single validation gate. One call per submitted batch, not per pixel.
+    me resolve(r: BufferSpanRef) -> i64:
+        val slot = r.object_slot as i64
+        if slot < 0 or slot >= self.slot_count:
+            return PACKED_SPAN_BAD_SLOT
+        if self.slot_live[slot] == 0:
+            return PACKED_SPAN_STALE_GENERATION
+        if self.slot_generation[slot] != r.object_generation:
+            return PACKED_SPAN_STALE_GENERATION
+        if r.element_stride == 0:
+            return PACKED_SPAN_BAD_STRIDE
+        if r.element_count == 0 or r.byte_length == 0:
+            return PACKED_SPAN_EMPTY
+        if r.element_count * r.element_stride != r.byte_length:
+            return PACKED_SPAN_BAD_STRIDE
+        val end = (r.byte_offset as i64) + (r.byte_length as i64)
+        if end > (self.slot_byte_len[slot] as i64):
+            return PACKED_SPAN_OUT_OF_BOUNDS
+        PACKED_SPAN_OK
+
+fn packed_span_make(slot: i64, generation: u32, byte_offset: u32, element_count: u32, element_stride: u32) -> BufferSpanRef:
+    BufferSpanRef(
+        object_slot: slot as u32,
+        object_generation: generation,
+        byte_offset: byte_offset,
+        byte_length: element_count * element_stride,
+        element_count: element_count,
+        element_stride: element_stride)
+
+export PackedSpanRegistry, BufferSpanRef, packed_span_make
+export PACKED_SPAN_OK, PACKED_SPAN_STALE_GENERATION, PACKED_SPAN_BAD_SLOT
+export PACKED_SPAN_OUT_OF_BOUNDS, PACKED_SPAN_BAD_STRIDE, PACKED_SPAN_EMPTY
