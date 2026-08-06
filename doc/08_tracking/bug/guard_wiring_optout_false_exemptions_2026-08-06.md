@@ -16,8 +16,12 @@ Line 22 exempted the core-C capsule gate as a *"hardware/emulator lane; needs
 QEMU, an FPGA or a physical dev board."* That was false — the gate needs only
 `cc`, `ar` and `nm` — and it had been RED at `origin/main` the entire time.
 
-This audit asked how many other entries are false. **The answer is: at least 23,
-of which 8 are RED and 2 are worse than RED — they are fail-open.**
+This audit asked how many other entries are false. **The answer is: at least 20
+— 10 whose gate is GREEN, 8 whose gate is RED, and 2 worse than RED because they
+are fail-open.** 23 reason texts were corrected in total; the other 3 name a real
+dependency that the old text got wrong (a live HTTP endpoint, a missing driver
+argument, a disk-reclamation report that is not a gate at all), which is a wrong
+reason rather than a false exemption.
 
 ## The family, enumerated
 
@@ -56,7 +60,7 @@ guard set (444 guards under `scripts/check/`, `scripts/audit/`, `scripts/*.shs`)
 
 ## Verdicts
 
-### FALSE EXEMPTION, gate is GREEN (13)
+### FALSE EXEMPTION, gate is GREEN (10)
 
 Ran to a real verdict on a plain Linux host with base tools only. No capability
 reason existed for any of them to sit outside CI.
@@ -73,13 +77,29 @@ reason existed for any of them to sit outside CI.
 | `check-simpleos-memory-safety-formal-proofs.shs` | 1s | `STATUS: PASS lean-proof-check project` |
 | `check-simpleos-storage-formal-proofs.shs` | 0s | `STATUS: PASS` |
 | `check-simpleos-ui-policy-formal-proofs.shs` | 1s | `STATUS: PASS` |
-| `check-simpleos-mission-critical-prereqs.shs` | 0s | `STATUS: PASS missing=none` |
-| `check-keyword-identifier-bindings.shs` | 3s | **wired in this change** — see below |
-| `qemu-storage-audit.shs` | 5s | disk-reclamation report, not a gate |
 
 None of these needs QEMU, an FPGA, a board, a GPU, a display or a browser.
-Six of them are *formal-proof artifact checks* — text over checked-in proof
+Five of them are *formal-proof artifact checks* — text over checked-in proof
 files.
+
+**Toolchain re-test (the second-pass correction).** This dev host has
+`lean`, `lake`, `yosys` and `sby` installed, so "ran green here" could have meant
+"quietly used a toolchain a checkout-only runner lacks" — the same error shape as
+the `nvcc` case. Every entry above was therefore re-run with `~/.elan/bin` and
+`~/.local/bin` stripped from `PATH`. **All ten still pass**, including the five
+`*-formal-proofs.shs` gates (`STATUS: PASS`) and `check-riscv-rtl-truth.shs`.
+
+**One entry failed that re-test and was corrected a second time:**
+`check-simpleos-mission-critical-prereqs.shs` exits 1 with
+`STATUS: FAIL simpleos-mission-critical-prereqs missing=sby,yosys`. Its hardware
+reason was false, but so was the first correction — it genuinely needs the
+SymbiYosys formal toolchain. Its entry now says so.
+
+Two entries counted in an earlier draft are deliberately **not** counted as
+false exemptions: `check-keyword-identifier-bindings.shs` (its reason was
+honest and named its own precondition — see "Fixed in this change") and
+`qemu-storage-audit.shs` (a disk-reclamation report, not a gate at all; its
+reason was wrong but a non-gate cannot be a falsely-exempted gate).
 
 ### FALSE EXEMPTION, gate is RED (8) — the capsule incident class
 
@@ -219,7 +239,7 @@ exemptions honest was this lane's deliverable.
 ## Rule this establishes
 
 A bulk-applied exemption reason is a *hypothesis*, not a fact. The 2026-08-01
-seeding assigned 6 reason strings to 347 guards by pattern, and at least 23 of
+seeding assigned 6 reason strings to 347 guards by pattern, and at least 20 of
 those assignments were wrong. **Test an exemption by running the thing.** A
 reason that names a resource the script never invokes is a false exemption, and
 a false exemption is how a RED gate stays invisible.
