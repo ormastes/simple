@@ -44,10 +44,24 @@ for spec in $SPECS; do
     SPEC_TIMEOUT="$TIMEOUT"
     case "$spec" in
         *compositor_occlusion_spec.spl)
-            # Confirmed non-hanging (Duration: 130637ms, 10/10 passed) but slow;
-            # give it headroom above the default 150s without adopting the
-            # spec header's stale 7200s recommendation.
-            [ "$SPEC_TIMEOUT" -lt 450 ] && SPEC_TIMEOUT=450
+            # Confirmed non-hanging: a direct `bin/simple run` of
+            # test/perf/graphics_2d/bench_occlusion_cull.spl (same code path,
+            # bypasses bin/simple test's internal 120s default entirely) gave
+            # a load-independent phase breakdown: the 3 pixel-content example
+            # pairs cost ~30s each (2 full 200x150=30000px interpreter-bound
+            # renders), the 8 non-pixel pairs cost ~1.2-1.6s each, wall clock
+            # matched the arithmetic sum plus ~8s compile/load overhead (43s
+            # total for 4 cases run standalone) -- consistent, bounded,
+            # non-quadratic per-op cost, not a hang or runaway growth. This
+            # matches the earlier clean standalone run (130637ms, 10/10
+            # passed). The prior 450s budget was previously observed to be
+            # insufficient under heavy contention (load avg 14, swap 100%
+            # full) where swap-thrashing multiplies wall time well past the
+            # bounded algorithmic cost without any code defect. Widen to 1200s
+            # (~9x the clean-run baseline) as defensible headroom against
+            # contention while still well under the spec header's stale
+            # 7200s figure.
+            [ "$SPEC_TIMEOUT" -lt 1200 ] && SPEC_TIMEOUT=1200
             ;;
     esac
     timeout "$SPEC_TIMEOUT" bin/simple test "$spec" --no-cache --no-cover-check >"$LOG" 2>&1
