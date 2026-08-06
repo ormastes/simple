@@ -3,8 +3,14 @@
 - **ID:** simpleos_freestanding_kernel_elf32_wrap_and_weak_gate_overbroad_2026-08-06
 - **Status:** Two root causes FIXED and verified (kernel now builds ELF64 and
   passes both host-side gates, boots through L1-L3 under real OVMF pflash). A
-  third, downstream, separate blocker remains OPEN: the in-guest `/usr/bin/simple
-  /hello.spl` FS-exec run exits `rc=70` with no output — not yet root-caused.
+  third, downstream, separate blocker remains OPEN: the in-guest
+  `/usr/bin/simple /hello.spl` FS-exec run exits `rc=70`. Narrowed (not fixed):
+  the process DOES print a diagnostic before exiting (`Runtime error: str.clear
+  was called on a receiver that is not text ... receiver=0x0`) — the original
+  "no output" observation was a serial-tail-truncation artifact, not the real
+  behavior. Root cause is a codegen/runtime dispatch-gap defect in the guest
+  interpreter's own parser/lexer frontend, not a kernel/ABI/FS-exec defect. See
+  "Root cause #3" below.
 - **Severity:** high — was blocking every OVMF-pflash + GRUB-EFI + multiboot1
   x86_64 freestanding kernel build (`ssh_simple_hello_uefi.shs`,
   `ssh_lld_link_uefi.shs`, `build_clang_disk.shs`, `build_fsexec_prod_ring3.shs`),
@@ -139,23 +145,142 @@ Serial log for the exec attempt:
 [sshd] ring3 deferred heap-stream spawn returned rc=70; accept loop continues
 ```
 
-## Open: root cause #3 (NOT fixed, not yet root-caused)
+## Root cause #3 (NARROWED, still open): dispatch-gap refusal fires with a nil receiver on every script, before any user output
 
-The kernel boots correctly (L1-L3) and FS-exec correctly resolves, streams,
-and maps `/usr/bin/simple` into a ring-3 address space and enters user mode at
-the right RIP — but the process exits `rc=70` with no
-`"hello from simple on simpleos"` output and no crash/fault log line before
-the exit. `70` is the classic `EX_SOFTWARE` (BSD sysexits.h) value; whether
-that's this kernel's convention or an incidental coincidence has not been
-checked. Candidate causes not yet ruled out: the interpreter's own startup
-path failing before its first print (e.g. an ABI mismatch consistent with the
-already-tracked
-`doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`
-family, though that bug is a segv not a clean rc=70 exit); a missing syscall
-(one of the weak `-ENOSYS` stubs from root cause #2, now actually exercised at
-program-startup rather than at print-time) causing the runtime to bail out
-cleanly instead of print-then-exit. This needs its own investigation session;
-not chased further here given scope.
+**Update 2026-08-06 (follow-up session):** root-caused far enough to identify
+the exact defect *class*, though not yet the single offending call site or a
+fix.
+
+### The "no output" framing was wrong
+
+The original report above said rc=70 came "with no crash/fault log line
+before the exit." That was a harness artifact, not the truth: the harness's
+serial-tail summary (`sed ... | tail -40`) is dominated by post-exit TCP/ARP
+noise, which pushed the actual diagnostic line off-screen, and the earlier
+pass never grepped for `Runtime error`. The line is there. Full verbatim
+transcript, `build/os/ssh_simple_hello_uefi.serial.log` lines 592-607 (fresh
+run against a rebuilt kernel + rebuilt `/usr/bin/simple`, host FS-exec path
+unchanged from the original report):
+
+```
+[spawn] stream+heap path=/usr/bin/simple hdr_len=456 file_len=2305016
+[spawn] parsed entry=0x1073741824
+[spawn] user AS ready (private low) root=402755584
+[spawn] phoff=64 phentsize=56 phnum=7 use_stream=1
+[spawn] image span lo=0x1073741824 hi=0x1076224000
+[spawn] PT_LOAD segments mapped
+[spawn] frame argc readback=2 expected=2
+[spawn] user stack mapped top=0x549757911040 pages=2048 rsp=0x549757910800
+[spawn] user heap mapped base=0x618475290624 pages=131072
+[spawn] entering user cs=0x2b iopl=3 rip=0x1073741824 rsp=0x549757910800
+[sc] open path=/hello.spl
+[vfs] open /hello.spl -> NVMe read 39 bytes
+[simpleos-cpl] phase=post-read cs=0x2b cpl=3
+Runtime error: str.clear was called on a receiver that is not text. This
+method has no compiled implementation for that receiver type -- a
+code-generation dispatch gap, not a program error. Refusing to substitute a
+value. receiver=0x0
+[syscall] exit status=70
+[spawn] ring3 program exited rc=70 (kernel resumed)
+```
+
+### `70` is `NOT_FOUND_EXIT_CODE`/dispatch-gap-refusal, confirmed not incidental
+
+`nm bin/release/x86_64-unknown-simpleos/simple` has no `rt_function_not_found`
+/ `rt_method_not_found` symbols, so the Rust-runtime abort path
+(`src/compiler_rust/runtime/src/value/sffi/error_handling.rs`) is not linked
+into this binary — it is compiled purely from `src/compiler` (pure Simple) +
+`src/runtime/runtime_native.c` (the C runtime), confirmed via `nm` showing
+`compiler__frontend__...`/`compiler__mir_opt__...` symbols and musl-style libc
+symbols (`printf`, `simpleos_syscall`, ...). In `runtime_native.c` there are
+exactly two `exit(70)` call sites, both inside the single function
+`rt_refuse_non_text_receiver(method, receiver)` (originally
+`rt_refuse_non_text_receiver(const char* method)`, no receiver arg — see fix
+below), called from 8 sites: `rt_reverse`/`rt_reverse_mut` ("rev"/"reverse"),
+`rt_take`, `rt_drop`, `rt_string_sorted`, `rt_string_partition_at`, `rt_pop`,
+and `rt_clear`. This is the SAME documented dispatch-gap-refusal mechanism as
+root cause #2's weak-symbol stubs: `rt_clear`'s dispatch table is keyed on
+method NAME only (no receiver type), so any `.clear()` call whose receiver the
+compiler could not statically resolve to Array or String reaches this generic
+C entry point, and `rt_core_as_array`/`rt_core_as_string` (both reject
+`raw < 4096`, i.e. reject nil) refuse it.
+
+### The message names `str.clear`, but the message wording is generic boilerplate
+
+`rt_refuse_non_text_receiver`'s wording always says `"str.%s"` regardless of
+what actually failed — it is the fallback for `.clear()` reached with ANY
+non-array/non-string receiver, not evidence the call site intended a text
+receiver. `simpleos_interpret_file("/hello.spl")` runs
+`parse_and_build_module` -> `desugar_module` -> `desugar_collections_static`
+-> `HirLowering.lower_module` -> `InterpreterBackendImpl.interpret_hir_module`
+before any print, and the compiler's own frontend (parser/lexer) uses the
+`X.clear()` idiom pervasively on `[text]`-typed state, e.g.
+`src/compiler/10.frontend/core/parser.spl:229-237`
+(`if par_errors == nil: par_errors = [] ` then `par_errors.clear()`, same
+shape for `par_warnings`, `par_struct_names`) and
+`src/compiler/10.frontend/core/lexer_struct.spl:365,375`
+(`self.slice_parts.clear()`, field typed `[text]`) and
+`src/compiler/10.frontend/core/lexer.spl:743-746`. This fires on a 1-line
+`print(...)` script with no input-dependent branching, so whichever call site
+is responsible, it fires on EVERY script this interpreter runs — this is not
+`/hello.spl`-specific.
+
+### Diagnostic added to discriminate "nil global" vs "mistagged garbage" — result: genuinely nil
+
+Added a `receiver` argument to `rt_refuse_non_text_receiver` so the abort
+message prints the raw receiver word
+(`src/runtime/runtime_native.c:4074-4082`, all 9 call sites updated to pass
+their receiver). Rebuilt: cross-compiled `runtime_native.o` for
+`x86_64-unknown-none-elf` with the same flags `src/os/port/llvm/sysroot.shs`
+uses, merged into `build/os/sysroot/lib/libsimple_runtime_native.a`, then ran
+`scripts/os/simpleos-native-build.shs` (rebuilds
+`bin/release/x86_64-unknown-simpleos/simple`, 723 objects, 0 failed) and
+reran `ssh_simple_hello_uefi.shs` end-to-end (fresh kernel rebuild too).
+
+Result: `receiver=0x0` — i.e. the value handed to `rt_clear` really is the
+untagged integer zero, not a mistagged non-nil pointer/struct (which would
+have shown a non-zero hex value that fails `rt_core_as_array`'s `kind`/`cap`
+checks instead of its `raw < 4096` early-out). This rules out "wrong-typed but
+present" receivers (e.g. an erased Dict/class instance reaching the array/text
+dispatch) and narrows the defect to: **the collection this `.clear()` targets
+is genuinely absent/uninitialized (0) at the call site**, consistent with
+either (a) the module-level `if X == nil: X = []` guard's assignment not
+happening before the immediately-following `.clear()` (a nil-guard that
+doesn't fire for some other reason), or (b) the guard's assignment happening
+but the store not being visible to the very next statement's read of the same
+module global under this native/freestanding codegen path — the same general
+"module-level global write not observed by an immediately co-located read"
+shape as the already-tracked
+`reference_jit_module_level_val_from_function_call_reads_zero` family, though
+that family is about cross-function calls, not same-function
+store-then-immediate-load, so this may be a distinct instance rather than the
+same bug.
+
+### Not yet done (deep codegen bug, out of scope for this pass)
+
+- **Which exact `.clear()` call site fires is still unknown.** At least three
+  shapes are candidates (module-level `var` in `parser.spl`, a struct field in
+  `lexer_struct.spl`, module-level arrays in `lexer.spl`) and they go through
+  different codegen paths (module global vs. struct field), so the fix (if
+  there is one root cause) is not yet targeted. Pinning this down needs either
+  a debug build with call-site-identifying instrumentation (e.g. threading a
+  `__LINE__`/site tag into `rt_clear`'s call sites) or single-stepping under
+  the kernel's own debug facilities — not done here.
+- **No fix landed for the underlying codegen defect.** Only the
+  diagnostic (`receiver=` in the error message) is a net-positive, permanent
+  improvement — it is generically useful for any future dispatch-gap refusal,
+  not a workaround.
+- `/usr/bin/simple --version` (which returns at `main.spl:70`, before ever
+  touching the parser/lexer) was not tried as a cheaper isolating boot in this
+  pass — it would confirm argv/env delivery and process startup are sound
+  independent of the parser bug, and is a fast follow-up.
+
+AC-6 (in-guest `/usr/bin/simple --version` + hello-world compile) therefore
+**still does not PASS**. What is now proven, not just plausible: L1-L4a
+(firmware/kernel/sshd/FS-exec/ELF-load/ring-3-entry) are all sound; the
+failure is a codegen/runtime dispatch-gap defect in the guest interpreter's
+own frontend (parser/lexer `.clear()` on a collection that reads back as nil),
+not a kernel, ABI, syscall, or FS-exec defect.
 
 ## Files changed
 
@@ -167,3 +292,7 @@ not chased further here given scope.
 - `scripts/os/build_fsexec_stream_ring3.shs`, `build_clang_stream_ring3.shs`,
   `build_clang_over_ssh.shs`, `ssh_clang_hello_ring3.shs`, `abi_probe_run.shs`
   (opt-in ELF32 wrap preserved for their legacy QEMU `-kernel` boot paths)
+- `src/runtime/runtime_native.c` (root cause #3 diagnostic: added a `receiver`
+  argument to `rt_refuse_non_text_receiver` and its 9 call sites, so a
+  dispatch-gap refusal now prints the actual receiver word — a permanent
+  diagnostic improvement, not a workaround; the underlying defect is unfixed)

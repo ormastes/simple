@@ -4071,13 +4071,13 @@ int64_t rt_string_substr_from(int64_t value, int64_t start) {
  * wrong receiver. Returning a plausible-looking value there is how this whole
  * bug started. These names had no compiled implementation at all before, so
  * exiting is exactly as loud as the behaviour it replaces, never quieter. */
-static void rt_refuse_non_text_receiver(const char* method) {
+static void rt_refuse_non_text_receiver(const char* method, int64_t receiver) {
     fprintf(stderr,
             "Runtime error: str.%s was called on a receiver that is not text. "
             "This method has no compiled implementation for that receiver type -- "
             "a code-generation dispatch gap, not a program error. Refusing to "
-            "substitute a value.\n",
-            method);
+            "substitute a value. receiver=0x%llx\n",
+            method, (unsigned long long)receiver);
     exit(70);
 }
 
@@ -4121,7 +4121,7 @@ int64_t rt_reverse(int64_t receiver) {
         return (int64_t)(uintptr_t)out;
     }
     RtCoreString* s = rt_core_as_string(receiver);
-    if (!s) rt_refuse_non_text_receiver("rev");
+    if (!s) rt_refuse_non_text_receiver("rev", receiver);
     return rt_string_reverse_chars(s);
 }
 
@@ -4159,7 +4159,7 @@ int64_t rt_reverse_mut(int64_t receiver) {
         return receiver;
     }
     RtCoreString* s = rt_core_as_string(receiver);
-    if (!s) rt_refuse_non_text_receiver("reverse");
+    if (!s) rt_refuse_non_text_receiver("reverse", receiver);
     return rt_string_reverse_chars(s);
 }
 
@@ -4271,7 +4271,7 @@ int64_t rt_take(int64_t receiver, int64_t n) {
         return (int64_t)(uintptr_t)out;
     }
     RtCoreString* s = rt_core_as_string(receiver);
-    if (!s) rt_refuse_non_text_receiver("take");
+    if (!s) rt_refuse_non_text_receiver("take", receiver);
     uint64_t e = 0;
     int64_t taken = 0;
     while (e < s->len && taken < n) { e += rt_utf8_width(s->data, e, s->len); taken++; }
@@ -4293,7 +4293,7 @@ int64_t rt_drop(int64_t receiver, int64_t n) {
         return (int64_t)(uintptr_t)out;
     }
     RtCoreString* s = rt_core_as_string(receiver);
-    if (!s) rt_refuse_non_text_receiver("drop");
+    if (!s) rt_refuse_non_text_receiver("drop", receiver);
     uint64_t b = 0;
     int64_t skipped = 0;
     while (b < s->len && skipped < n) { b += rt_utf8_width(s->data, b, s->len); skipped++; }
@@ -4309,7 +4309,7 @@ int64_t rt_drop(int64_t receiver, int64_t n) {
  * leaves array `sorted` exactly as unwired as it already is. */
 int64_t rt_string_sorted(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) rt_refuse_non_text_receiver("sorted");
+    if (!s) rt_refuse_non_text_receiver("sorted", value);
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     /* Collect codepoint spans, insertion-sort them by codepoint value, emit. */
     uint64_t n = 0;
@@ -4352,7 +4352,7 @@ int64_t rt_string_sorted(int64_t value) {
  * partition and the LAST slot for rpartition, matching the interpreter arms. */
 static int64_t rt_string_partition_at(int64_t value, int64_t sep_value, int from_end, const char* who) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) rt_refuse_non_text_receiver(who);
+    if (!s) rt_refuse_non_text_receiver(who, value);
     RtCoreString* sep = rt_core_as_string(sep_value);
     SplArray* out = rt_array_new(3);
     if (!out) return rt_core_nil();
@@ -6635,7 +6635,7 @@ int64_t rt_pop(int64_t receiver) {
     if (arr) return rt_array_pop(arr);
 
     RtCoreString* s = rt_core_as_string(receiver);
-    if (!s) rt_refuse_non_text_receiver("pop");
+    if (!s) rt_refuse_non_text_receiver("pop", receiver);
     /* Text pops the last CHARACTER, not the last byte: slicing a byte off a
      * multi-byte codepoint would emit invalid UTF-8.
      *
@@ -6672,7 +6672,7 @@ int64_t rt_clear(int64_t receiver) {
         rt_array_clear(arr);
         return receiver;
     }
-    if (!rt_core_as_string(receiver)) rt_refuse_non_text_receiver("clear");
+    if (!rt_core_as_string(receiver)) rt_refuse_non_text_receiver("clear", receiver);
     return rt_string_new((const uint8_t*)"", 0);
 }
 

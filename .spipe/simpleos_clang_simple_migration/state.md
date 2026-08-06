@@ -288,3 +288,53 @@ dev-done → implement (in progress)
   family though that's a segv not a clean exit; or a now-exercised weak
   ENOSYS syscall stub from fix #2 causing an early clean bail before the
   first print) — not chased further this session given scope.
+- AC-6 rc=70 follow-up 2026-08-06 (same day, later session): narrowed root
+  cause #3, did not fix it, did not achieve AC-6 PASS. The "no output" claim
+  above was a serial-tail-truncation artifact of the harness's summary (which
+  `tail -40`s a log dominated by post-exit TCP/ARP noise) — the process DOES
+  print before exiting. Full serial transcript (`build/os/ssh_simple_hello_uefi.serial.log`
+  lines 592-607, fresh kernel + fresh `/usr/bin/simple` rebuild):
+  `[vfs] open /hello.spl -> NVMe read 39 bytes`, `[simpleos-cpl] phase=post-read
+  cs=0x2b cpl=3`, then `Runtime error: str.clear was called on a receiver that
+  is not text ... Refusing to substitute a value. receiver=0x0`, then
+  `[syscall] exit status=70`. `nm` on the binary shows no `rt_function_not_found`
+  /`rt_method_not_found` (the Rust-runtime abort path is not linked here); the
+  C runtime `src/runtime/runtime_native.c` has exactly two `exit(70)` sites,
+  both inside `rt_refuse_non_text_receiver`, the SAME generic
+  dispatch-gap-refusal mechanism as root cause #2 (dispatch tables keyed on
+  method NAME only, no receiver type) — called here from `rt_clear`, reached
+  because the receiver failed both `rt_core_as_array` and `rt_core_as_string`.
+  Added a `receiver` arg to `rt_refuse_non_text_receiver` (all 9 call sites,
+  `src/runtime/runtime_native.c`) to print the actual receiver word — a
+  permanent diagnostic improvement, landed regardless of the outcome below.
+  Rebuilt `libsimple_runtime_native.a` + `bin/release/x86_64-unknown-simpleos/simple`
+  + kernel and reran: `receiver=0x0` — genuinely nil, not a mistagged non-nil
+  value (rules out an erased Dict/class instance reaching this path; a
+  mistagged pointer would show a non-zero hex value failing the `kind`/`cap`
+  checks instead of the `raw < 4096` early-out). This fires on a bare 1-line
+  `print(...)` script with no branching, so it is input-independent — every
+  script this interpreter runs hits it, inside `simpleos_interpret_file` ->
+  `parse_and_build_module`/`desugar_module`/`HirLowering`/`InterpreterBackendImpl`,
+  before any user print. The pure-Simple frontend uses the
+  `if X == nil: X = []` then `X.clear()` idiom pervasively on `[text]`-typed
+  state (module globals in `src/compiler/10.frontend/core/parser.spl:229-237`,
+  a struct field in `src/compiler/10.frontend/core/lexer_struct.spl:365,375`,
+  module globals in `src/compiler/10.frontend/core/lexer.spl:743-746`) — one
+  of these (not yet pinned down which) is calling `.clear()` on a collection
+  that reads back as nil immediately after being guarded/assigned, the same
+  general shape as the tracked
+  `reference_jit_module_level_val_from_function_call_reads_zero` family
+  (though that family is cross-function, this is same-function
+  store-then-immediate-load, so possibly a distinct instance). **AC-6 status:
+  STILL NOT PROVEN — no `--version` transcript, no hello-world.** What is now
+  proven rather than merely plausible: the entire kernel/firmware/sshd/FS-exec/
+  ELF-load/ring-3-entry chain (L1-L4a) is sound; the remaining gap is a
+  codegen/runtime dispatch-gap defect in the guest interpreter's own
+  parser/lexer frontend, not a kernel, ABI, syscall, or FS-exec defect. Not
+  fixed this session (deep codegen bug, needs call-site-identifying
+  instrumentation or single-stepping to pin down which `.clear()` fires, out
+  of scope for this pass). Fast follow-up not yet tried: `/usr/bin/simple
+  --version` returns at `main.spl:70` before ever touching the parser — would
+  isolate argv/env/process-startup soundness from the parser bug in one cheap
+  boot. Full writeup:
+  `doc/08_tracking/bug/simpleos_freestanding_kernel_elf32_wrap_and_weak_gate_overbroad_2026-08-06.md`.
