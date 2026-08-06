@@ -226,7 +226,9 @@ directory-removal primitives it flagged as missing at every layer:
 - New `Fat32Filesystem.rmdir_at(dev, path)` — same free+mark-deleted shape,
   gated on the directory holding only `.`/`..` (`ENOTEMPTY`, new const `-39`),
   `ENOTDIR` on a file.
-- `rename_at` was NOT added — see "What's still ENOSYS" below.
+- **UPDATE 2026-08-06 (later same day):** `rename_at` WAS added — see
+  "`rename` now real" below, which supersedes "`rename` deliberately left
+  ENOSYS" further down this doc.
 
 **`src/os/kernel/boot/boot_fs_mount.spl`**
 - `boot_fs_mount_fat32_from_device` now does more than validate the BPB: on a
@@ -339,7 +341,56 @@ describes itself as "the production boundary" without describing who crosses
 it) and was not introduced or closed here — board-runnable rule requires
 saying so explicitly rather than leaving it implicit.
 
-## `rename` deliberately left ENOSYS
+## `rename` now real (UPDATE 2026-08-06, later same day)
+
+The original entry below ("`rename` deliberately left ENOSYS") is preserved
+for history but is SUPERSEDED: a follow-on lane the same day added
+`Fat32Filesystem.rename_at(dev, old_path, new_path)` and wired
+`_handle_file_rename` to it.
+
+Resolution of the "IN PLACE rewrite" blocker described below: in-place
+byte-rewrite of an LFN entry's name field(s) was considered and rejected —
+an LFN name occupies a variable number of 32-byte slots plus a checksum byte
+derived from the 8.3 short name, so a rename to a name needing a different
+slot count cannot be a same-size in-place patch regardless. Instead
+`rename_at` reuses the already-tested `_link_entry` (LFN chain + 8.3 alias +
+checksum, the same primitive `create_at`/`mkdir_at` use) to link a new
+directory entry — copying only `start_cluster`/`file_size`, never the file's
+data — then calls `_mark_dirent_deleted` on the old entry, same as
+`unlink_at`/`rmdir_at`.
+
+**Honesty, not overclaiming atomicity:** this is NOT a single-sector atomic
+operation, including for same-directory renames (no special-casing — same
+LFN slot-count reasoning applies). A crash between "new entry linked" and
+"old entry marked deleted" leaves BOTH names live pointing at the same data
+— never neither, and file data is never touched or duplicated either way.
+Cross-directory moves of a directory also patch the moved directory's own
+`".."` entry to the new parent (one more dirent write, one more step in the
+non-atomic window — documented, not hidden). Destination-exists returns
+`EEXIST` — no atomic replace (POSIX `rename()`'s replace semantics are out of
+scope; would require freeing the destination's cluster chain inside this
+already non-atomic two-step, a strictly bigger data-loss window).
+
+Tests: `test/01_unit/os/kernel/fs/fat32_rename_spec.spl`, 6/6 passing —
+same-directory rename with content readback (proves DATA, not just the
+dirent, survives), EEXIST-on-collision, cross-directory file move with
+content readback, cross-directory directory move verifying the patched
+`".."`, EINVAL on move-into-self, and an explicit
+"old entry actually removed" check. Sabotage-verified in-session (reverted
+before landing): skipping the old-entry-delete step failed 4/6 examples;
+corrupting the copied `start_cluster` (0 instead of the real cluster) failed
+3/6.
+
+Landing note: `_handle_file_rename`'s wiring in `syscall_file.spl` landed
+inside `f92f60da224` (an unrelated fd-read/write-wiring commit) via a shared
+working tree — both lanes were editing the checkout concurrently and that
+commit's `git add` swept up this lane's already-written handler code too.
+`fat32.spl`'s `rename_at` primitive itself — the piece `f92f60da224` did NOT
+carry, so `syscall_file.spl` briefly referenced a nonexistent method on
+`origin/main` — followed immediately after as `cf12235211a`, restoring
+compilability.
+
+## `rename` deliberately left ENOSYS (ORIGINAL, SUPERSEDED — see above)
 
 Unlike unlink/rmdir (mark-deleted — a single-byte dirent patch reusing
 existing `_link_entry`/`resolve_path` machinery) or readdir (pure read
