@@ -2,7 +2,11 @@
 
 - **Filed:** 2026-08-06
 - **Status:** PARTIALLY FIXED — 12 scripts fixed, 10 scripts + 7 out-of-lane
-  `scripts/check/` scripts still violate, documented below
+  `scripts/check/` scripts still violate, documented below. The separate
+  `-kernel`-boot finding (§5, 3 scripts) was investigated 2026-08-06: no
+  miscitation as board-runnable evidence found anywhere in the repo (false
+  alarm) — closed with DEV-HARNESS-ONLY banners added to the 3 scripts; the
+  underlying OVMF-port gap for 2 of them remains open and tracked separately.
 - **Area:** `scripts/os/*.shs` (QEMU launch), `scripts/check/*.shs` (out of
   lane for this fix — flagged only), guest-side exit path
   `src/lib/nogc_async_mut_noalloc/baremetal/x86/semihost.spl`,
@@ -153,11 +157,54 @@ risk):
 Each should be triaged with the same backgrounded-vs-foreground test used in
 §2 before editing.
 
-## 5. Separate finding, not in scope here
+## 5. Separate finding, investigated 2026-08-06 — FALSE ALARM (not a miscitation)
 
 `scripts/os/ssh_clang_hello_ring3.shs`, `scripts/os/ssh_multi_cmd.shs`, and
 `scripts/os/scp_retrieve_over_ssh.shs` boot with `-kernel "$KERNEL"` rather
-than OVMF pflash — also a `board-runnable.md` violation ("never QEMU
-`-kernel` pass semantics") independent of the isa-debug-exit issue fixed
-here. Not touched in this change; needs its own investigation into whether an
-OVMF-pflash boot path is feasible for these three gates.
+than OVMF pflash — on its face a `board-runnable.md` violation ("never QEMU
+`-kernel` pass semantics"). `board-runnable.md` permits QEMU `-kernel` for
+fast dev iteration as long as it is never conflated with board-runnable
+proof, so the actual question is whether any doc/report/state file cites
+these three scripts' output AS board-runnable evidence.
+
+**Investigation:** grepped every `doc/**/*.md` and `.spipe/**/state.md` that
+mentions any of the three script basenames (13 files) for co-occurrence with
+"board-runnable"/"board proxy" language. Result: **no miscitation found.**
+
+- `scp_retrieve_over_ssh.shs` already has a compliant OVMF sibling,
+  `scripts/os/scp_retrieve_over_ssh_uefi.shs` (one of the 12 fixed in §2a of
+  this same doc). Every current active-lane doc that needs board-runnable
+  evidence for the getfile/retrieve gate — `.spipe/simpleos_harden_p6_toolchain/state.md`,
+  `.spipe/simpleos_clang_simple_migration/state.md`,
+  `doc/03_plan/os/in_guest_clang_selfhost_board_plan.md` — cites the `_uefi`
+  variant by name, never the plain `-kernel` one.
+- `doc/03_plan/os/in_guest_clang_selfhost_board_plan.md` (the plan doc this
+  whole clang-on-SimpleOS effort is tracked against) is explicit and honest
+  about the gap: it flags the `-kernel`-only clang-retrieve proof as an
+  "⚠️ OPEN GAP — ... violates the plan's own 'no QEMU-only mechanism' rule"
+  (lines 8-11, 13) and records it as *closed* only once superseded by the
+  OVMF path (`2f RESOLVED`, commit `7cf0b6aec3a`, which is exactly
+  `scp_retrieve_over_ssh_uefi.shs`).
+- `ssh_clang_hello_ring3.shs` and `ssh_multi_cmd.shs` have **no** OVMF
+  sibling yet — the one-shot clang-hello demo and the multi-command ring-3
+  resume gate have not been ported off `-kernel`. But every reference found
+  (`doc/03_plan/os/spipe_next_items_2026-07-11.md`,
+  `doc/05_design/os/ssh/simpleos_ssh_ring3_exec_plan.md`,
+  `doc/03_plan/os/in_guest_clang_selfhost_board_plan.md`) cites them only as
+  ordinary QEMU dev gates ("clang gate", "one-shot demo harness") — none
+  asserts or implies board-runnable status from their output.
+
+**Fix applied (hygiene, not a defect fix):** added an explicit
+"DEV-HARNESS ONLY — NOT board-runnable evidence" banner comment to all three
+scripts, naming `scripts/os/scp_retrieve_over_ssh_uefi.shs` as the
+board-proxy equivalent (existing, for the retrieve gate) or pointing at the
+tracked porting gap in `in_guest_clang_selfhost_board_plan.md` (for the two
+without an OVMF sibling yet), so a future citation cannot casually treat
+these three as board-runnable proof.
+
+**Not done (real, larger work, left as the open item it already was):**
+porting `ssh_clang_hello_ring3.shs` / `ssh_multi_cmd.shs` to OVMF pflash.
+That is guest-side freestanding-entry work of the same shape already
+described in §3 above for the isa-debug-exit 2b family, tracked at
+`doc/03_plan/os/in_guest_clang_selfhost_board_plan.md` Phase 2 ("board-runnable
+port") — not folded into this pass.
