@@ -3,9 +3,176 @@
 **ID:** lint_single_file_superlinear_timeout_on_line_count_2026-08-06
 **Severity:** P1 — makes `bin/simple lint` unusable on any file over a few hundred
 lines
-**Status:** Localized to the shared parse+decl-collection prefix of
-`run_lint_file`; exact quadratic site NOT pinned; no working fix landed
+**Status:** RE-CHARACTERIZED 2026-08-06 (second lane, same day) — see "Correction:
+this is NOT superlinear/quadratic" below. Root mechanism still NOT pinned; no
+fix landed. Localized to per-statement work inside `parse_module_silent_checked`
+(module_get_decls and decl-count are ruled OUT, see below).
 **Reported:** 2026-08-06
+
+---
+
+## Correction (second lane, same day): this is NOT superlinear/quadratic — it is
+## roughly LINEAR with a very large per-statement constant (~0.2-0.25s/statement)
+
+**The original "severe superlinear (looks worse than quadratic)" framing in this
+doc is not supported once measured with adequate timeouts.** Every "times out"
+data point in the original table used a 40-60s timeout, which is shorter than
+the file's true (linear) completion time — the earlier lane's own methodology
+note says to trust timing, but a *timeout* is not a timing, it's a censored
+lower bound. This lane re-ran the same synthetic-file family with generous
+timeouts (up to 280s, using `Bash(timeout: 300000)` — the harness's own default
+120s Bash timeout was hit once and silently truncated a `timeout 280` run at
+exactly 120s with exit 143; this must be set explicitly or every long lint run
+looks like a hang that isn't one) and got a clean, uncensored progression:
+
+Using single-decl synthetic files (`fn f(a: i64) -> i64:` followed by N repeats
+of `    a = a + i`, so line count = statement count + 1, isolating statement-parse
+cost from decl-count effects — see "module_get_decls is NOT the driver" below):
+
+| Statements | Lines | `bin/simple lint` wall time | Floor-subtracted (−3.3s) |
+|---|---|---|---|
+| 99 | 100 | 26.4s | 23.1s |
+| 199 | 200 | 50.4s | 47.1s |
+| 299 | 300 | 73.3s | 70.0s |
+| 599 | 600 | 164.3s | 161.0s |
+
+Pairwise fitted exponent `k` where `time ∝ N^k` (floor-subtracted):
+- 99→199 (2.01x N): 2.04x time → k≈1.02
+- 99→299 (3.02x N): 3.03x time → k≈1.00
+- 99→599 (6.05x N): 6.97x time → k≈1.08
+
+**This is linear (k≈1.0-1.1), not quadratic (k=2).** A true O(N²) site would
+show k→2 as N grows; instead k stays flat and near 1 across a 6x range. The
+per-statement cost is roughly constant at **~0.2-0.27s per statement**, which is
+still a severe usability defect (a 2613-line real file at this rate is
+~500-700s, matching the doc's own "originally reported 300-590s" data point
+almost exactly under a *linear*, not quadratic, model) but it is a different
+kind of bug: hunt an expensive-but-bounded per-statement operation (e.g. a
+linear scan through a fixed-size but large table on every token/statement, a
+syscall, an allocation-heavy pattern), not an accumulating-with-N algorithm.
+**Whoever picks this up next should retarget the search accordingly** — the
+original doc's quadratic framing and its "hunt for O(N²) in module_get_decls"
+recommendation are retired by the section below.
+
+### module_get_decls / decl count is NOT the driver — ruled out by this lane
+
+The original doc's "next step" was to bisect `module_decl_at`'s env-var
+fallback (`_Ast/module_state.spl:439-449`) as the suspected O(N²) site. This
+lane ruled it out directly, with no source edits and no rebuild, by holding
+total statement count fixed and varying decl count:
+
+- 600-line file, 300 decls (150 fns × 2 lines): times out (60s budget)
+- 600-line file, **1 decl** (single fn, 599 body statements): **164.3s**
+  (same order, not faster) — confirmed above
+
+Since a single-decl file is exactly as slow as a 300-decl file of the same
+line count, the cost cannot be scaling with decl count. This retires
+`module_get_decls()`, `module_add_decl()`, `module_decl_slots`,
+`module_decl_at()`, and the whole `SIMPLE_NATIVE_ARENA_DECLS` family
+(`_Ast/module_state.spl:408-449`, `_Ast/decl_nodes.spl:1294-1326`) as
+candidates — do not re-bisect these.
+
+### Other mechanisms checked and ruled out this lane (file:line, no rebuild needed)
+
+- **`resolve_lint_config` / `apply_file_attributes`**
+  (`config_and_model.spl:453-460`) returns at line 1 for any file whose first
+  non-blank line starts with `fn `/`me `/`class `/etc — which is every
+  synthetic repro file here. Near-zero cost on this shape. (Real files with a
+  license-header/import preamble before the first `fn` may pay more here, but
+  that is bounded by preamble length, not body length — not a fit for the
+  observed scaling.)
+- **`fmt --check`'s 21s baseline is NOT a valid comparison and should be
+  retired from this doc.** `src/compiler/90.tools/formatter/main.spl` imports
+  only `lexer_struct` (line 8) — it never calls `parse_module_silent_checked`
+  or builds an AST at all. The original doc's "lint does strictly less than
+  fmt yet is slower" argument compared two different pipelines (lexer-only vs
+  full-AST) and is invalid.
+- **The `expr_*`/`stmt_*` per-index env-mirror writers**
+  (`_AstExpr/nodes.spl:265-314`, `ast_stmt.spl:112-207`, both called from
+  `expr_alloc`/`stmt_alloc` on every node) are gated behind
+  `expr_env_mirror_enabled()`/`stmt_env_mirror_enabled()`, which read
+  `SIMPLE_BOOTSTRAP` once, cache the result in a module slot, and return the
+  cached `false` on every subsequent call in a plain `bin/simple lint` run
+  (confirmed `SIMPLE_BOOTSTRAP` unset in the test shell). Not the driver.
+- **`par_kind_set`/`par_text_set`/`par_line_set`/`par_col_set`**
+  (`parser.spl:122-157`, called on every `parser_advance()`, i.e. every token)
+  are gated behind `par_env_save_enabled()`, also cached, also default-off.
+  Not the driver.
+- **`lex_snapshot_save`/`lex_snapshot_restore`** (`lexer.spl:669-694`, used for
+  speculative/backtracking lookahead e.g. `try_parse_bare_ident_string_call`,
+  the `loop:`-statement lookahead) save/restore a fixed ~10-field struct plus a
+  bounded indent-stack — not position- or history-dependent. Not the driver.
+- **`.push()` on `[i64]`/`[text]` module-var arrays** — **inconclusive, not
+  ruled out.** A standalone probe (`push_bench.spl`, 30,000 `.push()` calls
+  across 4 sizes) compiled via `bin/simple compile` to SMF and executed via
+  `bin/simple <file>.smf` completed in 29ms total, suggesting amortized O(1)
+  push in whatever backend executes SMF. But `bin/simple compile`/`run` route
+  through a different execution path than the natively-compiled `lint`
+  command inside the deployed binary (both print the same
+  "Rust-built Simple binary is a bootstrap seed only" banner as `lint` does —
+  see below — so this is a shared-shim artifact, not proof of which backend
+  actually ran the push loop). **This probe does not conclusively test the
+  code path lint uses.** Do not cite it as ruling out `.push()`.
+- **The "Rust-built Simple binary is a bootstrap seed only" warning banner
+  printed by `bin/simple lint`/`fmt`/`compile`/`run` alike is a dead end, not
+  evidence of seed delegation.** Source: `driver/src/main.rs:104-105`,
+  unconditional unless `SIMPLE_RUST_SEED_WARNING=0` / `SIMPLE_BOOTSTRAP=1` /
+  `--seed-ok` (`driver/src/seed_warning.rs`). Confirmed
+  `bin/release/x86_64-unknown-linux-gnu/simple` (58,865,936 bytes) is NOT the
+  seed binary (`src/compiler_rust/target/bootstrap/simple`, 33,258,368 bytes,
+  different md5) — it is the deployed self-hosted binary, which apparently
+  links the same Rust host-shim crate for its process entry point. This banner
+  firing is consistent with normal self-hosted operation and should not be
+  chased as a delegation bug by the next lane, though it may be worth a
+  separate cosmetic bug report (the warning text is misleading on a
+  self-hosted binary).
+
+### Precise next step for whoever continues this
+
+The remaining candidate is unglamorous but narrow: some operation inside
+`parse_statement()` → `parse_expr()` → `expr_alloc()`/`stmt_alloc()`
+(`parser_stmts.spl`, `parser_expr.spl`, `_AstExpr/nodes.spl:476-499`,
+`ast_stmt.spl:252+`) costs on the order of 0.2-0.25s **per statement**,
+independent of N (i.e. NOT accumulating with N — the exponent is ~1, not
+growing). That constant is enormous for parsing `a = a + <int>` — candidates
+worth instrumenting first: `keyword_lookup()` (called per identifier-like
+token in several `parse_statement` branches — check if it's a linear scan
+over a large keyword table rather than a hash lookup), span/position
+bookkeeping, or any syscall/allocation happening once per statement.
+
+**Concrete bisection recipe (requires ONE T3 full bootstrap — budget 15-45min,
+has been observed to die mid-stage3 in this repo today, see
+`build/bootstrap/bootstrap-progress.log`; do not attempt more than one
+iteration per session without checking that budget):**
+
+1. Edit `parse_block()` (`parser_stmts.spl:246-274`) so the indented-block
+   branch's `while true:` loop still consumes tokens to the matching dedent
+   (kind 182) but does NOT call `parse_statement()`/`stmts.push(s)` — return
+   `[]` instead. This must still consume the right tokens (skip to dedent) so
+   the rest of the file continues to parse; do not just `return []`
+   unconditionally without draining tokens, or every subsequent top-level decl
+   will desync.
+2. Rebuild + deploy: `scripts/bootstrap/bootstrap-from-scratch.sh --deploy`.
+3. Time `syn_1decl_599stmt.spl` (600 lines, 1 decl, in
+   `/tmp/.../scratchpad/lintperf/` this session, or regenerate: a `fn` header
+   followed by 599 `a = a + i` lines).
+4. If it flips to fast (sub-5s): the cost is inside per-statement parsing
+   itself (statement/expr construction) — instrument `parse_statement`'s
+   default expression-statement branch and `expr_alloc` next.
+5. If it is still ~164s: the cost is in something reached even when
+   statements aren't built — check `parser_skip_newlines_and_semicolons()`
+   (called once per loop iteration regardless) and the lexer's per-token path
+   itself (contradicting the `fmt`-uses-lexer-only observation above, which
+   would then need re-examination for what state lint's lexer usage differs
+   on).
+
+**When re-measuring timeouts: always pass the Bash tool's own `timeout`
+parameter generously (e.g. 300000ms) in addition to any inner shell
+`timeout N`.** This lane lost one data point to the harness's 120s default
+Bash timeout silently truncating a `timeout 280` command at 120s (exit 143,
+"Command timed out after 2m 0s") — indistinguishable from a real hang unless
+you notice the exit code and elapsed time don't match your inner `timeout`
+value.
 
 ---
 
