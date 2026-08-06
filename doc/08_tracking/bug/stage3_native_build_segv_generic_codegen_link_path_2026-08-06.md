@@ -417,3 +417,31 @@ Also still open, and now more clearly scoped: `rt_dict_contains` returning
 false for a key that is present in a struct-valued `Dict<i64, Scope>`. That is
 the underlying native-codegen defect; this change routes around it rather than
 fixing it.
+
+### Proof that GREEN is not just recursing more slowly
+
+GREEN's Stage 3 climbs to >11 GB RSS while `progress.events` stays at
+`tasks_done=2/6`, which on its own is ambiguous: it could mean the same cycle
+still runs unbounded but now allocates per iteration (heap-dominated instead of
+stack-dominated) rather than being fixed. The discriminator is the **stack**
+segment, not RSS:
+
+```
+VmRSS:  11277948 kB
+VmData: 11249832 kB
+VmStk:       132 kB     <-- normal; a recursion this deep would be enormous
+Threads:       1
+```
+
+`VmStk` is 132 kB — an ordinary stack. Essentially all memory is heap
+(`VmData`). RED died *by exhausting the stack*; GREEN's stack never grows. The
+runaway recursion is gone, not merely slowed. (`gdb -p` could not confirm this
+directly: `/proc/sys/kernel/yama/ptrace_scope` is `1`, so attaching to an
+already-running process is refused. `VmStk` answers the same question without
+ptrace.)
+
+Separately, and NOT fixed by this change: Stage 3's memory appetite past this
+point is large and still growing at 11 GB. An earlier Stage 3 run was killed by
+earlyoom at 81 GB VmRSS. Whether Stage 3 now completes, or instead runs into
+that memory wall or the MIR-lowering blocker, is unresolved here and needs its
+own run to settle.
