@@ -1,0 +1,277 @@
+# @cover src/lib/common/ui/ui_scene_event_route.spl 80%
+# @tag: unit, ui, draw_ir, draw_ir_v3, unified_packed_ui_scene, l9
+
+use std.spec
+use common.ui.draw_ir_v3.{
+    DRAW_IR_V3_NO_ID,
+    DRAW_IR_V3_FLAG_HIDDEN,
+    DRAW_IR_V3_HIT_RECT,
+    DRAW_IR_V3_KIND_GROUP,
+    DRAW_IR_V3_KIND_RECT,
+    DrawIrV3Scene,
+    draw_ir_v3_empty_scene,
+    draw_ir_v3_empty_command,
+    draw_ir_v3_scene_push_command,
+    draw_ir_v3_hit_shape_append
+}
+use common.ui.draw_ir_v3_group_resolve.{draw_ir_v3_group_resolve, draw_ir_v3_port_surface_state_empty}
+use common.ui.ui_scene_counts.{UI_PRODUCER_WM, UI_PRODUCER_GUI, UI_PRODUCER_WEB}
+use common.ui.ui_scene_owner_table.{
+    UiOwnerRecord,
+    MenuActionBinding,
+    UI_SCENE_EVENT_POLICY_NONE,
+    UI_SCENE_EVENT_POLICY_HIT_OPAQUE,
+    UI_SCENE_DISPATCH_OK,
+    ui_scene_validate_menu_action_dispatch
+}
+use common.ui.ui_scene_event_route.{
+    UI_SCENE_ROUTE_OK,
+    UI_SCENE_ROUTE_REFUSE_NO_HIT,
+    UI_SCENE_ROUTE_REFUSE_NO_OWNER,
+    UI_SCENE_ROUTE_REFUSE_STALE_GENERATION,
+    ui_scene_route_event
+}
+
+# --- fixture helpers ---------------------------------------------------------
+
+# One RECT command at local (0,0,20,20) with the given identity/generation --
+# the paint row (index 0) and hit-shape row (index 0) share the SAME
+# component_id as the command itself, closing the correlation gap L6/L7's
+# oracle-copied content left open (design section 9 gate a).
+fn _l9_button_scene(component_id: u32, component_generation: u32) -> DrawIrV3Scene:
+    var scene = draw_ir_v3_empty_scene(1u32, 1u32)
+    scene.hit_shapes = draw_ir_v3_hit_shape_append(scene.hit_shapes, 0, 0, 20, 20, DRAW_IR_V3_HIT_RECT, 0u16, component_id)
+    var button = draw_ir_v3_empty_command()
+    button.kind = DRAW_IR_V3_KIND_RECT
+    button.component_id = component_id
+    button.component_generation = component_generation
+    button.hit_shape_id = 0u32
+    draw_ir_v3_scene_push_command(scene, button)
+
+fn _l9_owner(semantic_id: u32, semantic_generation: u32, parent_owner_id: u32, action_binding_id: u32) -> UiOwnerRecord:
+    UiOwnerRecord(
+        producer_kind: UI_PRODUCER_GUI, event_policy: UI_SCENE_EVENT_POLICY_HIT_OPAQUE,
+        semantic_id: semantic_id, semantic_generation: semantic_generation,
+        parent_owner_id: parent_owner_id, action_binding_id: action_binding_id
+    )
+
+# Two stacked commands at the SAME area: a background (drawn first, index 0)
+# and the target (drawn last, index 1, "on top"). Correct routing must hit
+# the target -- a forward (composition-order) walk would hit the background
+# instead (sabotage note 2: "walk composition order instead of reverse").
+fn _l9_stacked_scene(background_component_id: u32, target_component_id: u32) -> DrawIrV3Scene:
+    var scene = draw_ir_v3_empty_scene(1u32, 1u32)
+    scene.hit_shapes = draw_ir_v3_hit_shape_append(scene.hit_shapes, 0, 0, 20, 20, DRAW_IR_V3_HIT_RECT, 0u16, background_component_id)
+    scene.hit_shapes = draw_ir_v3_hit_shape_append(scene.hit_shapes, 0, 0, 20, 20, DRAW_IR_V3_HIT_RECT, 0u16, target_component_id)
+
+    var background = draw_ir_v3_empty_command()
+    background.kind = DRAW_IR_V3_KIND_RECT
+    background.component_id = background_component_id
+    background.hit_shape_id = 0u32
+    scene = draw_ir_v3_scene_push_command(scene, background)
+
+    var target = draw_ir_v3_empty_command()
+    target.kind = DRAW_IR_V3_KIND_RECT
+    target.component_id = target_component_id
+    target.hit_shape_id = 1u32
+    draw_ir_v3_scene_push_command(scene, target)
+
+# Nested WebView chain (design section 4.1/research section 7): Web button
+# (target) -> Web doc root -> GUI WebView host -> GUI window-content root ->
+# WM window (root). Only the target has a hit-testable scene command --
+# ancestor owners are pure OWNER_RECORDS rows, matching how a real nested
+# scene assembles (not every owner needs its own paintable command).
+fn _l9_webview_chain_owners() -> [UiOwnerRecord]:
+    [
+        _l9_owner(100u32, 0u32, 1u32, DRAW_IR_V3_NO_ID),   # 0: web button (target)
+        _l9_owner(101u32, 0u32, 2u32, DRAW_IR_V3_NO_ID),   # 1: web doc root
+        _l9_owner(102u32, 0u32, 3u32, DRAW_IR_V3_NO_ID),   # 2: gui webview host
+        _l9_owner(103u32, 0u32, 4u32, DRAW_IR_V3_NO_ID),   # 3: gui window-content root
+        _l9_owner(104u32, 0u32, DRAW_IR_V3_NO_ID, 7u32)    # 4: wm window (root, carries the only action)
+    ]
+
+fn _l9_expect_chain(actual: [u32], expected: [u32]):
+    expect(actual.len()).to_equal(expected.len())
+    var i = 0
+    while i < expected.len():
+        expect(actual[i]).to_equal(expected[i])
+        i = i + 1
+
+describe "ui_scene_route_event component identity (design section 9, gate a)":
+    """The paint row, hit shape and routed event for a fixture button all
+    share the same component identity -- proving the routing layer reads
+    the SAME id the paint/hit-shape tables were keyed by, not a
+    re-derived one."""
+
+    it "routes a hit to the exact component_id shared by the command, its hit shape and its owner":
+        val scene = _l9_button_scene(5u32, 0u32)
+        val resolved = draw_ir_v3_group_resolve(scene, draw_ir_v3_port_surface_state_empty())
+        val owners = [_l9_owner(5u32, 0u32, DRAW_IR_V3_NO_ID, DRAW_IR_V3_NO_ID)]
+        val receipt = ui_scene_route_event(scene, resolved, owners, 5, 5)
+        expect(receipt.accepted).to_equal(true)
+        expect(receipt.reason).to_equal(UI_SCENE_ROUTE_OK)
+        expect(receipt.hit_component_id).to_equal(scene.commands[0].component_id)
+        expect(receipt.hit_component_id).to_equal(5u32)
+        _l9_expect_chain(receipt.owner_chain, [0u32])
+        print "l9_route_identity hit={receipt.hit_component_id} chain_len={receipt.owner_chain.len()}"
+
+describe "ui_scene_route_event stale generation (design section 9, gate b)":
+    """A stale `component_generation` on the hit command -- meaning the
+    OWNER table has since recycled that semantic_id's slot for a newer
+    generation -- drops the event with a routed-refusal receipt, never
+    delivering to the recycled owner (sabotage 1: skip this check)."""
+
+    it "refuses a hit whose command generation no longer matches the owner table's current generation":
+        val scene = _l9_button_scene(5u32, 1u32)
+        val resolved = draw_ir_v3_group_resolve(scene, draw_ir_v3_port_surface_state_empty())
+        val owners = [_l9_owner(5u32, 0u32, DRAW_IR_V3_NO_ID, DRAW_IR_V3_NO_ID)]
+        val receipt = ui_scene_route_event(scene, resolved, owners, 5, 5)
+        expect(receipt.accepted).to_equal(false)
+        expect(receipt.reason).to_equal(UI_SCENE_ROUTE_REFUSE_STALE_GENERATION)
+        print "l9_route_stale_generation reason={receipt.reason}"
+
+    it "delivers an empty owner chain and NO_ID action on a stale-generation refusal (never a partial delivery)":
+        val scene = _l9_button_scene(5u32, 2u32)
+        val resolved = draw_ir_v3_group_resolve(scene, draw_ir_v3_port_surface_state_empty())
+        val owners = [_l9_owner(5u32, 0u32, DRAW_IR_V3_NO_ID, 9u32)]
+        val receipt = ui_scene_route_event(scene, resolved, owners, 5, 5)
+        expect(receipt.accepted).to_equal(false)
+        expect(receipt.owner_chain.len()).to_equal(0)
+        expect(receipt.action_binding_id).to_equal(DRAW_IR_V3_NO_ID)
+
+describe "ui_scene_route_event no-hit and no-owner refusals":
+    """A point outside every hit shape, or a hit component with no
+    matching OWNER_RECORDS row, both refuse cleanly rather than routing
+    to a guessed target."""
+
+    it "refuses with NO_HIT for a point outside every hit shape":
+        val scene = _l9_button_scene(5u32, 0u32)
+        val resolved = draw_ir_v3_group_resolve(scene, draw_ir_v3_port_surface_state_empty())
+        val owners = [_l9_owner(5u32, 0u32, DRAW_IR_V3_NO_ID, DRAW_IR_V3_NO_ID)]
+        val receipt = ui_scene_route_event(scene, resolved, owners, 500, 500)
+        expect(receipt.accepted).to_equal(false)
+        expect(receipt.reason).to_equal(UI_SCENE_ROUTE_REFUSE_NO_HIT)
+
+    it "refuses with NO_OWNER for a hit whose component_id has no owner record":
+        val scene = _l9_button_scene(5u32, 0u32)
+        val resolved = draw_ir_v3_group_resolve(scene, draw_ir_v3_port_surface_state_empty())
+        val receipt = ui_scene_route_event(scene, resolved, [], 5, 5)
+        expect(receipt.accepted).to_equal(false)
+        expect(receipt.reason).to_equal(UI_SCENE_ROUTE_REFUSE_NO_OWNER)
+        expect(receipt.hit_component_id).to_equal(5u32)
+
+    it "reports NO_ID hit_component_id on a NO_HIT refusal, distinct from a NO_OWNER refusal which still reports it":
+        val scene = _l9_button_scene(5u32, 0u32)
+        val resolved = draw_ir_v3_group_resolve(scene, draw_ir_v3_port_surface_state_empty())
+        val owners = [_l9_owner(5u32, 0u32, DRAW_IR_V3_NO_ID, DRAW_IR_V3_NO_ID)]
+        val receipt = ui_scene_route_event(scene, resolved, owners, 500, 500)
+        expect(receipt.hit_component_id).to_equal(DRAW_IR_V3_NO_ID)
+
+describe "ui_scene_route_event hidden-group hit exclusion (design section 4.1, gate d)":
+    """A click on a hidden group's former area routes to what is beneath
+    it, not the hidden owner -- reusing draw_ir_v3_group_resolve_hit_test's
+    own `effective_visible` exclusion (lane L2), not re-derived here."""
+
+    it "routes to the visible panel beneath a hidden group, not the hidden button inside it":
+        var scene = draw_ir_v3_empty_scene(1u32, 1u32)
+        scene.hit_shapes = draw_ir_v3_hit_shape_append(scene.hit_shapes, 0, 0, 20, 20, DRAW_IR_V3_HIT_RECT, 0u16, 10u32)
+        scene.hit_shapes = draw_ir_v3_hit_shape_append(scene.hit_shapes, 0, 0, 20, 20, DRAW_IR_V3_HIT_RECT, 0u16, 21u32)
+
+        var panel = draw_ir_v3_empty_command()
+        panel.kind = DRAW_IR_V3_KIND_RECT
+        panel.component_id = 10u32
+        panel.hit_shape_id = 0u32
+        scene = draw_ir_v3_scene_push_command(scene, panel)
+
+        var group = draw_ir_v3_empty_command()
+        group.kind = DRAW_IR_V3_KIND_GROUP
+        group.component_id = 20u32
+        group.flags = DRAW_IR_V3_FLAG_HIDDEN
+        scene = draw_ir_v3_scene_push_command(scene, group)
+
+        var hidden_button = draw_ir_v3_empty_command()
+        hidden_button.kind = DRAW_IR_V3_KIND_RECT
+        hidden_button.component_id = 21u32
+        hidden_button.parent_id = 20u32
+        hidden_button.hit_shape_id = 1u32
+        scene = draw_ir_v3_scene_push_command(scene, hidden_button)
+
+        val resolved = draw_ir_v3_group_resolve(scene, draw_ir_v3_port_surface_state_empty())
+        val owners = [
+            _l9_owner(10u32, 0u32, DRAW_IR_V3_NO_ID, DRAW_IR_V3_NO_ID),
+            _l9_owner(21u32, 0u32, DRAW_IR_V3_NO_ID, DRAW_IR_V3_NO_ID)
+        ]
+        val receipt = ui_scene_route_event(scene, resolved, owners, 5, 5)
+        expect(receipt.accepted).to_equal(true)
+        expect(receipt.hit_component_id).to_equal(10u32)
+        print "l9_route_hidden_group hit={receipt.hit_component_id}"
+
+describe "ui_scene_route_event nested WebView chain (design section 4.1/research section 7, gate c)":
+    """A hit on the Web target walks Web target -> Web doc root -> GUI
+    WebView host -> GUI window-content root -> WM window, in exactly that
+    order (sabotage 2: composition-order instead of reverse would hit the
+    stacked background command instead of the target)."""
+
+    it "walks the full nested chain in target-to-root order and stops at the reverse-topmost stacked command":
+        val scene = _l9_stacked_scene(999u32, 100u32)
+        val resolved = draw_ir_v3_group_resolve(scene, draw_ir_v3_port_surface_state_empty())
+        val owners = _l9_webview_chain_owners()
+        val receipt = ui_scene_route_event(scene, resolved, owners, 5, 5)
+        expect(receipt.accepted).to_equal(true)
+        expect(receipt.hit_component_id).to_equal(100u32)
+        _l9_expect_chain(receipt.owner_chain, [0u32, 1u32, 2u32, 3u32, 4u32])
+        print "l9_route_webview_chain hit={receipt.hit_component_id} chain_len={receipt.owner_chain.len()}"
+
+    it "bubbles past every GUI/Web ancestor with no action to the WM root's action (window-chrome close never mutates WindowManager directly)":
+        val scene = _l9_stacked_scene(999u32, 100u32)
+        val resolved = draw_ir_v3_group_resolve(scene, draw_ir_v3_port_surface_state_empty())
+        val owners = _l9_webview_chain_owners()
+        val receipt = ui_scene_route_event(scene, resolved, owners, 5, 5)
+        expect(receipt.accepted).to_equal(true)
+        expect(receipt.action_owner_id).to_equal(4u32)
+        expect(receipt.action_binding_id).to_equal(7u32)
+        print "l9_route_bubble_to_wm action_owner={receipt.action_owner_id} action_binding={receipt.action_binding_id}"
+
+    it "reports NO_ID action when no owner anywhere in the chain carries one":
+        val scene = _l9_stacked_scene(999u32, 100u32)
+        val resolved = draw_ir_v3_group_resolve(scene, draw_ir_v3_port_surface_state_empty())
+        val owners = [
+            _l9_owner(100u32, 0u32, 1u32, DRAW_IR_V3_NO_ID),
+            _l9_owner(101u32, 0u32, DRAW_IR_V3_NO_ID, DRAW_IR_V3_NO_ID)
+        ]
+        val receipt = ui_scene_route_event(scene, resolved, owners, 5, 5)
+        expect(receipt.accepted).to_equal(true)
+        expect(receipt.action_owner_id).to_equal(DRAW_IR_V3_NO_ID)
+        expect(receipt.action_binding_id).to_equal(DRAW_IR_V3_NO_ID)
+
+    it "stops at the NEAREST ancestor action, not a farther one, when both carry one":
+        val owners = [
+            _l9_owner(100u32, 0u32, 1u32, 42u32),      # target itself carries an action
+            _l9_owner(101u32, 0u32, DRAW_IR_V3_NO_ID, 99u32)  # parent also carries one -- must not win
+        ]
+        val scene = _l9_stacked_scene(999u32, 100u32)
+        val resolved = draw_ir_v3_group_resolve(scene, draw_ir_v3_port_surface_state_empty())
+        val receipt = ui_scene_route_event(scene, resolved, owners, 5, 5)
+        expect(receipt.accepted).to_equal(true)
+        expect(receipt.action_owner_id).to_equal(0u32)
+        expect(receipt.action_binding_id).to_equal(42u32)
+
+describe "ui_scene_route_event composes with menu-action dispatch validation":
+    """Once routing resolves an `action_binding_id`, generation validation
+    is delegated unchanged to the already-landed
+    ui_scene_validate_menu_action_dispatch (lane L1) -- this lane does not
+    duplicate that check."""
+
+    it "hands the resolved action_binding_id to ui_scene_validate_menu_action_dispatch for a live app generation":
+        val scene = _l9_stacked_scene(999u32, 100u32)
+        val resolved = draw_ir_v3_group_resolve(scene, draw_ir_v3_port_surface_state_empty())
+        val owners = _l9_webview_chain_owners()
+        val receipt = ui_scene_route_event(scene, resolved, owners, 5, 5)
+        expect(receipt.accepted).to_equal(true)
+
+        val binding = MenuActionBinding(app_id: 1u32, app_generation: 3u32, menu_revision: 2u32, action_id: receipt.action_binding_id, default_target_owner_id: 4u32)
+        val verdict = ui_scene_validate_menu_action_dispatch(binding, 3u32, 2u32)
+        expect(verdict.accepted).to_equal(true)
+        expect(verdict.reason).to_equal(UI_SCENE_DISPATCH_OK)
+        expect(verdict.target_owner_id).to_equal(4u32)
+        print "l9_route_dispatch_compose action_binding={receipt.action_binding_id} target={verdict.target_owner_id}"

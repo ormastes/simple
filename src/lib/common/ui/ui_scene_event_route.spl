@@ -1,0 +1,128 @@
+# Unified Packed UI Scene — reverse event routing (design section 4.1/section
+# 2.4, research section 7).
+#
+# Design authority: doc/05_design/ui/unified_packed_ui_scene.md sections 2.4, 4.1.
+# Lane: L9, doc/03_plan/ui/unified_packed_ui_scene_agent_lanes.md.
+#
+# Hit query -> component_id+generation -> owner-chain walk -> producer-local
+# dispatch. This is a from-scratch pure routing layer over TWO pieces of
+# already-landed infrastructure, not a re-derivation of either:
+#   - `draw_ir_v3_group_resolve_hit_test` (lane L2) already does the entire
+#     "which command did the point hit" step: reverse (top-most/last-drawn)
+#     command walk, clip+transform-aware point test, and skips
+#     `not effective_visible` states -- so a hidden group's former area
+#     correctly routes to whatever is beneath it (design section 4.1,
+#     "hidden UI must not eat clicks"). This lane does not re-implement any
+#     of that.
+#   - `ui_scene_owner_chain` (lane L1) already does the bounded
+#     `parent_owner_id` walk (target-to-root, i.e. bubble order). This lane
+#     does not re-implement that either.
+#
+# What this lane adds: the glue between a hit's `component_id` and the
+# OWNER_RECORDS table (semantic_id lookup), the "recycled slot" generation
+# check the design calls out separately from menu dispatch's own
+# app_generation/menu_revision check (`ui_scene_validate_menu_action_dispatch`,
+# lane L1, is reused unchanged for THAT), and the bubble-to-first-action-owner
+# rule that makes window-chrome-close-routes-to-WM work with no special
+# casing: a GUI close button's own owner record carries no action_binding_id
+# (GUI never mutates WindowManager directly), so bubbling naturally finds the
+# WM ancestor's action instead -- there is no separate "chrome adapter" step.
+#
+# NOTE on cross-producer wiring: L6/L7/L8 (GUI/Web/WM packed producers) each
+# write every owner record's `parent_owner_id` as NO_ID today -- none of them
+# yet cross-link a nested producer's root owner to its host's owner id (that
+# requires the scene ASSEMBLER, which alone knows the nesting, to thread an
+# extra id through at emit time -- a small, targeted follow-on, not a
+# retrofit of this lane). This lane's own spec fixtures build the nested-
+# owner-chain case directly to prove the ROUTING algorithm handles it
+# correctly; real cross-producer chains are wired by a later change.
+
+use common.ui.draw_ir_v3.{DRAW_IR_V3_NO_ID, DrawIrV3Scene}
+use common.ui.draw_ir_v3_group_resolve.{DrawIrV3GroupResolveResult, draw_ir_v3_group_resolve_hit_test}
+use common.ui.ui_scene_owner_table.{UiOwnerRecord, ui_scene_owner_chain}
+
+pub val UI_SCENE_ROUTE_OK: u16 = 0u16
+pub val UI_SCENE_ROUTE_REFUSE_NO_HIT: u16 = 1u16
+pub val UI_SCENE_ROUTE_REFUSE_NO_OWNER: u16 = 2u16
+pub val UI_SCENE_ROUTE_REFUSE_STALE_GENERATION: u16 = 3u16
+
+struct UiSceneRouteReceipt:
+    accepted: bool
+    reason: u16
+    hit_component_id: u32
+    # Target-to-root bubble order: owner_chain[0] is the hit target itself,
+    # owner_chain[last] is the root-most ancestor (design section 2.4/4.1;
+    # gate c, "assert the visited owner-id sequence").
+    owner_chain: [u32]
+    action_owner_id: u32       # NO_ID if no owner in the chain carries an action
+    action_binding_id: u32     # NO_ID if no owner in the chain carries an action
+
+fn _ui_scene_find_owner_by_semantic_id(owners: [UiOwnerRecord], semantic_id: u32) -> i64:
+    var i = 0
+    while i < owners.len():
+        if owners[i].semantic_id == semantic_id:
+            return i.to_i64()
+        i = i + 1
+    -1
+
+struct _UiSceneChainAction:
+    owner_id: u32
+    action_binding_id: u32
+
+# Bubbles from the target (chain[0]) toward the root, returning the FIRST
+# owner that carries a live action_binding_id. A producer that never sets
+# its own action_binding_id (e.g. GUI's window-chrome close button) is
+# transparently skipped -- the WM ancestor further up the chain is what
+# actually resolves, with no special-cased "chrome adapter" step.
+fn _ui_scene_chain_action(owners: [UiOwnerRecord], chain: [u32]) -> _UiSceneChainAction:
+    var i = 0
+    while i < chain.len():
+        val oid = chain[i]
+        val idx = oid.to_i64()
+        if idx >= 0 and idx < owners.len().to_i64():
+            if owners[idx].action_binding_id != DRAW_IR_V3_NO_ID:
+                return _UiSceneChainAction(owner_id: oid, action_binding_id: owners[idx].action_binding_id)
+        i = i + 1
+    _UiSceneChainAction(owner_id: DRAW_IR_V3_NO_ID, action_binding_id: DRAW_IR_V3_NO_ID)
+
+fn _ui_scene_route_refused(reason: u16, hit_component_id: u32) -> UiSceneRouteReceipt:
+    UiSceneRouteReceipt(
+        accepted: false, reason: reason, hit_component_id: hit_component_id,
+        owner_chain: [], action_owner_id: DRAW_IR_V3_NO_ID, action_binding_id: DRAW_IR_V3_NO_ID
+    )
+
+# `resolved` is the caller's own (possibly cached) `draw_ir_v3_group_resolve`
+# output -- not recomputed here, since it should only be re-run for changed
+# groups (design section 4.1), not once per routed event.
+fn ui_scene_route_event(
+    scene: DrawIrV3Scene, resolved: DrawIrV3GroupResolveResult, owners: [UiOwnerRecord], px: i32, py: i32
+) -> UiSceneRouteReceipt:
+    val hit = draw_ir_v3_group_resolve_hit_test(scene, resolved, px, py)
+    if not hit.hit:
+        return _ui_scene_route_refused(UI_SCENE_ROUTE_REFUSE_NO_HIT, DRAW_IR_V3_NO_ID)
+
+    val owner_idx = _ui_scene_find_owner_by_semantic_id(owners, hit.component_id)
+    if owner_idx < 0:
+        return _ui_scene_route_refused(UI_SCENE_ROUTE_REFUSE_NO_OWNER, hit.component_id)
+
+    # "The hit shape's component_generation" (design section 2.4) is read
+    # from the WINNING command's own `component_generation` field (hit
+    # shapes carry no generation of their own) and validated against the
+    # OWNER TABLE's current semantic_generation for that node -- the owner
+    # table is rewritten fresh every emit(), so a mismatch means the hit
+    # landed on a row a later generation has since recycled for a different
+    # logical node. Never delivered; refused instead (gate b).
+    val hit_command = scene.commands[hit.command_index]
+    val owner = owners[owner_idx]
+    if owner.semantic_generation != hit_command.component_generation:
+        return _ui_scene_route_refused(UI_SCENE_ROUTE_REFUSE_STALE_GENERATION, hit.component_id)
+
+    val chain = ui_scene_owner_chain(owners, owner_idx.to_u32())
+    val action = _ui_scene_chain_action(owners, chain)
+    UiSceneRouteReceipt(
+        accepted: true, reason: UI_SCENE_ROUTE_OK, hit_component_id: hit.component_id,
+        owner_chain: chain, action_owner_id: action.owner_id, action_binding_id: action.action_binding_id
+    )
+
+export UI_SCENE_ROUTE_OK, UI_SCENE_ROUTE_REFUSE_NO_HIT, UI_SCENE_ROUTE_REFUSE_NO_OWNER, UI_SCENE_ROUTE_REFUSE_STALE_GENERATION,
+    UiSceneRouteReceipt, ui_scene_route_event
