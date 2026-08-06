@@ -3,8 +3,150 @@
 Status: PARTIALLY FIXED 2026-08-06 (honesty landed 2026-08-06 AM; kernel-global
 mount + open/stat/mkdir/readdir/unlink/rmdir wiring landed 2026-08-06 PM;
 read/write-after-open wiring landed 2026-08-06 evening, see "Update 3" below;
-boot-reachability, and a newly-discovered mount-accessor persistence wall,
-still open)
+Wall 2 (mount-accessor persistence) INVESTIGATED and CONFIRMED REAL 2026-08-06
+night — see "Update 4" below; boot-reachability still open)
+
+## Update 4 (2026-08-06, this lane): Wall 2 confirmed REAL, root-caused, and NOT independently fixable in this pass — same pre-existing, already-closed seed-only defect, not a new bug
+
+**Verdict up front:** Wall 2 is real. It reproduces exactly as "Update 3"
+described. It is **not** a new defect and **not** specific to
+`fat32_mount_dev()`/`fat32_mount_fs()`, `BlockDevice`, or FAT32 at all — it is
+the same universal, already-diagnosed, already-CLOSED seed-interpreter defect
+tracked in
+`doc/08_tracking/bug/interp_trait_slot_receiver_reboxed_per_call_mutation_loss_2026-07-07.md`
+("Copy at `Optional` bind, universally"). That doc's own "Why no fix here"
+section applies unchanged: the seed is bootstrap-only and repairing its value
+model is out of scope for pure-Simple-first work. No code fix is landed in
+this update; what follows is the reproduction, exact matching, and a scoped
+severity re-assessment specific to FAT32/board-runnable concerns.
+
+### Direct reproduction (this session, not committed — throwaway diagnostic)
+
+A minimal spec, structurally identical to "Update 3"'s data point 3, calling
+`fat32_mount_dev()` from two genuinely separate top-level functions (not
+nested in one scope):
+
+```
+fn _write_via_separate_call():
+    val dev = fat32_mount_dev()
+    dev.write_sector(99u64, marker_byte_0x42)
+
+fn _read_via_separate_call() -> u8:
+    val dev = fat32_mount_dev()
+    dev.read_sector(99u64)[0]
+```
+
+Run via `bin/simple test <file>` (the harness every FAT32 spec in this repo
+runs under): `expected 0 to equal 66` — the write made in
+`_write_via_separate_call()` is invisible to the read in
+`_read_via_separate_call()`. Confirmed, not a harness artifact: the write IS
+visible when both operations run against the SAME held local reference
+(matching "Update 3"'s data point 1), only breaking across two separate
+`fat32_mount_dev()` fetches — the defining signature of the closed bug.
+
+### Root cause — confirmed, not new
+
+`bin/simple test` unconditionally delegates to the Rust seed's child process
+regardless of which `bin/simple` invoked it (see
+`.claude/memory/ref_*` note "`simple test` silently delegates to seed
+child"); this session's repro's own output shows `child binary:
+.../src/compiler_rust/target/debug/simple`. The seed interpreter represents a
+class instance as `Object { class, fields: Arc<HashMap<String, Value>> }`
+(`src/compiler_rust/compiler/src/value.rs:1161`) and mutates via
+`Arc::make_mut(fields)`
+(`src/compiler_rust/compiler/src/interpreter/place.rs:132,176-177`) — pure
+copy-on-write value semantics. `g_fat32_mount_dev: BlockDevice? = nil` is
+exactly the trigger shape the closed bug names: an `Option`-wrapped
+class/trait instance held in a module-level `var`, unwrapped fresh on every
+call (`fat32_mount_dev()` calls `.unwrap()` each time) — each unwrap forks a
+new copy of the underlying fields map, so a write through one fetch is
+invisible to the next. The already-closed bug doc states this was fixed for
+the **product** self-hosted interpreter as of `29c2a91a030` (2026-07-04);
+this session could not independently re-confirm that against the product
+interpreter specifically, because the `bin/simple` currently deployed at this
+repo root (`bin/release/x86_64-unknown-linux-gnu/simple`) prints the
+bootstrap-seed warning banner itself, and the only non-seed-flagged binary
+found (`bootstrap/stage3/x86_64-unknown-linux-gnu/simple`) supports only
+`compile`/`native-build` — no `test` or interpreted `run` — so it cannot
+execute this repro's spec form at all.
+
+### Attempted the same repro on the path that actually matters for
+board-runnable: native codegen
+
+Since the real kernel ships as a native-compiled binary, not interpreted
+code, whether the interpreter's COW bug applies is secondary to whether
+native codegen handles this shape at all. A userspace analog (same
+trait/class/`Option`-global/two-separate-calls shape) was compiled with
+`bootstrap/stage3/.../simple native-build`: it does **not** compile. MIR
+lowering cannot resolve a trait method called through
+`Option<Trait>.unwrap()` — it logs `unresolved method call 'write_it' lowered
+to const-0 placeholder (silent-null risk, Task #145)`, then hits `MIR error:
+unresolved method call: unwrap` / `unresolved method call: read_it` and the
+compiler process core-dumps. This is a **different, deeper, pre-existing gap**
+in native trait dispatch (consistent with the already-tracked
+`native_with_trait_impl_no_vtable_duck_trap_2026-07-28.md`), not evidence the
+COW-copy bug does or doesn't reproduce natively — the pattern doesn't reach
+codegen at all today.
+
+### Severity/blast-radius re-assessment (narrower than "Update 3" feared)
+
+- **Confirmed affected:** the seed-interpreter test harness (`bin/simple
+  test`), which is how every existing FAT32 spec in this repo runs. Any spec
+  that writes through one `fat32_mount_dev()`/`fat32_mount_fs()` fetch and
+  reads back through a separately-fetched reference will silently see stale
+  data. This is exactly why "Update 3"'s own new specs were written to build
+  a **fresh `Fat32Filesystem` from the SAME `dev` local variable** every time
+  (`_fs_from(dev)` takes `dev: MockDev` directly, never re-fetching through
+  `fat32_mount_dev()`), not through the mount accessors — that pattern
+  happens to sidestep the bug, but not by design against this specific
+  defect.
+- **NOT currently reachable on real hardware/board or QEMU:** the only real
+  `BlockDevice` implementer, `CNvmeBlockAdapterFs`
+  (`src/os/kernel/boot/c_nvme_adapter.spl`), is an intentional link-clean stub
+  whose `read_sector`/`write_sector` unconditionally return `Err(...)` — it
+  does no real I/O today (pre-existing gap, "Update 2"/"Update 3"), and
+  `boot_fs_mount_fat32_from_device` still has no live-boot caller. So even if
+  the COW bug reproduced identically on real hardware, there is currently no
+  code path that would exercise it there.
+- **Also structurally lower-risk than feared for a *real* `BlockDevice`:** the
+  in-memory `MockDev` used by every FAT32 spec stores sector bytes as a
+  Simple-level struct-array field (`sectors: [MockSector]`), which is exactly
+  what the COW-copy bug corrupts. A real hardware/NVMe adapter instead holds
+  a raw MMIO address (`sector_buf_addr: u64`) and would do reads/writes via
+  FFI/`mmio_*` primitives against that fixed address, not via Simple-level
+  field mutation on the class instance — so even once a real block device is
+  wired in, it plausibly would not trigger this specific copy-on-unwrap
+  mechanism the way the mock does. This is a plausibility argument, not
+  proof; it should be re-verified once a real `BlockDevice` implementer with
+  actual I/O exists.
+
+### Why no fix lands in this update
+
+The applicable fix (repair the seed interpreter's `Arc<HashMap>` COW value
+model) is explicitly out of scope per the existing closed bug's own "Why no
+fix here": the seed is bootstrap-only, repairing it is a refactor of a
+bootstrap-only engine, against the pure-Simple-first rule, and the product
+interpreter is already claimed correct for this shape. This session could not
+independently verify the product-interpreter claim (no runnable non-seed
+interpreter binary was available), and the native path — the one that
+actually matters for board-runnable — does not compile this shape at all
+today, a separate pre-existing gap. No `.spl`-level workaround was applied to
+`fat32_mount_dev()`/`fat32_mount_fs()` either: the established workaround from
+the closed bug (keep mutable state in a module-level `var`, not behind a
+`Trait?`-typed accessor) does not generalize to an arbitrary `BlockDevice`
+implementer's internal state without changing the trait's shape, and no
+concrete near-term consumer needs it fixed today (the only real implementer
+is a no-op stub; every current syscall handler fetches `fs`/`dev` once per
+call and stays self-consistent, matching the one case that already works).
+
+**Recorded as an open, scoped follow-up, not silently dismissed:** before a
+real `BlockDevice` (real NVMe/virtio-blk) is wired to
+`fat32_mount_publish`, re-run this exact write-then-read-via-separate-fetch
+repro against that real implementer (or, failing real hardware, first get the
+native-codegen trait-dispatch-through-`Option.unwrap()` gap fixed so an
+in-QEMU native repro becomes possible at all) to confirm or rule out the same
+failure mode before trusting cross-syscall FAT32 correctness for anything
+beyond a single self-contained syscall call.
 
 ## Update 3 (2026-08-06, this lane): fd read/write reach FAT32 for real — plus a critical, deeper wall found while verifying it
 
@@ -502,14 +644,16 @@ above) — the fd this lane's `open` allocates is real but `read`/`write` on it
 still don't reach FAT32. **UPDATE (later this session, see "Update 3"): the
 read/write connection is now also done.** The required next steps are now:
 (1) wire something in the live boot sequence to actually call
-`boot_fs_mount_fat32_from_device`/`fat32_mount_publish` (still open); (2)
-resolve Wall 2 from "Update 3" — confirm whether writes made by one syscall
-call are visible to a later, separate syscall call against the same mounted
-`fat32_mount_dev()`/`fat32_mount_fs()`, ideally with a real hardware or
-QEMU-backed `BlockDevice`, since the in-memory mock cannot currently prove it
-either way; this is now the single most important open question for whether
-ANY of this doc's "real" claims (open/stat/mkdir/readdir/unlink/rmdir/
-read/write) hold up across more than one syscall.
+`boot_fs_mount_fat32_from_device`/`fat32_mount_publish` (still open); (2) Wall
+2 from "Update 3" is now CONFIRMED and root-caused, see "Update 4" — it is the
+same pre-existing, already-closed, seed-interpreter-only `Option`-bind COW
+defect (`interp_trait_slot_receiver_reboxed_per_call_mutation_loss_2026-07-07.md`),
+not fixable within this repo's pure-Simple-first scope, and not currently
+reachable on real hardware/QEMU since the only real `BlockDevice` implementer
+is still a no-op stub; re-verify against a real block device once one exists,
+or once native codegen can even compile a trait-dispatch-through-`Option.unwrap()`
+call (a separate, deeper, pre-existing gap found while investigating Wall 2 —
+see "Update 4").
 
 ## Related, separately-landed honesty fixes in this same change
 
