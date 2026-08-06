@@ -1217,6 +1217,27 @@ mod tests {
     }
 }
 
+/// `true` for the integer code-point-to-character builtin, in either the bare
+/// (`chr`) or the receiver-qualified (`i64.chr`) spelling the caller's
+/// `lookup_name` can carry. The receiver-type prefix is restricted to integer
+/// spellings so a user-defined `SomeStruct.chr` still resolves normally.
+fn is_int_chr_method(name: &str) -> bool {
+    let (owner, method) = match name.rsplit_once('.') {
+        Some((owner, method)) => (Some(owner), method),
+        None => (None, name),
+    };
+    if !matches!(method, "chr" | "to_char") {
+        return false;
+    }
+    match owner {
+        None => true,
+        Some(owner) => matches!(
+            owner,
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" | "uint" | "Int" | "isize" | "usize"
+        ),
+    }
+}
+
 /// Try to compile a builtin method call (String, Array methods)
 /// Returns Some(result_value) if the method was handled, None otherwise
 fn try_compile_builtin_method_call<M: Module>(
@@ -1578,6 +1599,53 @@ fn try_compile_builtin_method_call<M: Module>(
             let bool_result = builder.inst_results(call)[0];
             let result = builder.ins().sextend(types::I64, bool_result);
             return Ok(Some(result));
+        }
+        // `n.chr()` / `n.to_char()` — build a character from a code point.
+        //
+        // There was no arm for this anywhere on the Cranelift path, so the
+        // call reached the last-resort branch in `compile_method_call_static`
+        // and emitted `rt_function_not_found("i64.chr")`, which aborts with
+        // "Function 'i64.chr' not found". The tree-walk interpreter
+        // (interpreter_method/primitives.rs:212), the LLVM backend
+        // (codegen/llvm/functions.rs:2406, functions/calls.rs:2049) and the
+        // pure-Simple MIR lowering
+        // (50.mir/_MirLoweringExpr/method_calls_literals.spl:1005) all
+        // implement it, so ~100 `.chr()` call sites in src/lib were outages on
+        // the default engine alone — including ASCII-only paths such as
+        // base_encoding's `_char_from_code`.
+        //
+        // `method` here is the caller's `lookup_name`, which for a qualified
+        // call is still the DOTTED name ("i64.chr"), hence the suffix test.
+        // The receiver-type prefix is restricted to integer spellings so a
+        // genuine `SomeStruct.chr` method is left to normal resolution.
+        //
+        // `text_dot_from_char_code` is the same runtime entry point the LLVM
+        // backend calls and is non-ASCII correct (see
+        // char_from_code_non_ascii_unsupported_2026-07-20). It is declared
+        // explicitly because it is not an `rt_*` pre-declared import.
+        //
+        // doc/08_tracking/bug/text_byte_len_vs_codepoint_index_family_2026-08-06.md
+        m if args.is_empty() && is_int_chr_method(m) => {
+            let fid = if let Some(&existing) = ctx.func_ids.get("text_dot_from_char_code") {
+                existing
+            } else {
+                let mut sig = Signature::new(platform_call_conv());
+                sig.params.push(AbiParam::new(types::I64));
+                sig.returns.push(AbiParam::new(types::I64));
+                match ctx
+                    .module
+                    .declare_function("text_dot_from_char_code", Linkage::Import, &sig)
+                {
+                    Ok(id) => {
+                        ctx.func_ids.insert("text_dot_from_char_code".to_string(), id);
+                        id
+                    }
+                    Err(_) => return Ok(None),
+                }
+            };
+            let fref = ctx.module.declare_func_in_func(fid, builder.func);
+            let call = adapted_call(builder, fref, &[receiver_val]);
+            return Ok(Some(builder.inst_results(call)[0]));
         }
         // Map/filter/join
         "join" => "rt_string_join",

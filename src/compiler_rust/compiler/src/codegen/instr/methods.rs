@@ -440,6 +440,56 @@ pub(crate) fn compile_builtin_method<M: Module>(
                         None
                     }
                 }
+            } else if matches!(method, "chr" | "to_char") && args.is_empty() {
+                // `n.chr()` / `n.to_char()` — build a character from a code
+                // point. There was no arm for this anywhere in the Cranelift
+                // path, so an integer receiver reached here, found no
+                // cross-module owner, and fell through to
+                // `rt_method_not_found`, which raised
+                // "Function 'i64.chr' not found" — the `Dict.insert`
+                // precedent above, one layer down. The tree-walk interpreter
+                // (interpreter_method/primitives.rs:212), the LLVM backend
+                // (codegen/llvm/functions.rs:2406) and the pure-Simple MIR
+                // lowering (50.mir/_MirLoweringExpr/method_calls_literals.spl:1005)
+                // all implement it, so ~100 `.chr()` call sites in src/lib were
+                // outages on the default engine alone.
+                //
+                // Placed in the NO-USER-OWNER branch on purpose: a genuine
+                // struct method named `chr` still resolves above, matching the
+                // custom-owner resolution the pure-Simple lowering performs.
+                // `text_dot_from_char_code` is the same runtime entry point the
+                // LLVM backend calls and is non-ASCII correct (see
+                // char_from_code_non_ascii_unsupported_2026-07-20).
+                //
+                // doc/08_tracking/bug/text_byte_len_vs_codepoint_index_family_2026-08-06.md
+                //
+                // Declared explicitly rather than via `call_runtime_1`: that
+                // helper panics on a name absent from `runtime_funcs`, and
+                // `text_dot_from_char_code` is not an `rt_*` pre-declared
+                // import. Same shape as the `rt_string_to_int_lenient`
+                // declaration in codegen/instr/basic_ops.rs.
+                let fid = if let Some(&existing) = ctx.func_ids.get("text_dot_from_char_code") {
+                    Some(existing)
+                } else {
+                    let mut sig = Signature::new(platform_call_conv());
+                    sig.params.push(AbiParam::new(types::I64));
+                    sig.returns.push(AbiParam::new(types::I64));
+                    match ctx
+                        .module
+                        .declare_function("text_dot_from_char_code", Linkage::Import, &sig)
+                    {
+                        Ok(id) => {
+                            ctx.func_ids.insert("text_dot_from_char_code".to_string(), id);
+                            Some(id)
+                        }
+                        Err(_) => None,
+                    }
+                };
+                fid.map(|fid| {
+                    let fref = ctx.module.declare_func_in_func(fid, builder.func);
+                    let call = adapted_call(builder, fref, &[receiver_val]);
+                    builder.inst_results(call)[0]
+                })
             } else {
                 None
             }
