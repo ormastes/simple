@@ -65,12 +65,20 @@ mkdir -p "$OUT_DIR" build/os/generated/generated
 
 [ -n "$COMPILER" ] || fail "set SIMPLE_BUILD_COMPILER to a proven self-hosted compiler"
 [ -x "$COMPILER" ] || fail "missing self-hosted compiler: $COMPILER"
-PROVENANCE="$(SIMPLE_BOOTSTRAP_DRIVER="$COMPILER" "$COMPILER" --version 2>&1 || true)"
-case "$COMPILER:$PROVENANCE" in
-    *compiler_rust*|*simple_seed*|*"bootstrap seed only"*)
-        fail "refusing Rust bootstrap seed"
-        ;;
-esac
+# Shared identity + capability predicates. This gate deliberately requires an
+# EXPLICIT SIMPLE_BUILD_COMPILER, so it uses the predicates directly rather than
+# simple_compiler_select() -- calling the selector here would silently add the
+# auto-discovery this gate exists to refuse.
+. "$ROOT_DIR/scripts/lib/simple-compiler-select.shs"
+
+simple_compiler_is_seed "$COMPILER" && fail "refusing Rust bootstrap seed: $COMPILER"
+
+# The `native-build --help | grep -- --target` check below was fail-OPEN on its
+# own: --help returns before any environment write, so the stale two-arg
+# rt_env_set binary passes it and then SIGSEGVs on the first real work. Probe
+# the actual capability first.
+simple_compiler_env_write_ok "$COMPILER" \
+    || fail "compiler failed the capability probe (crashes or proves nothing on real work): $COMPILER"
 NATIVE_HELP="$("$COMPILER" native-build --help 2>&1 || true)"
 printf '%s\n' "$NATIVE_HELP" | grep -q -- '--target' || fail "compiler lacks native-build --target: $COMPILER"
 command -v nm >/dev/null 2>&1 || fail "nm is required for compiler provenance"

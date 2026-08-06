@@ -127,14 +127,25 @@ if [ -z "$COMPILER" ] || [ ! -x "$COMPILER" ]; then
     blocked "artifacts ready for a follow-up run: $WORK/socket_echo_test.elf, $SR/lib/libsimpleos_c.a"
     exit 2
 fi
-PROVENANCE="$(SIMPLE_BOOTSTRAP_DRIVER="$COMPILER" "$COMPILER" --version 2>&1 || true)"
-case "$COMPILER:$PROVENANCE" in
-    *compiler_rust*|*simple_seed*|*"bootstrap seed only"*)
-        blocked "refusing Rust bootstrap seed: $COMPILER"
-        blocked "artifacts ready for a follow-up run: $WORK/socket_echo_test.elf, $SR/lib/libsimpleos_c.a"
-        exit 2
-        ;;
-esac
+# Shared identity + capability predicates. This gate deliberately requires an
+# EXPLICIT SIMPLE_BUILD_COMPILER, so it uses the predicates directly rather than
+# simple_compiler_select() -- calling the selector here would silently add the
+# auto-discovery this gate exists to refuse.
+. "$ROOT/scripts/lib/simple-compiler-select.shs"
+
+if simple_compiler_is_seed "$COMPILER"; then
+    blocked "refusing Rust bootstrap seed: $COMPILER"
+    blocked "artifacts ready for a follow-up run: $WORK/socket_echo_test.elf, $SR/lib/libsimpleos_c.a"
+    exit 2
+fi
+# The seed check alone was fail-open: a stale non-seed binary passes it and then
+# SIGSEGVs on the first environment write. Blocked (exit 2), not failed -- same
+# contract as the missing-compiler case above: the artifacts are still good.
+if ! simple_compiler_env_write_ok "$COMPILER"; then
+    blocked "compiler failed the capability probe (crashes or proves nothing on real work): $COMPILER"
+    blocked "artifacts ready for a follow-up run: $WORK/socket_echo_test.elf, $SR/lib/libsimpleos_c.a"
+    exit 2
+fi
 
 # A proven compiler is available: patch the test ELF onto the FS-exec
 # disk as /FSEXEC.ELF and delegate to the proven ring-3 boot harness,

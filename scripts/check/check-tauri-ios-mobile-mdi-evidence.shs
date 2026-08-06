@@ -2,6 +2,7 @@
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+. "$ROOT_DIR/scripts/lib/simple-compiler-select.shs"
 TAURI_DIR="$ROOT_DIR/tools/tauri-shell"
 BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/tauri_ios_mdi}"
 case "$BUILD_DIR" in
@@ -40,29 +41,14 @@ is_rust_seed_simple() {
 }
 if [ "${SIMPLE_BIN:-}" = "" ]; then
     SIMPLE_BIN_SOURCE="missing-self-hosted"
-    for candidate in "$ROOT_DIR"/bin/simple "$ROOT_DIR"/build/bootstrap/stage3/simple; do
-        if [ -x "$candidate" ]; then
-            SIMPLE_BIN="$candidate"
-            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
-            break
-        fi
-    done
-    if [ "${SIMPLE_BIN:-}" = "" ]; then
-        case "$(uname -s):$(uname -m)" in
-            Darwin:arm64) host_release_glob="$ROOT_DIR/release/aarch64-apple-darwin*/simple" ;;
-            Darwin:x86_64) host_release_glob="$ROOT_DIR/release/x86_64-apple-darwin*/simple" ;;
-            Linux:arm64|Linux:aarch64) host_release_glob="$ROOT_DIR/release/aarch64-unknown-linux-gnu/simple" ;;
-            Linux:x86_64) host_release_glob="$ROOT_DIR/release/x86_64-unknown-linux-gnu/simple" ;;
-            *) host_release_glob="" ;;
-        esac
-        for candidate in $host_release_glob; do
-            if [ -x "$candidate" ]; then
-                SIMPLE_BIN="$candidate"
-                SIMPLE_BIN_SOURCE="repo-host-release-fallback"
-                break
-            fi
-        done
-    fi
+    # Was two first-match-wins loops (bin/simple+stage3, then a host-arch
+    # release glob), each accepting on bare `-x` (fail-open: takes the first
+    # executable, including a seed or a cross-target payload). Now delegates
+    # to the shared positive-capability probe, which already ranks
+    # bootstrap/stage3+stage2 ahead of release/ and rejects wrong-arch/seed
+    # binaries via the env-write probe rather than a host-arch glob.
+    SIMPLE_BIN="$(simple_compiler_select --root "$ROOT_DIR" --quiet 2>/dev/null || true)"
+    [ -n "$SIMPLE_BIN" ] && SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
     if [ "${SIMPLE_BIN:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
         SIMPLE_BIN="$(command -v simple)"
         SIMPLE_BIN_SOURCE="path-opt-in"

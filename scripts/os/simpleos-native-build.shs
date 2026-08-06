@@ -100,99 +100,22 @@ sha256_file() {
 # `native-build --target <triple> --help` must exit 0 AND print the native-build
 # usage banner including --runtime-bundle. Crash (rc>=128), exec failure
 # (rc=126), and silent no-output all fail that test rather than passing it.
-compiler_can_build_target() {
-  probe_bin="$1"
-  probe_out="$(timeout 120 "$probe_bin" native-build --target "$TARGET" --help 2>&1)" \
-    && probe_rc=0 || probe_rc=$?
-  [ "$probe_rc" -eq 0 ] || return 1
-  case "$probe_out" in
-    *"Simple Native Build"*) ;;
-    *) return 1 ;;
-  esac
-  case "$probe_out" in
-    *"--runtime-bundle"*) ;;
-    *) return 1 ;;
-  esac
-  case "$probe_out" in
-    *"unknown"*"--target"*|*"unrecognized"*"--target"*) return 1 ;;
-  esac
+# The capability-probing selection that used to be inlined here now lives in
+# scripts/lib/simple-compiler-select.shs, shared with every other script that
+# has to pick a compiler. It is not a copy: the inline version here was itself
+# still fail-open. Measured 2026-08-06, its env-write probe ran `check`, which
+# the staged bootstrap compilers DO NOT IMPLEMENT -- they answer "unknown
+# command" (or bare rc=127), which the "reject only signal deaths" rule read as
+# a PASS. So this script would select build/bootstrap/stage2/.../simple having
+# proved nothing about it, and that binary then SIGSEGVs on the real work.
+# The shared helper probes a LADDER of subcommands and fails CLOSED when no
+# rung was conclusive. See its header for the full rationale.
+. "$REPO_ROOT/scripts/lib/simple-compiler-select.shs"
 
-  # `--help` is NOT sufficient. Measured 2026-08-06:
-  # release/x86_64-unknown-linux-gnu/simple (SHA-256 04a38e21…) links the
-  # obsolete TWO-argument rt_env_set and SIGSEGVs on the first environment
-  # write, yet it exits 0 on `native-build --target … --help` because --help
-  # returns before any env var is set. It therefore passes every check above.
-  # See doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md
-  #
-  # So additionally require the candidate to survive a command that actually
-  # writes the environment. `check` on a trivial file does exactly that
-  # (rt_env_set -> SIMPLE_BOOTSTRAP_* on ast_reset) and is fast. We only reject
-  # a *signal* death here: a non-zero exit from `check` itself is a source-level
-  # verdict about the fixture, not evidence about the compiler's ABI.
-  env_probe_file="${TMPDIR:-/tmp}/simpleos-native-build-envprobe.$$.spl"
-  printf 'fn main():\n    print("ok")\n' > "$env_probe_file"
-  timeout 120 "$probe_bin" check "$env_probe_file" >/dev/null 2>&1 \
-    && env_rc=0 || env_rc=$?
-  rm -f "$env_probe_file"
-  if [ "$env_rc" -ge 128 ]; then
-    echo "  (candidate died with signal rc=$env_rc on the environment-write probe)" >&2
-    return 1
-  fi
-  return 0
+COMPILER="$(simple_compiler_select --root "$REPO_ROOT" --builder-target "$TARGET")" || {
+  echo "error: no Simple compiler passed the native-build capability probe for $TARGET" >&2
+  exit 1
 }
-
-is_bootstrap_seed() {
-  case "$(timeout 60 "$1" --version 2>&1 || true)" in
-    *"bootstrap seed only"*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-COMPILER="${SIMPLE_BUILD_COMPILER:-}"
-COMPILER_EXPLICIT=1
-if [ -z "$COMPILER" ]; then
-  COMPILER_EXPLICIT=0
-  # build/bootstrap/stage3 and stage2 hold the pure-Simple staged compilers; a
-  # freshly bootstrapped stage3 outranks stage2, and both outrank whatever is
-  # sitting in release/.
-  for candidate in \
-    build/bootstrap/stage3/*/simple \
-    build/bootstrap/stage2/*/simple \
-    release/*/simple \
-    bin/release/*/simple
-  do
-    [ -x "$candidate" ] || continue
-    if is_bootstrap_seed "$candidate"; then
-      echo "skipping Rust bootstrap seed: $candidate" >&2
-      continue
-    fi
-    if ! compiler_can_build_target "$candidate"; then
-      echo "skipping compiler that failed the native-build capability probe: $candidate" >&2
-      continue
-    fi
-    COMPILER="$candidate"
-    break
-  done
-  if [ -z "$COMPILER" ]; then
-    echo "error: no self-hosted Simple compiler passed the native-build capability probe" >&2
-    echo "hint: run the bootstrap, or set SIMPLE_BUILD_COMPILER explicitly" >&2
-    exit 1
-  fi
-else
-  if [ ! -x "$COMPILER" ]; then
-    echo "error: SIMPLE_BUILD_COMPILER is not executable: $COMPILER" >&2
-    exit 1
-  fi
-  if is_bootstrap_seed "$COMPILER"; then
-    echo "warning: building with the Rust bootstrap seed (explicitly selected): $COMPILER" >&2
-    echo "warning: the resulting payload will FAIL both install-image provenance guards" >&2
-  fi
-  # An explicit choice still has to be able to do the job.
-  if ! compiler_can_build_target "$COMPILER"; then
-    echo "error: SIMPLE_BUILD_COMPILER failed the native-build --target capability probe: $COMPILER" >&2
-    exit 1
-  fi
-fi
 
 echo "Compiler:  ${COMPILER}"
 echo "Target:    ${TARGET}"
