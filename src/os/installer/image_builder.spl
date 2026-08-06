@@ -901,6 +901,19 @@ fn _validate_simple_binary(path: text, arch: PkgArch) -> Result<bool, text>:
     if not stamp.contains("entry=src/app/simpleos_tool/main.spl\n") or not stamp.contains("entry_closure=true\n"):
         return Err("SimpleOS Simple payload is not the focused compiler/interpreter/loader entry closure")
 
+    # Anti-seed provenance. This MUST mirror validate_simple_payload_provenance()
+    # in scripts/os/make_os_disk.shs (which rejects compiler values matching
+    # *compiler_rust* or *simple_seed*, and requires backend llvm|cranelift).
+    # Measured 2026-08-06: this layer checked only `target=`, so it happily
+    # STAGED a seed-built payload into the rootfs that the shell layer then
+    # refused to write into the FAT image — the two guards disagreed, and the
+    # Simple side was the fail-open one. A seed-built payload is bootstrap
+    # output, not self-hosted evidence, and must not reach an install image.
+    if stamp.contains("compiler_rust") or stamp.contains("simple_seed"):
+        return Err("SimpleOS Simple payload was built by the bootstrap seed, not the self-hosted compiler: {stamp_path}")
+    if not stamp.contains("backend=llvm\n") and not stamp.contains("backend=cranelift\n"):
+        return Err("SimpleOS Simple payload build stamp has no valid backend (want llvm or cranelift): {stamp_path}")
+
     val payload = rt_file_read_bytes(path) ?? []
     if payload.len() < 64 or payload[0] != 0x7fu8 or payload[1] != 0x45u8 or payload[2] != 0x4cu8 or payload[3] != 0x46u8:
         return Err("SimpleOS Simple payload is not an ELF executable")

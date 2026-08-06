@@ -25,6 +25,7 @@
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, VM_NO_EXECUTE}
 use os.kernel.boot.mmio.{mmio_read64, mmio_write64, mmio_invalidate_tlb}
 use os.kernel.memory.pmm.{PhysMemManager, pmm_alloc_page_raw, pmm_free_page}
+use os.kernel.memory.vmm_core.{vmm_publish_kernel_pml4}
 
 extern fn rt_read_cr3() -> u64
 extern fn rt_write_cr3(value: u64)
@@ -228,6 +229,14 @@ fn vmm_init(pmm_manager: PhysMemManager, hhdm_offset: u64):
         return
 
     g_vmm.pml4_phys = pml4_phys
+
+    # Publish the root into the PORTABLE VMM scalars (os.kernel.memory.vmm_core).
+    # This module owns the real kernel page tables, but every address-space /
+    # copy / VMA consumer reads the root through vmm_core.vmm_kernel_pml4_phys().
+    # Without this the two modules disagree and ring-3 spawn falls back to AS=1.
+    # Uses the LOCAL pml4_phys (a live value), not g_vmm.pml4_phys, because
+    # struct globals are the unreliable category under freestanding codegen.
+    vmm_publish_kernel_pml4(pml4_phys, hhdm_offset)
 
     log_raw_println("[VMM] PML4 at physical 0x{pml4_phys}")
 

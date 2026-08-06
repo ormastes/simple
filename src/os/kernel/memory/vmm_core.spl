@@ -270,6 +270,32 @@ use os.kernel.log.klog_api.{log_raw_println}
 # VMM Initialization
 # ============================================================================
 
+fn vmm_publish_kernel_pml4(pml4_phys: u64, hhdm_offset: u64):
+    """Publish the kernel PML4 physical address + HHDM offset established by the
+    ARCH paging layer into this module's portable scalars.
+
+    Two VMM implementations exist and print byte-identical serial banners:
+    `os.kernel.arch.x86_64.paging.vmm_init` (the one the boot path actually
+    calls, via X86Paging.init <- arch_adapt.x86_64.paging.paging_init) and this
+    module's `vmm_init_from_global_pmm` (which has no callers). The arch one
+    owns the real page tables and stores the root in ITS OWN `g_vmm.pml4_phys`,
+    so `_vmm_pml4_phys` here stayed 0 even after a fully successful VMM init.
+
+    Everything downstream of address-space creation — `create_user_address_space`,
+    `vmm_clone_kernel_low_private`, `vmm_copy` — reads the kernel root through
+    `vmm_kernel_pml4_phys()` here. With it 0, every FS-exec ring-3 spawn hit the
+    `[VMM] create_user_address_space: VMM not initialized` guard and fell back to
+    the legacy AS=1 sentinel, failing the spawn with rc=-1.
+
+    Scalars only: `g_vmm` is a struct global with a constructor initializer,
+    which is the unreliable category under freestanding codegen; scalar module
+    vars land in zeroed .bss and are the dependable channel. No consumer reads
+    `g_vmm`'s fields, so publishing the scalars is sufficient."""
+    _vmm_pml4_phys = pml4_phys
+    _vmm_hhdm_offset = hhdm_offset
+    g_vmm_initialized = 1
+    log_raw_println("[VMM] portable VMM published kernel PML4 0x{pml4_phys}")
+
 fn vmm_init(pmm_manager: PhysMemManager, hhdm_offset: u64):
     """Initialize virtual memory manager.
 

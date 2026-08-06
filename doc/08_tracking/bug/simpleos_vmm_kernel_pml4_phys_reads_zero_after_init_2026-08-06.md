@@ -1,7 +1,7 @@
 # `vmm_kernel_pml4_phys()` reads 0 after a SUCCESSFUL vmm_init — blocks every FS-exec ring-3 spawn
 
 - **ID:** simpleos-vmm-kernel-pml4-phys-reads-zero-2026-08-06
-- **Status:** OPEN — root-cause investigation in progress
+- **Status:** FIXED 2026-08-06 — verified by a positive in-guest marker (below)
 - **Severity:** CRITICAL — blocks in-guest execution of BOTH the clang toolchain
   and the Simple compiler payload. Gates AC-4..AC-8 of the migration campaign.
 - **Owner path:** `src/os/kernel/memory/vmm_core.spl`,
@@ -50,17 +50,79 @@ serial already reported as a nonzero physical address.
 - `vmm_address_space.spl:14` — imports the accessor from `vmm_core`
 
 Note the accessor lives in the SAME module as the global, so a naive
-"cross-module global" story is not sufficient on its own — the read goes through
-`vmm_core`'s own function. Candidate mechanisms still to discriminate:
-duplicate `.bss` storage per object in the freestanding link; the accessor being
-inlined into the caller's object against a different copy; the two init paths
-writing different storage; or `g_vmm_initialized` and `_vmm_pml4_phys`
-disagreeing.
+"cross-module global" story was never sufficient — the read goes through
+`vmm_core`'s own function.
 
-This is worth root-causing rather than accepting: the SimpleOS freestanding
-landmine catalog states that *scalar* module vars land in zeroed `.bss` and are
-reliable (unlike array/`[text]` initializers, which genuinely do not run). A
-scalar failing this way contradicts the documented contract.
+## ROOT CAUSE — two parallel VMM implementations printing IDENTICAL banners
+
+Not a codegen bug. A **wiring** bug, and the reason it burned a day across two
+lanes is that the decoy was the evidence itself.
+
+- `nm` finds exactly ONE `_vmm_pml4_phys`
+  (`src__os__kernel__memory__vmm_core___vmm_pml4_phys`) → duplicate-`.bss`
+  ruled out.
+- `objdump` of `vmm_kernel_pml4_phys` shows a real body
+  (`mov $0x80c4138,%rdi; mov (%rdi),%rax; ret`) → not a fabricated stub. The
+  global genuinely held 0.
+- The only `vmm_init` in the linked ELF is
+  `src__os__kernel__arch__x86_64__paging__vmm_init`. **`vmm_core.spl`'s own
+  `vmm_init` / `vmm_init_from_global_pmm` (`:273`, `:282`) have ZERO callers
+  repo-wide — dead code.**
+
+The live initializer is `src/os/kernel/arch/x86_64/paging.spl:214` (via
+`X86Paging.init`). It stores the root in **its own** `g_vmm.pml4_phys`
+(`paging.spl:230`). Everything downstream — `create_user_address_space`,
+`vmm_clone_kernel_low_private`, `vmm_copy` — reads
+`vmm_core::vmm_kernel_pml4_phys()`, which **nothing ever wrote**.
+
+**Both implementations print byte-identical `[VMM] …` banners.** So the serial
+"proof" that init succeeded was emitted by the OTHER init. Reading a log for a
+success marker cannot distinguish two implementations that log the same words —
+the marker must identify its writer.
+
+## Fix (kernel-source layer)
+
+New `vmm_publish_kernel_pml4(pml4_phys, hhdm_offset)` in `vmm_core.spl` sets the
+three **scalars** (`_vmm_pml4_phys`, `_vmm_hhdm_offset`, `g_vmm_initialized`)
+and prints a marker naming itself; `paging.spl`'s `vmm_init` calls it with its
+LOCAL live values. Scalars only — `g_vmm` is a struct global with a constructor
+initializer, the unreliable freestanding category. +35 lines across two files.
+
+## Verification — positive marker, plus anti-fabrication ratchet
+
+```
+  [ok]   L1 OVMF -> GRUB-EFI app ran
+  [ok]   L2 multiboot handoff -> kernel _start
+  [ok]   L3 sshd ring-3 accept loop (payload overlap fault cleared)
+  [ok]   L4 in-guest clang compiled /hello.o under OVMF
+[VMM] portable VMM published kernel PML4 0x402718720
+[spawn] parsed entry=0x1073741824
+[oo-nvme] persist /hello.o -> OK
+[syscall] exit status=0
+```
+(`build/os/vmm_gate_run.log`, 2026-08-06 05:48; serial
+`build/os/scp_retrieve_over_ssh_uefi.serial.log`.)
+
+Acceptance was deliberately a POSITIVE marker (`persist /hello.o -> OK`), never
+the absence of the failure line — an absence condition is also satisfied by a
+stubbed-out accessor. The `portable VMM published` line is itself
+anti-fabrication proof: a weak no-op stub prints nothing. Failure markers
+`VMM not initialized` / `FAIL user-AS` / `rc=-1` all occur **0** times.
+
+Stub ratchet: the entry was baselined on the PRE-fix build (56 rows, now in
+`config/freestanding_fabricated_stub_baseline.sdn`), and the post-fix build
+reports **56 known, 0 new** — so the fix introduced no fabricated symbols. Any
+future fabrication in this entry now fails the build instead of shipping a
+no-op.
+
+## Still open
+
+- **L5** host-side `getfile` retrieval returns an empty object. The serial ends
+  healthy (`exit status=0`, object base64 present, no fault), so this is the
+  retrieval transport, not the VMM/ring-3 path.
+- **Follow-up:** the two VMM implementations with identical banners should be
+  consolidated. Leaving both is exactly what made this defect cost two lanes a
+  day; merging was out of scope for the fix.
 
 ## Do NOT "fix" it by relaxing the guard
 
