@@ -1,6 +1,6 @@
 # test-runner post-spec lint gate invokes simple_lint with an empty/missing file arg
 
-**Status:** open
+**Status:** FIXED (2026-08-06) — see "Resolution" below
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** app/test_runner (SSpec `simple test` harness)
 
@@ -105,3 +105,118 @@ campaign's rules (Rust seed / test-runner source fix needs a rebuild).
   (one-line field-name correction) and verified: all 8 real examples now
   pass (`8 examples, 0 failures`) — the spec is blocked ONLY by this
   harness-level lint-gate defect now, not by any remaining spec/src issue.
+
+## Resolution (2026-08-06)
+
+**The "post-spec lint gate" never existed as such.** Both the original
+"missing companion source" hypothesis and the revised "unconditional
+post-spec `simple_lint` invocation" hypothesis were wrong — there is no code
+anywhere in `src/app/test_runner_new/`, `src/lib/nogc_sync_mut/test_runner/`,
+or the CLI dispatch layer that shells out to (or in-process calls) the lint
+tool after a spec's examples finish. Exhaustive grep across the repo for
+`simple_lint`, `run_lint_file`, `lint_main(` and `companion` found no such
+call site tied to spec execution.
+
+### Root cause (confirmed)
+
+Same underlying defect as
+`doc/08_tracking/bug/test_runner_wildcard_imported_main_phantom_failure_2026-08-01.md`
+("Site A" in that doc), just a different downstream symptom:
+
+- The interpreter-mode test runner generates a synthetic entry point for
+  every spec it executes: `src/lib/nogc_sync_mut/test_runner/test_result_wrapper.spl`
+  (`_preprocess_spipe_file`, ~line 479) always emits `fn main():` /
+  `fn main() -> i64:` as the wrapper's actual entry point, wrapping the
+  spec's real body.
+- Before the fix, `src/compiler/90.tools/lint/main.spl` re-exported its
+  `_LintMain.entry_and_fixes` submodule via a **wildcard**
+  (`export use compiler.tools.lint._LintMain.entry_and_fixes.*`), and that
+  submodule declared the lint CLI's entry point as a bare `fn main() -> Int`
+  (`src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl`, the function
+  now named `lint_main` at line 289). Any spec whose dependency graph
+  wildcard-imported `compiler.tools.lint.main` (directly or transitively)
+  therefore had a second `fn main` land in scope alongside the runner's own
+  synthesized one.
+- On name collision the wrong `main` won and got invoked as the process
+  entry point with no argument-passing plumbing (it is an in-process
+  function call, not a subprocess with argv). `lint_main`'s own
+  `args.len() < 2` guard (`entry_and_fixes.spl:293-317`) then fired and
+  printed its `Usage: simple_lint <file.spl> [options]` banner, returning a
+  failing status. The runner's aggregate parser folded that trailing
+  non-zero return into the example tally as one extra failed "example",
+  flipping an all-green spec to FAIL — exactly the `4 examples, 0 failures`
+  followed by `Usage: simple_lint ...` / `Failed: 1` signature in this doc's
+  symptom section. This explains why the trigger looked unconditional and
+  path-independent: it depended on the spec's *import graph* reaching
+  `compiler.tools.lint.main`, not on any lint-gate/companion-source logic at
+  all (there was none).
+
+### Fix (already landed, `.spl`-only)
+
+Two coupled changes, both already present in current `main`:
+
+1. `src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl:289` — the lint
+   CLI's `fn main() -> Int` renamed to `fn lint_main() -> Int`.
+2. `src/compiler/90.tools/lint/main.spl:24-29` — the facade's
+   `export use ..._LintMain.entry_and_fixes.*` wildcard replaced with an
+   explicit named list (`lint_cli_source, lint_cli_find_decl_line, ...,
+   run_lint_file, collect_easy_fixes, apply_collected_fixes, lint_main`)
+   that never binds a bare `main` symbol.
+
+With no `fn main` reachable via wildcard from the lint module graph, nothing
+can collide with the test-runner's synthesized entry point, so this specific
+collision path is closed. (A companion, Rust-side mechanism — "Site B" in
+the wildcard-main doc, binding an imported module's export dict under the
+literal key `"main"` for `Group`/`Glob` targets regardless of which symbols
+are named — is tracked separately in that doc and was still unverified as of
+2026-08-01; it produces a different, distinct symptom, `error: semantic:
+type mismatch: cannot convert dict to int`, not the `Usage: simple_lint`
+banner this doc is about, so it does not reopen this bug.)
+
+### Verification
+
+Re-ran this doc's exact repro:
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
+  /home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple \
+  test test/01_unit/tools/cat_spec.spl --no-session-daemon
+```
+
+Before (doc symptom, 2026-07-20): `4 examples, 0 failures` immediately
+followed by `Usage: simple_lint <file.spl> [options]` and `FAIL`.
+
+After (2026-08-06, current `main`): clean run, no `Usage: simple_lint` text
+anywhere in the output —
+
+```
+Passed: 4
+Failed: 0
+Results: 4 total, 4 passed, 0 failed
+PASS test/01_unit/tools/cat_spec.spl
+```
+
+`test/01_unit/app/doc_coverage/compiler_integration_spec.spl` no longer
+shows the lint-gate symptom either, but it now fails for a **separate, real,
+unrelated** reason: `semantic: variable 'NL' not found` in 7 of 8 examples.
+That is a genuine spec/source defect (not this harness defect) and is
+explicitly left alone here — out of scope for this doc.
+
+Broader spot-check (all specs run individually, sequential per
+`.claude/rules/testing.md`, `grep -c "Usage: simple_lint"` == 0 in every
+case):
+
+- `test/01_unit/tools/*_spec.spl` (15 files) — **all PASS**, zero
+  occurrences of `Usage: simple_lint`.
+- `test/01_unit/app/doc_coverage/*_spec.spl` (14 files) — zero occurrences
+  of `Usage: simple_lint`; 5 PASS, 9 FAIL for unrelated reasons (`Cannot
+  resolve module: doc_coverage.*`, `variable 'NL' not found`, `array index
+  out of bounds`) — a separate doc_coverage module-restructure regression,
+  not this bug, not investigated further here.
+
+No source change was required from this session: the fix was already
+present in current `main` (landed as a side effect of the sibling
+`test_runner_wildcard_imported_main_phantom_failure_2026-08-01` investigation,
+which this doc was not previously cross-linked to). This doc was left open
+only because it was never updated to point at that landed fix. Closing as
+FIXED; the original investigation above is kept for context.
