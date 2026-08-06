@@ -38,12 +38,14 @@ wrapper, `build/cyc/ARGV1`):
    mid-run, and cc was invoked 23 times for them. So the ELSE branch ran.
 2. The final `cc` link line carried **only two** objects: the user object and
    the generated entry shim. None of the 23 runtime objects appeared.
-3. After the failed link the 23 objects were **gone** from `t3` — they can only
-   have been removed by `cleanup_runtime_objects(runtime_objects)`, i.e. the
-   same `val` held the real, non-empty list at that later read.
+3. After the failed link the 23 objects were **gone** from `t3`.
 
-So one read of `runtime_objects` saw an empty list and a later read saw the full
-23-element list.
+So the ELSE branch ran and produced 23 objects, and the object-collection loop
+contributed zero of them. Who removed the objects afterwards was not traced:
+`cleanup_runtime_objects` on an empty list is a no-op, so their disappearance
+*suggests* the value was intact at that later read, but that was inferred, not
+observed. Treat "the same val read empty at one site and full at another" as an
+unconfirmed hypothesis.
 
 Only three symbols were reported because `-Wl,--gc-sections` is on the link
 line: lld does not report undefined references from sections it garbage
@@ -87,15 +89,29 @@ rt_install_crash_handler present   # runtime.c's spl_init_args won, not a stub
 __simple_runtime_shutdown -> call fflush; jmp fflush   # not a bare ret
 ```
 
-A whole-cycle GREEN through the compiler itself was NOT reached: a rebuilt
-stage2 now dies one phase earlier, in `llc`, on
-`%t3209 = icmp ne double %l39, 0` (an integer truthiness compare emitted against
-a double). That is a separate codegen defect and is unrelated to this change.
+Sabotage: relinking the same object with `runtime.o` and `runtime_native.o`
+removed from the object set brings back **exactly** those three undefined
+symbols and nothing else; restoring them relinks clean.
 
-Separately, the Stage 3 object's `__simple_main` is vacuous — it returns a stack
-slot without calling anything, so the linked binary is 28 KB and produces no
-output for any subcommand. Fixing the link does not by itself yield a
-self-hosting binary.
+A whole-cycle GREEN through the compiler itself was NOT reached. A stage2
+rebuilt from the bisect worktree dies one phase earlier, in `llc`, on
+`%t3209 = icmp ne double %l39, 0` (an integer truthiness compare emitted against
+a double). That worktree carries uncommitted in-flight edits from a concurrent
+lane in `_MirToLlvm/core_codegen.spl` (2 lines) and `llvm_ir_builder.spl` (20
+lines) that are not in `origin/main`; those files were deliberately not touched,
+and `origin/main`'s versions of them were not tested against this failure.
+
+## No self-host: the Stage 3 entry is vacuous
+
+Even with the link fixed, the Stage 3 object does not yield a working compiler.
+Its `__simple_main` is `mov -0x48(%rsp),%rax; ret` — it reads an uninitialised
+stack slot and returns, calling nothing. All 5,674 other `T` functions in the
+object are therefore unreachable and `--gc-sections` strips them, giving a 28 KB
+binary that prints nothing and exits 0 for `--version`, `build --help`, and a
+bare invocation. `nm` on the object shows no `app.cli.bootstrap_main.main`-style
+entry body at all, so the entry module's `main` never reached the object under a
+callable name. That is the next blocker and it is a lowering/entry-wiring
+defect, not a link defect.
 
 ## Repro shape
 
