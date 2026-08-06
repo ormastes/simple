@@ -123,4 +123,23 @@ interpreter's `match_pattern` had no enum-variant case at all. Fix drafts
 needs bootstrap + extended smoke. Full evidence:
 `doc/08_tracking/bug/cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md`.
 
+### Hand-inlined SIMD intrinsics in the Rust seed must gate on target ISA (2026-08-06)
+
+`src/compiler_rust/compiler/src/codegen/instr/calls.rs` has hand-written
+inline-codegen fast paths for a few numeric SFFI intrinsics
+(`compile_inline_numeric_contains_u64`, `compile_inline_numeric_xor_sum_u64`)
+that emit explicit Cranelift `I64X2` SIMD ops (`splat`/`load.i64x2`/`bxor`/
+`vany_true`). These previously emitted unconditionally on every target,
+including riscv64 without the `V` extension, where
+`ty_supported_vec`/`min_vec_reg_size()` is `0` — no vector type of any lane
+width can lower there, so this crashed codegen with "should be implemented in
+ISLE" (looked like a missing lowering rule; it was compiler-side
+overgeneration, not a real ISA gap — there's no vector hardware to add a rule
+for). Fixed by gating the SIMD fast path to `Architecture::X86_64` /
+`Aarch64(_)` (guaranteed SSE2/NEON) and falling back to a plain scalar loop
+everywhere else. Any new hand-inlined SIMD intrinsic in this file needs the
+same `ctx.module.isa().triple().architecture` check — grep `I64X2\|I8X16\|
+I32X4\|vany_true\|vall_true` in that file before adding a target. Full
+writeup: `doc/08_tracking/bug/riscv64_kernel_codegen_blocker_2026-07-20.md`.
+
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

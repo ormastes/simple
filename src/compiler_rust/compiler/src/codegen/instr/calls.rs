@@ -925,6 +925,109 @@ fn compile_inline_array_set_word<M: Module>(
     Ok(true)
 }
 
+fn compile_scalar_numeric_xor_sum_u64<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+    raw_data: bool,
+) -> InstrResult<bool> {
+    let expected_args = if raw_data { 3 } else { 2 };
+    if args.len() != expected_args {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+
+    let first_arg = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let length_arg = if raw_data {
+        Some(coerce_vreg_to_i64(ctx, builder, args[1]))
+    } else {
+        None
+    };
+    let xor_value = coerce_vreg_to_i64(ctx, builder, args[if raw_data { 2 } else { 1 }]);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let min_heap_value = builder.ins().iconst(types::I64, 4096);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let ptr_bits = if raw_data {
+        first_arg
+    } else {
+        builder.ins().band(first_arg, ptr_mask)
+    };
+
+    let kind_block = builder.create_block();
+    let len_block = builder.create_block();
+    let loop_block = builder.create_block();
+    let body_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(loop_block, types::I64);
+    builder.append_block_param(loop_block, types::I64);
+    builder.append_block_param(loop_block, types::I64);
+    builder.append_block_param(body_block, types::I64);
+    builder.append_block_param(body_block, types::I64);
+    builder.append_block_param(body_block, types::I64);
+    builder.append_block_param(done_block, types::I64);
+
+    let length: Value;
+    if raw_data {
+        length = length_arg.expect("raw numeric xor-sum lowering provides length");
+        builder.ins().jump(loop_block, &[zero, zero, ptr_bits]);
+    } else {
+        let too_small = builder.ins().icmp(IntCC::SignedLessThan, first_arg, min_heap_value);
+        builder.ins().brif(too_small, done_block, &[zero], kind_block, &[]);
+
+        builder.switch_to_block(kind_block);
+        let tag = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 0);
+        let tag64 = builder.ins().uextend(types::I64, tag);
+        let is_array = builder.ins().icmp_imm(IntCC::Equal, tag64, 2);
+        builder.ins().brif(is_array, len_block, &[], done_block, &[zero]);
+        builder.seal_block(kind_block);
+
+        builder.switch_to_block(len_block);
+        length = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+        let negative_len = builder.ins().icmp(IntCC::SignedLessThan, length, zero);
+        let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+        builder
+            .ins()
+            .brif(negative_len, done_block, &[zero], loop_block, &[zero, zero, data_ptr]);
+        builder.seal_block(len_block);
+    }
+
+    builder.switch_to_block(loop_block);
+    let sum = builder.block_params(loop_block)[0];
+    let idx = builder.block_params(loop_block)[1];
+    let cursor = builder.block_params(loop_block)[2];
+    let has_more = builder.ins().icmp(IntCC::SignedLessThan, idx, length);
+    let result_sum = if raw_data { sum } else { builder.ins().ishl_imm(sum, 3) };
+    builder
+        .ins()
+        .brif(has_more, body_block, &[sum, idx, cursor], done_block, &[result_sum]);
+
+    builder.switch_to_block(body_block);
+    let sum = builder.block_params(body_block)[0];
+    let idx = builder.block_params(body_block)[1];
+    let cursor = builder.block_params(body_block)[2];
+    let value = builder.ins().load(types::I64, MemFlags::new(), cursor, 0);
+    let xored = builder.ins().bxor(value, xor_value);
+    let next_sum = builder.ins().iadd(sum, xored);
+    let next_idx = builder.ins().iadd_imm(idx, 1);
+    let next_cursor = builder.ins().iadd_imm(cursor, 8);
+    builder.ins().jump(loop_block, &[next_sum, next_idx, next_cursor]);
+    builder.seal_block(body_block);
+    builder.seal_block(loop_block);
+
+    builder.switch_to_block(done_block);
+    let result = builder.block_params(done_block)[0];
+    builder.seal_block(done_block);
+    ctx.vreg_values.insert(*dest, result);
+    Ok(true)
+}
+
+/// Sibling of `compile_inline_numeric_contains_u64`: same overgeneration bug
+/// (unconditional I64X2 SIMD with no target gate, see the `use_simd` comment
+/// there). Dispatches to a pure-scalar reduction on targets without a
+/// hardware-supported vector unit at this width.
 fn compile_inline_numeric_xor_sum_u64<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -932,6 +1035,14 @@ fn compile_inline_numeric_xor_sum_u64<M: Module>(
     args: &[VReg],
     raw_data: bool,
 ) -> InstrResult<bool> {
+    let use_simd = matches!(
+        ctx.module.isa().triple().architecture,
+        target_lexicon::Architecture::X86_64 | target_lexicon::Architecture::Aarch64(_)
+    );
+    if !use_simd {
+        return compile_scalar_numeric_xor_sum_u64(ctx, builder, dest, args, raw_data);
+    }
+
     let expected_args = if raw_data { 3 } else { 2 };
     if args.len() != expected_args {
         return Ok(false);
@@ -1318,6 +1429,22 @@ fn compile_inline_numeric_contains_u64<M: Module>(
     let zero = builder.ins().iconst(types::I64, 0);
     let one = builder.ins().iconst(types::I64, 1);
 
+    // The chunked path below emits explicit I64X2 SIMD (`vany_true.i64x2` +
+    // friends). Cranelift's ISLE lowering for those ops is only implemented on
+    // backends with a real 128-bit-capable vector unit; on riscv64 without the
+    // V extension (`min_vec_reg_size() == 0`) there is no lowering rule at all
+    // and codegen aborts with "should be implemented in ISLE" (see
+    // doc/08_tracking/bug/riscv64_kernel_codegen_blocker_2026-07-20.md). x86_64
+    // (SSE2 baseline) and aarch64 (NEON baseline) always have hardware support,
+    // so restrict the SIMD chunk fast path to those and fall back to the plain
+    // scalar per-element loop everywhere else — this was MIR/codegen
+    // overgeneration (emitting SIMD unconditionally), not a genuine gap that
+    // needs a new ISLE rule for hardware that may not exist.
+    let use_simd = matches!(
+        ctx.module.isa().triple().architecture,
+        target_lexicon::Architecture::X86_64 | target_lexicon::Architecture::Aarch64(_)
+    );
+
     let ptr_bits = if raw_data {
         None
     } else {
@@ -1327,16 +1454,18 @@ fn compile_inline_numeric_contains_u64<M: Module>(
     let kind_block = if raw_data { None } else { Some(builder.create_block()) };
     let len_block = if raw_data { None } else { Some(builder.create_block()) };
     let loop_block = builder.create_block();
-    let chunk_block = builder.create_block();
-    let chunk_second_block = builder.create_block();
+    let chunk_block = if use_simd { Some(builder.create_block()) } else { None };
+    let chunk_second_block = if use_simd { Some(builder.create_block()) } else { None };
     let tail_block = builder.create_block();
     let tail_body_block = builder.create_block();
     let found_block = builder.create_block();
     let done_block = builder.create_block();
     builder.append_block_param(loop_block, types::I64);
     builder.append_block_param(loop_block, types::I64);
-    builder.append_block_param(chunk_second_block, types::I64);
-    builder.append_block_param(chunk_second_block, types::I64);
+    if let Some(chunk_second_block) = chunk_second_block {
+        builder.append_block_param(chunk_second_block, types::I64);
+        builder.append_block_param(chunk_second_block, types::I64);
+    }
     builder.append_block_param(tail_block, types::I64);
     builder.append_block_param(tail_block, types::I64);
     builder.append_block_param(tail_body_block, types::I64);
@@ -1375,61 +1504,67 @@ fn compile_inline_numeric_contains_u64<M: Module>(
     builder.switch_to_block(loop_block);
     let idx = builder.block_params(loop_block)[0];
     let cursor = builder.block_params(loop_block)[1];
-    let idx_plus_seven = builder.ins().iadd_imm(idx, 7);
-    let has_chunk = builder.ins().icmp(IntCC::SignedLessThan, idx_plus_seven, length);
-    builder
-        .ins()
-        .brif(has_chunk, chunk_block, &[], tail_block, &[idx, cursor]);
+    if let (Some(chunk_block), Some(chunk_second_block)) = (chunk_block, chunk_second_block) {
+        let idx_plus_seven = builder.ins().iadd_imm(idx, 7);
+        let has_chunk = builder.ins().icmp(IntCC::SignedLessThan, idx_plus_seven, length);
+        builder
+            .ins()
+            .brif(has_chunk, chunk_block, &[], tail_block, &[idx, cursor]);
 
-    builder.switch_to_block(chunk_block);
-    let needle_vec = builder.ins().splat(types::I64X2, needle);
-    let first_values = builder.ins().load(types::I64X2, MemFlags::new(), cursor, 0);
-    let mut hit_mask = vector_compare_mask_i64x2(builder, first_values, needle_vec);
-    for offset in [16, 32, 48] {
-        let values = builder.ins().load(types::I64X2, MemFlags::new(), cursor, offset);
-        let mask = vector_compare_mask_i64x2(builder, values, needle_vec);
-        hit_mask = builder.ins().bor(hit_mask, mask);
+        builder.switch_to_block(chunk_block);
+        let needle_vec = builder.ins().splat(types::I64X2, needle);
+        let first_values = builder.ins().load(types::I64X2, MemFlags::new(), cursor, 0);
+        let mut hit_mask = vector_compare_mask_i64x2(builder, first_values, needle_vec);
+        for offset in [16, 32, 48] {
+            let values = builder.ins().load(types::I64X2, MemFlags::new(), cursor, offset);
+            let mask = vector_compare_mask_i64x2(builder, values, needle_vec);
+            hit_mask = builder.ins().bor(hit_mask, mask);
+        }
+        let any_hit = builder.ins().vany_true(hit_mask);
+        let chunk_hit = builder.ins().icmp_imm(IntCC::NotEqual, any_hit, 0);
+        let next_idx = builder.ins().iadd_imm(idx, 8);
+        let next_cursor = builder.ins().iadd_imm(cursor, 64);
+        builder.ins().brif(
+            chunk_hit,
+            found_block,
+            &[],
+            chunk_second_block,
+            &[next_idx, next_cursor],
+        );
+        builder.seal_block(chunk_block);
+
+        builder.switch_to_block(chunk_second_block);
+        let idx = builder.block_params(chunk_second_block)[0];
+        let cursor = builder.block_params(chunk_second_block)[1];
+        let idx_plus_seven = builder.ins().iadd_imm(idx, 7);
+        let has_chunk = builder.ins().icmp(IntCC::SignedLessThan, idx_plus_seven, length);
+        let second_test_block = builder.create_block();
+        builder
+            .ins()
+            .brif(has_chunk, second_test_block, &[], tail_block, &[idx, cursor]);
+        builder.seal_block(chunk_second_block);
+
+        builder.switch_to_block(second_test_block);
+        let first_values = builder.ins().load(types::I64X2, MemFlags::new(), cursor, 0);
+        let mut hit_mask = vector_compare_mask_i64x2(builder, first_values, needle_vec);
+        for offset in [16, 32, 48] {
+            let values = builder.ins().load(types::I64X2, MemFlags::new(), cursor, offset);
+            let mask = vector_compare_mask_i64x2(builder, values, needle_vec);
+            hit_mask = builder.ins().bor(hit_mask, mask);
+        }
+        let any_hit = builder.ins().vany_true(hit_mask);
+        let chunk_hit = builder.ins().icmp_imm(IntCC::NotEqual, any_hit, 0);
+        let next_idx = builder.ins().iadd_imm(idx, 8);
+        let next_cursor = builder.ins().iadd_imm(cursor, 64);
+        builder
+            .ins()
+            .brif(chunk_hit, found_block, &[], loop_block, &[next_idx, next_cursor]);
+        builder.seal_block(second_test_block);
+    } else {
+        // No hardware vector support on this target: skip the chunked SIMD
+        // fast path entirely and scan every element scalar-wise via tail_block.
+        builder.ins().jump(tail_block, &[idx, cursor]);
     }
-    let any_hit = builder.ins().vany_true(hit_mask);
-    let chunk_hit = builder.ins().icmp_imm(IntCC::NotEqual, any_hit, 0);
-    let next_idx = builder.ins().iadd_imm(idx, 8);
-    let next_cursor = builder.ins().iadd_imm(cursor, 64);
-    builder.ins().brif(
-        chunk_hit,
-        found_block,
-        &[],
-        chunk_second_block,
-        &[next_idx, next_cursor],
-    );
-    builder.seal_block(chunk_block);
-
-    builder.switch_to_block(chunk_second_block);
-    let idx = builder.block_params(chunk_second_block)[0];
-    let cursor = builder.block_params(chunk_second_block)[1];
-    let idx_plus_seven = builder.ins().iadd_imm(idx, 7);
-    let has_chunk = builder.ins().icmp(IntCC::SignedLessThan, idx_plus_seven, length);
-    let second_test_block = builder.create_block();
-    builder
-        .ins()
-        .brif(has_chunk, second_test_block, &[], tail_block, &[idx, cursor]);
-    builder.seal_block(chunk_second_block);
-
-    builder.switch_to_block(second_test_block);
-    let first_values = builder.ins().load(types::I64X2, MemFlags::new(), cursor, 0);
-    let mut hit_mask = vector_compare_mask_i64x2(builder, first_values, needle_vec);
-    for offset in [16, 32, 48] {
-        let values = builder.ins().load(types::I64X2, MemFlags::new(), cursor, offset);
-        let mask = vector_compare_mask_i64x2(builder, values, needle_vec);
-        hit_mask = builder.ins().bor(hit_mask, mask);
-    }
-    let any_hit = builder.ins().vany_true(hit_mask);
-    let chunk_hit = builder.ins().icmp_imm(IntCC::NotEqual, any_hit, 0);
-    let next_idx = builder.ins().iadd_imm(idx, 8);
-    let next_cursor = builder.ins().iadd_imm(cursor, 64);
-    builder
-        .ins()
-        .brif(chunk_hit, found_block, &[], loop_block, &[next_idx, next_cursor]);
-    builder.seal_block(second_test_block);
     builder.seal_block(loop_block);
 
     builder.switch_to_block(tail_block);

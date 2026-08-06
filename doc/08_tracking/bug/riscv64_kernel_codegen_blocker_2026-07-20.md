@@ -109,3 +109,77 @@ is explicitly unsafe and was not used. Net: rv64 full-kernel boot (and
 therefore booting the cross-built toolchain payload) is still blocked purely
 in the compiler backend — a real ISLE lowering gap for `vany_true.i64x2`, not
 a riscv64-silicon or QEMU/OpenSBI issue.
+
+## FIXED 2026-08-06: was compiler overgeneration, not a genuine ISLE gap
+
+Investigated whether to add a riscv64 ISLE lowering rule for `vany_true.i64x2`.
+It is not possible/appropriate: `src/compiler_rust/vendor/cranelift-codegen/src/isa/riscv64/lower.isle`
+already has a general `vany_true` rule (line 2778), gated by `(ty_supported_vec
+ty)`. `ty_supported_vec` (`src/compiler_rust/vendor/cranelift-codegen/src/isa/riscv64/lower/isle.rs:185`)
+requires `ty_vec_fits_in_register`, which requires `ty.bits() <=
+min_vec_reg_size()` — and `min_vec_reg_size()` is `0` on a bare riscv64 target
+with no `V` extension. So **no** vector type, of any lane width, can ever match
+that rule on this target: there is no vector register file to lower onto, and
+adding an i64x2-specific ISLE rule would be lowering vectors onto hardware that
+doesn't exist.
+
+The actual root cause: `src/compiler_rust/compiler/src/codegen/instr/calls.rs`
+hand-inlines two numeric intrinsics — `compile_inline_numeric_contains_u64`
+(`rt_numeric_contains_u64[_data]`, called for `SingleUseLedger.is_armed`'s
+`token_ids[i] == token_id` scan) and `compile_inline_numeric_xor_sum_u64`
+(`rt_numeric_xor_sum_u64[_data]`) — and both **unconditionally** emitted
+explicit `I64X2` SIMD (`splat`/`load.i64x2`/`bxor`/`vany_true`) with no check of
+what the target ISA actually supports. This is MIR/codegen overgeneration, not
+a lowering gap: any 2-lane u64 SIMD-any-true/reduce for a scalar array-of-u64
+should scalarize on a target with no vector unit.
+
+**Fix landed:** both functions now check
+`ctx.module.isa().triple().architecture` and only take the I64X2 SIMD fast path
+on `X86_64` (SSE2 baseline) / `Aarch64` (NEON baseline), which are guaranteed
+to have real hardware support. Every other target (riscv64 without `V`,
+`s390x`, `pulley`, etc.) falls back to a plain scalar per-element loop — for
+`contains_u64` this reuses the existing tail-loop scalar body already present
+for the "remainder" case; for `xor_sum_u64` a new
+`compile_scalar_numeric_xor_sum_u64` helper mirrors the header/bounds-check
+dance and applies the same `raw_data ? sum : sum << 3` result transform the
+SIMD path used. x86_64/aarch64 codegen is byte-for-byte unchanged (same
+instruction order under `use_simd == true`).
+
+**Verified:** rebuilt the Rust seed and re-ran the exact riscv64 full-kernel
+build command from the 2026-08-06 update above. Before the fix: `FAILED FILES
+(1): cspace_spawn.spl => ... SingleUseLedger.is_armed ... vany_true.i64x2 ...
+should be implemented in ISLE`. After the fix: **0 FAILED FILES** — every
+`.spl` in the closure, including `cspace_spawn.spl`, now compiles and the build
+reaches the link stage. Sabotage-tested: reverted `calls.rs` to the pre-fix
+version, rebuilt, reran the identical command — the exact original
+`SingleUseLedger.is_armed` / `vany_true.i64x2` "should be implemented in ISLE"
+failure reproduced verbatim, then the fix was restored and re-verified.
+
+**New blocker exposed further down (not fixed here, out of this task's scope):**
+the build now fails at the **C inline-asm assembly stage**, not compile:
+```
+Build failed: compile inline asm C failed: .../simple_asm_blocks.c:445:12:
+error: unrecognized instruction mnemonic, did you mean: c.li, c.lui, li, lui?
+  "cli\n.Lhalt_loop:\nhlt\njmp .Lhalt_loop\n"
+```
+Pinned to `src/os/kernel/interrupts/idt.spl:230-235`, function `_halt()`:
+```
+fn _halt():
+    """Disable interrupts and halt CPU forever."""
+    asm """
+        cli
+        .Lhalt_loop:
+        hlt
+        jmp .Lhalt_loop
+    """
+```
+`cli`/`hlt`/`jmp` are x86_64-only instructions with no riscv64 equivalent
+mnemonics — this inline asm block is unconditionally compiled regardless of
+target, meaning `idt.spl` (or something that imports it) is reachable from the
+riscv64 boot entry-closure despite being x86_64-specific. This needs either
+target-gating the `_halt()` asm block (per-arch halt implementations, mirroring
+how `x86_64/cpu.spl` / `x86_32/cpu.spl` already have their own `hlt`/`x86_hlt`)
+or fixing the import chain so riscv64 doesn't pull in this x86_64-only IDT
+module at all. Left undone here as a distinct, unrelated bug class (bad-target
+inline asm reachability, not compiler backend codegen) — filing as a new
+tracked item is the next step rather than forcing a fix into this task.
