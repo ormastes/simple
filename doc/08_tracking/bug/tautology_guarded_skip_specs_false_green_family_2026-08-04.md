@@ -185,16 +185,8 @@ with occurrence counts. The 4 repaired above are excluded.
 | test/02_integration/compiler/llvm_parity_spec.spl | 9 |
 | test/integration/compiler/llvm_compiled_proof_spec.spl | 6 |
 | test/02_integration/compiler/llvm_compiled_proof_spec.spl | 6 |
-| test/integration/compiler/llvm_native_link_spec.spl | 5 |
-| test/02_integration/compiler/llvm_native_link_spec.spl | 5 |
-| test/integration/compiler/llvm_backend_e2e_spec.spl | 4 |
-| test/02_integration/compiler/llvm_backend_e2e_spec.spl | 4 |
-| test/integration/baremetal/remote_riscv32_spec.spl | 3 |
-| test/02_integration/baremetal/remote_riscv32_spec.spl | 3 |
-| test/unit/os/crypto/ffdhe_kat_spec.spl | 2 |
 | test/system/web_app_packaging_spec.spl | 2 |
 | test/03_system/infrastructure/web_app_packaging_spec.spl | 2 |
-| test/01_unit/os/crypto/ffdhe_kat_spec.spl | 2 |
 | test/unit/tools/shell/test_spec.spl | 1 |
 | test/unit/std/mock_spec.spl | 1 |
 | test/unit/std/hooks/hook_registry_spec.spl | 1 |
@@ -1434,4 +1426,161 @@ name is renamed. No spec was landed on a green-restore alone.
   to parse, the rest are misc.
 - **44 gutted specs** recoverable only from a renamed directory, needing
   per-file confirmation that the recovered blob is the same spec.
+
+## Fourth pass, 2026-08-06 — top of the "Remaining inventory" table, environment-gated variant
+
+This pass worked the top of the `## Remaining inventory` table (highest
+tautology counts first). It surfaced **two new sub-shapes** the earlier
+passes hadn't named, and repaired the shape that was actually a false green.
+
+### New shape 1 — whole-file stub, nothing to restore (NOT repaired)
+
+`static_const_declarations_spec.spl` (53 tautologies) and
+`alias_deprecated_spec.spl` (42) — the two highest-count files in the table —
+are **not** the doc's canonical pattern (a stub replacing a commented-out real
+body). Every `it` in both files was authored from the start as `val source =
+"<snippet>"; expect(source.len()).to_be_greater_than(0)` — the snippet is
+never fed to a lexer/parser/compiler. `grep -c '^\s*#.*expect('` is 0 in both;
+`git log --follow` shows exactly one commit for each file (post-tree-wipe
+squash), so there is no history to recover a real body from either. Sibling
+`test/03_system/feature/usage/*_spec.spl` files (e.g.
+`advanced_indexing_spec.spl`) show the repo's real pattern for this directory:
+write actual Simple source directly in the `it` and assert on its *runtime*
+behavior (`val arr = [10,20,30]; expect arr[-1] == 30`), not a string literal
+whose length is checked. Repairing these two files means **authoring ~95 new
+real test bodies** (including deciding how to assert "rejects duplicate
+static declaration" — a parse-error case with no existing helper in this
+directory) — that is feature-spec authoring, not a tautology fix, and is out
+of scope for a bounded batch. Also hit and left unrepaired for the same
+reason: `test/integration/doctest/discovery_spec.spl` +
+`test/02_integration/doctest/discovery_spec.spl` (11 each — no
+`discover_doctests`-shaped API exists anywhere in `src/`, so there is nothing
+to couple to either) and `test/system/web_app_packaging_spec.spl` +
+`test/03_system/infrastructure/web_app_packaging_spec.spl` (2 each — the two
+tautology `it`s assert on locally-constructed strings, not a real
+`SwaBuilder` call). **6 files reviewed, 0 repaired, all flagged
+"needs feature-spec authoring, not a tautology fix."**
+
+### New shape 2 — vacuous filler that does not gate anything (NOT repaired, deprioritized)
+
+`llvm_parity_spec.spl` and `llvm_compiled_proof_spec.spl` (both copies each,
+9 and 6 tautologies respectively) guard availability like this:
+
+```
+if not caps.llvm_backend_available:
+    val pending_reason = "llc not available"
+    expect(pending_reason.len()).to_be_greater_than(0)
+val module = make_test_module(...)          # <- runs UNCONDITIONALLY, no else
+val result = compile_module_with_backend(...)
+expect(result.is_ok()).to_equal(true)
+```
+
+There is no `else`, so the tautology never actually gates the real assertion
+below it — the real code runs regardless of tool availability (confirmed:
+`grep -n else:` finds exactly 0 matches in the touched regions of either
+file). This is dead, misleading filler, but it is **not a false green** in
+this family's sense: no coverage is hidden, and in an environment without
+`llc`/`libLLVM` the real assertion would fail loudly, not pass silently.
+(Likely provenance: the sibling `remote_riscv32_spec.spl` in the same batch
+carries the comment "BUG-RT: skip() doesn't halt execution and return doesn't
+work in it-lambdas. Guard entire test body with availability check" — these
+two files look like an abandoned attempt at the same guard that forgot the
+`else:`.) Fixing this properly (wrap the tail in `else:`, replace the filler
+with `pending(reason)`) is mechanical but was deprioritized this pass in favor
+of the shapes that are actual false greens; left unmodified and noted here so
+the next pass doesn't have to re-derive the shape. `llvm_parity_spec.spl`
+additionally carries `describe ..., tag: ["only-compiled"]`, which makes
+`bin/simple test` report `0 examples, 0 failures` for the whole file under a
+default invocation (tag-based filtering, unrelated to the tautology) —
+flagged separately, not a tautology issue.
+
+### Repaired: environment-gated tautology → honest `pending()` (4 base files, 8 physical files)
+
+The remaining files in this pass's range had a genuine if/else gate — the
+`pending_reason` tautology occupied the branch that fires when a required
+external tool is *unavailable*, and real code occupied the other branch. That
+is exactly the shape the repo's own `pending(name)` primitive exists for
+(precedent already in the repo: `bcrypt_kat_spec.spl`,
+`argon2id_rfc9106_kat_spec.spl` call `pending("...")` from inside a
+conditional `it` body). Fix applied uniformly: replace
+`val pending_reason = "..."; expect(pending_reason.len()).to_be_greater_than(0)`
+with `pending("...")` in the branch that previously held the tautology;
+the branch with real code was left untouched byte-for-byte.
+
+| Spec (+ mirror) | tautologies fixed | shape |
+|---|---|---|
+| `test/01_unit/os/crypto/ffdhe_kat_spec.spl` + `test/unit/os/crypto/ffdhe_kat_spec.spl` (byte-identical before edit) | 2 each | unconditional (`@slow`, no if/else — 2048-bit modexp is O(minutes) in the interpreter, a documented, genuine deferral) |
+| `test/02_integration/compiler/llvm_backend_e2e_spec.spl` + `test/integration/compiler/llvm_backend_e2e_spec.spl` (byte-identical before edit) | 4 each | if(unavailable)=tautology / else(available)=real |
+| `test/02_integration/compiler/llvm_native_link_spec.spl` + `test/integration/compiler/llvm_native_link_spec.spl` (**not** byte-identical — the `02_integration` copy carries one extra `it "keeps normal runtime owners..."` the other copy lacks; treated independently, same edits applied to the shared region) | 5 / 4 | mixed polarity: 2 occurrences are if(available)=real / else(unavailable)=tautology, the rest are if(unavailable)=tautology / else(available)=real |
+| `test/02_integration/baremetal/remote_riscv32_spec.spl` + `test/integration/baremetal/remote_riscv32_spec.spl` (**not** byte-identical — the `test/integration` copy carries `tag: ["only-compiled"]` on every `describe`, the `02_integration` copy does not; the touched `if/else` bodies themselves are identical text, confirmed via `diff` on the region) | 3 each | if(available)=real / else(unavailable)=tautology |
+
+**Verification (this sandbox has llc, libLLVM-18/20, qemu-system-riscv32,
+gdb-multiarch, riscv64-linux-gnu-gcc, riscv64-unknown-elf-gcc, and a C
+compiler all installed), so every "available" branch was already the one
+executing before this edit — the fix only changes the never-taken branch's
+text in this environment, which is exactly why example/failure counts are
+unchanged by the edit itself:**
+
+- `ffdhe_kat_spec.spl` (both copies): `14 total` before and after,
+  `0 failures` before and after. After the edit the two deferred examples
+  print `○ 2048-bit modexp is O(minutes)... (skipped)` instead of a bare `✓`
+  — the reason is now visible and grep-able instead of hidden behind a
+  tautology that reads identically to a real pass.
+- `llvm_backend_e2e_spec.spl` (both copies): `26 total, 24 passed, 2 failed`
+  after the edit, identical on both copies. Both failures are **pre-existing
+  and unrelated to this edit** — `✗ finds llc binary` (`expected
+  /usr/bin/llc-20 to start with llc`, i.e. `to_start_with("llc")` against a
+  full path) lives in the untouched `else:` branch, and `✗ creates
+  compatibility backend` (`expected x86-64-v1 to equal x86-64`) is in an
+  unrelated `describe` block this pass never touched. Left as-is per scope
+  (no product-bug fixing in this pass).
+- `llvm_native_link_spec.spl`: `02_integration` copy `6 total, 4 passed, 2
+  failed`; `integration` copy (missing the extra test) `5 total, 4 passed, 1
+  failed`. The shared failure, `✗ links a native executable when
+  prerequisites are present` (`expected false to equal true`, i.e.
+  `link_llvm_native(...).is_ok()` is false), is in the untouched `else:`
+  branch — pre-existing, unrelated to the edit. The `02_integration`-only
+  failure (`✗ keeps normal runtime owners when bootstrap links native_all`)
+  is in a describe block with no tautology at all — also pre-existing,
+  unrelated.
+- `remote_riscv32_spec.spl`, `02_integration` copy: `85 total, 78 passed, 7
+  failed`. All 3 edited QEMU-gated examples pass green with no `○` marker
+  (confirming the real `if`-branch, not the edited `else`, is what ran); the
+  7 failures are all in unrelated `GDB MI Parser` / `DebugError` describe
+  blocks this pass never touched. `test/integration` copy: `1 total, 0
+  passed, 1 failed`, every describe reporting `0 examples, 0 failures` — this
+  is the pre-existing `tag: ["only-compiled"]` filtering every example out
+  under a default `bin/simple test` invocation (see New shape 2 note above);
+  the file content in the touched region is confirmed identical to the
+  working `02_integration` copy, so this is a filtering artifact, not a
+  regression from this edit.
+
+No coupling gate or sabotage-proof was run for this batch: unlike the
+class-(i)/(ii) restores in prior passes, none of these edits newly exercise
+production code — the "available" branch (the one with real assertions) was
+already executing, before and after, in every environment where the tool in
+question is present. The repair is scoped to making the *unavailable* path
+honest instead of silently green; that claim is verified by before/after
+example-count and failure-count equality (or, for `ffdhe_kat_spec.spl`, by
+the transcript now showing `○ ... (skipped)` for the deferred cases). Sibling
+`bcrypt_kat_spec.spl` / `argon2id_rfc9106_kat_spec.spl` are the existing
+sabotage-independent precedent for this exact `pending(reason)`-inside-`it`
+idiom.
+
+### Net effect and updated inventory
+
+**9 tautology occurrences converted to honest `pending()` across 4 base
+files / 8 physical files** (`ffdhe_kat_spec.spl` ×2 files ×2 occurrences,
+`llvm_backend_e2e_spec.spl` ×2 files ×4, `llvm_native_link_spec.spl` ×2 files
+×5/4, `remote_riscv32_spec.spl` ×2 files ×3). These 8 files are removed from
+the `## Remaining inventory` table above. `static_const_declarations_spec.spl`,
+`alias_deprecated_spec.spl`, both `discovery_spec.spl` copies, and both
+`web_app_packaging_spec.spl` copies remain in the table (not repaired — see
+New shape 1). `llvm_parity_spec.spl` and `llvm_compiled_proof_spec.spl` (both
+copies each) also remain in the table (not repaired — see New shape 2).
+18 files were reviewed this pass in total.
+
+Not landed as a git commit at the time this section was written — see the
+session's final status note for push state; if unpushed, the working tree at
+these 8 paths is the source of truth for the repair described here.
 - **7 gutted specs** with no recoverable content anywhere.
