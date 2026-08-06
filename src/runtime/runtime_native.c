@@ -6879,22 +6879,35 @@ static RtCoreDict* rt_core_as_dict(int64_t value) {
  * unboxed) and the tagged form produced by `d.get(k)` (method path, rt_box_int)
  * collapse to one representation. String/heap keys are kept as-is and matched by
  * content via rt_native_eq. */
+/* The 64 bits that IDENTIFY a float key, for both the heap-boxed form and the
+ * legacy inline TAG_FLOAT form. -0.0 is folded to +0.0 so both zeros are one
+ * key, matching IEEE `-0.0 == 0.0`; every other bit is preserved. */
+static uint64_t rt_core_dict_float_bits(int64_t k) {
+    double d = rt_core_as_float(k);
+    if (d == 0.0) d = 0.0; /* fold -0.0 -> +0.0 so both zeros hash alike */
+    uint64_t bits;
+    memcpy(&bits, &d, sizeof(bits));
+    return bits;
+}
+
 static int64_t rt_core_dict_canon_key(int64_t k) {
     if (rt_core_as_string(k)) return k;
     /* A heap-boxed float key is a fresh pointer per value, so two keys of the
-     * same double would land in different buckets. Canonicalize to the inline
-     * tagged form (value-based, -0.0 normalized to 0.0) so equal-valued float
-     * keys collapse to one key -- the same identity float dict keys had before
-     * heap-boxing (keys keep the pre-existing low-3-bit fold; dict VALUES are
-     * lossless via the heap box). */
-    RtCoreFloat* f = rt_core_as_heap_float(k);
-    if (f) {
-        double d = f->value;
-        if (d == 0.0) d = 0.0; /* fold -0.0 -> +0.0 so both zeros hash alike */
-        uint64_t bits;
-        memcpy(&bits, &d, sizeof(bits));
-        return (int64_t)((bits & ~RT_VALUE_TAG_MASK) | RT_VALUE_TAG_FLOAT);
-    }
+     * same double would land in different buckets. That is a HASH problem, and
+     * it is solved in rt_core_dict_hash below (which hashes the double's bits,
+     * not the box address) plus rt_core_dict_key_eq (which compares those same
+     * bits). The key itself is therefore stored VERBATIM.
+     *
+     * It used to be rewritten to the inline tagged form
+     * `(bits & ~RT_VALUE_TAG_MASK) | RT_VALUE_TAG_FLOAT`, which ZEROES THE LOW
+     * 3 MANTISSA BITS: every group of 8 adjacent doubles collapsed into one
+     * key, so `d[1.0] = 1; d[1.0000000000000002] = 2` silently left a dict of
+     * len 1 whose d[1.0] read back 2, and dict_keys() handed back a double the
+     * caller never inserted. That contradicts RtCoreFloat's whole reason for
+     * existing ("the full double is stored verbatim so container/Any floats
+     * round-trip exactly"). See
+     * src/runtime/test/rt_dict_float_key_exactness_selfcheck.c. */
+    if (rt_core_is_float(k)) return k;
     if (rt_core_is_heap(k)) return k;
     return rt_value_int(rt_core_numeric_arg(k));
 }
@@ -6909,11 +6922,27 @@ static uint64_t rt_core_dict_hash(int64_t k) {
         }
         return h;
     }
-    uint64_t x = (uint64_t)k;
+    /* Float keys hash by VALUE, so two independent boxes of the same double --
+     * and the legacy inline form of that same double -- share a bucket. */
+    uint64_t x = rt_core_is_float(k) ? rt_core_dict_float_bits(k) : (uint64_t)k;
     x ^= x >> 33;
     x *= 0xff51afd7ed558ccdULL;
     x ^= x >> 33;
     return x;
+}
+
+/* Key equality for the slot scan. rt_native_eq everywhere EXCEPT float keys,
+ * which are compared on the full 64-bit pattern rt_core_dict_float_bits
+ * produces rather than by IEEE `==`. Bitwise is what a hash key needs: it is
+ * exact (the truncating canon above was not) and it keeps a NaN key findable,
+ * which IEEE `==` would not. -0.0/+0.0 stay one key via the fold. */
+static int rt_core_dict_key_eq(int64_t a, int64_t b) {
+    if (a == b) return 1;
+    if (rt_core_is_float(a) || rt_core_is_float(b)) {
+        if (!rt_core_is_float(a) || !rt_core_is_float(b)) return 0;
+        return rt_core_dict_float_bits(a) == rt_core_dict_float_bits(b);
+    }
+    return rt_native_eq(a, b) != 0;
 }
 
 static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
@@ -6960,7 +6989,7 @@ static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
         }
         if (e->occupied == -1) {
             if (first_tomb < 0) first_tomb = idx;
-        } else if (e->hash == h && rt_native_eq(e->key, ck)) {
+        } else if (e->hash == h && rt_core_dict_key_eq(e->key, ck)) {
             e->value = value;
             return 1;
         }
@@ -6977,7 +7006,7 @@ static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key) {
     for (;;) {
         RtCoreDictEntry* e = &d->entries[idx];
         if (e->occupied == 0) return rt_core_nil();
-        if (e->occupied == 1 && e->hash == h && rt_native_eq(e->key, ck)) return e->value;
+        if (e->occupied == 1 && e->hash == h && rt_core_dict_key_eq(e->key, ck)) return e->value;
         idx = (idx + 1) & mask;
     }
 }
@@ -6991,7 +7020,7 @@ static int rt_core_dict_has(RtCoreDict* d, int64_t key) {
     for (;;) {
         RtCoreDictEntry* e = &d->entries[idx];
         if (e->occupied == 0) return 0;
-        if (e->occupied == 1 && e->hash == h && rt_native_eq(e->key, ck)) return 1;
+        if (e->occupied == 1 && e->hash == h && rt_core_dict_key_eq(e->key, ck)) return 1;
         idx = (idx + 1) & mask;
     }
 }
@@ -7005,7 +7034,7 @@ static int rt_core_dict_del(RtCoreDict* d, int64_t key) {
     for (;;) {
         RtCoreDictEntry* e = &d->entries[idx];
         if (e->occupied == 0) return 0;
-        if (e->occupied == 1 && e->hash == h && rt_native_eq(e->key, ck)) {
+        if (e->occupied == 1 && e->hash == h && rt_core_dict_key_eq(e->key, ck)) {
             e->occupied = -1;
             d->len--;
             d->tombstones++;
