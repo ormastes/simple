@@ -1,0 +1,61 @@
+"""Regression spec for http/common.spl hex_to_int and chunked transfer decoding.
+
+hex_to_int previously called `ch.char_code()`, a method text does not have, so
+every call raised `Function 'str.char_code' not found` and chunked decoding
+returned nothing. Oracles are external: RFC 5234 §B.1 HEXDIG values and the
+RFC 7230 §4.1 chunked-body example.
+"""
+
+mod nogc_sync_mut.http.common
+mod nogc_sync_mut.http.headers
+
+use std.nogc_sync_mut.http.common.{hex_to_int}
+use std.nogc_sync_mut.http.headers.{decode_chunked, parse_hex_text}
+
+describe "hex_to_int (RFC 5234 HEXDIG)":
+    """A hex digit maps to its numeric value in all three cases."""
+
+    it "maps decimal digits 0-9":
+        expect(hex_to_int("0")).to_equal(0)
+        expect(hex_to_int("7")).to_equal(7)
+        expect(hex_to_int("9")).to_equal(9)
+
+    it "maps uppercase A-F to 10-15":
+        expect(hex_to_int("A")).to_equal(10)
+        expect(hex_to_int("C")).to_equal(12)
+        expect(hex_to_int("F")).to_equal(15)
+
+    it "maps lowercase a-f to 10-15":
+        expect(hex_to_int("a")).to_equal(10)
+        expect(hex_to_int("c")).to_equal(12)
+        expect(hex_to_int("f")).to_equal(15)
+
+    it "yields 0 for a non-hex digit":
+        expect(hex_to_int("G")).to_equal(0)
+        expect(hex_to_int("z")).to_equal(0)
+
+describe "parse_hex_text":
+    """Multi-digit hex strings accumulate base-16."""
+
+    it "parses mixed-case multi-digit hex":
+        expect(parse_hex_text("A")).to_equal(10)
+        expect(parse_hex_text("1a")).to_equal(26)
+        expect(parse_hex_text("ff")).to_equal(255)
+        expect(parse_hex_text("FF")).to_equal(255)
+        expect(parse_hex_text("100")).to_equal(256)
+
+describe "decode_chunked (RFC 7230 §4.1)":
+    """The canonical chunked message body decodes to its original payload."""
+
+    it "decodes the RFC 7230 4.1 example body":
+        # 4/"Wiki" + 5/"pedia" + E/" in\r\n\r\nchunks." (14 octets) + 0 terminator
+        val body = "4\r\nWiki\r\n5\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\n\r\n"
+        expect(decode_chunked(body)).to_equal("Wikipedia in\r\n\r\nchunks.")
+
+    it "decodes a lowercase hex chunk size":
+        val body = "a\r\n0123456789\r\n0\r\n\r\n"
+        expect(decode_chunked(body)).to_equal("0123456789")
+
+    it "decodes a two-digit uppercase hex chunk size":
+        val body = "1A\r\nABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n0\r\n\r\n"
+        expect(decode_chunked(body)).to_equal("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
