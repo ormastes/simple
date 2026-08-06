@@ -111,9 +111,19 @@ class LlvmIRBuilder:
         # builder class boundary. On the compiled pure-Simple lane its optional
         # env payload can already be corrupt at create(), while reconstructing
         # a fresh local from the scalar requested-target environment is stable.
-        val target = LlvmTargetTriple.from_target(llvm_builder_target())
+        # Both locals MUST carry the explicit `: LlvmTargetTriple` annotation.
+        # An untyped local loses the owner type, the seed layout pass fails open
+        # on owner_has_vtable, and every field read shifts by one slot: .arch
+        # returns vendor, .vendor returns os, .os returns the env Option (which
+        # then renders through the enum-to-text path as `<enum@0x...>`), and
+        # .env reads past the end so the Some arm never fires. That produced
+        # `target triple = "unknown-linux-<enum@0x...>"` and llc "unable to get
+        # target". Note the absence of a leading `-`: that is the tell that this
+        # is a shift, not an empty arch. Same defect shape as
+        # doc/08_tracking/bug/stage3_selfhost_vtable_field_offset_relro_segv_2026-08-06.md
+        val target: LlvmTargetTriple = LlvmTargetTriple.from_target(llvm_builder_target())
         val requested = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-        val header_target = if mir_target_context_os_from(requested, "") == "baremetal":
+        val header_target: LlvmTargetTriple = if mir_target_context_os_from(requested, "") == "baremetal":
             LlvmTargetTriple.from_target_baremetal(llvm_builder_target())
         else:
             target
