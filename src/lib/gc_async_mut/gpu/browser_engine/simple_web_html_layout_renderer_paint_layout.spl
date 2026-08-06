@@ -18,6 +18,7 @@ use common.ui.draw_ir.{
     DrawIrCommand, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_image_command,
     draw_ir_rect_bounds, draw_ir_style_prop, draw_ir_text_styled_clipped
 }
+use std.gc_async_mut.gpu.browser_engine.containment.{contain_value_contains_paint}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout.*
 
 fn has_visible_overflow_clip(styles: [Style]) -> bool:
@@ -1385,6 +1386,150 @@ fn paint_tiled(
             culled_styles[ci] = rst
         ci = ci + 1
     out
+
+# =========================================================================
+# `contain: paint` fast path for paint_selected. See containment.spl for
+# why this reads the attribute the same array/index-positional way as the
+# `contain: layout` lane in simple_web_html_layout_renderer_layout.spl
+# (node_contain_layout / layout_contain_boundary / layout_selected there),
+# rather than reusing that file's Dict-keyed cache.
+#
+# CSS semantics: a `contain: paint` node promises nothing inside its
+# subtree paints outside its own border box (no overflow, no escaping
+# absolutely-positioned descendants, no bleeding filters/shadows). That
+# licenses the fast path below to repaint ONLY the contained subtree's
+# nodes and leave every pixel outside it exactly as it was in the
+# retained framebuffer -- it does NOT license the converse (nothing
+# outside paints INTO the boundary's box area is not a CSS guarantee: a
+# sibling with a higher z-index can still visually overlap it), so
+# correctness never depends on that converse: the fast path only ever
+# SUPPRESSES nodes strictly outside the boundary subtree from repainting
+# (leaving their previously-painted pixels untouched); it never claims
+# the boundary's screen region belongs exclusively to the subtree.
+# =========================================================================
+
+fn node_contain_paint(node: HNode) -> bool:
+    contain_value_contains_paint(attr_value(node.attrs_raw, "contain"))
+
+fn nearest_contain_paint_ancestor(nodes: [HNode], idx: i32) -> i32:
+    var cur = nodes[idx].parent as i32
+    while cur >= 0:
+        if node_contain_paint(nodes[cur]):
+            return cur
+        cur = nodes[cur].parent as i32
+    -1
+
+# Nearest `contain: paint` ancestor shared by every dirty structural id.
+# Same conservative all-or-nothing restriction as layout_contain_boundary:
+# a mutation batch touching two different contained subtrees, or one that
+# isn't contained at all, falls straight through to a full repaint below
+# rather than attempting a partial region reuse.
+fn paint_contain_boundary(nodes: [HNode], dirty_structural_ids: [i64]) -> i32:
+    val node_count = nodes.len() as i32
+    var boundary: i32 = -1
+    var first = true
+    for structural_id in dirty_structural_ids:
+        val idx = (structural_id - 1) as i32
+        if idx < 0 or idx >= node_count:
+            return -1
+        val b = nearest_contain_paint_ancestor(nodes, idx)
+        if b < 0:
+            return -1
+        if first:
+            boundary = b
+            first = false
+        elif b != boundary:
+            return -1
+    boundary
+
+# True when node `i` is `boundary` itself or a descendant of it (walks the
+# parent chain). Used to decide which nodes the fast path is allowed to
+# repaint; every other node is suppressed via the same visibility_hidden
+# trick paint_tiled already uses for tile culling (see paint_tiled above),
+# so the unmodified `paint()` raster loop performs zero drawing work for
+# them -- this is the actual "paint work skipped" the containment feature
+# buys, not merely a trust-the-attribute shortcut.
+fn node_in_paint_subtree(nodes: [HNode], boundary: i32, i: i32) -> bool:
+    if i == boundary:
+        return true
+    var cur = nodes[i].parent as i32
+    while cur >= 0:
+        if cur == boundary:
+            return true
+        cur = nodes[cur].parent as i32
+    false
+
+fn paint_contain_subtree_node_count(nodes: [HNode], boundary: i32) -> i32:
+    val node_count = nodes.len() as i32
+    var total = 0
+    var i = 0
+    while i < node_count:
+        if node_in_paint_subtree(nodes, boundary, i):
+            total = total + 1
+        i = i + 1
+    total
+
+pub fn paint_contain_boundary_subtree_size(nodes: [HNode], dirty_structural_ids: [i64]) -> i32:
+    """Public probe for the correctness/proportionality spec: the count of
+    nodes the fast path actually re-runs paint work for, or the full node
+    count when no `contain: paint` boundary covers the dirty set (i.e. no
+    savings claimed, matching layout_contain_boundary_subtree_size)."""
+    val boundary = paint_contain_boundary(nodes, dirty_structural_ids)
+    if boundary < 0:
+        return nodes.len() as i32
+    paint_contain_subtree_node_count(nodes, boundary)
+
+pub fn paint_selected(
+    nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32],
+    wrap_cache: TextWrapCache, retained_fb: [u32], retained_bw: i32, retained_bh: i32,
+    fbw: i32, fbh: i32, widget_mode: bool, dirty_structural_ids: [i64]
+) -> [u32]:
+    """Incremental repaint entry point, mirroring layout_selected's shape.
+    `retained_fb` is the pixel buffer produced by the last full (or fast-
+    path) paint of this same document at size fbw x fbh; `retained_bw` /
+    `retained_bh` are the `contain: paint` boundary candidate's own box
+    dimensions AT THAT TIME. `dirty_structural_ids` (1-based, matching
+    layout_selected's convention) lists every node whose content changed
+    since then.
+
+    Correctness does not rely on trusting the `contain: paint` attribute:
+    the boundary's freshly recomputed box (bw[boundary]/bh[boundary]) is
+    compared against `retained_bw`/`retained_bh` below, and any mismatch
+    (a lying/violating `contain: paint`, or the boundary having moved or
+    resized for any other reason since the retained frame) falls through
+    to the unconditional full repaint, so this fast path can only ever
+    produce output identical to `paint(...)`, never wrong output."""
+    if dirty_structural_ids.len() == 0:
+        return retained_fb
+    if (
+        nodes.len() != styles.len() or bx.len() != nodes.len() or
+        by.len() != nodes.len() or bw.len() != nodes.len() or bh.len() != nodes.len() or
+        retained_fb.len() != fbw * fbh
+    ):
+        return paint(nodes, styles, bx, by, bw, bh, wrap_cache, retained_fb, fbw, fbh, widget_mode)
+    for structural_id in dirty_structural_ids:
+        if structural_id <= 0 or structural_id > nodes.len():
+            return paint(nodes, styles, bx, by, bw, bh, wrap_cache, retained_fb, fbw, fbh, widget_mode)
+
+    val boundary = paint_contain_boundary(nodes, dirty_structural_ids)
+    if boundary < 0:
+        return paint(nodes, styles, bx, by, bw, bh, wrap_cache, retained_fb, fbw, fbh, widget_mode)
+    if bw[boundary] != retained_bw or bh[boundary] != retained_bh:
+        return paint(nodes, styles, bx, by, bw, bh, wrap_cache, retained_fb, fbw, fbh, widget_mode)
+
+    val node_count = nodes.len()
+    var culled_styles = styles
+    var i = 0
+    # cpu-lane-loop-ok: suppresses every node outside the contain:paint
+    # boundary subtree so the unmodified paint() call below performs no
+    # raster work for them; bound is node_count, one linear pass
+    while i < node_count:
+        if not node_in_paint_subtree(nodes, boundary, i):
+            var cst = culled_styles[i]
+            cst.visibility_hidden = true
+            culled_styles[i] = cst
+        i = i + 1
+    paint(nodes, culled_styles, bx, by, bw, bh, wrap_cache, retained_fb, fbw, fbh, widget_mode)
 
 # ---------------------------------------------------------------------------
 # Render entry
