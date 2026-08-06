@@ -168,18 +168,37 @@ fn _attr_val(fragment: text, attr_name: text) -> text:
         return fragment.slice(start, end)
     ""
 
-# Case-insensitive char-to-lower (ASCII only).
+# ASCII-only lowercase; every other byte passes through untouched.
+#
+# Iterates s.bytes(). Two independent defects were fixed here:
+#   1. `s.char_at(i) as i64` under a bound of `s.len()` mixed CODE POINT
+#      indexing with a BYTE count, so any non-ASCII input over-ran; and on the
+#      JIT engine that cast does not return the code point at all, so plain
+#      ASCII uppercase was silently NOT lowercased ("DIV" -> "DIV").
+#   2. `(code + 32).chr()` -- `chr` is an interpreter-only builtin.
+# Bytes 0x41..0x5A never occur inside a multi-byte UTF-8 sequence, so every
+# slice boundary below is also a character boundary and non-ASCII text is
+# preserved byte-exactly. Slicing runs rather than single bytes is required:
+# a one-byte slice of a continuation byte would become U+FFFD.
+val _ASCII_LOWER = "abcdefghijklmnopqrstuvwxyz"
+
 fn _to_lower(s: text) -> text:
     var out = ""
+    val bs = s.bytes()
+    val n = bs.len()
     var i = 0
-    val n = s.len()
+    var run = 0
     while i < n:
-        val code = s.char_at(i) as i64
+        val code = bs[i] as i64
         if code >= 65 and code <= 90:
-            out = out + (code + 32).chr()
-        else:
-            out = out + s.char_at(i)
+            if i > run:
+                out = out + s[run:i]
+            val j = code - 65
+            out = out + _ASCII_LOWER[j:j + 1]
+            run = i + 1
         i = i + 1
+    if run < n:
+        out = out + s[run:n]
     out
 
 # Find char c in s starting at pos. Returns -1 if not found.
