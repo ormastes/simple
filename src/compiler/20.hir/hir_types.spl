@@ -370,18 +370,27 @@ impl SymbolTable:
         var scope_id = self.current_scope
 
         loop:
-            # A SymbolTable built via the bootstrap-flat path
-            # (bootstrap_flat_symbol_table in bootstrap_globals.spl) only
-            # populates `symbols` (the flat id->HirSymbol map); it never
-            # calls push_scope(), so `current_scope` can point at a scope id
-            # this instance's `scopes` dict does not actually hold (or a
-            # struct-valued Dict bracket read can otherwise come back null --
-            # see the comment below). Guard the read: an absent scope ends
-            # the chain instead of dereferencing a null Scope pointer, which
-            # previously SIGSEGVed on `scope.symbols` (bug
-            # stage3_native_build_segv_generic_codegen_link_path_2026-08-06).
-            if not rt_dict_contains(self.scopes, scope_id.id):
-                break
+            # DO NOT re-add an `if not rt_dict_contains(self.scopes,
+            # scope_id.id): break` guard here. It was added as
+            # "defense-in-depth" by 1ea6599e8fb and it broke the Stage 3
+            # self-host outright: `new()` DOES insert the id-0 root scope
+            # (`table.scopes[0] = Scope(...)` above) and `declare()` writes
+            # symbols into it, but `rt_dict_contains` under-reports
+            # membership on this struct-valued `Dict<i64, Scope>` (the
+            # documented native struct-valued-Dict pitfall,
+            # doc/07_guide/language/dict_native_pitfalls.md). The guard
+            # therefore ended the chain immediately and made lookup() a
+            # constant nil, which silently disabled the ONLY re-entrancy
+            # breakers in the HIR bootstrap-global cycle -- both
+            # try_register_bootstrap_global_symbol and
+            # register_imported_symbol memoize on `self.symbols.lookup(...)`
+            # -- producing unbounded mutual recursion (lower_type ->
+            # lower_named_kind -> try_register_bootstrap_global_symbol ->
+            # register_imported_symbol -> register_imported_type_methods ->
+            # declared_surface_callable_type -> lower_type) that overflowed
+            # the stack and SIGSEGVed Stage 3 with zero diagnostic output.
+            # See doc/08_tracking/bug/
+            # stage3_native_build_segv_generic_codegen_link_path_2026-08-06.md.
             val scope = self.scopes[scope_id.id]
             # Dict.get can falsely report nil for a present tagged integer on
             # the self-hosted native path. The runtime-owner predicate plus a
@@ -403,10 +412,10 @@ impl SymbolTable:
         var scope_id = self.current_scope
 
         loop:
-            # See lookup()'s matching comment: guard against a scope id the
-            # `scopes` dict doesn't actually hold.
-            if not rt_dict_contains(self.scopes, scope_id.id):
-                break
+            # See lookup()'s matching comment: do NOT re-add an
+            # `rt_dict_contains(self.scopes, scope_id.id)` guard here -- it
+            # under-reports membership on this struct-valued dict and breaks
+            # the Stage 3 self-host via unbounded HIR recursion.
             val scope = self.scopes[scope_id.id]
             if rt_dict_contains(scope.symbols, name):
                 val found: i64 = scope.symbols[name]

@@ -316,3 +316,104 @@ CLAUDE.md/`.claude/rules/bootstrap.md` says it should be.
    script, and the >90-minute full self-hosted compiler rebuild time
    observed in this investigation, are worth their own performance bug
    filing.
+
+---
+
+## 2026-08-06 follow-up — the `hir_types.spl` "defense-in-depth" guard broke Stage 3; removed
+
+The end-to-end native verification this doc left open has now been run. Result:
+the `switch_operators_calls.spl` half of `1ea6599e8fb` is a **real fix and is
+kept**. The `hir_types.spl` half — the `rt_dict_contains(self.scopes,
+scope_id.id)` guard added to `lookup()`/`lookup_or_invalid()` as
+"defense-in-depth" — was **not** load-bearing for this bug and **broke the
+Stage 3 self-host outright**. It has been removed.
+
+### What actually killed Stage 3
+
+Stage 3 died with **SIGSEGV (exit 139) and a 0-byte log**. The zero output is
+why it read as a mystery: it is not a compiler diagnostic and not an OOM (tree
+RSS peaked ~3.2 GB; earlyoom fired at no point during the run). A gdb backtrace
+against the unstripped stage2 shows **unbounded mutual recursion → stack
+overflow**, repeating this 6-frame cycle to stack exhaustion:
+
+```
+lower_type
+  -> lower_named_kind
+    -> try_register_bootstrap_global_symbol
+      -> register_imported_symbol
+        -> register_imported_type_methods
+          -> declared_surface_callable_type
+            -> lower_type ...
+```
+
+The faulting frame is `rt_env_get` / `std::env::var` → `copy_nonoverlapping`,
+which is **incidental** — it is merely the call that happened to touch the
+guard page. Chasing it as an env/getenv bug is a dead end.
+
+### Why the guard caused it
+
+That cycle's ONLY re-entrancy breakers are two memo checks, and **both** are
+`self.symbols.lookup(...)`:
+
+- `try_register_bootstrap_global_symbol`: `if self.symbols.lookup(name).?: return true`
+- `register_imported_symbol`: `val already_bound = self.symbols.lookup(local_name).?`
+
+The commit message's premise was wrong. It asserted `self.scopes` is `{}` with
+`current_scope` pointing at a scope id the dict does not hold. In fact
+`SymbolTable.new()` **does** insert the id-0 root scope (`table.scopes[0] =
+Scope(...)`) and `declare()` writes symbols into it. So scope 0 is present —
+but `rt_dict_contains` **under-reports membership** on this struct-valued
+`Dict<i64, Scope>` (the documented native struct-valued-Dict pitfall,
+`doc/07_guide/language/dict_native_pitfalls.md`). The guard therefore hit
+`break` on the first iteration every time, making `lookup()` a **constant nil**,
+which silently disabled both breakers at once → infinite recursion.
+
+Corollary: do **not** replace this with another `rt_dict_contains` on
+`self.scopes` — any form of that predicate there is the same hazard. In-source
+`DO NOT re-add` comments now mark both sites.
+
+### RED / GREEN evidence
+
+Both legs use the identical harness (seed → Stage 2 → Stage 3, faithful to
+`bootstrap-from-scratch.sh`'s recorded command transcripts), differing only in
+the presence of the guard.
+
+| | Stage 2 | Stage 3 | last progress | stage3 binary |
+|---|---|---|---|---|
+| **RED** (guard present, tree `9393117a5fe`) | exit 0, `727 compiled, 0 cached, 0 failed`, 155.0s | **exit 139 / SIGSEGV**, 0-byte log | `tasks_done=2/6`, parse complete | **none** |
+| **GREEN** (guard removed) | exit 0, `727 compiled, 0 cached, 0 failed`, 153.8s | **survives the crash point**, RSS climbs 3.1 → 4.6 GB doing real HIR lowering | past `tasks_done=2/6` | — |
+
+RED was reproduced 3×: the original T3 run, a manual replay of its exact
+recorded command (110 s to SIGSEGV), and a full seed→Stage2→Stage3 rebuild.
+RED's Stage 3 died ~22 s after `tasks_done=2/6`; GREEN was still alive and
+allocating minutes past that point, above RED's peak RSS.
+
+The guard-present leg is itself the sabotage check: same harness, same inputs,
+guard restored, exact same symptom (exit 139, 0-byte log, no binary).
+
+### The SIGSEGV fix is preserved
+
+Bug-doc `hello.spl` repro under gdb, run against **both** stage2 binaries:
+
+- guard present: no signal, `error: bootstrap entry lowered to 0 MIR instructions`
+- guard removed: no signal, **identical** message
+
+Neither segfaults, so `switch_operators_calls.spl` alone is sufficient to stop
+the original `try_lower_bitfield_construct` → `SymbolTable.lookup` fault (it
+removes the `lookup()` call from that path entirely). Removing the guard does
+not reintroduce it. The residual `0 MIR instructions` on the single-file
+`hello.spl` path is unchanged by this fix and is a separate, pre-existing
+limitation.
+
+### Still open
+
+Stage 3 is **not** yet a completed self-host — this change removes the
+stack-overflow wall that stopped it immediately after parse. It is expected to
+run on into HIR/MIR lowering and may still hit the previously documented
+MIR-lowering blocker. "Progressed past the recursion crash" is the claim here,
+not "Stage 3 succeeds".
+
+Also still open, and now more clearly scoped: `rt_dict_contains` returning
+false for a key that is present in a struct-valued `Dict<i64, Scope>`. That is
+the underlying native-codegen defect; this change routes around it rather than
+fixing it.
