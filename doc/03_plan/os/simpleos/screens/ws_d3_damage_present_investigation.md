@@ -178,3 +178,54 @@ does not. Land the §1b fixes and the §7 whole-buffer test **before** consuming
 damage, and re-run the §1b grep (`self.buf[..] =` in `backend_software.spl`)
 after their change lands: each new in-place kernel is a new candidate hole.
 Do not assume their rebase preserved marking.
+
+---
+
+## 9. WS-D6 follow-up — the damage mechanism still has NO safe consumer [V]
+
+Investigated 2026-08-06 while wiring D6. Binary: `bin/simple` →
+`bin/release/x86_64-unknown-linux-gnu/simple`, md5
+`ed53cc5f255e269ca27c4cd83b17aef9` (Rust seed build).
+
+### 9a. Census of the only in-scope readback entry point
+`Engine2dCompositorBackend.get_pixel_buffer()`
+(`src/os/compositor/compositor_engine2d.spl:122`) is the sole `read_pixels()`
+caller under `src/os/`. It is **not** a per-frame compositor readback. Its
+callers:
+
+| caller | what it does with the buffer |
+|---|---|
+| `glass_dispatch.spl:20,44,68` (`cap_blend_rect`, `cap_gradient_v`, blur) | `var pixels = ...` then **writes `pixels[idx] = out` in place**, then `set_pixel_buffer_override(pixels)` |
+| `text_render.spl:15` | same mutate-then-override shape |
+| `display_backend.spl:41-52`, `dual_backend.spl:103`, `src/app/ui.chromium/backend.spl:68` | snapshot / compare, not per frame |
+| specs under `test/01_unit/**` | assertions |
+
+### 9b. The alias contract is real, and it is violated by every mutating caller
+`read_pixels_damaged()` documents that it returns the backend's own mirror.
+Measured, not assumed — probe: seed the mirror, write `m1[0] = 0xFFDEADBE`,
+`present()`, read again with no new damage:
+
+```
+m1[0]=4279246896
+m2[0]=4292783550        # 0xFFDEADBE
+ALIAS: caller mutation reached the backend mirror
+```
+
+So routing `get_pixel_buffer()` → `read_pixels_damaged()` would let the glass
+and text-render paths **permanently corrupt the mirror**. It is a correctness
+regression, not an optimisation.
+
+### 9c. A second, independent blocker: present() ordering is already wrong here
+Every draw method on `Engine2dCompositorBackend` (`clear`, `fill_rect`,
+`draw_text`, `blit_pixels`, `:291-318`) calls `self.engine.present()` inline.
+`present()` is the sole damage-clear owner, so by the time any readback runs
+the damage set is already empty and a damaged read returns a stale mirror.
+Consuming damage here first requires moving clear-ownership off `present()`
+(the D3 §6-2 recommendation), which no consumer justifies yet.
+
+### 9d. Conclusion
+The real per-frame consumer remains `host_compositor_core.spl:1474`, which was
+out of scope for this pass. **D6 did not wire a damage consumer**; it delivered
+the compositor-side occlusion culling instead
+(`src/os/compositor/compositor.spl`, WS-D6 block). The mechanism from D3 is
+still consumed by nobody.

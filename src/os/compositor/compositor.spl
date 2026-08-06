@@ -134,6 +134,15 @@ val WM_TITLE_MAX_GLYPH_ADVANCE: i32 = 16
 # reference frame that the culled frame must match pixel-for-pixel.
 var _wm_occlusion_culling_enabled: bool = true
 
+# How many windows the LAST render_all() pre-pass skipped. This is the
+# anti-vacuity oracle: a whole-framebuffer equivalence assertion passes
+# trivially when nothing was ever culled, so the spec pins this count as well
+# as the pixels. Reset at the top of every render_all().
+var _wm_occlusion_culled_count: i32 = 0
+
+pub fn wm_occlusion_culled_count() -> i32:
+    _wm_occlusion_culled_count
+
 pub fn wm_set_occlusion_culling(on: bool):
     _wm_occlusion_culling_enabled = on
 
@@ -1414,6 +1423,7 @@ class Compositor:
         # (including the per-pixel PIXEL_SURFACE blit below) is skipped. The
         # window still enters `shared_windows` so the taskbar is unaffected.
         # Only fully-opaque, on-screen windows become occluders.
+        _wm_occlusion_culled_count = 0
         var occluded: [bool] = [false; self.surfaces.len()]
         var occ_x: [i32] = []
         var occ_y: [i32] = []
@@ -1423,8 +1433,7 @@ class Compositor:
         # cpu-lane-loop-ok: top-down z-order walk; bound is the surface count
         while t >= 0:
             val ts = self.surfaces[t]
-            val title_fits = WM_TITLE_TEXT_X + WM_TITLE_MAX_GLYPH_ADVANCE * ts.title.len().to_i32() <= ts.width
-            if _wm_occlusion_culling_enabled and ts.visible and ts.width > 0 and ts.height > 0 and title_fits:
+            if _wm_occlusion_culling_enabled and ts.visible and ts.width > 0 and ts.height > 0:
                 # A window paints OUTSIDE its own rect: draw_shared_mdi_window_chrome
                 # (shared_mdi_framebuffer_scene.spl:75) lays a drop shadow at
                 # (x+5, y+6, w, h) BEFORE the body fill. So the footprint that has
@@ -1434,11 +1443,14 @@ class Compositor:
                 # footprint is widened by the shadow offset, while only the
                 # unconditional opaque body fill (x, y, w, h) is offered as an
                 # occluder. Both errors point at "render anyway".
+                val title_extent = WM_TITLE_TEXT_X + WM_TITLE_MAX_GLYPH_ADVANCE * ts.title.len().to_i32()
+                val footprint_w = _wm_max_i32(ts.width + WM_WINDOW_SHADOW_DX, title_extent)
                 if _wm_rect_covered(ts.x, ts.y,
-                                    ts.width + WM_WINDOW_SHADOW_DX,
+                                    footprint_w,
                                     ts.height + WM_WINDOW_SHADOW_DY,
                                     occ_x, occ_y, occ_w, occ_h, 0):
                     occluded[t] = true
+                    _wm_occlusion_culled_count = _wm_occlusion_culled_count + 1
                 else:
                     occ_x.push(ts.x)
                     occ_y.push(ts.y)
