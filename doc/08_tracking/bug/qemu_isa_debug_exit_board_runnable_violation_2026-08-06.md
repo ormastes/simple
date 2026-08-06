@@ -1,8 +1,10 @@
 # QEMU launch scripts used `-device isa-debug-exit` — board-runnable rule violation
 
 - **Filed:** 2026-08-06
-- **Status:** PARTIALLY FIXED — 12 scripts fixed, 10 scripts + 7 out-of-lane
-  `scripts/check/` scripts still violate, documented below. The separate
+- **Status:** PARTIALLY FIXED — 16 scripts fixed (12 original + 4 more in the
+  2026-08-06 follow-up pass), 3 confirmed-genuine + 3 likely-safe-unverified
+  `scripts/os/` scripts remain, plus 7 out-of-lane `scripts/check/` scripts
+  still violate, documented below (§2b-revised, §4). The separate
   `-kernel`-boot finding (§5, 3 scripts) was investigated 2026-08-06: no
   miscitation as board-runnable evidence found anywhere in the repo (false
   alarm) — closed with DEV-HARNESS-ONLY banners added to the 3 scripts; the
@@ -85,31 +87,75 @@ never reads QEMU's exit code at all — it is a pure serial-log sentinel check,
 which is exactly the board-runnable-compliant pattern (real hardware can also
 be scraped over a real UART).
 
-### 2b. NOT FIXED — 10 scripts: device is the guest's actual exit signal
+### 2b-revised (2026-08-06, follow-up pass). Re-triaged: only 2 of the original
+10 actually gate on the exit code; 4 were reclassified and FIXED like §2a; 3
+are un-gated but left unconverted for lack of build artifacts this session;
+1 (`run_simpleos_q35_smoke.shs`) is confirmed genuinely 2b.
 
-These scripts run QEMU either in the **foreground** or under a wrapper, and
-capture the process exit code directly afterward (`RC=$?`, `guest_rc=$?`,
-`code=$?`), or (in `build_clang_stream_ring3.shs:112`, explicit comment) rely
-on "the bare-exec dispatcher's exit(0) halts QEMU via isa-debug-exit
-directly" as the mechanism that lets the script's shell resume at all. In this
-family the guest's exit path performs `outb(0xF4, code)` (see
-`src/lib/nogc_async_mut_noalloc/baremetal/x86/semihost.spl:99-103`
-`qemu_exit()`, and `test_harness.spl:69-81` `test_end()`) and there is
-**no other exit signal in the guest kernel/runtime for these entry points** —
-removing the device would either hang the script until timeout or make
-`$?`/`RC` read QEMU's ordinary SIGTERM/kill exit status instead of the guest's
-real result, silently turning every result into a false pass or false fail:
+The original blanket classification ("RC=$?/guest_rc=$?/code=$? capture" ⇒
+2b) was too coarse: several scripts capture `RC=$?` **only to echo it** into
+the log for human debugging, with the actual verdict coming entirely from
+`grep -q <marker> "$SERIAL_LOG" && echo PASS || echo MISS` lines that never
+gate the script's own exit code (the script always returns 0). Capturing and
+printing `$?` is not the same as depending on it. Re-checked each of the 10
+individually:
 
-- `scripts/os/abi_probe_run.shs`
-- `scripts/os/text_char_at_store_probe_run.shs`
-- `scripts/os/clang_argv_tokenize_probe_run.shs`
-- `scripts/os/modinit_probe_run.shs`
-- `scripts/os/run_simpleos_q35_smoke.shs`
-- `scripts/os/build_clang_stream_ring3.shs`
-- `scripts/os/build_clang_disk.shs`
-- `scripts/os/build_fsexec_prod_ring3.shs`
-- `scripts/os/build_fsexec_general_ring3.shs`
-- `scripts/os/build_fsexec_stream_ring3.shs`
+**FIXED — 4 probe scripts, same pattern as §2a (device was vestigial):**
+`abi_probe_run.shs`, `modinit_probe_run.shs`,
+`text_char_at_store_probe_run.shs`, `clang_argv_tokenize_probe_run.shs`. None
+of these four ever read `$?`/`RC` at all (verified by grep before editing) —
+pass/fail is a pure `grep -aE '^P'`/`'^(P|M)'`/`'^\[probe\]|^PROBE'` serial-log
+scrape, informational (the script itself always exits 0). Fixed by deleting
+the `-device isa-debug-exit,iobase=0xf4,iosize=0x04 \` line from each. **Sabotage
+verification:** ran each script before and after the edit with a fresh
+`native-build` (no pre-existing artifacts, so each run rebuilds from scratch).
+All four are currently hitting a pre-existing, unrelated failure in this
+environment — the guest never reaches its `PD`/marker print, serial log is
+empty, `timeout` fires at `QEMU_TIMEOUT` (20s) — **not caused by, or fixed by,
+this change**. Before and after are byte-identical modulo the QEMU child pid
+and the `Time:` build-duration line; same exit code (0), same empty serial
+log, same timeout-kill message. This is the same proof shape as the
+`ssh_simple_hello_uefi.shs` verification in §2a: removing the device changed
+nothing observable.
+
+**LIKELY SAFE, NOT CONVERTED (no build artifacts to verify against this
+session) — 3 scripts:** `build_fsexec_general_ring3.shs`,
+`build_fsexec_stream_ring3.shs`, `build_clang_stream_ring3.shs`. All three
+capture `RC=$?` but only `echo` it — none of the three `exit`/`fail` on it,
+and the pass/fail signal is entirely the `grep -q <marker> ... && echo PASS
+|| echo MISS` block below the capture, which also never gates the script's
+final exit code. `build_clang_stream_ring3.shs`'s comment ("the bare-exec
+dispatcher's exit(0) halts QEMU via isa-debug-exit directly") describes why
+the device makes QEMU terminate *promptly*, not why the verdict depends on
+it — with the existing `timeout "$QEMU_TIMEOUT" qemu-system-x86_64 ...`
+wrapper already in place, removing the device should only change wall-clock
+(QEMU runs to the timeout instead of self-exiting) not correctness. Not
+converted here because their required disk images
+(`build/os/fat32-fsexec.img`, `build/os/fat32-clang.img`) were not present
+in this session and building them was out of budget for this pass — do not
+convert without a real before/after run once those artifacts exist.
+
+**CONFIRMED GENUINELY 2b — 3 scripts, hard-gated on the QEMU exit code:**
+
+- `scripts/os/build_clang_disk.shs:56-61` —
+  `guest_rc=$?; ... [ "$guest_rc" -eq "$expected_rc" ] || fail ...` — the
+  script's own pass/fail hinges on the numeric exit code isa-debug-exit
+  produces.
+- `scripts/os/build_fsexec_prod_ring3.shs:230-234` —
+  `RC=$?; ...; [ "$RC" -eq 3 ] || fail "QEMU exit rc=$RC expected=3"` — same
+  hard gate (also separately checks a serial marker, but the RC gate runs
+  first and is unconditional).
+- `scripts/os/run_simpleos_q35_smoke.shs:137-140` —
+  `code=$?; ...; if [ "$code" -ne 1 ]; then ... exit 1; fi` — hard gate on
+  `code -eq 1`, evaluated *before* the (already fairly complete) marker checks
+  further down, including an existing `TEST PASSED` sentinel line the guest
+  already emits. Converting this one is probably the cheapest of the three
+  (the sentinel infrastructure the recommended fix in §3 asks for already
+  exists in the guest output) but still needs the guest's post-print behavior
+  changed from "exit via outb(0xF4,...)" to "halt-loop", rebuilt, and
+  boot-verified — not done in this pass.
+
+These 3 are the scripts §3's guest-side sentinel fix genuinely applies to.
 
 ## 3. Recommended fix for the 2b family (not implemented — substantial, deferred)
 
@@ -155,7 +201,10 @@ risk):
 - `scripts/check/check-simpleos-wm-visible-display-evidence.shs`
 
 Each should be triaged with the same backgrounded-vs-foreground test used in
-§2 before editing.
+§2 before editing. Not attempted in the 2026-08-06 follow-up pass either
+(time/budget went to re-triaging and converting the `scripts/os/` family
+first, per the doc's own guidance that this set is out of lane / concurrent-
+work risk).
 
 ## 5. Separate finding, investigated 2026-08-06 — FALSE ALARM (not a miscitation)
 
