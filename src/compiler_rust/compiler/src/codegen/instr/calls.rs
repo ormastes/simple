@@ -3418,21 +3418,6 @@ pub fn compile_call<M: Module>(
                 // arrays while leaving text behaviour unchanged.
                 "at" => Some("rt_at"),
                 "char_code_at" => Some("rt_string_char_code_at"),
-                // `i64.chr()` / `i64.to_char()` had NO arm here, so every
-                // `.chr()` call on the Cranelift (default/JIT) path fell
-                // through to a cross-module import and died with
-                // "Function 'i64.chr' not found" — while the tree-walk
-                // interpreter (interpreter_method/primitives.rs:212) and the
-                // LLVM backend (codegen/llvm/functions.rs:2406 and
-                // functions/calls.rs:2049) both implement it. ~100 `.chr()`
-                // call sites in src/lib were therefore JIT-path outages; see
-                // doc/08_tracking/bug/text_byte_len_vs_codepoint_index_family_2026-08-06.md.
-                // `text_dot_from_char_code` is the same runtime entry point the
-                // LLVM backend's qualified arm already calls, and it is
-                // non-ASCII correct (char_from_code_non_ascii_unsupported_2026-07-20).
-                // `args` includes the receiver, so the single i64 code point is
-                // args[0] — exactly this helper's signature.
-                "chr" | "to_char" => Some("text_dot_from_char_code"),
                 "byte_at" => Some("rt_string_byte_at"),
                 // Receiver-polymorphic, same reason as `at`/`sort`/`reverse`
                 // above: this table cannot see the receiver's type, and
