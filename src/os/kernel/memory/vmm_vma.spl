@@ -39,6 +39,20 @@ struct VmmMunmapResult:
     code: i32
     space: ProcessVmSpace
 
+struct VmaAddResult:
+    """Result of `vma_add`: an errno-style code plus the (possibly updated)
+    address space. `ProcessVmSpace` is a value type, so mutations made inside
+    `vma_add` are only visible to the caller via this returned copy — see
+    `vma_remove`'s `-> ProcessVmSpace` convention below, which this mirrors."""
+    code: i32
+    space: ProcessVmSpace
+
+struct VmaSplitResult:
+    """Result of `vma_split`: an errno-style code plus the (possibly updated)
+    address space. Same by-value-return rationale as `VmaAddResult`."""
+    code: i32
+    space: ProcessVmSpace
+
 # ============================================================================
 # VMA Internal Helpers
 # ============================================================================
@@ -61,26 +75,33 @@ fn _align_up(addr: u64, align: u64) -> u64:
 # VMA Operations
 # ============================================================================
 
-fn vma_add(space: ProcessVmSpace, area: VmArea) -> i32:
+fn vma_add(space: ProcessVmSpace, area: VmArea) -> VmaAddResult:
     """Append a VmArea to the address space, rejecting overlaps.
 
-    Returns 0 on success, -EEXIST (-17) if the range overlaps an existing VMA,
-    -ENOMEM (-12) if the VMA table is full.
+    `ProcessVmSpace` is a value type: mutations to `space` inside this
+    function do NOT propagate to the caller's copy, so the updated space is
+    returned alongside the code (same convention as `vma_remove`, which
+    already returns `-> ProcessVmSpace`). Callers MUST use the returned
+    `.space`, e.g. `space = vma_add(space, area).space`.
+
+    `.code` is 0 on success, -EEXIST (-17) if the range overlaps an existing
+    VMA, -ENOMEM (-12) if the VMA table is full.
     """
     if space.vma_count >= VMM_MAX_VMAS:
-        return -12  # -ENOMEM
+        return VmaAddResult(code: -12, space: space)  # -ENOMEM
 
     val new_end = area.start + area.len
     var i: i32 = 0
     while (i as u64) < space.vma_count:
         val existing = space.areas[i]
         if _vma_overlaps(existing, area.start, new_end):
-            return -17  # -EEXIST
+            return VmaAddResult(code: -17, space: space)  # -EEXIST
         i = i + 1
 
-    space.areas.push(area)
-    space.vma_count = space.vma_count + 1
-    0
+    var updated = space
+    updated.areas.push(area)
+    updated.vma_count = updated.vma_count + 1
+    VmaAddResult(code: 0, space: updated)
 
 fn vma_find(space: ProcessVmSpace, vaddr: u64) -> VmArea?:
     """Find the VmArea containing `vaddr`, or nil if none."""
@@ -150,8 +171,14 @@ fn vma_remove(space: ProcessVmSpace, vaddr: u64, len: u64) -> ProcessVmSpace:
             # Do NOT advance i — the slot now holds a different (swapped) entry
     updated
 
-fn vmm_teardown_user_space(space: ProcessVmSpace):
-    """Tear down all user-space VMAs in the given address space."""
+fn vmm_teardown_user_space(space: ProcessVmSpace) -> ProcessVmSpace:
+    """Tear down all user-space VMAs in the given address space.
+
+    `ProcessVmSpace` is a value type: returns the updated space (metadata
+    reset to empty) rather than mutating `space` in place, matching
+    `vma_remove`'s convention. Callers MUST use the return value, e.g.
+    `space = vmm_teardown_user_space(space)`.
+    """
     var current = space
     var i: i32 = 0
     while (i as u64) < current.vma_count:
@@ -159,7 +186,7 @@ fn vmm_teardown_user_space(space: ProcessVmSpace):
         if area.start < VMM_KERNEL_SPACE_START:
             val unmapped = vmm_munmap_result(current, area.start, area.len)
             if unmapped.code != 0:
-                return
+                return current
             current = unmapped.space
         else:
             i = i + 1
@@ -167,12 +194,20 @@ fn vmm_teardown_user_space(space: ProcessVmSpace):
     while current.areas.len() > 0:
         current.areas.pop()
     current.vma_count = 0
+    current
 
-fn vma_split(space: ProcessVmSpace, vaddr: u64) -> i32:
-    """Split whichever VMA contains `vaddr` at that address."""
+fn vma_split(space: ProcessVmSpace, vaddr: u64) -> VmaSplitResult:
+    """Split whichever VMA contains `vaddr` at that address.
+
+    `ProcessVmSpace` is a value type: mutations to `space` inside this
+    function do NOT propagate to the caller's copy, so the updated space is
+    returned alongside the code (same convention as `vma_remove`). Callers
+    MUST use the returned `.space`, e.g. `space = vma_split(space, v).space`.
+    """
+    var updated = space
     var i: i32 = 0
-    while (i as u64) < space.vma_count:
-        val area = space.areas[i]
+    while (i as u64) < updated.vma_count:
+        val area = updated.areas[i]
         val area_end = area.start + area.len
         if (vaddr > area.start) and (vaddr < area_end):
             # Replace area[i] with left half
@@ -184,7 +219,7 @@ fn vma_split(space: ProcessVmSpace, vaddr: u64) -> i32:
                 backing: area.backing,
                 backing_offset: area.backing_offset
             )
-            space.areas[i] = left
+            updated.areas[i] = left
 
             # Append right half
             val right_offset = vaddr - area.start
@@ -196,11 +231,11 @@ fn vma_split(space: ProcessVmSpace, vaddr: u64) -> i32:
                 backing: area.backing,
                 backing_offset: area.backing_offset + right_offset
             )
-            space.areas.push(right)
-            space.vma_count = space.vma_count + 1
-            return 0
+            updated.areas.push(right)
+            updated.vma_count = updated.vma_count + 1
+            return VmaSplitResult(code: 0, space: updated)
         i = i + 1
-    -22  # -EINVAL
+    VmaSplitResult(code: -22, space: space)  # -EINVAL
 
 # ============================================================================
 # Hint-address picker for vmm_mmap
@@ -288,14 +323,21 @@ fn vmm_mmap(
         backing: backing,
         backing_offset: backing_offset
     )
-    val rc = vma_add(space, area)
-    if rc != 0:
+    val add_result = vma_add(space, area)
+    if add_result.code != 0:
         # Roll the shared region back so a rejected VMA never leaves a live
         # shared-page reference behind.
         if kind == VMM_VMA_SHARED_FILE:
             _ = vmm_shared_unmap(space.id, chosen, aligned_len)
-        return rc as i64
+        return add_result.code as i64
 
+    # NOTE: `add_result.space` carries the VMA-list update that `vma_add`
+    # made (value-type propagation — see VmaAddResult), but `vmm_mmap`'s own
+    # signature only returns the chosen address (`-> i64`), so that update is
+    # not visible to `vmm_mmap`'s caller either. No spec exercises vmm_mmap
+    # today; threading the updated space up through vmm_mmap and its callers
+    # (syscall_spm.spl, elf64.spl) is a separate, larger change — filed
+    # rather than done here. See vmm_kernel_memory_specs_test_local_shims_not_product_2026-08-04.md.
     chosen as i64
 
 fn vmm_munmap_result(space: ProcessVmSpace, vaddr: u64, len: u64) -> VmmMunmapResult:
