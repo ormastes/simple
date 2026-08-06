@@ -106,6 +106,60 @@ two hits: the definition and the single use at the capacity branch. Neither
 `external_web_window_ids` nor `external_web_frames` is referenced outside
 `host_compositor_core.spl`. Nothing assumed the value 4.
 
+## Second defect, uncovered once the first was fixed
+
+Fixing the slot cap took the spec from **6/12 to 10/12**. The two residual
+failures were a *different* metric — `rendered_windows`, the count of
+accepted windows whose content rect reads back byte-identically from the
+composite (`session.spl capture()`):
+
+```
+✗ renders every declared window into the composited desktop
+    expected 4 to equal 5
+✗ changes the captured desktop when a window is closed
+    expected 3 to equal 4
+```
+
+A diagnostic added at `session.spl` (see below) named the culprit directly:
+
+```
+wm_showcase_rect_unmatched 2d@20,320+240x90
+```
+
+### Root cause: the 2D window was occluded by the taskbar
+
+The compositor draws the taskbar across the bottom `taskbar_height` rows of
+the desktop — `taskbar_y = height - taskbar_h`, default 56
+(`src/lib/common/ui/window_scene_draw_ir.spl:401-402`). With
+`WM_SHOWCASE_DESKTOP_H = 430` the taskbar began at y=374, but the 2D window
+spans y=288..414, so its lower band sat underneath the taskbar and could
+never read back byte-identically.
+
+The pixel receipts confirm the mechanism exactly: the 2D scene's rect
+occupies y=344..372, entirely **above** y=374, which is why `rect_px=1344`
+was perfectly intact (48x28 = 1344, the exact scene rect) while roughly
+7,168 *field* pixels below y=374 were missing.
+
+This is the same commit's second layout error. `81f11d167d1` grew the
+desktop 360->430 to fit the new second window row, but 430 is not tall
+enough once the taskbar's 56 rows are subtracted. It silently violated the
+invariant `wm_showcase_window_specs()`'s own docstring asserts: *"Laid out
+without overlap so each window's content rect can be read back unoccluded
+from the composite."*
+
+### Fix 3: `src/app/wm_showcase/session.spl` — desktop height 430 -> 480
+
+Lowest row is the 2D window at y=288 h=126 (bottom edge 414), so the desktop
+must be at least 414 + 56 = 470. 480 is used, leaving headroom.
+
+### Fix 4: `src/app/wm_showcase/session.spl` — name unmatched rects
+
+`capture()` now prints `wm_showcase_rect_unmatched <key>@<x>,<y>+<w>x<h>`
+for any window that was *accepted* but does not read back byte-identically.
+Same principle as the loud slot refusal: an accepted-but-unmatched window is
+the interesting case (bad inset, occlusion, chrome offset) and a bare count
+cannot be acted on. This diagnostic is what located the defect above.
+
 ## What was NOT done
 
 No assertion was weakened, no example deleted or skipped, and no expected
@@ -118,3 +172,16 @@ meet it.
 - `src/os/compositor/host_compositor_core.spl:71` — ceiling raised 4 -> 32,
   with a comment stating why the ceiling exists and why memory is unaffected.
 - `src/os/compositor/host_compositor_core.spl:798` — capacity refusal logged.
+- `src/app/wm_showcase/session.spl:95` — desktop height 430 -> 480 so every
+  window's content rect clears the taskbar.
+- `src/app/wm_showcase/session.spl` (`capture()`) — unmatched content rects
+  are now named rather than silently reducing a count.
+
+## Both defects share one shape
+
+Neither was a subtle algorithmic bug. Both were a **silently-swallowed
+`false`**: a capacity refusal that returned a bare boolean, and a rect
+mismatch that only decremented a counter. In each case the observable
+symptom was "a window that simply never draws", which is why a 3->5 window
+growth shipped twice-broken without anyone noticing — and why the false
+green on top of it went unquestioned for so long. Both are now loud.
