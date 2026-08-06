@@ -3,10 +3,17 @@
 **ID:** lint_single_file_superlinear_timeout_on_line_count_2026-08-06
 **Severity:** P1 — makes `bin/simple lint` unusable on any file over a few hundred
 lines
-**Status:** RE-CHARACTERIZED 2026-08-06 (second lane, same day) — see "Correction:
-this is NOT superlinear/quadratic" below. Root mechanism still NOT pinned; no
-fix landed. Localized to per-statement work inside `parse_module_silent_checked`
-(module_get_decls and decl-count are ruled OUT, see below).
+**Status:** RE-CHARACTERIZED 2026-08-06 (second lane) and QUANTIFIED 2026-08-06
+(third lane, same day). NOT superlinear — **linear at ~0.19-0.20 s/line**,
+replicated by two lanes on two independent synthetic families. **99.0% of the
+size-dependent cost is `parse_module_silent_checked`; all of lint's own ~44
+check functions together are 1.0%** (measured with zero source edits via the
+`.spl` extension gate — see "Third lane" below). This is therefore a **compiler
+frontend parser** performance defect that `bin/simple lint` exposes, not a
+lint-tooling defect; the title's "superlinear" wording is retained only because
+it is this file's ID. `module_get_decls`/decl-count are ruled OUT. No fix
+landed; the remaining question is whether the constant is the parser's algorithm
+or the tier it executes under.
 **Reported:** 2026-08-06
 
 ---
@@ -173,6 +180,186 @@ Bash timeout silently truncating a `timeout 280` command at 120s (exit 143,
 "Command timed out after 2m 0s") — indistinguishable from a real hang unless
 you notice the exit code and elapsed time don't match your inner `timeout`
 value.
+
+---
+
+## Third lane (2026-08-06, later same day): linearity replicated on a second
+## synthetic family, and the parse-vs-checks split MEASURED — parse is 99%
+
+This lane reproduced from scratch and independently reached the same linear
+verdict as the second lane, on a *different* synthetic shape — so the linear
+finding is now a two-family, two-lane replication rather than one lane's fit. It
+also closes the question the second lane's section ends on ("is the ~0.2s/statement
+constant inside `parse_module_silent_checked` or somewhere in the lint checks?")
+**with a number, without a bootstrap, and without a single source edit**, using
+an entry-point gate that was already in the code.
+
+**Binary under test:** `bin/simple` → `bin/release/x86_64-unknown-linux-gnu/simple`
+(58,865,936 bytes, mtime 2026-08-06 21:47) — the same binary the second lane
+measured. Every timing below is wall-clock from that binary with the
+`/proc/loadavg` 1-minute load recorded per sample. This box had two concurrent
+stage-3 compiles and ~10 other agent sessions running throughout, so **only
+back-to-back relative comparisons are load-safe**; contended samples are flagged.
+Reproducibility check: `syn_100.spl` measured 42.84s / 41.68s / 41.85s in three
+separate runs at loads 9.41 / 7.91 / 10.35 — under 3% spread across a 30% load
+swing, so these numbers are not load-noise artifacts.
+
+### Curve on a second synthetic family (N decls, not 1 decl) — also linear
+
+The second lane's family was 1 decl + N body statements. This lane used the
+opposite shape: N two-line declarations
+(`fn synthetic_fn_<i>(a: i64) -> i64:` / `    a + <i>`). If the constant were
+decl-driven, the two families would disagree. They do not.
+
+| File | Decls | Lines | lint wall | −floor (3.43s) | s/line | load |
+|---|---|---|---|---|---|---|
+| `tiny.spl` | 1 | 2 | 3.42s | — (floor) | — | 7.61 |
+| `syn_10.spl` | 10 | 20 | 7.85s | 4.4s | 0.22 | 6.77 |
+| `syn_25.spl` | 25 | 50 | 12.98s | 9.6s | 0.19 | 6.8 |
+| `syn_50.spl` | 50 | 100 | 25.60s | 22.2s | 0.22 | 7.0 |
+| `syn_100.spl` | 100 | 200 | 42.84s | 39.4s | 0.197 | 9.41 |
+| `syn_200.spl` | 200 | 400 | 83.78s | 80.4s | 0.201 | 7.30 |
+| `syn_400.spl` | 400 | 800 | 154.65s | 151.2s | 0.189 | 6.91 |
+
+Fitted exponent, floor-subtracted: 200→400 lines is 2.04x time for 2x input
+(k≈1.03); 400→800 lines is 1.88x time for 2x input (k≈0.91). **k≈0.9-1.0 across
+a 4x range on the N-decl family, matching the second lane's k≈1.0-1.1 on the
+1-decl family.** Two shapes, two lanes, same answer: linear, ~0.19-0.20 s/line,
+no accumulating term. Extrapolating 0.195 s/line to the reported real file
+(`simple_web_html_layout_renderer_layout.spl`, 2613 lines) gives ~513s — inside
+the originally reported 300-590s band **with no superlinear term required**.
+The H1 of this doc is retained only because it is the file's ID; the title's
+"superlinear" wording is wrong and the Status line above is authoritative.
+
+`bin/simple fmt --check` on the identical files: 3.52s / 10.50s / 16.89s /
+29.39s for 2 / 200 / 400 / 800 lines — also linear, ~0.033 s/line. Recorded as a
+scale reference only: per the second lane, fmt is lexer-only and does **not**
+bound lint's parse cost, so no attribution is drawn from it.
+
+### Parse vs. lint-checks: split measured via the existing `.spl` extension gate
+
+`lint_cli_source` (`src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl:35-38`)
+runs `linter.lint_source(path, content)` **unconditionally first**, and only then
+does `if not path.ends_with(".spl"): return results`. So linting the same bytes
+under a `.txt` name runs the entire `Linter.lint_source` body — the per-line
+`check_line` loop, all 17 whole-content `self.check_*` calls, and
+`check_all_rules` — while skipping `parse_module_silent_checked` and the 6
+AST-based decl checks. Linting one file under two extensions therefore splits the
+constant exactly, with zero source edits and no rebuild. **This replaces the
+T3-bootstrap bisection recipe the second lane proposed; it costs 8 seconds.**
+
+| Same bytes, two extensions | Lines | wall | above 3.43s floor | load |
+|---|---|---|---|---|
+| `tiny.txt` | 2 | 3.43s | — (floor) | 6.15 |
+| `syn_100.txt` — checks only | 200 | **3.72s** | **0.29s** | 6.13 |
+| `syn_100.spl` — checks + parse | 200 | 42.84s | 39.41s | 9.41 |
+| `syn_400.txt` — checks only | 800 | **4.64s** | **1.21s** | 6.12 |
+| `syn_400.spl` — checks + parse | 800 | 154.65s | 151.22s | 6.91 |
+
+**Verdict: 99.0% of the size-dependent cost is `parse_module_silent_checked` +
+the AST decl checks; every lint check lint actually owns costs 1.0%.** At 800
+lines that is 150.0s of parse against 1.2s of checks (0.0015 s/line — negligible
+and itself linear). The same 99/1 split holds at 200 lines, so it is not a
+crossover effect.
+
+Consequences:
+
+- The **first** lane's stubbing result ("stubbed all ~44 check functions, still
+  times out") was *correct*, not a stale-binary artifact — it is now corroborated
+  by an independent method that touches no source. That lane's conclusion was
+  sound and the doubt cast on it by its own eprint-ordering caveat can be lifted.
+- Combined with the first lane's stubbing of the 6 decl checks in
+  `entry_and_fixes.spl` (`check_argument_count`, `check_collection_patterns`,
+  `check_stub_impl`, `check_star_export_file`, `check_wide_public_file`,
+  `check_option_me_call_source`) leaving it slow, the 99% narrows further to
+  **`parse_module_silent_checked` itself**, i.e. the parser, not lint.
+- **Do not spend any more effort on the lint check functions, `check_all_rules`,
+  the ~30 `content.split("\n")` sites, or `resolve_lint_config`.** Their combined
+  contribution is ~1%. This is a compiler-frontend parser performance defect that
+  `bin/simple lint` merely exposes, not a lint-tooling defect.
+- **Also ruled out by the same number: findings-count / `.push()` cost.** See
+  below — but note it would have to live in the 1% anyway.
+
+Secondary datapoint: `syn_400.spl` copied under a path containing `src/lib/`
+(which un-gates `check_param_tag_spl`, `lint_checks.spl:320-323`) took 165.4s at
+load 12.94 vs 154.6s at load 6.91 — i.e. within the load difference and
+consistent with the 1% budget. Path-gated checks are not a hidden term for the
+reported `src/lib/**` files.
+
+### The lint tool is parsed from `.spl` on every invocation (explains the floor)
+
+`strace -f -e trace=openat bin/simple lint tiny.spl` on a **2-line** target
+records **554 `.spl` file opens**, including `src/app/cli/lint_entry.spl`, the
+whole `src/compiler/90.tools/lint/_LintMain/` and
+`src/compiler/90.tools/fix/rules/impl_/` trees, and
+`src/lib/nogc_sync_mut/tooling/easy_fix/*`. Independently, `bin/simple lint
+--help` emits parser deprecation warnings sourced from
+`src/lib/nogc_async_mut/env/paths.spl:5-6` — it is parsing the linter's own
+dependency tree before it can print usage.
+
+This is the mechanical explanation for the **~3.43s fixed floor** every lint
+invocation pays regardless of target size. It also reframes the second lane's
+closing puzzle ("0.2s per statement is enormous for parsing `a = a + i`"): if
+the pure-Simple parser is itself executing under the host engine rather than as
+compiled native code, a ~0.19 s/statement constant needs no exotic per-statement
+culprit (a linear `keyword_lookup` table scan, per-statement syscall, etc.).
+**This is a hypothesis, not a conclusion** — but it is far cheaper to check than
+instrumenting `parse_statement` behind a T3 bootstrap, so check it first. It does
+not contradict the second lane's binary-identity finding: a deployed self-hosted
+binary can still load its tool front-ends from source.
+
+### Ruled out this lane
+
+- **Seed `.push()` clone cost is NOT a meaningful term.** `.claude/rules` records
+  that the seed's `.push()` always clones, which would make `self.results.push()`
+  quadratic in *finding count* — a term invisible on clean synthetic files and a
+  plausible real superlinear mechanism on real sources. Tested by holding size
+  fixed and varying finding count (PascalCase `fn SyntheticFnN` names trip ST001,
+  which is pushed into `self.results` before the config filter suppresses it),
+  A/B/A/B interleaved and serial:
+
+  | | clean | +100/200 findings | delta |
+  |---|---|---|---|
+  | 200 lines, rep 1 | 41.68s | 43.29s | +3.9% |
+  | 200 lines, rep 2 | 41.85s | 46.73s | +11.7% (load 10.3) |
+  | 400 lines, rep 1 | 76.41s | 77.48s | +1.4% |
+  | 400 lines, rep 2 | 84.25s | 79.59s | **−5.5%** |
+
+  The delta does not grow with N and changes sign between reps — it is load
+  noise, not an O(findings²) term. Ruled out.
+- **earlyoom is NOT killing these runs.** `journalctl --since "12 hours ago"`
+  shows only earlyoom's hourly heartbeat lines and **zero kill lines**; available
+  memory never dropped below 40% of 128 GiB, and a running `bin/simple lint`
+  peaks around 350 MB RSS. Combined with the second lane's finding that the
+  harness's own 120s default Bash timeout truncates at exit 143, **today's
+  exit-143 "lint killed with no verdict" reports across several lanes were
+  harness timeouts on a genuinely slow but linear lint, not OOM kills.** That
+  wrong explanation was circulating between lanes and should be retired.
+- **Path-gated whole-content checks are already cheap.** `check_theme_package`
+  (`lint_checks.spl:302-304`), `check_stale_md_diagrams` (`:731-733`) and
+  `check_param_tag_spl` (`:320-323`) all early-return on a path test before
+  touching `content`, so "gated checks scanning content they discard" is not an
+  available easy win — and per the 99/1 split it could not have been.
+
+### Why no code fix shipped from this lane
+
+The 99% sits in `parse_module_silent_checked` — the compiler frontend parser, not
+`src/compiler/90.tools/lint/`. There is no minimal lint-layer diff that moves it,
+and a lint-side workaround would be exactly the kind of cover-up this repo's
+rules forbid. Per the standing rule that a runtime/frontend root cause is filed
+precisely rather than papered over at the tool layer, this lane's deliverable is
+the measurement above. **No source file was modified by this lane**, so there is
+no sabotage check to report — sabotage evidence is only meaningful for a shipped
+diff.
+
+### Precise next step (revised)
+
+Ignore the whole lint call graph. Reproduce the ~0.19 s/line on the parser alone,
+then determine whether the cost is the parser's algorithm or the tier it executes
+under — the second question is cheap (compare a `parse`-only invocation against
+the same parse inside a natively-compiled artifact) and, if the tier explains it,
+the per-statement hunt (`keyword_lookup`, span bookkeeping, per-statement
+syscalls) the second lane proposed is unnecessary.
 
 ---
 
