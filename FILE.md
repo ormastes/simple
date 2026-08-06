@@ -35,6 +35,7 @@ FILE.md files) are allowed.
 | `config` | Configuration files |
 | `scripts` | Build and utility scripts |
 | `tools` | Developer tooling |
+| `vendor` | Vendored third-party prebuilt binaries (e.g. Limine UEFI bootloader EFI apps) |
 | `.claude` | Claude Code settings and agents |
 | `.codex` | Codex settings |
 | `.agents` | Agent definitions |
@@ -67,6 +68,7 @@ FILE.md files) are allowed.
 | `bin/FILE.md` | `bin/` directory |
 | `examples/FILE.md` | `examples/` directory |
 | `tools/FILE.md` | `tools/` directory |
+| `vendor/FILE.md` | `vendor/` directory |
 | `variants/FILE.md` | `variants/` directory |
 | `assets/FILE.md` | `assets/` directory |
 

@@ -199,18 +199,162 @@ attempts, STOP and fall back to documenting the plan").
    on serial, matching what `limine_boot.spl:kernel_main()` already prints
    for x86_64. No ring-3/FS-exec/syscalls in scope — boot-entry only.
 
-**Risk estimate:** low-to-medium, roughly 1-3 days of work *once a working
-`BOOTAA64.EFI` is in hand* — the protocol-port work (step 2) is a
-near-mechanical port of an existing 438-line file with a well-understood
-arch delta (PL011 vs 0x3F8 serial). The actual bottleneck is step 1
-(provisioning Limine's binary), which is blocked in this environment by the
-curl/wget block and an unverified in-fork LLVM/lld AArch64-COFF path.
-Specific risky spots if step 1(b) (build-from-source) is taken instead of
-1(a) (fetch prebuilt): PE32+ relocation model / image-base alignment /
-`.reloc` section correctness for a *linked* EFI application (not just a
-COFF object, which is already confirmed easy) is unverified — Limine's own
-build system handles this upstream, so building Limine from source is
-lower-risk than hand-rolling equivalent lld invocations. Also unverified:
-whether this QEMU/EDK2 version's aarch64 `virt` machine needs
-`gic-version=3` or similar tuning for a clean Limine UEFI boot — untested
-without an actual boot attempt.
+**Risk estimate (superseded by the 2026-08-06 implementation pass below):**
+low-to-medium, roughly 1-3 days of work *once a working `BOOTAA64.EFI` is in
+hand* — the protocol-port work (step 2) is a near-mechanical port of an
+existing 438-line file with a well-understood arch delta (PL011 vs 0x3F8
+serial). The actual bottleneck is step 1 (provisioning Limine's binary),
+which is blocked in this environment by the curl/wget block and an
+unverified in-fork LLVM/lld AArch64-COFF path. Specific risky spots if step
+1(b) (build-from-source) is taken instead of 1(a) (fetch prebuilt): PE32+
+relocation model / image-base alignment / `.reloc` section correctness for a
+*linked* EFI application (not just a COFF object, which is already confirmed
+easy) is unverified — Limine's own build system handles this upstream, so
+building Limine from source is lower-risk than hand-rolling equivalent lld
+invocations. Also unverified: whether this QEMU/EDK2 version's aarch64
+`virt` machine needs `gic-version=3` or similar tuning for a clean Limine
+UEFI boot — untested without an actual boot attempt.
+
+## 2026-08-06 implementation pass: BOOTAA64.EFI acquired, real boot achieved, runtime port still open
+
+Correction to the "network constraint" section above: **curl/wget being
+blocked does not mean this environment has no network access.** `git clone`
+over https works (`git ls-remote https://github.com/...` succeeds), and
+Limine's upstream repo ships prebuilt binaries as committed git objects on
+orphan branches named `vN.x-binary` (verified: `v7.x-binary` through
+`v11.x-binary` all present via `git ls-remote --heads`). This is the
+standard, first-party distribution channel for Limine binaries — not a
+workaround.
+
+```
+$ git clone --depth 1 --branch v10.x-binary \
+    https://github.com/limine-bootloader/limine.git limine-bin
+$ file limine-bin/BOOTAA64.EFI limine-bin/BOOTX64.EFI
+BOOTAA64.EFI: PE32+ executable (EFI application) Aarch64 (stripped to external PDB), for MS Windows, 3 sections
+BOOTX64.EFI:  PE32+ executable (EFI application) x86-64 (stripped to external PDB), for MS Windows, 3 sections
+$ git -C limine-bin log -1 --format='%H %s %ai'
+7a9013f305de0bea1f6310e76e7baba30499fef0 Binary release v10.8.5 2026-03-11 23:32:34 +0000
+```
+
+Both binaries are now vendored at `vendor/limine/{BOOTX64.EFI,BOOTAA64.EFI}`
+— exactly the path `desktop_uefi_bootloader_path()` in
+`src/os/_QemuRunner/scenario_catalog.spl` already searches for x86_64 (that
+scenario was previously non-runnable: "not present in this checkout"; it is
+now provisioned). Repeatable acquisition:
+`sh scripts/os/provision_limine_efi.shs` (re-clones the pinned branch,
+verifies both files, re-copies into `vendor/limine/`).
+
+### Real-firmware boot proven end-to-end, both arches
+
+Before porting `limine_boot.spl`, validated the vendored binaries actually
+boot under real firmware using a minimal hand-written C probe kernel (NOT
+the Simple-language kernel — this is a protocol/toolchain validation step,
+not a shortcut around the "no PE/COFF stub" rule; the probe is a plain ELF
+loaded *by* Limine, same as the eventual SimpleOS kernel will be). Built
+with the system's stock `clang`/`ld.lld` (`--target=x86_64-elf` /
+`--target=aarch64-elf`, both present and working — no dependency on the
+in-fork `clang_static` that was crashing in the 2026-07-14 pass).
+
+Two real, previously-undocumented protocol requirements surfaced only by
+attempting an actual boot (both produce Limine PANICs with no other clue):
+
+1. **Kernel must link higher-half.** A kernel with a lower-half link address
+   (e.g. `0x100000`) is rejected outright: `PANIC: elf: Lower half PHDRs are
+   not allowed`. (`limine_boot.spl`'s own comment — "Called by Limine
+   bootloader after loading kernel into higher-half" — already anticipated
+   this; it just hadn't been verified against a real binary until now.)
+2. **Every PT_LOAD segment must be page-aligned in its own page.** Packing
+   R+X and R+W data into the same page triggers `PANIC: elf: Attempted to
+   load ELF file with PHDRs with different permissions sharing the same
+   memory page.` Fixed via a `PHDRS { text PT_LOAD FLAGS(5); data PT_LOAD
+   FLAGS(6); }` linker script with explicit `ALIGN(0x1000)` between them.
+3. **`limine.conf` (not `.cfg`) needs `serial: yes` and `graphics: no`, or
+   the bootloader's own console output never reaches the serial port at
+   all** — not an error, a silent indefinite hang (confirmed via `-d
+   int,cpu_reset` CPU tracing: QEMU was alive and servicing timer
+   interrupts in a firmware polling loop, not crashed). This is a
+   config-format gap the existing in-tree `limine.cfg` samples
+   (`build/.../efi/limine.cfg`, `KERNEL_PATH=` old syntax) don't cover —
+   Limine v10 requires the new `protocol:`/`path:` `.conf` syntax; the old
+   `.cfg` files elsewhere in this tree target a different (pre-v8) Limine
+   version and would need updating separately if ever exercised.
+4. **No version skew in the base protocol itself.** `limine_boot.spl` uses
+   `revision: 0` requests (no `LIMINE_BASE_REVISION` tag) — confirmed
+   still supported by v10.8.5's bootloader source
+   (`common/protos/limine.c`: `base_revision == 0` falls back to scanning
+   the ELF's `.limine_reqs` section directly, exactly the section name
+   `limine_boot.spl`'s linker-placement comments already use). No port
+   work needed on this axis.
+
+With both fixes applied, real-firmware boot to serial banner succeeded on
+**both architectures**, disk image built as a real FAT32 file (via
+`mkfs.vfat` + Python `pyfatfs`, avoiding a QEMU `vvfat`-synthesis hang that
+appeared unrelated to Limine — same vvfat setup used successfully elsewhere
+in this repo by GRUB, so likely an artifact of this probe's minimal disk
+layout rather than a vvfat defect per se; not investigated further since a
+real disk image sidesteps it entirely):
+
+```
+x86_64:  qemu-system-x86_64 -M q35 -pflash OVMF_CODE_4M.fd -pflash OVMF_VARS_4M.fd \
+           -device virtio-blk-pci,drive=esp ... -serial file:x86_64.serial.log
+  -> "limine: Loading executable `boot():/boot/kernel.elf`...SIMPLEOS-LIMINE-X86_64-PROBE-OK"
+
+aarch64: qemu-system-aarch64 -M virt -cpu cortex-a72 \
+           -pflash /usr/share/AAVMF/AAVMF_CODE.no-secboot.fd -pflash AAVMF_VARS.fd \
+           -device virtio-blk-pci,drive=esp ... -serial file:aarch64.serial.log
+  -> "limine: Loading executable `boot():/boot/kernel.elf`...SIMPLEOS-LIMINE-AARCH64-PROBE-OK"
+```
+
+The aarch64 probe kernel's `_start` writes directly to PL011 `DR` at
+`0x09000000` (QEMU `virt` UART0), confirming the MMIO base and access width
+`limine_boot_aarch64.spl` (below) assumes.
+
+### Protocol port landed; freestanding-runtime port is the real remaining gap
+
+`src/os/kernel/boot/limine_boot_aarch64.spl` — a structural port of
+`limine_boot.spl`'s request/response parsing and `kernel_main()`, with the
+arch deltas from item 2 of the original plan (PL011 `serial_base:
+0x09000000` / `serial_is_mmio: true`, `Architecture.Arm64`, x86_64-hardening
+canary call dropped). Companion linker script
+`examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld` encodes
+the higher-half + page-alignment requirements discovered above.
+
+**Neither has been compiled through the Simple toolchain or linked into a
+booting SimpleOS kernel yet.** Tracing `extern fn serial_println(msg: text)`
+(what `klog_api.spl`'s `log_raw_println` ultimately calls) to its
+implementation revealed why that's a separate, larger task than the
+protocol port itself:
+
+- x86_64's baremetal `serial_println` lives in
+  `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` — a
+  ~9,200-line freestanding reimplementation of the Simple runtime's print
+  path (`rt_print`, tagged-value decoding, `serial_puts`/`serial_getchar`
+  over port 0x3F8, plus much more of the baremetal runtime surface).
+- arm64's EL1-direct lane (`arch/arm64/`) uses a much smaller pattern
+  instead — `arch/common/baremetal_min_stdout.h` (~40 lines: just
+  `rt_stdout_write`/`rt_stdout_flush` over a `serial_putchar` the caller
+  supplies) + `arch/common/baremetal_pl011_uart_stdout.c` (PL011 register
+  init/write, reused as-is for the probe kernel above) — but this smaller
+  surface does **not** implement `serial_println(text)` as `klog_api.spl`
+  expects; it's wired for a different call convention
+  (`__simple_call_module_inits` + `spl_start`, the arm64 bare-metal boot
+  entry style, not Limine's direct `kernel_main()` jump).
+- **There is currently no aarch64 equivalent of `baremetal_stubs.c`'s
+  `serial_println(RuntimeValue)`.** Writing one (or a smaller subset
+  sufficient for `limine_boot_aarch64.spl`'s actual call surface — only
+  `log_raw_println`/`log_raw` are used, not the full runtime) is the next
+  concrete step, followed by an aarch64 crt (Limine hands off with a set-up
+  stack per protocol, so this should be minimal — likely no assembly
+  needed beyond what the linker script's `ENTRY(kernel_main)` already
+  captures) and a real `bin/simple build` compile+link+boot pass reusing
+  the exact QEMU command line proven above.
+- `src/os/_QemuRunner/scenario_catalog.spl` / `scenario_disks.spl` are not
+  yet extended with an `aarch64-desktop-uefi` scenario (plan step 4) —
+  deliberately deferred until there's a real kernel to boot with it, since
+  wiring scenario plumbing ahead of a working artifact would be
+  unverifiable and touches shared-lane files.
+
+**Board-runnable note:** the AAVMF-pflash boot above is the correct
+real-firmware proxy per `.claude/rules/board-runnable.md` and satisfies the
+board-proxy requirement for this milestone. It is a QEMU/EDK2 boot, not a
+physical-aarch64-board boot; no physical-board claim is made here.
