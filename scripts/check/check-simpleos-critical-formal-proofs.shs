@@ -4,11 +4,24 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 CHECK_LEAN="$ROOT_DIR/scripts/check/check-lean-proofs.shs"
 
+# OUTPUT CONTRACT
+#   PASS  — <n> theorem(s) required across <m> Lake project(s)   (n ALWAYS > 0)
+#   FAIL  — a required theorem is missing, or a project failed, exit 1
+#   ERROR — nothing was checked, exit 2
+# The count is what makes a vacuous run visible: this gate used to print a bare
+# "STATUS: PASS simpleos-critical-formal-proofs" with no number, which is
+# indistinguishable from a run whose require_theorem calls were all deleted.
+# Never remove the count, and never lower REQUIRE_THEOREM_FLOOR to pass.
+REQUIRE_THEOREM_FLOOR=80
+REQUIRED_THEOREMS=0
+
 require_theorem() {
     file="$1"
     name="$2"
+    REQUIRED_THEOREMS=$((REQUIRED_THEOREMS + 1))
     if ! grep -Eq "^[[:space:]]*theorem[[:space:]]+$name([[:space:]]|:|\\(|$)" "$ROOT_DIR/$file"; then
         echo "FAIL: missing theorem $name in $file" >&2
+        echo "STATUS: FAIL simpleos-critical-formal-proofs — $REQUIRED_THEOREMS theorem(s) checked" >&2
         exit 1
     fi
 }
@@ -137,4 +150,11 @@ require_theorem "src/verification/memory_capabilities/src/MemoryCapabilitiesCons
 require_theorem "src/verification/memory_capabilities/src/MemoryCapabilitiesConstraints.lean" "two_exclusive_env_not_wellformed"
 require_theorem "src/verification/memory_capabilities/src/MemoryCapabilitiesConstraints.lean" "two_isolated_env_not_wellformed"
 
-echo "STATUS: PASS simpleos-critical-formal-proofs"
+if [ "$REQUIRED_THEOREMS" -lt "$REQUIRE_THEOREM_FLOOR" ]; then
+    echo "STATUS: ERROR simpleos-critical-formal-proofs — nothing was checked: only" \
+         "$REQUIRED_THEOREMS require_theorem assertion(s) ran (expected >= $REQUIRE_THEOREM_FLOOR)." \
+         "Assertions were deleted or the script exited early. Restore them; do NOT" \
+         "lower REQUIRE_THEOREM_FLOOR." >&2
+    exit 2
+fi
+echo "STATUS: PASS simpleos-critical-formal-proofs — $REQUIRED_THEOREMS theorem(s) checked across 5 Lake project(s)"
