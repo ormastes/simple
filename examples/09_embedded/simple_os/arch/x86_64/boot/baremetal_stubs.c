@@ -16662,9 +16662,14 @@ void rt_user_heap_init_returning(uint64_t base, uint64_t size) {
  * avoids a full FAT allocator). See doc/05_design/os/exec/ring3_elf_exec_design.md.
  * -------------------------------------------------------------------------- */
 #define BARE_MAX_FILES 8
-#define BARE_IN_CAP    (1u << 20)   /* 1 MiB input (hello.c is tiny) */
+#define BARE_IN_MAX    (512u << 20) /* sanity ceiling against a corrupt dir
+                                     * entry claiming an absurd size; refused
+                                     * with -EFBIG, never silently truncated.
+                                     * Real input reads are sized to the
+                                     * ACTUAL file size (probed via
+                                     * fat32_find_file, see case 30) — there
+                                     * is no fixed input-size cap anymore. */
 #define BARE_OUT_CAP   (4u << 20)   /* 4 MiB output (hello.o < 8 KiB) */
-static uint8_t _bare_in_buf[BARE_IN_CAP];
 static uint8_t _bare_out_buf[BARE_OUT_CAP];
 static int     _bare_in_taken  = 0;
 static int     _bare_out_taken = 0;
@@ -16896,27 +16901,74 @@ static int _bare_exec_handle(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2
             {
                 char pbuf[96];
                 _bare_copy_name(pbuf, a0, a1);
-                uint32_t br = 0;
-                int rc = fat32_read_file(pbuf, _bare_in_buf, BARE_IN_CAP, &br);
-                if (rc != 0) {
-                    /* Retry by "/"+basename: clang may hand a dir-qualified
-                     * form ("/dir/hello.c") the flat FAT layout does not carry. */
+                /* Probe the REAL file size first via fat32_find_file so the
+                 * read buffer is sized to fit the whole file, not a fixed
+                 * guess. fat32_read_file(name, buf, max_size, &bytes_read)
+                 * silently caps its copy at max_size with no truncation
+                 * signal (file_size < max_size ? file_size : max_size, see
+                 * fat32_read_file above) — passing a too-small max_size is a
+                 * correctness bug, not a defense. So max_size here is always
+                 * derived from the probed size, never a hardcoded constant.
+                 * Falls back to "/"+basename for both the probe and the read
+                 * when clang hands a dir-qualified path the flat FAT layout
+                 * does not carry. */
+                uint32_t pcluster = 0, psize = 0;
+                int found = (fat32_find_file(pbuf, &pcluster, &psize) == 0);
+                char fb[96];
+                const char *read_name = pbuf;
+                if (!found) {
                     const char *b = pbuf;
                     for (const char *p = pbuf; *p; p++) if (*p == '/') b = p + 1;
                     if (b != pbuf) {
-                        char fb[96]; fb[0] = '/'; int k = 0;
+                        fb[0] = '/'; int k = 0;
                         for (; b[k] && k < 94; k++) fb[k + 1] = b[k];
                         fb[k + 1] = '\0';
-                        rc = fat32_read_file(fb, _bare_in_buf, BARE_IN_CAP, &br);
+                        found = (fat32_find_file(fb, &pcluster, &psize) == 0);
+                        if (found) read_name = fb;
                     }
                 }
-                if (rc != 0) {
+                if (!found) {
                     serial_puts("[sc] open ENOENT (NVMe miss)\r\n");
                     *out = -2; return 1;               /* -ENOENT */
                 }
+                if (psize > BARE_IN_MAX) {
+                    serial_puts("[sc] open EFBIG size=");
+                    serial_put_dec((int64_t)psize);
+                    serial_puts("\r\n");
+                    *out = -27; return 1;              /* -EFBIG */
+                }
+                /* Zero-length files still need a valid (non-NULL) 1-byte
+                 * buffer so later read()/mmap() bookkeeping has something
+                 * to point at. */
+                uint32_t cap = psize > 0 ? psize : 1;
+                uint8_t *inbuf = (uint8_t *)nvme_alloc_aligned(cap, 512);
+                if (!inbuf) {
+                    serial_puts("[sc] open ENOMEM (input buf alloc failed)\r\n");
+                    *out = -12; return 1;              /* -ENOMEM */
+                }
+                uint32_t br = 0;
+                int rc = fat32_read_file(read_name, inbuf, cap, &br);
+                if (rc != 0) {
+                    nvme_free_aligned(inbuf);
+                    serial_puts("[sc] open ENOENT (NVMe read failed after probe)\r\n");
+                    *out = -2; return 1;               /* -ENOENT */
+                }
+                if (br < psize) {
+                    /* Should be unreachable now that cap == psize, but never
+                     * silently hand back a short read — surface it loudly
+                     * and fail closed instead of feeding clang a truncated
+                     * translation unit with no diagnostic. */
+                    nvme_free_aligned(inbuf);
+                    serial_puts("[sc] open EIO short read expected=");
+                    serial_put_dec((int64_t)psize);
+                    serial_puts(" got=");
+                    serial_put_dec((int64_t)br);
+                    serial_puts("\r\n");
+                    *out = -5; return 1;               /* -EIO */
+                }
                 _bare_in_taken = 1;
                 nf->used = 1; nf->is_output = 0;
-                nf->data = _bare_in_buf; nf->cap = BARE_IN_CAP;
+                nf->data = inbuf; nf->cap = cap;
                 nf->size = br; nf->pos = 0;
                 _bare_copy_name(nf->name, a0, a1);
                 serial_puts("[vfs] open ");
