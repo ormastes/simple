@@ -160,3 +160,70 @@ within budget now vs an implied small fraction before). Unblocking still
 requires either raising `SIMPLE_WM_HEADLESS_CAPTURE_FRAME_TIMEOUT_MS` as a
 stopgap (masks rather than fixes, not done) or closing the interpreter-
 routing/HIR-lowering gap tracked in the linked bug docs (out of scope here).
+
+## Re-verified again 2026-08-06, later same day — checked against the daemon debug-seed-shadowing fix, still unaffected
+
+This session separately found and fixed
+`doc/08_tracking/bug/test_client_debug_seed_binary_shadowing_timeout_2026-08-06.md`
+(the light-test-daemon's `simple_binary()` resolver preferred a stray
+`target/debug/simple` build over `bin/simple`). Before assuming that fix was
+irrelevant here, checked whether `bin/simple run`'s own child-process spawn
+path for this host shares any code with it.
+
+**Code-path check: no overlap, confirmed by both source and by `ps`.**
+- `simple_binary()` is defined and called only in
+  `src/app/test_runner_new/test_runner_client.spl`,
+  `src/app/test_daemon/light_daemon.spl`, and `src/app/test_daemon/main.spl`
+  (grepped the whole tree; those are the only 3 hits among test/daemon
+  infra — the wm example files are not in that list).
+- `examples/06_io/ui/wm_web_standards_showcase_gui.spl:launch_showcase_child`
+  (lines 394-440) never calls `simple_binary()`. It hardcodes
+  `val simple_bin = path_join(repo_root, "bin/simple")` (line 419) and uses
+  that same value in **both** spawn branches: the Windows branch
+  (`process_spawn_async_env(simple_bin, ["run", showcase_source_path], env)`)
+  and the POSIX branch (`process_spawn_async("env", [...env vars..., simple_bin,
+  "run", showcase_source_path])`). No fallback chain, no debug-seed candidate,
+  no shared helper — completely separate resolution logic from the daemon bug.
+- Empirical confirmation while the repro was running: `ps -ef` showed host PID
+  963731 and child PID 964447/964449, and `readlink -f /proc/<pid>/exe` for
+  both resolved to `/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple`
+  — the same binary both processes' `bin/simple` symlink target, no
+  `target/debug/simple` anywhere in the spawn chain.
+- Side note, not related to the daemon bug: that release-path binary is
+  currently the Rust seed under the hood (prints the seed-banner warning on
+  every invocation) per the known, already-tracked, separate Stage 3
+  self-host blocker
+  (`doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md`).
+  This affects overall interpreter/JIT performance in general but is orthogonal
+  to — and was true both before and after — the debug-seed-shadowing fix, and
+  is not evidence that fix regressed anything here.
+
+**Fresh repro run**, exact command from "Reproduction" above, run to completion
+(23:12:32-23:15:54, ~3m22s wall, consistent with the ~3m19s figure already in
+this doc):
+
+```
+wm_web_standards_showcase_host_headless_status=fail
+wm_web_standards_showcase_host_headless_reason=child-frame-timeout:missing
+```
+
+Unchanged from both prior runs. The `[jit-fallback] HIR lowering error: ...
+SimpleWebEngine2DStaticPixelCache.retain_result_for_html: struct
+'SimpleWebLayoutEngine2DReadbackResult' field 'resolved_backend': whole
+module dropped to the interpreter` line is present again, twice, confirming
+the root cause is still the same interpreted-lane fallback. Node progress
+this run: `[font-inherit-trace] index=86` of `of=149` at the point the host's
+deadline fired — **86/149 ≈ 58%**, lower than the prior run's 113/149 (76%).
+This box's load average during this run was 17-27 (`uptime`), materially
+higher than typical; the lower node count is consistent with contention, not
+a regression — nothing in this session's changes (the daemon fix, or the 4
+earlier CSS fixes) touches this code path, and the reasoning above rules out
+any code-sharing explanation.
+
+**Conclusion: confirmed unchanged.** The daemon debug-seed-shadowing fix does
+not intersect this code path at all — different spawn logic, verified both by
+source and by live `ps`/`/proc/exe` inspection — and was never expected to.
+U2 remains blocked on the same, already-understood, already-out-of-scope
+interpreted-lane HIR-lowering defect. No sabotage test performed (no green
+baseline exists to sabotage). This is a legitimate, expected "nothing changed"
+result, not a stale or skipped re-check.
