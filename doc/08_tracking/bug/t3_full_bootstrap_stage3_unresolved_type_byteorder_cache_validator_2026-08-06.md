@@ -279,3 +279,151 @@ here. Two things the next lane should note:
 
 This is now the first blocker Stage 3 actually reports, so it is the live head
 of task #18.
+
+---
+
+## RESOLVED (2026-08-06, BGS1) — the defect was in the resolver, not in any consumer file
+
+`9bb8727cbc3` did **not** regress. Its `use std.binary_io.{ByteOrder}` in
+`cache_validator.spl` is intact at `origin/main`, and that file no longer
+fails. What happened is the thing this document's own "Suggested next step"
+warned about: it fixed **one member of a family** and the next member came
+straight up behind it —
+
+```
+error: in-process native-build: HIR lowering error in
+  src/compiler/driver/watcher/watcher_client.spl: unresolved type: ByteOrder
+```
+
+16x (8 per use site x 2 sites), exit 1, ~131s into Stage 3.
+
+### Root cause
+
+`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:924`, in
+`try_register_bootstrap_global_symbol`.
+
+That function performs a genuine import registration, but **lazily** — it is
+reached from BODY lowering (`hir_lowering/types.spl:673`, inside
+`lower_named_kind`, immediately before the `unresolved type` gate at
+`types.spl:784`; and `hir_lowering/expressions.spl:394`) rather than from
+Pass 0.
+
+Pass 0 (`module_lowering.spl:1858-1861`) sets `registering_import_symbols` for
+exactly the span of `resolve_import_symbols`. That flag is what makes
+`declared_surface_callable_type` return `nil` outright
+(`module_lowering.spl:430-431`) — which is precisely why a top-level import
+**never** lowers an imported type's METHOD SIGNATURES in the consumer's scope.
+
+The lazy path left the flag `false`. So `register_imported_type_methods`
+(`module_lowering.spl:1336`) **did** lower those signatures, and every
+parameter/return type that the OWNER module imports but the CONSUMER does not
+have in scope died as `unresolved type: X`.
+
+### Why a function-local `use` is the trigger
+
+A `use` inside a function body is **discarded outright** by the parser
+(`src/compiler/10.frontend/core/parser_stmts.spl:371` -> `parse_use_stmt_inline`
+returns a bare `pass`). The name is therefore unbound when the body is lowered,
+and falls through to `try_register_bootstrap_global_symbol`.
+
+The control case is what makes this conclusive, and it was measured, not
+assumed:
+
+| file | how `ShbReader` is imported | `ByteOrder` in scope | result |
+|---|---|---|---|
+| `driver/shb/shb_cache.spl` | **top-level** `use` | no | **passes** |
+| `driver/cache/cache_validator.spl` | function-local `use` | no (before 9bb8727cbc3) | failed 8x |
+| `driver/watcher/watcher_client.spl` | function-local `use` x2 | no | failed 16x |
+
+`shb_cache.spl` imports the *same* `ShbReader`, *also* without `ByteOrder` in
+scope, and calls the same `open`/`is_valid` methods that `cache_validator.spl`
+calls — and it does not fail. The error depends on **how a name was bound**,
+not on what the code does with it. That asymmetry is the entire defect.
+
+(Note this also disposes of two plausible-looking theories: it is not about
+which methods the consumer *calls* — `cache_validator.spl` calls only
+`open`/`is_valid`/`source_mtime`/`source_hash`, none of which mention
+`ByteOrder` — and it is not about `ShbReader`'s fields or method signatures,
+which contain no `ByteOrder` at all.)
+
+### The fix
+
+Save, set, and restore `registering_import_symbols` around the registration, so
+the lazy path behaves exactly as Pass 0 already does:
+
+```
+val saved_registering_import_symbols = self.registering_import_symbols
+self.registering_import_symbols = true
+self.register_imported_symbol(owner, owner.module_name, name, name, span, true)
+self.registering_import_symbols = saved_registering_import_symbols
+```
+
+Saved and **restored**, not cleared: Pass 0 walks composite fields and lowers
+their types, which can re-enter `lower_named_kind` and arrive here with the flag
+already `true`; clearing it unconditionally would corrupt the in-progress Pass 0.
+
+### Why the resolver layer, and not per-site `use` imports
+
+Because the affected set is **not statically enumerable**. It is "every name
+that reaches `try_register_bootstrap_global_symbol` under `SIMPLE_BOOTSTRAP=1`
+whose resolved owner's method signatures reference a type absent from the
+consumer's scope". A function-local `use` is only *one* way to produce an
+unbound name, so the 62 function-local `use` statements in `src/compiler` are
+**not** the family — that list is wrong in both directions (it includes sites
+that never fail, and misses unbound names produced any other way).
+
+Per-site imports fix one member and leave the rest. That is exactly what
+happened with `9bb8727cbc3`: `cache_validator.spl` was fixed, and
+`watcher_client.spl` was next in line. One resolver-side guard retires the whole
+class at once.
+
+The `use std.binary_io.{ByteOrder}` added to `cache_validator.spl` by
+`9bb8727cbc3` is left in place. It is now believed redundant, but that was NOT
+verified by a run with it removed, so it is not claimed as subsumed.
+
+### RED -> GREEN -> SABOTAGE
+
+Method: replay Stage 3 alone against a pinned worktree
+(`/home/ormastes/dev/simple-s3bisect`, verified byte-identical to `origin/main`
+for every file touched), using `build/cyc/build_stage2.sh` +
+`build/cyc/run_stage3.sh`. The fix is in the COMPILER, so each cycle must
+rebuild stage2 from the seed — stage2 rebuild ~2m50s, stage3 to the HIR wall
+~2m. Far cheaper than the ~50min full-bootstrap replay this doc previously
+recorded.
+
+| run | tree | STAGE3_EXIT | wall | `unresolved type: ByteOrder` | phase reached |
+|---|---|---|---|---|---|
+| `GRN2RUN` / `VER2RUN` (RED) | origin/main | 1 | 127-131s | **16** | `phase=hir`, `failed=1` |
+| `FIX1RUN` (GREEN) | + BGS1 fix | 139 | 394s | **0** | `phase=monomorphize`, `tasks_done=4/6`, `failed=0` |
+| `SAB3RUN` (SABOTAGE) | fix reverted | 1 | 129s | **16** | `phase=hir`, `failed=1` |
+
+HIR lowering — the phase that hard-failed in every prior run — now completes
+clean, and Stage 3 advances two further pipeline tasks.
+
+### Status: past this wall, next blocker is different
+
+Stage 3 does **not** complete, and no `stage3-simple` binary is produced. It now
+dies later and differently: **SIGSEGV, exit 139, "dumped core"**, at 394s, peak
+RSS 10.7 GB, during `phase=monomorphize` / MIR lowering. The last log lines are
+`[mir-lower-expr] int:start / int:builder / int:emitted / int:done`.
+
+This is a *signal*, not a diagnostic — exit 139 with no `error:` line. It is
+distinct from the three failure modes already catalogued here: not the 60s
+timeout (255), not the `--budget` SIGKILL (137), not an `earlyoom` kill (143,
+and peak RSS was well under budget anyway).
+
+It is also NOT the stack-overflow fixed by `030ff43e330` and NOT the
+non-termination fixed by `548f2d3b1f6` — both of those are upstream of HIR
+completion, which now passes.
+
+Most likely the same "pre-existing native-build instability" named as the
+blocker in
+`doc/08_tracking/bug/mir_lowering_codegen_error_first_call_zero_core_dump_2026-08-06.md`,
+whose own `CompileResult.CodegenError` source fix is already present at
+`origin/main` (verified: all call sites in `driver_aot_pipeline.spl`,
+`driver_pipeline_execution.spl`, `driver_orchestration.spl` carry the fixed
+form). That doc could not verify itself against a rebuilt stage3 because Stage 3
+never got this far; this run is the first to reach that ground. Attribution is
+stated as likely, not proven — no core-dump analysis was performed here.
+
+That MIR-lowering segfault is the new live head of task #18.

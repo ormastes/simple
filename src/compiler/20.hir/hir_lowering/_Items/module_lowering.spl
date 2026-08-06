@@ -922,7 +922,37 @@ impl HirLowering:
         if matching_index < 0:
             return false
         val owner = self.module_surfaces.surfaces[matching_index]
+        # BGS1 (2026-08-06): this is an IMPORT REGISTRATION performed LAZILY,
+        # from BODY lowering (types.spl:673 in lower_named_kind, and
+        # expressions.spl:394), not from Pass 0. Pass 0 sets
+        # `registering_import_symbols` for exactly the span of
+        # resolve_import_symbols (:1858-1861), and that flag makes
+        # declared_surface_callable_type return nil outright (:430-431) — so a
+        # top-level import NEVER lowers the imported type's METHOD SIGNATURES
+        # in the consumer's scope. This lazy path left the flag false, so
+        # register_imported_type_methods (:1336) DID lower them here, and any
+        # parameter/return type that the OWNER module imports but the CONSUMER
+        # does not have in scope died as "unresolved type: X".
+        #
+        # Stage 3 hit this as `unresolved type: ByteOrder`, 8x per use site, in
+        # driver/cache/cache_validator.spl and driver/watcher/watcher_client.spl.
+        # Both reach `ShbReader` through a FUNCTION-LOCAL `use`, which the parser
+        # DISCARDS outright (10.frontend/core/parser_stmts.spl:371 ->
+        # parse_use_stmt_inline, which returns a bare `pass`), so the name is
+        # unbound when the body is lowered and lands here. driver/shb/shb_cache.spl
+        # imports the SAME `ShbReader` at top level, goes through Pass 0 with the
+        # flag set, and does not fail. That asymmetry is the whole defect: the
+        # error depends on HOW a name was bound, not on what the code does with it.
+        #
+        # Saved and RESTORED rather than cleared: Pass 0 walks composite fields
+        # and lowers their types, which can re-enter lower_named_kind and arrive
+        # here with the flag ALREADY true; clearing it unconditionally would
+        # corrupt the in-progress Pass 0 registration.
+        # doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md
+        val saved_registering_import_symbols = self.registering_import_symbols
+        self.registering_import_symbols = true
         self.register_imported_symbol(owner, owner.module_name, name, name, span, true)
+        self.registering_import_symbols = saved_registering_import_symbols
         self.symbols.lookup(name).?
 
     me resolve_module_key(name: text) -> text:
