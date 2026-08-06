@@ -41,13 +41,22 @@ for spec in $SPECS; do
     [ -z "$spec" ] && continue
     SPEC_COUNT=$((SPEC_COUNT + 1))
     LOG=$(mktemp)
-    timeout "$TIMEOUT" bin/simple test "$spec" --no-cache --no-cover-check >"$LOG" 2>&1
+    SPEC_TIMEOUT="$TIMEOUT"
+    case "$spec" in
+        *compositor_occlusion_spec.spl)
+            # Confirmed non-hanging (Duration: 130637ms, 10/10 passed) but slow;
+            # give it headroom above the default 150s without adopting the
+            # spec header's stale 7200s recommendation.
+            [ "$SPEC_TIMEOUT" -lt 450 ] && SPEC_TIMEOUT=450
+            ;;
+    esac
+    timeout "$SPEC_TIMEOUT" bin/simple test "$spec" --no-cache --no-cover-check >"$LOG" 2>&1
     rc=$?
     verdict=$(grep -o 'declared>=[0-9]* executed=[0-9]* passed=[0-9]* failed=[0-9]*' "$LOG" | tail -1)
     if [ -z "$verdict" ]; then
         echo "CANNOT_EXECUTE: $spec (exit=$rc, no verdict line — timeout or crash)"
         if grep -q 'Process timed out' "$LOG"; then
-            echo "  reason: process timed out after ${TIMEOUT}s"
+            echo "  reason: process timed out after ${SPEC_TIMEOUT}s"
         fi
         CANNOT_EXECUTE=$((CANNOT_EXECUTE + 1))
         RED=1

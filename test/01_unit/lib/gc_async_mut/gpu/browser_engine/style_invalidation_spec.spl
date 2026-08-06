@@ -5,10 +5,8 @@
 # mutated and the mutation is reported via invalidate_node_discriminant_change,
 # apply_css_rules_to_tree_invalidated (using the memoized/dirty-tracked
 # incremental path) must style every node IDENTICALLY to a from-scratch full
-# re-match of the same mutated tree (a fresh InvalidationState forces
-# apply_css_rules_to_tree_invalidated to re-match every node — that is the
-# ground-truth oracle used here; see the note below on why style_block.spl's
-# own apply_css_rules_to_tree_linear could not be reused as the oracle).
+# re-match of the same mutated tree using style_block.spl's own
+# apply_css_rules_to_tree_linear as the ground-truth oracle.
 #
 # Proportionality requirement: when only a handful of nodes in a larger tree
 # are mutated, the invalidation pass must re-match strictly fewer nodes than
@@ -17,29 +15,21 @@
 #
 # NOTE on the oracle choice: style_block.spl's apply_rules_to_node /
 # apply_rules_to_node_indexed (used by apply_css_rules_to_tree_linear and
-# apply_css_rules_to_tree) call be_dom_set_children(node, new_kids) as a bare
-# statement and discard its return value. be_dom_set_children is a pure
-# constructor — it returns a NEW BeDomNode, it does not mutate its argument
-# in place — so combined with the interpreter's copy-on-array-index
-# semantics for class instances, a re-styled child's OWN inline style
-# survives but its re-styled DESCENDANTS never get written back into the
-# tree at all. Verified directly: a "*" rule sets background-color on the
-# root but leaves every non-root node's style at its default "". This is a
-# pre-existing defect in style_block.spl's write-back plumbing (not in
-# SelectorRuleIndex's bucketing logic, and not introduced by this file),
-# and this task is scoped not to edit style_block.spl. Using
-# apply_css_rules_to_tree_linear as the correctness oracle here would make
-# the comparison vacuous below the root (both sides would just show "" and
-# trivially "match"), so this spec instead uses this module's OWN
-# already-correct full-rematch path (fresh state) as the oracle, which
-# properly threads write-back through the recursion's return value.
+# apply_css_rules_to_tree) used to call be_dom_set_children(node, new_kids)
+# as a bare statement and discard its return value, so a re-styled child's
+# descendants never got written back into the tree. That write-back bug has
+# since been fixed (be_dom_set_children's return value is now threaded
+# through apply_rules_to_node / apply_rules_to_node_indexed as the function's
+# return value, verified independently by
+# style_block_descendant_writeback_spec.spl), so apply_css_rules_to_tree_linear
+# is now safe to use as this spec's correctness oracle.
 #
 # @cover src/lib/gc_async_mut/gpu/browser_engine/style_invalidation.spl
 use std.spec.{describe, it, expect}
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, StyleProps}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_get_children, be_dom_set_children}
-use std.gc_async_mut.gpu.browser_engine.style_block.{CssRule, CssDecl, build_selector_rule_index}
+use std.gc_async_mut.gpu.browser_engine.style_block.{CssRule, CssDecl, build_selector_rule_index, apply_css_rules_to_tree_linear}
 use std.gc_async_mut.gpu.browser_engine.style_invalidation.{
     new_invalidation_state, apply_css_rules_to_tree_invalidated,
     invalidate_node_discriminant_change}
@@ -175,10 +165,10 @@ describe "style invalidation correctness":
         var tree_inv = build_wide_tree(6)
         val idx = build_selector_rule_index(rules)
 
-        # Establish baseline: full pass on both trees first (fresh state on
-        # the ground-truth tree forces a full rematch every time it's used).
-        var gt_state = new_invalidation_state()
-        tree_gt = apply_css_rules_to_tree_invalidated(tree_gt, rules, idx, gt_state)
+        # Establish baseline: full pass on both trees first (the shared
+        # apply_css_rules_to_tree_linear is the ground-truth oracle, run
+        # fresh from scratch every time it's used).
+        tree_gt = apply_css_rules_to_tree_linear(tree_gt, rules)
         var state = new_invalidation_state()
         tree_inv = apply_css_rules_to_tree_invalidated(tree_inv, rules, idx, state)
         expect(colors_flat(tree_inv)).to_equal(colors_flat(tree_gt))
@@ -193,9 +183,8 @@ describe "style invalidation correctness":
             "p", "", old_class.split(" "),
             "p", "", new_class.split(" "))
 
-        # Ground truth: full re-match from scratch (fresh state).
-        var gt_state2 = new_invalidation_state()
-        tree_gt = apply_css_rules_to_tree_invalidated(tree_gt, rules, idx, gt_state2)
+        # Ground truth: full re-match from scratch via the shared oracle.
+        tree_gt = apply_css_rules_to_tree_linear(tree_gt, rules)
         # Invalidation-aware path: reuses memoized state, should only
         # re-match the mutated node (and any node in the buckets it moved
         # between) yet must still reach the SAME final styling.
