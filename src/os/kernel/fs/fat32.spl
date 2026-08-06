@@ -1794,6 +1794,105 @@ impl Fat32Filesystem:
                 ci = ci + 1
         self._mark_dirent_deleted(dev, loc.dirent_sector, loc.dirent_offset)
 
+    fn rename_at(self, dev: BlockDevice, old_path: text, new_path: text) -> Result<(), i32>:
+        """Rename/move a file or directory (real FAT32 primitive, not
+        create+delete of the DATA — see honesty note below).
+
+        Implemented as link-new-entry, then delete-old-entry, reusing the
+        same tested `_link_entry` (LFN chain + 8.3 alias + checksum
+        generation, collision-numbered short names) and `_mark_dirent_deleted`
+        primitives `create_at`/`mkdir_at`/`unlink_at` already rely on.
+        Hand-rolling an in-place rewrite of a directory entry's name field(s)
+        was considered and rejected: an LFN name occupies a variable number of
+        32-byte slots (`fat32_lfn_slot_count`) plus a checksum byte derived
+        from the 8.3 short name, so renaming to a name needing a different
+        slot count cannot be a same-size in-place patch — it would still have
+        to free/relink slots, at which point it is not meaningfully more
+        atomic than the two-step approach below, just less tested.
+
+        ATOMICITY, HONESTLY (this is not a single-sector atomic operation):
+          - The file's DATA is never touched or copied. `_link_entry` copies
+            only the existing `start_cluster`/`file_size` into the new
+            directory entry; no cluster chain is walked, freed, or duplicated.
+          - The two directory-entry writes are NOT atomic as a pair. If the
+            kernel dies between "new entry linked" and "old entry marked
+            deleted", the directory graph holds BOTH names pointing at the
+            same start_cluster (recoverable — an fsck-equivalent would drop
+            one) — it never ends up with NEITHER name, and it never corrupts
+            the underlying file data. This applies to same-directory renames
+            too: this method does not special-case same-parent renames as a
+            single-sector patch, for the LFN slot-count reason above.
+          - Cross-directory moves of a DIRECTORY additionally patch the moved
+            directory's own ".." entry (a single dirent write, in its own
+            first cluster) to point at the new parent, so a later `cd ..`
+            resolves correctly. That patch happens after the new entry is
+            linked and before the old one is deleted, widening the crash
+            window by one more single-dirent write — documented, not hidden.
+
+        Destination-exists policy: returns EEXIST (via `_link_entry`'s own
+        duplicate check) rather than atomically replacing an existing
+        destination. POSIX `rename()` atomic-replace semantics are explicitly
+        OUT of scope here — supporting it would mean freeing the destination's
+        cluster chain as part of this already non-atomic two-step, which is a
+        strictly larger data-loss window than what this method already
+        documents above. Callers that need replace-semantics must unlink the
+        destination first (accepting the same non-atomicity that implies).
+
+        Moving a directory into itself or one of its own descendants is
+        rejected with EINVAL for the direct case (new parent == the directory
+        being moved); deeper cycles (moving into a grandchild) are not
+        detected — out of scope for this primitive, callers must not do that.
+        """
+        if old_path == new_path:
+            return Ok(())
+        val loc_r = self.resolve_path(dev, old_path)
+        if loc_r.is_err():
+            return Err(loc_r.unwrap_err())
+        val loc = loc_r.unwrap()
+
+        val new_parts = fat32_split_path(new_path)
+        if new_parts.len() == 0:
+            return Err(EINVAL)
+        val new_name = new_parts[new_parts.len() - 1]
+        if new_name == "." or new_name == "..":
+            return Err(EINVAL)
+
+        val pd = self._parent_dir_cluster(dev, new_path)
+        if pd.is_err():
+            return Err(pd.unwrap_err())
+        val dest_dir_cluster = pd.unwrap()
+
+        if loc.is_dir and dest_dir_cluster == loc.start_cluster:
+            return Err(EINVAL)  # moving a directory into itself
+
+        var attr = FAT32_ATTR_ARCHIVE
+        if loc.is_dir:
+            attr = FAT32_ATTR_DIR_BYTE
+
+        val link_r = self._link_entry(dev, dest_dir_cluster, new_name, attr, loc.start_cluster, loc.file_size)
+        if link_r.is_err():
+            return Err(link_r.unwrap_err())
+
+        if loc.is_dir and dest_dir_cluster != loc.dir_cluster:
+            # Cross-directory directory move: fix up the moved directory's own
+            # ".." entry (stored in ITS first cluster, offset 32) so it points
+            # at the new parent — otherwise a subsequent `cd ..` from inside it
+            # would resolve to the old parent. Root's own cluster number is
+            # never stored on disk (FAT32 records 0 for "parent is root").
+            var dotdot_link = dest_dir_cluster
+            if dest_dir_cluster == self.root_cluster:
+                dotdot_link = 0u32
+            val dotdot_entry = fat32_make_dirent(fat32_short_field(".."), FAT32_ATTR_DIR_BYTE, dotdot_link, 0u32)
+            var self_chain: [u32] = [loc.start_cluster]
+            val fix_r = self._write_dir_bytes(dev, self_chain, 32, dotdot_entry)
+            if fix_r.is_err():
+                return Err(fix_r.unwrap_err())
+
+        # Entry now exists at its new name/location; only now remove the old
+        # one. If this step fails or the kernel crashes here, both names
+        # remain live (see the ATOMICITY note above) — never neither.
+        self._mark_dirent_deleted(dev, loc.dirent_sector, loc.dirent_offset)
+
     static fn make_for_chain_test(fat_start_sector: u32, bytes_per_sector: u32, data_clusters: u32) -> Fat32Filesystem:
         """Create a pre-configured Fat32Filesystem for read_cluster_chain unit tests.
 
