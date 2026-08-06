@@ -389,8 +389,24 @@ open.
   spl`) has no direct spec coverage in this repo; a board/QEMU boot-and-exec
   smoke test would be the real verification and was out of scope here.
 - `syscall_dispatch` in `syscall.spl` still calls the legacy `syscall_handler`
-  only and was not converted (zero callers found; low priority, but flagged
+  only and was not converted (zero **production** callers found — grepped
+  outside comments and confirmed again 2026-08-06; low priority, but flagged
   so it isn't silently assumed fixed).
+  - **Correction/clarification (2026-08-06):** "zero callers" is accurate only
+    for the production dispatch surface. `syscall_dispatch` DOES have real
+    callers in `test/01_unit/os/kernel/ipc/syscall_spec.spl:284,339` (and the
+    duplicate `.spipe_matchers_syscall_spec.spl`), which assert its
+    disposition logic directly (e.g. `expect(result.disposition).to_equal(
+    SyscallTrapDisposition.BlockCurrent)`) — non-vacuous coverage of the
+    NoReturn/BlockCurrent/ScheduleNext/ReturnToCaller branching that no other
+    function in this file tests. It is **not dead code** in the "unused,
+    safe to delete" sense: it's a designed-but-not-yet-wired trap-entry
+    dispatcher with its own tested behavior, most likely the intended target
+    once `x86_dispatch_installed_syscall`/the C-ABI shims are converted to
+    route through a single disposition-aware entry point instead of calling
+    `syscall_handler_ipc_state` directly. Do not delete it without also
+    deleting/rewriting the two `syscall_spec.spl` examples that depend on it,
+    and confirming nothing is planned to wire it up.
 
 ## 2026-08-06 follow-up 3: root cause 1 resolved as case (b) — dead code marked,
 ## not wired into production; a separate, real gate already exists

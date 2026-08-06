@@ -7,6 +7,34 @@ alwaysApply: false
 ---
 # Bootstrap & Binary Architecture
 
+## KNOWN BLOCKER (2026-08-06, check before redeploying): Stage 3 self-host fails
+`bin/simple --version` right now prints the Rust-seed WARNING banner, and it
+will keep doing so until this is fixed. `scripts/bootstrap/bootstrap-from-scratch.sh
+--full-bootstrap --deploy` is the **correct, documented command** — it is not
+broken and not missing — but it currently fails at Stage 3 (stage2 compiler
+recompiling itself) with `unresolved type: ByteOrder` in `cache_validator.spl`,
+then (once that's patched) an `Effect` facade collision in
+`compiler.mir.__init__`. The wrapper correctly refuses to fall back to the
+seed for the full CLI build, so **no redeploy will succeed until this Stage 3
+defect is fixed in `src/compiler`** — this is a real compiler bug, not a
+tooling/script gap. Full trace, root cause, and an in-progress fix:
+`doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md`
+(see also `doc/08_tracking/bug/deployed_bin_simple_still_seed_2026-08-05.md`).
+
+**Do not paper over this by hand-rolling `cargo build --release` and manually
+copying the result to `bin/release/<triple>/simple`.** That produces a fresh
+Rust **seed**, not a self-hosted binary — the seed banner is the tell. Worse,
+the fresh mtime makes the binary *look* current/deployed to the next lane,
+which is exactly how this recurs: multiple sessions in this shared working
+tree have each independently done this ad hoc "fix" today alone, and each one
+resets the clock on the next lane's binary-provenance check without fixing
+anything. Before touching `bin/release/**` yourself: (1) run `bin/simple
+--version` and check for the seed banner, (2) if seed, check the bug doc above
+for current status before assuming it's a quick fix, (3) if you only need a
+*working* binary right now and self-host is still blocked, run the seed
+explicitly and consciously (`--seed-ok`/`SIMPLE_RUST_SEED_WARNING=0`) rather
+than silently leaving a freshly-copied seed masquerading as `bin/simple`.
+
 ## Default tooling runs on pure-Simple, NOT the Rust seed
 **Policy:** every tool — `test`, `lint`, `fmt`, `check`, `build`, `run`, `-c`,
 the MCP/LSP servers, doc-coverage, etc. — must run on the **pure-Simple
