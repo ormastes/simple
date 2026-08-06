@@ -175,3 +175,169 @@ the pattern the crypto trees should follow and do not.
    load-bearing — after confirming which, not before.
 4. The two crypto trees are a design decision, not a cleanup. Do not merge them
    without an owner ruling.
+
+## Follow-up investigation, 2026-08-06 (findings 1-4 — no deletions, no merges)
+
+Scope: one level deeper on findings 1-4 (finding 5 was already fixed
+2026-08-06 by a sibling agent, commit `90a4048e4ce2afdf94d02636611e3d649abd4ecf`,
+untouched here; finding 6 untouched). Nothing was deleted or merged in this
+pass — see per-finding verdicts below for why.
+
+### Finding 1 (crypto trees) — full 14-name table, no exceptions found
+
+Sampled all 14 overlapping names fresh (not just the 7 the original doc left
+unsampled). All 13 simple-file pairs have real `fn` bodies on **both** sides
+(no re-export found anywhere) — the pattern generalizes with zero exceptions.
+`x25519_mlkem768` is structurally different from the other 13 and should not
+be read as the same kind of duplication: `src/os/crypto/x25519_mlkem768/`
+(8 files, GPU/CUDA/Vulkan/Metal NTT acceleration — `cuda_ntt_provider.spl`,
+`vulkan_ntt_provider.spl`, `metal_ntt_provider.spl`, `accelerator_cache.spl`)
+and `src/lib/common/crypto/x25519_mlkem768/` (8 files, evidence/attestation —
+`performance_attestation.spl`, `qualified_timing.spl`, `matrix_receipt.spl`)
+address different concerns (hardware KEM acceleration vs. measurement
+receipts), not the same primitive implemented twice.
+
+| name | os/crypto lines | common/crypto lines | os prod importers | os test importers | common prod importers | common test importers |
+|---|---|---|---|---|---|---|
+| sha256 | 403 | 414 | 10 | 28 | 58 | 23 |
+| ed25519 | 637 | 1,526 | 12 | 35 | 0 | 0 |
+| aes_gcm | 639 | 718 | 1 | 6 | 2 | 0 |
+| chacha20 | 738 | 206 | 1 | 9 | 0 | 0 |
+| chacha20_poly1305 | 229 | 282 | 3 | 21 | 0 | 0 |
+| poly1305 | 283 | 283 | 0 | 9 | 0 | 0 |
+| blake2s | 402 | 209 | 0 | 3 | 0 | 0 |
+| blake3 | 579 | 853 | 0 | 2 | 0 | 0 |
+| argon2 | 622 | 581 | 0 | 3 | 0 | 0 |
+| pbkdf2 | 127 | 252 | 0 | 2 | 1 | 0 |
+| pem | 278 | 203 | 0 | 3 | 0 | 0 |
+| ecdsa_p256 | 332 | 73 | 4 | 9 | 0 | 3 |
+| sha512 | 626 | 1,558 | 1 | 7 | 1 | 0 |
+| x25519_mlkem768 | (dir, 8 files, GPU/NTT) | (dir, 8 files, attestation) | 8 | 31 | 0 | 0 |
+
+(Counts are `grep -rl 'use os.crypto.<name>.'` / `use (std.)?common.crypto.<name>.'`
+hits outside each tree's own directory; production excludes `test/`.)
+
+Reading: **`os.crypto` is the tree SSH actually depends on** — every SSH
+production import goes through `os.crypto.*` (matches the original doc's
+"SSH imports only `os.crypto.*`" line, now confirmed name-by-name). `sha256`
+is the one name where `common.crypto` has dramatically more usage (58 prod
+importers vs. 10) — that's because `common.crypto.sha256` is the
+general-purpose stdlib hash used all over the tree outside SSH, not a
+SSH-specific competitor. For the other 12 named pairs, `common.crypto` has
+0-2 production importers each — largely unused outside its own tree and a
+handful of tests. Net: this is not "two trees each half-used" — it's one
+actively-depended-on tree per name, and for 12 of 13 non-sha256 names that
+tree is `os.crypto`. Still a genuine architecture decision (real duplicate
+logic, not dead weight on either side) — no merge performed.
+
+Aside, out of assigned scope, flagged for whoever owns this: there is
+actually a **third** crypto surface, `std.crypto` (`src/lib/crypto.spl` +
+`src/lib/crypto/{sha256,sha512,sha1,hmac,hkdf,pbkdf2,legacy_hash,types}.spl`),
+used e.g. by `src/app/package.registry/{signing,verify}.spl`. Not
+investigated further here — noted only so the eventual crypto-tree ruling
+accounts for it instead of rediscovering it later.
+
+### Finding 2 (AES-GCM packet layers) — confirmed genuine split, not accidental duplication
+
+Split still exists exactly as described. Fresh importer check:
+
+- `ssh_cipher.spl` (502 L, pure Simple — imports `os.crypto.{aes_gcm,
+  chacha20, chacha20_poly1305}`, zero `extern fn`): imported by
+  `src/os/apps/sshd/mod.spl`, **and by the live client**
+  `src/os/tools/net/_SshTool/{run,transport}.spl`, plus
+  `test/03_system/os/os_ssh_spec.spl` (+ its `test/system/` legacy twin) and
+  two integration specs.
+- `ssh_cipher_live.spl` (285 L, header literally says "live-safe AES-256-GCM
+  only" — declares 5 `extern fn`s: `rt_tls13_aes256_gcm_encrypt/decrypt`,
+  `rt_ssh_aes256_gcm_decrypt_packet[_payload_len]`, `rt_bytes_u8_at`):
+  imported only by `src/os/apps/sshd/ssh_session.spl` (the server's live
+  session loop) and its own unit spec plus
+  `rv64_ssh_live_login_in_qemu_spec.spl`.
+
+This reads as a **deliberate split, not accidental duplication**: `ssh_cipher.spl`
+is the portable pure-Simple reference implementation used by the client and
+by generic/system tests; `ssh_cipher_live.spl` is a C-accelerated variant
+built specifically for the server's baremetal/QEMU-booted live session path
+(consistent with `.spipe/ssh_native_survey/state.md`'s independent note that
+"the shipped server's bulk-crypto hot path is C-accelerated, not pure
+Simple"). The 5 colliding names never collide at compile time — no file
+imports both modules together. **Recommendation, not performed:** don't
+blind-merge. If consolidation is wanted, the real options are (a) port the
+C-accelerated primitives behind the portable `os.crypto.aes_gcm` API with a
+target/build-flag switch so both callers share one module, or (b) keep the
+split but rename `ssh_cipher_live.spl` to something that says *why* it exists
+(e.g. `ssh_cipher_baremetal.spl`) so the next reader doesn't read it as
+accidental drift the way this bug doc's title implied.
+
+### Finding 3 (two client stacks) — REVERSED from "safe to delete": confirmed active WIP, do not delete
+
+Fresh grep, both narrow (`src/app src/os`, excluding self and `test/`) and
+repo-wide including `test/`:
+
+```
+grep -rln 'ssh_client' src/app src/os --include=*.spl | grep -v test
+  -> only files inside src/os/apps/ssh_client/ itself
+grep -rn 'os\.apps\.ssh_client\|apps/ssh_client' src/ test/ --include=*.spl \
+  | grep -v '^src/os/apps/ssh_client/'
+  -> only the 4 test files: ssh_client_host_key_spec.spl,
+     ssh_client_protocol_spec.spl, ssh_client_kex_inprocess_spec.spl,
+     ssh_client_session_flow_spec.spl
+```
+
+The one apparent hit outside the dir, `src/os/apps/sshd/ssh_session.spl:53`
+(`fn _live_openssh_client_version_bytes()`), is a false positive — a function
+name, not an import. **"Zero production importers" is confirmed, still true
+today.**
+
+However: **do not delete this.** `.spipe/ssh_native_client/state.md` (lane
+SSHCLI, dated 2026-07-27, "slice shipped, spec-proven, not yet wired to a
+socket") documents `src/os/apps/ssh_client/` as a deliberate, in-progress
+replacement client architecture, not dead/duplicate code. It reuses the
+sshd protocol core directly (packet/transport/KEX modules imported from
+`os.apps.sshd`, not reimplemented) and adds exactly the pieces the live
+`_SshTool` client is missing: `ssh_known_hosts.spl` (host-key **pinning** —
+independently confirmed here, `grep -c known_hosts src/os/tools/net/_SshTool/*.spl`
+is 0, i.e. `_SshTool` really has none) plus a socket-free state machine meant
+to be testable without a live server. The lane's own doc says explicitly:
+"this lane is complementary, not duplicative — but it does mean there are now
+two client trees, and that must be resolved (next increment #1)." Zero
+production importers here is the *expected* state of a lane still mid-flight
+on its own documented next increment (wiring to a socket), not a signal of
+abandonment. Deleting it would discard real security-relevant work (MITM
+protection `_SshTool` lacks) with no replacement. **Recommendation:** leave
+both stacks; the real next step is finishing the SSHCLI lane's own
+"increment #1" (decide whether `_SshTool` adopts the new socket-free core or
+is retired in its favor) — that is an implementation decision for the lane
+owner, not a duplication cleanup.
+
+### Finding 4 (near-duplicate `ssh_ffi.spl`/`ssh_sffi.spl`) — already resolved, no action needed
+
+`src/app/io/ssh_ffi.spl` **does not exist** in the current tree or at `HEAD`
+(`920136b593979eab310126d5e4de6a97b27e9888`). `find src -iname 'ssh_ffi.spl'`
+and a repo-wide `grep -rln '\bssh_ffi\b'` (excluding `ssh_sffi`) both return
+nothing — no file, no lingering references, and the stale
+`scripts/check/ui_backend_isolation_baseline.txt` entry the original doc
+flagged is already gone too. History shows this was done in commit
+`7ba93b8c0b1` ("refactor(ssh): delete the duplicate ssh_ffi module and its
+dangling tier facades") — that commit is not an ancestor of current `HEAD`
+(likely a parallel/rewritten jj lineage), but its effect is already present
+in the current tree, so there is nothing left to delete here. Verified this
+does not touch `ssh_sffi.spl`/`ssh_terminal.spl` (finding 5, already fixed
+and out of scope) — neither was modified in this pass. **Finding 4: resolved,
+no further action.**
+
+### Net status
+
+- Finding 1: still OPEN, owner decision needed. Comparison table above ready
+  to act on.
+- Finding 2: still OPEN, owner decision needed. Recommendation above ready to
+  act on; leaning "genuine split with a naming problem," not "accidental
+  duplication."
+- Finding 3: reclassified from "candidate for deletion" to **do not delete —
+  active WIP**; resolve via the SSHCLI lane's own next increment, not via
+  this bug.
+- Finding 4: **resolved** (already deleted elsewhere in history; confirmed
+  clean in current tree). No further action.
+- Overall doc status stays **OPEN** — findings 1-2 (and 3, now reframed) are
+  unresolved design decisions; only finding 4 (and finding 5, previously) are
+  closed.
