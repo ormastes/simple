@@ -96,6 +96,64 @@ is simply no PQ group, so SSH is further from PQ than TLS, not closer.
    (`rt_ssh_*`/`rt_sftp_*`); **none** is defined in `src/runtime/`. Unregistered
    externs return nil silently under the JIT. `ssh_terminal.spl` (242 L) wraps it
    and has 5 importers.
+
+   **Sub-finding addressed, 2026-08-06 (narrow scope only — see below).**
+   Re-verified independently: `grep -rn "rt_ssh_\|rt_sftp_" src/runtime/` is
+   empty, and none of the 30 names resolve anywhere in `src/compiler_rust/`
+   (source, not just build output) either — confirmed dead, not just
+   under-grepped. File is
+   `src/lib/nogc_sync_mut/io/ssh_sffi.spl` (the tier files under
+   `nogc_async_mut`/`gc_sync_mut`/`gc_async_mut` are thin re-exports, as noted
+   above). `ssh_terminal.spl`'s 5 real importers: `terminal/connection.spl`,
+   `terminal/power/host_power.spl`, `terminal/credential/config_parser.spl`,
+   `terminal/__init__.spl`, and `nogc_async_mut/terminal/credential/__init__.spl`
+   (the 3 tier `ssh_terminal.spl` re-export files don't count as separate
+   importers). These are reachable from real production code, not just tests:
+   `src/app/test_daemon/adapters/remote_pc_adapter.spl` (a real app under
+   `src/app/test_daemon/`, which has its own `main.spl`/`daemon.spl`) reaches
+   `ssh_terminal.spl` transitively via `std.terminal.connection`.
+
+   Fix (does NOT implement any SSH/SFTP functionality — scope stays "make the
+   failure loud", per the recommended-order item 2 above): `ssh_sffi.spl`'s
+   extern block is now documented UNBACKED (same convention as
+   `nogc_async_mut/net/sffi.spl`'s UDP/HTTP block from
+   `network_coverage_illusion_and_spec_tree_duplication_2026-08-05.md`), and
+   `ssh_terminal.spl` — the sole real call-site layer, confirmed by grep that
+   nothing outside it and the tier re-exports imports `ssh_sffi` directly — now
+   calls an unconditional (never level-gated, always-on) `stderr_write`
+   diagnostic at the top of all 6 public functions
+   (`ssh_terminal_connect/execute/send/receive/upload/download/close`) stating
+   plainly that the SFFI backing has zero `src/runtime/` definitions and the
+   call always fails, with a pointer back to this doc. `std.log.log_error` was
+   considered and rejected: it is gated by `SIMPLE_LOG` and silent by default,
+   which would have reproduced the exact silent-failure hazard this is fixing.
+
+   Verified with a standalone probe calling `ssh_terminal_connect` against
+   `bin/simple run` (Rust bootstrap seed) in both default and
+   `SIMPLE_EXECUTION_MODE=jit`: before this change the call returned
+   `connected=false` with no diagnostic distinguishing "not implemented" from a
+   real connection failure; after, stderr now prints
+   `ssh_terminal: ssh_terminal_connect(host=127.0.0.1, port=22023) -- ssh_sffi
+   backing (rt_ssh_*/rt_sftp_*) has zero definitions in src/runtime/; this call
+   always fails. See doc/08_tracking/bug/
+   ssh_daemon_baremetal_only_and_duplication_2026-08-05.md#5-a-dead-third-stack`
+   before the (unchanged) `connected=false` return. On this seed the interpreter
+   path also separately logs its own `rt_interp_call error: ... unknown extern
+   function: rt_ssh_connect` — i.e. this specific engine was not fully silent
+   either — but the new `.spl`-level diagnostic is unconditional and does not
+   depend on that engine-specific behavior, so it holds under the documented
+   silent-JIT case too. `bin/simple lint` on both changed files: 0 errors (3
+   pre-existing, unrelated `unnamed_duplicate_typed_args` warnings in
+   `ssh_sffi.spl` untouched by this change).
+
+   No existing spec covers `ssh_terminal.spl` (`find test -iname
+   "*ssh_terminal*"` is empty), so nothing broke and there was no
+   silent-nil-shaped spec to flag.
+
+   Explicitly NOT done here (out of scope for this sub-finding): no
+   `rt_ssh_*`/`rt_sftp_*` runtime primitives were implemented, findings #1-4 and
+   #6 are untouched, and `src/app/io/ssh_ffi.spl`-vs-`ssh_sffi.spl` (finding #4)
+   was not touched.
 6. **Legacy spec trees.** SSH-affecting: 7 legacy unit + 5 legacy system files,
    all content-divergent from their live twins. See
    `doc/08_tracking/dedupe/`.

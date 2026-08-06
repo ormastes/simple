@@ -13,12 +13,32 @@
 use std.nogc_sync_mut.io.ssh_sffi.{SshSession, SshChannel, SftpSession, SshExecResult, SftpFileInfo, ssh_connect, ssh_disconnect, ssh_auth_password, ssh_auth_pubkey, ssh_auth_agent, ssh_exec, ssh_shell, ssh_channel_read, ssh_channel_write, ssh_channel_close, sftp_init, sftp_shutdown, sftp_upload, sftp_download, sftp_mkdir, sftp_rmdir, sftp_delete, sftp_rename, sftp_list, sftp_stat, ssh_is_authenticated, ssh_get_banner, ssh_set_timeout}
 use std.nogc_sync_mut.terminal.types.{TerminalConfig, TerminalConnection, TerminalExecResult, make_ssh_config, make_exec_result}
 use std.nogc_sync_mut.terminal.credential.store.{credential_resolve}
+use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
 
 # ============================================================================
 # SFFI - Timing
 # ============================================================================
 
 extern fn rt_time_now_unix_micros() -> i64
+
+# ============================================================================
+# Dead-backing diagnostic (doc/08_tracking/bug/
+# ssh_daemon_baremetal_only_and_duplication_2026-08-05.md, finding 5)
+# ============================================================================
+#
+# ssh_sffi.spl's 30 rt_ssh_*/rt_sftp_* externs have zero definitions in
+# src/runtime/. Under the JIT an unregistered extern returns nil silently, so
+# every operation below always "fails" in a way indistinguishable from a real
+# network/auth failure. This prints an unconditional (never level-gated,
+# always visible) stderr line identifying the true cause, so callers and
+# operators are not misled by a plausible-looking nil/false/empty result.
+
+fn _ssh_sffi_unbacked_warn(op: text):
+    """Emit a loud, unconditional stderr diagnostic before an ssh_terminal
+    operation that can never succeed because its ssh_sffi.spl backing externs
+    are unregistered in src/runtime/.
+    """
+    stderr_write("ssh_terminal: {op} -- ssh_sffi backing (rt_ssh_*/rt_sftp_*) has zero definitions in src/runtime/; this call always fails. See doc/08_tracking/bug/ssh_daemon_baremetal_only_and_duplication_2026-08-05.md#5-a-dead-third-stack\n")
 
 # ============================================================================
 # Connection ID Counter
@@ -50,6 +70,8 @@ fn ssh_terminal_connect(config: TerminalConfig) -> TerminalConnection:
         if conn.connected:
             print "SSH connected"
     """
+    _ssh_sffi_unbacked_warn("ssh_terminal_connect(host={config.host}, port={config.port})")
+
     ssh_conn_id_counter = ssh_conn_id_counter + 1
     val id = ssh_conn_id_counter
 
@@ -118,6 +140,8 @@ fn ssh_terminal_execute(conn: TerminalConnection, command: text) -> TerminalExec
     Returns:
         TerminalExecResult with exit_code, stdout, stderr, duration_ms
     """
+    _ssh_sffi_unbacked_warn("ssh_terminal_execute")
+
     if not conn.connected:
         return make_exec_result(-1, "", "not connected", 0)
 
@@ -140,6 +164,8 @@ fn ssh_terminal_send(conn: TerminalConnection, data: text) -> bool:
     Returns:
         true if data was written successfully
     """
+    _ssh_sffi_unbacked_warn("ssh_terminal_send")
+
     if not conn.connected:
         return false
     if conn.channel_handle == 0:
@@ -159,6 +185,8 @@ fn ssh_terminal_receive(conn: TerminalConnection, timeout_ms: i64) -> text:
     Returns:
         Text data received, or empty string on timeout/error
     """
+    _ssh_sffi_unbacked_warn("ssh_terminal_receive")
+
     if not conn.connected:
         return ""
     if conn.channel_handle == 0:
@@ -184,6 +212,8 @@ fn ssh_terminal_upload(conn: TerminalConnection, local_path: text, remote_path: 
     Returns:
         true if upload was successful
     """
+    _ssh_sffi_unbacked_warn("ssh_terminal_upload")
+
     if not conn.connected:
         return false
 
@@ -207,6 +237,8 @@ fn ssh_terminal_download(conn: TerminalConnection, remote_path: text, local_path
     Returns:
         true if download was successful
     """
+    _ssh_sffi_unbacked_warn("ssh_terminal_download")
+
     if not conn.connected:
         return false
 
@@ -230,6 +262,8 @@ fn ssh_terminal_close(conn: TerminalConnection) -> bool:
     Returns:
         true if disconnection was successful
     """
+    _ssh_sffi_unbacked_warn("ssh_terminal_close")
+
     if not conn.connected:
         return false
 
