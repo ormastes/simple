@@ -57,3 +57,160 @@ Boot + loader/FS-exec staging on aarch64 is GREEN with these workarounds. Full
 in-guest U-mode Simple RUN stays blocked on the #99 seed-cranelift enum
 miscompile (all arches). Items 1-3 are the concrete follow-ups; none is a
 regression.
+
+## 2026-08-06 research: EFI-stub scoping (mirroring the x86_64 pattern)
+
+Scoping pass for item 1. Verified the doc above is still current. Key
+correction: **the x86_64 "real-firmware" path does NOT hand-author a PE/COFF
+EFI-stub in-tree.** It uses a prebuilt third-party UEFI bootloader (Limine),
+not a custom entry point. This changes the recommended aarch64 approach from
+"write a PE/COFF stub" to "port the Limine-protocol kernel entry + provision
+Limine's aarch64 binary" — mirroring what x86_64 already does, not inventing
+new PE/COFF work.
+
+### x86_64 pattern (verified from source)
+
+- `examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s` is a **Multiboot1**
+  header (`.text.entry`), used for the plain `-kernel` dev-harness lane —
+  not the real-firmware lane.
+- The real-firmware lane (`x64-desktop-uefi` scenario,
+  `src/os/_QemuRunner/scenario_catalog.spl` / `scenario_disks.spl` /
+  `scenario_exec.spl`) boots OVMF pflash (`ovmf_code_path()`, candidates incl.
+  `/usr/share/OVMF/OVMF_CODE_4M.fd`) → **Limine's prebuilt `BOOTX64.EFI`**
+  (`desktop_uefi_bootloader_path()` searches
+  `build/third_party/limine-install/share/limine/BOOTX64.EFI`,
+  `vendor/limine/BOOTX64.EFI`, etc. — **not present in this checkout**; it's
+  an external artifact the build must provision) → Limine loads the kernel
+  ELF per the Limine boot protocol and jumps to `kernel_main()`.
+- `src/os/kernel/boot/limine_boot.spl` (438 lines) is the actual EFI-side
+  entry point in spirit: it defines Limine request/response structs
+  (`@repr("C")`, magic IDs `LIMINE_COMMON_MAGIC_0/1` etc.), parses memory
+  map / framebuffer / RSDP / HHDM / kernel-address responses via raw MMIO
+  reads, and its `@entry @noreturn fn kernel_main()` is what Limine calls
+  after UEFI handoff. This is a **protocol port**, not PE/COFF authorship —
+  Limine's own binary is the actual PE32+ EFI_APPLICATION; SimpleOS never
+  emits PE/COFF itself for x86_64.
+- Conclusion: there is **no existing in-tree pattern for writing a PE/COFF
+  header or `efi_main(handle, systab)` UEFI entry** to mirror — x86_64
+  delegates that entirely to Limine.
+
+### aarch64 gap, restated
+
+`examples/09_embedded/simple_os/arch/arm64/boot/crt0.S` is a pure bare-metal
+ELF entry at `0x40200000` (EL2→EL1 drop) — no PE header, no Multiboot header,
+no Limine request/response structs, no `@entry` Limine-protocol
+`kernel_main()`. There is no `arch/aarch64/` directory yet (existing dir is
+named `arm64/`). Confirms doc item 1 exactly as written.
+
+### LLVM PE/COFF+AArch64 capability — mixed evidence
+
+- **Generic capability confirmed, real command+output:** stock system
+  `clang-18` (NOT the SimpleOS fork) emits a valid AArch64 COFF object:
+  ```
+  $ clang-18 --target=aarch64-unknown-windows -c -o /tmp/test2.obj -x c /tmp/t.c
+  exit=0
+  $ file /tmp/test2.obj
+  /tmp/test2.obj: Aarch64 COFF object file, not stripped, 4 sections,
+  symbol offset=0xb8, 12 symbols, created ..., 1st section name ".text"
+  ```
+  So AArch64+COFF is a real, low-risk pairing in mainline LLVM 18.
+- **In-fork status: UNCONFIRMED, and not currently testable.** The repo's own
+  built binary `build/os/clang_static/bin/clang_static` (121MB, mtime today —
+  likely mid-rebuild by a concurrent lane) **segfaults on every invocation**
+  right now, including plain `--version` and `-print-targets` (exit 139, core
+  dumped). Did not retry further to avoid measuring a sibling lane's
+  in-progress build (see `feedback_measurement_traps_harness_not_system`).
+  `src/os/port/llvm/build.spl` configures `LLVM_TARGETS_TO_BUILD` per target
+  triple (`AArch64` for `aarch64-*`) with `LLVM_ENABLE_PROJECTS=clang;lld`,
+  so lld's COFF driver + AArch64 backend are plausibly both buildable, but
+  this was not verified against a live binary today.
+- **Moot either way for the recommended approach:** since x86_64 doesn't
+  emit its own PE/COFF (Limine does), aarch64 shouldn't either — this
+  question only matters if the fallback "build Limine from source with the
+  in-tree fork" sub-path is taken (see plan step 3 below).
+
+### QEMU + AAVMF firmware — already ready on this machine, no provisioning needed
+
+```
+$ qemu-system-aarch64 --version   → QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.17)
+$ qemu-system-aarch64 -machine help | grep -i virt   → virt-8.2 (aliased "virt") present, sbsa-ref present
+$ dpkg -l | grep qemu-efi-aarch64 → ii qemu-efi-aarch64 2024.02-2ubuntu0.8
+```
+Firmware images found:
+- `/usr/share/AAVMF/AAVMF_CODE.fd`, `AAVMF_CODE.no-secboot.fd`, `AAVMF_VARS.fd` (pflash CODE+VARS pair, Debian `ovmf`-style layout)
+- `/usr/share/AAVMF/AAVMF32_CODE.fd` / `AAVMF32_VARS.fd` (32-bit ARM)
+- `/usr/share/qemu-efi-aarch64/QEMU_EFI.fd` (single-file EDK2 image)
+
+### Network constraint (why the stretch goal was not attempted)
+
+curl/wget are blocked in this session's environment (context-mode routing
+policy), and no equivalent MCP fetch tool was available to this agent. This
+blocks obtaining a prebuilt Limine aarch64 `BOOTAA64.EFI` from upstream —
+the actual bottleneck for a real boot, not EFI-stub authorship. Combined
+with the in-fork `clang_static` crash above (so "build Limine from source
+in-tree" is not currently a verified fallback either), the stretch goal was
+not attempted — this is a plan-only research pass, per the task's explicit
+stop condition ("if it doesn't clearly work within a reasonable number of
+attempts, STOP and fall back to documenting the plan").
+
+### Concrete plan (mirrors x86_64's Limine pattern, not a hand-rolled PE stub)
+
+1. **Provision Limine's aarch64 UEFI binary** (`BOOTAA64.EFI`). Two paths:
+   (a) fetch upstream prebuilt release from a session with network access —
+   Limine has shipped aarch64 UEFI support upstream for years, lowest risk;
+   or (b) build Limine from source using the in-tree LLVM/clang fork, which
+   requires first confirming the fork's AArch64 backend + lld COFF driver
+   are healthy (blocked today by the `clang_static` crash above — retest
+   once that lane's build finishes).
+2. **Port `src/os/kernel/boot/limine_boot.spl` → a new
+   `limine_boot_aarch64.spl`** (or arch-branch the existing file). The
+   Limine request/response protocol (magic IDs, struct layouts) is
+   architecture-agnostic — reuse verbatim. Arch-specific deltas: early
+   serial uses PL011 UART MMIO (QEMU `virt` base `0x09000000`) instead of
+   x86 port I/O at `0x3F8`; drop the x86-only
+   `x86_64_hardening_boot_canary_marker()` call; `Architecture.AArch64` in
+   `BootOutputPort`. AAPCS64 entry convention needs no shadow-space handling
+   (unlike x86_64 MS ABI concerns elsewhere in this repo) — Limine calls
+   `kernel_main()` with no arguments here, same as the x86_64 version, so
+   the calling-convention risk is low.
+3. **New `examples/09_embedded/simple_os/arch/aarch64/boot/`** (deliberately
+   distinct from `arch/arm64/boot/`, which stays the EL1-direct bare-metal
+   lane owned by a concurrent lane) holding: a Limine-protocol linker
+   script (`.limine_reqs` section placement; output is a plain ELF, *not*
+   PE — Limine's own binary is the PE32+ EFI_APPLICATION, the kernel it
+   loads stays ELF, exactly as x86_64 does), and any minimal aarch64 crt
+   glue Limine's protocol needs (typically none beyond the linker script,
+   since Limine hands off already in EL1/64-bit mode with a set-up stack).
+4. **Extend `src/os/_QemuRunner/scenario_disks.spl` /
+   `scenario_catalog.spl`** with an `aarch64-desktop-uefi` scenario mirroring
+   `x64-desktop-uefi`: `SIMPLEOS_AAVMF_CODE` (+ `_VARS`) env vars pointing at
+   `/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd` / `AAVMF_VARS.fd`, and an
+   aarch64 bootloader-path search list mirroring `ovmf_code_candidates()` /
+   `desktop_uefi_bootloader_path()` but for `BOOTAA64.EFI`. FAT32 ESP layout:
+   `EFI/BOOT/BOOTAA64.EFI` (Limine) + `limine.conf` + the aarch64 kernel ELF,
+   built via a `make_os_disk.shs`-equivalent step for aarch64 (script
+   already parameterizes arch as `"x86_64"` today — extend, don't fork).
+5. **Milestone ("boots to a serial print"):** compile the ported
+   `limine_boot_aarch64.spl` kernel_main → link as plain ELF → package into
+   the FAT ESP with provisioned `BOOTAA64.EFI` → `qemu-system-aarch64 -M
+   virt -cpu cortex-a72 -pflash AAVMF_CODE.no-secboot.fd -pflash
+   AAVMF_VARS.fd -drive if=virtio,format=raw,file=esp.img -serial stdio` →
+   see the ported "SimpleOS — Limine Boot Protocol" banner + boot-info dump
+   on serial, matching what `limine_boot.spl:kernel_main()` already prints
+   for x86_64. No ring-3/FS-exec/syscalls in scope — boot-entry only.
+
+**Risk estimate:** low-to-medium, roughly 1-3 days of work *once a working
+`BOOTAA64.EFI` is in hand* — the protocol-port work (step 2) is a
+near-mechanical port of an existing 438-line file with a well-understood
+arch delta (PL011 vs 0x3F8 serial). The actual bottleneck is step 1
+(provisioning Limine's binary), which is blocked in this environment by the
+curl/wget block and an unverified in-fork LLVM/lld AArch64-COFF path.
+Specific risky spots if step 1(b) (build-from-source) is taken instead of
+1(a) (fetch prebuilt): PE32+ relocation model / image-base alignment /
+`.reloc` section correctness for a *linked* EFI application (not just a
+COFF object, which is already confirmed easy) is unverified — Limine's own
+build system handles this upstream, so building Limine from source is
+lower-risk than hand-rolling equivalent lld invocations. Also unverified:
+whether this QEMU/EDK2 version's aarch64 `virt` machine needs
+`gic-version=3` or similar tuning for a clean Limine UEFI boot — untested
+without an actual boot attempt.
