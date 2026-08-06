@@ -12,6 +12,66 @@ use std.fs_driver.fat32_core.{
 }
 use std.fs_driver.fat32_parsers.{_read_u16_le, _read_u32_le, _parse_short_name, _split_path, _lower_text}
 
+fn _fat32_sfn_byte(b: u8) -> u8:
+    """Map one UTF-8 byte of a filename to its FAT 8.3 short-name byte.
+
+    Lowercase ASCII is upcased. Anything that is not legal in an 8.3 name --
+    control bytes, the reserved punctuation set, and every non-ASCII byte --
+    becomes `_`, so a non-ASCII filename yields a defined short name instead
+    of raw bytes in a directory entry.
+    """
+    if b >= 0x61 and b <= 0x7A:
+        return b - 32
+    if b < 0x20 or b > 0x7E:
+        return 0x5F
+    if b == 0x22 or b == 0x2A or b == 0x2B or b == 0x2C or b == 0x2E or b == 0x2F:
+        return 0x5F
+    if b == 0x3A or b == 0x3B or b == 0x3C or b == 0x3D or b == 0x3E or b == 0x3F:
+        return 0x5F
+    if b == 0x5B or b == 0x5C or b == 0x5D or b == 0x7C:
+        return 0x5F
+    b
+
+fn fat32_short_name_bytes(name: text) -> [u8]:
+    """Build the 11-byte FAT 8.3 short name (8 base + 3 extension, space padded).
+
+    Iterates `name.bytes()`. The three call sites below previously read
+    `name.char_at(i) as u8` while bounding the loop by `name.len()` -- a BYTE
+    count, whereas char_at is CODE POINT indexed. Nothing filters or rejects
+    non-ASCII filenames before this point, so an ordinary name like "café.txt"
+    over-ran the string; and on the JIT engine `char_at(i) as u8` does not
+    yield the code point at all, it truncates a raw pointer. Both produced
+    garbage directory entries.
+    """
+    var out: [u8] = []
+    var k: i64 = 0
+    while k < 11:
+        out.push(0x20)
+        k = k + 1
+    val nb = name.bytes()
+    val n: i64 = nb.len()
+    var dot_pos: i64 = -1
+    var di: i64 = 0
+    while di < n:
+        if (nb[di] as i64) == 0x2E:
+            dot_pos = di
+        di = di + 1
+    var base_end: i64 = n
+    if dot_pos >= 0:
+        base_end = dot_pos
+    var ci: i64 = 0
+    while ci < base_end and ci < 8:
+        out[ci] = _fat32_sfn_byte(nb[ci])
+        ci = ci + 1
+    if dot_pos >= 0:
+        var exi: i64 = 0
+        var si: i64 = dot_pos + 1
+        while si < n and exi < 3:
+            out[8 + exi] = _fat32_sfn_byte(nb[si])
+            exi = exi + 1
+            si = si + 1
+    out
+
 fn fat32_create_file(core: Fat32Core, path: text) -> Result<[u32], text>:
     if not core.mounted:
         return Err("filesystem not mounted")
@@ -66,37 +126,11 @@ fn fat32_create_file(core: Fat32Core, path: text) -> Result<[u32], text>:
         ei = ei + 1
     if slot_off < 0:
         return Err("directory full")
+    val sfn = fat32_short_name_bytes(name)
     var ni = 0
     while ni < 11:
-        dir_data[slot_off + ni] = 0x20
+        dir_data[slot_off + ni] = sfn[ni]
         ni = ni + 1
-    var dot_pos: i64 = -1
-    var di: i64 = 0
-    while di < name.len():
-        var db: u8 = name.char_at(di) as u8
-        if db == 0x2E:
-            dot_pos = di
-        di = di + 1
-    var base_end: i64 = name.len()
-    if dot_pos >= 0:
-        base_end = dot_pos
-    var ci: i64 = 0
-    while ci < base_end and ci < 8:
-        var b: u8 = name.char_at(ci) as u8
-        if b >= 0x61 and b <= 0x7A:
-            b = b - 32
-        dir_data[slot_off + ci.to_i32()] = b
-        ci = ci + 1
-    if dot_pos >= 0:
-        var exi: i64 = 0
-        var si = dot_pos + 1
-        while si < name.len() and exi < 3:
-            var b: u8 = name.char_at(si) as u8
-            if b >= 0x61 and b <= 0x7A:
-                b = b - 32
-            dir_data[slot_off + 8 + exi.to_i32()] = b
-            exi = exi + 1
-            si = si + 1
     dir_data[slot_off + 11] = 0x20
     dir_data[slot_off + 20] = ((new_cluster >> 16) & 0xFF).to_u8()
     dir_data[slot_off + 21] = ((new_cluster >> 24) & 0xFF).to_u8()
@@ -168,37 +202,11 @@ fn fat32_mkdir(core: Fat32Core, path: text) -> Result<(), text>:
         ei = ei + 1
     if slot_off < 0:
         return Err("directory full")
+    val sfn = fat32_short_name_bytes(name)
     var ni = 0
     while ni < 11:
-        dir_data[slot_off + ni] = 0x20
+        dir_data[slot_off + ni] = sfn[ni]
         ni = ni + 1
-    var dot_pos: i64 = -1
-    var di: i64 = 0
-    while di < name.len():
-        var db: u8 = name.char_at(di) as u8
-        if db == 0x2E:
-            dot_pos = di
-        di = di + 1
-    var base_end: i64 = name.len()
-    if dot_pos >= 0:
-        base_end = dot_pos
-    var ci: i64 = 0
-    while ci < base_end and ci < 8:
-        var b: u8 = name.char_at(ci) as u8
-        if b >= 0x61 and b <= 0x7A:
-            b = b - 32
-        dir_data[slot_off + ci.to_i32()] = b
-        ci = ci + 1
-    if dot_pos >= 0:
-        var exi: i64 = 0
-        var si = dot_pos + 1
-        while si < name.len() and exi < 3:
-            var b: u8 = name.char_at(si) as u8
-            if b >= 0x61 and b <= 0x7A:
-                b = b - 32
-            dir_data[slot_off + 8 + exi.to_i32()] = b
-            exi = exi + 1
-            si = si + 1
     dir_data[slot_off + 11] = FAT32_ATTR_DIRECTORY
     dir_data[slot_off + 20] = ((new_cluster >> 16) & 0xFF).to_u8()
     dir_data[slot_off + 21] = ((new_cluster >> 24) & 0xFF).to_u8()
@@ -421,37 +429,11 @@ fn fat32_rename(core: Fat32Core, old_path: text, new_path: text) -> Result<(), t
             val off = (ei * FAT32_DIR_ENTRY_SIZE).to_i32()
             val fb = cdata[off]
             if fb == 0x00 or fb == 0xE5:
+                val rsfn = fat32_short_name_bytes(new_name)
                 var rni = 0
                 while rni < 11:
-                    cdata[off + rni] = 0x20
+                    cdata[off + rni] = rsfn[rni]
                     rni = rni + 1
-                var rdot: i64 = -1
-                var rdi: i64 = 0
-                while rdi < new_name.len():
-                    var rdb: u8 = new_name.char_at(rdi) as u8
-                    if rdb == 0x2E:
-                        rdot = rdi
-                    rdi = rdi + 1
-                var rbe: i64 = new_name.len()
-                if rdot >= 0:
-                    rbe = rdot
-                var rci: i64 = 0
-                while rci < rbe and rci < 8:
-                    var rb: u8 = new_name.char_at(rci) as u8
-                    if rb >= 0x61 and rb <= 0x7A:
-                        rb = rb - 32
-                    cdata[off + rci.to_i32()] = rb
-                    rci = rci + 1
-                if rdot >= 0:
-                    var rei: i64 = 0
-                    var rsi = rdot + 1
-                    while rsi < new_name.len() and rei < 3:
-                        var rb: u8 = new_name.char_at(rsi) as u8
-                        if rb >= 0x61 and rb <= 0x7A:
-                            rb = rb - 32
-                        cdata[off + 8 + rei.to_i32()] = rb
-                        rei = rei + 1
-                        rsi = rsi + 1
                 cdata[off + 11] = found_attr
                 cdata[off + 20] = ((found_cluster >> 16) & 0xFF).to_u8()
                 cdata[off + 21] = ((found_cluster >> 24) & 0xFF).to_u8()
