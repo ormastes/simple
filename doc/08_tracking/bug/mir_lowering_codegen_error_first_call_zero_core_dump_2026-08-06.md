@@ -5,12 +5,23 @@
   lowering error (which includes the common `Option<Trait>.unwrap().method()`
   shape) crashed the compiler process itself (SIGSEGV) instead of printing a
   diagnostic, on the deployed self-hosted stage3 binary.
-- **Status:** source-fixed in three call sites (`driver_aot_pipeline.spl`,
-  `driver_pipeline_execution.spl`, `driver_orchestration.spl`); verified
-  correct via the interpreted `bin/simple` worker path (clean exit 1,
-  correct message, no crash). **NOT yet verified against a freshly rebuilt
-  stage3 binary** — blocked by an unrelated, already-broader, pre-existing
-  native-build instability described below.
+- **Status:** the original crash (`CodegenError` construction calling
+  unresolved `Array.first()`) is source-fixed in three call sites
+  (`driver_aot_pipeline.spl`, `driver_pipeline_execution.spl`,
+  `driver_orchestration.spl`) and confirmed still working end-to-end via a
+  2026-08-06 execution probe (4/4 fatal MIR errors printed cleanly, no
+  crash from error reporting itself). The FOLLOW-UP feature added in the
+  same investigation — real MIR lowering for `Array.first()`/`.last()`
+  (`lower_array_first_or_last`) — is **execution-confirmed NOT to engage**:
+  a 2026-08-06 discriminator probe shows every tested `.first()`/`.last()`
+  call (empty/non-empty, `i64`/`text`/struct element types, including a
+  plainly explicitly-typed `[i64]` local) still falls through to the OLD
+  "unresolved method call" placeholder. Open defect, root cause not yet
+  pinned — see "Update (2026-08-06, later)" below for the exact repro and
+  investigation leads. Verification was also complicated throughout by an
+  unrelated, already-broader, pre-existing native-build SIGSEGV described
+  below (which the discriminator-probe technique works around, since MIR
+  diagnostics print before that crash).
 
 ## How this was found
 
@@ -277,6 +288,133 @@ simple` setup, taking ~150s. This is evidence *against* this bug's earlier
 through the seed, not a rebuilt self-hosted stage3, it does not by itself
 retire that blocker for the self-hosted binary; it only shows the seed
 itself is not universally broken this way today.
+
+## Update (2026-08-06, later): execution verification attempted again — still blocked, now with 4x more evidence the blocker is systemic, not this-worktree-specific
+
+Fresh session, `git fetch origin main` first (tip `eb1fa07e49e`, c49bb56 confirmed
+an ancestor). Searched for any genuinely self-hosted binary built *after*
+c49bb56 landed (2026-08-06T15:17:50+00:00):
+
+- This worktree's `bootstrap/stage{1,2,3}/...simple` (BuildID `3b41f55f...`,
+  mtime 04:12-04:14) all **predate** the fix — ruled out immediately, no test
+  run needed.
+- `bin/release/x86_64-unknown-linux-gnu/simple` is still the Rust seed
+  (confirmed again via its own WARNING banner) — cannot exercise the edit,
+  per the previous update.
+- Found **four** independent parallel worktrees on disk
+  (`~/dev/simple-s3clean`, `-s3red`, `-s3family`, `-s3fix`), each with a
+  freshly-rebuilt `bootstrap/stage3/x86_64-unknown-linux-gnu/simple` (BuildID
+  `fe5c2e9b...`, distinct from both the seed and this worktree's stale
+  stage3) and a `release/x86_64-unknown-linux-gnu/simple` (BuildID
+  `545d912c...`), all built between 20:20 and 21:07 today — well after the
+  fix landed. Confirmed via `git log -1 -- .../method_calls_literals.spl`
+  in each worktree that HEAD's last touch to the fixed file *is* commit
+  c49bb56, and `git merge-base --is-ancestor c49bb5606dea HEAD` returns true
+  in all four. These are genuinely self-hosted, post-fix binaries.
+
+**Control probe first** (`fn main(): print("hello")`, the same trivial case
+from the "Native stage3 binary: NOT verified" section above), run on all
+five candidate binaries (4x `bootstrap/stage3/...`, 1x `release/...` from
+`simple-s3clean`): **all five SIGSEGV**, identical symptom
+(`timeout: the monitored command dumped core`, exit 139, no output file
+produced). `strace -f -e trace=memory` on the `simple-s3clean` stage3 run
+confirms the exact same fault already pinned in this doc's earlier update:
+`SIGSEGV {si_code=SEGV_MAPERR, si_addr=0x118}`, occurring right after the
+`uname -m`/`uname -s` subprocess pair exits cleanly (target-triple
+detection). Same address, same call shape, reproduced on five more distinct
+freshly-built self-hosted binaries across four separate worktrees, none of
+which is this worktree's own stale stage3, on top of the 5/5 already
+recorded in `stage3_native_build_segv_generic_codegen_link_path_2026-08-06.md`
+(2/2 this worktree + 3/3 the other lane) — this is one input (`hello.spl`)
+tested on five binaries, not a claim that every input crashes identically
+(see below: the fatal-MIR-error path crashes too, but at a different
+address).
+
+**Corroboration, not the final word:** the `0x118` crash confirms every
+self-hosted `native-build` rebuilt today (before or after c49bb56) SIGSEGVs
+before the process exits on the zero-MIR-error (`hello.spl`) case — but MIR
+lowering's own diagnostics print to stderr *before any crash on either path*,
+so they are captured regardless. This doc's own earlier "direct discriminator probe"
+technique (grep the `[mir-lower] WARNING: unresolved method call '...'
+lowered to const-0 placeholder` line) still works on a crashing binary and
+was used below to get a real answer instead of stopping at "blocked."
+
+**Discriminator probe result: `lower_array_first_or_last` does NOT engage,
+on any of the three prepared test files, including the plain explicitly-typed
+`[i64]` case.** Ran all three (`first_last_int.spl`, `first_last_text.spl`,
+`first_last_struct.spl`) through `simple-s3clean`'s post-fix stage3 with full
+(untruncated) stderr capture. Every `.first()`/`.last()` call in every file —
+`empty.first()`, `empty.last()`, `nonempty.first()`, `nonempty.last()` for
+`val nonempty: [i64] = [10, 20, 30]` included — produces the exact same
+`[mir-method-call] unresolved-array method=first` trace immediately followed
+by `[mir-lower] WARNING: unresolved method call 'first' lowered to const-0
+placeholder (silent-null risk, Task #145)`, i.e. the OLD fail-through-to-
+placeholder path, never the new one. Confirmed this is not a truncation
+artifact: `first_last_int.spl`'s full log shows all 4 calls hit the WARNING
+and all 4 correctly become `[ERROR] MIR error: MIR lowering error: unresolved
+method call: first/last` (proving the *other* part of this bug — fail-closed
+error reporting via `errors[0]` instead of `errors.first()` — is genuinely
+still working; it's the `Array.first()`/`.last()` lowering itself that never
+fires). The process then still SIGSEGVs afterward on this run too, but
+`strace -f -e trace=memory` on this exact run shows a **different** fault
+than the control probe: `SIGSEGV {si_code=SEGV_MAPERR, si_addr=NULL}`
+(address `0x0`), with no `uname` subprocess pair preceding it (the
+fatal-MIR-error exit path returns before target-triple detection runs, so it
+never fires here). This is a distinct crash site from the `hello.spl`
+control probe's `si_addr=0x118` fault, not a recurrence of the same one —
+recorded here as its own open finding (a SIGSEGV at NULL somewhere after the
+4th `[ERROR] MIR error:` line prints, on the fatal-MIR-lowering-error exit
+path through `driver_aot_pipeline.spl`/`driver_orchestration.spl`) rather
+than conflated with the already-tracked `0x118` bug. Not investigated
+further here (exact call site unpinned); flagging for whichever lane next
+touches that exit path.
+
+**Conclusion: the fix, as implemented, is not currently effective for the
+tested shapes — this is a real defect independent of the shared SEGV
+blocker**, discovered because the SEGV happens late enough to leave the
+lowering diagnostics intact. Read the guarded code path in
+`lower_array_first_or_last` (`method_calls_literals.spl:3478-3554`): it
+returns `nil` (falling through to the old placeholder) unless either
+`self.find_local_hir_type(arr.id)` or `self.receiver_declared_type(receiver)`
+resolves an `Array`/`Slice` `HirType` for the receiver. Traced the two
+plausible population sites for a `val nonempty: [i64] = [...]` binding
+(`mir_lowering_stmts.spl`'s two parallel `Let`-lowering arms, ~line
+496-540/704-713 the live "disc==1 early-Let" path vs. ~769-900 which its own
+comment marks "dead for Let today") and confirmed the live path DOES call
+`self.remember_local_hir_type(local.id, declared_type)` when the initializer
+local's own type lookup misses (line 710-713) — so on a source read, this
+*should* work. Did not pin the exact reason it doesn't (would need either an
+instrumented eprint inside `lower_array_first_or_last` itself, which none of
+the existing trace calls cover, or a careful trace of
+`receiver_declared_type`'s two lookup arms — `self.symbols.get_symbol_raw()`
+vs. `self.local_map`/`find_local_hir_type` — against the receiver's actual
+`Var`/`NamedVar` HIR shape at the call site). A full self-hosted rebuild to
+test an instrumented or corrected version takes 90+ minutes per the sibling
+bug doc, so a blind fix-and-hope was not attempted here; recording this as
+the concrete, reproducible next step instead (see "Test files" below for
+exact repro inputs).
+
+**Test files** (used for this probe, kept for the next investigating lane):
+`first_last_int.spl` (empty/non-empty `[i64]`), `first_last_text.spl`
+(empty/non-empty `[text]`), `first_last_struct.spl` (empty/non-empty
+`[Point]`, chains `.unwrap()` to touch a field) — all three hit the same
+non-engagement result, so this is not element-type-specific. (The struct
+file's log additionally shows two `[mir-lower-expr] unsupported-expr-kind
+kind=<value:...> disc=4026180482` entries logged for the `[Point]` array
+LITERAL construction itself, before the `.first()`/`.last()` calls — a
+separate, unrelated gap in struct-array-literal lowering, not investigated
+here, noted so the next lane doesn't mistake it for part of this finding.)
+Not committed (scratch/, ignored by policy); source is short, see this
+update's prose or regenerate from the pattern (`val empty: [T] = []`,
+`val nonempty: [T] = [...]`, `print(x.first()); print(x.last())`).
+
+Status: **source written but confirmed NOT effective for the tested cases
+via a real (if indirect) execution signal — this is now a known-open defect
+in `lower_array_first_or_last`'s type-resolution fallback chain, not merely
+"unverified."** No code change made in this pass (root cause not pinned
+precisely enough to fix blind, and no fast rebuild path exists to verify a
+fix) — flagging for the next lane with the exact function names, line
+ranges, and a working repro/probe technique above.
 
 ## Why the original "core-dumps" description pointed at the wrong layer
 

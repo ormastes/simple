@@ -445,3 +445,37 @@ point is large and still growing at 11 GB. An earlier Stage 3 run was killed by
 earlyoom at 81 GB VmRSS. Whether Stage 3 now completes, or instead runs into
 that memory wall or the MIR-lowering blocker, is unresolved here and needs its
 own run to settle.
+
+## Update (2026-08-06, later): corroborated on 5 independently-rebuilt binaries — not this-worktree-specific
+
+While attempting execution verification for
+`mir_lowering_codegen_error_first_call_zero_core_dump_2026-08-06.md` (a
+different feature, `Array.first()`/`.last()`), found four parallel worktrees
+on disk (`~/dev/simple-s3clean`, `-s3red`, `-s3family`, `-s3fix`), each with
+its own freshly self-hosted-rebuilt `bootstrap/stage3/.../simple` (built
+20:20-21:07 today, all confirmed via `git merge-base --is-ancestor` to
+include commits well past this bug's original repro) plus one
+`release/x86_64-unknown-linux-gnu/simple`. Ran the same trivial
+`fn main(): print("hello")` control case against all five: **all five
+SIGSEGV**, `strace -f -e trace=memory` on one of them confirms the identical
+`SEGV_MAPERR si_addr=0x118` fault immediately after the `uname -m`/`uname -s`
+target-triple-detection subprocess pair, matching this doc's own reproduction
+exactly. This rules out "stale/misconfigured single stage3 copy in one
+worktree" as an explanation — the fault is present in every self-hosted
+`native-build` rebuilt anywhere on this machine today, independent of
+worktree or exact source revision (as long as it's after whatever introduced
+this regression). No new investigation into the root cause was done in this
+pass (out of scope for that task); recorded here purely as corroborating
+reproduction evidence (five more runs, all matching this doc's own `0x118`
+signature, on top of the 5/5 already on file) and to save the next
+investigating lane from re-discovering "is this worktree-specific?".
+
+**Related but distinct fault, NOT the same crash:** the same investigation
+also ran `native-build` on inputs that hit a *fatal MIR-lowering error*
+(4 collected errors, `mir_ok=false`) rather than a clean success — that path
+returns before the `uname` target-triple-detection subprocess pair this
+doc's `0x118` fault depends on, and `strace` shows a **different** fault
+there: `SIGSEGV {si_code=SEGV_MAPERR, si_addr=NULL}`. Recorded as its own
+open finding, not folded into this doc's `0x118` mechanism — see
+`mir_lowering_codegen_error_first_call_zero_core_dump_2026-08-06.md`'s
+2026-08-06 "later" update for the exact repro and stderr capture.
