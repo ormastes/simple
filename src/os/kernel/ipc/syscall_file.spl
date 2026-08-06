@@ -6,7 +6,6 @@
 # _handle_getcwd, _handle_chdir.
 
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
-use os.kernel.types.ipc_types.{IpcMessage}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.memory.vmm.{vmm_verify_user_write}
@@ -14,8 +13,230 @@ use os.kernel.boot.mmio.{mmio_write8}
 use os.kernel.fd_io.{posix_close, posix_read, posix_write, posix_lseek}
 use os.kernel.ipc.syscall.{MAX_BINARY_PATH_LEN, _is_userspace_range}
 
+extern fn rt_copy_user_byte(ptr_addr: u64) -> u8
+
 # ============================================================================
-# File Syscall Handlers (routed to VFS via IPC)
+# Errno constants used by this module (negative return convention)
+# ============================================================================
+
+val _FS_EPERM: i64 = -1
+val _FS_ENOENT: i64 = -2
+val _FS_EBADF: i64 = -9
+val _FS_EFAULT: i64 = -14
+val _FS_EINVAL: i64 = -22
+val _FS_ERANGE: i64 = -34
+val _FS_ENOMEM: i64 = -12
+val _FS_ENOSYS: i64 = -38
+val _FS_ENAMETOOLONG: i64 = -36
+
+# ============================================================================
+# Per-process current working directory
+#
+# Real kernel state, owned by this lane. Paths are kept as `[u8]` end to end:
+# `text` byte indexing (`s[i] as u8`, `char_at`, `starts_with`) is unreliable
+# on dynamically-built strings in freestanding kernel code, and the raw bytes
+# already arrive from userspace as `[u8]`.
+#
+# Module-level ARRAY initializers do not run in the freestanding kernel, so the
+# table is lazily built behind a scalar `.bss` bool (which does zero-init).
+# See doc/07_guide/os/baremetal_simple_codegen_landmines.md.
+# ============================================================================
+
+struct CwdEntry:
+    """One process's current working directory, stored as raw path bytes."""
+    task_id: u64
+    path: [u8]
+
+val MAX_CWD_ENTRIES: u64 = 256
+
+var g_cwd_table: [CwdEntry] = []
+var g_cwd_table_ready: bool = false
+
+fn _cwd_empty_table() -> [CwdEntry]:
+    """fn-returning constant: module-level array literals never execute here."""
+    val empty: [CwdEntry] = []
+    empty
+
+fn _cwd_root_bytes() -> [u8]:
+    """The default cwd, "/", as bytes."""
+    var b: [u8] = []
+    b.push(47u8)
+    b
+
+fn _cwd_ensure_table():
+    """Lazily initialise the cwd table exactly once."""
+    if not g_cwd_table_ready:
+        g_cwd_table = _cwd_empty_table()
+        g_cwd_table_ready = true
+
+fn cwd_get(task_id: u64) -> [u8]:
+    """Current working directory bytes for a task; "/" when never set."""
+    _cwd_ensure_table()
+    var i: u64 = 0
+    while i < g_cwd_table.len():
+        if g_cwd_table[i].task_id == task_id:
+            return g_cwd_table[i].path
+        i = i + 1
+    _cwd_root_bytes()
+
+fn cwd_set(task_id: u64, path: [u8]) -> bool:
+    """Install a task's cwd (replacing any previous). False when the table is full.
+
+    Bounded by MAX_CWD_ENTRIES so a spawn-heavy workload cannot grow this
+    kernel-global without limit; entries are released by cwd_clear on teardown.
+    """
+    _cwd_ensure_table()
+    var i: u64 = 0
+    while i < g_cwd_table.len():
+        if g_cwd_table[i].task_id == task_id:
+            g_cwd_table[i] = CwdEntry(task_id: task_id, path: path)
+            return true
+        i = i + 1
+    if g_cwd_table.len() >= MAX_CWD_ENTRIES:
+        return false
+    g_cwd_table.push(CwdEntry(task_id: task_id, path: path))
+    true
+
+fn cwd_clear(task_id: u64):
+    """Drop a task's cwd entry (call on process teardown)."""
+    _cwd_ensure_table()
+    var kept = _cwd_empty_table()
+    var i: u64 = 0
+    while i < g_cwd_table.len():
+        if g_cwd_table[i].task_id != task_id:
+            kept.push(g_cwd_table[i])
+        i = i + 1
+    g_cwd_table = kept
+
+fn _fs_copy_user_bytes(ptr_addr: u64, len: u64) -> [u8]:
+    """Copy `len` userspace bytes. Caller must have range-checked the pointer."""
+    var bytes: [u8] = []
+    var i: u64 = 0
+    while i < len:
+        bytes.push(rt_copy_user_byte(ptr_addr + i))
+        i = i + 1
+    bytes
+
+fn _path_is_absolute(p: [u8]) -> bool:
+    """True when the path's first byte is '/'."""
+    if p.len() == 0:
+        return false
+    p[0] == 47u8
+
+fn _path_normalize(raw: [u8]) -> [u8]:
+    """Collapse "//", drop ".", and pop one component per "..".
+
+    Operates on an already-absolute byte path and always returns a path that
+    starts with '/' and (except for the root itself) has no trailing '/'.
+    Index loops only: array slicing + `.join()` is unreliable in guest code.
+    """
+    # Component start offsets and lengths, parsed in one pass.
+    var starts: [u64] = []
+    var lens: [u64] = []
+    var i: u64 = 0
+    var cur_start: u64 = 0
+    var cur_len: u64 = 0
+    while i < raw.len():
+        if raw[i] == 47u8:
+            if cur_len > 0:
+                starts.push(cur_start)
+                lens.push(cur_len)
+                cur_len = 0
+            cur_start = i + 1
+        else:
+            if cur_len == 0:
+                cur_start = i
+            cur_len = cur_len + 1
+        i = i + 1
+    if cur_len > 0:
+        starts.push(cur_start)
+        lens.push(cur_len)
+
+    # Resolve "." and ".." against a component stack.
+    var keep_start: [u64] = []
+    var keep_len: [u64] = []
+    var c: u64 = 0
+    while c < starts.len():
+        val s = starts[c]
+        val n = lens[c]
+        var is_dot = false
+        var is_dotdot = false
+        if n == 1:
+            if raw[s] == 46u8:
+                is_dot = true
+        if n == 2:
+            if raw[s] == 46u8 and raw[s + 1] == 46u8:
+                is_dotdot = true
+        if is_dotdot:
+            if keep_start.len() > 0:
+                keep_start.pop()
+                keep_len.pop()
+        else:
+            if not is_dot:
+                keep_start.push(s)
+                keep_len.push(n)
+        c = c + 1
+
+    var out: [u8] = []
+    if keep_start.len() == 0:
+        out.push(47u8)
+        return out
+    var k: u64 = 0
+    while k < keep_start.len():
+        out.push(47u8)
+        var j: u64 = 0
+        while j < keep_len[k]:
+            out.push(raw[keep_start[k] + j])
+            j = j + 1
+        k = k + 1
+    out
+
+fn path_resolve(task_id: u64, raw: [u8]) -> [u8]:
+    """Resolve a user-supplied path against the task's cwd, then normalise."""
+    if _path_is_absolute(raw):
+        return _path_normalize(raw)
+    var joined = cwd_get(task_id)
+    joined.push(47u8)
+    var i: u64 = 0
+    while i < raw.len():
+        joined.push(raw[i])
+        i = i + 1
+    _path_normalize(joined)
+
+# ============================================================================
+# File Syscall Handlers
+#
+# HONESTY CONTRACT (see .claude/rules/code-style.md "No Cover-Up Fixes"):
+# every path-based operation that this kernel cannot actually perform returns a
+# NEGATIVE ERRNO. None of them may return 0, and `open` in particular must never
+# return 0 — 0 is a valid fd meaning stdin, so a fake success there silently
+# redirects a caller's writes to the console.
+#
+# The path-based operations below previously built an `IpcMessage` and fired it
+# at port 0. `IpcMessage` carries NO payload pointer, `send()` queues an empty
+# payload and returns 0, and no reply was ever awaited — so the path bytes never
+# left the kernel and the caller's stat/dirent buffers were left uninitialised
+# while the call reported success. Those sends are removed here rather than
+# re-plumbed: the transport was never the binding constraint.
+#
+# UPDATE 2026-08-06: `os.kernel.fs.fat32.Fat32Filesystem` now has real
+# freestanding-safe `open_at`/`create_at`/`mkdir_at`/`stat`/`write`/`flush`
+# methods against a `BlockDevice` (42 passing examples in
+# test/01_unit/os/kernel/fs/fat32_{subdir,write_path}_spec.spl), so the
+# "no reachable primitive" claim below no longer holds at the fat32.spl layer.
+# What is still missing is INTEGRATION: no kernel boot path ever constructs a
+# `Fat32Filesystem` and stores it as persistent kernel state (grep
+# `Fat32Filesystem(` under src/os/ — every construction site is inside
+# fat32.spl's own impl/specs), so this module has no handle to call `open_at`/
+# `mkdir_at`/`stat` *on*. `os.services.vfs` has a hosted dispatch layer with
+# equivalent read-side calls (`g_vfs_file_size`, `g_vfs_read_file_bytes`), but
+# that layer is explicitly hosted-only and out of bounds for this freestanding
+# IPC module (see the import boundary comment in
+# src/os/kernel/boot/boot_fs_mount.spl). readdir/unlink/rename/rmdir have no
+# primitive at any layer yet — Fat32Filesystem does not implement them.
+# Required next step: mount a `Fat32Filesystem` into freestanding kernel-global
+# state (mirroring the g_cwd_table pattern below) during boot, then have the
+# handlers below call it directly instead of returning ENOSYS.
 # ============================================================================
 
 fn _handle_file_open(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
@@ -28,21 +249,20 @@ fn _handle_file_open(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
     """
     val path_ptr = args.arg0 as u64
     val path_len = args.arg1 as u64
-    if path_ptr == 0 or path_len == 0 or path_len > MAX_BINARY_PATH_LEN:
-        return SyscallResult(value: -22)
-    var sched = scheduler
-    val current = sched.get_current()
-    val msg = IpcMessage(
-        src_port: current.id,
-        dst_port: 0,
-        method: 1,
-        flags: args.arg2 as u32,
-        payload_len: path_len,
-        cap_count: 0
-    )
-    var ipc_mgr = ipc
-    val result = ipc_mgr.send(msg)
-    SyscallResult(value: result)
+    if path_ptr == 0 or path_len == 0:
+        return SyscallResult(value: _FS_EINVAL)
+    if path_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: _FS_ENAMETOOLONG)
+    if not _is_userspace_range(path_ptr, path_len):
+        return SyscallResult(value: _FS_EFAULT)
+    # `Fat32Filesystem.open_at`/`create_at` exist (fat32.spl) but no kernel-global
+    # mounted-filesystem handle reaches this module (see module doc comment
+    # above). `posix_open` (fd_io.spl) is a separate dead path: it IPC-sends to
+    # a "VFS service" at port 1 that init_services.spl documents as never
+    # spawned in production, so it would block forever, not fake success.
+    # Returning ENOSYS is mandatory: returning 0 would hand the caller fd 0
+    # (stdin) as if it were a newly created file.
+    SyscallResult(value: _FS_ENOSYS)
 
 fn _handle_file_read(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
     """Read from a file descriptor through the active POSIX fd backend.
@@ -97,23 +317,19 @@ fn _handle_file_stat(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
     val path_ptr = args.arg0 as u64
     val path_len = args.arg1 as u64
     val stat_buf = args.arg2 as u64
-    if path_ptr == 0 or path_len == 0 or path_len > MAX_BINARY_PATH_LEN:
-        return SyscallResult(value: -22)
+    if path_ptr == 0 or path_len == 0:
+        return SyscallResult(value: _FS_EINVAL)
+    if path_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: _FS_ENAMETOOLONG)
     if not vmm_verify_user_write(stat_buf, 128):
-        return SyscallResult(value: -14)
-    var sched = scheduler
-    val current = sched.get_current()
-    val msg = IpcMessage(
-        src_port: current.id,
-        dst_port: 0,
-        method: 5,
-        flags: 0,
-        payload_len: path_len,
-        cap_count: 0
-    )
-    var ipc_mgr = ipc
-    val result = ipc_mgr.send(msg)
-    SyscallResult(value: result)
+        return SyscallResult(value: _FS_EFAULT)
+    # The buffer is write-verified but NOT written, so it must not be reported
+    # as filled. Previously this returned send()'s 0 and the caller read
+    # uninitialised memory as a valid struct stat. `Fat32Filesystem.stat` (-> a
+    # `FileStat` with a real kind/size) already exists in fat32.spl; the
+    # missing piece is a mounted kernel-global instance to call it on (see
+    # module doc comment above).
+    SyscallResult(value: _FS_ENOSYS)
 
 fn _handle_file_mkdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
     """Create a directory. Routed to VFS service via IPC.
@@ -125,21 +341,16 @@ fn _handle_file_mkdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) 
     """
     val path_ptr = args.arg0 as u64
     val path_len = args.arg1 as u64
-    if path_ptr == 0 or path_len == 0 or path_len > MAX_BINARY_PATH_LEN:
-        return SyscallResult(value: -22)
-    var sched = scheduler
-    val current = sched.get_current()
-    val msg = IpcMessage(
-        src_port: current.id,
-        dst_port: 0,
-        method: 6,
-        flags: args.arg2 as u32,
-        payload_len: path_len,
-        cap_count: 0
-    )
-    var ipc_mgr = ipc
-    val result = ipc_mgr.send(msg)
-    SyscallResult(value: result)
+    if path_ptr == 0 or path_len == 0:
+        return SyscallResult(value: _FS_EINVAL)
+    if path_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: _FS_ENAMETOOLONG)
+    # `Fat32Filesystem.mkdir_at` already exists in fat32.spl (real cluster
+    # allocation, "." / ".." entries, -EEXIST / -ENOENT on a missing parent —
+    # see test/01_unit/os/kernel/fs/fat32_subdir_spec.spl), but no kernel-global
+    # mounted-filesystem instance reaches this module to call it on (see module
+    # doc comment above).
+    SyscallResult(value: _FS_ENOSYS)
 
 fn _handle_file_readdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
     """Read directory entries. Routed to VFS service via IPC.
@@ -152,42 +363,26 @@ fn _handle_file_readdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager
     val buf_ptr = args.arg1 as u64
     val buf_size = args.arg2 as u64
     if buf_ptr == 0 or buf_size == 0:
-        return SyscallResult(value: -22)
+        return SyscallResult(value: _FS_EINVAL)
     if not vmm_verify_user_write(buf_ptr, buf_size):
-        return SyscallResult(value: -14)
-    var sched = scheduler
-    val current = sched.get_current()
-    val msg = IpcMessage(
-        src_port: current.id,
-        dst_port: 0,
-        method: 7,
-        flags: args.arg0 as u32,
-        payload_len: buf_size,
-        cap_count: 0
-    )
-    var ipc_mgr = ipc
-    val result = ipc_mgr.send(msg)
-    SyscallResult(value: result)
+        return SyscallResult(value: _FS_EFAULT)
+    # d_name was never written; returning 0 made libc report "one entry read"
+    # over uninitialised memory. Required primitive: a directory cursor, e.g.
+    # simpleos_fat32_opendir(path) -> handle and
+    # simpleos_fat32_readdir(handle, out_name_ptr, out_cap) -> i64 name length.
+    SyscallResult(value: _FS_ENOSYS)
 
 fn _handle_file_unlink(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
     """Remove a file. Routed to VFS service via IPC method 8 (UNLINK)."""
     val path_ptr = args.arg0 as u64
     val path_len = args.arg1 as u64
-    if path_ptr == 0 or path_len == 0 or path_len > MAX_BINARY_PATH_LEN:
-        return SyscallResult(value: -22)
-    var sched = scheduler
-    val current = sched.get_current()
-    val msg = IpcMessage(
-        src_port: current.id,
-        dst_port: 0,
-        method: 8,
-        flags: 0,
-        payload_len: path_len,
-        cap_count: 0
-    )
-    var ipc_mgr = ipc
-    val result = ipc_mgr.send(msg)
-    SyscallResult(value: result)
+    if path_ptr == 0 or path_len == 0:
+        return SyscallResult(value: _FS_EINVAL)
+    if path_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: _FS_ENAMETOOLONG)
+    # Required primitive: simpleos_fat32_unlink(path) -> i64 (free the cluster
+    # chain and mark the directory entry 0xE5).
+    SyscallResult(value: _FS_ENOSYS)
 
 fn _handle_file_rename(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
     """Rename a file or directory. Routed to VFS service via IPC method 9 (RENAME)."""
@@ -195,43 +390,25 @@ fn _handle_file_rename(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager)
     val old_len = args.arg1 as u64
     val new_ptr = args.arg2 as u64
     val new_len = args.arg3 as u64
-    if old_ptr == 0 or old_len == 0 or old_len > MAX_BINARY_PATH_LEN:
-        return SyscallResult(value: -22)
-    if new_ptr == 0 or new_len == 0 or new_len > MAX_BINARY_PATH_LEN:
-        return SyscallResult(value: -22)
-    var sched = scheduler
-    val current = sched.get_current()
-    val msg = IpcMessage(
-        src_port: current.id,
-        dst_port: 0,
-        method: 9,
-        flags: old_len as u32,
-        payload_len: old_len + 1 + new_len,
-        cap_count: 0
-    )
-    var ipc_mgr = ipc
-    val result = ipc_mgr.send(msg)
-    SyscallResult(value: result)
+    if old_ptr == 0 or old_len == 0 or new_ptr == 0 or new_len == 0:
+        return SyscallResult(value: _FS_EINVAL)
+    if old_len > MAX_BINARY_PATH_LEN or new_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: _FS_ENAMETOOLONG)
+    # Required primitive: simpleos_fat32_rename(old, new) -> i64 (rewrite the
+    # LFN + 8.3 slots in place, preserving the start cluster and size).
+    SyscallResult(value: _FS_ENOSYS)
 
 fn _handle_file_rmdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
     """Remove a directory. Routed to VFS service via IPC method 14 (RMDIR)."""
     val path_ptr = args.arg0 as u64
     val path_len = args.arg1 as u64
-    if path_ptr == 0 or path_len == 0 or path_len > MAX_BINARY_PATH_LEN:
-        return SyscallResult(value: -22)
-    var sched = scheduler
-    val current = sched.get_current()
-    val msg = IpcMessage(
-        src_port: current.id,
-        dst_port: 0,
-        method: 14,
-        flags: 0,
-        payload_len: path_len,
-        cap_count: 0
-    )
-    var ipc_mgr = ipc
-    val result = ipc_mgr.send(msg)
-    SyscallResult(value: result)
+    if path_ptr == 0 or path_len == 0:
+        return SyscallResult(value: _FS_EINVAL)
+    if path_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: _FS_ENAMETOOLONG)
+    # Required primitive: simpleos_fat32_rmdir(path) -> i64 (-ENOTEMPTY unless
+    # the directory holds only "." and "..").
+    SyscallResult(value: _FS_ENOSYS)
 
 fn _handle_lseek(args: SyscallArgs) -> SyscallResult:
     """Reposition read/write file offset via POSIX fd layer.
@@ -264,12 +441,23 @@ fn _handle_getcwd(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     """
     val buf_ptr = args.arg0 as u64
     val buf_size = args.arg1 as u64
+    if buf_ptr == 0:
+        return SyscallResult(value: _FS_EFAULT)
     if buf_size < 2:
-        return SyscallResult(value: -34)
+        return SyscallResult(value: _FS_ERANGE)
     if not vmm_verify_user_write(buf_ptr, buf_size):
-        return SyscallResult(value: -14)
-    mmio_write8(buf_ptr, 0x2F)          # '/'
-    mmio_write8(buf_ptr + 1, 0x00)      # null terminator
+        return SyscallResult(value: _FS_EFAULT)
+    var sched = scheduler
+    val current = sched.get_current()
+    val path = cwd_get(current.id)
+    # Need room for the path plus its NUL terminator.
+    if path.len() + 1 > buf_size:
+        return SyscallResult(value: _FS_ERANGE)
+    var i: u64 = 0
+    while i < path.len():
+        mmio_write8(buf_ptr + i, path[i])
+        i = i + 1
+    mmio_write8(buf_ptr + path.len(), 0x00)
     SyscallResult(value: buf_ptr as i64)
 
 fn _handle_chdir(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
@@ -281,6 +469,23 @@ fn _handle_chdir(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     """
     val path_ptr = args.arg0 as u64
     val path_len = args.arg1 as u64
-    if path_ptr == 0 or path_len == 0 or path_len > MAX_BINARY_PATH_LEN:
-        return SyscallResult(value: -22)
+    if path_ptr == 0 or path_len == 0:
+        return SyscallResult(value: _FS_EINVAL)
+    if path_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: _FS_ENAMETOOLONG)
+    if not _is_userspace_range(path_ptr, path_len):
+        return SyscallResult(value: _FS_EFAULT)
+    var sched = scheduler
+    val current = sched.get_current()
+    val raw = _fs_copy_user_bytes(path_ptr, path_len)
+    val resolved = path_resolve(current.id, raw)
+    # NOTE: the target directory's existence is NOT verified — no FAT32
+    # directory-kind probe is reachable from Simple today (stream_open opens
+    # files only). The cwd state change itself is real and getcwd observes it;
+    # the missing check is recorded as a required primitive
+    # (simpleos_fat32_path_kind(path) -> i64: 0 absent, 1 file, 2 directory)
+    # rather than papered over. Until it lands, chdir to a nonexistent
+    # directory succeeds where POSIX requires ENOENT.
+    if not cwd_set(current.id, resolved):
+        return SyscallResult(value: _FS_ENOMEM)
     SyscallResult(value: 0)
