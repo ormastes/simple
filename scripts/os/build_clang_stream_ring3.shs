@@ -97,7 +97,6 @@ timeout "$QEMU_TIMEOUT" qemu-system-x86_64 \
     -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
     -kernel "$KERNEL_OUTPUT" \
     -serial "file:$SERIAL_LOG" \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -drive "file=$IMG,if=none,id=nvme0,format=raw" \
     -device nvme,drive="nvme0",serial="clangstreamnvme0"
 RC=$?
@@ -109,8 +108,11 @@ cat "$SERIAL_LOG" 2>/dev/null || echo "(no serial log)"
 echo "===== marker check ====="
 grep -q 'file_size=124602568' "$SERIAL_LOG" 2>/dev/null && echo "PASS stream-open (125MB)" || echo "MISS stream-open"
 grep -q 'clang version'       "$SERIAL_LOG" 2>/dev/null && echo "PASS clang banner" || echo "MISS clang banner"
-# The bare-exec dispatcher's exit(0) halts QEMU via isa-debug-exit directly
-# (rc=(status<<1)|1), so a clean exit shows as this serial line, not the kernel
-# resume marker.
+# No isa-debug-exit device (board-runnable: real hardware has no such port).
+# The bare-exec dispatcher's exit(0) syscall handler now just halts (`cli;
+# hlt`) after printing this serial line instead of exiting QEMU, so `timeout`
+# runs the QEMU wrapper to its bound; the pass/fail signal below is unchanged
+# — it was always this serial line, never QEMU's own exit code (see RC=$?,
+# echoed only, never gated).
 grep -q '\[syscall\] exit status=0' "$SERIAL_LOG" 2>/dev/null && echo "PASS clean exit(0)" || echo "MISS clean exit(0)"
 grep -q 'CLANG FILE-LAUNCH WORKS' "$SERIAL_LOG" 2>/dev/null && echo "PASS clang-launch (kernel resume)" || echo "MISS clang-launch (kernel resume; expected if exit halted QEMU directly)"

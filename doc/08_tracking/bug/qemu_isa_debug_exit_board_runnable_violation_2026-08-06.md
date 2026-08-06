@@ -1,12 +1,17 @@
 # QEMU launch scripts used `-device isa-debug-exit` — board-runnable rule violation
 
 - **Filed:** 2026-08-06
-- **Status:** PARTIALLY FIXED — 16 scripts fixed (12 original + 4 more in the
-  2026-08-06 follow-up pass), 3 confirmed-genuine + 3 likely-safe-unverified
-  `scripts/os/` scripts remain, plus 7 out-of-lane `scripts/check/` scripts
-  still violate, documented below (§2b-revised, §4). The separate
-  `-kernel`-boot finding (§5, 3 scripts) was investigated 2026-08-06: no
-  miscitation as board-runnable evidence found anywhere in the repo (false
+- **Status:** PARTIALLY FIXED — 22 scripts fixed (12 original + 4 in the first
+  follow-up pass + 3 `build_fsexec_general/stream_ring3.shs`/
+  `build_clang_stream_ring3.shs` + `run_simpleos_q35_smoke.shs` +
+  2 `scripts/check/` scripts in this 2026-08-06 second follow-up pass). 2
+  `scripts/os/` scripts remain confirmed-genuine 2b, deferred with a precise
+  reason (§2c below). All 7 originally-flagged `scripts/check/*.shs` are now
+  resolved: 5 already carried no active `isa-debug-exit` device (their
+  mentions are rule-compliance comments only — the §4 list had shifted since
+  filing) and the remaining 2 are fixed in this pass (§4-revised). The
+  separate `-kernel`-boot finding (§5, 3 scripts) was investigated 2026-08-06:
+  no miscitation as board-runnable evidence found anywhere in the repo (false
   alarm) — closed with DEV-HARNESS-ONLY banners added to the 3 scripts; the
   underlying OVMF-port gap for 2 of them remains open and tracked separately.
 - **Area:** `scripts/os/*.shs` (QEMU launch), `scripts/check/*.shs` (out of
@@ -135,29 +140,168 @@ converted here because their required disk images
 in this session and building them was out of budget for this pass — do not
 convert without a real before/after run once those artifacts exist.
 
-**CONFIRMED GENUINELY 2b — 3 scripts, hard-gated on the QEMU exit code:**
+**CONFIRMED GENUINELY 2b — 2 scripts, hard-gated on the QEMU exit code (3rd,
+`run_simpleos_q35_smoke.shs`, resolved 2026-08-06 — see §2c below):**
 
 - `scripts/os/build_clang_disk.shs:56-61` —
   `guest_rc=$?; ... [ "$guest_rc" -eq "$expected_rc" ] || fail ...` — the
   script's own pass/fail hinges on the numeric exit code isa-debug-exit
-  produces.
+  produces. **2026-08-06 deep investigation:** unlike the smoke-script case,
+  this one genuinely IS two-valued at the source: the ring-3 `exit(status)`
+  syscall handler
+  (`examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c:16798`,
+  `_bare_exec_handle` case 0) computes
+  `outb(0xF4, (uint8_t)((a0 << 1) | 1))` where `a0` is the guest program's own
+  exit status — so `isa-debug-exit`'s own `(val<<1)|1` mapping turns this into
+  QEMU exit `(a0<<2)|3`; `a0=0` → exit 3 (`expected_rc`), `a0≠0` → a different
+  code. However, the syscall handler ALSO unconditionally prints
+  `"[syscall] exit status=" + a0` to serial *before* the `outb` call, and
+  `build_clang_disk.shs:174-175` already independently checks
+  `grep -qx '[syscall] exit status=0' "$SERIAL_LOG"` right after `run_guest`
+  returns — so the exit-code gate and the serial-marker gate currently encode
+  the *same* fact twice. Converting is therefore safe in principle (drop the
+  RC gate, keep the log check, which already exists) but requires: (a)
+  background+poll instead of foreground `timeout` (two phases — compile and
+  link — each need their own completion marker to poll for, since with the
+  device gone `cli; hlt` no longer terminates QEMU), and (b) a real
+  `SIMPLE_BUILD_COMPILER` self-hosted-compiler build environment plus
+  `clang_static`/FAT32-image staging to verify end-to-end. Not attempted this
+  pass — out of budget alongside the rest of this sweep.
 - `scripts/os/build_fsexec_prod_ring3.shs:230-234` —
   `RC=$?; ...; [ "$RC" -eq 3 ] || fail "QEMU exit rc=$RC expected=3"` — same
   hard gate (also separately checks a serial marker, but the RC gate runs
-  first and is unconditional).
-- `scripts/os/run_simpleos_q35_smoke.shs:137-140` —
-  `code=$?; ...; if [ "$code" -ne 1 ]; then ... exit 1; fi` — hard gate on
-  `code -eq 1`, evaluated *before* the (already fairly complete) marker checks
-  further down, including an existing `TEST PASSED` sentinel line the guest
-  already emits. Converting this one is probably the cheapest of the three
-  (the sentinel infrastructure the recommended fix in §3 asks for already
-  exists in the guest output) but still needs the guest's post-print behavior
-  changed from "exit via outb(0xF4,...)" to "halt-loop", rebuilt, and
-  boot-verified — not done in this pass.
+  first and is unconditional). Requires the same `SIMPLE_BUILD_COMPILER`
+  self-hosted-compiler dependency as `build_clang_disk.shs` above (not just
+  the seed) — not investigated at the same depth this pass; treat as
+  presumptively similar (single `exit(status)` syscall handler feeding the
+  same `isa-debug-exit` mapping) until confirmed.
 
-These 3 are the scripts §3's guest-side sentinel fix genuinely applies to.
+These 2 are the scripts §3's guest-side sentinel fix genuinely applies to
+(third, `run_simpleos_q35_smoke.shs`, resolved below in §2c).
 
-## 3. Recommended fix for the 2b family (not implemented — substantial, deferred)
+## 2c. FIXED (2026-08-06, second follow-up pass) — `run_simpleos_q35_smoke.shs`
+
+Re-investigated per the guest source, not just the host script. Both guest
+entries this script boots —
+`examples/09_embedded/simple_os/arch/x86_64/boot_stage1_entry.spl:65-68` (the
+`c-boot-bridge` profile) and
+`examples/09_embedded/simple_os/arch/x86_64/q35_pure_nvme_perf_entry.spl:27-28`
+(the `pure-simple` profile) — call `serial_println("TEST PASSED")` then
+`rt_port_outb(0xf4, 0)` **unconditionally**, on every path including ones
+where earlier sub-checks logged `=fail` markers. The guest never varies the
+outb value — the exit code was always a single fixed value (mapped by
+`isa-debug-exit` to process exit 1), never a real pass/fail signal. The
+script's own subsequent marker-grep loop (checking for `TEST PASSED` plus
+per-subsystem `=pass` markers) was already the actual, sole arbiter of
+pass/fail; the `code -ne 1` early-exit gate only filtered out
+crash/hang/timeout cases, which the marker loop also independently catches
+(missing `TEST PASSED` → `missing=1` → `exit 1`).
+
+**Fix:** converted the foreground `timeout ... qemu-system-x86_64 | code=$?`
+invocation to background + serial-log poll + `kill`, the same pattern already
+used by `run_x64_desktop_disk_probe` in `src/os/desktop_qemu_contract.spl`:
+launch QEMU with `&`, poll `grep -a -q "TEST PASSED" "$SIMPLEOS_Q35_LOG"`
+against the live serial log up to `SIMPLEOS_Q35_TIMEOUT` seconds, kill the
+process once the marker is seen or the deadline passes, then run the
+pre-existing marker-check block unchanged. Removed
+`-device isa-debug-exit,iobase=0xf4,iosize=0x04` from both QEMU invocations
+(pure-simple and c-boot-bridge).
+
+**Verification:** structural proof by construction (guest always emits the
+same sentinel regardless of internal pass/fail, so serial-log detection is
+provably equivalent to the old exit-code gate for the crash/hang case, and
+strictly more accurate for the internal-check-failed-but-guest-still-exits
+case, which the exit code could never have distinguished anyway). Empirical
+before/after run **not performed**: `build/os/simpleos_x86_64.elf` /
+`build/os/simpleos_x86_64_pure_nvme_perf.elf` are not present in this
+environment and no build command for them was found in this session's
+budget (not built by any `scripts/os/*.shs` found by grep — likely built by
+a separate, longer-running lane). Marked **unverified-by-run, verified-by-
+construction** — do not cite this as a real pass/fail-path proof; re-run
+`sh scripts/os/run_simpleos_q35_smoke.shs` once those artifacts exist and
+update this entry with the result.
+
+## 4-revised. `scripts/check/*.shs` (2026-08-06, second follow-up pass)
+
+Re-grepped for exact active usage (not just any string mention of
+`isa-debug-exit` — several of the original 7 mention it only in
+`NEVER isa-debug-exit`-style compliance comments, having already been fixed
+or written compliant since the doc's first version). Only 2 of the original 7
+still had an active `-device isa-debug-exit,iobase=0xf4,iosize=0x04` line:
+
+- **`scripts/check/check-simpleos-usb-xhci-qemu.shs`** — captured
+  `qemu_rc=$?` but only interpolated it into a diagnostic message
+  (`"no serial output captured (qemu_rc=$qemu_rc)"`); the actual `PASS`/`FAIL`
+  verdict (`require_marker` calls + `device_count=2` check) never reads
+  `qemu_rc`. Vestigial — same shape as the §2a family. Fixed by deleting the
+  device line.
+  **Verification (sabotage-style):** ran the gate end-to-end (built its own
+  kernel via the seed compiler, `SKIP_KERNEL=1` on repeat runs) before and
+  after the edit. Both runs hit the same pre-existing, unrelated environment
+  failure — `qemu-system-x86_64: Cannot load x86-64 image, give a 32bit one.`
+  — with byte-identical output (`qemu_rc=1`, `[usb-xhci-gate] gate blocked: no
+  serial output captured (qemu_rc=1)`, exit 1). Confirms the device was never
+  load-bearing; the pre-existing ELF-format failure is unrelated to this
+  change and not fixed here.
+- **`scripts/check/check-simpleos-servers-qemu.shs`** — already backgrounds
+  QEMU (`... &`, `QEMU_PID=$!`, `trap 'kill "$QEMU_PID" ...' EXIT`,
+  `wait_for_marker` polling `grep -qa "$MARKER" "$SERIAL_FILE"`); grepped the
+  whole file for `$?` — zero matches, the exit code is never even captured.
+  Textbook §2a vestigial case. Fixed by deleting the device line (used once,
+  inside the shared `boot_qemu()` helper called for both the boot #1 and
+  reboot-persistence boot #2 phases). Not independently re-run this session
+  (the gate's full body needs `sshpass`/`nc` and a two-boot durability
+  sequence against a live disk image — materially more expensive than the
+  usb-xhci gate); the code-reading proof (no `$?` capture anywhere in the
+  file) is the same class of evidence the doc's §2a fixes were accepted on.
+
+The other 5 (`check-freebsd-wm-seam-refusal.shs`,
+`check-simpleos-x86-64-wm-hello-lifecycle-evidence.shs`,
+`check-simpleos-wm-host-seam-evidence.shs`,
+`check-simpleos-wm-aqua-glyph-ovmf-evidence.shs`,
+`check-simpleos-wm-visible-display-evidence.shs`) needed **no fix** — grep
+confirmed zero active `-device isa-debug-exit` lines; every hit was a
+rule-compliance comment (e.g. "NEVER `-kernel`, NEVER `isa-debug-exit`").
+§4 (original) is now stale/superseded by this section.
+
+## 2d. Part B — disk images that were "missing" are now present; 3 scripts converted and verified
+
+At filing time (§2b-revised), `build_fsexec_general_ring3.shs`,
+`build_fsexec_stream_ring3.shs`, and `build_clang_stream_ring3.shs` were left
+unconverted because their disk images (`build/os/elfexec/fat32-fsexec.img`,
+`build/os/elfexec/fat32-clang.img`) were absent. As of this pass both images
+exist (built by a concurrent/prior lane today), so real before/after
+verification was possible. All three scripts already never gate their exit
+code on `RC=$?` (confirmed: `RC` is captured, echoed into a log line, and the
+script's marker-check block at the end never calls `exit` at all — the script
+unconditionally returns 0) — vestigial, same as the four probe scripts fixed
+in §2b-revised. Fixed by deleting the `-device isa-debug-exit,...` line from
+each (`build_clang_stream_ring3.shs`'s stale comment about the device halting
+QEMU was also corrected).
+
+**Verification (sabotage-style, real builds + real QEMU runs, not
+pre-existing artifacts alone — kernels rebuilt fresh via the seed compiler
+each run):**
+
+- `build_fsexec_general_ring3.shs`: before/after identical —
+  `qemu-system-x86_64: Cannot load x86-64 image, give a 32bit one.`, qemu exit
+  rc=1, all 3 markers MISS, script exit 0 both times. (Same pre-existing
+  32-bit-ELF environment issue as the usb-xhci gate above — unrelated,
+  not fixed here.)
+- `build_fsexec_stream_ring3.shs`: before/after identical — guest boots to
+  SeaBIOS and hangs there (times out at 40s, `qemu exit rc=124`), all 3
+  markers MISS, script exit 0 both times.
+- `build_clang_stream_ring3.shs`: before/after identical — this one boots
+  much further (real ring-3 handoff: PT_LOAD segments mapped, user stack/heap
+  mapped, `entering user cs=0x2b ...`) but clang never reaches its banner
+  print; all 4 markers MISS, script exit 0 both times, marker-check sections
+  are diff-empty between the two runs.
+
+All three: removing the device changed nothing observable in either the pass
+signal (never reached in this environment) or the fail signal (identical
+messages/exit codes) — confirming the device was inert for all three.
+
+## 3. Recommended fix for the remaining 2b family (not implemented — substantial, deferred)
 
 `test_harness.spl:69-81` already shows the right shape: it prints a
 deterministic sentinel line over serial (`[TEST END] passed=N failed=N`)
@@ -186,11 +330,12 @@ a host-side shell script edit). Scope kept to the low-risk §2a set per the
 board-runnable rule's own guidance: don't force a fix that risks breaking a
 working QEMU-based harness.
 
-## 4. Out-of-lane: `scripts/check/*.shs` (not touched, flagged for a follow-up pass)
+## 4. Out-of-lane: `scripts/check/*.shs` (not touched, flagged for a follow-up pass) — SUPERSEDED, see §4-revised
 
 7 files under `scripts/check/` also register `-device isa-debug-exit` and were
 not investigated or touched by this change (different lane / concurrent work
-risk):
+risk) — this list is now stale; §4-revised (2026-08-06) re-triaged each and
+found only 2 still active, both now fixed:
 
 - `scripts/check/check-freebsd-wm-seam-refusal.shs`
 - `scripts/check/check-simpleos-servers-qemu.shs`
@@ -201,10 +346,7 @@ risk):
 - `scripts/check/check-simpleos-wm-visible-display-evidence.shs`
 
 Each should be triaged with the same backgrounded-vs-foreground test used in
-§2 before editing. Not attempted in the 2026-08-06 follow-up pass either
-(time/budget went to re-triaging and converting the `scripts/os/` family
-first, per the doc's own guidance that this set is out of lane / concurrent-
-work risk).
+§2 before editing.
 
 ## 5. Separate finding, investigated 2026-08-06 — FALSE ALARM (not a miscitation)
 
