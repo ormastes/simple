@@ -3235,11 +3235,24 @@ pub extern "C" fn rt_text_cmp_any(string1: RuntimeValue, string2: RuntimeValue) 
 #[no_mangle]
 pub extern "C" fn rt_string_char_at(string: RuntimeValue, index: i64) -> RuntimeValue {
     let len = rt_string_len(string);
-    if len < 0 || index >= len {
+    if len < 0 {
+        // Receiver is not a text value at all — that stays NIL.
+        return RuntimeValue::NIL;
+    }
+    if index >= len {
         // `index >= len` is a permissive fast reject: the byte length
         // upper-bounds the character count, and chars().nth enforces the
         // real character bound below.
-        return RuntimeValue::NIL;
+        //
+        // Forward over-run returns EMPTY TEXT, not NIL. The tree-walk
+        // interpreter (interpreter_method/string.rs `"char_at" | "at"`)
+        // returns `""` here, so the pervasive loop-termination idiom
+        // `if ch == "": break` was FAIL-OPEN on the compiled path only —
+        // `nil == ""` is false, so the guard never fired and the loop ran
+        // past the end. Divergence measured 2026-08-06:
+        // `"Café".char_at(99) == ""` was false on JIT, true on interpret.
+        // See doc/08_tracking/bug/text_byte_len_vs_codepoint_index_family_2026-08-06.md.
+        return new_string("");
     }
 
     let data = rt_string_data(string);
@@ -3270,7 +3283,14 @@ pub extern "C" fn rt_string_char_at(string: RuntimeValue, index: i64) -> Runtime
             let char_str = c.encode_utf8(&mut buf);
             rt_string_new(char_str.as_ptr(), char_str.len() as u64)
         } else {
-            RuntimeValue::NIL
+            // Real CHARACTER-bound over-run (index passed the byte-length fast
+            // reject above but is >= the codepoint count — the common case for
+            // non-ASCII text, e.g. `"Café".char_at(4)`, 5 bytes / 4 chars).
+            // Same contract as the fast reject: empty text, not NIL, so
+            // `if ch == "": break` terminates on the compiled path too.
+            // A negative index cannot reach here: `adjusted >= 0` implies
+            // `adjusted < chars().count()`.
+            new_string("")
         }
     }
 }
