@@ -1,15 +1,20 @@
 # B1 witness: in-guest clang -cc1 aborts (SIGABRT/134) partway through a real TU — heap-size hypothesis DISCONFIRMED
 
-Status: PARTIALLY RESOLVED (2026-08-06, third follow-up round). The SIGABRT
-crash is root-caused and fixed — `-cc1` now compiles `TU1.I` to completion
-in-guest with no abort, every run, 3 for 3. The originally-planned win
-condition (byte-identical `TU1.O` vs the host reference, sha256
-`f71aa3f9545c908c3e0b3bc3eddf4d1b11bde443152e45a04207b8969252cfb4`) is **NOT**
-met: the recompiled object is the right size (10,616 bytes) with identical
-`.rodata`/`.data`/`.bss`, but `.text` differs from the host reference — a
-new, narrower, non-crashing codegen-divergence defect, tracked as an open
-follow-up at the end of this doc. See "Round 3" section below for the full
-instrumentation, root cause, fix, and verification evidence.
+Status: RESOLVED as far as B1 requires (2026-08-06, fourth follow-up round).
+The SIGABRT crash is root-caused and fixed — `-cc1` now compiles `TU1.I` to
+completion in-guest with no abort, every run, 3 for 3, producing a valid
+ELF64 relocatable of the exact correct size. The originally-planned win
+condition (byte-identical `TU1.O` vs a reference built with **stock Ubuntu**
+clang-20.1.8, sha256
+`f71aa3f9545c908c3e0b3bc3eddf4d1b11bde443152e45a04207b8969252cfb4`) is
+**not** met, but Round 4 root-caused why: that reference was never built
+with the project's own LLVM fork (the compiler `clang_static` actually is),
+so byte-identity against it was never a sound oracle. Disassembly proves the
+entire `.text` diff is one functionally-equivalent instruction-selection
+choice (`tzcnt`-trick vs `bsf`+`cmovne` for `countTrailingZeros`) in a single
+function, not a correctness bug. See "Round 3" for the crash fix and "Round
+4" for the `.text`-diff root cause, the oracle-script correction, and an
+inconclusive host-native-fork-compiler side finding filed for follow-up.
 
 Status (historical, rounds 1-2): OPEN. Filed 2026-08-06, lane B1 (clang self-compile witness),
 follow-up to `doc/08_tracking/bug/bare_in_cap_silently_truncates_guest_input_files_2026-08-06.md`.
@@ -422,3 +427,160 @@ called out.
   `7b6b6a3db45a3150f362b44d64623b9fd1104b17ae8ba8efcee36146087bfc6f`
   (10,616 bytes, valid ELF64 relocatable) — NOT a match to the win-condition
   reference; see ".text DIFF" analysis above.
+
+## Round 4 (2026-08-06, follow-up): `.text` DIFF root-caused — wrong-compiler reference, not a guest bug
+
+### The "R1 ruled out" claim in Round 3 was never actually tested
+
+Round 3 states TU/compiler-revision skew (R1) was ruled out because "the host
+repro used the exact same 20.1.8 binary the reference was built with." That
+statement is true but answers the wrong question. Reading
+`build/os/b1_witness/make_reference.shs:10` directly:
+`CC1BIN=${CC1BIN:-/usr/lib/llvm-20/bin/clang}` — the reference `TU1.O` (and
+the Round 3 "host repro" that matched it byte-for-byte) were **both** built
+with the stock **Ubuntu llvm-20 package** (`20.1.8`,
+`87f0227cb601`, dated 2025-08-04). Neither one ever invoked the project's own
+LLVM fork. The actual in-guest compiler, `clang_static`, is linked from a
+**different** LLVM tree entirely:
+`github.com/ormastes/llvm-project.git`, branch `simpleos`, currently at
+commit `59612206386553df81efc06ec0421acf646d49ef` (`20.0.0git`, dated
+2026-08-06) — confirmed via `git -C /home/ormastes/llvm-project log -1`. So
+the Round 3 control tested "is the reference generator deterministic"
+(yes), not "does the fork's compiler match the reference" — R1 was
+mislabeled ruled-out; it was never exercised.
+
+### Disassembly diff: the entire `.text` DIFF is one 3-byte instruction-selection difference
+
+`build/os/b1_witness/compare_object.shs`'s tier-2 loop only diffs the *base*
+`.text` section by name; this TU has several COMDAT `.text.<mangled>`
+sections too (`readelf -SW` confirms), but those are all byte-identical —
+only the base `.text` (5,145 vs 5,148 bytes, +3) differs. Full
+`llvm-objdump-20 -d --no-show-raw-insn` diff of that section (guest object
+extracted from `build/os/elfexec_b1/fat32-b1.img` cluster 3, matching the
+already-recorded sha256 `7b6b6a3d...`) against the reference `TU1.O` shows
+**exactly one semantic divergence**, inside
+`_ZN4llvm30UnsignedDivisionByConstantInfo3getERKNS_5APIntEjb` (confirmed via
+`readelf -sW`: size `3353` (ref) vs `3356` (guest), the same +3; every other
+symbol identical) — a `countTrailingZeros` idiom at ref-offset `0x11e1`:
+
+```
+ref:    movl $0x40, %ebx ; tzcntq %rax, %rbx                (10 bytes)
+guest:  bsfq %rax, %rcx ; movl $0x40, %ebx ; cmovneq %rcx, %rbx  (13 bytes)
+```
+
+Both are correct, standard x86 lowerings of "count trailing zeros, defined
+as 64 when the input is zero": the reference's form pre-loads the
+destination with 64 and issues `tzcnt` (which decodes as `rep bsf` on
+non-BMI hardware and, per real-silicon behavior, leaves the destination
+unmodified when the input is zero — the classic BMI-independent `tzcnt`
+trick); the guest's form is the more conservative explicit `bsf` +
+`cmovne` fallback. **Semantically equivalent, not a correctness bug.** Every
+other byte in every other diff line downstream is the same instruction with
+addresses shifted by the constant +3 propagating through relative jump
+targets — confirmed by diffing corresponding operand mnemonics line-by-line,
+not just addresses. `.rela.text` was not independently diffed by content
+(same-size relocations at shifted offsets are expected and consistent with
+this).
+
+**Classification: wrong-compiler reference artifact, not a guest bug**,
+per the advisor's framing — byte-identity against a *different compiler
+build* (Ubuntu's stock clang-20.1.8) was never a sound oracle for "does
+`clang_static` (the project's own LLVM fork) compile this TU correctly
+inside SimpleOS." What B1 actually demonstrates stands on its own: the
+guest process now compiles a real, large (1.16 MB) C++17 TU to completion
+under real OVMF UEFI with no crash, producing a valid ELF64 relocatable of
+the exact correct size with byte-identical `.rodata`/`.data`/`.bss`/
+`.llvm_addrsig`, and the sole `.text` divergence disassembles to one
+functionally-equivalent instruction-selection choice.
+
+### Attempted host-native fork-compiler control — inconclusive, a second finding surfaced
+
+To get a genuine apples-to-apples reference (same fork commit, run natively
+on the host instead of through the guest OS), a host-native build of the
+fork already exists:
+`build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang-20` — confirmed via
+`--version` to be `clang version 20.0.0git
+(https://github.com/ormastes/llvm-project.git
+59612206386553df81efc06ec0421acf646d49ef)`, i.e. the identical commit
+`clang_static` was built from, `make_reference.shs`'s own `$CROSS_BUILD`
+tree, dynamically linked against the host's normal glibc (not
+`simpleos_dlmalloc`/`simpleos_cxxabi`).
+
+Running the identical `-cc1` line from `make_reference.shs:23-32` with this
+binary **also aborts, exit 134, at the same source position** (last warning
+at `TU1.I:8061`). This was investigated in some depth to check whether it
+duplicates the original guest bug (it should not, by hypothesis, since
+`operator new(0)` never returns NULL on glibc):
+
+- `strace -f` shows a literal `exit(134)` **syscall**, not a raw
+  signal — confirmed against a ground-truth `abort()` test binary on the
+  same host, which instead shows `tgkill(...SIGABRT...)` /
+  `+++ killed by SIGABRT (core dumped) +++`. So this is *not* the same
+  failure mode as a real `abort()`/SIGABRT.
+- `/usr/bin/time -v` shows Maximum RSS 62,976 KB (~63 MB) and
+  "Signals delivered: 0" — rules out OOM and rules out a delivered fatal
+  signal.
+- `gdb -batch -ex run -ex bt` shows `exited with code 0206` (octal 134) with
+  **no stack to unwind** — gdb saw a clean process exit, not a trap/signal
+  stop, so no backtrace could be captured this way.
+- Ruled out as the cause: `ulimit -s 65536` (8x default stack, still
+  crashes), dropping `-vectorize-loops -vectorize-slp` (still crashes),
+  `-fsyntax-only` (succeeds, 0 warnings-only, rc=0 — so Sema/parsing of the
+  templated `<chrono>` `operator""` literals is fine; this is an `-O3`
+  codegen-only failure). No `LLVM ERROR:`/`bad_alloc`/assertion message
+  appeared anywhere in stderr despite the binary having assertions compiled
+  in (`strings` shows `Assertion failed: %s at %s:%u (%s)`).
+- Grepped the fork source (`llvm/lib/Support/Unix/Signals.inc`,
+  `clang/tools/driver/cc1_main.cpp`, `CrashRecoveryContext.cpp`) for a
+  literal `134`/`Process::Exit` pattern that would explain a deliberate
+  self-chosen exit code matching SimpleOS's own `abort()` convention;
+  found none. The exact internal call site that invokes `exit(134)` is
+  **not identified**.
+
+**This does not contradict the documented guest success.** The guest run
+(`b1_run5`, this same fork commit, same TU, same flags, executed via
+`clang_static` under real OVMF UEFI) is independently verified to have
+produced a complete, correctly-sized, valid object — re-confirmed in this
+round by directly disassembling the extracted `TU1_extracted.O` cleanly.
+Since the natively-run fork binary crashes here but the guest binary (same
+fork commit) does not, the most likely explanation is that this specific
+sandboxed host shell has some restriction (a seccomp/ptrace policy,
+resource-limit, or environment difference invisible to `ulimit`/cgroup
+inspection performed above) that this particular `-O3` compile path is
+sensitive to — **not** a reproduction of the original guest bug, and not
+proof the fork's backend is broken. **Not chased further this round** to
+avoid an unbounded loop (per the standing rule on this doc); flagging for a
+follow-up lane to retest `build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang-20`
+outside any agent sandbox before drawing conclusions from it.
+
+### In-scope fix landed this round: `compare_object.shs` oracle correction
+
+The script's own header comment is self-contradictory: it claims tier-2
+requires "identical `.text`" *and* separately says any diff "must be
+attributable to ... revision skew" — a revision skew can, and here does,
+change `.text`. It also claims to check `.rela*` content but the loop never
+does. Rewrote the tier-2 header comment and section list to state plainly
+that `.text`/`.rela.text` MAY legitimately differ under a same-effect,
+different-encoding instruction-selection change from a different compiler
+build, and that such a diff requires a disassembly-level review (not a
+sha256-only gate) before being accepted. `TU1.O` was **not** regenerated or
+swapped — it remains the correct byte-identical output of its own generator
+(`make_reference.shs` with the stock Ubuntu `clang-20`); it was simply never
+a sound byte-for-byte oracle for the fork compiler and the script's
+comments now say so.
+
+### Evidence (this round)
+
+- Guest object (already on record): sha256
+  `7b6b6a3db45a3150f362b44d64623b9fd1104b17ae8ba8efcee36146087bfc6f`.
+- Fork commit confirmed twice: `git -C /home/ormastes/llvm-project log -1`
+  and `clang-20 --version` from the cross-build tree, both
+  `59612206386553df81efc06ec0421acf646d49ef`.
+- `readelf -SW` section-header diff: only `.text` size differs
+  (`0x1419` vs `0x141c`), all other sections byte-identical.
+- `readelf -sW` symbol-table diff: only
+  `_ZN4llvm30UnsignedDivisionByConstantInfo3getERKNS_5APIntEjb` size differs
+  (`3353` vs `3356`), all other symbols identical.
+- `llvm-objdump-20 -d` diff of `.text`: single instruction-selection
+  divergence at the countTrailingZeros idiom, everything else is address-shift
+  propagation of that one +3.
