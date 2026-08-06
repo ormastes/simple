@@ -21,8 +21,12 @@ use os.compositor.host_compositor_entry.{HeadlessHostCompositorBackend, headless
 use os.compositor.simple_web_window_renderer.{simple_web_content_render_request_with_active_theme}
 use os.compositor.web_render_surface.{compositor_render_request_artifact}
 use std.gc_async_mut.ui.gui_content_renderer.{gui_session_content_frame}
+use std.common.perf.render_perf_receipt_v2.{
+    render_perf_receipt_new, perf_receipt_gate, perf_receipt_line, perf_ctr_set,
+    PERF_CTR_RASTER_MS, PERF_CTR_CULLED_OPS}
 
 extern fn rt_time_now_nanos() -> i64
+extern fn rt_env_get(key: text) -> text
 fn ms() -> i64:
     rt_time_now_nanos() / 1000000
 
@@ -70,8 +74,28 @@ fn check(name: text, layout: [i32], pixel_content: bool):
         + " culls=" + wm_occlusion_culled_count().to_text()
         + " ms_full=" + (t1 - t0).to_text() + " ms_culled=" + (t2 - t1).to_text())
 
+# Engine-identity receipt: the caller ATTESTS engine + binary md5 via env
+# (SIMPLE_BINARY_ENGINE, SIMPLE_BINARY_MD5) because seed vs pure-simple cannot
+# be distinguished from inside the process. Missing attestation -> loud refusal,
+# never a silent pass.
+fn emit_receipt(raster_ms: i64, culls: i64):
+    val engine = rt_env_get("SIMPLE_BINARY_ENGINE")
+    val md5 = rt_env_get("SIMPLE_BINARY_MD5")
+    val r0 = render_perf_receipt_new(engine, md5)
+    if not r0.?:
+        print("perf_receipt_v2 REFUSED: engine='" + engine + "' md5='" + md5
+            + "' — set SIMPLE_BINARY_ENGINE + SIMPLE_BINARY_MD5 to attest; numbers above are UNATTRIBUTED")
+        return
+    var r = r0!
+    r = perf_ctr_set(r, PERF_CTR_RASTER_MS, raster_ms)
+    r = perf_ctr_set(r, PERF_CTR_CULLED_OPS, culls)
+    print(perf_receipt_line(r))
+    print("perf_receipt_gate=" + perf_receipt_gate(r, engine))
+
 fn main():
+    val bench_t0 = ms()
     check("EXPENSIVE-CULL px", [40,40,100,60, 15,12,175,130], true)
     check("contained        ", [40,40,100,60, 15,12,175,130], false)
     check("union-cover      ", [30,25,120,90, 20,15,90,115, 100,15,95,115], false)
     check("no-cull-identical", [20,16,150,110, 20,16,150,110], false)
+    emit_receipt(ms() - bench_t0, wm_occlusion_culled_count())
