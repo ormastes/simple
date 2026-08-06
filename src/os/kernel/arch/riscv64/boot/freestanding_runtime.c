@@ -69,7 +69,16 @@ __asm__(
 extern spl_i64 kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(spl_i64 size) __attribute__((weak));
 
 static spl_u64 g_freestanding_heap_next = 0x87000000ULL;
-static spl_u64 g_freestanding_heap_limit = 0x90000000ULL;
+/* Top of physical RAM, not 0x90000000: rt_riscv_qemu_ram_base() (0x80000000)
+ * + rt_riscv_qemu_ram_size() (128 MiB) == 0x88000000. The previous
+ * 0x90000000 limit reached 128 MiB past the end of QEMU virt's actual RAM,
+ * so the bounds check below silently permitted allocations into memory that
+ * does not exist (data lost or, worse, MMIO-region corruption on other
+ * boards) instead of failing. This matches the region rt_riscv_noalloc_pmm_
+ * init() already treats as the PMM's own upper bound (its `heap_start`
+ * argument is 0x87000000, i.e. the PMM page allocator already assumes
+ * everything from 0x87000000 up to end-of-RAM belongs to this byte heap). */
+static spl_u64 g_freestanding_heap_limit = 0x88000000ULL;
 
 static spl_u64 rt_align8(spl_u64 value) {
     return (value + 7ULL) & ~7ULL;
@@ -1277,8 +1286,9 @@ void rt_store_barrier(void) {
 }
 /* unsafe_addr_of: identity cast, no allocator/heap dependency — mirrors the
  * hosted implementation exactly (src/runtime/runtime_native.c:4853,
- * `return (uint64_t)value;`). Surfaced as undefined once the rt_volatile_*/
- * rt_load_barrier fixes above let the linker get further into this closure. */
+ * `return (uint64_t)value;`). Surfaced as undefined once the rt_volatile
+ * family / rt_load_barrier fixes above let the linker get further into this
+ * closure. */
 spl_u64 unsafe_addr_of(spl_i64 value) {
     return (spl_u64)value;
 }
