@@ -204,3 +204,45 @@ dev-done → implement (in progress)
 - S1 BLOCKED: 20 missing `rt_*` symbols; runtime-port lane opened. Also fixed a
   fail-open compiler probe that had accepted a core-dumping builder.
 - Landed `8b2e712744c` on main (verified via ls-remote).
+- AC-6 investigation 2026-08-06 (this session): image-builder wiring for the
+  seven install-image paths was ALREADY DONE prior to this session —
+  `_SIMPLE_TOOLCHAIN_ROLE_PATHS` in `src/os/installer/image_builder.spl:67-80`
+  already lists `/bin/simple(.smf)`, `/usr/bin/simple(.smf)`,
+  `/sys/apps/simple{,_compiler,_interpreter,_loader}(.smf)`, and
+  `_stage_simple_toolchain_payload` separately writes `/SYS/SIMPLETOOL.SDN`. A
+  provenance-valid, non-seed payload also already exists at
+  `bin/release/x86_64-unknown-simpleos/simple`
+  (`entry=src/app/simpleos_tool/main.spl`, `entry_closure=true`,
+  `backend=cranelift`, `artifact_sha256=58b65147…`), which passes
+  `_validate_simple_binary` (image_builder.spl:886) by construction — that
+  guard REQUIRES the focused `simpleos_tool` entry closure, not the full CLI,
+  so the full-CLI segv (`doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`)
+  is out of scope for AC-6 by the guard's own contract, not a workaround.
+  BLOCKED on producing a fresh boot transcript this session: ran
+  `scripts/os/ssh_simple_hello_uefi.shs` (SKIP_STAGE unset, fresh kernel
+  build) to refresh evidence, and the freestanding kernel link produced 56
+  unbaselined FABRICATED-NEW symbols (incl. `vmm_create_user_address_space`,
+  `vmm_destroy_user_address_space`, three `Nvfs*HostedDriver` ctors, and the
+  string-builder family), then the final artifact
+  `build/os/simpleos_ssh_ring3_uefi128_laneb.elf` came out as a 32-bit ELF
+  (`ELF 32-bit LSB executable, Intel 80386`) instead of the expected 64-bit —
+  `[x86-kernel-elf] ERROR: kernel is not ELF64`, boot never attempted. Root
+  cause traced to environment, not to the payload or the image-builder wiring:
+  `src/os/kernel/fs/fat32.spl` and `src/os/kernel/ipc/syscall_file.spl` are
+  both `git status` DIRTY right now from another lane's in-flight,
+  uncommitted work (the FS lane flagged as active in this campaign's own
+  ground truth) — per this repo's standing rule, those files were left
+  untouched, and the kernel build was not re-attempted against a clean tree.
+  `vmm_create_user_address_space` has ZERO definitions anywhere under
+  `src/os/` (`grep -rn` came back empty), confirming it's a currently-broken
+  reference, not a stub that was ever real. **AC-6 status: NOT YET PROVEN.**
+  No install-image was built, no OVMF boot was attempted, no `--version` or
+  `/hello.spl` transcript was captured this session — reporting this
+  honestly rather than reusing the AC-5/prior interpreter-run evidence
+  (`ssh root@guest /usr/bin/simple /hello.spl` → "hello from simple on
+  simpleos", staged via FS-exec, not the install-image path) as if it proved
+  AC-6, since AC-6 requires the install-image contract specifically. Next
+  step: re-run `ssh_simple_hello_uefi.shs` end-to-end (plus a `--version`
+  probe and an image built through `ImageBuilder.build()` rather than the
+  hand-rolled FAT32 concat this script uses) once the FS lane's changes to
+  `fat32.spl`/`syscall_file.spl` land or are confirmed unrelated.
