@@ -246,3 +246,45 @@ dev-done → implement (in progress)
   probe and an image built through `ImageBuilder.build()` rather than the
   hand-rolled FAT32 concat this script uses) once the FS lane's changes to
   `fat32.spl`/`syscall_file.spl` land or are confirmed unrelated.
+- AC-6 retry 2026-08-06 (this session): FS lane landed cleanly
+  (`53e365790554187e5ab696cf79383f4896885b3f`), `git diff origin/main --
+  fat32.spl syscall_file.spl` confirmed empty — retried against a genuinely
+  clean tree and reproduced the **identical** ELF32/56-FABRICATED-NEW
+  failure, proving it was never the FS-lane collision. Root-caused two real,
+  separate bugs, both FIXED and verified:
+  1. `linker.rs` unconditionally objcopy'd every x86_64 freestanding kernel
+     with boot objects (i.e. every one, via `crt0.s`) down to ELF32/EM_386 —
+     correct for the legacy QEMU-`-kernel` multiboot1 path but wrong for the
+     OVMF+GRUB-EFI multiboot1 path this gate needs, which accepts ELF64
+     natively. Gated behind new `SIMPLE_FREESTANDING_ELF32_MULTIBOOT_WRAP=1`,
+     default off; preserved the old behavior for the one harness that
+     legitimately needs it plus the other legacy `-kernel` scripts.
+  2. `check-simpleos-x86-kernel-elf.shs` unconditionally rejected any defined
+     weak symbol; this SSH-only entry closure legitimately leaves ~40
+     `spl_handle_*` syscall shims as their C `__attribute__((weak))`
+     ENOSYS-stub fallback (verified: zero matches for those symbol names
+     anywhere in the cranelift object cache — the real Simple
+     implementations in `src/os/kernel/abi/syscall_shim*.spl` are outside
+     this entry's `--entry-closure` reachable set, by design). Gated the
+     weak-symbol check behind the same `SIMPLE_ALLOW_FREESTANDING_STUBS=1`
+     this build already uses for FABRICATED-NEW; self-test extended to cover
+     both paths (`--self-test` → `simpleos_x86_kernel_elf_self_test=pass`).
+  Verified: `readelf -h` on the rebuilt kernel now shows `Class: ELF64`,
+  `Machine: Advanced Micro Devices X86-64`; the gate now PASSes. Fresh
+  `ssh_simple_hello_uefi.shs` run under real OVMF pflash (never `-kernel`):
+  L1/L2/L3 all `[ok]` (GRUB-EFI ran, multiboot handoff succeeded, sshd
+  ring-3 accept loop reached), L4a `[ok]` (sshd dispatched the deferred FS-exec
+  for `/usr/bin/simple /hello.spl`, which resolved, streamed, and mapped the
+  payload into a ring-3 address space, entered user mode at the correct RIP)
+  — but L4b `[MISS]`: the process exits `rc=70` with no
+  `"hello from simple on simpleos"` output and no fault/crash line logged
+  before the exit. **AC-6 status: STILL NOT PROVEN**, but materially closer —
+  the install-image + boot-chain + FS-exec-spawn path is now fully verified
+  working; the remaining gap is isolated to the in-guest interpreter process
+  itself exiting early. Full writeup, serial transcripts, and file list:
+  `doc/08_tracking/bug/simpleos_freestanding_kernel_elf32_wrap_and_weak_gate_overbroad_2026-08-06.md`.
+  Next step: root-cause the rc=70 exit (candidates: interpreter startup ABI
+  mismatch consistent with the `deployed_selfhost_env_set_miscompile_segv`
+  family though that's a segv not a clean exit; or a now-exercised weak
+  ENOSYS syscall stub from fix #2 causing an early clean bail before the
+  first print) — not chased further this session given scope.

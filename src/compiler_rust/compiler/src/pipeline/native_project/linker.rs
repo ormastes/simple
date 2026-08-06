@@ -2289,7 +2289,25 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
         let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
 
         if output_result.status.success() {
-            if (triple.contains("x86_64") || triple.contains("i686")) && !boot_objects.is_empty() {
+            // Multiboot1-over-BIOS/legacy QEMU `-kernel` boot chains (e.g. the
+            // SimpleOS-WM fullscreen showcase harness,
+            // check-simpleos-wm-fullscreen-evidence.shs) require a 32-bit
+            // ELF/EM_386 multiboot image — see
+            // doc/08_tracking/bug/simpleos_x86_64_kernel_links_as_elf32_em386_2026-07-25.md.
+            // The OVMF-pflash + GRUB-EFI + multiboot1 board-proxy chain (the
+            // default, board-runnable path — see .claude/rules/board-runnable.md)
+            // needs the OPPOSITE: GRUB-EFI's multiboot module accepts ELF64
+            // natively and check-simpleos-x86-kernel-elf.shs enforces ELF64 for
+            // it. This downgrade must therefore be opt-in, not automatic on
+            // "x86_64 + has boot objects" (every x86_64 freestanding kernel has
+            // boot objects via crt0.s, so that heuristic silently broke every
+            // OVMF/GRUB-EFI kernel once a working objcopy landed on PATH).
+            let want_elf32_multiboot_wrap =
+                std::env::var("SIMPLE_FREESTANDING_ELF32_MULTIBOOT_WRAP").as_deref() == Ok("1");
+            if want_elf32_multiboot_wrap
+                && (triple.contains("x86_64") || triple.contains("i686"))
+                && !boot_objects.is_empty()
+            {
                 let elf64 = self.output.with_extension("elf64");
                 let _ = std::fs::rename(&self.output, &elf64);
                 let objcopy_bin = ["llvm-objcopy", "gobjcopy", "objcopy"]

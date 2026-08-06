@@ -75,10 +75,26 @@ END { exit found ? 0 : 1 }
 
 validate_symbols() {
     symbols=$1
-    printf '%s\n' "$symbols" | awk '
+    # A defined-weak-symbol final binding is the expected shape of a freestanding
+    # kernel build's boot-side fallback shims (see
+    # examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c "Wave
+    # 10B: spl_handle_* weak shims"): entry-closure builds that don't pull in
+    # the full src/os/kernel/abi/syscall_shim*.spl family legitimately keep
+    # those __attribute__((weak)) C fallbacks (and their Simple-side qualified
+    # aliases created by the bare<->qualified defsym bridge in
+    # native_project/linker.rs) as the only definition. That is the SAME
+    # deliberately-incomplete-build contract SIMPLE_ALLOW_FREESTANDING_STUBS=1
+    # already signals for FABRICATED-NEW symbols, so honor it here too instead
+    # of unconditionally rejecting every freestanding kernel that hasn't linked
+    # in every syscall handler yet. The strong-undefined-symbol check below is
+    # NOT relaxed by this flag — a truly missing symbol is still a hard link
+    # defect, not a documented incompleteness.
+    if [ "${SIMPLE_ALLOW_FREESTANDING_STUBS:-0}" != "1" ]; then
+        printf '%s\n' "$symbols" | awk '
 $5 == "WEAK" && $7 != "UND" { bad = 1 }
 END { exit bad ? 1 : 0 }
 ' || fail "kernel contains a defined weak symbol"
+    fi
     printf '%s\n' "$symbols" | awk '
 $5 == "GLOBAL" && $7 == "UND" { bad = 1 }
 END { exit bad ? 1 : 0 }
@@ -120,11 +136,17 @@ run_self_test() {
     if (validate_program_headers '  LOAD 0x0 0x8000000 0x8000000 0x1000 0x2000 R 0x1000' 0x800001c) >/dev/null 2>&1; then
         fail "self-test accepted a non-executable entry segment"
     fi
-    if (validate_symbols '     1: 000000000800001c 0 FUNC WEAK DEFAULT 1 weak_fn') >/dev/null 2>&1; then
+    if (SIMPLE_ALLOW_FREESTANDING_STUBS=0 validate_symbols '     1: 000000000800001c 0 FUNC WEAK DEFAULT 1 weak_fn') >/dev/null 2>&1; then
         fail "self-test accepted a defined weak symbol"
+    fi
+    if ! (SIMPLE_ALLOW_FREESTANDING_STUBS=1 validate_symbols '     1: 000000000800001c 0 FUNC WEAK DEFAULT 1 weak_fn') >/dev/null 2>&1; then
+        fail "self-test rejected a defined weak symbol under SIMPLE_ALLOW_FREESTANDING_STUBS=1"
     fi
     if (validate_symbols '     1: 0000000000000000 0 NOTYPE GLOBAL DEFAULT UND missing_fn') >/dev/null 2>&1; then
         fail "self-test accepted a strong undefined symbol"
+    fi
+    if (SIMPLE_ALLOW_FREESTANDING_STUBS=1 validate_symbols '     1: 0000000000000000 0 NOTYPE GLOBAL DEFAULT UND missing_fn') >/dev/null 2>&1; then
+        fail "self-test accepted a strong undefined symbol even under SIMPLE_ALLOW_FREESTANDING_STUBS=1"
     fi
     echo "simpleos_x86_kernel_elf_self_test=pass"
 }
