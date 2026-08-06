@@ -3,9 +3,7 @@
 - **Date:** 2026-08-06
 - **Severity:** critical — this is the current Stage 3 self-host blocker (#5),
   reached only after blockers #1-#4 are in place.
-- **Status:** root-caused to machine-code level with a gdb backtrace + objdump
-  + ELF section evidence. **NOT fixed** — the defective code generator is the
-  **Rust seed**, not any `.spl` file (see "Fix layer / scope decision").
+- **Status:** root-caused to machine-code level (gdb + objdump + ELF), FIXED in `.spl` as a two-line workaround; the underlying Rust-seed fail-open remains open. RED/GREEN + sabotage below.
 - **Not** the same defect as
   `mir_lowering_codegen_error_first_call_zero_core_dump_2026-08-06.md`
   (that one is a `call 0` from an unresolved builtin in the CodegenError
@@ -110,61 +108,102 @@ Rust seed, `src/compiler_rust/compiler/src/pipeline/native_project/compiler.rs`
   owner therefore has no native object header".
 - The `owner_name: None` arm likewise forces `Some(false)` (:1707).
 
-Both of those are **fail-open**: an owner the pass could not resolve is
-silently declared header-less, and every field access through it is
-off-by-one-slot. `driver_bootstrap.spl` imports `MirToLlvm` through a
-**re-export facade** (`use compiler.backend.llvm_backend.{MirToLlvm, ...}`,
-:12) while the class is actually defined in
-`compiler.backend.backend._MirToLlvm.class_def` — so the owner key the pass
-derives there does not match the one `vtable_impls`/`StructInit` derived in the
-defining module, and the fallback picks "no vtable".
+Both of those are **fail-open**: an owner the pass cannot name is silently
+declared header-less, and every field access through it is off-by-one-slot.
+
+**Which branch fires was measured, not guessed.** In the *same source file*,
+`bootstrap_emit_llvm_trailer` reads `translator.unknown_func_decls` (field
+index 19) at `0xa0(%rbx)` = `19*8 + 8` and `translator.defined_func_names`
+(index 20) at `0xa8(%rbx)` = `20*8 + 8` — both **vtable-aware and correct**.
+Same file, same imports, same class. So the import path is NOT the
+discriminator, and the "re-export facade" hypothesis is refuted.
+
+The actual discriminator is **how the receiver local got its type**:
+
+| receiver | binding | `owner_name` at MIR lowering | offset |
+|---|---|---|---|
+| `bootstrap_emit_llvm_trailer(translator: MirToLlvm)` | typed **parameter** | `Some("MirToLlvm")` -> resolves | `+8` correct |
+| `bootstrap_emit_real_llvm_object`: `var translator = MirToLlvm.create(...)` | local **inferred from a `static fn` return** | `None` -> forced `Some(false)` | `0` WRONG |
+
+`lowering_expr_struct.rs:275` derives `owner_name` from
+`type_registry.get_type_name(receiver_ty)`. A local whose type came from a
+static-constructor return carries no named type there, so `owner_name` is
+`None`, and the `owner_name: None` arm at :1707 forces `owner_has_vtable =
+Some(false)` — guessing "no header" for a class that has one.
 
 This is structurally the SAME shape as blocker #4 (`unresolved type: ByteOrder`):
-**the generated code depends on HOW a name was imported, not on what the code
-does with it.**
+**the generated code depends on HOW a name was bound, not on what the code does
+with it.**
 
-### Blast radius (larger than the one crash)
+### Blast radius
 
-Every `translator.<field>` access in `driver_bootstrap.spl` is shifted by one
-slot, not just `.builder`: `translator.unknown_func_decls`,
-`translator.defined_func_names`, `translator.builder.build()`, and the reads in
-`bootstrap_emit_llvm_trailer`. Only `.builder` (field index 0) crashes, because
-only it lands on the RELRO vtable pointer; the rest read a neighbouring field's
-value **silently**. A fix that only rewrites the crashing call site would
-convert a loud SIGSEGV into a silently wrong LLVM module.
+Measured, not inferred: only the accesses in `bootstrap_emit_real_llvm_object`
+and `bootstrap_emit_real_llvm_module_object` (the two functions binding
+`translator` from `MirToLlvm.create(...)`) are shifted. The typed-parameter
+reads in `bootstrap_emit_llvm_trailer` are correct. Of the shifted ones, only
+field index 0 (`.builder`) crashes, because only it lands on the RELRO vtable
+pointer; the others would read a neighbouring field **silently**.
 
-## Fix layer / scope decision (why this is NOT fixed here)
+## Fix applied
 
-The crashing binary is **stage2**, whose machine code was produced by the
-**Rust seed** (`build_stage2.sh` runs the seed with
-`SIMPLE_NATIVE_BUILD_RUST=1`). No `.spl` edit can change stage2's behaviour on
-this cycle. The correct-layer fix is therefore in the Rust seed's native-project
-layout pass, at the two fail-open branches above — most likely: consult the
-`all_mangled` bare-name suffix index (the logic the `ambiguous_names` branch
-already implements at :1668-1681) *before* defaulting to `false`, and make a
-genuinely unresolvable class-typed owner **fail closed** (an `Err`) instead of
-guessing a layout.
+`src/compiler/80.driver/driver_bootstrap.spl:328,369` — give the local the
+explicit type its sibling function's parameter already has:
 
-Two options were considered and **rejected**:
+```
+var translator: MirToLlvm = MirToLlvm.create("app.cli.bootstrap_main", CodegenTarget.Host, nil)
+```
 
-- *"Add the missing import to `driver_bootstrap.spl` so the layout agrees."*
-  Rejected: layout depending on imports is the bug; exploiting it is a
-  cover-up that silently un-fixes itself on any import reorder.
-- *"Wrap the access in a method on `MirToLlvm`."* Rejected: it fixes only
-  `.builder` and leaves the other shifted accesses reading wrong fields
-  silently.
+This is not an import-order trick: it makes the receiver's named type available
+to `type_registry.get_type_name`, which is precisely the input the layout pass
+needs and the same input a typed parameter already supplies. Two lines, no
+behavioural change other than the layout decision.
 
-Handing the seed change back for scoping rather than implementing it silently:
-it touches cross-module owner resolution in the seed, requires a seed rebuild
-(which would replace the pinned `stage2-runtime-authority` seed), and the
-"fix `.spl` not Rust" rule cannot apply to a defect in the seed's own code
-generator.
+**It is a workaround for a real Rust-seed defect, not the root fix.** stage2's
+machine code is produced by the seed (`build_stage2.sh` runs the seed with
+`SIMPLE_NATIVE_BUILD_RUST=1`), so the fail-open at
+`native_project/compiler.rs:1707` is still live and will mis-lower any *other*
+field access on a vtable-bearing class through an un-named local. The correct
+root fix is in that pass: an unresolvable **class-typed** owner must fail
+closed (an `Err`) rather than being guessed as header-less, and/or
+`owner_has_vtable` should be resolved from the receiver's MIR type rather than
+from a name that inference may not have. Not done here: it requires a seed
+rebuild, which would replace the pinned `stage2-runtime-authority` seed that
+every lane measures against.
 
-**Second, separate finding to check:** the pure-Simple compiler's own
+**Second, separate finding, not audited here:** the pure-Simple compiler's own
 field-offset lowering (`src/compiler/50.mir`, `src/compiler/70.backend`) mirrors
-this seed logic and very likely carries the same visibility-dependent fallback.
-That does not cause the present crash (stage2 is seed-built) but would
-reproduce it from stage3 onward. Not audited here.
+this seed logic and may carry the same fallback. It cannot cause the present
+crash (stage2 is seed-built) but would reproduce it from stage3 onward.
+
+## RED / GREEN (FIX1 and FIX2 differ ONLY by these two lines)
+
+| | stage2 | machine code at the `.builder` read | Stage 3 result |
+|---|---|---|---|
+| RED | `FIX1` | `0x705d8e: mov (%rbx),%rdi` | **exit 139**, SIGSEGV, core dumped, 394 s — reproduced **2/2** (`FIX1RUN`, `GDBRUN1`, `GDBRUN2`) |
+| GREEN | `FIX2` | `0x705d9e: mov 0x8(%rbx),%rdi` | **exit 1**, no signal, 393 s |
+
+`FIX1` is the identical tree with the annotation absent, so it doubles as the
+sabotage pass: removing the two annotations restores the exact SIGSEGV at the
+exact address.
+
+Stage 3 now runs well past this wall: it emits the module header, translates
+**5,674** bootstrap MIR functions and **86** statics, and writes a 5.9 MB
+`.ll`.
+
+## Next blocker (#6) — distinct, characterised separately
+
+`llc` rejects the emitted IR:
+
+```
+llc: error: unable to get target for 'unknown-linux-<enum@0x27c1498b0>'
+```
+
+The `target triple` line built in `emit_module_header`
+(`llvm_ir_builder.spl:126`) renders with an **empty `arch`** and an `env` that
+printed as a raw enum handle instead of text — i.e. `LlvmTargetTriple`'s scalar
+fields are not surviving the way that function reconstructs them. That is a
+text/enum rendering defect in the backend, unrelated to object layout. Not
+investigated here.
 
 ## Reproduction
 
