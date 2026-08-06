@@ -178,6 +178,36 @@ Load-bearing facts:
 - Physical-board GPU display evidence (virtio-gpu is a QEMU device; gap filed per
   `.claude/rules/board-runnable.md`).
 
+## Traps found during implementation (propagate to anyone touching these)
+- **Scroll assertions pass vacuously.** Neither the `max_height` prop nor
+  `with_height` on a scroll container creates overflow: layout gives the container
+  the parent's spare height (186px) then **shrinks its children to fit** (rows
+  measured 2–10px). `_scroll_max_offset` stays 0, the panel silently refuses to
+  scroll, and every scroll assertion passes against 0. **Fix: pin each ROW's height**
+  (`SC_ROW_H=24`). Any host or spec doing scroll work needs this.
+- `match` on a `u8` scrutinee does **not** match integer-literal patterns — every arm
+  falls through to `case _`. This had silently broken the entire PS/2 keyboard
+  (`scancode_to_key` returned `Key.Unknown` for every key). Widen to `i64` first;
+  `virtio_input_ops.spl:146` notes the same sidestep for evdev.
+- Three plan-doc signatures were wrong vs source: `widget_scrollbar_pointer_move`
+  takes 4 args (no `px`); `widget_scrollbar_pointer_down` returns `text`, not bool;
+  `draw_ir_v2_to_v3` is single-arg.
+- `node_rect` runs a full `compute_layout` — never call it per coordinate. The
+  interpreter's 10M-op budget is the binding constraint on showcase tree size.
+- `ScreenHost` lives in its own `screen_host.spl`, NOT `backend.spl`: putting it in
+  `backend.spl` would drag `draw_ir_v3` transitively into all 8 `RenderBackend`
+  importers, including the two OS-side files.
+
+## Immediate follow-up (ready to do, not yet done)
+`key_code.spl` now exists with the canonical VK/W3C space, but
+`host_input_event.spl:22-27` still carries the "code space is UNASSIGNED / stopgap"
+comment and `host_key_name` has not been delegated to `canon_key_name`. Wire them
+together and delete the stopgap note. Then route each producer through its mapper
+(`ps2_set1_to_canon`, `evdev_to_canon`, `winit_keycode_to_canon`,
+`sdl_keysym_to_canon`) — note `ps2_keyboard.scancode_to_key` covers only 0x01–0x39
+and needs the E0-prefixed block, which requires a 16-bit parameter (`0xE000|byte`),
+and the 4 duplicate SDL `parse_virtual_key` copies should call the shared mapper.
+
 ## Unowned gaps (cross-review; assign before the AC they gate can pass)
 - **Key-code vocabulary has no owner.** Three producers (PS/2 scancodes, SDL keysyms,
   evdev codes) in three different code spaces feed one `Key(code)` field. This
