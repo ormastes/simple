@@ -1499,3 +1499,136 @@ template for the matching Rust side it will also need.
 Hazards 2 (`_bootstrap_mir_functions` retaining `MirFunction`s past codegen) and
 4 (`MirFunction.name` sharing heap strings with HIR/AST and the SymbolTable) are
 untouched and remain as described in the previous update.
+
+## UPDATE 2026-08-06 (third session): step 4's C primitives now EXIST, and the
+## driver eviction path STILL CANNOT USE THEM. Wiring one
+## up would reclaim ~0.1% of the target memory while introducing a
+## use-after-free. MEASURED, not reasoned: `src/runtime/test/
+## rt_driver_eviction_reclaim_selfcheck.c`.
+
+`92b09df4583` landed `rt_dict_free_deep` and `rt_free_deep` in the C runtime,
+closing the "no dict-free primitive at all" half of the previous update's
+blocker. Their refusal discipline was re-verified against the step-2/3 contract
+and is intact: one shared planner with `rt_array_free_deep`
+(`runtime_native.c:5364`), one `seen` set spanning every kind, keys classified
+exactly like values (`:5416`), only `occupied==1` slots followed, and
+`rt_core_deep_free_classify` (`:5331`) gating every dereference on registry
+membership with a catch-all `REFUSE`.
+
+So the primitives are correct. The driver still cannot call them, for a reason
+the earlier updates had not isolated.
+
+### The measurement
+
+All four numbers below come from one probe built against the real C runtime
+(build line in the file's header comment; it links `src/runtime/*.c`, not a
+mock). N=1000 entries.
+
+| probe | shape | verdict | delta_free |
+|-------|-------|---------|------------|
+| P0 RED | `self.modules = {}` (today's eviction) | n/a | **0** of 2001 |
+| P1 | `Dict<text, text>` | 1 | **2001** |
+| P2 | `Dict<text, class instance>` | **1** | **1001** of 2001 |
+| P3 | keys aliased from OUTSIDE | **1** | frees a live alias |
+| P4 | `rt_free_deep(class instance)` | 0 | refuses |
+
+**P0 confirms the RED.** `evict_ast()` / `evict_hir()` / `evict_mir_module()`
+reclaim exactly **0** of 2001 allocations. With no GC and no refcounting,
+dropping the reference is a pure no-op, as this bug has assumed throughout. The
+replacement `{}` costs one *additional* registration, so eviction today is very
+slightly net-negative.
+
+**P1 confirms the primitive works**, at exactly the rigor step 2 set:
+`verdict=1, delta_free=2001` = 1000 keys + 1000 values + the dict header.
+
+**P2 is the finding.** The driver's three eviction targets are, without
+exception, `Dict<text, CLASS INSTANCE>`:
+
+- `driver_types.spl:66`  `modules: Dict<text, ParserModule>`
+- `driver_types.spl:68`  `hir_modules: Dict<text, HirModule>`
+- `driver_types.spl:70`  `mir_modules: Dict<text, MirModule>`
+
+On this lane a class/struct instance is an **untagged, unregistered,
+header-less `rt_alloc` block** — `runtime.h` says so in `rt_free_deep`'s own
+contract comment: "not identifiable at runtime at all". `rt_free_deep` therefore
+correctly refuses one as a ROOT (P4, verdict=0).
+
+But in ELEMENT position the same pointer takes a different path.
+`rt_core_deep_free_classify` tests `(raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP`
+and returns `LEAF`. A malloc block is 16-aligned, so `raw & 7 == 0 ==
+RT_VALUE_TAG_INT` — **byte-for-byte indistinguishable from a tagged immediate.**
+The classifier cannot refuse what it cannot see, so it classifies every
+`ParserModule` / `HirModule` / `MirModule` as a leaf and the call **ACCEPTS**.
+
+The result is the worst available combination:
+
+- `verdict=1` — the caller is told the whole structure was reclaimed.
+- `delta_free=1001` — only the 1000 key strings and the dict header came back.
+- The 1000 class instances, **which hold essentially all of the memory this bug
+  is about** (every AST/HIR/MIR node hangs off them), are silently STRANDED.
+
+The all-or-nothing contract is not violated — it is satisfied vacuously, because
+the planner never learns there was anything else to free. This is not a bug in
+`rt_dict_free_deep`; it is the ceiling of what any deep-free can do on a lane
+where the objects carrying the memory are unidentifiable.
+
+**P3 confirms hazard 4 empirically, and it is worse than "it refuses."** The
+`seen` set only spans nodes the planner TRAVERSES, so an alias held from OUTSIDE
+the structure is undetectable by construction. `MirFunction.name` /
+`export_name` are the same heap strings as the HIR/AST/SymbolTable copies, which
+live outside `mir_modules`; hazard 2's `_bootstrap_mir_functions` global is the
+same story. The probe's externally-held key survives the call as a dangling
+pointer: `verdict=1`, and the outside holder now names freed storage. Step 2
+predicted exactly this for arrays ("cannot detect an alias from OUTSIDE the
+structure, so it would accept the call and corrupt the keys"); it is now
+measured for dicts.
+
+### Conclusion: step 4 is landed at the runtime tier and BLOCKED at the driver tier
+
+No call site was added to `driver_types.spl`. Adding one would, per the numbers
+above, reclaim ~1001 of 2001 registrations — **none of them the module objects**
+— while freeing key strings that HIR, the AST and the SymbolTable still point
+at. That trades a no-op for a use-after-free and buys ~0.1% of the target
+memory. A refusing free that reclaims nothing is not a fix; an ACCEPTING free
+that reclaims the wrong 0.1% and corrupts the rest is strictly worse than the
+no-op it replaces.
+
+There is no sabotage check to report because there is no GREEN: P1 vs P2 is the
+discriminating control — same harness, same N, only the value shape differs, and
+that alone moves `delta_free` from 2001 to 1001.
+
+### What would actually unblock it (in order)
+
+1. **Make class instances identifiable.** Until a `ParserModule`/`HirModule`/
+   `MirModule` can be recognised at runtime, no deep-free can reach the memory.
+   This is a codegen/representation change (a header or a registry for
+   class allocations), not a driver or runtime-primitive change. It is the ONLY
+   step that changes the P2 number.
+2. **Resolve hazards 2 and 4 first anyway** — they are prerequisites, not
+   side-quests. Even with identifiable objects, P3 shows the planner cannot see
+   an external alias, so `_bootstrap_mir_functions` must be cleared and
+   `MirFunction.name` must own its strings (or the strings must be interned and
+   thus refused) BEFORE any call site is added.
+3. Only then is a `driver_types.spl` call site measurable.
+
+Hazards 2 and 4 remain UNRESOLVED. Steps 1-3 remain landed. Step 4's C runtime
+primitives are landed (`92b09df4583`); step 4's *driver call site* is now
+understood to be blocked on the object-identifiability gap above, which is a
+new, separately-trackable item and NOT something the driver tier can fix.
+
+### State-of-the-tree note for whoever picks this up
+
+The multi-registry `.spl`/Rust wiring that would make `rt_dict_free_deep` and
+`rt_free_deep` *callable from Simple* (interpreter dispatch table, Cranelift ABI
+spec table, ELF symbol resolution, the three LLVM emitters + Cranelift adapter,
+and the Rust twin in `value/collections.rs`) exists in the shared working copy
+as ANOTHER LANE'S UNCOMMITTED WORK and is **not at `origin/main`** as of this
+update — verified by `git grep rt_dict_free_deep origin/main`, which finds only
+this document. That wiring is deliberately NOT included in this commit; it is
+not this session's to land.
+
+This does not affect any conclusion above. Every number in the table was
+measured against the **C runtime directly**, which is what the self-hosted
+binary links, so the probe is independent of whether the `.spl` bridge has
+landed. It does mean that a future session should not assume the extern is
+callable from `.spl` without re-checking `origin/main` first.

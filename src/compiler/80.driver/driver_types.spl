@@ -229,6 +229,28 @@ class CompileContext:
             ))
         self.sources = metadata
 
+    # The three evictions below drop references only. With no GC and no
+    # refcounting that reclaims NOTHING -- measured at 0 of 2001 allocations by
+    # src/runtime/test/rt_driver_eviction_reclaim_selfcheck.c (probe P0).
+    #
+    # Do NOT "fix" this by calling rt_dict_free_deep here. That was measured
+    # too, and it is worse than the no-op. All three targets are
+    # Dict<text, CLASS INSTANCE>, and a class instance on this lane is an
+    # untagged, unregistered, header-less rt_alloc block -- byte-for-byte
+    # indistinguishable from a tagged immediate. The planner classifies each
+    # module object as a LEAF, so the call ACCEPTS (verdict=1) but frees only
+    # the key strings and the dict header: 1001 of 2001, none of them the
+    # module objects that hold the memory (probe P2). Worse, those key strings
+    # are aliased from OUTSIDE the dict by HIR/AST/SymbolTable and by
+    # _bootstrap_mir_functions (hazards 2 and 4), and the planner's `seen` set
+    # spans only nodes it traverses -- so an external alias is undetectable and
+    # gets freed out from under its live holder (probe P3).
+    #
+    # Unblocking this needs class instances to be identifiable at runtime, a
+    # codegen/representation change, NOT a driver change. Full numbers:
+    # doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md
+    # (UPDATE 2026-08-06, third session).
+
     # After HIR lowering, AST modules are no longer needed.
     me evict_ast():
         self.modules = {}
