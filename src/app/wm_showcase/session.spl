@@ -1,4 +1,4 @@
-# WM Showcase Session — three real windows, a taskbar derived from them.
+# WM Showcase Session — five real windows, a taskbar derived from them.
 #
 # MDSOC outer layer: this module owns the WM session (compositor + window
 # lifecycle) and hands every business decision to the small pure helpers
@@ -14,7 +14,13 @@
 #   * std.gc_async_mut.gpu.browser_engine.simple_web_renderer — the Simple Web
 #     HTML render path both the GUI and web windows go through
 #   * common.ui.wm_full_stack_demo                        — the shared demo
-#     widget tree and 2D scene, reused verbatim for two of the three windows.
+#     widget tree and 2D scene, reused verbatim for two of the five windows.
+#   * app.browser.render_adapter                          — Simple Browser
+#     window's real HTML (browser chrome + Hello World home page)
+#   * app.terminal.render_adapter                          — Simple Terminal
+#     window's real HTML (terminal chrome + subcommand reference). Both
+#     adapters use the shared app.ui.render.types contract ~20 sibling apps
+#     already implement (see doc/00_llm_process/feature_expert/browser/skill.md).
 #
 # Web window producer note (2026-08-05): the WEB window's content is produced
 # by the SAME `simple_web_render_html_to_readback_result_with_engine2d_backend`
@@ -53,6 +59,9 @@ use common.ui.pixel_surface_content_frame.{pixel_surface_content_frame}
 use common.ui.wm_full_stack_demo.{WmDemo2dState, wm_full_stack_demo_tree}
 use common.ui.state.{init_state}
 use app.ui.render.html_widgets.{render_html_tree}
+use app.ui.render.types.{RenderConfig}
+use app.browser.render_adapter.{render_browser_html}
+use app.terminal.render_adapter.{render_terminal_html}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_resolved_engine2d_backend_name,
     simple_web_render_html_to_readback_result_with_engine2d_backend}
@@ -68,16 +77,18 @@ val WM_SHOWCASE_RENDER_BUDGET_FLOOR_MS: i64 = 900000
 
 # Desktop and window sizes are bounded by the CPU rasteriser, not by taste.
 # The Simple Web layout renderer runs interpreted here and costs minutes at
-# a few hundred pixels square, so the two HTML-backed windows are sized to the
-# same 96x72 content the sibling web showcase suite uses. The 2D window is a
-# pure pixel producer and can afford the full 240x90 demo scene.
+# a few hundred pixels square, so all four HTML-backed windows are sized to
+# the same 96x72 content the sibling web showcase suite uses. The 2D window
+# is a pure pixel producer and can afford the full 240x90 demo scene.
 val WM_SHOWCASE_DESKTOP_W: i32 = 480
-val WM_SHOWCASE_DESKTOP_H: i32 = 360
+val WM_SHOWCASE_DESKTOP_H: i32 = 430
 val WM_SHOWCASE_HTML_CONTENT_W: i32 = 96
 val WM_SHOWCASE_HTML_CONTENT_H: i32 = 72
 
 val WM_SHOWCASE_KEY_GUI: text = "gui"
 val WM_SHOWCASE_KEY_WEB: text = "web"
+val WM_SHOWCASE_KEY_BROWSER: text = "browser"
+val WM_SHOWCASE_KEY_TERMINAL: text = "terminal"
 val WM_SHOWCASE_KEY_2D: text = "2d"
 
 # Chrome geometry of a HostCompositor window, measured against the running
@@ -98,7 +109,7 @@ struct WmShowcaseWindowSpec:
     h: i32
 
 fn wm_showcase_window_specs() -> [WmShowcaseWindowSpec]:
-    """The three declared showcase windows. Laid out without overlap so each
+    """The five declared showcase windows. Laid out without overlap so each
     window's content rect can be read back unoccluded from the composite."""
     [
         WmShowcaseWindowSpec(
@@ -116,9 +127,23 @@ fn wm_showcase_window_specs() -> [WmShowcaseWindowSpec]:
             h: WM_SHOWCASE_HTML_CONTENT_H + 36
         ),
         WmShowcaseWindowSpec(
+            key: WM_SHOWCASE_KEY_BROWSER, kind: "browser",
+            title: "Simple Browser", app_id: "org.simple.showcase.browser",
+            x: 16, y: 164,
+            w: WM_SHOWCASE_HTML_CONTENT_W + 8,
+            h: WM_SHOWCASE_HTML_CONTENT_H + 36
+        ),
+        WmShowcaseWindowSpec(
+            key: WM_SHOWCASE_KEY_TERMINAL, kind: "terminal",
+            title: "Simple Terminal", app_id: "org.simple.showcase.terminal",
+            x: 136, y: 164,
+            w: WM_SHOWCASE_HTML_CONTENT_W + 8,
+            h: WM_SHOWCASE_HTML_CONTENT_H + 36
+        ),
+        WmShowcaseWindowSpec(
             key: WM_SHOWCASE_KEY_2D, kind: "pixel",
             title: "2D Surface Showcase", app_id: "org.simple.showcase.2d",
-            x: 16, y: 164, w: 248, h: 126
+            x: 16, y: 288, w: 248, h: 126
         ),
     ]
 
@@ -182,6 +207,22 @@ fn wm_showcase_web_html() -> text:
         "<title>Web Render Showcase</title>\n<style>" +
         _showcase_web_css() + "</style>\n</head>\n<body>" +
         wm_showcase_web_body_html() + "</body>\n</html>"
+
+# `render_browser_html`/`render_terminal_html` already return a complete
+# document (doctype/head/style/body) via `app.ui.render.html.html_page` — no
+# extra wrapping needed, unlike the two hand-rolled pages above.
+fn wm_showcase_browser_html() -> text:
+    """Simple Browser's real render_adapter output at its default URL
+    (`simple://home`, the Hello World page) — the SAME app.ui.render
+    contract every sibling app (terminal, ide tools, ...) uses. Routed
+    through the identical cascade + layout + paint path as the other
+    HTML-backed windows; nothing about this window is a pixel shortcut."""
+    render_browser_html(RenderConfig.html_export()).html_output
+
+fn wm_showcase_terminal_html() -> text:
+    """Simple Terminal's real render_adapter output — same contract,
+    same rendering path as the browser window above."""
+    render_terminal_html(RenderConfig.html_export()).html_output
 
 val WM_SHOWCASE_2D_HOME_X: i32 = 24
 val WM_SHOWCASE_2D_HOME_Y: i32 = 24
@@ -576,6 +617,30 @@ fn _produce_frame(
             ),
             reason: "web-frame-rejected",
             web_pixels: pixels
+        )
+    if spec.kind == "browser":
+        val result = simple_web_render_html_to_readback_result_with_engine2d_backend(
+            wm_showcase_browser_html(), content_w, content_h, "auto"
+        )
+        return _ProducedFrame(
+            frame: wm_gui_content_frame_from_pixels(
+                window_key, "", 0, 0, content_w, content_h,
+                result.readback.pixels, revision, revision
+            ),
+            reason: "browser-frame-rejected",
+            web_pixels: []
+        )
+    if spec.kind == "terminal":
+        val result = simple_web_render_html_to_readback_result_with_engine2d_backend(
+            wm_showcase_terminal_html(), content_w, content_h, "auto"
+        )
+        return _ProducedFrame(
+            frame: wm_gui_content_frame_from_pixels(
+                window_key, "", 0, 0, content_w, content_h,
+                result.readback.pixels, revision, revision
+            ),
+            reason: "terminal-frame-rejected",
+            web_pixels: []
         )
     val result = simple_web_render_html_to_readback_result_with_engine2d_backend(
         wm_showcase_gui_html(), content_w, content_h, "auto"

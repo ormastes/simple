@@ -85,6 +85,34 @@ Key paths:
 - **Operator guide:** `doc/07_guide/app/mcp/mcp.md`
 - **Plan trace:** `doc/03_plan/agent_tasks/llm_tooling_context_ponytail_mimic.md`
 
+## Simple Browser
+The hosted `app.ui.render`-contract browser app at `src/app/browser/` — same
+shared `RenderConfig`/`RenderResult` contract ~20 sibling apps use (terminal,
+office, dashboard, ...). `render_browser_html()` renders real browser chrome
+(tab strip, address bar, back/forward/reload controls) around the loaded
+page's own markup; the default page (`simple://home`) is a genuine Hello
+World document, not a placeholder. Consumed by the
+[WM Showcase](#wm-showcase)'s "Simple Browser" window, where its HTML output
+is fed through the same cascade + layout + paint render path every other
+showcase window uses — no pixel shortcut.
+
+Do not confuse with two other "browser" modules in this repo:
+`src/os/apps/simple_browser` (baremetal/freestanding-only, boots as a QEMU
+kernel directly — cannot run hosted) and `src/app/ui.browser` (a standalone
+winit-windowed GUI-widget-tree app with its own event loop, predates this
+one). See `doc/00_llm_process/feature_expert/browser/skill.md` for the full
+disambiguation.
+
+## WM Showcase
+`src/app/wm_showcase/` — a scripted `HostCompositor` session that opens
+several real windows (GUI widget tree, Simple Web HTML page, [Simple
+Browser](#simple-browser), Simple Terminal, a 2D pixel-surface scene),
+captures the composited desktop, and proves each window actually rendered
+via a byte-identical rect match against the composite (never a fabricated
+handle or hardcoded pixel fill). The taskbar is derived, not built — it
+projects from the compositor's own live window list, so closing a window
+necessarily changes it.
+
 ## Crate
 Package and module are used in many different meaning across different languages.
 Crate is simple.sdn exist deployment package unit.
