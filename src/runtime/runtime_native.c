@@ -5199,14 +5199,15 @@ void rt_array_free(SplArray* value) {
  *     the literal intern table, whose objects are handed to unrelated holders,
  *     so freeing one corrupts all of them).
  *   - a registered array element, recursively, under all of these same rules.
+ *   - a registered dict element, recursively (see rt_dict_free_deep below).
+ *     Dicts joined this tier on 2026-08-06; before that they were refused for
+ *     want of a free primitive.
  *
  * Everything else refuses the WHOLE call, in particular:
- *   - any HEAP-tagged element that is not a registered string or registered
- *     array. That set includes registered enums / closures / mutexes /
- *     heap-boxed f64 (owned, but with no free path here -- freeing the buffer
- *     would strand them), RtCoreDict (now registered, hence identifiable, but
- *     still refused here: it owns an entries buffer and has no free primitive,
- *     so freeing the array would strand it exactly as for the types above),
+ *   - any HEAP-tagged element that is not a registered string, registered
+ *     array or registered dict. That set includes registered enums / closures /
+ *     mutexes / heap-boxed f64 (owned, but with no free path here -- freeing
+ *     the buffer would strand them),
  *     foreign
  *     pointers, and raw i64 payloads that merely alias the tag bits. The last
  *     case is a FALSE refusal for a generic array carrying raw i64s >= 4096
@@ -5223,12 +5224,31 @@ void rt_array_free(SplArray* value) {
  * its string. The caller must own the whole subtree, not merely the root. The
  * refusals above shrink the blast radius; they do not remove that obligation.
  * Likewise not thread-safe against a concurrent free of the same objects.
+ *
+ * SECOND LIMIT, recorded 2026-08-06 because it is easy to misread the LEAF rule
+ * as "safe by construction": a class/struct INSTANCE is invisible to this
+ * classifier. On the C-native lane an instance is emitted as a bare
+ * `call ptr @rt_alloc(i64 n*8)` block (70.backend/.../aggregate_intrinsics.spl,
+ * the Aggregate/Struct lowering) -- it carries NO kind header, is NOT
+ * heap-tagged, and is NOT in any registry (rt_alloc only records a block while
+ * a transient array scope is active, runtime_native.c
+ * rt_core_transient_raw_register_state). Such a pointer is >= 4096 with low
+ * bits 0b000, so it lands in the FIRST branch below and classifies as LEAF --
+ * i.e. "nothing to free", which is true of the WORD but false of the block it
+ * points at. Freeing a container of instances therefore reclaims the container
+ * and IRREVERSIBLY strands every instance. This cannot be fixed inside the
+ * classifier: an untagged i64 is genuinely indistinguishable from an integer.
+ * It is fixable only upstream, by giving rt_alloc'd aggregates a kind header or
+ * an unconditional registration. Until then, a caller must not hand this
+ * primitive any structure whose leaves are object instances. See
+ * doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md
  */
 
 #define RT_CORE_DEEP_FREE_LEAF 0
 #define RT_CORE_DEEP_FREE_STRING 1
 #define RT_CORE_DEEP_FREE_ARRAY 2
 #define RT_CORE_DEEP_FREE_REFUSE 3
+#define RT_CORE_DEEP_FREE_DICT 4
 
 /* Bounds the planner's own memory; exceeding it refuses rather than grows. */
 #define RT_CORE_DEEP_FREE_MAX_NODES ((size_t)1 << 22)
@@ -5328,19 +5348,24 @@ static int rt_core_deep_free_classify(int64_t value, void** out_ptr) {
             *out_ptr = s;
             return RT_CORE_DEEP_FREE_STRING;
         }
+        if (kind == RT_VALUE_HEAP_DICT) {
+            /* Re-validate through rt_core_as_dict rather than trusting the kind
+             * byte alone -- same belt-and-braces the array branch above applies
+             * via rt_core_as_array. */
+            RtCoreDict* d = rt_core_as_dict((int64_t)raw);
+            if (!d) return RT_CORE_DEEP_FREE_REFUSE;
+            *out_ptr = d;
+            return RT_CORE_DEEP_FREE_DICT;
+        }
     }
     return RT_CORE_DEEP_FREE_REFUSE;
 }
 
-int64_t rt_array_free_deep(int64_t value) {
-    uintptr_t root_raw = (uintptr_t)value;
-    if (root_raw < 4096) return 0;
-    /* the root must be an explicitly heap-tagged, registered array; a string
-     * root belongs to rt_string_free, not here */
-    if ((root_raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;
-    RtCoreArray* root = rt_core_as_registered_array(value);
-    if (!root) return 0;
-
+/* Shared engine for rt_array_free_deep / rt_dict_free_deep / rt_free_deep.
+ * `root` is an already-validated registry member and `root_kind` is its
+ * RT_CORE_DEEP_FREE_* classification. Returns 1 if the entire reachable
+ * structure was reclaimed, 0 if the call refused and freed NOTHING. */
+static int64_t rt_core_deep_free_run(void* root, int root_kind) {
     RtCoreDeepFreePlan plan;
     plan.nodes = NULL;
     plan.len = 0;
@@ -5351,18 +5376,67 @@ int64_t rt_array_free_deep(int64_t value) {
 
     int refused = 0;
     if (rt_core_deep_free_seen_insert(&plan, (uintptr_t)root) != 1) refused = 1;
-    if (!refused && !rt_core_deep_free_plan_push(&plan, root, RT_CORE_DEEP_FREE_ARRAY)) refused = 1;
+    if (!refused && !rt_core_deep_free_plan_push(&plan, root, root_kind)) refused = 1;
 
     /* Phase 1: read-only breadth-first classification. plan.nodes doubles as
      * the worklist, so this is iterative -- a deeply nested structure cannot
-     * blow the C stack. */
+     * blow the C stack. One shared `seen` set spans ALL node kinds, so an alias
+     * that crosses a type boundary (the same string reachable from both an
+     * array element and a dict key) is caught exactly like a same-kind alias.
+     * That is why dict support lives in this one planner rather than in a
+     * separate primitive chained after it: two planners would each see a clean
+     * tree and between them double-free the shared node. */
     for (size_t i = 0; !refused && i < plan.len; i++) {
-        if (plan.nodes[i].kind != RT_CORE_DEEP_FREE_ARRAY) continue;
-        RtCoreArray* a = (RtCoreArray*)plan.nodes[i].ptr;
-        if (a->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) continue;
-        if (!a->data) continue;
-        const int64_t* slots = (const int64_t*)a->data;
-        for (int64_t k = 0; k < a->len; k++) {
+        /* Every child slot is funnelled through this lambda-shaped block so the
+         * array and dict walks cannot drift apart. */
+        int64_t inline_slots[2];
+        const int64_t* slots = NULL;
+        int64_t slot_count = 0;
+
+        if (plan.nodes[i].kind == RT_CORE_DEEP_FREE_ARRAY) {
+            RtCoreArray* a = (RtCoreArray*)plan.nodes[i].ptr;
+            if (a->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) continue;
+            if (!a->data) continue;
+            slots = (const int64_t*)a->data;
+            slot_count = a->len;
+        } else if (plan.nodes[i].kind != RT_CORE_DEEP_FREE_DICT) {
+            continue; /* strings are leaves */
+        }
+
+        if (plan.nodes[i].kind == RT_CORE_DEEP_FREE_DICT) {
+            RtCoreDict* d = (RtCoreDict*)plan.nodes[i].ptr;
+            if (!d->entries) continue;
+            /* Walk the whole slot table, not just `len` entries: empty and
+             * tombstoned slots carry stale key/value words that must NOT be
+             * followed, and occupied==1 is the only state whose words are live.
+             * Both a key and a value are ordinary tagged values, so the key
+             * gets exactly the same classification as the value -- a shared or
+             * interned string key refuses the call rather than being freed out
+             * from under the intern table. */
+            for (int64_t s = 0; s < d->cap && !refused; s++) {
+                RtCoreDictEntry* e = &d->entries[s];
+                if (e->occupied != 1) continue;
+                inline_slots[0] = e->key;
+                inline_slots[1] = e->value;
+                for (int k = 0; k < 2; k++) {
+                    void* child = NULL;
+                    int kind = rt_core_deep_free_classify(inline_slots[k], &child);
+                    if (kind == RT_CORE_DEEP_FREE_LEAF) continue;
+                    if (kind == RT_CORE_DEEP_FREE_REFUSE) { refused = 1; break; }
+                    if (rt_core_deep_free_seen_insert(&plan, (uintptr_t)child) != 1) {
+                        refused = 1;
+                        break;
+                    }
+                    if (!rt_core_deep_free_plan_push(&plan, child, kind)) {
+                        refused = 1;
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        for (int64_t k = 0; k < slot_count; k++) {
             void* child = NULL;
             int kind = rt_core_deep_free_classify(slots[k], &child);
             if (kind == RT_CORE_DEEP_FREE_LEAF) continue;
@@ -5393,6 +5467,12 @@ int64_t rt_array_free_deep(int64_t value) {
                     free(a->data);
                     free(a);
                 }
+            } else if (plan.nodes[i].kind == RT_CORE_DEEP_FREE_DICT) {
+                RtCoreDict* d = (RtCoreDict*)plan.nodes[i].ptr;
+                if (rt_core_unregister_immortal_ptr(d)) {
+                    free(d->entries);
+                    free(d);
+                }
             } else {
                 RtCoreString* s = (RtCoreString*)plan.nodes[i].ptr;
                 if (rt_core_unregister_string(s)) free(s);
@@ -5403,6 +5483,74 @@ int64_t rt_array_free_deep(int64_t value) {
     free(plan.nodes);
     free(plan.seen);
     return refused ? 0 : 1;
+}
+
+int64_t rt_array_free_deep(int64_t value) {
+    uintptr_t root_raw = (uintptr_t)value;
+    if (root_raw < 4096) return 0;
+    /* the root must be an explicitly heap-tagged, registered array; a string
+     * root belongs to rt_string_free, not here */
+    if ((root_raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;
+    RtCoreArray* root = rt_core_as_registered_array(value);
+    if (!root) return 0;
+    return rt_core_deep_free_run(root, RT_CORE_DEEP_FREE_ARRAY);
+}
+
+/* ===========================================================================
+ * rt_dict_free_deep -- deep (recursive) dict free
+ * ===========================================================================
+ *
+ * The dict-shaped counterpart of rt_array_free_deep, sharing its planner and
+ * therefore its contract CLAUSE FOR CLAUSE: two phases (read-only classify,
+ * then commit), all-or-nothing (a refusal frees NOTHING), every dereference
+ * gated on registry membership so a tag-aliasing raw i64 is never followed, and
+ * one `seen` pointer set that refuses on any internal alias or cycle.
+ *
+ * Dict-specific clauses:
+ *   - Keys are classified EXACTLY like values. A dict keyed by interned or
+ *     short-cache strings therefore refuses, which is the correct answer: those
+ *     strings belong to a process-wide table and freeing one corrupts every
+ *     other holder.
+ *   - Only occupied==1 slots are followed. Empty and tombstoned slots retain
+ *     stale key/value words from a previous occupant; following them would
+ *     free memory the dict no longer owns.
+ *   - The entries buffer is a flat calloc'd array of RtCoreDictEntry, freed in
+ *     phase 2 with the header, exactly as rt_array_free frees data + header.
+ *
+ * NOT provided, deliberately: a SHALLOW rt_dict_free. rt_array_free's shallow
+ * shape predates this contract and is kept only for compatibility; adding a new
+ * shallow dict free would hand callers a primitive whose only outcome on a dict
+ * of heap values is the irreversible strand the contract comment above argues
+ * against by name. Callers wanting shallow semantics can empty the dict first.
+ */
+int64_t rt_dict_free_deep(int64_t value) {
+    RtCoreDict* root = rt_core_as_dict(value);
+    if (!root) return 0;
+    return rt_core_deep_free_run(root, RT_CORE_DEEP_FREE_DICT);
+}
+
+/* Type-dispatching deep free. Accepts an array, a dict, or a non-shared
+ * registered string root and applies the same all-or-nothing contract; refuses
+ * anything else, including class/struct instances -- see the SECOND LIMIT note
+ * on rt_array_free_deep for why an instance is not even identifiable here.
+ *
+ * This exists because the structures that actually need reclaiming are
+ * heterogeneous nests (a Dict whose values are Dicts whose values hold arrays),
+ * so a caller at the root cannot know statically which primitive to call, and
+ * calling them in sequence would give each call its own `seen` set and lose the
+ * cross-structure alias detection that makes the whole thing safe. */
+int64_t rt_free_deep(int64_t value) {
+    uintptr_t raw = (uintptr_t)value;
+    if (raw < 4096) return 0;
+    if ((raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;
+    void* p = (void*)(raw & ~RT_VALUE_TAG_MASK);
+    if (!rt_core_is_registered_immortal_ptr(p)) return 0;
+    switch (rt_core_registered_object_kind(p)) {
+        case RT_VALUE_HEAP_ARRAY:  return rt_array_free_deep(value);
+        case RT_VALUE_HEAP_DICT:   return rt_dict_free_deep(value);
+        case RT_VALUE_HEAP_STRING: return rt_string_free(value);
+        default:                   return 0;
+    }
 }
 
 /* Free a heap string. Returns 1 if the object was reclaimed, 0 if it was

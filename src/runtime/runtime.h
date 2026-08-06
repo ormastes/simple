@@ -370,6 +370,17 @@ void      rt_array_free(SplArray* array);  /* shallow: preserves element handles
  * registered string or array, and any internal alias or cycle. See the contract
  * comment in runtime_native.c. */
 int64_t   rt_array_free_deep(int64_t value);
+/* Deep dict free. Same all-or-nothing, refuse-biased contract as
+ * rt_array_free_deep and the same shared planner: keys are classified exactly
+ * like values (so an interned/short-cache string key refuses the whole call),
+ * only occupied slots are followed, and any internal alias or cycle refuses.
+ * Returns 1 only if the ENTIRE structure was reclaimed, 0 if nothing was. */
+int64_t   rt_dict_free_deep(int64_t value);
+/* Type-dispatching deep free: array, dict, or non-shared registered string
+ * root. Refuses everything else -- including class/struct instances, which are
+ * untagged, unregistered, header-less rt_alloc blocks on this lane and are
+ * therefore not identifiable at runtime at all. */
+int64_t   rt_free_deep(int64_t value);
 SplArray* rt_byte_array_new(uint64_t cap);
 SplArray* rt_byte_array_new_len(uint64_t len);
 SplArray* rt_bytes_alloc(int64_t len);
