@@ -1234,6 +1234,54 @@ spl_i64 rt_volatile_read_u8(spl_i64 addr) {
 void rt_volatile_write_u8(spl_i64 addr, spl_i64 value) {
     rt_mmio_write_u8(addr, value);
 }
+/* rt_volatile_read/write_u16/u32/u64 and rt_load_barrier/rt_store_barrier:
+ * completing the rt_volatile_* family declared in src/runtime/runtime.h and
+ * implemented for the hosted build in
+ * src/runtime/runtime_native.c:4874-4906 (int64_t addr/value ABI, matching
+ * the `extern fn` declarations in src/lib/nogc_sync_mut/io/volatile_ops.spl).
+ * Only the u8 pair existed here before; the riscv64 kernel closure's
+ * os.kernel.boot.mmio_hardware module calls the u16/u32/u64 read/write and
+ * io.volatile_ops calls load_barrier(), all of which linked as undefined
+ * symbols until this fix. Bridged onto the existing rt_mmio_* primitives
+ * above (same pattern as the u8 pair) rather than reimplementing the raw
+ * volatile access, so there is exactly one MMIO access site per width.
+ * rt_load_barrier/rt_store_barrier are declared in runtime.h but were never
+ * implemented in EITHER runtime variant (hosted or freestanding) before this
+ * fix; they are directional fences with no allocator/heap dependency, so are
+ * safe to implement here as acquire/release barriers, matching the semantics
+ * documented in io/volatile_ops.spl ("load_barrier() - acquire fence",
+ * "store_barrier() - release fence"). */
+spl_i64 rt_volatile_read_u16(spl_i64 addr) {
+    return rt_mmio_read_u16(addr);
+}
+spl_i64 rt_volatile_read_u32(spl_i64 addr) {
+    return rt_mmio_read_u32(addr);
+}
+spl_i64 rt_volatile_read_u64(spl_i64 addr) {
+    return rt_mmio_read_u64(addr);
+}
+void rt_volatile_write_u16(spl_i64 addr, spl_i64 value) {
+    rt_mmio_write_u16(addr, value);
+}
+void rt_volatile_write_u32(spl_i64 addr, spl_i64 value) {
+    rt_mmio_write_u32(addr, value);
+}
+void rt_volatile_write_u64(spl_i64 addr, spl_i64 value) {
+    rt_mmio_write_u64(addr, value);
+}
+void rt_load_barrier(void) {
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+}
+void rt_store_barrier(void) {
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+}
+/* unsafe_addr_of: identity cast, no allocator/heap dependency — mirrors the
+ * hosted implementation exactly (src/runtime/runtime_native.c:4853,
+ * `return (uint64_t)value;`). Surfaced as undefined once the rt_volatile_*/
+ * rt_load_barrier fixes above let the linker get further into this closure. */
+spl_u64 unsafe_addr_of(spl_i64 value) {
+    return (spl_u64)value;
+}
 
 static void uart_put_byte(spl_u8 byte) {
     *(volatile spl_u8 *)0x10000000ULL = byte;

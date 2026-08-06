@@ -362,3 +362,105 @@ tracked item / dedicated pass rather than a rushed subset landing here.
 diagnosis is not preserved (temp build dir), but is trivially reproducible by
 rerunning the exact command in this doc and inspecting the kept objects path
 printed on link failure (`Link failed. Objects kept at: ...`).
+
+## FIXED 2026-08-06: `rt_volatile_read/write_u16/u32/u64`, `rt_load_barrier`,
+## `rt_store_barrier`, `unsafe_addr_of` — the mechanically-trivial subset
+
+**Wrong file identified first, corrected.** The "genuinely missing" analysis
+above named `src/runtime/startup/baremetal/runtime_minimal.c` as the
+freestanding runtime that never grew `rt_volatile_*` equivalents. That file
+turns out to be **orphaned for this build path** — grepped the entire Rust
+seed pipeline (`src/compiler_rust/compiler/src/pipeline/native_project/`) and
+found zero references to `runtime_minimal.c` outside a stale doc comment;
+confirmed empirically by `nm`-scanning every kept object from a real riscv64
+link failure for `rt_zero_bss`/`rt_hlt` (both declared there) — neither is
+defined in ANY linked object. `SIMPLE_LINK_OBJECTS` (the seed's escape hatch
+for injecting extra objects) also had no effect, because
+`configured_extra_link_objects()` is only called from
+`link_objects_freestanding`'s **hosted** sibling path in `linker.rs`, not from
+`link_objects_freestanding` itself.
+
+The **actual** freestanding runtime for this entry point is
+`src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` — `link_objects_
+freestanding()` (`linker.rs:1644`) autodiscovers every `.c`/`.s` file in the
+entry file's sibling `boot/` directory (`src/os/kernel/arch/riscv64/boot/`,
+alongside `baremetal_stubs.c`). It already had `rt_volatile_read_u8`/
+`rt_volatile_write_u8` (bridging onto pre-existing `rt_mmio_read_u8`/
+`rt_mmio_write_u8`) but not the `_u16`/`_u32`/`_u64` widths, and had no
+`rt_load_barrier`/`rt_store_barrier`/`unsafe_addr_of` at all.
+
+**Fix:** added to `freestanding_runtime.c`, immediately after the existing
+`rt_volatile_read_u8`/`rt_volatile_write_u8` pair:
+- `rt_volatile_read_u16/u32/u64` and `rt_volatile_write_u16/u32/u64` — each a
+  one-line bridge onto the pre-existing `rt_mmio_read_u16/u32/u64` /
+  `rt_mmio_write_u16/u32/u64` (same pattern as the existing `u8` pair; those
+  already do the real `volatile` pointer access, so this keeps exactly one
+  MMIO access site per width instead of duplicating it).
+- `rt_load_barrier`/`rt_store_barrier` — declared in `runtime.h` but, per a
+  fresh grep, **never implemented in either runtime variant** (hosted or
+  freestanding) before this fix; only `rt_memory_barrier` (a full fence)
+  existed. Implemented as `__atomic_thread_fence(__ATOMIC_ACQUIRE)` /
+  `__ATOMIC_RELEASE`, matching the acquire/release semantics documented in
+  `src/lib/nogc_sync_mut/io/volatile_ops.spl`'s own comments. No
+  allocator/heap dependency, so safe to add alongside the MMIO quartet.
+- `unsafe_addr_of` — surfaced as undefined only after the above fixes let the
+  linker get further into the closure. Assessed and confirmed mechanically
+  trivial: the hosted implementation (`runtime_native.c:4853`) is a bare
+  identity cast (`return (uint64_t)value;`), no allocator/heap dependency.
+  Ported verbatim.
+
+Also implemented the parallel `int64_t addr`/`int64_t value` ABI versions of
+the same `rt_volatile_*` + `rt_load_barrier`/`rt_store_barrier` functions in
+`src/runtime/startup/baremetal/runtime_minimal.c` (the file originally
+misidentified as the fix location) for whenever that file's wiring into a
+build path is restored — it is currently dead code for every build this repo
+runs, so this is speculative and unverified by any real link, but keeps the
+two freestanding runtime variants from drifting further apart now that the
+gap is documented.
+
+**Verified:** rebuilt the Rust seed (unaffected, no Rust changed) and reran
+the exact riscv64 full-kernel `native-build` command from this doc.
+- Before this fix: `rt_volatile_read_u16/u32/u64`, `rt_volatile_write_u32/u64`
+  (u16 write happened not to be referenced in this closure) undefined at
+  link, cutting off lld's default 20-error cap before any of the deeper
+  allocator-dependent symbols became visible.
+- After this fix: none of `rt_volatile_*`/`rt_load_barrier`/`unsafe_addr_of`
+  appear in the undefined-symbol list anymore. The link now fails on a
+  **different, deeper** set of undefined symbols that were previously masked
+  by the error cap: `rt_alloc`, `rt_array_new`, `rt_array_push`,
+  `rt_array_copy`, `rt_byte_array_new`, `rt_bytes_to_text`,
+  `rt_enum_check_discriminant`, `rt_enum_new`, `rt_enum_payload`,
+  `rt_eprintln_str`, `rt_index_get`, `rt_index_set`, `rt_native_cmp`,
+  `rt_pool_safepoint`, `rt_slice`, `rt_string_concat`, `rt_string_len`,
+  `rt_string_new`, `rt_string_new_literal`, `rt_typed_bytes_u8_push` (still
+  capped at 20 by lld; the CLI has no supported way to raise
+  `--error-limit` — a `-- -Wl,--error-limit=0` passthrough was tried and
+  silently ignored, confirmed by the error count staying at exactly 20).
+
+**Assessment of the remaining ~30+ symbols (this pass and the original list
+combined):** all genuinely need real design work, confirming (and
+sharpening) the original "why not fixed in this pass" reasoning above. The
+deeper list surfaced by this fix shows the missing piece is not just
+dict/string/enum — **`rt_alloc` itself is undefined**, i.e. this freestanding
+runtime has no heap allocator at all yet. Every one of `rt_array_new`,
+`rt_string_new`, `rt_enum_new`, `rt_byte_array_new` etc. is a constructor
+that would need to call some allocator; `rt_native_cmp`, `rt_find`,
+`rt_index_of` (from the intermediate list before this pass) all dispatch
+through the same tagged-value/heap-object representation (`RtCoreString`,
+`SplArray` structs, tag bits) that the hosted runtime uses and this
+freestanding runtime does not have. None of this is "dead code closure
+narrowing" territory — `rt_alloc`/`rt_array_new`/`rt_string_new` are called
+from genuinely-reached kernel paths (FAT32 driver, ELF loader, serial shell),
+not debug-only formatting. This confirms the earlier flagging: implementing
+the dict/string/enum/array family needs a dedicated design pass (freestanding
+allocator strategy first, then a tagged-value representation compatible with
+the existing HIR/codegen's assumptions), not a rushed subset landing.
+
+**Evidence:** `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`
+(actual fix), `src/runtime/startup/baremetal/runtime_minimal.c` (speculative
+parallel fix for the currently-dead build path),
+`src/compiler_rust/compiler/src/pipeline/native_project/linker.rs:1644`
+(`link_objects_freestanding`, boot-dir `.c` autodiscovery),
+`src/compiler_rust/compiler/src/pipeline/native_project/linker.rs:1017-1027`
+(`configured_extra_link_objects` only reachable from the hosted sibling
+path). Reproduction: same exact command as earlier in this doc.

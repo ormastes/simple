@@ -124,6 +124,72 @@ void rt_mmio_write_u64(uint64_t addr, uint64_t value) {
 }
 
 /* ========================================================================
+ * rt_volatile_* / rt_*_barrier — freestanding counterparts of the hosted
+ * runtime's `rt_volatile_read_u8/u16/u32/u64`, `rt_volatile_write_u8/u16/
+ * u32/u64`, `rt_load_barrier`, `rt_store_barrier` (declared in
+ * src/runtime/runtime.h, implemented for the hosted build in
+ * src/runtime/runtime_native.c:4874-4906). Signatures match exactly
+ * (int64_t addr/value, matching the Simple-side `extern fn` declarations
+ * in src/lib/nogc_sync_mut/io/volatile_ops.spl) so callers behave
+ * identically whether linked against the hosted or baremetal runtime.
+ *
+ * Distinct from `rt_mmio_read/write_u8/u16/u32/u64` above: those use an
+ * unsigned uint64_t/uintN_t ABI and are a separate, pre-existing call
+ * convention used elsewhere in the baremetal tree. `rt_volatile_*` is the
+ * signed-int64 ABI the hosted runtime and `io.volatile_ops` module expect;
+ * both may legitimately coexist as distinct symbols.
+ *
+ * `rt_load_barrier`/`rt_store_barrier` are declared in runtime.h but were
+ * never implemented in EITHER runtime variant (grepped: no definition in
+ * src/runtime/runtime.c or runtime_native.c). They are mechanically trivial
+ * (a directional fence, no allocator/heap dependency) so are implemented
+ * here as acquire/release fences, matching the semantics documented in
+ * io/volatile_ops.spl ("load_barrier() - acquire fence", "store_barrier()
+ * - release fence"). `rt_memory_barrier` (a full fence) already exists
+ * below for x86/general use; these two round out the family.
+ * ======================================================================== */
+
+int64_t rt_volatile_read_u8(int64_t addr) {
+    return *(volatile uint8_t *)(uintptr_t)addr;
+}
+
+int64_t rt_volatile_read_u16(int64_t addr) {
+    return *(volatile uint16_t *)(uintptr_t)addr;
+}
+
+int64_t rt_volatile_read_u32(int64_t addr) {
+    return *(volatile uint32_t *)(uintptr_t)addr;
+}
+
+int64_t rt_volatile_read_u64(int64_t addr) {
+    return (int64_t)*(volatile uint64_t *)(uintptr_t)addr;
+}
+
+void rt_volatile_write_u8(int64_t addr, int64_t value) {
+    *(volatile uint8_t *)(uintptr_t)addr = (uint8_t)value;
+}
+
+void rt_volatile_write_u16(int64_t addr, int64_t value) {
+    *(volatile uint16_t *)(uintptr_t)addr = (uint16_t)value;
+}
+
+void rt_volatile_write_u32(int64_t addr, int64_t value) {
+    *(volatile uint32_t *)(uintptr_t)addr = (uint32_t)value;
+}
+
+void rt_volatile_write_u64(int64_t addr, int64_t value) {
+    *(volatile uint64_t *)(uintptr_t)addr = (uint64_t)value;
+}
+
+void rt_load_barrier(void) {
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+}
+
+void rt_store_barrier(void) {
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+}
+
+/* ========================================================================
  * x86 Port I/O — for PS/2 keyboard, PIC, serial, PCI config space.
  * ======================================================================== */
 
