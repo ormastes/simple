@@ -730,6 +730,83 @@ pub fn rt_ptr_write_i32(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+/// Volatile MMIO/RAM read/write primitives (u8/u16/u32), single address arg
+/// (no offset) — mirrors `rt_mmio_*` in
+/// `src/runtime/startup/baremetal/runtime_minimal.c`, which is compiled only
+/// into baremetal SimpleOS images and is absent from every hosted build.
+/// Hosted callers (e.g. `src/os/gui/render.spl`'s shadow-buffer path, which
+/// always targets a plain `rt_alloc`ed RAM address in this tree, never a real
+/// device register) need the identical volatile-pointer semantics, so this is
+/// a genuine implementation, not a mock/double: the same read-what-was-written
+/// contract holds on both RAM and true MMIO. See
+/// doc/08_tracking/bug/render_spl_specs_cannot_execute_mmio_externs_2026-08-06.md.
+///
+/// Callable from Simple as: `rt_mmio_read_u32(addr: u64) -> u32`
+pub fn rt_mmio_read_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_mmio_read_u32 requires 1 argument (addr)"));
+    }
+    let addr = args[0].as_int()? as usize;
+    unsafe { Ok(Value::Int((addr as *const u32).read_volatile() as i64)) }
+}
+
+/// Callable from Simple as: `rt_mmio_write_u32(addr: u64, value: u32)`
+pub fn rt_mmio_write_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_mmio_write_u32 requires 2 arguments (addr, value)",
+        ));
+    }
+    let addr = args[0].as_int()? as usize;
+    let value = args[1].as_int()? as u32;
+    unsafe { (addr as *mut u32).write_volatile(value) };
+    Ok(Value::Nil)
+}
+
+/// Callable from Simple as: `rt_mmio_read_u16(addr: u64) -> u16`
+pub fn rt_mmio_read_u16(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_mmio_read_u16 requires 1 argument (addr)"));
+    }
+    let addr = args[0].as_int()? as usize;
+    unsafe { Ok(Value::Int((addr as *const u16).read_volatile() as i64)) }
+}
+
+/// Callable from Simple as: `rt_mmio_write_u16(addr: u64, value: u16)`
+pub fn rt_mmio_write_u16(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_mmio_write_u16 requires 2 arguments (addr, value)",
+        ));
+    }
+    let addr = args[0].as_int()? as usize;
+    let value = args[1].as_int()? as u16;
+    unsafe { (addr as *mut u16).write_volatile(value) };
+    Ok(Value::Nil)
+}
+
+/// Callable from Simple as: `rt_mmio_read_u8(addr: u64) -> u8`
+pub fn rt_mmio_read_u8(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_mmio_read_u8 requires 1 argument (addr)"));
+    }
+    let addr = args[0].as_int()? as usize;
+    unsafe { Ok(Value::Int((addr as *const u8).read_volatile() as i64)) }
+}
+
+/// Callable from Simple as: `rt_mmio_write_u8(addr: u64, value: u8)`
+pub fn rt_mmio_write_u8(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_mmio_write_u8 requires 2 arguments (addr, value)",
+        ));
+    }
+    let addr = args[0].as_int()? as usize;
+    let value = args[1].as_int()? as u8;
+    unsafe { (addr as *mut u8).write_volatile(value) };
+    Ok(Value::Nil)
+}
+
 /// Write u8 value at addr+offset.
 ///
 /// Callable from Simple as: `rt_ptr_write_u8(addr: i64, offset: i64, value: i64)`

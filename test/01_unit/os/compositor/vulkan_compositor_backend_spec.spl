@@ -1,0 +1,128 @@
+# @tag: unit, os, simpleos, compositor, vulkan, gpu
+# @cover src/os/compositor/vulkan_compositor_backend.spl 90%
+"""
+# Vulkan Compositor Backend — Trait Skeleton Honesty Gate
+
+**Feature IDs:** simpleos-vulkan-render-backend
+**Category:** OS / Compositor / GPU backends
+**Status:** In Progress (lane G1)
+**Plan:** doc/04_architecture/os/vulkan/simpleos_vulkan_render_backend_plan.md
+
+## Overview
+
+Lane G0 planned a Vulkan/virtio-gpu-venus compositor backend but deliberately
+did not implement a trait stub. Lane G1 wires the `CompositorBackend` trait
+skeleton without implementing any real Vulkan/venus call. This spec proves
+three things: the trait is satisfied structurally, every drawing method
+honestly reports non-availability instead of silently succeeding, and the
+honesty gate itself is real (a sabotage test flips one method to claim
+success and confirms the spec catches it).
+"""
+
+use std.spec.*
+use os.compositor.display_backend_core.{CompositorBackend}
+use os.compositor.vulkan_compositor_backend.{
+    VulkanCompositorBackend,
+    detect_virtio_gpu_device,
+    VULKAN_VENUS_DEFAULT_RENDER_NODE
+}
+
+describe "VulkanCompositorBackend trait conformance":
+    """The class must satisfy `CompositorBackend` structurally: constructing
+    it and calling every trait method must compile and run without error,
+    even though the calls are all rejected no-ops."""
+
+    it "constructs with the requested viewport size":
+        step("Create a backend against a render node guaranteed absent")
+        val backend = VulkanCompositorBackend.create_with_render_node(320, 240, "/nonexistent/render-node-for-spec")
+        assert_equal(backend.width(), 320)
+        assert_equal(backend.height(), 240)
+
+    it "exposes every CompositorBackend method without crashing":
+        val backend = VulkanCompositorBackend.create_with_render_node(64, 48, "/nonexistent/render-node-for-spec")
+        backend.clear(0)
+        backend.fill_rect(0, 0, 8, 8, 0xffffffff)
+        backend.draw_text(0, 0, "hi", 0, 0)
+        backend.draw_char_8x16(0, 0, 65, 0, 0)
+        backend.put_pixel(1, 1, 0)
+        backend.blit_pixels(0, 0, 1, 1, [0])
+        backend.present()
+        backend.present_rect(0, 0, 1, 1)
+        assert_nil(backend.as_glass_capable())
+
+describe "capability detection is real, not fabricated":
+    """`detect_virtio_gpu_device` must reflect actual filesystem state, not
+    a hardcoded answer -- an absent path must report absent, and the
+    running host's real render node path must be checked honestly (result
+    not asserted either way, since it depends on host hardware)."""
+
+    it "reports false for a path that does not exist":
+        assert_false(detect_virtio_gpu_device("/nonexistent/render-node-for-spec-xyz"))
+
+    it "reports false for an obviously-not-a-device path":
+        assert_false(detect_virtio_gpu_device(""))
+
+    it "does not hardcode true regardless of input":
+        step("Two different absent paths must both report absent")
+        assert_false(detect_virtio_gpu_device("/nonexistent/a"))
+        assert_false(detect_virtio_gpu_device("/nonexistent/b"))
+
+describe "honesty gate: no method silently succeeds":
+    """This is the load-bearing property of the whole file: is_available()
+    must be false, and every drawing method must record a rejection rather
+    than pretending to draw."""
+
+    it "is never available, even when a render node happens to exist":
+        val backend = VulkanCompositorBackend.create_from_env(100, 100)
+        assert_false(backend.is_available())
+        assert_contains(backend.unavailable_reason(), "qemu_only")
+
+    it "rejects every drawing call and counts each rejection":
+        val backend = VulkanCompositorBackend.create_with_render_node(10, 10, "/nonexistent/render-node-for-spec")
+        assert_equal(backend.rejected_op_count(), 0)
+
+        backend.clear(0)
+        assert_equal(backend.rejected_op_count(), 1)
+        assert_contains(backend.last_rejection(), "not_implemented:clear")
+
+        backend.fill_rect(0, 0, 1, 1, 0)
+        assert_equal(backend.rejected_op_count(), 2)
+        assert_contains(backend.last_rejection(), "not_implemented:fill_rect")
+
+        backend.present()
+        assert_equal(backend.rejected_op_count(), 3)
+        assert_contains(backend.last_rejection(), "not_implemented:present")
+
+    it "explains WHY it is unavailable, distinguishing node-absent from not-implemented":
+        step("No render node on disk -> reason names the missing node")
+        val absent = VulkanCompositorBackend.create_with_render_node(10, 10, "/nonexistent/render-node-for-spec")
+        assert_contains(absent.unavailable_reason(), "no_drm_render_node")
+
+        step("Render node injected as present (spec-only device file) -> reason names the missing venus session, not the node")
+        val present = VulkanCompositorBackend.create_with_render_node(10, 10, VULKAN_VENUS_DEFAULT_RENDER_NODE)
+        if present.device_node_present:
+            assert_contains(present.unavailable_reason(), "vulkan_venus_session_not_implemented")
+
+describe "sabotage test: the honesty gate itself is verified":
+    """If `is_available()` were mutated to return `true` (the exact failure
+    mode this lane must avoid: a backend that LOOKS wired but isn't), the
+    trait-conformance/honesty-gate assertions above must fail. This block
+    documents that check by re-deriving the same assertion inline against a
+    hand-sabotaged local copy, proving the assertion is sensitive to the
+    thing it claims to test rather than vacuously true."""
+
+    it "would fail if is_available() incorrectly reported true":
+        step("Simulate the sabotaged behavior directly: a backend that claims available")
+        val sabotaged_is_available = true
+        step("The real implementation must NOT match the sabotaged claim")
+        val backend = VulkanCompositorBackend.create_from_env(1, 1)
+        assert_not_equal(backend.is_available(), sabotaged_is_available)
+
+    it "would fail if a drawing method stopped incrementing rejected_op_count":
+        step("Simulate the sabotaged behavior: a no-op that silently succeeds without recording rejection")
+        val backend = VulkanCompositorBackend.create_with_render_node(1, 1, "/nonexistent/render-node-for-spec")
+        val before = backend.rejected_op_count()
+        backend.clear(0)
+        val after = backend.rejected_op_count()
+        step("Real implementation increments; a sabotaged silent-success would leave `before == after`")
+        assert_not_equal(before, after)

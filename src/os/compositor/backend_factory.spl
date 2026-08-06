@@ -16,17 +16,19 @@
 use os.compositor.display_backend_core.{CompositorBackend}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use os.compositor.vulkan_compositor_backend.{VulkanCompositorBackend}
 use os.simpleos_config_matrix.{SimpleOsRuntimeProfile, profile_supports_capability}
 
 extern fn rt_env_get(key: text) -> text?
 
-val SCREEN_TYPE_NAMES: [text] = ["wm", "2d", "web", "gui"]
+val SCREEN_TYPE_NAMES: [text] = ["wm", "2d", "web", "gui", "vulkan"]
 
 enum ScreenType:
     Wm
     TwoD
     Web
     Gui
+    Vulkan
 
 class ScreenSelection:
     requested: text
@@ -45,6 +47,8 @@ pub fn screen_type_from_text(name: text) -> ScreenType:
         return ScreenType.Web
     if value == "gui":
         return ScreenType.Gui
+    if value == "vulkan":
+        return ScreenType.Vulkan
     ScreenType.Wm
 
 pub fn screen_type_name(t: ScreenType) -> text:
@@ -56,6 +60,8 @@ pub fn screen_type_name(t: ScreenType) -> text:
             "web"
         case ScreenType.Gui:
             "gui"
+        case ScreenType.Vulkan:
+            "vulkan"
         case _:
             "wm"
 
@@ -68,6 +74,13 @@ pub fn screen_capability_key(t: ScreenType) -> text:
             "framebuffer"
         case ScreenType.Gui:
             "framebuffer"
+        case ScreenType.Vulkan:
+            # `requires_vulkan` in simpleos_config_matrix.spl. NOTE: passing
+            # this gate only means the profile claims Vulkan is present --
+            # VulkanCompositorBackend.is_available() is unconditionally
+            # false regardless (see vulkan_compositor_backend.spl), so
+            # selecting this screen type never yields working GPU rendering.
+            "vulkan"
         case _:
             "wm"
 
@@ -142,6 +155,13 @@ pub fn create_screen_backend(
                 (browser_compositor_backend.spl:48).
       * `gui` — host-window-server only; never resolves here on a profile
                 without it, so it has no construction arm of its own.
+      * `vulkan` — `VulkanCompositorBackend` implements `CompositorBackend`
+                (vulkan_compositor_backend.spl), registered here so the
+                plumbing exists, but every drawing method on it is a
+                rejecting no-op and `is_available()` is hardcoded `false`.
+                Selecting this screen type constructs the backend object;
+                it does not make anything render via Vulkan. See the
+                honesty contract at the top of vulkan_compositor_backend.spl.
     """
     val decided = resolve_screen_type(requested, profile)
     val effective = decided.0
@@ -163,6 +183,14 @@ pub fn create_screen_backend(
                 reason: reason,
                 backend: BrowserCompositorBackend.new(width, height),
                 shell: "web"
+            )
+        case ScreenType.Vulkan:
+            ScreenSelection(
+                requested: requested,
+                effective: effective,
+                reason: reason,
+                backend: VulkanCompositorBackend.create_from_env(width, height),
+                shell: "vulkan"
             )
         case _:
             # `wm` floor (and any `gui` that survived resolution on a host

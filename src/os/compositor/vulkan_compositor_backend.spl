@@ -1,0 +1,145 @@
+#![allow(primitive_api, bare_bool)]
+@allow(primitive_api, bare_bool)
+# Vulkan/virtio-gpu-venus `CompositorBackend` trait skeleton (lane G1).
+#
+# Lane G0 (`doc/04_architecture/os/vulkan/simpleos_vulkan_render_backend_plan.md`)
+# deliberately did NOT create this file: no VulkanBackend stub existed ahead
+# of real trait wiring. This lane (G1) wires the trait skeleton G0 deferred,
+# WITHOUT implementing any real Vulkan/venus call — none exist in this tree
+# yet (see `doc/01_research/os/vulkan/venus_virtio_gpu_protocol_facts.md`).
+#
+# HONESTY CONTRACT (read before touching this file):
+#   * No method here talks to a GPU, a venus ring, or any Vulkan API. There
+#     is no `vk*` call anywhere in this file.
+#   * `is_available()` is hardcoded `false` and MUST stay `false` until a
+#     real venus session (CTX_CREATE + blob ring + SUBMIT_3D, per the G0
+#     plan §1) is actually implemented and bit-exact/faster gated through
+#     `kernel_registry.spl` (per the G0 plan §3). Flipping it without that
+#     work landing is exactly the "looks wired but isn't" failure mode this
+#     lane was told to avoid.
+#   * Every `CompositorBackend` drawing method (`clear`, `fill_rect`,
+#     `draw_text`, `draw_char_8x16`, `put_pixel`, `blit_pixels`, `present`,
+#     `present_rect`) is a REJECTING NO-OP: it touches no pixel buffer,
+#     reports no success, and records the rejection via `rejected_op_count()`
+#     / `last_rejection_reason()` so a spec (or a future caller) can observe
+#     that nothing was drawn. It never silently delegates to another backend.
+#   * The ONE real, verifiable piece of behavior is
+#     `detect_virtio_gpu_device()`: a plain filesystem check for a DRM render
+#     node. That proves a render node exists — it proves NOTHING about
+#     venus/Vulkan capset support, and QEMU-side venus is itself unproven on
+#     the research host (`doc/08_tracking/bug/simpleos_vulkan_board_gap_venus_is_qemu_only_2026-08-06.md`).
+#     No board path exists for virtio-gpu at all (same doc).
+#
+# MDSOC: feature dimension, compositor layer
+
+use std.io_runtime.{file_exists}
+use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
+
+## Default DRM render node checked for virtio-gpu/any-GPU device presence.
+## Overridable via `create_from_env`'s `render_node` argument for tests.
+pub val VULKAN_VENUS_DEFAULT_RENDER_NODE: text = "/dev/dri/renderD128"
+
+pub fn detect_virtio_gpu_device(render_node: text) -> bool:
+    """REAL, VERIFIABLE capability probe: does a DRM render node exist at
+    this path on disk? This is the only claim this file is willing to make
+    about hardware. It does NOT mean virtio-gpu specifically (any DRM render
+    node passes), and it does NOT mean venus/Vulkan capset support -- those
+    require protocol negotiation this file does not implement. Callers must
+    not read a `true` result as "Vulkan works"."""
+    file_exists(render_node)
+
+pub class VulkanCompositorBackend:
+    w: i32
+    h: i32
+    render_node: text
+    device_node_present: bool
+    rejected_ops: i64 = 0
+    last_rejection_reason: text = ""
+
+    static fn create_from_env(width: i32, height: i32) -> VulkanCompositorBackend:
+        """Construct with a real (but limited) capability probe against the
+        default render node. Drawing remains rejected regardless of the
+        probe result -- see the file-level honesty contract."""
+        VulkanCompositorBackend.create_with_render_node(
+            width, height, VULKAN_VENUS_DEFAULT_RENDER_NODE
+        )
+
+    static fn create_with_render_node(
+        width: i32,
+        height: i32,
+        render_node: text
+    ) -> VulkanCompositorBackend:
+        """Same as `create_from_env` but with an injectable render-node path,
+        so specs can exercise both the present and absent branches of
+        `detect_virtio_gpu_device` without depending on host hardware."""
+        VulkanCompositorBackend(
+            w: width,
+            h: height,
+            render_node: render_node,
+            device_node_present: detect_virtio_gpu_device(render_node),
+            rejected_ops: 0,
+            last_rejection_reason: ""
+        )
+
+    pub fn is_available() -> bool:
+        """Always false today. No venus session, ring, pipeline, or op is
+        implemented -- a present DRM render node is not sufficient. This
+        method exists specifically so node-presence can never be mistaken
+        for Vulkan/venus capability by a caller who only checks one flag."""
+        false
+
+    pub fn unavailable_reason() -> text:
+        """Human-readable reason `is_available()` is false. Always includes
+        the `qemu_only` scope marker required by the G0 plan §4 so a reader
+        cannot mistake this for a claim of board support."""
+        if not self.device_node_present:
+            return "no_drm_render_node:{self.render_node}:qemu_only"
+        "vulkan_venus_session_not_implemented:qemu_only:board_gap_open"
+
+    pub fn rejected_op_count() -> i64:
+        self.rejected_ops
+
+    pub fn last_rejection() -> text:
+        self.last_rejection_reason
+
+    me reject(op: text):
+        """Record a rejected draw call. Never touches a pixel, never claims
+        success -- the honest-gate primitive every trait method below routes
+        through."""
+        self.rejected_ops = self.rejected_ops + 1
+        self.last_rejection_reason = "not_implemented:{op}:{self.unavailable_reason()}"
+
+impl CompositorBackend for VulkanCompositorBackend:
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        self.reject("clear")
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.reject("fill_rect")
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        self.reject("draw_text")
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        self.reject("draw_char_8x16")
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        self.reject("put_pixel")
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        self.reject("blit_pixels")
+
+    me present():
+        self.reject("present")
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        self.reject("present_rect")
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        # No glass/blur GPU path exists either -- do not claim one.
+        nil

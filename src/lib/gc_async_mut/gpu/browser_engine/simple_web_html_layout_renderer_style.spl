@@ -770,3 +770,68 @@ fn css_declaration_priority_split(decls: text) -> CssDeclarationPrioritySplit:
             break
         pos = semi + 1
     CssDeclarationPrioritySplit(normal: normal, important: important)
+
+# W1 (doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md section 7,
+# "Web style" bullet): small hot struct carrying only the fields the layout
+# hot loop reads every node — display/position/visibility/opacity/color/
+# width/height plus layout+paint flags — with a `cold` reference to the full
+# monolithic `Style` for everything else (border/font/animation/etc. detail).
+# This is a computed-style SPLIT, not a replacement: `Style` remains the
+# source of truth produced by the cascade (`_apply_decls_dispatch` and
+# friends in simple_web_html_layout_renderer_decl_apply.spl); `ComputedStyleHot`
+# is derived from a finished `Style` at the point layout/paint consult it.
+#
+# NOTE on cold-table wiring: per
+# doc/08_tracking/bug/class_field_reference_semantics_diverge_2026-08-06.md,
+# the interpreted lane (SIMPLE_EXECUTION_MODE=interpret, still the seed
+# tree-walk interpreter that `bin/simple test` runs today) VALUE-COPIES a
+# class stored into a field on every construction/assignment — it does not
+# alias by reference the way the JIT does. Holding `cold: Style` as a class
+# field is therefore not a zero-copy index in that lane; it is a value that
+# happens to be correct (each node already owns its own `Style`, so an extra
+# copy changes cost, not correctness) but NOT an aliasing "index into a side
+# table" in the sense the plan describes for a future array-of-Style side
+# table. That stronger form is deferred (see below) until the reference-
+# semantics defect above is resolved or a side table is threaded as an
+# explicit `i64` index into a caller-owned `[Style]` array instead of a class
+# field.
+class ComputedStyleHot:
+    display: text
+    position_relative: bool
+    position_absolute: bool
+    position_sticky: bool
+    position_fixed: bool
+    visibility_hidden: bool
+    content_visibility_hidden: bool
+    opacity_pct: i32
+    fg: u32
+    width_px: i32
+    height_px: i32
+    border_box: bool
+    overflow_hidden: bool
+    z_index: i32
+    cold: Style
+
+fn computed_style_hot_from(st: Style) -> ComputedStyleHot:
+    ComputedStyleHot(
+        display: st.display,
+        position_relative: st.position_relative,
+        position_absolute: st.position_absolute,
+        position_sticky: st.position_sticky,
+        position_fixed: st.position_fixed,
+        visibility_hidden: st.visibility_hidden,
+        content_visibility_hidden: st.content_visibility_hidden,
+        opacity_pct: st.opacity_pct,
+        fg: st.fg,
+        width_px: st.width_px,
+        height_px: st.height_px,
+        border_box: st.border_box,
+        overflow_hidden: st.overflow_hidden,
+        z_index: st.z_index,
+        cold: st
+    )
+
+# Real hot-path predicate used by the layout skip checks below — reads only
+# hot fields, never touches `cold`.
+fn simple_web_style_hot_is_display_none(hot: ComputedStyleHot) -> bool:
+    hot.display == "none"

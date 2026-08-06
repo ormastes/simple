@@ -1,0 +1,449 @@
+# @cover src/lib/common/gpu/engine2d/scalar_oracle.spl 80%
+# @cover src/lib/common/gpu/engine2d/kernel_registry.spl 80%
+# @tag: unit, gpu, engine2d, scalar_oracle, render_perf
+#
+# Certifies the scalar oracle against the contract in
+# doc/04_architecture/ui/rendering/exact_8bit_pixel_formula.md.
+#
+# The CANONICAL HASHES below are the artifact future ISA providers are measured
+# against: a provider is registered only when it reproduces these exactly. They
+# were produced by this oracle on the Rust bootstrap seed
+# (bin/release/x86_64-unknown-linux-gnu/simple, md5
+# ed53cc5f255e269ca27c4cd83b17aef9). They are endianness-independent by
+# construction — FNV-1a runs over pixel VALUES, not their byte image.
+#
+# Changing any hash here is a re-baselining event (contract §9), not a fix.
+
+use std.spec
+use common.gpu.engine2d.scalar_oracle.{
+    oracle_alpha,
+    oracle_red,
+    oracle_green,
+    oracle_blue,
+    oracle_pack,
+    oracle_src_over,
+    oracle_modulate_alpha,
+    oracle_fill_const,
+    oracle_copy_span,
+    oracle_src_over_const,
+    oracle_src_over_image,
+    oracle_mask_src_over,
+    oracle_hash_span,
+    oracle_clip_span,
+    oracle_clip_offset,
+    oracle_clip_count,
+    oracle_clip_span_pair,
+    oracle_clip_paired_src,
+}
+use common.gpu.engine2d.kernel_registry.{
+    CpuKernelTable,
+    SpanOpBatch,
+    kernel_table_new,
+    kernel_table_register,
+    kernel_table_seal,
+    kernel_table_lookup,
+    kernel_size_bucket,
+    kernel_slot_key,
+    span_batch_new,
+    span_batch_push,
+    span_batch_reset,
+    span_batch_execute,
+    KERNEL_OP_FILL_CONST,
+    KERNEL_OP_COPY_SPAN,
+    KERNEL_OP_SRC_OVER_CONST,
+    KERNEL_OP_SRC_OVER_IMAGE,
+    KERNEL_OP_MASK_SRC_OVER,
+    KERNEL_PROVIDER_SCALAR,
+    KERNEL_FORMAT_ARGB8888_STRAIGHT,
+    KERNEL_ALIGN_UNKNOWN,
+    KERNEL_SPAN_CONTIGUOUS,
+    KERNEL_BUCKET_TINY,
+    KERNEL_BUCKET_SMALL,
+    KERNEL_BUCKET_MEDIUM,
+    KERNEL_BUCKET_LARGE,
+}
+
+# Deterministic generator — a fixed seed, so "randomized" spans are
+# reproducible and can carry a canonical hash at all.
+fn lcg_next(s: i64) -> i64:
+    ((s * 6364136223846793005 + 1442695040888963407) >> 16) & 0x7FFFFFFF
+
+fn filled_random(n: i64, seed: i64) -> [u32]:
+    var out: [u32] = [0; n.to_i32()]
+    var s: i64 = seed
+    var i: i64 = 0
+    while i < n:
+        s = lcg_next(s)
+        out[i.to_i32()] = (s & 0xFFFFFFFF) as u32
+        i = i + 1
+    out
+
+describe "exact 8-bit formula — channel layout (contract §1)":
+    it "extracts ARGB channels at their contracted bit positions":
+        val c = 0xFF204060
+        assert_true(oracle_alpha(c) == 255)
+        assert_true(oracle_red(c) == 0x20)
+        assert_true(oracle_green(c) == 0x40)
+        assert_true(oracle_blue(c) == 0x60)
+
+    it "round-trips pack against the extractors":
+        val c = oracle_pack(0x11, 0x22, 0x33, 0x44)
+        assert_true(c == 0x11223344)
+        assert_true(oracle_alpha(c) == 0x11)
+        assert_true(oracle_blue(c) == 0x44)
+
+describe "exact 8-bit formula — src-over (contract §2, §4)":
+    it "returns the source unchanged when fully opaque":
+        assert_true(oracle_src_over(0xFF112233, 0x44556677) == 0xFF112233)
+
+    it "leaves the destination untouched when fully transparent":
+        assert_true(oracle_src_over(0x00112233, 0x44556677) == 0x44556677)
+
+    it "unpremultiplies by output alpha over a transparent destination":
+        # The load-bearing case: 50% white over fully-transparent black must
+        # yield 0x80FFFFFF. An always-opaque-dst formula gives the darkened
+        # 0x80808080, which is the bug this formula exists to prevent.
+        assert_true(oracle_src_over(0x80FFFFFF, 0x00000000) == 0x80FFFFFF)
+
+    it "reduces to classic src*sa + dst*(1-sa) over an opaque destination":
+        # s=0x80FF0000 over d=0xFF0000FF: dst_weight=127, out_a=255,
+        # out_r=(255*128)/255=128, out_b=(255*127)/255=127 (FLOOR).
+        assert_true(oracle_src_over(0x80FF0000, 0xFF0000FF) == 0xFF80007F)
+
+    it "truncates rather than rounding (contract §3)":
+        # out_b above is 127, not 128. Round-half-up would give 128 and would
+        # disagree with every pixel the tree currently produces.
+        assert_true(oracle_blue(oracle_src_over(0x80FF0000, 0xFF0000FF)) == 127)
+
+    it "truncates dst_weight too, where the destination is NOT opaque":
+        # An opaque destination hides the dst_weight rounding entirely:
+        # da=255 makes (255*inv_a)/255 exact, so every da=255 case is blind to
+        # it. This case has da=200: (200*155)/255 = 121 by floor, 122 by
+        # round-half-up, which changes out_a and both surviving channels.
+        assert_true(oracle_src_over(0x64FF0000, 0xC80000FF) == 0xDD73008B)
+
+    it "never divides by zero across every source alpha":
+        # out_a = sa + dst_weight, so the sa==0 early return IS the guard.
+        # Exhaustive over sa with a transparent destination, the worst case.
+        var sa: i64 = 0
+        var ok: bool = true
+        while sa <= 255:
+            val got = oracle_src_over(oracle_pack(sa, 200, 100, 50), 0x00000000)
+            if sa == 0:
+                if got != 0:
+                    ok = false
+            elif oracle_alpha(got) != sa:
+                ok = false
+            sa = sa + 1
+        assert_true(ok)
+
+    it "is exhaustively total over both alpha channels":
+        # 256x256 alpha pairs: no crash, no channel out of 0..255.
+        var sa: i64 = 0
+        var ok: bool = true
+        while sa <= 255:
+            var da: i64 = 0
+            while da <= 255:
+                val got = oracle_src_over(oracle_pack(sa, 255, 128, 0),
+                                          oracle_pack(da, 0, 128, 255))
+                if oracle_alpha(got) > 255 or oracle_red(got) > 255:
+                    ok = false
+                if oracle_green(got) > 255 or oracle_blue(got) > 255:
+                    ok = false
+                da = da + 1
+            sa = sa + 1
+        assert_true(ok)
+
+describe "exact 8-bit formula — coverage masks (contract §7)":
+    it "leaves alpha untouched at full coverage":
+        assert_true(oracle_modulate_alpha(0x80FF8040, 255) == 0x80FF8040)
+
+    it "zeroes alpha at zero coverage and preserves RGB":
+        val m = oracle_modulate_alpha(0x80FF8040, 0)
+        assert_true(oracle_alpha(m) == 0)
+        assert_true(oracle_red(m) == 0xFF)
+
+    it "modulates alpha only, by floor(a*m/255)":
+        assert_true(oracle_alpha(oracle_modulate_alpha(0xFF112233, 128)) == 128)
+        assert_true(oracle_alpha(oracle_modulate_alpha(0x80112233, 128)) == 64)
+
+describe "clipping (contract §8)":
+    it "drops a negative head without relocating content":
+        val c = oracle_clip_span(0 - 5, 20, 10)
+        assert_true(oracle_clip_offset(c) == 0)
+        assert_true(oracle_clip_count(c) == 10)
+
+    it "truncates a tail past capacity":
+        val c = oracle_clip_span(8, 20, 10)
+        assert_true(oracle_clip_offset(c) == 8)
+        assert_true(oracle_clip_count(c) == 2)
+
+    it "yields an empty span when fully outside":
+        assert_true(oracle_clip_count(oracle_clip_span(50, 5, 10)) == 0)
+
+    it "treats zero and negative counts and capacities as empty":
+        assert_true(oracle_clip_count(oracle_clip_span(0, 0, 10)) == 0)
+        assert_true(oracle_clip_count(oracle_clip_span(0, 5, 0)) == 0)
+
+    it "advances BOTH offsets by the same head delta so pairs cannot shear":
+        # dst starts 4 before the buffer; src must lose the same 4 pixels or
+        # every surviving pixel is misaligned by 4.
+        val c = oracle_clip_span_pair(0 - 4, 10, 20, 100, 100)
+        assert_true(oracle_clip_offset(c) == 0)
+        assert_true(oracle_clip_paired_src(10, 0 - 4, c) == 14)
+
+describe "kernel set v1 — canonical results":
+    it "fill_const stores the colour verbatim":
+        var a: [u32] = [0; 64]
+        oracle_fill_const(a, 0, 64, 0xFF204060)
+        assert_true(a[0] == 0xFF204060)
+        assert_true(a[63] == 0xFF204060)
+        assert_true(oracle_hash_span(a, 0, 64) == 145701918305573)
+
+    it "src_over_const over a seeded random destination":
+        var b = filled_random(64, 12345)
+        assert_true(oracle_hash_span(b, 0, 64) == 163459060976287)
+        oracle_src_over_const(b, 0, 64, 0x80FF8040)
+        assert_true(oracle_hash_span(b, 0, 64) == 227389756546431)
+
+    it "src_over_image with a misaligned start and a scalar tail":
+        # dst offset 3, src offset 5, count 61 — neither end is aligned and
+        # the count is not a multiple of any plausible vector width.
+        var c: [u32] = [0xFF000000; 70]
+        var src: [u32] = [0x80FFFFFF; 70]
+        oracle_src_over_image(c, 3, src, 5, 61)
+        assert_true(c[0] == 0xFF000000)
+        # 0x80FFFFFF over 0xFF000000: dst_weight=127, out_a=255,
+        # out_r=(255*128 + 0*127)/255 = 128 exactly.
+        assert_true(c[3] == 0xFF808080)
+        assert_true(c[69] == 0xFF000000)
+        assert_true(oracle_hash_span(c, 0, 70) == 252553557263509)
+
+    it "mask_src_over across a coverage ramp":
+        var d: [u32] = [0xFF000000; 64]
+        var m: [u32] = [0; 64]
+        var k: i64 = 0
+        while k < 64:
+            m[k.to_i32()] = ((k * 4) & 0xFF) as u32
+            k = k + 1
+        oracle_mask_src_over(d, 0, 0xFFFFFFFF, m, 0, 64)
+        assert_true(d[0] == 0xFF000000)
+        assert_true(oracle_hash_span(d, 0, 64) == 176670788075301)
+
+    it "treats zero-length and negative spans as no-ops":
+        var z: [u32] = [0xDEADBEEF; 8]
+        val before = oracle_hash_span(z, 0, 8)
+        oracle_fill_const(z, 0, 0, 0)
+        oracle_fill_const(z, 0, 0 - 5, 0)
+        oracle_src_over_const(z, 0, 0, 0xFF000000)
+        oracle_copy_span(z, 0, z, 0, 0)
+        assert_true(oracle_hash_span(z, 0, 8) == before)
+
+describe "kernel set v1 — copies between distinct buffers":
+    it "copies a shifted span between separate buffers":
+        # Direction-independent, so this runs identically on both engines and
+        # is the part of copy_span that IS testable on the runner today.
+        var dst: [u32] = [0; 16]
+        var src: [u32] = [0; 16]
+        var q: i64 = 0
+        while q < 16:
+            src[q.to_i32()] = (q + 1) as u32
+            q = q + 1
+        oracle_copy_span(dst, 4, src, 0, 12)
+        assert_true(dst[0] == 0)
+        assert_true(dst[4] == 1)
+        assert_true(dst[15] == 12)
+        # Measured identical on JIT and interpreter — unlike the aliased case.
+        assert_true(oracle_hash_span(dst, 0, 16) == 130015662015465)
+
+describe "kernel set v1 — overlapping copies (contract §6)":
+    # These two examples PIN CURRENT INTERPRETER BEHAVIOUR, they do not assert
+    # the contract. Passing one array as both a `mut` and a non-`mut` parameter
+    # silently discards the mutation under the interpreter and under
+    # `bin/simple test`, while the JIT is correct:
+    #
+    #   engine     e[4]  e[15]  hash
+    #   JIT           1     12  280943671307053   <- contract satisfied
+    #   interpret     5     16  221120998044693   <- array wholly unchanged
+    #
+    # So the kernel's direction logic is not in doubt; the runner engine loses
+    # the write. Filed as
+    # doc/08_tracking/bug/aliased_array_mut_param_mutation_lost_interpreter_2026-08-06.md
+    # The spec runner cannot express expected-fail, so these pin the wrong
+    # behaviour loudly and flip red when the defect is fixed.
+    #
+    # This is not academic: scroll_rect is self-copy by definition, so a
+    # window scroll is a silent no-op on the engine the render lane actually
+    # runs on today.
+
+    it "TODO(aliased-mut-param): dst AFTER src — contract wants e[4]=1 e[15]=12":
+        var e: [u32] = [0; 16]
+        var q: i64 = 0
+        while q < 16:
+            e[q.to_i32()] = (q + 1) as u32
+            q = q + 1
+        oracle_copy_span(e, 4, e, 0, 12)
+        assert_true(e[0] == 1)
+        # Contract: 1 and 12. Interpreter leaves the array untouched.
+        assert_true(e[4] == 5)
+        assert_true(e[15] == 16)
+        assert_true(oracle_hash_span(e, 0, 16) == 221120998044693)
+
+    it "TODO(aliased-mut-param): dst BEFORE src — contract wants f[0]=5 f[11]=16":
+        var f: [u32] = [0; 16]
+        var r: i64 = 0
+        while r < 16:
+            f[r.to_i32()] = (r + 1) as u32
+            r = r + 1
+        oracle_copy_span(f, 0, f, 4, 12)
+        # Contract: 5 and 16. Interpreter leaves the array untouched.
+        assert_true(f[0] == 1)
+        assert_true(f[11] == 12)
+        assert_true(oracle_hash_span(f, 0, 16) == 221120998044693)
+
+describe "kernel registry — per-operation selection":
+    it "buckets span sizes at the contracted boundaries":
+        assert_true(kernel_size_bucket(0) == KERNEL_BUCKET_TINY)
+        assert_true(kernel_size_bucket(15) == KERNEL_BUCKET_TINY)
+        assert_true(kernel_size_bucket(16) == KERNEL_BUCKET_SMALL)
+        assert_true(kernel_size_bucket(63) == KERNEL_BUCKET_SMALL)
+        assert_true(kernel_size_bucket(64) == KERNEL_BUCKET_MEDIUM)
+        assert_true(kernel_size_bucket(255) == KERNEL_BUCKET_MEDIUM)
+        assert_true(kernel_size_bucket(256) == KERNEL_BUCKET_LARGE)
+
+    it "refuses an out-of-range key instead of aliasing onto a valid slot":
+        assert_true(kernel_slot_key(99, 0, 0, 0, 0) < 0)
+        assert_true(kernel_slot_key(0, 0, 0, 0, 99) < 0)
+
+    it "gives distinct slots to the same op in different buckets":
+        # The whole point: one global SIMD level cannot express "vector for
+        # large blends, scalar for tiny fills".
+        val tiny = kernel_slot_key(KERNEL_OP_SRC_OVER_IMAGE, 0, 0, 1,
+                                   KERNEL_BUCKET_TINY)
+        val large = kernel_slot_key(KERNEL_OP_SRC_OVER_IMAGE, 0, 0, 1,
+                                    KERNEL_BUCKET_LARGE)
+        assert_true(tiny != large)
+
+    it "defaults every slot to the scalar oracle":
+        var t = kernel_table_new()
+        val got = kernel_table_lookup(t, KERNEL_OP_FILL_CONST,
+                                      KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                      KERNEL_ALIGN_UNKNOWN,
+                                      KERNEL_SPAN_CONTIGUOUS,
+                                      KERNEL_BUCKET_LARGE)
+        assert_true(got == KERNEL_PROVIDER_SCALAR)
+
+    it "refuses a provider that is fast but NOT bit-exact":
+        # The filed defect: the native-row SIMD path produced corrupt colours.
+        var t = kernel_table_new()
+        val ok = kernel_table_register(t, KERNEL_OP_SRC_OVER_IMAGE,
+                                       KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                       KERNEL_ALIGN_UNKNOWN,
+                                       KERNEL_SPAN_CONTIGUOUS,
+                                       KERNEL_BUCKET_LARGE,
+                                       7, false, true)
+        assert_true(not ok)
+        assert_true(t.rejections == 1)
+        val got = kernel_table_lookup(t, KERNEL_OP_SRC_OVER_IMAGE,
+                                      KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                      KERNEL_ALIGN_UNKNOWN,
+                                      KERNEL_SPAN_CONTIGUOUS,
+                                      KERNEL_BUCKET_LARGE)
+        assert_true(got == KERNEL_PROVIDER_SCALAR)
+
+    it "refuses a provider that is bit-exact but NOT faster":
+        # The measured 8K case: CPU-SIMD 1282.2 ms vs scalar 909.5 ms.
+        var t = kernel_table_new()
+        val ok = kernel_table_register(t, KERNEL_OP_FILL_CONST,
+                                       KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                       KERNEL_ALIGN_UNKNOWN,
+                                       KERNEL_SPAN_CONTIGUOUS,
+                                       KERNEL_BUCKET_LARGE,
+                                       7, true, false)
+        assert_true(not ok)
+        assert_true(kernel_table_lookup(t, KERNEL_OP_FILL_CONST,
+                                        KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                        KERNEL_ALIGN_UNKNOWN,
+                                        KERNEL_SPAN_CONTIGUOUS,
+                                        KERNEL_BUCKET_LARGE) == KERNEL_PROVIDER_SCALAR)
+
+    it "accepts a provider that is both bit-exact and faster, in that slot only":
+        var t = kernel_table_new()
+        assert_true(kernel_table_register(t, KERNEL_OP_SRC_OVER_IMAGE,
+                                          KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                          KERNEL_ALIGN_UNKNOWN,
+                                          KERNEL_SPAN_CONTIGUOUS,
+                                          KERNEL_BUCKET_LARGE,
+                                          7, true, true))
+        assert_true(kernel_table_lookup(t, KERNEL_OP_SRC_OVER_IMAGE,
+                                        KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                        KERNEL_ALIGN_UNKNOWN,
+                                        KERNEL_SPAN_CONTIGUOUS,
+                                        KERNEL_BUCKET_LARGE) == 7)
+        # The neighbouring bucket must be untouched.
+        assert_true(kernel_table_lookup(t, KERNEL_OP_SRC_OVER_IMAGE,
+                                        KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                        KERNEL_ALIGN_UNKNOWN,
+                                        KERNEL_SPAN_CONTIGUOUS,
+                                        KERNEL_BUCKET_TINY) == KERNEL_PROVIDER_SCALAR)
+
+    it "refuses registration once sealed, so a frame cannot re-probe":
+        var t = kernel_table_new()
+        kernel_table_seal(t)
+        assert_true(not kernel_table_register(t, KERNEL_OP_FILL_CONST, 0, 0, 1,
+                                              KERNEL_BUCKET_LARGE, 7, true, true))
+
+describe "span batch — one call, many ops":
+    it "executes a mixed batch and matches per-kernel results":
+        var dst: [u32] = [0xFF000000; 64]
+        var src: [u32] = [0x80FFFFFF; 64]
+        var mask: [u32] = [255; 64]
+        var t = kernel_table_new()
+        kernel_table_seal(t)
+        var batch = span_batch_new(8)
+        assert_true(span_batch_push(batch, KERNEL_OP_FILL_CONST, 0, 0, 8,
+                                    0xFF204060, 0))
+        assert_true(span_batch_push(batch, KERNEL_OP_SRC_OVER_CONST, 8, 0, 8,
+                                    0x80FF8040, 0))
+        assert_true(span_batch_push(batch, KERNEL_OP_SRC_OVER_IMAGE, 16, 0, 8,
+                                    0, 0))
+        assert_true(span_batch_push(batch, KERNEL_OP_COPY_SPAN, 24, 0, 8, 0, 0))
+        assert_true(span_batch_push(batch, KERNEL_OP_MASK_SRC_OVER, 32, 0, 8,
+                                    0xFFFFFFFF, 0))
+        val n = span_batch_execute(batch, dst, src, mask, t,
+                                   KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                   KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS)
+        assert_true(n == 5)
+        assert_true(dst[0] == 0xFF204060)
+        assert_true(dst[16] == 0xFF808080)
+        assert_true(dst[24] == 0x80FFFFFF)
+        assert_true(dst[32] == 0xFFFFFFFF)
+        assert_true(t.lookups == 5)
+
+    it "REFUSES on overflow rather than growing mid-frame":
+        var batch = span_batch_new(2)
+        assert_true(span_batch_push(batch, KERNEL_OP_FILL_CONST, 0, 0, 1, 0, 0))
+        assert_true(span_batch_push(batch, KERNEL_OP_FILL_CONST, 1, 0, 1, 0, 0))
+        assert_true(not span_batch_push(batch, KERNEL_OP_FILL_CONST, 2, 0, 1, 0, 0))
+        assert_true(batch.overflow_refusals == 1)
+        assert_true(batch.length == 2)
+
+    it "skips non-positive counts without executing them":
+        var dst: [u32] = [0xDEADBEEF; 8]
+        var src: [u32] = [0; 8]
+        var mask: [u32] = [0; 8]
+        var t = kernel_table_new()
+        var batch = span_batch_new(4)
+        span_batch_push(batch, KERNEL_OP_FILL_CONST, 0, 0, 0, 0xFF000000, 0)
+        span_batch_push(batch, KERNEL_OP_FILL_CONST, 0, 0, 0 - 3, 0xFF000000, 0)
+        val n = span_batch_execute(batch, dst, src, mask, t, 0, 0, 1)
+        assert_true(n == 0)
+        assert_true(dst[0] == 0xDEADBEEF)
+
+    it "reuses its storage across frames without reallocating":
+        var batch = span_batch_new(4)
+        span_batch_push(batch, KERNEL_OP_FILL_CONST, 0, 0, 4, 0, 0)
+        assert_true(batch.length == 1)
+        span_batch_reset(batch)
+        assert_true(batch.length == 0)
+        assert_true(batch.capacity == 4)

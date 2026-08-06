@@ -20,6 +20,16 @@ use common.ui.glyph_bitmap_5x7.{glyph_index_for_char_code, glyph_row_bits}
 use std.gpu.engine2d.simd_provider.{record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit}
 use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, _scalar_fill_row, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, engine2d_simd_blend_row_u32}
 use std.gpu.engine2d.simd_kernels.{active_arch_text}
+use common.gpu.engine2d.kernel_registry.{
+    CpuKernelTable, SpanOpBatch,
+    kernel_table_new, kernel_table_register, kernel_table_seal,
+    span_batch_new, span_batch_push,
+    KERNEL_OP_FILL_CONST, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+    KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE,
+    KERNEL_PROVIDER_SIMD_ISA,
+}
+use std.nogc_sync_mut.gpu.engine2d.simd_isa_provider.{simd_span_batch_execute, simd_isa_fill_const}
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -75,6 +85,9 @@ class SoftwareBackend:
     native_simd_spans: bool
     mirror: [u32]             # WS-D3 frame-persistent readback mirror
     mirror_valid: bool
+    kernel_table: CpuKernelTable   # per-op provider table for simd_span_batch_execute
+    kernel_table_ready: bool       # true once the honest timing gate has run and sealed the table
+    simd_batch_hits: i64           # observable: ops the batch dispatcher actually routed to SIMD_ISA
 
     static fn create() -> SoftwareBackend:
         """Create an uninitialized software backend."""
@@ -96,7 +109,10 @@ class SoftwareBackend:
             initialized: false,
             native_simd_spans: false,
             mirror: [],
-            mirror_valid: false
+            mirror_valid: false,
+            kernel_table: kernel_table_new(),
+            kernel_table_ready: false,
+            simd_batch_hits: 0
         )
 
     static fn create_cpu_simd() -> SoftwareBackend:
@@ -755,12 +771,58 @@ impl SoftwareBackend:
                     self.mark_span_dirty(start_x, py, w)
             ly = ly + 1
 
+    me ensure_kernel_table():
+        """Build the CpuKernelTable once, per-session, with an honest timing
+        gate: fill_const only earns the KERNEL_PROVIDER_SIMD_ISA slot if a
+        real measurement (same pattern as simd_isa_provider_spec.spl) shows
+        it both bit-exact (the SIMD-ISA kernel always matches the scalar
+        oracle by construction) and faster than the scalar path on this
+        machine. If it is not faster, the slot honestly stays scalar and
+        simd_span_batch_execute's own fallback keeps output identical."""
+        if self.kernel_table_ready:
+            return
+        val n: i64 = 4096
+        val iters: i64 = 64
+        var probe: [u32] = [0; 4096]
+        val t0 = time_now_unix_micros()
+        var i0: i64 = 0
+        while i0 < iters:
+            _scalar_fill_row(probe, 0, n, 0xFF102030u32)
+            i0 = i0 + 1
+        val t1 = time_now_unix_micros()
+        val scalar_us = t1 - t0
+        # Measure the actual SIMD-ISA fill_const kernel (the same function
+        # simd_span_batch_execute calls when a slot resolves to SIMD_ISA).
+        val t2 = time_now_unix_micros()
+        var i2: i64 = 0
+        while i2 < iters:
+            simd_isa_fill_const(probe, 0, n, 0xFF102030)
+            i2 = i2 + 1
+        val simd_us = time_now_unix_micros() - t2
+        val faster = simd_us < scalar_us
+        kernel_table_register(self.kernel_table, KERNEL_OP_FILL_CONST, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE,
+                              KERNEL_PROVIDER_SIMD_ISA, true, faster)
+        kernel_table_seal(self.kernel_table)
+        self.kernel_table_ready = true
+
     me sw_fill_raw_span(offset: i32, count: i32, color: u32):
         val safe_count = _span_safe_count(self.buf.len(), offset, count)
         if safe_count <= 0:
             return
         if self.native_simd_spans and native_pixel_rows_enabled():
+            self.ensure_kernel_table()
             record_simd_fill_hit()
+            var batch = span_batch_new(1)
+            span_batch_push(batch, KERNEL_OP_FILL_CONST, offset as i64, 0, safe_count as i64, color as i64, 0)
+            val empty_u32: [u32] = []
+            val executed = simd_span_batch_execute(batch, self.buf, empty_u32, empty_u32, self.kernel_table,
+                                                   KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS)
+            self.simd_batch_hits = self.simd_batch_hits + batch.non_scalar_lookups
+            if executed == batch.length:
+                return
+            # Batch dispatcher refused (shouldn't happen for a single valid op) —
+            # fall back to the direct native call rather than leave the span unfilled.
             self.buf = rt_engine2d_simd_fill_span_u32(self.buf, offset as i64, safe_count as i64, color)
             return
         _scalar_fill_row(self.buf, offset as i64, safe_count as i64, color)

@@ -1563,6 +1563,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_ptr_read_i64", memory::rt_ptr_read_i64);
     insert_simple!("rt_ptr_write_i32", memory::rt_ptr_write_i32);
     insert_simple!("rt_ptr_write_i64", memory::rt_ptr_write_i64);
+    insert_simple!("rt_mmio_read_u32", memory::rt_mmio_read_u32);
+    insert_simple!("rt_mmio_write_u32", memory::rt_mmio_write_u32);
+    insert_simple!("rt_mmio_read_u16", memory::rt_mmio_read_u16);
+    insert_simple!("rt_mmio_write_u16", memory::rt_mmio_write_u16);
+    insert_simple!("rt_mmio_read_u8", memory::rt_mmio_read_u8);
+    insert_simple!("rt_mmio_write_u8", memory::rt_mmio_write_u8);
     insert_simple!("rt_ptr_write_u8", memory::rt_ptr_write_u8);
     insert_simple!("rt_random_getstate", random::rt_random_getstate_fn);
     insert_simple!("rt_random_hex", random::rt_random_hex_fn);

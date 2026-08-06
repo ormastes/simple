@@ -35,6 +35,24 @@ use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{
 }
 use common.gpu.engine2d.scalar_oracle.{
     oracle_modulate_alpha,
+    oracle_fill_const,
+    oracle_copy_span,
+    oracle_src_over_const,
+    oracle_src_over_image,
+    oracle_mask_src_over,
+}
+use common.gpu.engine2d.kernel_registry.{
+    CpuKernelTable,
+    SpanOpBatch,
+    kernel_table_lookup,
+    kernel_size_bucket,
+    KERNEL_PROVIDER_SCALAR,
+    KERNEL_PROVIDER_SIMD_ISA,
+    KERNEL_OP_FILL_CONST,
+    KERNEL_OP_COPY_SPAN,
+    KERNEL_OP_SRC_OVER_CONST,
+    KERNEL_OP_SRC_OVER_IMAGE,
+    KERNEL_OP_MASK_SRC_OVER,
 }
 
 # --- fill_const --------------------------------------------------------------
@@ -139,3 +157,65 @@ fn simd_isa_mask_src_over(mut dst: [u32], dst_offset: i64, colour: i64,
     while j < count:
         dst[(dst_offset + j).to_i32()] = blended[j.to_i32()]
         j = j + 1
+
+# --- real per-op dispatcher --------------------------------------------------
+#
+# kernel_registry.span_batch_execute (common tier) cannot call these SIMD
+# functions without inverting the tier order, so it always executes via the
+# scalar oracle and only records which slots WOULD have picked a non-scalar
+# provider (`batch.non_scalar_lookups`). This function is the actual
+# production dispatcher: it lives in the higher `nogc_sync_mut` tier, so it
+# can import both the registry/oracle (common) and the SIMD providers
+# (this module), and it genuinely branches per op on `kernel_table_lookup`.
+
+fn simd_span_batch_execute(mut batch: SpanOpBatch, mut dst: [u32], src: [u32],
+                           mask: [u32], mut table: CpuKernelTable,
+                           format: i64, alignment: i64, contiguity: i64) -> i64:
+    """Run every op in the batch, dispatching to the registered provider.
+    Returns the number of ops executed. Falls back to the scalar oracle for
+    any op whose slot is not registered to KERNEL_PROVIDER_SIMD_ISA."""
+    var executed: i64 = 0
+    var i: i64 = 0
+    while i < batch.length:
+        val idx = i.to_i32()
+        val op = batch.ops[idx]
+        val count = batch.counts[idx]
+        if count > 0:
+            val bucket = kernel_size_bucket(count)
+            val provider = kernel_table_lookup(table, op, format, alignment, contiguity, bucket)
+            val use_simd = provider == KERNEL_PROVIDER_SIMD_ISA
+            if use_simd:
+                batch.non_scalar_lookups = batch.non_scalar_lookups + 1
+            val dst_off = batch.dst_offsets[idx]
+            val src_off = batch.src_offsets[idx]
+            if op == KERNEL_OP_FILL_CONST:
+                if use_simd:
+                    simd_isa_fill_const(dst, dst_off, count, batch.colours[idx])
+                else:
+                    oracle_fill_const(dst, dst_off, count, batch.colours[idx])
+                executed = executed + 1
+            elif op == KERNEL_OP_COPY_SPAN:
+                oracle_copy_span(dst, dst_off, src, src_off, count)
+                executed = executed + 1
+            elif op == KERNEL_OP_SRC_OVER_CONST:
+                if use_simd:
+                    simd_isa_src_over_const(dst, dst_off, count, batch.colours[idx])
+                else:
+                    oracle_src_over_const(dst, dst_off, count, batch.colours[idx])
+                executed = executed + 1
+            elif op == KERNEL_OP_SRC_OVER_IMAGE:
+                if use_simd:
+                    simd_isa_src_over_image(dst, dst_off, src, src_off, count)
+                else:
+                    oracle_src_over_image(dst, dst_off, src, src_off, count)
+                executed = executed + 1
+            elif op == KERNEL_OP_MASK_SRC_OVER:
+                if use_simd:
+                    simd_isa_mask_src_over(dst, dst_off, batch.colours[idx], mask,
+                                           batch.mask_offsets[idx], count)
+                else:
+                    oracle_mask_src_over(dst, dst_off, batch.colours[idx], mask,
+                                         batch.mask_offsets[idx], count)
+                executed = executed + 1
+        i = i + 1
+    executed

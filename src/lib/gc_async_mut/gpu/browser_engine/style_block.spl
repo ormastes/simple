@@ -68,17 +68,23 @@ pub fn css_decls_contain(decls: [CssDecl], property: text, value: text) -> bool:
 # Apply rules to DOM tree
 # =========================================================================
 
-fn apply_css_rules_to_tree(root: BeDomNode, rules: [CssRule]):
+fn apply_css_rules_to_tree(root: BeDomNode, rules: [CssRule]) -> BeDomNode:
+    val idx = build_selector_rule_index(rules)
+    apply_rules_to_node_indexed(root, rules, idx, nil, 1, 1)
+
+pub fn apply_css_rules_to_tree_linear(root: BeDomNode, rules: [CssRule]) -> BeDomNode:
+    """Reference (pre-index) linear-scan path, kept for equivalence testing
+    against apply_css_rules_to_tree's indexed path. Not used in production."""
     apply_rules_to_node(root, rules, nil, 1, 1)
 
-fn apply_rules_to_node(node: BeDomNode, rules: [CssRule], parent: BeDomNode?, nth: i32, sibling_count: i32):
+fn apply_rules_to_node(node: BeDomNode, rules: [CssRule], parent: BeDomNode?, nth: i32, sibling_count: i32) -> BeDomNode:
     if be_dom_get_is_text(node):
-        return
+        return node
 
     # Skip style/link/meta/title/head/html/!doctype elements
     val tag = be_dom_get_tag(node)
     if tag == "style" or tag == "link" or tag == "meta" or tag == "title" or tag == "head":
-        return
+        return node
 
     var color_ru_idx = 0
     while color_ru_idx < rules.len():
@@ -107,8 +113,12 @@ fn apply_rules_to_node(node: BeDomNode, rules: [CssRule], parent: BeDomNode?, nt
     # The interpreter copies class instances on array index/push, so the
     # `child` we fetch from children[i] is a detached copy. We style it,
     # recurse (which rebuilds its grandchildren in turn), then push the
-    # styled copy into a new array and write the new array back via
-    # be_dom_set_children so the parent sees the changes.
+    # RETURNED (re-styled) copy into a new array and write the new array
+    # back via be_dom_set_children so the parent sees the changes.
+    # be_dom_set_children is a pure constructor (returns a NEW BeDomNode; it
+    # does not mutate `node` in place), so this function must return that
+    # constructed value and every caller — including the recursive call
+    # above — must use the returned node, not the original argument.
     var child_nth = 1
     val sb_kids = be_dom_get_children(node)
     var child_count = 0
@@ -122,8 +132,220 @@ fn apply_rules_to_node(node: BeDomNode, rules: [CssRule], parent: BeDomNode?, nt
     while sc_idx < sb_kids.len():
         var child = sb_kids[sc_idx]
         sc_idx = sc_idx + 1
-        apply_rules_to_node(child, rules, node, child_nth, child_count)
-        new_kids.push(child)
+        val updated_child = apply_rules_to_node(child, rules, node, child_nth, child_count)
+        new_kids.push(updated_child)
+        if not be_dom_get_is_text(child):
+            child_nth = child_nth + 1
+    be_dom_set_children(node, new_kids)
+
+# =========================================================================
+# Selector index — buckets rules by a cheap discriminant (id / first class /
+# tag of the rule's subject simple selector) so per-node matching only runs
+# full selector_matches against candidate rules instead of the whole ruleset.
+# Soundness: selector_matches always requires the subject (last simple
+# selector, i.e. the part that must match the node itself) to match the
+# node, so bucketing on a necessary condition of the subject (its id, one of
+# its required classes, or its tag) can only ever drop rules that provably
+# cannot match. Selectors that resist cheap discrimination (attribute
+# selectors, pseudo-functions, bare "*") fall into the universal bucket,
+# which is checked for every node — identical to the old linear scan for
+# just those rules.
+# =========================================================================
+
+pub class SelectorRuleIndex:
+    tag_buckets: Dict<text, [i32]>
+    id_buckets: Dict<text, [i32]>
+    class_buckets: Dict<text, [i32]>
+    universal: [i32]
+
+fn selector_bucket_key_end(s: text) -> i64:
+    var idx = 0
+    val len = s.len()
+    while idx < len:
+        val ch = s.slice(idx, idx + 1)
+        if ch == "." or ch == "#" or ch == ":" or ch == "[":
+            return idx
+        idx = idx + 1
+    len
+
+pub fn selector_bucket_discriminant(selector: text) -> [text]:
+    """Returns [kind, key] where kind is one of "id"/"class"/"tag"/"universal"."""
+    val trimmed = selector.trim()
+    if trimmed.len() == 0:
+        return ["universal", ""]
+    # Subject is the simple selector that must match the node itself: the
+    # part after a top-level child combinator, or the last whitespace token
+    # for descendant combinators, mirroring selector_matches's own logic.
+    var subject = trimmed
+    val child_pos = sb_find_top_level_child_combinator(trimmed)
+    if child_pos < 999999999:
+        subject = trimmed.slice(child_pos + 1, trimmed.len()).trim()
+    else:
+        val parts = sb_split_ws(trimmed)
+        if parts.len() > 0:
+            subject = parts[parts.len() - 1]
+    if subject.len() == 0 or subject == "*":
+        return ["universal", ""]
+    if sb_find(subject, "[", 0) < 999999999:
+        return ["universal", ""]
+    if subject.starts_with(":"):
+        return ["universal", ""]
+    val hash_pos = sb_find(subject, "#", 0)
+    if hash_pos < 999999999:
+        val rest = subject.slice(hash_pos + 1, subject.len())
+        val end_pos = selector_bucket_key_end(rest)
+        return ["id", rest.slice(0, end_pos)]
+    val dot_pos = sb_find(subject, ".", 0)
+    if dot_pos < 999999999:
+        val rest2 = subject.slice(dot_pos + 1, subject.len())
+        val end_pos2 = selector_bucket_key_end(rest2)
+        return ["class", rest2.slice(0, end_pos2)]
+    val colon_pos = sb_find(subject, ":", 0)
+    var tag_part = subject
+    if colon_pos < 999999999:
+        tag_part = subject.slice(0, colon_pos)
+    if tag_part.len() == 0:
+        return ["universal", ""]
+    ["tag", tag_part]
+
+pub fn build_selector_rule_index(rules: [CssRule]) -> SelectorRuleIndex:
+    var idx = SelectorRuleIndex(
+        tag_buckets: {},
+        id_buckets: {},
+        class_buckets: {},
+        universal: [])
+    var i = 0
+    while i < rules.len():
+        val kind_key = selector_bucket_discriminant(rules[i].selector)
+        val kind = kind_key[0]
+        val key = kind_key[1]
+        if kind == "id":
+            if idx.id_buckets.contains_key(key):
+                var arr = idx.id_buckets[key]
+                arr.push(i)
+                idx.id_buckets[key] = arr
+            else:
+                idx.id_buckets[key] = [i]
+        elif kind == "class":
+            if idx.class_buckets.contains_key(key):
+                var arr2 = idx.class_buckets[key]
+                arr2.push(i)
+                idx.class_buckets[key] = arr2
+            else:
+                idx.class_buckets[key] = [i]
+        elif kind == "tag":
+            if idx.tag_buckets.contains_key(key):
+                var arr3 = idx.tag_buckets[key]
+                arr3.push(i)
+                idx.tag_buckets[key] = arr3
+            else:
+                idx.tag_buckets[key] = [i]
+        else:
+            idx.universal.push(i)
+        i = i + 1
+    idx
+
+pub fn selector_index_candidates(idx: SelectorRuleIndex, tag: text, id: text, classes: [text]) -> [i32]:
+    var out: [i32] = []
+    var oi = 0
+    while oi < idx.universal.len():
+        out.push(idx.universal[oi])
+        oi = oi + 1
+    if id.len() > 0 and idx.id_buckets.contains_key(id):
+        val arr = idx.id_buckets[id]
+        var i2 = 0
+        while i2 < arr.len():
+            out.push(arr[i2])
+            i2 = i2 + 1
+    if tag.len() > 0 and idx.tag_buckets.contains_key(tag):
+        val arr2 = idx.tag_buckets[tag]
+        var i3 = 0
+        while i3 < arr2.len():
+            out.push(arr2[i3])
+            i3 = i3 + 1
+    var ci = 0
+    while ci < classes.len():
+        val c = classes[ci]
+        if idx.class_buckets.contains_key(c):
+            val arr3 = idx.class_buckets[c]
+            var i4 = 0
+            while i4 < arr3.len():
+                out.push(arr3[i4])
+                i4 = i4 + 1
+        ci = ci + 1
+    # The buckets above are concatenated in a FIXED order (universal, id,
+    # tag, class-per-node-class) that has nothing to do with the original
+    # rule array order. apply_rules_to_node_indexed applies declarations in
+    # candidate order and later declarations win on conflict (CSS cascade:
+    # last rule of equal specificity wins), so `out` MUST be restored to
+    # ascending rule-index order here — otherwise two rules that both match
+    # a node but land in different buckets can apply in the wrong relative
+    # order and the wrong one wins. (Confirmed divergence: rules
+    # [".beta"@idx2, "section .alpha"@idx5] on a node with class="alpha
+    # beta" — class-bucket iteration visits "alpha" before "beta" because
+    # that's the node's own class order, so idx5 was applied before idx2,
+    # picking idx2's declaration as the final value instead of idx5's.)
+    var si = 1
+    while si < out.len():
+        val key = out[si]
+        var sj = si - 1
+        while sj >= 0 and out[sj] > key:
+            out[sj + 1] = out[sj]
+            sj = sj - 1
+        out[sj + 1] = key
+        si = si + 1
+    out
+
+fn apply_rules_to_node_indexed(node: BeDomNode, rules: [CssRule], idx: SelectorRuleIndex, parent: BeDomNode?, nth: i32, sibling_count: i32) -> BeDomNode:
+    if be_dom_get_is_text(node):
+        return node
+
+    val tag = be_dom_get_tag(node)
+    if tag == "style" or tag == "link" or tag == "meta" or tag == "title" or tag == "head":
+        return node
+
+    val node_id = be_dom_get_id(node)
+    val node_classes = be_dom_get_classes(node)
+    val candidates = selector_index_candidates(idx, tag, node_id, node_classes)
+
+    var color_ci = 0
+    while color_ci < candidates.len():
+        val rule = rules[candidates[color_ci]]
+        color_ci = color_ci + 1
+        if selector_matches(rule.selector, node, parent, nth, sibling_count):
+            var dc_idx = 0
+            while dc_idx < rule.declarations.len():
+                val decl = rule.declarations[dc_idx]
+                dc_idx = dc_idx + 1
+                if decl.property == "color":
+                    node.set_style(decl.property, decl.value)
+    var ci2 = 0
+    while ci2 < candidates.len():
+        val rule = rules[candidates[ci2]]
+        ci2 = ci2 + 1
+        if selector_matches(rule.selector, node, parent, nth, sibling_count):
+            var dc_idx2 = 0
+            while dc_idx2 < rule.declarations.len():
+                val decl = rule.declarations[dc_idx2]
+                dc_idx2 = dc_idx2 + 1
+                if decl.property != "color":
+                    node.set_style(decl.property, decl.value)
+
+    var child_nth = 1
+    val sb_kids = be_dom_get_children(node)
+    var child_count = 0
+    var count_idx = 0
+    while count_idx < sb_kids.len():
+        if not be_dom_get_is_text(sb_kids[count_idx]):
+            child_count = child_count + 1
+        count_idx = count_idx + 1
+    var new_kids: [BeDomNode] = []
+    var sc_idx = 0
+    while sc_idx < sb_kids.len():
+        var child = sb_kids[sc_idx]
+        sc_idx = sc_idx + 1
+        val updated_child = apply_rules_to_node_indexed(child, rules, idx, node, child_nth, child_count)
+        new_kids.push(updated_child)
         if not be_dom_get_is_text(child):
             child_nth = child_nth + 1
     be_dom_set_children(node, new_kids)
@@ -132,7 +354,7 @@ fn apply_rules_to_node(node: BeDomNode, rules: [CssRule], parent: BeDomNode?, nt
 # Public API: process HTML with <style> blocks
 # =========================================================================
 
-pub fn process_style_blocks(root: BeDomNode, html: text):
+pub fn process_style_blocks(root: BeDomNode, html: text) -> BeDomNode:
     val blocks = extract_style_blocks(html)
     var all_rules: [CssRule] = []
     var all_vars: [CssDecl] = []
@@ -153,11 +375,11 @@ pub fn process_style_blocks(root: BeDomNode, html: text):
             all_rules.push(r)
     if all_rules.len() > 0:
         val resolved_rules = resolve_css_vars_in_rules(all_rules, all_vars)
-        apply_css_rules_to_tree(root, resolved_rules)
+        return apply_css_rules_to_tree(root, resolved_rules)
+    root
 
 pub fn process_style_blocks_result(root: BeDomNode, html: text) -> BeDomNode:
     process_style_blocks(root, html)
-    root
 
 # =========================================================================
 # Helpers (shared by style_block_parse and style_block_resolve via import)
