@@ -41,9 +41,11 @@ Lanes L0-L9 all landed:
   gate was only proven against a hand-built fixture, not real nested
   producer output). See `test/02_integration/ui/unified_packed_scene_nesting_spec.spl`.
 
+- L6 interactive-widget hit-shape reachability fix (Gotcha 6 below): landed
+  `PENDING_LANDING_HASH`.
+
 Not started: a real multi-producer *assembler* module (today, composing
-real producer output is only proven inline in the integration spec above);
-L6's orphan hit-shape gap (see Gotchas).
+real producer output is only proven inline in the integration spec above).
 
 ## Gotchas
 
@@ -97,16 +99,32 @@ L6's orphan hit-shape gap (see Gotchas).
    generation constant (`WEB_HIT_OWNER_GENERATION`) was simply wrong (1u32)
    and is now 0u32 to match.
 
-6. **GUI's interactive-widget hit shapes are unreachable by the L9 router
-   today — not just "unflagged", actually unreachable.**
-   `draw_ir_v3_group_resolve_hit_test` only considers commands whose own
-   `hit_shape_id` is set; GUI's synthetic interactive-widget hit_shapes/
-   owners have no backing command that cross-references them (the
-   widget-tree oracle never emits one). Documented at
-   `GUI_INTERACTIVE_GENERATION`'s definition in
-   `ui_gui_packed_producer.spl`, deliberately NOT silently patched — fixing
-   it needs a real synthetic command + `hit_shape_id` cross-reference (like
-   L8's menubar items get), not a generation-constant tweak.
+6. **Closed: GUI's interactive-widget hit shapes were unreachable by the
+   L9 router** (`draw_ir_v3_group_resolve_hit_test` only considers
+   commands whose own `hit_shape_id` is set; GUI's synthetic
+   interactive-widget hit_shapes had no backing command cross-referencing
+   them, since the widget-tree oracle never emits `hit_rect`). Fixed by a
+   real cross-reference instead of a generation tweak:
+   `draw_ir_v2_to_v3.spl` gained ONE small additive export,
+   `draw_ir_v2_to_v3_command_ids_for(composition, component_ids: [text]) ->
+   [u32]` (no existing signature changed) — it re-runs the SAME
+   deterministic id-assignment pass `draw_ir_v2_to_v3` uses internally and
+   looks up each requested v2 text `component_id` (e.g. a widget's own
+   `rect.id`; the FIRST command `_emit_widget` pushes per kind is
+   button/input/textfield: `rect.id` itself, checkbox: `"{rect.id}-box"`)
+   in the resulting map. `ui_gui_packed_producer.spl` uses this to find
+   the real command that draws each interactive widget and patches THAT
+   command's `hit_shape_id` to point at the widget's synthetic hit_shape
+   row (`_gui_find_command_index` + a per-command-index override array,
+   computed before the main command-writing loop since existing hit_shapes
+   are written first at a statically-known offset — no writer cursor
+   needed). Also aligned `GUI_INTERACTIVE_GENERATION` to `0u32` (same
+   reasoning as Gotcha 5's Web/WM fix, since these commands now really are
+   cross-referenced and come from the same oracle). New regression test:
+   `ui_gui_packed_producer_spec.spl`'s "interactive-widget hit shapes are
+   reachable via L9 routing" — builds a real scene, runs
+   `draw_ir_v3_group_resolve` + `ui_scene_route_event` against a click on
+   the button's own hit_shape rect, asserts `accepted: true`.
 
 ## Update Rule
 
