@@ -17,11 +17,19 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-SYSROOT="$REPO_ROOT/build/os/sysroot"
 LIBC_DIR="$REPO_ROOT/src/os/libc"
 LLVM_BUILD="$REPO_ROOT/build/os/llvm"
 LLVM_SRC="${LLVM_SRC:-$HOME/llvm-project}"
 TRIPLE="${SIMPLEOS_TARGET_TRIPLE:-${SIMPLE_TARGET:-x86_64-unknown-simpleos}}"
+# Per-arch sysroot, matching simpleos_sysroot_dir() in
+# src/compiler_rust/compiler/src/pipeline/native_project/linker.rs: x86_64 keeps
+# the historical unsuffixed path, aarch64 gets its own. Before this, an aarch64
+# run of this script wrote into the x86_64 sysroot — clobbering it while
+# producing nothing at the path the linker actually reads for aarch64.
+case "$TRIPLE" in
+    aarch64-*) SYSROOT="${SIMPLEOS_SYSROOT:-$REPO_ROOT/build/os/sysroot-aarch64}" ;;
+    *)         SYSROOT="$REPO_ROOT/build/os/sysroot" ;;
+esac
 LIBC_BUILD="$REPO_ROOT/build/os/libc-$TRIPLE"
 LIBCXX_BUILD="$REPO_ROOT/build/os/libcxx-$TRIPLE"
 
@@ -291,6 +299,59 @@ ASMEOF
             rm -f "$SYSROOT/lib/libsimpleos_c.a"
             "$AR" rcs "$SYSROOT/lib/libsimpleos_c.a" "$LIBC_BUILD"/*.o
             cp "$LIBC_BUILD/simpleos_crt0.o" "$SYSROOT/lib/crt0.o"
+
+            # -- Simple runtime ABI + real Simple C runtime ------------------
+            # Third arch of the same defect family: this branch built libc and
+            # three .S files and NOTHING for the Simple runtime, so the aarch64
+            # payload could not link (x86_64 fixed in
+            # doc/08_tracking/bug/simpleos_payload_link_missing_20_rt_symbols_2026-08-06.md,
+            # riscv64 in scripts/os/simpleos-sysroot-riscv64.shs).
+            #
+            # Everything below builds into SUBDIRECTORIES of $LIBC_BUILD on
+            # purpose: libsimpleos_c.a above is `ar`'d from "$LIBC_BUILD"/*.o,
+            # which does not recurse. A top-level object here would leak the
+            # Simple runtime into plain C/C++ links — the exact bug in
+            # doc/08_tracking/bug/simpleos_libc_leaks_simple_runtime_syms_2026-08-06.md.
+            ENTRY_BUILD="$LIBC_BUILD/entry"
+            rm -rf "$ENTRY_BUILD"; mkdir -p "$ENTRY_BUILD"
+            "$CC" $CFLAGS -ffunction-sections -fdata-sections \
+                -c "$LIBC_DIR/simpleos_entry.c" \
+                -o "$SYSROOT/lib/simple_entry.o"
+            echo "[sysroot] Building SimpleOS Simple runtime ABI for $TRIPLE..."
+            "$CC" $CFLAGS -ffunction-sections -fdata-sections \
+                -c "$LIBC_DIR/simpleos_simple_runtime.c" \
+                -o "$ENTRY_BUILD/simpleos_simple_runtime.o"
+            rm -f "$SYSROOT/lib/libsimple_runtime_compat.a" "$SYSROOT/lib/libsimple_runtime.a"
+            "$AR" rcs "$SYSROOT/lib/libsimple_runtime_compat.a" "$ENTRY_BUILD/simpleos_simple_runtime.o"
+            cp "$SYSROOT/lib/libsimple_runtime_compat.a" "$SYSROOT/lib/libsimple_runtime.a"
+
+            # One object per source file, deliberately: archive members are the
+            # linker's granularity, so a reference to one runtime entry point
+            # does not drag the rest in. Do NOT partial-link (ld -r) these, and
+            # do NOT merge them into libsimpleos_c.a.
+            echo "[sysroot] Cross-compiling real Simple runtime for $TRIPLE..."
+            RT_BUILD="$LIBC_BUILD/simple_runtime_native"
+            rm -rf "$RT_BUILD"; mkdir -p "$RT_BUILD"
+            RT_CFLAGS="--target=$TRIPLE -ffreestanding -nostdlib -nostdlibinc \
+                -fno-builtin -fno-stack-protector -fno-exceptions \
+                -fno-unwind-tables -fno-asynchronous-unwind-tables \
+                -ffunction-sections -fdata-sections -O2 -D__simpleos__=1 \
+                -isystem $LIBC_DIR/include"
+            RT_OBJS=""
+            for rt_src in runtime_native runtime_simd_utf8 runtime_contracts \
+                          runtime_memory runtime_time runtime_timestamp \
+                          runtime_pool runtime_memtrack
+            do
+                "$CC" $RT_CFLAGS -c "$REPO_ROOT/src/runtime/$rt_src.c" \
+                    -o "$RT_BUILD/$rt_src.o" || {
+                        echo "[sysroot] ERROR: failed to cross-compile $rt_src.c" >&2
+                        exit 1
+                    }
+                RT_OBJS="$RT_OBJS $RT_BUILD/$rt_src.o"
+            done
+            rm -f "$SYSROOT/lib/libsimple_runtime_native.a"
+            "$AR" rcs "$SYSROOT/lib/libsimple_runtime_native.a" $RT_OBJS
+            echo "[sysroot] Built libsimple_runtime_native.a ($(echo $RT_OBJS | wc -w) members)"
             ;;
         *)
             echo "[sysroot] ERROR: libc runtime build is not wired for $TRIPLE" >&2
@@ -348,6 +409,87 @@ build_libcxx_runtime() {
 }
 
 build_libcxx_runtime
+
+# -- libc++abi / libunwind (no-exceptions config) ----------------------------
+# clang_static.shs's link line requires these two archives to exist. Every
+# object clang_static links was compiled -fno-exceptions, so the "real"
+# unwinder is never invoked at runtime; what's needed is only the ABI-level
+# symbol set libc++.a references (__cxa_guard_*, __cxa_atexit helpers,
+# type_info RTTI comparison, demangler, etc.), built from libcxxabi's own
+# LIBCXXABI_ENABLE_EXCEPTIONS=OFF source list (see
+# $LLVM_SRC/libcxxabi/src/CMakeLists.txt) so no cxa_exception.cpp /
+# cxa_personality.cpp (the real Itanium unwind path) is pulled in.
+build_libcxxabi_runtime() {
+    if [ ! -d "$LLVM_SRC/libcxxabi/src" ]; then
+        echo "[sysroot] NOTE: libcxxabi sources not found at $LLVM_SRC/libcxxabi/src"
+        return
+    fi
+    echo "[sysroot] Building libc++abi.a (no-exceptions) for $TRIPLE..."
+    LIBCXXABI_BUILD="$REPO_ROOT/build/os/libcxxabi-$TRIPLE"
+    mkdir -p "$LIBCXXABI_BUILD"
+    CXX="${CXX:-clang++}"
+    AR="${AR:-llvm-ar}"
+    command -v "$AR" >/dev/null 2>&1 || AR=ar
+    LIBCXXABI_FLAGS="--target=$TRIPLE --sysroot=$SYSROOT -std=c++23 -ffreestanding -nostdlib -nostdinc++ -fno-exceptions -fno-rtti -fvisibility=hidden -fvisibility-inlines-hidden -fstrict-aliasing -D__simpleos__=1 -D_LIBCPP_BUILDING_LIBRARY -DHAVE___CXA_THREAD_ATEXIT_IMPL=0 -I$LLVM_SRC/libcxxabi/include -I$LLVM_SRC/libcxxabi/src -I$LLVM_SRC/libcxx/src -isystem $SYSROOT/include/c++/v1 -isystem $SYSROOT/include"
+    for src in \
+        cxa_aux_runtime.cpp cxa_default_handlers.cpp cxa_demangle.cpp \
+        cxa_exception_storage.cpp cxa_guard.cpp cxa_handlers.cpp \
+        cxa_vector.cpp cxa_virtual.cpp cxa_noexception.cpp \
+        stdlib_exception.cpp stdlib_stdexcept.cpp stdlib_typeinfo.cpp \
+        abort_message.cpp fallback_malloc.cpp private_typeinfo.cpp
+    do
+        obj="$LIBCXXABI_BUILD/$(printf '%s' "$src" | tr '/.' '__').o"
+        # private_typeinfo.cpp IMPLEMENTS the RTTI comparison runtime itself
+        # (dynamic_cast/typeid on __class_type_info etc.), so it needs -frtti
+        # even though every consumer of libc++abi is built -fno-rtti.
+        # libcxxabi's own CMakeLists forces this per-file too.
+        PERFILE_FLAGS="$LIBCXXABI_FLAGS"
+        case "$src" in
+            private_typeinfo.cpp) PERFILE_FLAGS="$(printf '%s' "$LIBCXXABI_FLAGS" | sed 's/-fno-rtti/-frtti/')" ;;
+        esac
+        "$CXX" $PERFILE_FLAGS -c "$LLVM_SRC/libcxxabi/src/$src" -o "$obj"
+    done
+    rm -f "$SYSROOT/lib/libc++abi.a"
+    "$AR" rcs "$SYSROOT/lib/libc++abi.a" "$LIBCXXABI_BUILD"/*.o
+    echo "[sysroot] Installed libc++abi.a"
+}
+
+# libunwind: with every object -fno-exceptions, nothing in the closure calls
+# a real _Unwind_* entry point (verified: cxa_noexception.cpp only touches the
+# _Unwind_Exception *type*, never links against libunwind symbols — see
+# doc/08_tracking/bug for the B1 witness lane). clang_static.shs's link line
+# still names libunwind.a explicitly inside --start-group/--end-group, so an
+# archive must exist; ld treats an archive that resolves nothing as a no-op.
+# Building it for real (rather than shipping an empty archive) costs little
+# and removes the risk that some clang/LLVM TU does reference a real
+# _Unwind_* symbol, so it is built from libunwind's own source list.
+build_libunwind_runtime() {
+    if [ ! -d "$LLVM_SRC/libunwind/src" ]; then
+        echo "[sysroot] NOTE: libunwind sources not found at $LLVM_SRC/libunwind/src"
+        return
+    fi
+    echo "[sysroot] Building libunwind.a for $TRIPLE..."
+    LIBUNWIND_BUILD="$REPO_ROOT/build/os/libunwind-$TRIPLE"
+    mkdir -p "$LIBUNWIND_BUILD"
+    CXX="${CXX:-clang++}"
+    CC="${CC:-clang}"
+    AR="${AR:-llvm-ar}"
+    command -v "$AR" >/dev/null 2>&1 || AR=ar
+    LIBUNWIND_FLAGS="--target=$TRIPLE --sysroot=$SYSROOT -ffreestanding -nostdlib -nostdinc++ -fno-exceptions -fno-rtti -fvisibility=hidden -fvisibility-inlines-hidden -D__simpleos__=1 -D_LIBUNWIND_IS_BAREMETAL -D_LIBUNWIND_HAS_NO_THREADS -I$LLVM_SRC/libunwind/include -isystem $SYSROOT/include"
+    for src in libunwind.cpp UnwindLevel1.c UnwindLevel1-gcc-ext.c Unwind-sjlj.c; do
+        obj="$LIBUNWIND_BUILD/$(printf '%s' "$src" | tr '/.' '__').o"
+        case "$src" in
+            *.cpp) "$CXX" -std=c++17 $LIBUNWIND_FLAGS -c "$LLVM_SRC/libunwind/src/$src" -o "$obj" ;;
+            *.c)   "$CC" $LIBUNWIND_FLAGS -c "$LLVM_SRC/libunwind/src/$src" -o "$obj" ;;
+        esac
+    done
+    rm -f "$SYSROOT/lib/libunwind.a"
+    "$AR" rcs "$SYSROOT/lib/libunwind.a" "$LIBUNWIND_BUILD"/*.o
+    echo "[sysroot] Installed libunwind.a"
+}
+
+build_libcxxabi_runtime
+build_libunwind_runtime
 
 # -- CRT objects ------------------------------------------------------------
 

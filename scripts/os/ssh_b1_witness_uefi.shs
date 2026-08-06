@@ -1,0 +1,253 @@
+#!/bin/sh
+# ssh_b1_witness_uefi.shs — Lane B1 capstone: in-guest `clang -cc1` compiles a
+# real LLVM translation unit (llvm/lib/Support/DivisionByConstantInfo.cpp,
+# preprocessed to build/os/b1_witness/TU1.I) to /TU1.O under REAL UEFI
+# firmware (OVMF pflash -> GRUB-EFI -> multiboot1), NEVER `-kernel`
+# (.claude/rules/board-runnable.md). The object is retrieved over SSH and
+# byte-compared against the host reference build/os/b1_witness/TU1.O.
+#
+# Modeled directly on the proven sibling gate
+# scripts/os/scp_retrieve_over_ssh_uefi.shs (same kernel entry, same OVMF
+# boot sequence, same SSH dispatch idiom) — the ONLY structural difference is
+# the two-payload stager (scripts/os/fsexec_mkimg_b1.spl) that appends TU1.I
+# as a second raw blob after clang_static, and the -cc1 command line/oracle,
+# per doc/03_plan/os/simpleos/b1_clang_selfcompile_witness.md §5.
+#
+# GATES (serial):
+#   L1 "[grub-uefi] multiboot loading"     OVMF -> GRUB-EFI app ran
+#   L2 "call _start" / "SimpleOS Boot"     multiboot handoff -> kernel _start
+#   L3 "accept loop start"                 sshd reached ring-3 accept loop
+#   L4 "oo-nvme] persist /TU1.O -> OK"     in-guest clang -cc1 compiled TU1.I
+#   L5 host: retrieved TU1.O size=10616 and compare_object.shs verdict
+#
+# Env: SEED, CLANG_BIN, SKIP_STAGE=1, SKIP_KERNEL=1 (default: reuse existing
+#      kernel — same entry as the proven scp gate), QEMU_MEM (2G), BOOT_WAIT,
+#      CLANG_WAIT (900), SSH_PORT.
+set -eu
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+SEED="${SEED:-src/compiler_rust/target/release/simple}"
+CLANG_BIN="${CLANG_BIN:-build/os/clang_static/bin/clang_static}"
+TU1_I="${TU1_I:-build/os/b1_witness/TU1.I}"
+TU1_O_REF="${TU1_O_REF:-build/os/b1_witness/TU1.O}"
+STAGER="scripts/os/fsexec_mkimg_b1.spl"
+STAGE_DIR="build/os/elfexec_b1"
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/ssh_ring3_clang_entry.spl"
+LINKER="examples/09_embedded/simple_os/arch/x86_64/linker_128mb.ld"
+# Reuse the proven 128 MiB-base merged SSH+clang-stream kernel if present —
+# it is the SAME entry file this lane needs (ssh_ring3_clang_entry.spl), so
+# no kernel rebuild is required unless it is missing.
+KERNEL="${KERNEL:-build/os/simpleos_ssh_ring3_uefi128.elf}"
+IMG="$STAGE_DIR/fat32-b1.img"
+SERIAL="build/os/ssh_b1_witness_uefi.serial.log"
+CACHE="build/os/ssh_b1_cache_uefi128"
+BUILD="build/os/uefi_b1"
+ESP="$BUILD/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+OVMF_VARS="$BUILD/OVMF_VARS_4M.fd"
+QEMU_MEM="${QEMU_MEM:-2G}"
+BOOT_WAIT="${BOOT_WAIT:-60}"
+SCRATCH="${SCRATCH:-build/os/scratch_b1_witness}"
+
+command -v grub-mkstandalone >/dev/null 2>&1 || { echo "FAIL: grub-mkstandalone missing"; exit 1; }
+command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "FAIL: qemu-system-x86_64 missing"; exit 1; }
+command -v sshpass >/dev/null 2>&1 || { echo "FAIL: sshpass missing"; exit 1; }
+[ -f "$OVMF_CODE" ] || { echo "FAIL: OVMF_CODE not found at $OVMF_CODE"; exit 1; }
+[ -f "$OVMF_VARS_SRC" ] || { echo "FAIL: OVMF_VARS not found at $OVMF_VARS_SRC"; exit 1; }
+[ -f "$CLANG_BIN" ] || { echo "FAIL: $CLANG_BIN missing — run sh src/os/port/llvm/clang_static.shs"; exit 1; }
+[ -f "$TU1_I" ] || { echo "FAIL: $TU1_I missing — regenerate per doc/03_plan/os/simpleos/b1_clang_selfcompile_witness.md §1"; exit 1; }
+[ -f "$TU1_O_REF" ] || { echo "FAIL: $TU1_O_REF missing (host reference) — run build/os/b1_witness/make_reference.shs"; exit 1; }
+mkdir -p build/os/generated/generated "$STAGE_DIR" "$SCRATCH"
+
+# ---- 1. Payload image: /FSEXEC.ELF (+/usr/bin/CLANG alias) + /TU1.I --------
+if [ "${SKIP_STAGE:-0}" != "1" ] || [ ! -f "$IMG" ]; then
+    stat -c%s "$CLANG_BIN" > "$STAGE_DIR/payload_size.txt"
+    stat -c%s "$TU1_I"     > "$STAGE_DIR/tu_size.txt"
+    MKOUT="$(SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SEED" run "$STAGER" 2>&1)"
+    echo "$MKOUT" | tail -3
+    STATUS_LINE="$(echo "$MKOUT" | grep -a 'fsexec_mkimg_b1_status=ok' || true)"
+    [ -n "$STATUS_LINE" ] || { echo "[b1-witness] STAGER FAILED"; echo "$MKOUT" | tail -20; exit 1; }
+    kv() { echo "$STATUS_LINE" | tr ' ' '\n' | grep -a "^$1=" | cut -d= -f2; }
+    P1PAD="$(kv payload1_padded_bytes)"; SPC="$(kv spc)"; TUCLUSTERS="$(kv tu_clusters)"; TOTAL="$(kv total_bytes)"
+    [ -n "$P1PAD" ] && [ -n "$SPC" ] && [ -n "$TUCLUSTERS" ] && [ -n "$TOTAL" ] \
+        || { echo "[b1-witness] STAGER status line malformed: $STATUS_LINE"; exit 1; }
+    CLUSTER_BYTES=$((SPC * 512))
+    TU_PAD=$((TUCLUSTERS * CLUSTER_BYTES))
+    cp "$CLANG_BIN" "$SCRATCH/CLANG.pad"; truncate -s "$P1PAD" "$SCRATCH/CLANG.pad"
+    cp "$TU1_I"      "$SCRATCH/TU1.pad";   truncate -s "$TU_PAD" "$SCRATCH/TU1.pad"
+    cat "$STAGE_DIR/fat32-b1-prefix.bin" "$SCRATCH/CLANG.pad" "$SCRATCH/TU1.pad" > "$IMG"
+    truncate -s "$TOTAL" "$IMG"
+    rm -f "$SCRATCH/CLANG.pad" "$SCRATCH/TU1.pad"
+fi
+[ -f "$IMG" ] || { echo "[b1-witness] missing image $IMG"; exit 1; }
+if command -v readelf >/dev/null 2>&1; then
+    PBASE="$(readelf -l "$CLANG_BIN" 2>/dev/null | awk '/LOAD/{print $3; exit}')"
+    echo "[b1-witness] clang_static first PT_LOAD vaddr = $PBASE (want 0x0000000040000000)"
+fi
+
+# ---- 2. Kernel: reuse the proven 128 MiB-base SSH+clang-stream kernel ------
+printf 'pub fn ssh_live_build_marker() -> text:\n    "ssh-ring3-build:uefi-b1-witness"\n' \
+    > build/os/generated/ssh_live_build_marker.spl
+cat > build/os/generated/generated/simpleos_log_config.spl <<'SPL'
+val SIMPLEOS_LOG_COMPILED: bool = false
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+SPL
+if [ "${SKIP_KERNEL:-1}" != "1" ] || [ ! -f "$KERNEL" ]; then
+    OBJCOPY_PREFIX=""
+    for d in /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin; do
+        [ -f "$d/llvm-objcopy" ] && OBJCOPY_PREFIX="$d" && break
+    done
+    rm -rf "$CACHE"; mkdir -p "$CACHE"; rm -f "$KERNEL"
+    echo "[b1-witness] building 128MB-base kernel -> $KERNEL"
+    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT/src" SIMPLE_OS_LOG_MODE=off SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$SEED" native-build --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os --backend cranelift --cpu x86-64-v1 \
+        --opt-level=aggressive --log off --entry-closure --cache-dir "$CACHE" \
+        --entry "$ENTRY" --target x86_64-unknown-none -o "$KERNEL" \
+        --linker-script "$LINKER" 2>&1 | tail -40
+    [ -f "$KERNEL" ] || { echo "[b1-witness] KERNEL BUILD FAILED"; exit 1; }
+fi
+echo "[b1-witness] kernel=$KERNEL ($(stat -c%s "$KERNEL") bytes)"
+
+# ---- 3. ESP: self-contained BOOTX64.EFI (kernel in memdisk) ----------------
+rm -rf "$BUILD"; mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+cat > "$BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS SSH ring-3 B1 witness (UEFI/multiboot, 128MB)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+grub-mkstandalone --format=x86_64-efi --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$BUILD/grub.cfg" "boot/kernel.elf=$KERNEL"
+[ -f "$EFIAPP" ] || { echo "FAIL: grub-mkstandalone did not produce $EFIAPP"; exit 1; }
+
+# ---- 4. Free host port ------------------------------------------------------
+SSH_PORT="${SSH_PORT:-42522}"
+if ss -ltn 2>/dev/null | grep -q ":$SSH_PORT "; then
+    for p in 43522 44522 45522 46522; do
+        ss -ltn 2>/dev/null | grep -q ":$p " || { SSH_PORT=$p; break; }
+    done
+fi
+echo "[b1-witness] host ssh port = $SSH_PORT -> guest 22"
+
+# ---- 5. Boot under OVMF pflash (NOT -kernel). ESP via vvfat, payload on NVMe.
+QEMU_ACCEL="${QEMU_ACCEL:-auto}"
+ACCEL_ARGS="-machine q35 -cpu qemu64"
+ACCEL_MODE="tcg"
+if [ "$QEMU_ACCEL" != "tcg" ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    ACCEL_ARGS="-machine q35,accel=kvm -cpu qemu64"
+    ACCEL_MODE="kvm"
+fi
+echo "[b1-witness] qemu acceleration = $ACCEL_MODE (correctness gate; TCG is valid but slow)"
+rm -f "$SERIAL"
+qemu-system-x86_64 -no-user-config -monitor none -nographic -no-reboot \
+    $ACCEL_ARGS -m "$QEMU_MEM" \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
+    -serial "file:$SERIAL" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -drive "file=$IMG,if=none,id=nvm,format=raw" -device nvme,serial=deadbeef,drive=nvm \
+    -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22" -device virtio-net-pci,netdev=n0 &
+QEMU_PID=$!
+trap 'kill "$QEMU_PID" 2>/dev/null || true' EXIT
+
+# ---- 6. Wait for the ring-3 accept loop under OVMF -------------------------
+i=0
+while [ $i -lt "$BOOT_WAIT" ]; do
+    grep -qa "accept loop start" "$SERIAL" 2>/dev/null && break
+    kill -0 "$QEMU_PID" 2>/dev/null || break
+    sleep 1; i=$((i+1))
+done
+rung() { grep -qa "$1" "$SERIAL" 2>/dev/null && echo "  [ok]   $2" || echo "  [MISS] $2"; }
+echo "===== UEFI boot ladder ====="
+rung "\[grub-uefi\] multiboot loading" "L1 OVMF -> GRUB-EFI app ran"
+rung "call _start\|SimpleOS Boot"       "L2 multiboot handoff -> kernel _start"
+rung "accept loop start"                "L3 sshd ring-3 accept loop"
+if ! grep -qa "accept loop start" "$SERIAL" 2>/dev/null; then
+    echo "===== RESULT: accept loop NOT reached under OVMF ====="
+    sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$SERIAL" 2>/dev/null | grep -a . | tail -30
+    kill "$QEMU_PID" 2>/dev/null || true
+    exit 1
+fi
+
+# ---- 7. In-guest clang -cc1 compile of TU1.I, then getfile retrieval ------
+# Exact flag set from doc/03_plan/os/simpleos/b1_clang_selfcompile_witness.md
+# §5 — every flag verified present in the guest binary's OptTable, and
+# REQUIRED for byte-reproducibility (see that doc §4 for -fno-ident etc.).
+CLANG_CMD="clang -cc1 -triple x86_64-unknown-simpleos -emit-obj -disable-free -clear-ast-before-backend -disable-llvm-verifier -discard-value-names -main-file-name TU1.I -mrelocation-model static -mframe-pointer=all -fmath-errno -ffp-contract=on -fno-rounding-math -mconstructor-aliases -funwind-tables=2 -target-cpu x86-64 -tune-cpu generic -fdebug-compilation-dir=/ -fcoverage-compilation-dir=/ -O3 -std=c++17 -fdeprecated-macro -ferror-limit 19 -fno-rtti -fgnuc-version=4.2.1 -fskip-odr-check-in-gmf -vectorize-loops -vectorize-slp -faddrsig -fno-ident -D__GCC_HAVE_DWARF2_CFI_ASM=1 -o /TU1.O -x c++-cpp-output /TU1.I"
+echo "[b1-witness] ssh -p $SSH_PORT root@127.0.0.1 $CLANG_CMD"
+sshpass -p simpleos ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+    root@127.0.0.1 $CLANG_CMD || true
+# Same compile budget rationale as scp_retrieve_over_ssh_uefi.shs: the guest
+# must stream the ~122 MB clang_static image through FS-exec before running a
+# line of it. TU1.I itself is only 1.1 MB and read via ordinary fopen, not
+# FS-exec, so it adds negligible time once clang is running.
+CLANG_WAIT="${CLANG_WAIT:-900}"
+j=0
+while [ $j -lt "$CLANG_WAIT" ]; do
+    grep -qaE "oo-nvme\] persist|heap:stream-open-fail|ring3 program exited" "$SERIAL" 2>/dev/null && break
+    kill -0 "$QEMU_PID" 2>/dev/null || break
+    sleep 2; j=$((j+2))
+done
+if ! grep -qa "oo-nvme\] persist /TU1.O -> OK" "$SERIAL" 2>/dev/null; then
+    if grep -qaE "spawn\] FAIL user-AS|spawn returned rc=-1|VMM not initialized" "$SERIAL" 2>/dev/null; then
+        echo "[b1-witness] FAIL: ring-3 spawn REJECTED the image — NOT a timeout, do not raise CLANG_WAIT"
+        grep -aoE "\[VMM\][^;]{0,70}|\[spawn\][^;]{0,60}|ring3 deferred[^;]{0,50}" "$SERIAL" 2>/dev/null | tail -4
+    elif grep -qa "heap:stream-open-ok" "$SERIAL" 2>/dev/null \
+       && ! grep -qa "ring3 program exited" "$SERIAL" 2>/dev/null; then
+        echo "[b1-witness] FAIL: clang image opened but never finished (accel=$ACCEL_MODE, waited ${j}s of ${CLANG_WAIT}s)"
+    elif grep -qa "heap:stream-open-fail" "$SERIAL" 2>/dev/null; then
+        echo "[b1-witness] FAIL: guest could not open the clang image (stream-open-fail)"
+    else
+        echo "[b1-witness] FAIL: /TU1.O not persisted (clang never dispatched, or -cc1 errored under OVMF)"
+    fi
+    kill "$QEMU_PID" 2>/dev/null || true; sleep 1
+    echo "===== serial tail ====="; sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$SERIAL" | tail -80
+    exit 1
+fi
+echo "  [ok]   L4 in-guest clang -cc1 compiled /TU1.O under OVMF"
+
+rm -f "$SCRATCH/retrieved_TU1.O"
+sshpass -p simpleos ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+    root@127.0.0.1 getfile /TU1.O > "$SCRATCH/retrieved_TU1.O" 2>/dev/null || true
+k=0
+while [ $k -lt 20 ]; do
+    grep -qaE "getfile path|scp read-open-fail" "$SERIAL" 2>/dev/null && break
+    kill -0 "$QEMU_PID" 2>/dev/null || break
+    sleep 1; k=$((k+1))
+done
+kill "$QEMU_PID" 2>/dev/null || true; sleep 1
+
+# ---- 8. Host-side verification: size, then the tier-1/tier-2 oracle -------
+if [ ! -s "$SCRATCH/retrieved_TU1.O" ]; then
+    echo "FAIL: $SCRATCH/retrieved_TU1.O missing or empty (transport failure — see doc §5 known hazard)"; exit 1
+fi
+RSIZE="$(stat -c%s "$SCRATCH/retrieved_TU1.O")"
+echo "[b1-witness] retrieved TU1.O size=$RSIZE sha256=$(sha256sum "$SCRATCH/retrieved_TU1.O" | cut -d' ' -f1)"
+if [ "$RSIZE" != "10616" ]; then
+    echo "FAIL: retrieved TU1.O is $RSIZE bytes, want 10616 — transport failure, not a compile verdict"
+    exit 1
+fi
+sh build/os/b1_witness/compare_object.shs "$SCRATCH/retrieved_TU1.O"
