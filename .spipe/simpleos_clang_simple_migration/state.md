@@ -29,9 +29,17 @@ Plan of record: `doc/03_plan/os/simpleos/toolchain_selfhost_bootstrap_plan.md`.
   `src/os/port/llvm/build.spl` `LLVM_REVISION` equals the fork tip.
   **DONE** — fork tip and pin both `596122063`; verified by `git ls-remote`.
 - AC-2: Cross LLVM/clang/lld for `x86_64-unknown-simpleos` builds from source on
-  this host: `build/os/llvm/cross-x86_64-unknown-simpleos/bin/` contains clang and
-  lld, and `build/os/clang_static/bin/` contains the static guest binaries.
-  **IN PROGRESS** — configure fixed and succeeding; ninja building clang+lld.
+  this host, and the outputs are GUEST-RUNNABLE (Type=EXEC, entry 0x40000000,
+  zero INTERP segments) — not the Linux-dynamic ELFs stage 2 used to emit.
+  **DONE 2026-08-06.** All three stages complete:
+  `bin/clang-20` 127,572,072 B sha256 `8554035d57523bbf8a62aedd…`;
+  `bin/lld` 64,526,504 B sha256 `bf1da1aece19814a0df3a381…`; both EXEC /
+  0x40000000 / 0 INTERP. compiler-rt builtins installed to
+  `build/os/sysroot/lib/clang/20/lib/x86_64-unknown-simpleos/`.
+  Required fixing three SimpleOS defects (libc runtime-symbol leak, stale
+  `libm.a` copy, duplicate `environ`) plus adding `-static` + the SimpleOS
+  linker script to the toolchain. The deprecated `clang_static.shs` relink is
+  no longer needed for a guest-runnable image.
 - AC-3: `bin/release/x86_64-unknown-simpleos/simple` exists as a static ET_EXEC
   ELF64, entry `0x40000000`, proven by `readelf -h`.
   **BLOCKED** — link needs ~20 `rt_*` symbols; real Simple runtime is not

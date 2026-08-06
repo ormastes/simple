@@ -141,9 +141,32 @@ fi
 echo "[uefi-scp] host ssh port = $SSH_PORT -> guest 22"
 
 # ---- 5. Boot under OVMF pflash (NOT -kernel). ESP via vvfat, payload on NVMe.
+#
+# Acceleration: the guest ISA is x86_64 and so is the host, so KVM is usable
+# when /dev/kvm is present and accessible. This is a CORRECTNESS gate, so TCG is
+# a valid (merely slow) fallback — but streaming a ~127 MB clang through
+# FS-exec and compiling under pure TCG overruns the compile budget below, which
+# presents as "compile incomplete" rather than "too slow". Prefer KVM, fall back
+# to TCG, and SAY WHICH ONE RAN so timing is never misattributed as native.
+# QEMU_ACCEL=tcg forces the slow path for A/B comparison.
+QEMU_ACCEL="${QEMU_ACCEL:-auto}"
+ACCEL_ARGS="-machine q35 -cpu qemu64"
+ACCEL_MODE="tcg"
+if [ "$QEMU_ACCEL" != "tcg" ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    # Keep -cpu qemu64. Do NOT switch to -cpu host here: that changes the CPU
+    # MODEL as well as the accelerator, exposing feature bits (AVX/XSAVE etc.)
+    # the freestanding kernel never enables in CR4/XCR0. Measured 2026-08-06:
+    # `accel=kvm -cpu host` faults in ring 0 at rip≈0x0800f3fe during boot,
+    # while plain TCG boots fine — an accelerator/CPU-model confound, not a
+    # kernel regression. Change one variable at a time here.
+    ACCEL_ARGS="-machine q35,accel=kvm -cpu qemu64"
+    ACCEL_MODE="kvm"
+fi
+echo "[uefi-scp] qemu acceleration = $ACCEL_MODE (correctness gate; TCG is valid but slow)"
+
 rm -f "$SERIAL"
 qemu-system-x86_64 -no-user-config -monitor none -nographic -no-reboot \
-    -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
+    $ACCEL_ARGS -m "$QEMU_MEM" \
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
     -drive "if=pflash,format=raw,file=$OVMF_VARS" \
     -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
@@ -180,14 +203,32 @@ echo "[uefi-scp] ssh -p $SSH_PORT root@127.0.0.1 $CLANG_CMD"
 sshpass -p simpleos ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
     root@127.0.0.1 $CLANG_CMD || true
+# Compile budget. The guest must STREAM the whole clang image through FS-exec
+# before it runs a single line of it, so this budget scales with clang's size
+# and with the accelerator: ~127 MB under TCG does not finish in 120s, and the
+# failure looks identical to a broken compile. Default generously; override
+# with CLANG_WAIT. Distinguish "still streaming" from "actually failed" in the
+# diagnosis below rather than reporting one as the other.
+CLANG_WAIT="${CLANG_WAIT:-900}"
 j=0
-while [ $j -lt 120 ]; do
+while [ $j -lt "$CLANG_WAIT" ]; do
     grep -qaE "oo-nvme\] persist|heap:stream-open-fail|ring3 program exited" "$SERIAL" 2>/dev/null && break
     kill -0 "$QEMU_PID" 2>/dev/null || break
     sleep 2; j=$((j+2))
 done
 if ! grep -qa "oo-nvme\] persist /hello.o -> OK" "$SERIAL" 2>/dev/null; then
-    echo "[uefi-scp] FAIL: /hello.o not persisted (clang compile under OVMF incomplete)"
+    # Name the actual stage reached — "compile incomplete" alone sent one
+    # investigation after a phantom exec failure when the real state was a
+    # timeout mid-stream of a 127 MB binary.
+    if grep -qa "heap:stream-open-ok" "$SERIAL" 2>/dev/null \
+       && ! grep -qa "ring3 program exited" "$SERIAL" 2>/dev/null; then
+        echo "[uefi-scp] FAIL: clang image opened but never finished (accel=$ACCEL_MODE, waited ${j}s of ${CLANG_WAIT}s)"
+        echo "[uefi-scp]       payload is $(stat -c%s "$CLANG_BIN" 2>/dev/null) bytes; raise CLANG_WAIT or enable KVM"
+    elif grep -qa "heap:stream-open-fail" "$SERIAL" 2>/dev/null; then
+        echo "[uefi-scp] FAIL: guest could not open the clang image (stream-open-fail)"
+    else
+        echo "[uefi-scp] FAIL: /hello.o not persisted (clang never dispatched under OVMF)"
+    fi
     kill "$QEMU_PID" 2>/dev/null || true; sleep 1
     echo "===== serial tail ====="; sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$SERIAL" | tail -60
     exit 1

@@ -2,8 +2,8 @@
 # ssh_lld_link_uefi.shs — Lane P6 (toolchain) board gate: rungs 3-6 of the
 # in-guest LLVM ladder (master plan
 # doc/01_research/domain/simpleos_production_host_master_plan.md §13):
-#   rung 3  /usr/bin/ld.lld starts via ordinary FS-exec and prints its version
-#   rung 4  ld.lld links the guest-generated object into an ELF
+#   rung 3  /LLD.ELF starts via ordinary FS-exec and prints its version
+#   rung 4  lld links the guest-generated object into an ELF
 #   rung 5  the resulting ELF starts from the filesystem
 #   rung 6  it returns an expected status and output
 #
@@ -29,8 +29,9 @@
 # this script keeps the same convention: present in the machine config,
 # never the source of truth for PASS/FAIL.
 #
-# WHY THIS IS BLOCKED TODAY (verified statically 2026-07-27; see prerequisite
-# guards below and doc/03_plan/os/in_guest_lld_link_ladder.md for detail):
+# WHY THIS IS BLOCKED TODAY (re-verified 2026-08-06 for lane C4 of
+# doc/03_plan/os/simpleos/toolchain_selfhost_bootstrap_plan.md; see the
+# prerequisite guards below and doc/03_plan/os/in_guest_lld_link_ladder.md):
 #   1. No lld_static build product exists on this host. src/os/port/llvm/
 #      clang_static.shs already supports `SIMPLEOS_LLVM_TOOL=lld` to relink
 #      the cross-built LLD into a static SimpleOS-native ELF (exactly the
@@ -39,25 +40,65 @@
 #      upstream cross build tree (build/os/llvm/cross-x86_64-unknown-simpleos/)
 #      has no build.ninja on this host, so `bin/lld` has not even been
 #      cross-compiled yet. Full rebuild is a multi-hour LLVM build, not a
-#      bounded static-first task.
-#   2. No multi-file guest image stager exists. scripts/os/fsexec_mkimg_big.spl
-#      and scripts/os/fsexec_mkimg_simple.spl each stage exactly ONE big ELF
-#      payload + one small companion file. Linking needs lld_static PLUS at
-#      least a guest object, crt0.o, and a linker script (src/os/port/llvm/
-#      sysroot.shs simpleos.ld) staged simultaneously. A new stager (working
-#      name scripts/os/fsexec_mkimg_lld.spl, referenced as $STAGER below) is
-#      required and is explicitly out of this lane's exclusive-path scope.
+#      bounded static-first task. THIS IS THE ONLY REMAINING BLOCKER.
+#   2. RESOLVED 2026-08-06: the multi-file guest image stager now exists as
+#      scripts/os/fsexec_mkimg_lld.spl ($STAGER below). Like
+#      fsexec_mkimg_big.spl it emits only a FAT32 STRUCTURAL PREFIX; the big
+#      payloads (lld_static, optionally libc++.a) are appended raw by step 1
+#      below, because a 100 MB-class ELF cannot be held in a Simple array.
 #   3. doc/03_plan/os/in_guest_clang_selfhost_board_plan.md already recorded
 #      this exact gap: "No in-guest linking in Phase 1. ld/lld needs fork
 #      too. .o is the deliverable; link+run happens on host for verification,
-#      or is a later phase." Rung 3 here (direct FS-exec of ld.lld, same
-#      no-fork dispatch idiom already proven for `clang -cc1` and
-#      `/usr/bin/simple`) sidesteps the fork constraint that blocked the
-#      clang *driver* path; rungs 4-6 still need the staged inputs in #2.
+#      or is a later phase." Rung 3 here (direct FS-exec of lld, same no-fork
+#      dispatch idiom already proven for `clang -cc1` and `/usr/bin/simple`)
+#      sidesteps the fork constraint that blocked the clang *driver* path.
 #
-# Env: SEED, LLD_BIN, GUEST_OBJ, CRT0_OBJ, LINKER_SCRIPT, SKIP_STAGE,
-#      SKIP_KERNEL=1 (default: reuse existing kernel), QEMU_MEM (2G),
-#      BOOT_WAIT, SSH_PORT.
+# TWO GUEST-SIDE CONSTRAINTS THIS SCRIPT MUST OBEY (verified in-tree
+# 2026-08-06 -- changing any command string below without re-checking these
+# will make the ladder fail for the wrong reason):
+#
+#   A. FAT32 WRITE is ROOT-DIRECTORY-ONLY with 8.3 names. Reads DO traverse
+#      subdirectories (baremetal_stubs.c `_fat32_find_path` splits on '/' and
+#      descends), and the name comparison UPPERCASES the query, so a lowercase
+#      or subdirectory read path would resolve. But `fat32_write_file`
+#      (baremetal_stubs.c, via `_fat32_find_root_dir_slot`) never descends:
+#      it 8.3-mangles whatever name it is given and drops the entry in the
+#      ROOT. There is no mkdir and no LFN create. So the rung-4 OUTPUT must be
+#      a root 8.3 name (/HELLO.ELF). Lane C4 (plan line 152) requires the same
+#      of every staged INPUT (/LLD.ELF, /CRT0.O, /HELLO.O, /SIMPLEOS.LD,
+#      /LIBC.A) -- so this script uses root 8.3 paths throughout and
+#      fsexec_mkimg_lld.spl creates no subdirectories at all. Uppercase is
+#      used everywhere so what is typed is byte-identical to what is on disk.
+#
+#   B. `lld` IS THE GENERIC MULTIPLEXER AND NEEDS `-flavor gnu`.
+#      clang_static.shs relinks ninja target `bin/lld` (NOT `bin/ld.lld`) into
+#      build/os/clang_static/bin/lld_static, and the ring-3 loader passes the
+#      RESOLVED PATH as argv[0] (x86_64_fs_exec_ring3.spl
+#      `_build_sysv_stack_frame`: binary_path is argv[0], argc = argv.len()+1).
+#      argv[0] is therefore "/LLD.ELF", which lld's argv[0]-based flavor
+#      detection cannot map to the ELF driver -- it would abort with "lld is a
+#      generic driver, invoke ld.lld instead". Every invocation below passes
+#      `-flavor gnu` explicitly, matching src/os/port/llvm/test_smoke.spl:78.
+#      (argv budget is fine: sshd tokenizes on spaces only, and the ring-3
+#      frame allows 64 argv items within one 4 KiB page.)
+#
+#   C. lld's output temp-file + rename dance IS already covered -- do not
+#      "fix" it by hand. lld::elf writes through FileOutputBuffer, which by
+#      default creates `<output>-<random>.tmp`, mmaps it, and rename()s it
+#      into place: a non-8.3 name, a file-backed mmap, and a rename that
+#      root-only FAT32 has no primitive for. The x86_64 baremetal_stubs.c
+#      RAM-output-file layer absorbs all three -- syscall 10 handles
+#      file-backed mmap, 43 (ftruncate) is accepted, and 44 (rename) renames
+#      the in-RAM output file -- and only the FINAL name is 8.3-mangled into
+#      the root when `_bare_dump_all_outputs` flushes at exit. If a future run
+#      shows a stray `.tmp` in the guest root, the escape hatch is
+#      `--no-mmap-output-file` (already used host-side at
+#      baremetal_stubs.c:17082), which routes lld through InMemoryBuffer and
+#      writes the final path directly with no temp and no rename.
+#
+# Env: SEED, LLD_BIN, GUEST_OBJ, CRT0_OBJ, LIBC_A, LIBCXX_A, LINKER_SCRIPT,
+#      SKIP_STAGE, SKIP_KERNEL=1 (default: reuse existing kernel),
+#      QEMU_MEM (2G), BOOT_WAIT, SSH_PORT.
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
@@ -66,8 +107,11 @@ SEED="${SEED:-src/compiler_rust/target/release/simple}"
 LLD_BIN="${LLD_BIN:-build/os/clang_static/bin/lld_static}"
 GUEST_OBJ="${GUEST_OBJ:-build/os/elfexec_lld/hello.o}"
 CRT0_OBJ="${CRT0_OBJ:-build/os/sysroot/lib/crt0.o}"
+LIBC_A="${LIBC_A:-build/os/sysroot/lib/libsimpleos_c.a}"
+LIBCXX_A="${LIBCXX_A:-}"   # set to build/os/sysroot/lib/libc++.a for the C5 C++ row
 LINKER_SCRIPT="${LINKER_SCRIPT:-build/os/sysroot/share/simpleos/simpleos.ld}"
 STAGER="scripts/os/fsexec_mkimg_lld.spl"
+STAGE_DIR="build/os/elfexec_lld/stage"
 ENTRY="examples/09_embedded/simple_os/arch/x86_64/ssh_ring3_clang_entry.spl"
 KLINKER="examples/09_embedded/simple_os/arch/x86_64/linker_128mb.ld"
 KERNEL="build/os/simpleos_ssh_ring3_uefi128_lld.elf"
@@ -94,7 +138,8 @@ req_cmd() {
     command -v "$1" >/dev/null 2>&1 || { echo "[lld-link] MISSING: $1 (command not found)"; FAIL=1; }
 }
 req_file "$LLD_BIN" "build: SIMPLEOS_LLVM_TOOL=lld sh src/os/port/llvm/clang_static.shs (requires a completed 'cross' stage first: sh src/os/port/llvm/build.shs cross)"
-req_file "$STAGER" "multi-payload guest image stager not yet authored (out of lane P6 exclusive-path scope; see doc/03_plan/os/in_guest_lld_link_ladder.md prerequisite #2)"
+req_file "$STAGER" "multi-payload guest image stager (authored 2026-08-06; see doc/03_plan/os/in_guest_lld_link_ladder.md prerequisite #2)"
+req_file "$LIBC_A" "run src/os/port/llvm/sysroot.shs to produce libsimpleos_c.a"
 req_file "$GUEST_OBJ" "a guest-target (x86_64-unknown-simpleos) object to link -- e.g. retrieve one via scripts/os/scp_retrieve_over_ssh_uefi.shs, or cross-compile on host with the toolchain from src/os/port/llvm/build.shs"
 req_file "$CRT0_OBJ" "run src/os/port/llvm/sysroot.shs to produce the SimpleOS sysroot (crt0.o + libsimpleos_c.a + simpleos.ld)"
 req_file "$LINKER_SCRIPT" "produced by src/os/port/llvm/sysroot.shs alongside crt0.o"
@@ -111,12 +156,40 @@ if [ "$FAIL" != "0" ]; then
 fi
 mkdir -p build/os/elfexec_lld build/os/generated/generated "$SCRATCH"
 
-# ---- 1. Payload image: /usr/bin/ld.lld + crt0.o + guest object + linker script ----
+# ---- 1. Payload image: /LLD.ELF + /CRT0.O + /HELLO.O + /SIMPLEOS.LD + /LIBC.A
+# All ROOT, all uppercase 8.3 (constraint A in the header). The stager emits
+# only the structural prefix; the big payloads are concatenated here, each
+# cluster-aligned, exactly as scp_retrieve_over_ssh_uefi.shs does for clang.
 if [ "${SKIP_STAGE:-0}" != "1" ] || [ ! -f "$IMG" ]; then
     echo "[lld-link] staging image via $STAGER"
-    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SEED" run "$STAGER" \
-        --lld "$LLD_BIN" --crt0 "$CRT0_OBJ" --obj "$GUEST_OBJ" \
-        --ld-script "$LINKER_SCRIPT" --out "$IMG" 2>&1 | tail -20
+    rm -rf "$STAGE_DIR"; mkdir -p "$STAGE_DIR"
+    cp "$CRT0_OBJ"       "$STAGE_DIR/CRT0.O"
+    cp "$LINKER_SCRIPT"  "$STAGE_DIR/SIMPLEOS.LD"
+    cp "$GUEST_OBJ"      "$STAGE_DIR/HELLO.O"
+    cp "$LIBC_A"         "$STAGE_DIR/LIBC.A"
+    [ -n "${GUEST_OBJ2:-}" ] && cp "$GUEST_OBJ2" "$STAGE_DIR/HELLO2.O"
+    [ -n "${GUEST_SRC:-}"  ] && cp "$GUEST_SRC"  "$STAGE_DIR/HELLO.C"
+    stat -c%s "$LLD_BIN" > build/os/elfexec_lld/payload_size.txt
+    if [ -n "$LIBCXX_A" ] && [ -f "$LIBCXX_A" ]; then
+        stat -c%s "$LIBCXX_A" > build/os/elfexec_lld/libcxx_size.txt
+    else
+        echo 0 > build/os/elfexec_lld/libcxx_size.txt
+    fi
+    MKOUT="$(SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SEED" run "$STAGER" 2>&1)"
+    echo "$MKOUT" | tail -3
+    STATUS_LINE="$(echo "$MKOUT" | grep -a 'fsexec_mkimg_lld_status=ok' || true)"
+    [ -n "$STATUS_LINE" ] || { echo "[lld-link] STAGER FAILED"; exit 1; }
+    kv() { echo "$STATUS_LINE" | tr ' ' '\n' | grep -a "^$1=" | cut -d= -f2; }
+    P1PAD="$(kv payload1_padded_bytes)"; TOTAL="$(kv total_bytes)"
+    [ -n "$P1PAD" ] && [ -n "$TOTAL" ] || { echo "[lld-link] STAGER status line malformed"; exit 1; }
+    cp "$LLD_BIN" "$SCRATCH/LLD.pad"; truncate -s "$P1PAD" "$SCRATCH/LLD.pad"
+    if [ -n "$LIBCXX_A" ] && [ -f "$LIBCXX_A" ]; then
+        cat build/os/elfexec_lld/fat32-lld-prefix.bin "$SCRATCH/LLD.pad" "$LIBCXX_A" > "$IMG"
+    else
+        cat build/os/elfexec_lld/fat32-lld-prefix.bin "$SCRATCH/LLD.pad" > "$IMG"
+    fi
+    truncate -s "$TOTAL" "$IMG"
+    rm -f "$SCRATCH/LLD.pad"
 fi
 [ -f "$IMG" ] || { echo "[lld-link] missing image $IMG"; exit 1; }
 
@@ -207,44 +280,47 @@ if ! grep -qa "accept loop start" "$SERIAL" 2>/dev/null; then
 fi
 
 # ---- 7. Ladder rungs 3-6 over SSH -------------------------------------------
-# Rung 3: FS-exec launches ld.lld directly (no fork -- same dispatch idiom
-# already proven for `clang -cc1` and `/usr/bin/simple`; absolute path
-# bypasses the sshd canned-fixture branch, see ssh_simple_hello_uefi.shs
-# header note 3).
-echo "[lld-link] rung3: ssh -p $SSH_PORT root@127.0.0.1 /usr/bin/ld.lld --version"
+# Rung 3: FS-exec launches lld DIRECTLY -- never through the clang driver, so
+# no fork is needed (same dispatch idiom already proven for `clang -cc1` and
+# `/usr/bin/simple`; the absolute path also bypasses the sshd canned-fixture
+# branch, see ssh_simple_hello_uefi.shs header note 3, and it is NOT
+# /FSEXEC.ELF, so sshd takes the heap-stream branch that PRESERVES argv).
+# Root 8.3 name + explicit -flavor gnu: constraints A and B in the header.
+echo "[lld-link] rung3: ssh -p $SSH_PORT root@127.0.0.1 /LLD.ELF -flavor gnu --version"
 sshpass -p simpleos ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
-    root@127.0.0.1 /usr/bin/ld.lld --version || true
+    root@127.0.0.1 /LLD.ELF -flavor gnu --version || true
 j=0
 while [ $j -lt 60 ]; do
     grep -qaE "LLD [0-9]|ring3 deferred .*returned rc|command not found" "$SERIAL" 2>/dev/null && break
     kill -0 "$QEMU_PID" 2>/dev/null || break
     sleep 2; j=$((j+2))
 done
-rung "LLD [0-9]" "rung3 /usr/bin/ld.lld started via FS-exec, printed version"
+rung "LLD [0-9]" "rung3 /LLD.ELF started via FS-exec, printed version"
 
-# Rung 4: ld.lld links the staged guest object (+crt0.o) into /hello.elf,
-# using the staged linker script -- persisted to NVMe (same "persist ... -> OK"
-# marker convention as the proven cc1 gate's /hello.o write).
-LLD_CMD="/usr/bin/ld.lld -T /simpleos.ld -o /hello.elf /crt0.o /hello.o"
+# Rung 4: lld links the staged guest object (+crt0.o, +libc) into /HELLO.ELF
+# using the staged linker script -- persisted to NVMe by fat32_write_file,
+# which is ROOT-ONLY + 8.3 (constraint A), hence /HELLO.ELF and not a path.
+# Marker convention: baremetal_stubs.c prints "[oo-nvme] persist <name> -> OK".
+LLD_CMD="/LLD.ELF -flavor gnu -T /SIMPLEOS.LD -o /HELLO.ELF /CRT0.O /HELLO.O /LIBC.A"
 echo "[lld-link] rung4: ssh -p $SSH_PORT root@127.0.0.1 $LLD_CMD"
 sshpass -p simpleos ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
     root@127.0.0.1 $LLD_CMD || true
 k=0
-while [ $k -lt 60 ]; do
-    grep -qaE "persist /hello.elf -> OK|ring3 deferred .*returned rc|command not found" "$SERIAL" 2>/dev/null && break
+while [ $k -lt 120 ]; do
+    grep -qaiE "persist .*HELLO\.ELF -> OK|wf-diag|ring3 deferred .*returned rc|command not found" "$SERIAL" 2>/dev/null && break
     kill -0 "$QEMU_PID" 2>/dev/null || break
     sleep 2; k=$((k+2))
 done
-rung "persist /hello.elf -> OK" "rung4 ld.lld linked /hello.o + /crt0.o -> /hello.elf on NVMe"
+rung "persist .*HELLO\.ELF -> OK" "rung4 lld linked /HELLO.O + /CRT0.O -> /HELLO.ELF on NVMe"
 
 # Rungs 5+6: run the just-linked ELF directly from the filesystem and check
 # its exit status + output.
-echo "[lld-link] rung5/6: ssh -p $SSH_PORT root@127.0.0.1 /hello.elf"
+echo "[lld-link] rung5/6: ssh -p $SSH_PORT root@127.0.0.1 /HELLO.ELF"
 SSH_OUT="$(sshpass -p simpleos ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
-    root@127.0.0.1 /hello.elf 2>&1 || true)"
+    root@127.0.0.1 /HELLO.ELF 2>&1 || true)"
 echo "[lld-link] ssh channel output: <<$SSH_OUT>>"
 m=0
 while [ $m -lt 60 ]; do
@@ -255,15 +331,15 @@ done
 kill "$QEMU_PID" 2>/dev/null || true; sleep 1
 
 echo "===== exec ladder (serial) ====="
-rung "ring3 deferred"        "rung5 /hello.elf started via FS-exec"
-rung "returned rc=0\|exit 0" "rung6 /hello.elf returned the expected status"
+rung "heap:stream-open-ok path=/HELLO.ELF" "rung5 /HELLO.ELF started via FS-exec"
+rung "returned rc=0\|exit 0" "rung6 /HELLO.ELF returned the expected status"
 echo "===== serial tail ====="
 sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$SERIAL" | grep -a . | tail -40
 
 if grep -qaE "LLD [0-9]" "$SERIAL" 2>/dev/null \
-   && grep -qa "persist /hello.elf -> OK" "$SERIAL" 2>/dev/null \
+   && grep -qaiE "persist .*HELLO\.ELF -> OK" "$SERIAL" 2>/dev/null \
    && grep -qaE "returned rc=0|exit 0" "$SERIAL" 2>/dev/null; then
-    echo "PASS: in-guest ld.lld linked and ran /hello.elf under OVMF (board proxy)"
+    echo "PASS: in-guest lld linked and ran /HELLO.ELF under OVMF (board proxy)"
 else
     echo "FAIL: one or more ladder rungs 3-6 not observed (see serial tail above)"
     exit 1

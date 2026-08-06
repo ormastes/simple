@@ -20,10 +20,36 @@ rungs 3-6. Status as of 2026-07-27: **authored, not yet executed**
 
 | Rung | Requirement | Gate script step | Serial/SSH evidence |
 |---|---|---|---|
-| 3 | `/usr/bin/ld.lld` starts via ordinary FS-exec and prints its version | step 7, "rung3" | `LLD <version>` in serial log after `ssh ... /usr/bin/ld.lld --version` |
-| 4 | ld.lld links the guest-generated object into an ELF | step 7, "rung4" | `persist /hello.elf -> OK` in serial log after `ssh ... /usr/bin/ld.lld -T /simpleos.ld -o /hello.elf /crt0.o /hello.o` |
-| 5 | The resulting ELF starts from the filesystem | step 7, "rung5" | `ring3 deferred` dispatch line in serial log after `ssh ... /hello.elf` |
+| 3 | `/LLD.ELF` starts via ordinary FS-exec and prints its version | step 7, "rung3" | `LLD <version>` in serial log after `ssh ... /LLD.ELF -flavor gnu --version` |
+| 4 | lld links the guest-generated object into an ELF | step 7, "rung4" | `[oo-nvme] persist ...HELLO.ELF -> OK` in serial log after `ssh ... /LLD.ELF -flavor gnu -T /SIMPLEOS.LD -o /HELLO.ELF /CRT0.O /HELLO.O /LIBC.A` |
+| 5 | The resulting ELF starts from the filesystem | step 7, "rung5" | `[fs-exec] heap:stream-open-ok path=/HELLO.ELF` in serial log after `ssh ... /HELLO.ELF` |
 | 6 | It returns an expected status and output | step 7, "rung6" | `returned rc=0` (or the chosen expected code) in serial log + matching SSH channel output |
+
+### Two guest-side constraints the rung commands encode (verified 2026-08-06)
+
+**Root-only 8.3 names.** SimpleOS FAT32 *reads* traverse subdirectories
+(`baremetal_stubs.c` `_fat32_find_path` splits on `/` and descends, and
+`_fat32_make_8_3_name` uppercases the query, so lowercase and `/usr/bin/...`
+would resolve). *Writes* do not: `fat32_write_file` goes through
+`_fat32_find_root_dir_slot`, which never leaves the root cluster, and there is
+no mkdir and no LFN create. The rung-4 output must therefore be a root 8.3
+name, and lane C4 (plan line 152) requires the same of every staged input. All
+rung commands use uppercase root 8.3 paths so what is typed is byte-identical
+to what is on disk. Note `libc++.a` cannot keep its name — `+` is not a legal
+8.3 character — so it is staged as `/LIBCXX.A`.
+
+**`-flavor gnu` is mandatory.** `clang_static.shs` relinks the ninja target
+`bin/lld` — the *generic multiplexer*, not `bin/ld.lld` — into
+`build/os/clang_static/bin/lld_static`. The ring-3 loader passes the resolved
+path as `argv[0]` (`x86_64_fs_exec_ring3.spl` `_build_sysv_stack_frame`:
+`binary_path` is `argv[0]`, `argc = argv.len() + 1`), so lld sees
+`argv[0] = "/LLD.ELF"`, which its argv[0]-based flavor detection cannot map to
+the ELF driver; without an explicit flavor it aborts with *"lld is a generic
+driver"*. `src/os/port/llvm/test_smoke.spl:78` already passes `-flavor gnu`
+for the same reason. Argv budget is not a concern: sshd tokenizes on spaces
+only and the ring-3 startup frame allows 64 argv items within one 4 KiB page.
+Because `/LLD.ELF` is not `/FSEXEC.ELF`, sshd takes the heap-stream branch,
+which *preserves* argv (the `/FSEXEC.ELF` branch discards it).
 
 Rung 3 deliberately reuses the **no-fork direct FS-exec dispatch idiom**
 already proven for `clang -cc1` and `/usr/bin/simple` (absolute path bypasses
@@ -60,18 +86,39 @@ Verified statically (2026-07-27) that this has never been run on this host:
 - `build/os/sysroot/` (crt0.o, libc++, `simpleos.ld`) DOES already exist —
   the Phase-3 sysroot stage is not a blocker.
 
-### 2. Multi-file guest image stager — NOT YET AUTHORED
+### 2. Multi-file guest image stager — AUTHORED 2026-08-06 (no longer a blocker)
 
 `scripts/os/fsexec_mkimg_big.spl` (used for `clang_static`) and
 `scripts/os/fsexec_mkimg_simple.spl` (used for `/usr/bin/simple`) each stage
 exactly **one** big ELF payload plus **one** small companion file. The link
-ladder needs `lld_static` PLUS at least: a guest object (`/hello.o`), a crt
-object (`/crt0.o`), and a linker script (`/simpleos.ld`) staged
-simultaneously. No such stager exists in this repo today. A new one (working
-name `scripts/os/fsexec_mkimg_lld.spl`) is required; it is **out of lane
-P6's exclusive-path scope** for this increment (exclusive paths are limited
-to `scripts/os/ssh_lld_link_uefi.shs`, this doc, and the lane state file) and
-is therefore the primary blocker recorded below.
+ladder needs `lld_static` PLUS at least: a guest object (`/HELLO.O`), a crt
+object (`/CRT0.O`), a libc archive (`/LIBC.A`) and a linker script
+(`/SIMPLEOS.LD`) staged simultaneously.
+
+`scripts/os/fsexec_mkimg_lld.spl` now does this. Like `fsexec_mkimg_big.spl`
+it emits only a FAT32 **structural prefix**; the big payloads are appended raw
+by the caller, because a 100 MB-class `lld_static` cannot be held in a Simple
+array under the seed interpreter. Shape:
+
+- small files (each ≤ 256 KiB) come from a fixed 8.3 candidate table under
+  `build/os/elfexec_lld/stage/` and are materialised **inside** the prefix;
+- big payload 1 is `LLD.ELF` (size from `payload_size.txt`), big payload 2 is
+  the optional `LIBCXX.A` (`libcxx_size.txt`);
+- **no subdirectories at all** — unlike `fsexec_mkimg_big.spl`, which builds a
+  `/usr/bin` FHS skeleton — because the guest write path is root-only;
+- `SPARE_CLUSTERS = 256` (8 MiB) of free clusters follow the last payload so
+  the in-guest FAT32 write path has room for the linked ELF. The 16-cluster
+  (512 KiB) reserve `fsexec_mkimg_big.spl` uses for a bare `.o` is not enough
+  for a statically linked binary.
+- the caller consumes the printed `fsexec_mkimg_lld_status=ok ...` line
+  (`payload1_padded_bytes`, `total_bytes`) to do
+  `cat prefix LLD.pad [LIBCXX.A] > img && truncate -s total_bytes img`.
+
+Verified host-side 2026-08-06 with a synthetic 4 MB payload plus the real
+sysroot `crt0.o`/`simpleos.ld`/`libsimpleos_c.a`/`libc++.a`: `fsck.fat -n -v`
+reports a clean *"6 files, 191/447 clusters"* with a 256-cluster free
+remainder, and every staged file byte-compares equal when read back at its
+computed cluster offset.
 
 The general desktop disk image builder (`scripts/os/make_os_disk.c` /
 `.shs`) was also checked: it stages LLVM/clang/rust only as
@@ -120,13 +167,32 @@ until every prerequisite above is satisfied.
 
 1. `lld_static` not built — needs `sh src/os/port/llvm/build.shs cross`
    (multi-hour) then `SIMPLEOS_LLVM_TOOL=lld sh src/os/port/llvm/clang_static.shs`.
-2. `scripts/os/fsexec_mkimg_lld.spl` multi-payload stager not authored —
-   out of this lane's exclusive-path scope; needs its own task/lane.
+   **This is now the only structural blocker.**
+2. ~~multi-payload stager~~ — RESOLVED, see prerequisite 2 above.
 3. No guest `.o` staged for the link input yet (unblocked once a prior
    cc1-gate run's retrieved object, or a fresh cross-compiled one, is placed
    at `build/os/elfexec_lld/hello.o`).
 4. Dedicated QEMU run slot — parallel lanes are running QEMU concurrently;
    this increment intentionally does not launch QEMU (STATIC-FIRST, bounded).
+
+Confirmed 2026-08-06 by running the gate: the step-0 prerequisite guard exits
+before QEMU with exactly two MISSING lines (`lld_static`, `hello.o`).
+
+## Lane C5 smoke matrix
+
+`test/03_system/os/qemu/sys_qemu_lld_link_smoke_matrix_spec.spl` holds the four
+C5 rows — (a) in-guest compile+link+run `hello.c`, (b) two-TU C program, (c)
+C++ hello against `/LIBCXX.A`, (d) `-O0` vs `-O2` byte-compared against the
+host cross build of the same `.i`. Rows are fail-closed and classify as
+`pass` / `missing-media:<path>` / `boot-fail:<marker>`; `skip()` is never used.
+A row only passes when the retained serial transcript carries every marker of
+that row (via the shared `classify_serial`, with `[wf-diag]` treated as a
+FAT32-write failure) — presence of a log file is never itself a pass. Row (d)
+additionally byte-compares the retrieved objects against the host cross build.
+Today, with the toolchain absent, it reports **5 examples, 4 failures** —
+the four rows visibly RED with
+`blocked:<row>` + `CLASSIFIED: missing-media:build/os/clang_static/bin/clang_static`,
+and the infrastructure row green.
 
 See `.spipe/simpleos_harden_p6_toolchain/state.md` for the lane-tracking form
 of this same blocker list.
