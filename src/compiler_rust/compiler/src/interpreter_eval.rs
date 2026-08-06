@@ -343,6 +343,7 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     "rt_cuda_memcpy_dtoh",
     "rt_cuda_memcpy_dtod",
     "rt_cuda_memset",
+    "rt_cuda_memset_d32",
     "rt_cuda_f64_binary_op",
     "rt_cuda_f64_sum",
     "rt_cuda_f64_minmax",

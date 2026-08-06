@@ -9,6 +9,7 @@ use gc_async_mut.gpu_sffi.{
     cuda_memcpy_dtoh,
     cuda_memcpy_dtod,
     cuda_memset,
+    cuda_memset_d32,
     cuda_launch_kernel,
     cuda_sync,
     cuda_device_get,
@@ -66,8 +67,30 @@ fn gpu_download(gpu_ptr: GpuPtr, host_ptr: i64, size: i64) -> Result<(), GpuErro
     gpu_status(cuda_memcpy_dtoh(host_ptr, gpu_ptr.device_ptr, size))
 
 fn gpu_memset(gpu_ptr: GpuPtr, value: i64, size: i64) -> Result<(), GpuError>:
-    """Set device memory to a value."""
+    """Set device memory to a value.
+
+    BYTE granularity (CUDA cuMemsetD8_v2): `value` is truncated to one byte and
+    `size` is a BYTE count. Only correct when the intended fill is byte-uniform.
+    For 32-bit element fills use gpu_memset_d32.
+    """
     gpu_status(cuda_memset(gpu_ptr.device_ptr, value, size))
+
+fn gpu_i32_fill_pattern(value: i64) -> i64:
+    """The 32-bit word an i32 fill of `value` must write.
+
+    Two's-complement low 32 bits, so -1 becomes 0xFFFFFFFF. Split out from the
+    memset wrappers so the granularity contract is directly testable without a
+    device.
+    """
+    value & 0xFFFFFFFF
+
+fn gpu_memset_d32(gpu_ptr: GpuPtr, pattern: i64, count: i64) -> Result<(), GpuError>:
+    """Fill device memory with a 32-bit pattern (CUDA cuMemsetD32_v2).
+
+    `count` is a number of 32-BIT ELEMENTS, NOT bytes. Passing a byte count here
+    would write four times past the buffer.
+    """
+    gpu_status(cuda_memset_d32(gpu_ptr.device_ptr, pattern, count))
 
 fn gpu_launch(module: GpuModule, func_name: text, config: GpuLaunchConfig, args_ptr: i64) -> Result<(), GpuError>:
     """Launch a GPU kernel with the given configuration."""
@@ -211,8 +234,13 @@ fn gpu_memset_f32(ptr: GpuPtr, value: f32, count: i64) -> Result<(), GpuError>:
     gpu_memset(ptr, 0, count * 4)
 
 fn gpu_memset_i32(ptr: GpuPtr, value: i64, count: i64) -> Result<(), GpuError>:
-    """Memset i32 device memory."""
-    gpu_memset(ptr, value, count * 4)
+    """Fill `count` i32 elements with `value`.
+
+    Routed through the 32-bit primitive: the old byte-granularity path wrote
+    `value` into every BYTE, so a request for 1 filled each i32 with 0x01010101
+    (16843009) and still returned Ok(()).
+    """
+    gpu_memset_d32(ptr, gpu_i32_fill_pattern(value), count)
 
 fn gpu_copy_f32(dst: GpuPtr, src: GpuPtr, count: i64) -> Result<(), GpuError>:
     """Copy f32 device memory between buffers."""
@@ -551,6 +579,7 @@ fn gpu_global_size_z() -> i64:
 
 export gpu_status
 export gpu_init, gpu_alloc, gpu_free, gpu_upload, gpu_download, gpu_memset, gpu_launch, gpu_sync
+export gpu_memset_d32, gpu_i32_fill_pattern
 export gpu_device_name, gpu_device_compute_capability, gpu_device_total_memory
 export gpu_set_device, gpu_device_count
 export gpu_upload_f32, gpu_download_f32, gpu_upload_i32, gpu_upload_i64, gpu_upload_f64

@@ -178,6 +178,9 @@ mod cuda_driver {
     type CuCtxSynchronize = unsafe extern "C" fn() -> c_int;
     type CuMemcpyDtoD = unsafe extern "C" fn(CUdeviceptr, CUdeviceptr, usize) -> c_int;
     type CuMemsetD8 = unsafe extern "C" fn(CUdeviceptr, u8, usize) -> c_int;
+    // CUDA Driver API: CUresult cuMemsetD32_v2(CUdeviceptr dstDevice, unsigned int ui, size_t N)
+    // N is a count of 32-BIT ELEMENTS, not bytes, and dstDevice must be 4-byte aligned.
+    type CuMemsetD32 = unsafe extern "C" fn(CUdeviceptr, u32, usize) -> c_int;
     type CuModuleLoad = unsafe extern "C" fn(*mut CUmodule, *const c_char) -> c_int;
     type CuDeviceComputeCapability = unsafe extern "C" fn(*mut c_int, *mut c_int, CUdevice) -> c_int;
 
@@ -204,6 +207,7 @@ mod cuda_driver {
         cuCtxSynchronize: CuCtxSynchronize,
         cuMemcpyDtoD_v2: CuMemcpyDtoD,
         cuMemsetD8_v2: CuMemsetD8,
+        cuMemsetD32_v2: CuMemsetD32,
         cuModuleLoad: CuModuleLoad,
         cuDeviceComputeCapability: CuDeviceComputeCapability,
     }
@@ -266,6 +270,7 @@ mod cuda_driver {
             cuCtxSynchronize: sym!(b"cuCtxSynchronize\0", CuCtxSynchronize),
             cuMemcpyDtoD_v2: sym!(b"cuMemcpyDtoD_v2\0", CuMemcpyDtoD),
             cuMemsetD8_v2: sym!(b"cuMemsetD8_v2\0", CuMemsetD8),
+            cuMemsetD32_v2: sym!(b"cuMemsetD32_v2\0", CuMemsetD32),
             cuModuleLoad: sym!(b"cuModuleLoad\0", CuModuleLoad),
             cuDeviceComputeCapability: sym!(b"cuDeviceComputeCapability\0", CuDeviceComputeCapability),
             _lib: lib,
@@ -392,6 +397,10 @@ mod cuda_driver {
 
     pub unsafe fn cuMemsetD8_v2(dstDevice: CUdeviceptr, uc: u8, N: usize) -> c_int {
         dispatch!(cuMemsetD8_v2(dstDevice, uc, N))
+    }
+
+    pub unsafe fn cuMemsetD32_v2(dstDevice: CUdeviceptr, ui: u32, N: usize) -> c_int {
+        dispatch!(cuMemsetD32_v2(dstDevice, ui, N))
     }
 
     pub unsafe fn cuModuleLoad(module: *mut CUmodule, fname: *const c_char) -> c_int {
@@ -1687,6 +1696,33 @@ pub extern "C" fn rt_cuda_memset(ptr: i64, value: i64, size: i64) -> i64 {
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
 pub extern "C" fn rt_cuda_memset(_ptr: i64, _value: i64, _size: i64) -> i64 {
+    -3
+}
+
+/// Fill device memory with a 32-bit pattern.
+///
+/// `count` is a number of 32-BIT ELEMENTS (cuMemsetD32_v2's `N`), NOT bytes,
+/// and `ptr` must be 4-byte aligned. `pattern` is truncated to its low 32 bits.
+/// This is the granularity-correct primitive for i32/f32 fills; the byte-wise
+/// rt_cuda_memset replicates its value across all four bytes of each word.
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_memset_d32(ptr: i64, pattern: i64, count: i64) -> i64 {
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    unsafe {
+        let err = cuMemsetD32_v2(ptr as CUdeviceptr, pattern as u32, count as usize);
+        if err != 0 {
+            return -(err as i64);
+        }
+        0
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_memset_d32(_ptr: i64, _pattern: i64, _count: i64) -> i64 {
     -3
 }
 

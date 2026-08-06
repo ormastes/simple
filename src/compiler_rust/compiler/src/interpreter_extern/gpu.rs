@@ -456,7 +456,8 @@ use simple_runtime::cuda_runtime::{
     rt_cuda_device_name, rt_cuda_f64_binary_op, rt_cuda_f64_minmax, rt_cuda_f64_scalar_div, rt_cuda_f64_slice_1d,
     rt_cuda_f64_slice_2d, rt_cuda_f64_sum, rt_cuda_f64_sum_axis, rt_cuda_get_error_string, rt_cuda_init,
     rt_cuda_launch_kernel, rt_cuda_mem_alloc, rt_cuda_mem_free, rt_cuda_memcpy_dtoh, rt_cuda_memcpy_dtod,
-    rt_cuda_memcpy_htod, rt_cuda_memset, rt_cuda_module_get_function, rt_cuda_module_load, rt_cuda_module_load_data,
+    rt_cuda_memcpy_htod, rt_cuda_memset, rt_cuda_memset_d32, rt_cuda_module_get_function, rt_cuda_module_load,
+    rt_cuda_module_load_data,
     rt_cuda_module_unload, rt_cuda_sync,
 };
 
@@ -1307,6 +1308,30 @@ pub fn rt_cuda_memset_fn(args: &[Value]) -> Result<Value, CompileError> {
     {
         if let Some(fns) = get_cuda_dl() {
             let r = unsafe { (fns.memset_d8)(ptr as u64, value as u8, size as usize) };
+            return Ok(Value::Int(r as i64));
+        }
+        Ok(Value::Int(-3))
+    }
+}
+
+/// cuMemsetD32_v2: fill device memory with a 32-bit pattern.
+///
+/// CUDA Driver API signature is
+/// `CUresult cuMemsetD32_v2(CUdeviceptr dstDevice, unsigned int ui, size_t N)`,
+/// where `N` counts 32-BIT ELEMENTS (not bytes) and `dstDevice` must be 4-byte
+/// aligned. Callers pass an element count, never a byte count.
+pub fn rt_cuda_memset_d32_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let ptr = arg_i64(args, 0, "rt_cuda_memset_d32", 3)?;
+    let pattern = arg_i64(args, 1, "rt_cuda_memset_d32", 3)?;
+    let count = arg_i64(args, 2, "rt_cuda_memset_d32", 3)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_memset_d32(ptr, pattern, count)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        if let Some(fns) = get_cuda_dl() {
+            let r = unsafe { (fns.memset_d32)(ptr as u64, pattern as u32, count as usize) };
             return Ok(Value::Int(r as i64));
         }
         Ok(Value::Int(-3))

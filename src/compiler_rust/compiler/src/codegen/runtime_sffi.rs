@@ -1719,6 +1719,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cuda_mem_alloc", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_mem_free", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memset", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cuda_memset_d32", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memcpy_dtoh", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_module_load_data", &[I64, I64], &[I64]), // ptx_ptr, ptx_len -> module
     RuntimeFuncSpec::new("rt_cuda_module_load_data_bytes", &[I64, I64], &[I64]), // ptx_ptr, ptx_len -> module

@@ -925,6 +925,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cuda_memcpy_htod", gpu::rt_cuda_memcpy_htod_fn);
     insert_simple!("rt_cuda_mem_free", gpu::rt_cuda_mem_free_fn);
     insert_simple!("rt_cuda_memset", gpu::rt_cuda_memset_fn);
+    insert_simple!("rt_cuda_memset_d32", gpu::rt_cuda_memset_d32_fn);
     insert_simple!("rt_cuda_module_get_function", gpu::rt_cuda_module_get_function_fn);
     insert_simple!("rt_cuda_module_load_data", gpu::rt_cuda_module_load_data_fn);
     insert_simple!("rt_cuda_module_load", gpu::rt_cuda_module_load_fn);
