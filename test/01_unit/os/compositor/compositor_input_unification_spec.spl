@@ -22,9 +22,10 @@ use std.spec
 use os.compositor.compositor.{Compositor}
 use os.compositor.host_compositor_entry.{HeadlessHostCompositorBackend}
 use os.compositor.display_backend.{CompositorBackend}
-use os.compositor.input_backend.{InputBackend}
+use os.compositor.input_backend.{InputBackend, host_event_from_polled}
 use os.drivers.input.ps2_keyboard.{Key, KeyEvent}
 use os.drivers.input.ps2_mouse.{MouseEvent}
+use common.ui.host_input_event.{HostInputEvent}
 
 class ScriptedInput:
     """Replays a fixed recorded script, one event per poll, then nothing.
@@ -60,6 +61,25 @@ impl ScriptedInput:
         )
 
 impl InputBackend for ScriptedInput:
+
+    me poll_event() -> HostInputEvent?:
+        """The ONE trait-level ingress. Composes the inherent poll_key/poll_mouse
+        pair through the shared helper, exactly as the real backends do."""
+        val key_opt: KeyEvent? = self.poll_key()
+        var ch = ""
+        if val key_event = key_opt:
+            if val Press(pressed_key) = key_event:
+                if val Some(c) = self.key_to_char(pressed_key):
+                    ch = c
+            return host_event_from_polled(
+                key_opt, nil, ch,
+                self.shift_held(), self.ctrl_held(), self.alt_held()
+            )
+        val mouse_opt: MouseEvent? = self.poll_mouse()
+        host_event_from_polled(
+            nil, mouse_opt, "",
+            self.shift_held(), self.ctrl_held(), self.alt_held()
+        )
     me poll_key() -> KeyEvent?:
         if self.key_idx >= self.keys.len():
             return nil

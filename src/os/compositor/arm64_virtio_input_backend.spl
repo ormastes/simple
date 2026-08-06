@@ -4,7 +4,8 @@
 # adapter keeps pointer records together until SYN_REPORT, retains keyboard
 # press/release edges, and exposes both through the shared InputBackend trait.
 
-use os.compositor.input_backend.{InputBackend}
+use os.compositor.input_backend.{InputBackend, host_event_from_polled}
+use common.ui.host_input_event.{HostInputEvent}
 use os.drivers.input.ps2_keyboard.{Key, KeyEvent}
 use os.drivers.input.ps2_mouse.{MouseEvent}
 use os.drivers.virtio.virtio_input_ops.{
@@ -299,6 +300,29 @@ impl Arm64VirtioInputBackend:
         self._available
 
 impl InputBackend for Arm64VirtioInputBackend:
+
+    me poll_event() -> HostInputEvent?:
+        """The ONE trait-level ingress: next input as a `HostInputEvent`.
+
+        Key before mouse, matching every other backend. `poll_key`/`poll_mouse`
+        are inherent to this class now (Workstream C step 6 removed them from
+        the trait) and are composed here through the shared free helper.
+        """
+        val key_opt: KeyEvent? = self.poll_key()
+        var ch = ""
+        if val key_event = key_opt:
+            if val Press(pressed_key) = key_event:
+                if val Some(c) = self.key_to_char(pressed_key):
+                    ch = c
+            return host_event_from_polled(
+                key_opt, nil, ch,
+                self.shift_held(), self.ctrl_held(), self.alt_held()
+            )
+        val mouse_opt: MouseEvent? = self.poll_mouse()
+        host_event_from_polled(
+            nil, mouse_opt, "",
+            self.shift_held(), self.ctrl_held(), self.alt_held()
+        )
     me poll_key() -> KeyEvent?:
         if self.pending_key == nil and self.pending_mouse == nil:
             self._pump_until_pending()

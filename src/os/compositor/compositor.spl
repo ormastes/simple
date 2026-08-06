@@ -93,6 +93,69 @@ fn _ps2_wm_pointer_button_code(left_btn: bool, right_btn: bool, middle_btn: bool
         return 2
     return 0
 
+# ---------------------------------------------------------------------------
+# WS-D6 — occlusion culling support.
+#
+# `Compositor.surfaces` is stored bottom-to-top (`focused_idx` is set to
+# `surfaces.len() - 1` on create/raise, so the LAST entry is the topmost
+# window). A window whose whole rect is covered by the union of the opaque
+# rects of the windows ABOVE it contributes nothing to the framebuffer, so all
+# of its chrome and content rasterisation can be skipped.
+#
+# `_wm_rect_covered` is an EXACT region-subtraction test, not a bounding-box
+# approximation: a rect is covered iff every one of the (up to four) strips
+# left over after removing the first intersecting occluder is itself covered by
+# the occluders that follow it. Recursing with `start + 1` bounds the recursion
+# by the occluder count. It never returns a false "covered" — a window is
+# skipped only when it is provably invisible — which is what keeps the
+# whole-framebuffer equivalence in
+# `test/01_unit/os/compositor/compositor_occlusion_spec.spl` true.
+# Test/diagnostic switch. Production always leaves this ON; the
+# whole-framebuffer equivalence spec turns it OFF to render the full-redraw
+# reference frame that the culled frame must match pixel-for-pixel.
+var _wm_occlusion_culling_enabled: bool = true
+
+pub fn wm_set_occlusion_culling(on: bool):
+    _wm_occlusion_culling_enabled = on
+
+pub fn wm_occlusion_culling_enabled() -> bool:
+    _wm_occlusion_culling_enabled
+
+fn _wm_max_i32(a: i32, b: i32) -> i32:
+    if a > b: a else: b
+
+fn _wm_min_i32(a: i32, b: i32) -> i32:
+    if a < b: a else: b
+
+fn _wm_rect_covered(rx: i32, ry: i32, rw: i32, rh: i32,
+                    ox: [i32], oy: [i32], ow: [i32], oh: [i32],
+                    start: i32) -> bool:
+    if rw <= 0 or rh <= 0:
+        return true
+    var i = start
+    while i < ox.len().to_i32():
+        val cx0 = _wm_max_i32(rx, ox[i])
+        val cy0 = _wm_max_i32(ry, oy[i])
+        val cx1 = _wm_min_i32(rx + rw, ox[i] + ow[i])
+        val cy1 = _wm_min_i32(ry + rh, oy[i] + oh[i])
+        if cx1 > cx0 and cy1 > cy0:
+            # Top strip above the overlap.
+            if not _wm_rect_covered(rx, ry, rw, cy0 - ry, ox, oy, ow, oh, i + 1):
+                return false
+            # Bottom strip below the overlap.
+            if not _wm_rect_covered(rx, cy1, rw, ry + rh - cy1, ox, oy, ow, oh, i + 1):
+                return false
+            # Left strip beside the overlap.
+            if not _wm_rect_covered(rx, cy0, cx0 - rx, cy1 - cy0, ox, oy, ow, oh, i + 1):
+                return false
+            # Right strip beside the overlap.
+            if not _wm_rect_covered(cx1, cy0, rx + rw - cx1, cy1 - cy0, ox, oy, ow, oh, i + 1):
+                return false
+            return true
+        i = i + 1
+    false
+
+
 class WindowSurface:
     id: i32
     title: text
@@ -1313,6 +1376,33 @@ class Compositor:
         # differs (framebuffer here, winit pixel buffer on the host).
         val theme = wm_chrome_theme()
         render_shared_mdi_desktop_chrome(self.backend, self.screen_width, self.screen_height, theme)
+
+        # WS-D6 occlusion pre-pass. Walk TOP-DOWN accumulating the opaque rects
+        # already claimed by higher windows; a visible window fully covered by
+        # them paints nothing observable, so its chrome + content rasterisation
+        # (including the per-pixel PIXEL_SURFACE blit below) is skipped. The
+        # window still enters `shared_windows` so the taskbar is unaffected.
+        # Only fully-opaque, on-screen windows become occluders.
+        var occluded: [bool] = [false; self.surfaces.len()]
+        var occ_x: [i32] = []
+        var occ_y: [i32] = []
+        var occ_w: [i32] = []
+        var occ_h: [i32] = []
+        var t = self.surfaces.len().to_i32() - 1
+        # cpu-lane-loop-ok: top-down z-order walk; bound is the surface count
+        while t >= 0:
+            val ts = self.surfaces[t]
+            if _wm_occlusion_culling_enabled and ts.visible and ts.width > 0 and ts.height > 0:
+                if _wm_rect_covered(ts.x, ts.y, ts.width, ts.height,
+                                    occ_x, occ_y, occ_w, occ_h, 0):
+                    occluded[t] = true
+                else:
+                    occ_x.push(ts.x)
+                    occ_y.push(ts.y)
+                    occ_w.push(ts.width)
+                    occ_h.push(ts.height)
+            t = t - 1
+
         var shared_windows: [SharedMdiRenderWindow] = []
         var i = 0
         while i < self.surfaces.len():
@@ -1332,7 +1422,7 @@ class Compositor:
                 0
             )
             shared_windows.push(shared)
-            if s.visible:
+            if s.visible and not occluded[i]:
                 draw_shared_mdi_window_chrome(self.backend, shared, theme)
                 val content_w = s.width - 8
                 val content_h = s.height - 36

@@ -4,12 +4,12 @@
 # against a winit event loop, while `hosted_backend_sdl2.spl` (the SDL2 DISPLAY
 # backend) had no input peer at all. This file is that peer.
 #
-# It implements the CURRENT `InputBackend` trait (poll_key / poll_mouse /
-# alt_held / shift_held / ctrl_held / key_to_char), deliberately mirroring
-# `HostedInputBackend` so the compositor can switch host toolkits without
-# knowing which one it got. When C1 lands Workstream B's `HostInputEvent`, this
-# class migrates alongside every other InputBackend impl; it does NOT define a
-# host event type of its own.
+# It implements the `InputBackend` trait (poll_event / alt_held / shift_held /
+# ctrl_held / key_to_char), deliberately mirroring `HostedInputBackend` so the
+# compositor can switch host toolkits without knowing which one it got. The
+# ONE ingress type is `HostInputEvent`; this class does NOT define a host event
+# type of its own. `poll_key`/`poll_mouse` are inherent (non-trait) methods
+# kept as the internal SDL2-queue drain that `poll_event` composes.
 #
 # Key code space
 # --------------
@@ -36,9 +36,10 @@
 # `extern fn` here — an unregistered extern silently returns nil under JIT, and
 # a duplicate declaration is exactly how that goes unnoticed.
 
-use os.compositor.input_backend.{InputBackend}
+use os.compositor.input_backend.{InputBackend, host_event_from_polled}
 use os.drivers.input.ps2_keyboard.{KeyEvent, Key}
 use os.drivers.input.ps2_mouse.{MouseEvent}
+use common.ui.host_input_event.{HostInputEvent}
 use std.nogc_sync_mut.io.window_sffi.{
     rt_sdl2_poll_event,
     rt_sdl2_event_key_sym,
@@ -392,6 +393,30 @@ impl Sdl2InputBackend:
 # ============================================================================
 
 impl InputBackend for Sdl2InputBackend:
+
+    me poll_event() -> HostInputEvent?:
+        """The ONE trait-level ingress: next input as a `HostInputEvent`.
+
+        Key before mouse, matching every other backend. `poll_key`/`poll_mouse`
+        below are INHERENT methods now (Workstream C step 6 removed them from
+        the trait); they remain because this body and the buffering contract
+        between them are what make the ordering observable.
+        """
+        val key_opt: KeyEvent? = self.poll_key()
+        var ch = ""
+        if val key_event = key_opt:
+            if val Press(pressed_key) = key_event:
+                if val Some(c) = self.key_to_char(pressed_key):
+                    ch = c
+            return host_event_from_polled(
+                key_opt, nil, ch,
+                self._shift_held, self._ctrl_held, self._alt_held
+            )
+        val mouse_opt: MouseEvent? = self.poll_mouse()
+        host_event_from_polled(
+            nil, mouse_opt, "",
+            self._shift_held, self._ctrl_held, self._alt_held
+        )
 
     me poll_key() -> KeyEvent?:
         """Poll the SDL2 queue for a keyboard event.

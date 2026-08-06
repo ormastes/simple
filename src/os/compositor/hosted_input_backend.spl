@@ -11,7 +11,8 @@
 # The winit event loop handle (event_loop_id) is an opaque i64 obtained
 # from the Rust FFI layer during hosted window creation.
 
-use os.compositor.input_backend.{InputBackend}
+use os.compositor.input_backend.{InputBackend, host_event_from_polled}
+use common.ui.host_input_event.{HostInputEvent}
 use os.drivers.input.ps2_keyboard.{KeyEvent, Key}
 use os.drivers.input.ps2_mouse.{MouseEvent}
 
@@ -210,6 +211,29 @@ class HostedInputBackend:
 # ============================================================================
 
 impl InputBackend for HostedInputBackend:
+
+    me poll_event() -> HostInputEvent?:
+        """The ONE trait-level ingress: next input as a `HostInputEvent`.
+
+        Key before mouse, matching every other backend. `poll_key`/`poll_mouse`
+        are inherent to this class now (Workstream C step 6 removed them from
+        the trait) and are composed here through the shared free helper.
+        """
+        val key_opt: KeyEvent? = self.poll_key()
+        var ch = ""
+        if val key_event = key_opt:
+            if val Press(pressed_key) = key_event:
+                if val Some(c) = self.key_to_char(pressed_key):
+                    ch = c
+            return host_event_from_polled(
+                key_opt, nil, ch,
+                self.shift_held(), self.ctrl_held(), self.alt_held()
+            )
+        val mouse_opt: MouseEvent? = self.poll_mouse()
+        host_event_from_polled(
+            nil, mouse_opt, "",
+            self.shift_held(), self.ctrl_held(), self.alt_held()
+        )
 
     me poll_key() -> KeyEvent?:
         """Poll the winit event loop for a keyboard event.

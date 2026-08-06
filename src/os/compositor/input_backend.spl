@@ -8,54 +8,52 @@ use os.drivers.input.host_input_adapt.{
 use common.ui.host_input_event.{HostInputEvent}
 
 trait InputBackend:
-    me poll_key() -> KeyEvent?
-    me poll_mouse() -> MouseEvent?
+    me poll_event() -> HostInputEvent?
     fn alt_held() -> bool
     fn shift_held() -> bool
     fn ctrl_held() -> bool
     fn key_to_char(key: Key) -> text?
 
-fn input_backend_poll_event(backend: InputBackend) -> HostInputEvent?:
-    """Next input from any backend as the ONE ingress type, nil when idle.
+fn host_event_from_polled(
+    key_opt: KeyEvent?,
+    mouse_opt: MouseEvent?,
+    ch: text,
+    shift: bool,
+    ctrl: bool,
+    alt: bool
+) -> HostInputEvent?:
+    """Shared composer: fold one driver-shaped poll result into the ONE ingress
+    type. Backends that still keep a `poll_key`/`poll_mouse` pair as INHERENT
+    (non-trait) methods call this from their `poll_event()` body, so the
+    key-before-mouse ordering and modifier packing stay in exactly one place.
 
-    THIS is what consumers call; `poll_key`/`poll_mouse` are the driver-shaped
-    legacy pair, kept because five backends and a dozen spec stubs implement
-    them. Routing every backend through this single function is what makes the
-    unification additive -- not one `impl InputBackend` had to be edited.
-
-    A free function, NOT a trait method with a default body. The default-body
-    form was written first and SEGFAULTS (exit 139) the moment it is invoked
-    through a trait object: a default body that calls the trait's own
-    `fn`-declared methods (`shift_held`/`ctrl_held`/`alt_held`/`key_to_char`)
-    dies under the JIT. Byte-identical logic as a free function taking the
-    trait object as a parameter returns correctly. Do not "tidy" this back into
-    the trait -- see the bug note in
+    Takes only PLAIN VALUES -- never the trait object. A version of this logic
+    that lived as a trait default body and called the trait's own `fn`-declared
+    methods SEGFAULTS (exit 139) through a trait object under the JIT; see
     doc/08_tracking/bug/trait_default_body_segfaults_via_trait_object_2026-08-06.md
+    Keep the trait object out of this signature.
 
     Ordering is key-before-mouse, matching the order the compositor polled the
     two sources in before unification, so a recorded sequence replays
-    identically. Modifier state is sampled here at poll time, exactly as the
-    old compositor sampled it immediately after `poll_key()`."""
-    val key_opt: KeyEvent? = backend.poll_key()
+    identically."""
     if val key_event = key_opt:
-        var ch = ""
-        if val Press(pressed_key) = key_event:
-            if val Some(c) = backend.key_to_char(pressed_key):
-                ch = c
-        return host_key_event_from_ps2(
-            key_event,
-            ch,
-            backend.shift_held(),
-            backend.ctrl_held(),
-            backend.alt_held()
-        )
-    # Bind through a typed local so the optional carries a concrete MouseEvent
-    # type into lowering; the trait-dispatched call alone leaves the receiver
-    # erased.
-    val mouse_opt: MouseEvent? = backend.poll_mouse()
+        return host_key_event_from_ps2(key_event, ch, shift, ctrl, alt)
     if val mouse_event = mouse_opt:
         return host_pointer_event_from_ps2(mouse_event)
     nil
+
+fn input_backend_poll_event(backend: InputBackend) -> HostInputEvent?:
+    """Next input from any backend as the ONE ingress type, nil when idle.
+
+    THIS is what consumers call. `poll_key`/`poll_mouse` are GONE from the
+    trait as of Workstream C step 6: `poll_event` is the single trait-level
+    ingress and every backend authors a real body for it. Backends whose specs
+    assert on the driver-shaped pair keep it as inherent methods on the
+    concrete class, reachable only off the concrete type.
+
+    Still a free function, NOT a trait method with a default body -- see
+    `host_event_from_polled` above for why that shape segfaults."""
+    backend.poll_event()
 
 class Ps2InputBackend:
     keyboard: Ps2Keyboard
@@ -64,12 +62,34 @@ class Ps2InputBackend:
     static fn create(keyboard: Ps2Keyboard, mouse: Ps2Mouse) -> Ps2InputBackend:
         Ps2InputBackend(keyboard: keyboard, mouse: mouse)
 
-impl InputBackend for Ps2InputBackend:
+impl Ps2InputBackend:
     me poll_key() -> KeyEvent?:
         self.keyboard.poll()
 
     me poll_mouse() -> MouseEvent?:
         self.mouse.poll()
+
+impl InputBackend for Ps2InputBackend:
+    me poll_event() -> HostInputEvent?:
+        val key_opt: KeyEvent? = self.keyboard.poll()
+        var ch = ""
+        if val key_event = key_opt:
+            if val Press(pressed_key) = key_event:
+                if val Some(c) = self.keyboard.key_to_char(pressed_key):
+                    ch = c
+            return host_event_from_polled(
+                key_opt, nil, ch,
+                self.keyboard.shift_held,
+                self.keyboard.ctrl_held,
+                self.keyboard.alt_held
+            )
+        val mouse_opt: MouseEvent? = self.mouse.poll()
+        host_event_from_polled(
+            nil, mouse_opt, "",
+            self.keyboard.shift_held,
+            self.keyboard.ctrl_held,
+            self.keyboard.alt_held
+        )
 
     fn alt_held() -> bool:
         self.keyboard.alt_held
