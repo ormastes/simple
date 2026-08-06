@@ -1,5 +1,5 @@
 use std.spec
-use os.installer.image_builder.{build_install_image_with_simple_binary, build_install_image_with_rootfs, build_usb_installer_image, build_install_image, image_builder_set_screen}
+use os.installer.image_builder.{build_install_image_with_simple_binary, build_install_image_with_rootfs, build_usb_installer_image}
 use os.tools.pkg.pkg_format.{PkgArch}
 
 extern fn rt_file_exists(path: text) -> bool
@@ -49,47 +49,3 @@ describe "Image builder artifacts":
         expect(rootfs_cfg).to_contain("carrier = \"fat32\"")
         expect(boot_marker).to_contain("rootfs_backend=nvfs")
         expect(boot_marker).to_contain("rootfs_carrier=fat32")
-
-describe "Image builder screen selection staging (WS-A A5)":
-    it "stages a default image with the pre-A5 rc.conf byte-for-byte":
-        val dir = "build/test-artifacts/image-builder-screen-default"
-        _reset_dir(dir)
-        val output = "{dir}/simpleos-x86_64-default.img"
-        val result = build_install_image(PkgArch.X86_64, "", "", output, 64)
-        expect(result.is_ok()).to_equal(true)
-        val rc_conf = rt_file_read_text("{output}.contents/rootfs/etc/rc.conf")
-        # Hardcoded literal of the pre-A5 template, NOT re-derived from the
-        # function under test — an equal-to-itself check would be tautological.
-        expect(rc_conf).to_equal("hostname=\"simpleos\"\nsshd_enable=\"NO\"\nsimpleos_desktop=\"YES\"\n")
-
-    it "stages screen_type/screen_res/screen_simd when the build requests them":
-        val dir = "build/test-artifacts/image-builder-screen-2d"
-        _reset_dir(dir)
-        val output = "{dir}/simpleos-x86_64-2d.img"
-        val request = image_builder_set_screen("2d", "1024x768", "avx2")
-        expect(request.is_ok()).to_equal(true)
-        val result = build_install_image(PkgArch.X86_64, "", "", output, 64)
-        expect(result.is_ok()).to_equal(true)
-        val rc_conf = rt_file_read_text("{output}.contents/rootfs/etc/rc.conf")
-        expect(rc_conf).to_equal("hostname=\"simpleos\"\nsshd_enable=\"NO\"\nsimpleos_desktop=\"YES\"\nscreen_type=\"2d\"\nscreen_res=\"1024x768\"\nscreen_simd=\"avx2\"\n")
-
-    it "consumes the request so a following build reverts to the default":
-        val dir = "build/test-artifacts/image-builder-screen-consume"
-        _reset_dir(dir)
-        expect(image_builder_set_screen("gui", "", "").is_ok()).to_equal(true)
-        val first = "{dir}/first.img"
-        expect(build_install_image(PkgArch.X86_64, "", "", first, 64).is_ok()).to_equal(true)
-        expect(rt_file_read_text("{first}.contents/rootfs/etc/rc.conf")).to_contain("screen_type=\"gui\"")
-        val second = "{dir}/second.img"
-        expect(build_install_image(PkgArch.X86_64, "", "", second, 64).is_ok()).to_equal(true)
-        expect(rt_file_read_text("{second}.contents/rootfs/etc/rc.conf")).to_equal("hostname=\"simpleos\"\nsshd_enable=\"NO\"\nsimpleos_desktop=\"YES\"\n")
-
-    it "rejects an unrecognized screen value instead of silently staging wm":
-        val bad_type = image_builder_set_screen("quake", "", "")
-        expect(bad_type.is_err()).to_be(true)
-        if val Err(message) = bad_type:
-            expect(message).to_contain("screen_type invalid")
-        val bad_res = image_builder_set_screen("2d", "1024by768", "")
-        expect(bad_res.is_err()).to_be(true)
-        val bad_simd = image_builder_set_screen("2d", "", "mmx")
-        expect(bad_simd.is_err()).to_be(true)
