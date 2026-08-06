@@ -25,13 +25,30 @@ SYSROOT="${SIMPLEOS_SYSROOT_AARCH64:-build/os/sysroot-aarch64}"
 OUTPUT="bin/release/${TARGET}/simple"
 ENTRY="src/app/simpleos_tool/main.spl"
 BACKEND="${SIMPLE_NATIVE_BACKEND:-cranelift}"
-COMPILER="${SIMPLE_BUILD_COMPILER:-bin/release/simple}"
 TARGET_RUNTIME="build/os/simple-core-simpleos-aarch64/libsimple_runtime.a"
 
-[ -x "$COMPILER" ] || { echo "error: compiler not found: $COMPILER" >&2; exit 1; }
+# Was: COMPILER="${SIMPLE_BUILD_COMPILER:-bin/release/simple}" followed by a bare
+# `[ -x "$COMPILER" ]`. That is the weakest form of this family's defect: no seed
+# check and no capability probe at all, so it would silently build the aarch64
+# payload with whatever happened to sit at that path -- including the Rust
+# bootstrap seed, whose payload then fails both install-image provenance guards.
+# Now shares the capability-probing selection with every other builder.
+. "$REPO_ROOT/scripts/lib/simple-compiler-select.shs"
 
+COMPILER="$(simple_compiler_select --root "$REPO_ROOT" --builder-target "$TARGET")" || {
+  echo "error: no Simple compiler passed the native-build capability probe for $TARGET" >&2
+  exit 1
+}
+
+# CC wrapper carries the merged libc + real Simple C runtime + simple-core
+# runtime archive (libsimpleos_all.a) through the -print-libgcc-file-name
+# slot, mirroring scripts/os/simpleos-native-build-riscv64.shs — because
+# simpleos_user_runtime_paths() in the seed linker is x86_64-gated, so
+# aarch64 (like riscv64) cannot rely on the linker's hardcoded 3-input path.
 for f in "$SYSROOT/lib/crt0.o" "$SYSROOT/lib/libsimpleos_c.a" \
-         "$SYSROOT/lib/libsimple_runtime.a" "$SYSROOT/share/simpleos/simpleos.ld"; do
+         "$SYSROOT/lib/libsimpleos_all.a" \
+         "$SYSROOT/lib/cc-aarch64-simpleos" \
+         "$SYSROOT/share/simpleos/simpleos.ld"; do
   [ -s "$f" ] || { echo "error: missing sysroot piece: $f (run scripts/os/simpleos-sysroot-aarch64.shs)" >&2; exit 1; }
 done
 
@@ -41,6 +58,7 @@ echo "Sysroot:   ${SYSROOT}"
 echo "Output:    ${OUTPUT}"
 mkdir -p "$(dirname "$OUTPUT")"
 
+CC="$SYSROOT/lib/cc-aarch64-simpleos" \
 SIMPLEOS_SYSROOT="$SYSROOT" \
 SIMPLE_SIMPLE_CORE_PATH="$TARGET_RUNTIME" \
 SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 "$COMPILER" native-build \

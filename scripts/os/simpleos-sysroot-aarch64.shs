@@ -49,7 +49,8 @@ C_SRCS="simpleos_libc.c simpleos_math.c simpleos_math_ext.c simpleos_fs.c \
   simpleos_signalfd.c simpleos_inotify.c simpleos_fs_walk.c \
   simpleos_glob_stub.c simpleos_pwd_stub.c simpleos_strfmon.c \
   simpleos_fork.c simpleos_ipc.c simpleos_socket.c \
-  simpleos_filelock.c simpleos_statvfs.c simpleos_utsname.c"
+  simpleos_filelock.c simpleos_statvfs.c simpleos_utsname.c \
+  simpleos_posix_ext.c"
 
 mkdir -p "$OBJ_DIR" "$SYSROOT/lib" "$SYSROOT/share/simpleos"
 
@@ -73,6 +74,80 @@ echo "[sysroot-aarch64] archiving libsimpleos_c.a..."
 rm -f "$SYSROOT/lib/libsimpleos_c.a"
 # shellcheck disable=SC2086
 $AR rcs "$SYSROOT/lib/libsimpleos_c.a" $OBJS
+
+# -- Real Simple C runtime, cross-compiled for aarch64 ------------------------
+#
+# Mirrors the x86_64 lane in src/os/port/llvm/sysroot.shs and the riscv64 lane
+# in scripts/os/simpleos-sysroot-riscv64.shs. aarch64 has the IDENTICAL
+# "20 undefined rt_* symbols" gap x86_64 and riscv64 both hit — see
+# doc/08_tracking/bug/simpleos_payload_link_missing_20_rt_symbols_2026-08-06.md
+# (x86_64) and the riscv64 sysroot script header. Without this the aarch64
+# payload link fails on the same set.
+#
+# One object per source file, deliberately: archive members are the linker's
+# granularity, so a reference to one runtime entry point does not drag the
+# rest in. Do NOT partial-link (ld -r) these, and do NOT put them in
+# libsimpleos_c.a — a plain C/C++ link must never pull the Simple runtime in
+# (doc/08_tracking/bug/simpleos_libc_leaks_simple_runtime_syms_2026-08-06.md).
+# They go into libsimpleos_all.a instead, served through the
+# -print-libgcc-file-name slot by cc-aarch64-simpleos, because
+# simpleos_user_runtime_paths() in the seed linker is x86_64-gated.
+echo "[sysroot-aarch64] Cross-compiling real Simple runtime for aarch64..."
+RT_BUILD="$OBJ_DIR/simple_runtime_native"
+mkdir -p "$RT_BUILD"
+RT_CFLAGS="-target $TRIPLE \
+    -ffreestanding -nostdlib -nostdlibinc -fno-builtin -fno-stack-protector \
+    -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables \
+    -ffunction-sections -fdata-sections -O2 -D__simpleos__=1 \
+    -isystem $LIBC_DIR/include"
+# `runtime_legacy_core` is a NINTH source beyond the x86_64 list, matching the
+# riscv64 lane: runtime_native.o's rt_panic / rt_process_run pull in
+# spl_panic, spl_strdup, spl_str_concat, spl_file_read and rt_is_dir, which
+# live in no other archive. Verified zero defined-symbol overlap with
+# runtime_native.o on riscv64; the source is arch-neutral C, so the same holds
+# here.
+for rt_src in runtime_native runtime_simd_utf8 runtime_contracts \
+              runtime_memory runtime_time runtime_timestamp \
+              runtime_pool runtime_memtrack runtime_legacy_core
+do
+    # shellcheck disable=SC2086
+    $CC $RT_CFLAGS -c "$REPO_ROOT/src/runtime/$rt_src.c" \
+        -o "$RT_BUILD/$rt_src.o" || {
+            echo "[sysroot-aarch64] ERROR: failed to cross-compile $rt_src.c" >&2
+            exit 1
+        }
+done
+echo "[sysroot-aarch64] Built aarch64 C runtime objects ($(ls "$RT_BUILD"/*.o | wc -l))"
+
+# -- Merged link archive (served via the -print-libgcc-file-name slot) -------
+CORE_OBJ_DIR="${SIMPLE_CORE_OBJ_DIR:-$REPO_ROOT/build/os/simple-core-simpleos-aarch64/parts/objects}"
+rm -f "$SYSROOT/lib/libsimpleos_all.a"
+if [ -d "$CORE_OBJ_DIR" ]; then
+    "$AR" rcs "$SYSROOT/lib/libsimpleos_all.a" \
+        $OBJS \
+        "$RT_BUILD"/*.o \
+        "$CORE_OBJ_DIR"/*/*.o
+    echo "[sysroot-aarch64] Installed libsimpleos_all.a (libc + C runtime + simple-core runtime + crt0)"
+else
+    # shellcheck disable=SC2086
+    "$AR" rcs "$SYSROOT/lib/libsimpleos_all.a" $OBJS "$RT_BUILD"/*.o
+    echo "[sysroot-aarch64] WARNING: core runtime objects missing ($CORE_OBJ_DIR); libsimpleos_all.a is libc + C runtime only"
+fi
+
+# -- CC wrapper ---------------------------------------------------------------
+cat > "$SYSROOT/lib/cc-aarch64-simpleos" << CCEOF
+#!/bin/sh
+# clang passthrough that serves libsimpleos_all.a as the compiler builtins
+# archive, so the Simple seed linker places it AFTER the Simple objects.
+for a in "\$@"; do
+    if [ "\$a" = "-print-libgcc-file-name" ]; then
+        echo "$SYSROOT/lib/libsimpleos_all.a"
+        exit 0
+    fi
+done
+exec clang "\$@"
+CCEOF
+chmod +x "$SYSROOT/lib/cc-aarch64-simpleos"
 
 echo "[sysroot-aarch64] writing linker script + triple stamp..."
 cat > "$SYSROOT/share/simpleos/simpleos.ld" <<'EOF'
