@@ -8,8 +8,8 @@ use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use common.ui.taskbar_model.{TaskbarModel}
 use common.ui.window_scene.{SharedWmScene, WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput}
-use common.ui.window_scene_draw_ir.{SharedWmPixelBufferBackend, shared_wm_scene_render_taskbar_context_to_backend, shared_wm_scene_render_taskbar_context_to_pixel_buffer, shared_wm_pixel_buffer_pixels}
-use os.gui.render.{render_blit_frame}
+use common.ui.window_scene_draw_ir.{SharedWmPixelBufferBackend, shared_wm_scene_render_taskbar_context_to_backend, shared_wm_scene_render_taskbar_context_to_pixel_buffer, shared_wm_pixel_buffer_pixels, shared_wm_pixel_buffer_addr, shared_wm_pixel_buffer_count}
+use os.gui.render.{render_blit_frame, render_blit_frame_from_addr}
 
 # ============================================================================
 # Baremetal Engine2D adapter (shared CompositorBackend contract)
@@ -92,6 +92,22 @@ fn render_baremetal_shared_wm_scene_to_pixel_buffer(backend: SharedWmPixelBuffer
 fn present_pixel_buffer_to_framebuffer(backend: SharedWmPixelBufferBackend):
     """Copy the pixel-buffer backend's composed frame into the os.gui.render
     shadow buffer (full-frame dirty) and present it. render_init(fb, w, h) must
-    have run first; render_blit_frame no-ops until the shadow buffer exists."""
-    val pixels = shared_wm_pixel_buffer_pixels(backend)
-    render_blit_frame(pixels, backend.width_px.to_u64(), backend.height_px.to_u64())
+    have run first; the blit no-ops until the shadow buffer exists.
+
+    Moves the frame ADDRESS-TO-ADDRESS in one rt_memcpy. The previous form went
+    raw buffer -> [u32] -> shadow buffer, which cost two full-frame FFI loops
+    per frame (230,400 rt_ptr_read_i64 + 230,400 rt_mmio_write_u32 at 480x480)
+    and allocated a 230,400-element array that was consumed element-by-element
+    and immediately discarded. Both endpoints are plain RAM holding contiguous
+    little-endian ARGB, so the intermediate array was pure overhead.
+
+    Falls back to the array path when the backend has no raw address, so a
+    backend that is not on the raw-buffer lane still presents rather than
+    silently showing nothing."""
+    val src = shared_wm_pixel_buffer_addr()
+    val w = backend.width_px.to_u64()
+    val h = backend.height_px.to_u64()
+    if src != 0:
+        render_blit_frame_from_addr(src.to_u64(), shared_wm_pixel_buffer_count().to_u64(), w, h)
+        return
+    render_blit_frame(shared_wm_pixel_buffer_pixels(backend), w, h)

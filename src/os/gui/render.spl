@@ -12,11 +12,17 @@
 #   rt_alloc          — heap allocation
 #   rt_mmio_read_u32  — volatile 32-bit read (works on RAM and MMIO)
 #   rt_mmio_write_u32 — volatile 32-bit write (works on RAM and MMIO)
+#   rt_memcpy         — bulk RAM->RAM copy, used ONLY for the shadow buffer
+#                       (never MMIO). Availability in the baremetal image is
+#                       established by existing kernel users on the same link
+#                       line: os/kernel/memory/vmm_address_space.spl:23 and
+#                       os/drivers/virtio/_VirtioBlk/driver_class.spl:113.
 
 # Architecture-independent runtime externs
 extern fn rt_alloc(size: u64) -> u64
 extern fn rt_mmio_read_u32(addr: u64) -> u32
 extern fn rt_mmio_write_u32(addr: u64, value: u32)
+extern fn rt_memcpy(dest: i64, src: i64, len: i64)
 
 # ============================================================================
 # Global State
@@ -32,6 +38,14 @@ var g_dirty_x1: u64 = 0
 var g_dirty_y1: u64 = 0
 var g_dirty_x2: u64 = 0
 var g_dirty_y2: u64 = 0
+
+# Blit accounting. These exist so a spec can PROVE which path ran: the
+# array path is scalar (one FFI store per pixel), the address path is a
+# single bulk copy. Without a counter, "the fast path was taken" is an
+# unverifiable claim and a silent regression back to the scalar loop would
+# look identical from the outside.
+var g_blit_scalar_pixel_writes: u64 = 0
+var g_blit_bulk_copies: u64 = 0
 
 # ============================================================================
 # Frame Lifecycle
@@ -206,9 +220,65 @@ fn render_blit_frame(pixels: [u32], width: u64, height: u64):
     while i < count:
         rt_mmio_write_u32(g_shadow_buf + i * 4, pixels[i.to_i64()])
         i = i + 1
+    g_blit_scalar_pixel_writes = g_blit_scalar_pixel_writes + count
     render_mark_dirty_rect(0, 0, width, height)
     if g_fb_addr != 0:
         render_present()
+
+fn render_blit_frame_from_addr(src_addr: u64, src_pixel_count: u64, width: u64, height: u64):
+    """Same as render_blit_frame, but the source is a RAW ADDRESS rather than
+    a `[u32]`, so the whole frame moves in ONE rt_memcpy.
+
+    Why this exists: the caller that materialised a `[u32]` only to hand it
+    straight back to a per-pixel store was paying TWO full-frame FFI loops per
+    frame — one to read the raw buffer out (rt_ptr_read_i64 per pixel) and one
+    to write it back in (rt_mmio_write_u32 per pixel). At 480x480 that is
+    460,800 boundary crossings to move a buffer from one address to another,
+    plus a 230,400-element allocation that no consumer ever needed.
+
+    Safe as a memcpy because BOTH sides are plain RAM holding contiguous
+    little-endian 0xAARRGGBB, and the destination is the shadow buffer, never
+    the MMIO framebuffer — MMIO is still reached only through
+    render_present()'s volatile stores.
+
+    No `[u32]` is produced, so this does NOT inherit the live-alias hazard
+    documented in ws_d3_damage_present_investigation.md §9b: there is no shared
+    array for a caller to mutate.
+
+    `src_pixel_count` is REQUIRED, not inferred from width*height. The array
+    form gets its source bound for free from `pixels.len()`; a raw address
+    carries no length, so without an explicit count a caller whose requested
+    dimensions exceed its allocation would read past the buffer. Clamping to
+    both the destination capacity and the source count is what keeps this as
+    safe as the form it replaces.
+    """
+    if g_ready == 0 or src_addr == 0:
+        return
+    var count = width * height
+    val cap = g_width * g_height
+    if count > cap:
+        count = cap
+    if count > src_pixel_count:
+        count = src_pixel_count
+    if count == 0:
+        return
+    rt_memcpy(g_shadow_buf.to_i64(), src_addr.to_i64(), (count * 4).to_i64())
+    g_blit_bulk_copies = g_blit_bulk_copies + 1
+    render_mark_dirty_rect(0, 0, width, height)
+    if g_fb_addr != 0:
+        render_present()
+
+fn render_blit_scalar_pixel_writes() -> u64:
+    """Per-pixel FFI stores charged to the array blit path since last reset."""
+    g_blit_scalar_pixel_writes
+
+fn render_blit_bulk_copies() -> u64:
+    """Whole-frame rt_memcpy calls charged to the address blit path."""
+    g_blit_bulk_copies
+
+fn render_blit_counters_reset():
+    g_blit_scalar_pixel_writes = 0
+    g_blit_bulk_copies = 0
 
 # ============================================================================
 # Pixel Operations (on shadow buffer)
