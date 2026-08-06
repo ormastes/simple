@@ -23,12 +23,26 @@ use gc_async_mut.gpu_types.{GpuError, GpuPtr, GpuModule, GpuLaunchConfig}
 # Top-Level API Functions
 # ============================================================================
 
-fn gpu_init() -> Result<(), GpuError>:
-    """Initialize the GPU runtime. Must be called before any other GPU operations."""
-    val result = cuda_init()
-    if result < 0:
+fn gpu_status(result: i64) -> Result<(), GpuError>:
+    """Map a CUDA driver status word to a Result.
+
+    CUDA_SUCCESS is 0 and every CUresult error enumerator is NON-ZERO
+    (CUDA_ERROR_INVALID_VALUE = 1, CUDA_ERROR_OUT_OF_MEMORY = 2,
+    CUDA_ERROR_NOT_INITIALIZED = 3, ...), so failure is `result != 0`.
+
+    The runtime hooks behind these wrappers are inconsistent about sign: some
+    negate the driver status, some return it raw. Every wrapper used to inline
+    its own `result < 0` test, which silently accepted the raw-positive
+    failures as success. Observed live on a 2x NVIDIA box: cuda_init()
+    returned 3 while gpu_init() returned Ok. Keep the comparison here, once.
+    """
+    if result != 0:
         return Err(GpuError.from_code(result))
     Ok(())
+
+fn gpu_init() -> Result<(), GpuError>:
+    """Initialize the GPU runtime. Must be called before any other GPU operations."""
+    gpu_status(cuda_init())
 
 fn gpu_alloc(size: i64) -> Result<GpuPtr, GpuError>:
     """Allocate device memory of given size in bytes."""
@@ -41,31 +55,19 @@ fn gpu_free(gpu_ptr: GpuPtr) -> Result<(), GpuError>:
     """Free device memory."""
     if gpu_ptr.is_null():
         return Ok(())
-    val result = cuda_mem_free(gpu_ptr.device_ptr)
-    if result < 0:
-        return Err(GpuError.from_code(result))
-    Ok(())
+    gpu_status(cuda_mem_free(gpu_ptr.device_ptr))
 
 fn gpu_upload(gpu_ptr: GpuPtr, host_ptr: i64, size: i64) -> Result<(), GpuError>:
     """Copy data from host memory to device memory."""
-    val result = cuda_memcpy_htod(gpu_ptr.device_ptr, host_ptr, size)
-    if result < 0:
-        return Err(GpuError.from_code(result))
-    Ok(())
+    gpu_status(cuda_memcpy_htod(gpu_ptr.device_ptr, host_ptr, size))
 
 fn gpu_download(gpu_ptr: GpuPtr, host_ptr: i64, size: i64) -> Result<(), GpuError>:
     """Copy data from device memory to host memory."""
-    val result = cuda_memcpy_dtoh(host_ptr, gpu_ptr.device_ptr, size)
-    if result < 0:
-        return Err(GpuError.from_code(result))
-    Ok(())
+    gpu_status(cuda_memcpy_dtoh(host_ptr, gpu_ptr.device_ptr, size))
 
 fn gpu_memset(gpu_ptr: GpuPtr, value: i64, size: i64) -> Result<(), GpuError>:
     """Set device memory to a value."""
-    val result = cuda_memset(gpu_ptr.device_ptr, value, size)
-    if result < 0:
-        return Err(GpuError.from_code(result))
-    Ok(())
+    gpu_status(cuda_memset(gpu_ptr.device_ptr, value, size))
 
 fn gpu_launch(module: GpuModule, func_name: text, config: GpuLaunchConfig, args_ptr: i64) -> Result<(), GpuError>:
     """Launch a GPU kernel with the given configuration."""
@@ -80,16 +82,11 @@ fn gpu_launch(module: GpuModule, func_name: text, config: GpuLaunchConfig, args_
         config.block_z,
         args_ptr
     )
-    if result < 0:
-        return Err(GpuError.from_code(result))
-    Ok(())
+    gpu_status(result)
 
 fn gpu_sync() -> Result<(), GpuError>:
     """Synchronize the device - wait for all pending operations to complete."""
-    val result = cuda_sync()
-    if result < 0:
-        return Err(GpuError.from_code(result))
-    Ok(())
+    gpu_status(cuda_sync())
 
 # ============================================================================
 # Device Info Wrappers
@@ -219,24 +216,15 @@ fn gpu_memset_i32(ptr: GpuPtr, value: i64, count: i64) -> Result<(), GpuError>:
 
 fn gpu_copy_f32(dst: GpuPtr, src: GpuPtr, count: i64) -> Result<(), GpuError>:
     """Copy f32 device memory between buffers."""
-    val result = cuda_memcpy_dtod(dst.device_ptr, src.device_ptr, count * 4)
-    if result < 0:
-        return Err(GpuError.from_code(result))
-    Ok(())
+    gpu_status(cuda_memcpy_dtod(dst.device_ptr, src.device_ptr, count * 4))
 
 fn gpu_copy_i32(dst: GpuPtr, src: GpuPtr, count: i64) -> Result<(), GpuError>:
     """Copy i32 device memory between buffers."""
-    val result = cuda_memcpy_dtod(dst.device_ptr, src.device_ptr, count * 4)
-    if result < 0:
-        return Err(GpuError.from_code(result))
-    Ok(())
+    gpu_status(cuda_memcpy_dtod(dst.device_ptr, src.device_ptr, count * 4))
 
 fn gpu_copy(dst: GpuPtr, src: GpuPtr, bytes: i64) -> Result<(), GpuError>:
     """Copy bytes between device buffers."""
-    val result = cuda_memcpy_dtod(dst.device_ptr, src.device_ptr, bytes)
-    if result < 0:
-        return Err(GpuError.from_code(result))
-    Ok(())
+    gpu_status(cuda_memcpy_dtod(dst.device_ptr, src.device_ptr, bytes))
 
 # ============================================================================
 # GPU Intrinsic Stubs (interpreter mode)
@@ -561,6 +549,7 @@ fn gpu_global_size_z() -> i64:
     """Total global thread count in Z (grid_dim_z * block_dim_z)."""
     gpu_grid_dim_z() * gpu_block_dim_z()
 
+export gpu_status
 export gpu_init, gpu_alloc, gpu_free, gpu_upload, gpu_download, gpu_memset, gpu_launch, gpu_sync
 export gpu_device_name, gpu_device_compute_capability, gpu_device_total_memory
 export gpu_set_device, gpu_device_count
