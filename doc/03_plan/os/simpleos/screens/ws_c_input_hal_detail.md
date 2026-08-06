@@ -169,11 +169,33 @@ Notes: ring buffer, not a growing list — `push` must be ISR-safe (C2) and allo
 
 **Trait change (`input_backend.spl:5`):**
 
+> **SUPERSEDED — what actually landed (2026-08-06). Read this before following
+> the steps below.**
+>
+> `poll_event` is **NOT a trait method**. It landed as a **free function**
+> `input_backend_poll_event(backend)` in `input_backend.spl`, and the trait was
+> left alone.
+>
+> Why: the zero-churn variant of this step — putting a **default body** on the
+> trait so no impl needs editing — **SIGSEGVs (exit 139)** through a trait object
+> when the default body calls the trait's own `fn`-declared methods. Byte-identical
+> logic as a free function works. See
+> `doc/08_tracking/bug/trait_default_body_segfaults_via_trait_object_2026-08-06.md`.
+> The free function carries a comment forbidding a tidy-up back into a default
+> body, because the refactor looks obviously correct and will be attempted again.
+>
+> (The prose below is accurate that the declaration must be **default-free** —
+> that part was never the problem. The problem is only the tempting shortcut.)
+>
+> **Step 6 is DONE**: `poll_key`/`poll_mouse` are gone from the trait and all
+> seven implementors plus their spec stubs are migrated. Verified at origin: zero
+> `fn poll_key`/`fn poll_mouse` declarations remain on `trait InputBackend`.
+
 ```
 trait InputBackend:
-    me poll_event() -> HostInputEvent?      # NEW — the only method C5+ uses
-    me poll_key() -> KeyEvent?              # legacy, removed in step 6
-    me poll_mouse() -> MouseEvent?          # legacy, removed in step 6
+    # poll_event is NOT here — see the superseded note above.
+    me poll_key() -> KeyEvent?              # REMOVED in step 6 (done)
+    me poll_mouse() -> MouseEvent?          # REMOVED in step 6 (done)
     fn alt_held() -> bool
     fn shift_held() -> bool
     fn ctrl_held() -> bool
