@@ -1,5 +1,16 @@
 # Tracked self-hosted release artifact links a stale `rt_env_set` ABI
 
+> **STATUS 2026-08-06: still OPEN — re-confirmed by disassembly and probe.**
+> The `04a38e21…` artifact is still present at
+> `release/x86_64-unknown-linux-gnu/simple` and still SIGSEGVs on `check` and
+> `test --help`. Do NOT confuse it with
+> `bin/release/x86_64-unknown-linux-gnu/simple` — a *different* file (`c026a806…`)
+> holding a Rust bootstrap seed copy, tracked in
+> `deployed_bin_simple_still_seed_2026-08-05.md`.
+> The 2026-08-06 lane D1 sections at the end contain a **RETRACTION** of an
+> earlier, incorrect "closed by supersession" claim, plus a new hazard: this
+> binary exits 0 on `--help`-shaped capability probes.
+
 The tracked full pure-Simple CLI under `release/` crashes before parsing
 `check` input and before `native-build` reaches user code. The defect is an
 artifact/runtime ABI mismatch, not a dropped Simple call argument. It must not
@@ -333,3 +344,205 @@ admission probe followed by the tiny `p2_add.spl` check and canonical redeploy
 gate listed above. The separate retained Stage-3 streaming-surface crash must
 first gain a focused failing regression and a proven owner fix; do not retry
 the full entry build merely to rediscover its first-surface SIGSEGV.
+
+## 2026-08-06 lane D1 re-measurement: the stale artifact is GONE
+
+Positive capability probes on every candidate compiler on disk:
+
+| path | sha256 (16) | `--version` | `native-build --target ... --help` |
+|---|---|---|---|
+| `bin/release/x86_64-unknown-linux-gnu/simple` | `c026a806af3cf0a9` | **"bootstrap seed only"** | rc=0, full banner |
+| `build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple` | `bed40ba33a43347a` | `simple-bootstrap 1.0.0-beta` | **rc=0, full banner** |
+| `bootstrap/stage{1,2,3}/…/simple` (all four the SAME file) | `48a12b4f8fe2208e` | `simple-bootstrap 1.0.0-beta` | **rc=139 (core dump)** |
+| `bin/release/x86_64-unknown-simpleos/simple` | (payload) | n/a | rc=139 |
+
+**RETRACTION.** An earlier draft of this section claimed the `04a38e21…`
+artifact was "no longer on disk anywhere" and that this bug was closed by
+supersession. **That was wrong, and it was wrong because the ground-truth table
+above enumerated only `bin/release/…` and missed the top-level `release/`
+directory this bug is actually titled after.** `release/` is a real directory,
+not a symlink to `bin/release/`. Corrected row:
+
+| path | sha256 | `--version` | `check` / `test --help` |
+|---|---|---|---|
+| `release/x86_64-unknown-linux-gnu/simple` | **`04a38e21d6fbd86149d46d3ee2d761349f8ad29b02c5037a8eb589b6a1b9e4e0`** | `Simple v1.0.0-beta` | **rc=139 (SIGSEGV), both** |
+
+Re-disassembled 2026-08-06 — the obsolete two-argument implementation is still
+linked, forwarding `%rsi` (the key LENGTH) straight into `setenv`'s value slot:
+
+```text
+0000000002af5a47 <rt_env_set>:
+  test %rdi,%rdi ; je ...
+  test %rsi,%rsi
+  cmovne %rsi,%rax
+  mov  %rax,%rsi          <-- key length becomes setenv() value pointer
+  mov  $0x1,%edx
+  call setenv@plt
+```
+
+**This bug remains OPEN.** The correct verdict is: a stale ARTIFACT, still
+present, not a source defect.
+
+1. Two different artifacts exist and must not be conflated.
+   `release/x86_64-unknown-linux-gnu/simple` is the original `04a38e21…`
+   stale-ABI binary, still SEGVing today.
+   `bin/release/x86_64-unknown-linux-gnu/simple` is a *different* file,
+   `c026a806…`, a Rust bootstrap **seed** copy — the separate problem tracked in
+   `deployed_bin_simple_still_seed_2026-08-05.md`.
+2. Source is already correct on both sides of the ABI.
+   `src/runtime/runtime.h:649` and `runtime_native.c:7957` declare the
+   four-argument `(key_ptr, key_len, value_ptr, value_len)` form. The `.spl`
+   callers use either the explicit four-argument extern
+   (`70.backend/sffi_minimal.spl:128`, `backend/interpreter_calls.spl:25`) or
+   the two-`text` form (`10.frontend/core/_Ast/module_state.spl:24`,
+   `decl_nodes.spl:24`) — and this bug's own disassembly already recorded that
+   the two-`text` form expands to the same four registers at the call site. So
+   no caller or compiler workaround is warranted, and none was made.
+3. The live crasher, `bootstrap/stage3/x86_64-unknown-linux-gnu/simple`, is
+   **not** this defect: it is stripped and contains **no `rt_env_set` symbol at
+   all**. It is also 3.4 MB and byte-identical across `bootstrap/stage1`,
+   `stage2` and `stage3` — a tracked placeholder, not three staged compilers.
+   Its crash needs its own record; do not attribute it here.
+
+This bug therefore stays OPEN: the fix is still a rebuild/redeploy of
+`release/x86_64-unknown-linux-gnu/simple`, gated by the admission checks listed
+under "Required fix and gate". Lane D1 did **not** attempt that redeploy — it is
+the circular whole-compiler redeploy, and D1's acceptance never required it.
+
+**New hazard this measurement exposed.** The stale `04a38e21…` binary exits **0**
+on `native-build --target <triple> --help`, because `--help` returns before any
+environment write. So a `--help`-shaped capability probe **cannot** distinguish
+it from a healthy compiler; only a command that actually writes an env var (any
+`check`, `test`, or real build) faults. Any tool that selects a compiler by
+`--help` probe alone can still pick this binary. See the discovery hardening
+below.
+
+## 2026-08-06 discovery defect fixed in `scripts/os/simpleos-native-build.shs`
+
+Blocking lane D1 was not the ABI at all but the builder-discovery loop, which
+had two independent defects:
+
+1. It took the **first executable** in the glob and then *rejected* it, aborting
+   the whole run instead of continuing to the next candidate. Because
+   `bin/release/*/simple` is a seed copy today, auto-discovery could never reach
+   a working compiler — every legitimate build was forced through the
+   `SIMPLE_BUILD_COMPILER` seed route-around, which is exactly what the two
+   install-image provenance guards then refuse.
+2. Its remaining checks were **fail-open**: only `rc>=128` or output naming
+   `--target` was rejected. `bin/release/x86_64-unknown-simpleos/simple` — the
+   SimpleOS *payload*, a cross-target ELF — matches the same glob and is
+   executable, so it was a live candidate for being selected as the BUILDER.
+
+Discovery is now a **positive capability search**: a candidate is admitted only
+by exiting 0 on `native-build --target <triple> --help` *and* printing the
+native-build banner including `--runtime-bundle`. Seed identity is skipped and
+the loop continues rather than aborting; `build/bootstrap/stage3` and
+`stage2` are searched ahead of `release/`. An explicit `SIMPLE_BUILD_COMPILER`
+must pass the same capability probe. Measured: stage2 PASS, both `rc=139`
+candidates FAIL, seed skipped.
+
+## 2026-08-06 lane D1 result: self-hosted SimpleOS payload produced
+
+With discovery repaired, `sh scripts/os/simpleos-native-build.shs` was run with
+`SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1` and **no** `SIMPLE_BUILD_COMPILER`
+override. Auto-discovery selected the pure-Simple stage2 by capability probe:
+
+```text
+Compiler:  build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple
+Build complete: 723 compiled, 0 cached, 0 failed
+Time: 91.5s compile + 46.6s link = 138.1s total
+Linked (freestanding): bin/release/x86_64-unknown-simpleos/simple (2246 KB)
+  via clang --target=x86_64-unknown-elf
+```
+
+Independently verified (`readelf -h`, not the script's weaker `file` check):
+
+```text
+Class:               ELF64
+Data:                2's complement, little endian
+Type:                EXEC (Executable file)
+Machine:             Advanced Micro Devices X86-64
+Entry point address: 0x40000000
+```
+
+New stamp, produced by the build (never hand-written):
+
+```text
+target=x86_64-unknown-simpleos
+entry=src/app/simpleos_tool/main.spl
+entry_closure=true
+backend=cranelift
+compiler=build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple
+artifact_sha256=666c19750e7be618f4b18d93413b6ae44c0a5f846b3b5e3d501db96f9148df80
+```
+
+`sha256sum` on the artifact matches the stamped digest, and the stamp is newer
+than the binary. The previous stamp read
+`compiler=/home/ormastes/dev/pub/simple/src/compiler_rust/target/bootstrap/simple`
+(seed), which is exactly what both guards refuse.
+
+Guard status:
+
+- `scripts/os/make_os_disk.shs` `validate_simple_payload_provenance`: **PASS**
+  (executed against the real payload; the script's own `--self-test` also
+  passes, so the guard is not vacuous).
+- `src/os/installer/image_builder.spl` `_validate_simple_binary`: all five
+  conditions satisfied — `target=`, `entry=`, `entry_closure=true`, no
+  `compiler_rust`/`simple_seed` substring, `backend=cranelift`, ELF class 2 and
+  machine 62.
+
+**Scope of the claim.** The builder was **stage2** — the compiler compiled from
+Simple sources, non-seed, admitted by positive capability probe. There is no
+`build/bootstrap/stage3/*/simple` on disk, so this is *not* a fixpoint-proven
+self-host; it is a legitimately non-seed build, which is what the two provenance
+guards actually require. Do not read the passing guards as a stage3 fixpoint.
+
+## 2026-08-06 discovery probe hardened against the stale-ABI binary
+
+The first version of the D1 capability probe used only
+`native-build --target <triple> --help`. Measured: the stale `04a38e21…` binary
+**passes** that probe at rc=0. Discovery therefore now also requires the
+candidate to survive a command that actually writes the environment — `check`
+on a trivial two-line fixture, which reaches `rt_env_set` via `ast_reset`. Only
+a *signal* death (rc>=128) rejects; a non-zero `check` exit is a verdict about
+the fixture, not about the compiler's ABI.
+
+Measured discrimination with the final probe:
+
+| candidate | `--help` probe | env-write probe | verdict |
+|---|---|---|---|
+| `build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple` | rc=0 | rc=0 | **PASS** |
+| `release/x86_64-unknown-linux-gnu/simple` | rc=0 | **rc=139** | **FAIL** |
+| `bin/release/x86_64-unknown-linux-gnu/simple` | rc=0 | rc=0 | PASS probe, rejected by seed identity |
+
+Note the middle row: `--help` alone would have admitted the stale-ABI binary as
+a builder. That is the fail-open this hardening closes.
+
+### Payload undefined-symbol check (not covered by either provenance guard)
+
+Neither provenance guard looks past the ELF header, and a SimpleOS target binary
+cannot be executed on the host, so a green link is not proof of a complete link.
+`nm -u` on the new payload reports exactly three symbols, **all weak** (`w`):
+`simpleos_entropy_seed_u64`, `_Z4mainiPPc`, `_Z4mainv`. Weak undefined symbols
+resolve to 0 and do not prevent a static link from being well-formed; there are
+**no strong undefined symbols**. The build log's `511 unexpected symbol(s)` /
+`505 deferred to linker` lines are the freestanding precheck being conservative,
+and the linker resolved them.
+
+### End-to-end rerun with the final hardened script
+
+The payload was rebuilt a second time after the env-write probe was added, so
+the receipt below reflects the script exactly as it now stands (not an earlier
+revision). Discovery again selected stage2 with no `SIMPLE_BUILD_COMPILER`:
+
+```text
+Build complete: 723 compiled, 0 cached, 0 failed
+Time: 90.0s compile + 48.3s link = 138.3s total
+```
+
+Final artifact: `artifact_sha256=58b65147dfff4810a8cf74f674aa8ddf18f977bfe7745957e4122e8421583186`
+(matches `sha256sum`; stamp newer than binary). `readelf -h`: ELF64, EXEC,
+x86-64, entry `0x40000000`. `nm -u`: 3 weak symbols, 0 strong. Real shell guard:
+**PASS**. The build is reproducible in structure (723/0/0 both runs) though the
+digest differs between runs, so the payload is not bit-reproducible — worth its
+own investigation, not a D1 blocker.
