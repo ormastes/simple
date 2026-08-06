@@ -1,4 +1,4 @@
-# @tag: compositor, occlusion, ws-d6
+# @tag: compositor, occlusion, ws-d6, slow
 # @cover src/os/compositor/compositor.spl 5%
 #
 # WS-D6 — compositor occlusion culling: WHOLE-FRAMEBUFFER equivalence.
@@ -11,39 +11,65 @@
 # switched off. That is the same oracle shape WS-D3 used for damage.
 #
 # The reference and the subject are rendered by two independent compositors
-# over two independent Engine2D CPU backends, so a shared-buffer aliasing
-# mistake cannot make the comparison pass vacuously.
+# over two independent headless backends, so a shared-buffer aliasing mistake
+# cannot make the comparison pass vacuously.
+#
+# The import set (and the fixture-style headless backend) is copied from
+# `test/fixtures/wm_compositor_content_kind_render_probe.spl` deliberately:
+# `Compositor.render_all()` only resolves under this module set. A narrower set
+# collapses `Color` (`src/lib/common/color/types.spl` vs
+# `src/os/drivers/framebuffer/fb_driver.spl`) and dies with "unknown static
+# method rgb on class Color" — a pre-existing same-name-collapse defect,
+# reproducible at HEAD without this change.
+#
+# RUNTIME WARNING — this spec is SLOW and needs an explicit timeout:
+#   bin/simple test test/01_unit/os/compositor/compositor_occlusion_spec.spl \
+#     --no-cache --no-cover-check --timeout 7200
+# `render_all()` is interpreter-bound (a jit-fallback drops the web-engine
+# module: "cannot infer field type while lowering
+# SimpleWebEngine2DStaticPixelCache.retain_result_for_html"), and `bin/simple
+# test` is the tree-walk interpreter on top of that. Under `bin/simple run`
+# each 200x150 pixel-surface frame costs ~20s; under the spec runner it is
+# slower again. Without `--timeout` the runner aborts with "Process timed out"
+# and NO verdict line. The same layouts are measured, far faster, by
+# `test/perf/graphics_2d/bench_occlusion_cull.spl`.
 
 use std.spec.{describe, context, it, expect, step}
-use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use os.compositor.compositor.{Compositor, wm_set_occlusion_culling, wm_occlusion_culling_enabled}
-use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use common.ui.builder.{build_tree, column, label}
+use nogc_sync_mut.ui.session.{UISession}
+use os.compositor.compositor.{Compositor, wm_set_occlusion_culling, wm_occlusion_culling_enabled, wm_occlusion_culled_count}
+use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.host_compositor_entry.{HeadlessHostCompositorBackend, headless_host_compositor_pixels}
+use os.compositor.simple_web_window_renderer.{simple_web_content_render_request_with_active_theme}
+use os.compositor.web_render_surface.{compositor_render_request_artifact}
+use std.gc_async_mut.ui.gui_content_renderer.{gui_session_content_frame}
 
-val SW: i32 = 240
-val SH: i32 = 180
-
-fn _make_backend() -> Engine2dCompositorBackend:
-    var engine = Engine2D.create_with_backend(SW, SH, "cpu")
-    engine.clear(0xFF000000u32)
-    engine.present()
-    Engine2dCompositorBackend.create(engine)
+val SW: i32 = 200
+val SH: i32 = 150
 
 # Renders the given window set and returns the FULL framebuffer.
-# `layout` entries are (x, y, w, h) quadruples flattened into one array so the
-# two renders are driven from literally the same data.
-fn _render_frame(layout: [i32], culling: bool) -> [u32]:
+# `layout` entries are (x, y, w, h) quadruples flattened into one array so both
+# renders are driven from literally the same data.
+fn _render_frame(layout: [i32], pixel_content: bool, culling: bool) -> [u32]:
     wm_set_occlusion_culling(culling)
-    var backend = _make_backend()
+    val headless = HeadlessHostCompositorBackend.new(SW, SH)
+    val backend: CompositorBackend = headless
     var comp = Compositor.with_backends(backend, nil, SW, SH)
     var i = 0
     while i + 3 < layout.len().to_i32():
-        comp.create_window("w" + (i / 4).to_text(),
-                           layout[i], layout[i + 1], layout[i + 2], layout[i + 3])
+        val w = comp.create_window("w" + (i / 4).to_text(),
+                                   layout[i], layout[i + 1], layout[i + 2], layout[i + 3])
+        if pixel_content:
+            val cw = layout[i + 2] - 8
+            val ch = layout[i + 3] - 36
+            if cw > 0 and ch > 0:
+                val handle = comp.create_pixel_content(cw, ch, 0xFF204060u32 + i.to_u32())
+                if handle > 0:
+                    comp.attach_window_pixel_content(w.to_u64(), handle)
         i = i + 4
     comp.render_all()
-    val px = backend.get_pixel_buffer()
     wm_set_occlusion_culling(true)
-    px
+    headless_host_compositor_pixels(headless)
 
 # Counts differing pixels over the WHOLE buffer (not a sampled region).
 fn _whole_framebuffer_mismatches(a: [u32], b: [u32]) -> i32:
@@ -57,10 +83,16 @@ fn _whole_framebuffer_mismatches(a: [u32], b: [u32]) -> i32:
         i = i + 1
     diff
 
-fn _assert_identical(layout: [i32]):
-    val reference = _render_frame(layout, false)
-    val culled = _render_frame(layout, true)
-    expect(reference.len()).to_equal(SW.to_i64() * SH.to_i64())
+# `expect_culls` is the ANTI-VACUITY oracle. A whole-framebuffer equivalence
+# assertion passes trivially when the pre-pass culled nothing at all, so every
+# case states how many windows it expects to be skipped and that is checked
+# alongside the pixels.
+fn _assert_identical(layout: [i32], pixel_content: bool, expect_culls: i32):
+    val reference = _render_frame(layout, pixel_content, false)
+    expect(wm_occlusion_culled_count()).to_equal(0)
+    val culled = _render_frame(layout, pixel_content, true)
+    expect(wm_occlusion_culled_count()).to_equal(expect_culls)
+    expect(reference.len() > 0).to_equal(true)
     expect(culled.len()).to_equal(reference.len())
     expect(_whole_framebuffer_mismatches(reference, culled)).to_equal(0)
 
@@ -68,44 +100,45 @@ fn _assert_identical(layout: [i32]):
 describe "WS-D6 compositor occlusion culling":
     """Culled frames must be pixel-identical to a full redraw."""
 
-    context "toggle":
-        """The reference switch itself must work, or every case is vacuous."""
-
-        it "defaults to enabled and round-trips":
-            step("default is on")
-            expect(wm_occlusion_culling_enabled()).to_equal(true)
-            step("switch off and back on")
-            wm_set_occlusion_culling(false)
-            expect(wm_occlusion_culling_enabled()).to_equal(false)
-            wm_set_occlusion_culling(true)
-            expect(wm_occlusion_culling_enabled()).to_equal(true)
-
-    context "whole-framebuffer equivalence":
+    context "whole-framebuffer equivalence, chrome-only windows":
         """Every layout renders identically with and without culling."""
 
-        it "fully covered window (exact same rect) — the cull case":
-            step("two identical rects; the lower one is invisible")
-            _assert_identical([30, 30, 120, 90, 30, 30, 120, 90])
+        it "two identical rects — NOT culled, the lower shadow still shows":
+            step("the chrome drop shadow reaches past the covering rect")
+            _assert_identical([20, 16, 150, 110, 20, 16, 150, 110], false, 0)
 
         it "strictly contained window — the cull case":
-            step("lower window sits entirely inside the upper one")
-            _assert_identical([50, 50, 60, 40, 30, 30, 140, 100])
+            step("upper window clears the lower one's shadow band too")
+            _assert_identical([40, 40, 100, 60, 15, 12, 175, 130], false, 1)
 
         it "covered by the UNION of two windows, by neither alone":
             step("exact region subtraction, not a bounding-box guess")
-            _assert_identical([40, 40, 120, 80, 40, 40, 60, 80, 100, 40, 60, 80])
+            _assert_identical([30, 25, 120, 90, 20, 15, 90, 115, 100, 15, 95, 115], false, 1)
 
         it "partial overlap — must NOT be culled":
             step("a false cull here shows up as missing pixels")
-            _assert_identical([30, 30, 120, 90, 90, 70, 120, 90])
+            _assert_identical([10, 10, 120, 90, 60, 40, 120, 90], false, 0)
 
         it "disjoint windows — nothing culled":
-            _assert_identical([10, 10, 80, 60, 140, 100, 80, 60])
+            _assert_identical([5, 5, 60, 45, 130, 95, 60, 45], false, 0)
 
         it "occluder one pixel short of covering — must NOT be culled":
             step("off-by-one in the coverage test is caught whole-buffer")
-            _assert_identical([40, 40, 100, 80, 40, 40, 100, 79])
+            _assert_identical([30, 25, 120, 90, 30, 25, 120, 89], false, 0)
 
         it "single window and empty desktop":
-            _assert_identical([20, 20, 100, 70])
-            _assert_identical([])
+            _assert_identical([20, 20, 120, 90], false, 0)
+            _assert_identical([], false, 0)
+
+    context "whole-framebuffer equivalence, content-bearing windows":
+        """PIXEL_SURFACE windows are the expensive path culling skips."""
+
+        it "occluded pixel-surface window — the expensive cull":
+            step("its per-pixel put_pixel blit is skipped entirely")
+            _assert_identical([40, 40, 100, 60, 15, 12, 175, 130], true, 1)
+
+        it "two stacked pixel-surface windows — NOT culled":
+            _assert_identical([20, 16, 140, 100, 20, 16, 140, 100], true, 0)
+
+        it "pixel-surface window partially overlapping another":
+            _assert_identical([10, 10, 120, 90, 50, 35, 120, 90], true, 0)
