@@ -1317,7 +1317,17 @@ static void rt_core_reclaim_transient_raw(void) {
         RtCoreTransientRawAlloc* entry = &rt_core_transient_raw_allocs[i];
         if (entry->ptr == 0 || entry->ptr == RT_CORE_TRANSIENT_RAW_TOMBSTONE) continue;
         if (entry->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) {
-            free((void*)entry->ptr);
+            void* raw = (void*)entry->ptr;
+            /* Now that sampled guard slots are registered here too, reclaim
+             * must not hand one to free(): a slot is a page-aligned mmap
+             * mapping, not a libc chunk. Route it through the guard's own
+             * reclaim, which PROT_NONEs the mapping so a later UAF traps.
+             * This mirrors rt_free's guard-slot branch. */
+            if (rt_mem_guard_is_slot(raw)) {
+                rt_mem_guard_free_sampled(raw);
+            } else {
+                free(raw);
+            }
         }
     }
     rt_core_transient_raw_clear();
@@ -4757,7 +4767,20 @@ void* rt_alloc(int64_t size) {
     if (size < 0) return NULL;
     if (rt_mem_guard_should_sample((size_t)size)) {
         void* guarded = rt_mem_guard_alloc_sampled((size_t)size);
-        if (guarded != NULL) return guarded;
+        if (guarded != NULL) {
+            /* A sampled slot is still a raw block handed to the caller, so it
+             * must enter the core transient raw registry exactly like the
+             * malloc path below. Skipping it made the registry's view of a
+             * block depend on a sampling coin flip: rt_transient_heap_promote
+             * could not classify a tagged raw root that happened to be
+             * sampled, so it refused, and a promoted live graph was reported
+             * unpromotable under SIMPLE_MEM_GUARD_RATE. */
+            if (!rt_core_transient_raw_register(guarded, (size_t)size)) {
+                rt_mem_guard_free_sampled(guarded);
+                return NULL;
+            }
+            return guarded;
+        }
         /* mmap/mprotect failed (or the slot table is full) -- fall through
          * to the normal allocator below rather than returning NULL for a
          * sampling decision that isn't itself an OOM. */

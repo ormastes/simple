@@ -151,6 +151,33 @@ int main(void) {
     check(rt_array_len(outside_control) == 2 && rt_array_get(outside_control, 1) == 42,
           "scope-death CONTROL array is unaffected by the scope");
 
+    /* CONTRACT: a raw rt_alloc block born in a scope and left unpromoted is
+     * reclaimed at scope end. Under SIMPLE_MEM_GUARD_RATE that block can be a
+     * SAMPLED GUARD SLOT -- a page-aligned mmap mapping, not a libc heap chunk
+     * -- so reclamation must route it through the guard's own free path and
+     * never through free(). Handing an mmap slot to free() is undefined
+     * behaviour and aborts under glibc. Without this case the guard-slot branch
+     * of transient raw reclamation is never entered, so it would ship
+     * unverified. The CONTROL block is promoted and read back after scope end,
+     * so a broken rt_alloc cannot let this pass vacuously. Run this file with
+     * SIMPLE_MEM_GUARD_RATE=1 to exercise the sampled path. */
+    check(rt_transient_array_scope_begin() == 1, "raw-reclaim scope begins");
+    int64_t* raw_dropped = (int64_t*)rt_alloc((int64_t)sizeof(int64_t) * 4);
+    int64_t* raw_control = (int64_t*)rt_alloc((int64_t)sizeof(int64_t) * 4);
+    check(raw_dropped != NULL && raw_control != NULL,
+          "scope-born raw blocks allocate");
+    raw_dropped[0] = 0x5AFE;
+    check(raw_dropped[0] == 0x5AFE, "unpromoted scope-born raw block is writable");
+    check(rt_transient_array_scope_pause() == 1, "raw-reclaim scope pauses");
+    check(rt_transient_heap_promote((int64_t)((uintptr_t)raw_control | 1)) == 1,
+          "raw CONTROL block promotes");
+    raw_control[0] = 0x600D;
+    check(rt_transient_array_scope_end() == 1,
+          "scope end reclaims the unpromoted raw block without aborting");
+    check(raw_control[0] == 0x600D,
+          "promoted raw CONTROL block survives reclamation of its sibling");
+    rt_free(raw_control);
+
     int64_t string_base = rt_heap_registry_count();
     check(rt_transient_array_scope_begin() == 1, "direct-string scope begins");
     int64_t direct_string = rt_string_new(
