@@ -15,13 +15,15 @@
 #     integrated into the absolute x/y by the driver, and the only consumer
 #     (compositor cursor placement) read x/y, never dx/dy — so nothing is lost.
 #
-# `Key.code` lives in an officially UNASSIGNED code space (host_input_event.spl
-# header). `ps2_key_code` therefore only assigns the codes that
-# `host_key_name` already gives a widget-layer meaning, and returns 0
-# ("producer-local, prefer `ch`") for everything else. Inventing a full 78-key
-# numbering here would be a second, competing code space.
+# `Key.code` is the CANONICAL code space owned by `common.ui.key_code` (Windows
+# VK / W3C keyCode). `ps2_key_code` therefore delegates to
+# `ps2_keyboard.key_to_canon` rather than carrying a table of its own: this file
+# is the only site in the tree that fills `HostInputEvent.Key.code`, so a local
+# table here IS the "second, competing code space" the header used to warn
+# about. It was one — it named 13 keys and returned 0 for the other 65,
+# including every letter, digit and function key.
 
-use os.drivers.input.ps2_keyboard.{Key, KeyEvent}
+use os.drivers.input.ps2_keyboard.{Key, KeyEvent, key_to_canon}
 use os.drivers.input.ps2_mouse.{MouseEvent}
 use common.ui.host_input_event.{
     HostInputEvent,
@@ -78,37 +80,17 @@ fn mods_has_alt(mods: i64) -> bool:
 # ============================================================================
 
 fn ps2_key_code(k: Key) -> i64:
-    """Numeric code for a decoded PS/2 key.
+    """Canonical numeric code for a decoded PS/2 key.
 
-    Only keys that `host_key_name` maps to a widget-layer name get a code;
-    everything else returns 0, meaning "no code, use `ch`"."""
-    match k:
-        Key.Backspace:
-            8
-        Key.Tab:
-            9
-        Key.Enter:
-            13
-        Key.Escape:
-            27
-        Key.Space:
-            32
-        Key.End:
-            35
-        Key.Home:
-            36
-        Key.Left:
-            37
-        Key.Up:
-            38
-        Key.Right:
-            39
-        Key.Down:
-            40
-        Key.Delete:
-            46
-        _:
-            0
+    A thin alias of `ps2_keyboard.key_to_canon`, which is the single seam from
+    the symbolic `Key` enum to the canonical space and is shared by all four
+    producers (PS/2, evdev, SDL2, winit). Unmapped keys are CANON_UNKNOWN (0),
+    meaning "no code, use `ch`" — same contract as before, now over the whole
+    keyboard instead of 13 keys.
+
+    Cross-producer equality is pinned at absolute VK integers in
+    `test/01_unit/os/input/producer_key_canon_spec.spl`."""
+    key_to_canon(k)
 
 # ============================================================================
 # Event translation

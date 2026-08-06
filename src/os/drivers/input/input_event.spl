@@ -101,11 +101,23 @@ impl InputEventQueue:
         self.count = 0
 
     me drain() -> [HostInputEvent]:
-        """Pop everything into a list, oldest first. Allocates: not ISR-safe."""
+        """Pop everything into a list, oldest first. Allocates: not ISR-safe.
+
+        The pop logic is inlined rather than written as
+        `while val ev = self.pop():`. That form does NOT terminate here: a
+        self-mutating `me` call driving its own loop condition never observes
+        the decremented `count`, and the example died on
+        "Execution limit of 10000000 operations exceeded" instead of
+        returning. Read `count` ONCE up front and count down locally."""
         var out: [HostInputEvent] = []
+        val n = self.count
+        var i = 0
         # cpu-lane-loop-ok: bound is the queue count, at most INPUT_QUEUE_CAP
-        while val ev = self.pop():
-            out = out.push(ev)
+        while i < n:
+            out = out.push(self.buf[self.head])
+            self.head = (self.head + 1) % INPUT_QUEUE_CAP
+            i = i + 1
+        self.count = 0
         out
 
     me stats() -> text:

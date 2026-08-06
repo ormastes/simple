@@ -1,0 +1,131 @@
+# ScreenHost impl #4 of 4 -- web.
+#
+# WHAT THIS DOES: presents the DrawIrV3 scene as an absolutely-positioned HTML
+# document (one <div> per RECT command, colours straight from the paint table)
+# written to a served document path, and drains browser-posted input from
+# numbered event files. The scene->HTML translation and the event ingress are
+# both module-level and exported, so they are unit-testable with no browser
+# and no listening socket.
+#
+# WHAT THIS DELIBERATELY DOES NOT DO, and why -- read before "finishing" it:
+#   * It does not bind an HTTP listener. `src/app/ui.web/server.spl` serves a
+#     `UISession` through the `WebServer` class; driving a DrawIrV3 scene
+#     through it means editing `src/app/ui.web/**`, which this workstream is
+#     explicitly not allowed to write. Serving the emitted document is left to
+#     whoever owns that tree (or to any static server pointed at the path).
+#   * It does not use `WebPackedProducer` (ui_web_packed_producer.spl). That
+#     producer goes html -> DrawIrV3Scene; this host already HAS the scene and
+#     needs the opposite direction, so calling it would be decoration.
+# Both are stated here rather than hidden behind a plausible-looking adapter.
+#
+# Event ingress reuses the WmFsAppEvent wire encoding rather than inventing a
+# second one: a posted event is exactly the text `wm_fs_app_event_encode`
+# produces, decoded and converted by the same landed helpers the WM host uses.
+
+use std.io_runtime.{env_get, file_exists, file_read, write_file, mkdir_p}
+use common.ui.draw_ir_v3.{
+    DrawIrV3Scene, draw_ir_v3_geometry_at, draw_ir_v3_paint_at, draw_ir_v3_has_flag,
+    DRAW_IR_V3_KIND_RECT, DRAW_IR_V3_FLAG_HIDDEN, DRAW_IR_V3_NO_ID
+}
+use common.ui.screen_host.{ScreenHost}
+use common.ui.host_input_event.{HostInputEvent, host_input_from_wm_fs_event}
+use common.ui.wm_app_process_contract.{wm_fs_app_event_decode, wm_fs_app_event_seq_path}
+
+fn web_color_css(argb: u32) -> text:
+    """ARGB u32 -> `rgba(r,g,b,a)`. Alpha is emitted in thousandths so no
+    float formatting is involved."""
+    val c: i64 = argb.to_i64()
+    val a = (c >> 24) & 255
+    val r = (c >> 16) & 255
+    val g = (c >> 8) & 255
+    val b = c & 255
+    val milli = a * 1000 / 255
+    "rgba({r},{g},{b},0.{milli})"
+
+fn web_scene_to_html(scene: DrawIrV3Scene, width: i32, height: i32) -> text:
+    """Scene -> a standalone document. One absolutely positioned div per RECT
+    command, in command order, so painter's-algorithm ordering is preserved."""
+    var body = ""
+    var i: i64 = 0
+    val n = scene.commands.len().to_i64()
+    while i < n:
+        val cmd = scene.commands[i]
+        if cmd.kind == DRAW_IR_V3_KIND_RECT and cmd.geometry_id != DRAW_IR_V3_NO_ID and
+                not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
+            val geom = draw_ir_v3_geometry_at(scene.geometry, cmd.geometry_id)
+            val paint = draw_ir_v3_paint_at(scene.paint, cmd.paint_id)
+            if geom.present and geom.width > 0 and geom.height > 0:
+                var style = "position:absolute;left:{geom.x}px;top:{geom.y}px;"
+                style = style + "width:{geom.width}px;height:{geom.height}px;"
+                if paint.present:
+                    style = style + "background:" + web_color_css(paint.fill_color) + ";"
+                    if geom.corner_radius > 0:
+                        style = style + "border-radius:{geom.corner_radius}px;"
+                body = body + "<div data-cmd=\"{i}\" style=\"" + style + "\"></div>\n"
+        i = i + 1
+    "<div id=\"showcase-root\" style=\"position:relative;width:{width}px;height:{height}px\">\n" +
+        body + "</div>\n"
+
+fn web_read_event_at(event_dir: text, seq: i64) -> HostInputEvent?:
+    """Next browser-posted event, or nil when it has not arrived."""
+    val path = wm_fs_app_event_seq_path(event_dir + "/event", seq)
+    if not file_exists(path):
+        return nil
+    val doc = file_read(path)
+    if doc.trim() == "":
+        return nil
+    host_input_from_wm_fs_event(wm_fs_app_event_decode(doc))
+
+class ScreenWebHost:
+    var w: i32
+    var h: i32
+    var doc_path: text
+    var event_dir: text
+    var event_seq: i64
+    var last_html_len: i64
+
+    static fn open(w: i32, h: i32, doc_path: text, event_dir: text) -> ScreenWebHost?:
+        """nil when there is no document path to publish to -- with nowhere to
+        write, nothing is presented and saying otherwise would be a lie."""
+        if doc_path.trim() == "":
+            return nil
+        ScreenWebHost(
+            w: w, h: h, doc_path: doc_path.trim(),
+            event_dir: event_dir.trim(), event_seq: 0, last_html_len: 0
+        )
+
+    static fn open_from_env(w: i32, h: i32) -> ScreenWebHost?:
+        ScreenWebHost.open(
+            w, h,
+            env_get("SIMPLE_SHOWCASE_WEB_DOC"),
+            env_get("SIMPLE_SHOWCASE_WEB_EVENTS")
+        )
+
+impl ScreenHost for ScreenWebHost:
+    me host_name() -> text:
+        "web"
+
+    me size() -> (i32, i32):
+        (self.w, self.h)
+
+    me present_scene(scene: DrawIrV3Scene) -> bool:
+        val html = web_scene_to_html(scene, self.w, self.h)
+        self.last_html_len = html.len().to_i64()
+        if self.last_html_len == 0:
+            return false
+        write_file(self.doc_path, html)
+
+    me poll_input() -> HostInputEvent?:
+        if self.event_dir == "":
+            return nil
+        val next = self.event_seq + 1
+        val ev = web_read_event_at(self.event_dir, next)
+        if ev == nil:
+            return nil
+        self.event_seq = next
+        ev
+
+    me shutdown():
+        self.doc_path = ""
+
+export ScreenWebHost, web_scene_to_html, web_color_css, web_read_event_at
