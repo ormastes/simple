@@ -39,7 +39,7 @@ foundation: CowEnv dirty-tracking, byte-level heap counters — see
 | `src/lib/nogc_sync_mut/mem/dump.spl` | M8-prep v1 TSV snapshot writer (`KIND`/`OWNER`/`RSS` rows), `SIMPLE_MEM_SNAPSHOT`/`SIMPLE_MEM_DUMP_PATH` |
 | `src/lib/nogc_sync_mut/io/signal_handlers.spl` | SIGUSR2 hook added for M8 live-dump trigger |
 | `src/lib/common/mem_infra/config.spl` | M3 capability matrix — 7 rows (attr/guard/harden/genarena/strict/asan/memprof) x 3 backends; pure functions only, no env reads, **not yet wired** into CLI/build |
-| `src/app/mem/main.spl` | M8 `simple mem` CLI skeleton: `top --profile`, `diff`, `help`; post-mortem file mode only, no live-process/TUI channel yet |
+| `src/app/mem/main.spl` | M8 `simple mem` CLI: `top --profile` (post-mortem file mode), `diff`, `help`, and `top --pid <P> [--path F] [--wait-ms N]` (live SIGUSR2 poll of a running process via `src/app/mem/live_poll.spl`, landed `0a4c3f64129` — that file was previously a real orphan, never called from `main.spl`) |
 | `src/app/memstat/main.spl` | L5 out-of-process RSS sampler feeding the stage-4 gate |
 | `scripts/check/check-stage4-memory-gate.shs` | CI RSS gate over `memstat` output; PASS/FAIL verdict line |
 
@@ -94,12 +94,23 @@ sh scripts/check/check-stage4-memory-gate.shs                        # PASS peak
   serves the compiler pipeline's own internals, never a program `Value`. The
   GC row of the M1-M8 allocator-model matrix is satisfied trivially, not
   because GC instrumentation was built.
-- **LLVM lane (M4) does not compile.** ASan build integration and
-  `-fmemory-profile` (memprof) emission are MED-cost and LLVM-backend-only
-  by design; `src/lib/*/sanitizer/asan/` stubs exist per-tier but are not
-  wired into a working `--mem-infra=asan` build path (M4 compiler build fails).
-  Cranelift/interpreter resolve `asan`/`memprof` rows to the M2 equivalents
-  instead (see `mem_infra_matrix()` in `config.spl`).
+- **LLVM lane (M4) — LANDED 2026-08-06 (was "does not compile").** Both ASan
+  (`13348d0fc46`) and memprof (`5029d3feade`) are real: `SIMPLE_MEM_ASAN`/
+  `SIMPLE_MEM_MEMPROF` env gates in `codegen/llvm/backend_core.rs`,
+  `-fsanitize=address`/`-fmemory-profile` link flags, `--sanitize`/`--memprof`
+  and `--mem-infra=asan`/`=memprof` CLI flags. **Pipeline-alias gotcha:** the
+  bare `"memprof"` LLVM pass-pipeline alias resolves to FUNCTION-SCOPED ONLY
+  on LLVM 18.1.8 (`opt -print-pipeline-passes` shows `function(memprof),
+  verify,print` — never emits `memprof.module_ctor`/`__memprof_init`); the
+  correct string is `"function(memprof),module(memprof-module)"` explicitly.
+  Always ground-truth an LLVM pass-pipeline alias with `opt
+  -print-pipeline-passes` before trusting it — the same trap likely applies
+  to other single-word aliases (`asan`, `tsan`, `msan`). Still open: the
+  plan's full exit bar (memprof profile from a real stage-2 compile) is
+  blocked on a separate, pre-existing bug
+  (`doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md`)
+  — both fixes so far are standalone-fixture-level only, matching M4's own
+  original scoping.
 - **+36.6% ON cost, M1 attribution, measured pre-any-lock-sharding.** The
   `SIMPLE_MEM_ATTR=1` path takes one global `Mutex<HashMap>` lock per heap
   alloc/free; on an allocation-heavy probe (90k-element array push+sum) the
@@ -116,6 +127,18 @@ sh scripts/check/check-stage4-memory-gate.shs                        # PASS peak
   code in the Rust seed. Pure-Simple interpreter has these defined correctly.
   **Current status: OPEN ITEM, seed interpreter missing wiring for three
   mem-infra externs.**
+
+- **Signal-callback context under the interpreter only resolves `rt_`/`spl_`-
+  prefixed externs.** Found wiring M8 live-poll's SIGUSR2 handler
+  (`src/lib/nogc_sync_mut/mem/dump.spl`): calling a bare-named function like
+  `memory_usage()` from inside a signal callback crashes with `unknown
+  extern function` because `rt_interp_call` (the signal-dispatch path) only
+  resolves `rt_`/`spl_`-prefixed names. Split into an RSS-free variant
+  (`mem_dump_tsv_no_rss()`) for the signal path; the ordinary
+  `simple mem snapshot` command still gets the real RSS row. Also:
+  `use std.io_runtime.{thread_sleep}` silently fails to resolve under the
+  interpreter (the `io_runtime.spl` shim doesn't re-export it) — import from
+  `std.nogc_sync_mut.io_runtime` directly instead.
 
 ## Update Rule
 When a new M-phase lands, gains a design doc, or an env gate's status

@@ -1085,6 +1085,33 @@ tests", and had to retract a landed claim. Match `example` and `failure` as
 (`test_output.rs:251`), so a `failures` pattern silently drops one-failure
 blocks — the mirror of the `examples\?` trap already in `.claude/rules/testing.md`.
 
+### A `Results:` FAIL can be harness plumbing, not the spec (2026-08-06)
+
+Two confirmed, unrelated ways `bin/simple test` reports a spec FAILED with
+**zero real assertion failures**, both in `src/app/test_runner_new/` (pure
+`.spl`, fixed same day):
+
+- **Session-daemon cache masked failures.** `--no-cache` never actually
+  bypassed the daemon's stale-result cache — only `--clean` did — and a
+  cached failure copied NO diagnostic text into the display, so a stale red
+  result could show with nothing explaining why. Fixed in
+  `test_runner_main.spl` (`20348690152`).
+- **`fn main` name collision.** The lint CLI's own entry point
+  (`src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl`) used to
+  wildcard-re-export a bare `fn main`, colliding with the synthesized
+  `fn main` every interpreter-mode spec gets. On collision the WRONG `main`
+  ran (no args), hit its own usage guard, printed `Usage: simple_lint
+  <file.spl> [options]`, and the runner miscounted that trailing text as an
+  extra failed example — flipping an all-green spec (`4 examples, 0
+  failures`) to `FAIL`. Renamed to `fn lint_main` + explicit non-wildcard
+  re-export list (`1517fbe7b51`).
+
+**Lesson:** a `FAIL` with an example count that doesn't match any visible `✗`
+assertion, or with unrelated CLI usage/help text interleaved in the log, is a
+harness-plumbing signature — re-run with `--no-session-daemon` and read the
+full log for stray `Usage:`/tool-help text before trusting the fail as a real
+regression in the spec's own code.
+
 ### Never `tail -1` a spec log
 
 The `N examples, M failures` line is printed **once per top-level `describe`**,

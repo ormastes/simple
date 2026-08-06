@@ -88,6 +88,19 @@ registry hunk presence. After any expr_dispatch refactor, re-verify:
    so a drifted copy crashes with `method has not found on type nil` — native
    path only. Always call `MirLowering.new_for_target`.
 
+## `lower_type` wildcard arm — verify new `HirTypeKind` variants get real arms
+
+`_MirLowering/function_lowering.spl`'s `lower_type` match had only 17 of 26
+`HirTypeKind` variants (declared `src/compiler/20.hir/hir_types.spl`) with
+explicit arms; 9 fell through to a FATAL `case _:` wildcard (`Slice,
+TypeParam, DynTrait, Function, Projection, Isolated, Any, Tensor, Layer`),
+aborting compilation for any code touching those types. **When adding a new
+`HirTypeKind` variant, or when a "MIR lowering error" names a type kind you
+don't recognize, check `lower_type`'s arm list against the current
+`HirTypeKind` declaration first** — a wildcard match hiding missing variants
+is a silent trap that only surfaces when someone's code happens to use the
+gap. See `doc/08_tracking/bug/mir_lowering_missing_hirtypekind_arms_wildcard_fatal_2026-08-05.md`.
+
 ## Update Rule
 
 After changes to method lowering, array handling, or runtime_array_locals

@@ -95,7 +95,13 @@ verify that the caller actually crosses the worker/library boundary.
   `use` is only a WARN and still exits 0), or a green stdout while the real
   failure line went to stderr.
 - **Do not confuse with:** exit 143 (≈60s CPU guard, SIGTERM) and exit 255 +
-  `Process timed out` (600s daemon request cap). Neither is a test result.
+  `Process timed out` (600s daemon request cap). Neither is a test result. Also
+  not a real regression: a `FAIL` whose example count doesn't match any
+  visible `✗` assertion, or with stray CLI usage/help text (e.g.
+  `Usage: simple_lint ...`) interleaved in the log — that shape is test-runner
+  plumbing (session-daemon stale-result cache, or a `fn main` name collision
+  between the spec's synthesized entry point and an unrelated tool's own
+  `main`), not a code defect. Re-run with `--no-session-daemon` first.
 - **Detailed traps:** `.claude/skills/spipe.md` §"Reading the verdict — how a
   spec run lies to you".
 - **Layer note:** `doc/00_llm_process/layer_expert/test_runner/skill.md`.
@@ -117,6 +123,21 @@ is a real assertion (`.../cli/test_runner/execution.rs:989`), so an
 `check(true)`. A failing `expect` does not abort the example body and only the
 last failure per example prints, so the count of printed failures is a lower
 bound on defects, never the defect count.
+
+### Engine-divergence rule: a green interpreter run does not clear the JIT
+
+`bin/simple test` hard-defaults to the tree-walk interpreter and has no JIT
+variant, so the whole spec suite is structurally blind to a real, recurring
+bug class: an unregistered or mis-dispatched `extern fn` — or an unbox/marshal
+fallback with a silent default — returns a wrong-but-plausible value (empty
+digest, `0`, `nil`) under **the JIT only**, with no error and exit 0. Confirmed
+independently three times in one session (`rt_tls13_sha256` returning an
+empty digest and manufacturing a false "JIT is 4x faster" claim since
+`"" == ""`; `rt_simd_*_i32x8` misaligned-pointer UB; unbacked `rt_ssh_*`
+externs reading as `connected=false`). A digest/hash/checksum comparison that
+"passes" via `bin/simple test` alone has not exercised the engine ordinary
+`bin/simple run` uses — re-verify with `SIMPLE_EXECUTION_MODE=jit` (or plain
+`bin/simple run`) before trusting a cross-engine equality claim.
 
 ## Evidence discipline: census, sabotage, and size
 

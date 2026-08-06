@@ -118,6 +118,33 @@ Consequences for measurement:
 - A spec that cannot be run by its normal command is not runnable. File it as a
   concrete todo rather than leaving it as folklore.
 
+## Two ways a fully-passing spec reports FAIL (2026-08-06, both fixed)
+
+Neither involves the spec's own code — both are `src/app/test_runner_new/`
+plumbing bugs, and both produce a `FAIL` whose example count doesn't match
+any real `✗` assertion:
+
+- **`--no-cache` didn't bypass the session-daemon cache.** Only `--clean`
+  did; `--no-cache` was silently a no-op against the daemon's stale-result
+  cache, and a cached-failure result copied no diagnostic text into the
+  display — so a stale red result could show with nothing explaining it.
+  Fixed in `test_runner_main.spl` (`20348690152`).
+- **`fn main` collision with an unrelated tool's own entry point.** The lint
+  CLI (`src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl`) used to
+  wildcard-re-export a bare `fn main`, which collided with the synthesized
+  `fn main` every interpreter-mode spec gets. On collision the wrong `main`
+  ran (no args), hit its own usage guard, and printed `Usage: simple_lint
+  <file.spl> [options]` into the spec's own output — miscounted by the
+  runner as one extra failed example, flipping an all-green spec to `FAIL`.
+  Fixed by renaming to `fn lint_main` + an explicit non-wildcard re-export
+  list (`1517fbe7b51`).
+
+**Diagnostic:** a `FAIL` with a mismatched example count, or with unrelated
+CLI usage/help text interleaved in the log, is this class — re-run with
+`--no-session-daemon` and read the full log before assuming a real
+regression. Detail: `.claude/skills/spipe.md` §"A `Results:` FAIL can be
+harness plumbing, not the spec".
+
 ## Adjacent tooling: `simple clean`
 
 `src/app/clean/main.spl` — manual + automatic temp/cache cleanup. Auto mode is
