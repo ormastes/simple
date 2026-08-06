@@ -60,17 +60,28 @@ val header_target = if mir_target_context_os_from(requested, "") == "baremetal":
 ```
 
 Both were **untyped locals**. An untyped local loses the owner type, MIR emits
-`owner_name: None`, and the seed layout pass fails open to
-`owner_has_vtable = Some(true)` — reserving a vtable slot that a plain struct
-does not have, so every subsequent field read is off by one.
+`owner_name: None`, and the downstream layout decision is then made without
+that type — the observed consequence is that every field read of the value is
+displaced by exactly one slot.
 
-This is the same defect shape as blocker #5
-(`stage3_selfhost_vtable_field_offset_relro_segv_2026-08-06.md`), where the
-fail-open went the other way (`Some(false)`) and produced a RELRO SIGSEGV. The
-underlying Rust-seed fail-open at `native_project/compiler.rs:1707` is
-**still live and open**; fixing it requires a seed rebuild, which would replace
-the pinned `stage2-runtime-authority` other lanes measure against. Not done
-here.
+**Scope of this claim.** The displacement is proven empirically (RED/GREEN plus
+a sabotage pass, below); the precise seed mechanism is **not** established by
+this lane. In particular it is *not* simply the fail-open at
+`src/compiler_rust/compiler/src/pipeline/native_project/compiler.rs:1707` doing
+the obvious thing: that line was read and it sets
+`*owner_has_vtable = Some(false)` ("preserve legacy raw layout"), i.e. it
+*omits* a vtable slot rather than reserving one. A `Some(false)` fail-open
+explains blocker #5's shift in the **opposite** direction (reading at offset 0
+instead of +8). It does not, on its own, explain the +1 displacement seen here.
+So this shares the *shape* of blocker #5
+(`stage3_selfhost_vtable_field_offset_relro_segv_2026-08-06.md`) — an untyped
+local silently losing type information that a later layout pass depends on —
+but the two are not proven to be the same code path, and anyone building on
+this should re-derive the mechanism rather than inherit it from this doc.
+
+The Rust-seed fail-open at `compiler.rs:1707` remains live and open regardless;
+fixing it requires a seed rebuild, which would replace the pinned
+`stage2-runtime-authority` other lanes measure against. Not done here.
 
 ## Fix
 
