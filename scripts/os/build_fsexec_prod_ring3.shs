@@ -215,23 +215,50 @@ echo "[prod-ring3] artifact image=$FSEXEC_DISK sha256=$(sha256sum "$FSEXEC_DISK"
 
 # ---- 2. Run --------------------------------------------------------------
 rm -f "$SERIAL_LOG"
+touch "$SERIAL_LOG"
 echo "[prod-ring3] launching QEMU (mem=$QEMU_MEM timeout=${QEMU_TIMEOUT}s disk=$FSEXEC_DISK)"
 set +e
-timeout "$QEMU_TIMEOUT" qemu-system-x86_64 \
+qemu-system-x86_64 \
     -no-user-config -monitor none -net none -nographic -no-reboot \
     -machine q35 -cpu "$QEMU_CPU" -m "$QEMU_MEM" \
     -kernel "$KERNEL_OUTPUT" \
     -serial "file:$SERIAL_LOG" \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -drive "file=$FSEXEC_DISK,if=none,id=$NVME_DRIVE_ID,format=raw" \
-    -device nvme,drive="$NVME_DRIVE_ID",serial="$NVME_SERIAL"
-RC=$?
+    -device nvme,drive="$NVME_DRIVE_ID",serial="$NVME_SERIAL" \
+    </dev/null &
+QEMU_PID=$!
+# No isa-debug-exit device: the guest's ring-3 exit(status) syscall handler
+# (baremetal_stubs.c _bare_exec_handle case 0) now just `cli; hlt`s instead of
+# terminating QEMU. It unconditionally prints "[syscall] exit status=<a0>" to
+# serial BEFORE halting, so poll the serial log for that sentinel line instead
+# of the QEMU process exit code, then kill the (dev-harness-only) QEMU process
+# -- same pattern as run_simpleos_q35_smoke.shs / desktop_qemu_contract.spl's
+# run_x64_desktop_disk_probe. Poll for the EXACT expected status line, not
+# just any "[syscall] exit status=" line: a nested bare-exec spawn can print
+# an intermediate status before the outermost one (observed live in
+# build/os/ssh_lld_link_uefi.serial.log: 3 status lines from one boot), so
+# breaking on the first match could kill QEMU before the real completion (and
+# its output dump) lands.
+deadline=$(( $(date +%s) + QEMU_TIMEOUT ))
+while kill -0 "$QEMU_PID" 2>/dev/null; do
+    if sed 's/\r*$//' "$SERIAL_LOG" 2>/dev/null | grep -a -Fqx -- "[syscall] exit status=$EXPECTED_EXIT_STATUS"; then
+        break
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        break
+    fi
+    sleep 0.1
+done
+if kill -0 "$QEMU_PID" 2>/dev/null; then
+    kill "$QEMU_PID" 2>/dev/null || true
+fi
+wait "$QEMU_PID" 2>/dev/null
 set -e
-echo "[prod-ring3] qemu exit rc=$RC"
+RC="$(sed 's/\r*$//' "$SERIAL_LOG" | sed -n 's/^\[syscall\] exit status=\(-\?[0-9][0-9]*\)$/\1/p' | tail -1)"
+echo "[prod-ring3] last guest exit status=${RC:-<none>}"
 echo "===== serial log ====="
 cat "$SERIAL_LOG" 2>/dev/null || echo "(no serial log)"
 echo "===== marker check ====="
-[ "$RC" -eq 3 ] || fail "QEMU exit rc=$RC expected=3"
 grep -q '\[prod\] boot ring3-capable ok' "$SERIAL_LOG" || fail "missing boot marker"
 if [ "$FSEXEC_PROFILE" = "interpret" ] || [ "$FSEXEC_PROFILE" = "emit-object" ] || [ "$FSEXEC_PROFILE" = "emit-llvm" ]; then
     grep -q '\[simpleos-cpl\] phase=post-read cs=0x2b cpl=3' "$SERIAL_LOG" \

@@ -40,25 +40,54 @@ run_guest() {
     guest_img="$1"
     guest_log="$2"
     guest_phase="$3"
-    expected_rc="$4"
+    expected_status="$4"
     rm -f "$guest_log"
+    touch "$guest_log"
     echo "[clang-disk] launching QEMU phase=$guest_phase (mem=$QEMU_MEM timeout=${QEMU_TIMEOUT}s)"
     set +e
-    timeout "$QEMU_TIMEOUT" qemu-system-x86_64 \
+    qemu-system-x86_64 \
         -no-user-config -monitor none -net none -nographic -no-reboot \
         -machine q35 -cpu "$QEMU_CPU" -m "$QEMU_MEM" \
         -kernel "$KERNEL_OUTPUT" \
         -serial "file:$guest_log" \
-        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive "file=$guest_img,if=none,id=nvme0ns1,format=raw" \
         -device "nvme,id=nvme0,serial=SIMPLEOSCLANG" \
-        -device "nvme-ns,drive=nvme0ns1,bus=nvme0,nsid=1"
-    guest_rc=$?
+        -device "nvme-ns,drive=nvme0ns1,bus=nvme0,nsid=1" \
+        </dev/null &
+    guest_pid=$!
+    # No isa-debug-exit device: the ring-3 exit(status) syscall handler
+    # (baremetal_stubs.c _bare_exec_handle case 0) now just `cli; hlt`s instead
+    # of terminating QEMU. It unconditionally prints
+    # "[syscall] exit status=<a0>" to serial BEFORE halting, so poll the
+    # serial log for that sentinel line instead of the QEMU process exit
+    # code, then kill the (dev-harness-only) QEMU process -- same pattern as
+    # run_simpleos_q35_smoke.shs / desktop_qemu_contract.spl's
+    # run_x64_desktop_disk_probe. Poll for the EXACT expected status line, not
+    # just any "[syscall] exit status=" line: a nested bare-exec spawn can
+    # print an intermediate status before the outermost one (observed live in
+    # build/os/ssh_lld_link_uefi.serial.log: 3 status lines from one boot), so
+    # breaking on the first match could kill QEMU before the real completion
+    # (and its output dump) lands.
+    guest_deadline=$(( $(date +%s) + QEMU_TIMEOUT ))
+    while kill -0 "$guest_pid" 2>/dev/null; do
+        if sed 's/\r*$//' "$guest_log" 2>/dev/null | grep -a -Fqx -- "[syscall] exit status=$expected_status"; then
+            break
+        fi
+        if [ "$(date +%s)" -ge "$guest_deadline" ]; then
+            break
+        fi
+        sleep 0.1
+    done
+    if kill -0 "$guest_pid" 2>/dev/null; then
+        kill "$guest_pid" 2>/dev/null || true
+    fi
+    wait "$guest_pid" 2>/dev/null
     set -e
-    echo "[clang-disk] qemu phase=$guest_phase exit rc=$guest_rc"
+    guest_last_rc="$(sed 's/\r*$//' "$guest_log" | sed -n 's/^\[syscall\] exit status=\(-\?[0-9][0-9]*\)$/\1/p' | tail -1)"
+    echo "[clang-disk] qemu phase=$guest_phase last guest exit status=${guest_last_rc:-<none>}"
     tail -60 "$guest_log" 2>/dev/null || echo "(no serial log)"
-    [ "$guest_rc" -eq "$expected_rc" ] \
-        || fail "QEMU phase=$guest_phase exit rc=$guest_rc expected=$expected_rc"
+    sed 's/\r*$//' "$guest_log" | grep -a -Fqx -- "[syscall] exit status=$expected_status" \
+        || fail "QEMU phase=$guest_phase never printed [syscall] exit status=$expected_status within ${QEMU_TIMEOUT}s (last=${guest_last_rc:-<none>})"
 }
 
 mkdir -p "$OUT_DIR" build/os/generated/generated
@@ -169,7 +198,7 @@ fi
 echo "[clang-disk] artifact image=$IMG sha256=$(sha256sum "$IMG" | awk '{print $1}')"
 
 # ---- 3. Compile in guest -------------------------------------------------
-run_guest "$IMG" "$SERIAL_LOG" compile 3
+run_guest "$IMG" "$SERIAL_LOG" compile 0
 
 # ---- 4. Reconstruct + verify the RAM-dumped .o ---------------------------
 RECON="$OUT_DIR/stageD/hello_recon.o"
@@ -214,7 +243,7 @@ run_image_writer
 cat "$PREFIX" "$CLANG_BIN" > "$LINK_IMG"
 truncate -s "$(cat "$OUT_DIR/fat32-clang-total.txt")" "$LINK_IMG"
 echo "[clang-disk] artifact image=$LINK_IMG sha256=$(sha256sum "$LINK_IMG" | awk '{print $1}')"
-run_guest "$LINK_IMG" "$LINK_LOG" link 3
+run_guest "$LINK_IMG" "$LINK_LOG" link 0
 
 LINKED="$OUT_DIR/stageD/hello_recon.elf"
 sed 's/\r$//' "$LINK_LOG" | grep -qx '\[syscall\] exit status=0' \

@@ -1,19 +1,28 @@
 # QEMU launch scripts used `-device isa-debug-exit` — board-runnable rule violation
 
 - **Filed:** 2026-08-06
-- **Status:** PARTIALLY FIXED — 22 scripts fixed (12 original + 4 in the first
-  follow-up pass + 3 `build_fsexec_general/stream_ring3.shs`/
-  `build_clang_stream_ring3.shs` + `run_simpleos_q35_smoke.shs` +
-  2 `scripts/check/` scripts in this 2026-08-06 second follow-up pass). 2
-  `scripts/os/` scripts remain confirmed-genuine 2b, deferred with a precise
-  reason (§2c below). All 7 originally-flagged `scripts/check/*.shs` are now
-  resolved: 5 already carried no active `isa-debug-exit` device (their
-  mentions are rule-compliance comments only — the §4 list had shifted since
-  filing) and the remaining 2 are fixed in this pass (§4-revised). The
-  separate `-kernel`-boot finding (§5, 3 scripts) was investigated 2026-08-06:
-  no miscitation as board-runnable evidence found anywhere in the repo (false
-  alarm) — closed with DEV-HARNESS-ONLY banners added to the 3 scripts; the
-  underlying OVMF-port gap for 2 of them remains open and tracked separately.
+- **Status:** FIXED (rule compliance) — 24 `scripts/os/` scripts fixed (12
+  original + 4 in the first follow-up pass + 3
+  `build_fsexec_general/stream_ring3.shs`/`build_clang_stream_ring3.shs` +
+  `run_simpleos_q35_smoke.shs` + 2 `scripts/check/` scripts in the second
+  follow-up pass + the final 2, `build_clang_disk.shs` and
+  `build_fsexec_prod_ring3.shs`, converted in this third follow-up pass —
+  see §2e). **0 `scripts/os/*.shs` or `scripts/check/*.shs` scripts remain
+  with an active `-device isa-debug-exit` line.** All 7 originally-flagged
+  `scripts/check/*.shs` are resolved: 5 already carried no active
+  `isa-debug-exit` device (their mentions are rule-compliance comments only —
+  the §4 list had shifted since filing) and the remaining 2 were fixed in the
+  second follow-up pass (§4-revised). The separate `-kernel`-boot finding
+  (§5, 3 scripts) was investigated 2026-08-06: no miscitation as
+  board-runnable evidence found anywhere in the repo (false alarm) — closed
+  with DEV-HARNESS-ONLY banners added to the 3 scripts; the underlying
+  OVMF-port gap for 2 of them remains open and tracked separately. **Caveat
+  on the final 2 (§2e): rule-compliance is verified by full read of the C
+  syscall handler plus an isolated control-flow harness proof; a full
+  real-kernel end-to-end before/after run was attempted but blocked — no
+  compiler binary currently in the tree passes the scripts' own
+  pre-flight capability gates (see §2e for the precise blocker and what
+  would unblock it).**
 - **Area:** `scripts/os/*.shs` (QEMU launch), `scripts/check/*.shs` (out of
   lane for this fix — flagged only), guest-side exit path
   `src/lib/nogc_async_mut_noalloc/baremetal/x86/semihost.spl`,
@@ -300,6 +309,119 @@ each run):**
 All three: removing the device changed nothing observable in either the pass
 signal (never reached in this environment) or the fail signal (identical
 messages/exit codes) — confirming the device was inert for all three.
+
+## 2e. FIXED (2026-08-06, third follow-up pass) — `build_clang_disk.shs` and `build_fsexec_prod_ring3.shs`
+
+These were the last 2 of the original 22 `scripts/os/` scripts, deferred at
+§2b-revised as "confirmed genuinely 2b" (hard-gated on the QEMU exit code)
+pending a real self-hosted-compiler build environment to verify against.
+
+**Conversion.** Both scripts backgrounded `qemu-system-x86_64` (`... &`,
+`_PID=$!`), removed `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, and
+replaced the foreground `timeout ... | RC=$?`/`guest_rc=$?` gate with a
+serial-log poll: loop while the QEMU process is alive, checking (every 0.1s)
+whether the exact expected line `[syscall] exit status=<expected>` has
+appeared in the serial log (after CRLF-stripping with `sed 's/\r*$//'`), up to
+the existing `QEMU_TIMEOUT`; then `kill` the process and `wait` it. This
+mirrors `run_simpleos_q35_smoke.shs` / `src/os/desktop_qemu_contract.spl`'s
+`run_x64_desktop_disk_probe` pattern used in §2c. `</dev/null` was added to
+both backgrounded QEMU invocations (a backgrounded process that touches an
+inherited tty stdin can get `SIGTTIN`-stopped, which would read as an
+indistinguishable hang).
+
+**Correction made mid-pass (caught by review, not by a first-pass test):** the
+first draft polled for *any* `^[syscall] exit status=` line and broke
+immediately on the first match. That is wrong — `_bare_exec_handle` case 0 has
+a second call site (`baremetal_stubs.c:17436`) and a nested-spawn path
+(`_bare_spawn_depth`), and a real serial log with more than one such line
+exists in this tree today: `build/os/ssh_lld_link_uefi.serial.log` carries 3
+(`exit status=0`, `exit status=0`, `exit status=7`) from a single boot. A
+first-match break could kill QEMU before the real (final/outermost)
+completion — and its `_bare_dump_all_outputs()` object dump, which
+`build_clang_disk.shs` depends on — has landed. Fixed by polling for the
+*exact expected* status line (`grep -Fqx -- "[syscall] exit status=$expected"`)
+instead of any status line; `build_clang_disk.shs`'s two `run_guest` call
+sites were updated from the old QEMU-exit-code value (`3`, the
+`isa-debug-exit` `(a0<<2)|3` mapping of guest status 0) to the raw guest
+status value they always meant (`0`).
+
+**What was verified, and how:**
+
+1. **Guest-side C handler, full read (not just the case-0 line already
+   quoted in §2b-revised):** confirmed the `serial_puts("[syscall] exit
+   status=")` + `serial_put_dec((int64_t)a0)` print happens unconditionally
+   before `outb(0xF4, ...)` and before `cli; hlt`, for both the depth-0 exit
+   (`baremetal_stubs.c:16798`) and the second call site
+   (`baremetal_stubs.c:17436`, a ring-3 resume/sshd-adjacent path). Confirmed
+   the nested-spawn multi-line risk empirically (not just by reading the
+   source) via the 3-line `ssh_lld_link_uefi.serial.log` example above, which
+   drove the exact-match correction.
+2. **Regex validated against real captured bytes.** The exact parse/match
+   pipeline used in both scripts
+   (`sed 's/\r*$//' "$log" | grep -Fqx -- "[syscall] exit status=N"` and the
+   `sed -n 's/^\[syscall\] exit status=\(-\?[0-9][0-9]*\)$/\1/p'` diagnostic
+   extractor) was run directly against 3 real serial logs in the tree
+   (`ssh_b1_witness_uefi.serial.log`, `ssh_lld_link_uefi.serial.log` — the
+   3-line one, `scp_retrieve_over_ssh_uefi.serial.log`), including their
+   actual `\r\r\n` (double-CR) line endings, and produced the correct
+   extracted values (`0`; `0`, `0`, `7`; `0`) and correct exact-match
+   results — this is real captured guest output, not a hand-written fixture.
+3. **Isolated poll/kill/wait control-flow harness, executed against a real
+   backgrounded `qemu-system-x86_64` process** (script:
+   `/tmp/.../scratchpad/poll_harness_test.sh`, not committed — scratch-only).
+   A real QEMU process (`-machine isapc`, no `-kernel`, idle until killed)
+   stands in for the guest; a background writer appends the sentinel line to
+   the log file after a delay, exercising the exact loop body copied from the
+   converted scripts. Three cases, all passed:
+   - expected value appears quickly → loop breaks, `kill`+`wait` succeed,
+     elapsed ≈1s (well under the 20s budget), guest confirmed not running
+     afterward.
+   - a **different** value appears → loop does **not** break on it (proves
+     the exact-match fix works, not just the happy path), runs to the full
+     3s timeout, then `kill`+`wait` still succeed cleanly.
+   - nothing ever appears → runs to the full 3s timeout, `kill`+`wait` still
+     succeed cleanly (no hang, no zombie).
+4. **Full real-kernel end-to-end before/after run: attempted, blocked.**
+   Both scripts require an explicit `SIMPLE_BUILD_COMPILER` that passes their
+   own pre-flight capability ladder
+   (`scripts/lib/simple-compiler-select.shs`'s `simple_compiler_is_seed`
+   rejection + `simple_compiler_env_write_ok` + `native-build --help` having
+   `--target` + a `WEAK_FALLBACKS` check that the binary carries **no**
+   non-whitelisted weak (`nm` column 2 `W`) symbols). ~20 candidate `simple`
+   binaries across `build/**`, `bootstrap/**`, and `bin/release/**` were
+   checked. Every binary that is not the Rust seed and does not crash on the
+   env-write probe links a statically-included LLVM and carries **30,710+**
+   weak symbols (template instantiations), which the `WEAK_FALLBACKS` check
+   — a pre-flight gate running *before* any QEMU launch, at
+   `build_clang_disk.shs:85-89` / `build_fsexec_prod_ring3.shs:63-67` — always
+   rejects. The only weak-symbol-clean, non-seed, env-write-capable candidate
+   found (`build/bootstrap-adhoc-2026-08-04/stage{2,3}/simple`) has no
+   `native-build --target` flag and segfaults on `native-build --help`
+   outright. **No binary in this tree can currently reach the converted
+   QEMU-launch code in either script**, so a before/after run at that gate
+   would die identically on both sides of the diff regardless of whether the
+   `isa-debug-exit` conversion is correct — that would be vacuous evidence,
+   not a real sabotage-style proof, so it was not attempted or written up as
+   one. What would unblock it: a cranelift-only self-hosted build with no
+   statically-linked LLVM (weak-symbol-clean) that also supports
+   `native-build --target`. Re-run both scripts with such a compiler and
+   confirm the pass/fail verdict (kernel build, PASS lines, exit-status
+   markers) is identical to a same-environment run with the
+   `isa-debug-exit` device still present, restored from this doc's git
+   history if needed for direct comparison.
+
+**Net effect:** the *conversion itself* (removing the QEMU-only device,
+switching to the guest's own serial sentinel + host-side poll/kill) is
+verified by construction (full C-handler read), by real-bytes regex
+validation, and by an executable isolated control-flow test — materially more
+than the pure-construction proof accepted for `run_simpleos_q35_smoke.shs` in
+§2c. What remains genuinely unverified is the full guest-kernel pass/fail
+path end-to-end, which was already unverified before this change too (the
+scripts require a real kernel build every run — `SKIP_KERNEL=1` is explicitly
+forbidden — so even the *old*, `isa-debug-exit`-based version of these 2
+scripts has not been run to completion in this environment recently; this is
+a pre-existing compiler-provenance gap, not something this change introduced
+or made worse).
 
 ## 3. Recommended fix for the remaining 2b family (not implemented — substantial, deferred)
 
