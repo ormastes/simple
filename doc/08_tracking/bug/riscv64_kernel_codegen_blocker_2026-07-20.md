@@ -183,3 +183,65 @@ or fixing the import chain so riscv64 doesn't pull in this x86_64-only IDT
 module at all. Left undone here as a distinct, unrelated bug class (bad-target
 inline asm reachability, not compiler backend codegen) — filing as a new
 tracked item is the next step rather than forcing a fix into this task.
+
+## FIXED 2026-08-06: `_halt()` target-gated via existing `rt_*` extern idiom
+
+Fixed by reusing an idiom already live in this exact file: `idt.spl` already
+declares `extern fn rt_lidt(...)` / `extern fn rt_read_cr2()` and calls into
+`src/runtime/startup/baremetal/runtime_minimal.c`, which implements each
+`rt_*` primitive once per target behind `#if defined(__x86_64__)` (real
+instruction) / `#else` (no-op stub) — so the same `.spl` source compiles on
+every target without inline target-specific asm. `_halt()` did not follow
+that idiom; it hardcoded raw x86 mnemonics in an `asm """ ... """` block.
+
+**Fix:** `_halt()` now calls two new externs, `rt_cli()` / `rt_hlt()` (reusing
+the runtime-func names already registered in `runtime_sffi.rs` and already
+used by `x86_64/cpu.spl`), in a `while true: rt_hlt()` loop instead of the
+inline `cli`/`hlt`/`jmp` block. `runtime_minimal.c`'s `rt_hlt()` stub gained a
+`#elif defined(__riscv)` branch emitting a real `wfi` (wait-for-interrupt)
+instruction — mirroring the `wfi()` already used by
+`os.kernel.arch.riscv64.cpu.Rv64Cpu.cpu_halt_loop()` — instead of the generic
+empty no-op, so riscv64 gets a genuine halt rather than a busy-spin.
+`rt_cli()`/`rt_sti()` were deliberately left as plain no-ops on riscv64 (not
+given a CSR-based SIE-clear branch): riscv64 already has its own IRQ-mask path
+(`os.kernel.arch.riscv64.cpu.csrc_sstatus(SSTATUS_SIE)`), and `_halt()` in
+`idt.spl` is only reached from x86 IDT exception handlers, so it is dead code
+on riscv64 — correctness there means "compiles and links", not "masks IRQs".
+The x86_64 branch of `runtime_minimal.c` (`#if defined(__x86_64__)`, lines
+182-249) was not touched.
+
+**Files:** `src/os/kernel/interrupts/idt.spl`,
+`src/runtime/startup/baremetal/runtime_minimal.c`.
+
+**Verified** (rebuilt Rust seed unaffected — no Rust changed; ran the exact
+riscv64 full-kernel `native-build` command from the 2026-08-06 update above):
+- Before this fix (still true from the update above):
+  `Build failed: compile inline asm C failed: .../simple_asm_blocks.c:445:12:
+  error: unrecognized instruction mnemonic` (`cli`/`hlt`/`jmp`).
+- After this fix: that error is gone entirely (0 occurrences of "unrecognized
+  instruction mnemonic" in the build log). The riscv64 closure now compiles
+  every `.spl` and reaches the **link** stage, where it hits a new, later,
+  unrelated blocker: `ld.lld: error: undefined symbol: rt_enum_id` /
+  `rt_native_cmp` / `rt_string_new_literal`, plus an undefined
+  `os__kernel__arch__riscv64__boot__boot_main` referenced from
+  `simple_asm_blocks.c` — a link-graph/object-selection gap, not an asm or
+  codegen defect. Out of scope for this task; needs its own tracked item.
+- x86_64 regression check: rebuilt the x86_64 kernel closure
+  (`--entry src/os/kernel/arch/x86_64/boot.spl --target x86_64-unknown-none`)
+  — `Build complete: 7 compiled, 0 cached, 0 failed`, links successfully.
+  `_halt()`'s x86_64 behavior is semantically equivalent (same `cli` once then
+  `hlt`-in-a-loop), not byte-identical asm (extern calls through the runtime
+  ABI replace one static inline-asm block); the untouched `#if
+  defined(__x86_64__)` branch of `runtime_minimal.c` guarantees the C-level
+  `rt_cli`/`rt_hlt` implementations themselves are unchanged.
+- Sabotage test: reverted only `idt.spl`'s `_halt()` back to the raw
+  `asm """cli\n.Lhalt_loop:\nhlt\njmp .Lhalt_loop"""` block, reran the
+  identical riscv64 build command — the exact original
+  `simple_asm_blocks.c:445:12: error: unrecognized instruction mnemonic`
+  failure reproduced verbatim (plus two more mnemonic errors at columns 47/60
+  for `.Lhalt_loop:`/`jmp`). Restored the fix and re-verified it builds past
+  that point again.
+- Sibling scan: grepped every non-`arch/x86*` kernel/services `.spl` file for
+  `asm """` blocks containing x86-only mnemonics (`cli|sti|hlt|lgdt|lidt|ltr|
+  invlpg|rdmsr|wrmsr|outb|inb|outw|inw|outl|inl|iretq|lretq|mov %cr|swapgs`) —
+  `idt.spl`'s `_halt()` was the only match; no known siblings remain.

@@ -257,7 +257,16 @@ uint64_t rt_read_msr(uint32_t msr) { (void)msr; return 0; }
 void rt_write_msr(uint32_t msr, uint64_t val) { (void)msr; (void)val; }
 void rt_cli(void) {}
 void rt_sti(void) {}
+#if defined(__riscv)
+/* riscv64/riscv32 have a real wait-for-interrupt instruction; use it so
+ * arch-neutral callers (e.g. os.kernel.interrupts.idt._halt()) get a genuine
+ * halt instead of a busy-spin. Interrupt masking on riscv is done via SIE/CSR
+ * ops (see os.kernel.arch.riscv64.cpu.csrc_sstatus) — rt_cli() intentionally
+ * stays a no-op here, callers that need real IRQ masking use that path. */
+void rt_hlt(void) { __asm__ volatile ("wfi"); }
+#else
 void rt_hlt(void) {}
+#endif
 void rt_lgdt(uint64_t a) { (void)a; }
 void rt_lidt(uint64_t a) { (void)a; }
 void rt_ltr(uint16_t s) { (void)s; }
