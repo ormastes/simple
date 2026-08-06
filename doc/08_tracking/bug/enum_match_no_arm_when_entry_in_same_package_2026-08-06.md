@@ -1,10 +1,57 @@
 # `match` on an imported enum silently matches NO arm when the entry point lives in the same package
 
 - **Filed:** 2026-08-06
-- **Status:** Open
+- **Status:** Fixed (2026-08-06) — see "Fix landed" below. The MIR gap
+  identified in finding (b) is closed; the Rust-seed-JIT measurement in
+  finding (a) remains out of scope (`src/compiler_rust/**`).
 - **Severity:** High — silent wrong behavior, no error, no crash, no warning
 - **Component:** compiler — enum discriminant / module identity
 - **Found by:** WS-B host-adapter work (`src/app/ui_showcase/hosts/main_2d.spl`)
+
+## Fix landed (2026-08-06)
+
+Landed exactly the fix this doc's own investigation (finding (b), below)
+already prescribed: `HirExprKind.Unwrap` (the `!` force-unwrap operator) now
+has a dedicated arm in MIR lowering
+(`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`, `case
+Unwrap(base):`, inserted directly before the `Try` arm). Before this, `!` had
+no MIR arm at all and fell to the file's loud `case _` default (records a
+compile error, returns a fresh unit temp) — a *different* symptom than the
+silent match-fallthrough measured via the Rust seed in finding (a), which
+remains a separate, out-of-scope artifact of `src/compiler_rust/**`.
+
+The new arm mirrors `.unwrap()`'s own proven MIR lowering
+(`method_calls_literals.spl`, the `"unwrap"` method-call arm) essentially
+line-for-line: branch on `rt_is_some` (never truthiness, so a present numeric
+zero / payloadless variant round-trips correctly), extract the Some-branch
+payload via `option_payload_or_self` + `enum_payload_value` /
+`decode_runtime_value` / `option_text_value` / `option_bool_value` depending
+on the physical Option lane and payload type, panic via `rt_panic` on the
+None branch, and carry `struct_value_syms` provenance across so a
+struct-typed payload stays field-addressable after `!`.
+
+**Regression spec:** `test/01_unit/compiler/mir/enum_match_after_force_unwrap_mir_spec.spl`
+(6 examples). Since sspec's default runner is the tree-walk interpreter and
+cannot reach the JIT/native path `!` lowers through (see
+`doc/07_guide/infra/testing.md`), the spec pins the CONTENT of the new MIR
+arm structurally (`rt_file_read_text` + `to_contain`/`index_of`), the same
+pattern already established for other MIR-lowering-only fixes (see
+`test/01_unit/compiler/mir/option_text_unwrap_pointer_spec.spl`). Sabotage-checked
+manually: reverting the MIR edit reproduces 5 of 6 failures (the 6th assertion
+was hardened afterward to no longer pass vacuously when the string is
+absent); reapplying restores all 6 to green.
+
+Not re-verified end-to-end against a fresh pure-Simple self-hosted binary
+(`bin/simple native-build` + execute the committed repro fixture): this
+session's environment had 7-10 concurrent native-build/bootstrap processes
+from other agent sessions throughout, and two attempts to build a fresh
+stage2 binary for direct verification stalled/were resource-starved. The fix
+is a close structural mirror of already-shipping, already-tested code
+(`.unwrap()`'s identical lowering shape), so risk is low, but a follow-up
+native-build + run of
+`test/fixtures/repro/compiler/enum/enum_match_after_option_unwrap_repro.spl`
+lines 2-3 (expect `A7` / `Green`, not `FALLTHROUGH`) once a quiet window is
+available is still worthwhile.
 
 ## Symptom
 
@@ -165,8 +212,13 @@ repro above is quick to reconstruct from this description.
 - ~~Whether this affects enums generally or only payload-carrying variants.~~
   DONE — all enums.
 - ~~Whether `case _` fallthrough fires.~~ DONE — it fires.
-- Still open: land the MIR `Unwrap` arm and re-verify (needs a pure-Simple
-  build); file the inverted interpreter defect (line 4) separately.
+- ~~Still open: land the MIR `Unwrap` arm~~ DONE — see "Fix landed" above.
+- ~~file the inverted interpreter defect (line 4) separately~~ DONE —
+  `doc/08_tracking/bug/interpreter_match_on_option_of_enum_fires_no_arm_2026-08-06.md`,
+  now also fixed (different root cause, see that doc).
+- Still open: re-verify the MIR fix end-to-end against a freshly built
+  pure-Simple self-hosted binary once the shared build environment is quiet
+  (native-build + run the committed repro fixture, lines 2-3).
 
 ## Related
 

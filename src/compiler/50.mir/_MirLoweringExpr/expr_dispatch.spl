@@ -3188,6 +3188,104 @@ impl MirLowering:
                 self.builder = b_merge
                 result_local
 
+            case Unwrap(base):
+                # `expr!` -- force-unwrap: Some(v) (or the flat-nullable raw
+                # word form) yields v, None/nil panics. Before this arm,
+                # HirExprKind.Unwrap had NO MIR lowering at all and fell to
+                # the `case _` default below, which records a compile error
+                # and hands back a fresh unit temp -- see
+                # doc/08_tracking/bug/enum_match_no_arm_when_entry_in_same_package_2026-08-06.md.
+                #
+                # This mirrors `.unwrap()`'s own MIR lowering exactly
+                # (method_calls_literals.spl, the "unwrap" method-call arm):
+                # same rt_is_some branch (never truthiness, so a present
+                # numeric zero / payloadless variant is preserved), same
+                # enum_payload_value/option_payload_or_self/decode_runtime_value
+                # payload extraction depending on which physical Option lane
+                # the receiver is in, same struct-name provenance carry-over
+                # via struct_value_syms -- because `!` and `.unwrap()` are the
+                # same runtime operation with different call syntax.
+                val uw_base_local = self.lower_expr(base)
+                var uw_result_type = MirType.i64()
+                var uw_is_text = false
+                var uw_is_bool = false
+                val uw_inner_type = self.option_inner_hir_type_for_local(base, uw_base_local)
+                if uw_inner_type != nil:
+                    val uw_found_inner = uw_inner_type ?? HirType(kind: HirTypeKind.Error, span: base.span)
+                    match uw_found_inner.kind:
+                        case HirTypeKind.Str:
+                            uw_result_type = self.bootstrap_text_type()
+                            uw_is_text = true
+                        case HirTypeKind.Bool:
+                            uw_result_type = MirType.bool()
+                            uw_is_bool = true
+                        case _: uw_result_type = self.lower_type(uw_found_inner)
+                elif self.local_is_str(uw_base_local):
+                    uw_result_type = self.bootstrap_text_type()
+                    uw_is_text = true
+                elif val uw_base_mir_type = self.local_mir_type_of(uw_base_local):
+                    uw_result_type = uw_base_mir_type
+
+                var b_uw_chk = self.builder
+                val is_some_uw_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_is_some"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                    )))
+                ))
+                val is_some_uw_res = b_uw_chk.emit_call(is_some_uw_op, [mir_operand_copy(uw_base_local)], MirType.bool())
+                self.builder = b_uw_chk
+                val is_some_uw_local = is_some_uw_res ?? LocalId(id: 0)
+
+                var b_split_uw = self.builder
+                val some_block_uw = b_split_uw.new_block(Some("force_unwrap_some"))
+                val none_block_uw = b_split_uw.new_block(Some("force_unwrap_none"))
+                val merge_block_uw = b_split_uw.new_block(Some("force_unwrap_merge"))
+                val result_local_uw = b_split_uw.new_temp(uw_result_type)
+                b_split_uw.terminate_if(mir_operand_copy(is_some_uw_local), some_block_uw, none_block_uw)
+                self.builder = b_split_uw
+
+                var b_some_uw = self.builder
+                b_some_uw.switch_to_block(some_block_uw)
+                self.builder = b_some_uw
+                var some_val_uw = self.option_payload_or_self(uw_base_local)
+                if uw_is_text:
+                    some_val_uw = self.option_text_value(some_val_uw, uw_result_type)
+                elif self.is_runtime_value_local(uw_base_local.id) and not self.option_value_locals.contains(uw_base_local.id):
+                    some_val_uw = self.decode_runtime_value(some_val_uw, uw_result_type)
+                elif uw_is_bool:
+                    some_val_uw = self.option_bool_value(some_val_uw)
+                else:
+                    some_val_uw = self.enum_payload_value(some_val_uw, uw_result_type)
+                b_some_uw = self.builder
+                b_some_uw.emit_copy(result_local_uw, some_val_uw)
+                b_some_uw.terminate_goto(merge_block_uw)
+                self.builder = b_some_uw
+
+                var b_none_uw = self.builder
+                b_none_uw.switch_to_block(none_block_uw)
+                self.builder = b_none_uw
+                val panic_msg_uw = b_none_uw.emit_const_str("called `!` force-unwrap on a nil Option")
+                val panic_op_uw = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_panic"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))
+                ))
+                b_none_uw.emit_call(panic_op_uw, [mir_operand_copy(panic_msg_uw)], MirType.unit())
+                b_none_uw.emit_const(result_local_uw, MirConstValue.Zero, uw_result_type)
+                b_none_uw.terminate_goto(merge_block_uw)
+                self.builder = b_none_uw
+
+                if self.is_runtime_value_local(some_val_uw.id):
+                    self.mark_runtime_value_local(result_local_uw.id)
+
+                if self.struct_value_syms.contains(uw_base_local.id):
+                    self.struct_value_syms[result_local_uw.id] = self.struct_value_syms[uw_base_local.id]
+
+                var b_merge_uw = self.builder
+                b_merge_uw.switch_to_block(merge_block_uw)
+                self.builder = b_merge_uw
+                result_local_uw
+
             case Try(try_base):
                 # `expr?` — Err propagates via early return, Ok yields payload.
                 self.lower_try_expr(try_base)

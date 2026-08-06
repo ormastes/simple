@@ -821,9 +821,11 @@ fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
                 return val_get_text(val_struct_get_field_idx(value_id, 0)) == "None"
             return val_is_nil(value_id)
         if enum_variant_is_declared(name):
-            if val_is_boxed_enum(value_id):
-                return val_get_text(val_struct_get_field_idx(value_id, 0)) == name
-            return false
+            # Delegates to match_enum_variant_pattern so a bare nullary
+            # pattern (`case Red:`) gets the same Option::Some/None-wrapper
+            # unwrap as the qualified/call forms (`case E.C:`, `case E.A(x):`)
+            # -- see the comment on that function.
+            return match_enum_variant_pattern(value_id, name, [])
         # Binding: bind value to name
         env_define(name, value_id)
         return true
@@ -934,6 +936,23 @@ fn match_enum_variant_pattern(value_id: i64, variant: text, arg_eids: [i64]) -> 
     flat raw-or-nil form of Option."""
     # Boxed form: compare the runtime __tag against the pattern's variant.
     if val_is_boxed_enum(value_id):
+        # An Option::Some/Option::None BOX wrapping a real enum value (as
+        # opposed to that enum's OWN boxed [__tag, __payload] struct, whose
+        # struct name is "EnumName::Variant") must be unwrapped before
+        # comparing a tag against a non-Option variant name. Without this, an
+        # `E?` scrutinee matched directly against E's own variant patterns
+        # (`case E.A(x):`, no leading `case Some(...)`/force-unwrap) compared
+        # the WRAPPER's own tag ("Some"/"None") against "A"/"C" and could
+        # never match -- verified directly: match_enum_variant_pattern on an
+        # Option::Some(E::A(7)) value against variant "A" returned false
+        # before this check. See doc/08_tracking/bug/
+        # interpreter_match_on_option_of_enum_fires_no_arm_2026-08-06.md.
+        if variant != "Some" and variant != "None":
+            val struct_name = val_get_struct_name(value_id)
+            if struct_name == "Option::Some":
+                return match_enum_variant_pattern(val_struct_get_field_idx(value_id, 1), variant, arg_eids)
+            if struct_name == "Option::None":
+                return false
         val tag_text = val_get_text(val_struct_get_field_idx(value_id, 0))
         if tag_text != variant: return false
         if arg_eids.len() == 0: return true
