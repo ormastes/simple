@@ -67,11 +67,53 @@ export use compiler.mir.mir_json.{
 export use compiler.mir.mir_serialization.{serialize_mir_module, serialize_mir_inst}
 
 # Re-exported from mir_lowering.spl
-export use compiler.mir.mir_lowering.{MirLowering, MirError}
+#
+# BOOTSTRAP SELF-HOST (2026-08-06, cycle 3): removed for the same reason as
+# the synthetic-driver re-exports below. `compiler.mir.{MirLowering}` /
+# `compiler.mir.{MirError}` (i.e. through THIS facade) have zero callers in
+# the tree (verified: grep for `compiler.mir.{...MirLowering...}` /
+# `...MirError...` outside src/compiler/50.mir/ itself is empty); the one
+# real caller, src/compiler/80.driver/pipeline_fn.spl:13, already imports
+# `use compiler.mir.mir_lowering.{MirLowering}` directly. `MirLowering` is
+# re-exported (wildcard, via mir_lowering.spl -> compiler.mir._MirLowering.
+# function_lowering.*) from `_MirLowering/function_lowering.spl`, whose
+# core entry point `me lower_function(fn_: HirFunction) -> MirFunction`
+# (function_lowering.spl:69) is the SAME `Effect`-materializing dependency
+# as the synthetic-driver functions below, just load-bearing rather than
+# dead code -- so unlike the synthetic-driver case this one cannot be fixed
+# by finding an unused re-export; it genuinely needs `HirFunction` (MIR
+# lowering's whole job is consuming HIR functions). Removing the re-export
+# here (cycle 2 fix, synthetic-driver only) was therefore insufficient on
+# its own: Stage 3 hit the identical `Effect` conflict again at the same
+# file/line on retry. This is the real fix: keep `MirLowering`/`MirError`
+# reachable only via the direct submodule path, which is what every actual
+# caller already used.
+# doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md
 
 # FR-DRIVER-0001 static-registration synthesis planner + codegen
-export use compiler.mir.synthetic_driver_registration.{
-    SyntheticDriverRegistrationStatus, SyntheticDriverRegistrationPlan,
-    plan_synthetic_driver_registration
-}
-export use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
+#
+# BOOTSTRAP SELF-HOST (2026-08-06): these two re-exports used to live here,
+# but every real caller (src/compiler/50.mir/_MirLowering/{asm_and_targets,
+# module_lowering,function_lowering,bootstrap_globals}.spl) already imports
+# `apply_synthetic_driver_codegen` directly from
+# `compiler.mir.synthetic_driver_codegen`, never through this facade; nothing
+# in the tree imports `plan_synthetic_driver_registration` /
+# `SyntheticDriverRegistrationStatus` / `SyntheticDriverRegistrationPlan`
+# through `compiler.mir` either (verified: zero grep hits for
+# `compiler.mir.{...SyntheticDriverRegistration...}` outside the two
+# declaring files). So these re-exports were dead weight -- but not harmless
+# dead weight: both re-exported functions take `fn_: HirFunction`
+# (compiler.hir.hir_definitions), whose `effects: [Effect]` field
+# (hir_definitions.spl:34) transitively materializes `Effect` as
+# `compiler.hir.hir_types::Effect::struct` in THIS file's lowering scope --
+# colliding with the `Effect` enum this file already exports explicitly from
+# `compiler.mir.mir_effects` two blocks up. The self-hosted HIR resolver hard-
+# errors on that same-name divergent-kind collision (self.error("enum payload
+# dependency `Effect` conflicts: ...") in
+# 20.hir/hir_lowering/_Items/module_lowering.spl:1175); the Rust seed doesn't
+# surface it. Same defect class as the `BackendKind`/`CompiledSymbolKind`
+# facade collision documented at the top of
+# src/compiler/70.backend/backend_types.spl -- fixed the same way, by
+# collapsing to one terminal binding for the colliding name, here by dropping
+# the dead re-export rather than renaming a type.
+# doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md
