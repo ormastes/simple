@@ -16,7 +16,8 @@ use common.text_layout.font_renderer.{
     browser_serif_font_candidates,
     _browser_default_font_cache_key,
     _font_atlas_dependency_generation_after, _resolved_font_metric_key, _resolved_font_metrics_cacheable,
-    ensure_browser_provided_fonts}
+    ensure_browser_provided_fonts,
+    resolved_font_metric_cache_hits, resolved_font_metric_cache_misses, _resolved_font_metric_cache_reset_for_test}
 use common.text_layout.font_provider.{browser_bundled_font_path_for_family}
 use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels}
@@ -566,6 +567,80 @@ describe "shared font renderer fallbacks":
         val unspecified = resolve_font_metrics("sans-serif", "العربية", 32)
         expect(unspecified.shaping_required).to_equal(true)
         expect(unspecified.glyph_run.valid).to_equal(false)
+
+    # Shaped-run cache (render_perf_redesign_plan_2026-08-06.md §7):
+    #   _resolved_font_metric_cached/_store below, keyed (family, content,
+    #   size, identity, language, render-config) -> ResolvedFontMetrics
+    #   (including glyph_run). Pre-existed this session; this spec adds its
+    #   first hit/miss counters (resolved_font_metric_cache_hits/_misses).
+    #
+    #   A parallel glyph-RASTER (pixel) cache was attempted this session,
+    #   keyed the same way but over `[text]` keys read back by index. It was
+    #   found to have a 0% real hit rate due to a compiler defect where a
+    #   plain `[text]` array element read-back after store returns
+    #   corrupted/empty text (see
+    #   doc/08_tracking/bug/glyph_raster_cache_text_array_index_corrupt_zero_hit_rate_2026-08-06.md).
+    #   It has been removed rather than wired, since it would silently claim
+    #   caching worked when it never actually served hits.
+    #
+    #   The shaped-run cache below stores its keys in the SAME shape
+    #   (`_resolved_font_metric_keys: [text]`, read back by linear index
+    #   scan in `_resolved_font_metric_cached`), so it carries the identical
+    #   corruption risk in principle. The stress test immediately below
+    #   probes many (12) distinct keys, each looked up twice, specifically to
+    #   catch a "first key happens to work, later keys don't" failure mode
+    #   that a 2-3-case test could miss.
+
+    it "shaped-run cache: STRESS -- many distinct keys each hit correctly, not just the first ones":
+        _resolved_font_metric_cache_reset_for_test()
+        val contents = [
+            "stress key alpha", "stress key bravo", "stress key charlie", "stress key delta",
+            "stress key echo", "stress key foxtrot", "stress key golf", "stress key hotel",
+            "stress key india", "stress key juliet", "stress key kilo", "stress key lima"]
+        var widths: [i64] = []
+        var idx: i64 = 0
+        while idx < contents.len():
+            val first = resolve_font_metrics_with_language("sans-serif", contents[idx], 16, "und")
+            widths = widths.push(first.width)
+            idx = idx + 1
+        val misses_after_all_first = resolved_font_metric_cache_misses()
+        expect(misses_after_all_first).to_equal(contents.len())
+        # Now re-look-up EVERY key a second time, checking each individually
+        # -- a bug that only breaks e.g. index 5 onward would be invisible if
+        # only the aggregate hit counter were checked.
+        idx = 0
+        while idx < contents.len():
+            val hits_before = resolved_font_metric_cache_hits()
+            val second = resolve_font_metrics_with_language("sans-serif", contents[idx], 16, "und")
+            expect(second.width).to_equal(widths[idx])
+            expect(resolved_font_metric_cache_hits()).to_equal(hits_before + 1)
+            idx = idx + 1
+        expect(resolved_font_metric_cache_misses()).to_equal(misses_after_all_first)
+        expect(resolved_font_metric_cache_hits()).to_equal(contents.len())
+
+    it "shaped-run cache: repeated identical (family, content, size) shaping is byte-identical and records a hit":
+        _resolved_font_metric_cache_reset_for_test()
+        val first = resolve_font_metrics_with_language("sans-serif", "cache me", 16, "und")
+        val misses_after_first = resolved_font_metric_cache_misses()
+        val second = resolve_font_metrics_with_language("sans-serif", "cache me", 16, "und")
+        expect(second.width).to_equal(first.width)
+        expect(second.line_height).to_equal(first.line_height)
+        expect(second.glyph_run.valid).to_equal(first.glyph_run.valid)
+        expect(second.glyph_run.glyph_ids.len()).to_equal(first.glyph_run.glyph_ids.len())
+        expect(resolved_font_metric_cache_hits()).to_be_greater_than(0)
+        expect(resolved_font_metric_cache_misses()).to_equal(misses_after_first)
+
+    it "shaped-run cache: different content is NOT served from the cached entry (no stale reuse)":
+        _resolved_font_metric_cache_reset_for_test()
+        val a = resolve_font_metrics_with_language("sans-serif", "alpha text", 16, "und")
+        val b = resolve_font_metrics_with_language("sans-serif", "totally different much longer text", 16, "und")
+        expect(a.width == b.width).to_equal(false)
+
+    it "shaped-run cache: different font size is NOT served from the cached entry (no stale reuse)":
+        _resolved_font_metric_cache_reset_for_test()
+        val a = resolve_font_metrics_with_language("sans-serif", "size probe", 16, "und")
+        val b = resolve_font_metrics_with_language("sans-serif", "size probe", 32, "und")
+        expect(a.width == b.width).to_equal(false)
 
     it "selects accepted language faces and the declared Chinese mono fallback":
         val chinese = resolve_font_metrics_with_language("monospace", "中文", 32, "zh")

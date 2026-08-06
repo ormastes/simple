@@ -142,6 +142,22 @@ var _resolved_font_metric_keys: [text] = []
 var _resolved_font_metric_values: [ResolvedFontMetrics] = []
 var _resolved_font_metric_cursor: i64 = 0
 var _resolved_font_metric_lock: Mutex? = nil
+# Shaped-run cache hit/miss counters (2026-08-06) -- this cache existed
+# before this session but had no observability; added so proportionality
+# (repeated identical shaping produces hits, not re-shaping) is provable.
+# A parallel glyph-raster (pixel) cache was attempted the same day using the
+# same `[text]`-array-key-scan pattern and found to have a 0% real hit rate
+# under native/JIT codegen (plain `[text]` array element read-back after
+# store returns corrupted/empty text) -- see doc/08_tracking/bug/
+# glyph_raster_cache_text_array_index_corrupt_zero_hit_rate_2026-08-06.md.
+# It was removed rather than landed. These counters and the stress test
+# below (font_renderer_spec.spl) were added specifically to probe whether
+# THIS cache -- same key-array shape -- shares that corruption; a spec run
+# under `bin/simple test` only exercises the tree-walk interpreter, not the
+# JIT/native lane the bug doc reproduced on, so a green spec run here proves
+# interpreter-lane correctness only, not JIT-lane safety.
+var _resolved_font_metric_hits: i64 = 0
+var _resolved_font_metric_misses: i64 = 0
 # Referenced by the shared mutex helpers below. Keep this declaration before
 # first use because SMF semantic compilation resolves module globals in order.
 var _registered_selected_fonts_only: bool = false
@@ -237,11 +253,27 @@ fn _resolved_font_metric_cached(key: text) -> ResolvedFontMetrics?:
     while index < _resolved_font_metric_keys.len():
         if _resolved_font_metric_keys[index] == key:
             val found = _resolved_font_metric_values[index]
+            _resolved_font_metric_hits = _resolved_font_metric_hits + 1
             _resolved_font_metric_lock_release(active_lock)
             return found
         index = index + 1
+    _resolved_font_metric_misses = _resolved_font_metric_misses + 1
     _resolved_font_metric_lock_release(active_lock)
     nil
+
+fn resolved_font_metric_cache_hits() -> i64:
+    _resolved_font_metric_hits
+
+fn resolved_font_metric_cache_misses() -> i64:
+    _resolved_font_metric_misses
+
+fn _resolved_font_metric_cache_reset_for_test():
+    """Test-only: clear entries AND counters so a spec gets a cold cache."""
+    _resolved_font_metric_keys = []
+    _resolved_font_metric_values = []
+    _resolved_font_metric_cursor = 0
+    _resolved_font_metric_hits = 0
+    _resolved_font_metric_misses = 0
 
 fn _resolved_font_metric_store(key: text, metrics: ResolvedFontMetrics):
     val active_lock = _resolved_font_metric_lock_acquire()
