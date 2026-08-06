@@ -42,6 +42,14 @@ class MirToLlvm:
     # load/store temps have no MirLocal entry, so get_local_type falls back to
     # i64 and an f64 slot value would round-trip through fptosi (data loss).
     alloca_elem_types: Dict<i64, text>
+    # The SAME fact keyed by the slot's emitted LLVM value name ("%l112").
+    # The local-id-keyed map above does not reliably round-trip under the
+    # native-built stage2 (measured 2026-08-06: it returns "" for slots
+    # alloca'd earlier in the same function, in BOTH the `.get()` and the
+    # `contains_key` + index forms), which made translate_load emit
+    # `load i64` out of an `alloca ptr` text slot. Text keys are the access
+    # pattern value_types already depends on. See alloca_elem_type_for_value.
+    alloca_elem_types_by_name: Dict<text, text>
     # Unsigned bit for the alloca slot's declared MIR type (U8/U16/U32/U64),
     # parallel to alloca_elem_types. Needed because llvm_type_text collapses
     # I8/U8 (etc) to the same LLVM text type "i8" -- the LLVM type string
@@ -112,6 +120,13 @@ class MirToLlvm:
         self.ptr_locals = {}
         self.unsigned_locals = {}
         self.alloca_elem_unsigned = {}
+        # alloca_elem_types is keyed by LOCAL ID, and local ids are reused
+        # across functions -- a stale `double`/`ptr` entry left by the
+        # previous function would retype an unrelated slot's loads/stores.
+        # It was omitted here while operand_alloca_elem_type always returned
+        # "" (see core_codegen.spl), which made the leak unobservable.
+        self.alloca_elem_types = {}
+        self.alloca_elem_types_by_name = {}
 
     me set_function_return_type(return_type: text):
         """Select the active LLVM return type through the class owner."""
@@ -198,6 +213,7 @@ class MirToLlvm:
             bool_locals: {},
             ptr_locals: {},
             alloca_elem_types: {},
+            alloca_elem_types_by_name: {},
             alloca_elem_unsigned: {},
             unsigned_locals: {},
             function_return_types: {},
@@ -250,6 +266,7 @@ class MirToLlvm:
             bool_locals: {},
             ptr_locals: {},
             alloca_elem_types: {},
+            alloca_elem_types_by_name: {},
             alloca_elem_unsigned: {},
             unsigned_locals: {},
             function_return_types: {},

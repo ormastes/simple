@@ -1028,12 +1028,23 @@ impl MirTextCodegen for MirToLlvm:
                         val val_str = "%l{return_local_id}"
                         if bootstrap_debug:
                             print "[mir-to-llvm] terminator:ret-threaded-value index={block_index} value={val_str}"
-                        # The function ABI is authoritative at Ret. MIR must
-                        # materialize any required value cast before this edge.
+                        # The function ABI is authoritative at Ret -- but
+                        # nothing upstream actually materializes the cast this
+                        # edge assumed, so emit it here. Without it a returned
+                        # local whose LLVM type differs from the ABI type is
+                        # spliced in raw and llc rejects the module
+                        # ("'%lN' defined with type 'i1' but expected 'i64'").
+                        # value_as_type re-reads the value's registered type
+                        # from value_types (translate_load registers it), so
+                        # it sees the load's ACTUAL type, not the stale
+                        # declared one, and is a no-op when they agree.
                         val ret_ty = self.valid_llvm_type(return_type_text)
+                        val ret_src_ty = self.get_local_type(return_local_id)
+                        val ret_src_unsigned = if self.unsigned_locals.contains_key(return_local_id): self.unsigned_locals[return_local_id] else: false
                         if bootstrap_debug:
-                            print "[mir-to-llvm] terminator:ret-threaded-abi index={block_index} type={ret_ty} value={val_str}"
-                        self.builder.emit_ret(ret_ty, self.ret_value_for_type(ret_ty, val_str))
+                            print "[mir-to-llvm] terminator:ret-threaded-abi index={block_index} type={ret_ty} value={val_str} src={ret_src_ty}"
+                        val ret_val = self.value_as_type_signed(val_str, ret_src_ty, ret_ty, ret_src_unsigned)
+                        self.builder.emit_ret(ret_ty, ret_val)
                         if bootstrap_debug:
                             print "[mir-to-llvm] terminator:emit index={block_index} variant=ret-local"
                 elif ret_kind == 3:
@@ -1071,7 +1082,15 @@ impl MirTextCodegen for MirToLlvm:
                 if bootstrap_debug:
                     print "[mir-to-llvm] terminator:if index={block_index} then={then_id} else={else_id}"
                 val cond_val = self.translate_operand_at(cond_operands, 0)
-                val cond_ty = self.valid_llvm_type(self.get_operand_type_at(cond_operands, 0))
+                # The EMITTED value's registered type wins over the MIR-declared
+                # one: once loads carry their alloca slot's element type, a cond
+                # whose MIR type still says `ptr` can already be an `i1` value,
+                # and the ptr arm below then emits `icmp ne ptr %lN, null`
+                # against an i1 -- rejected by llc. Same contains_key + index
+                # read idiom value_as_type uses against value_types.
+                var cond_ty = self.valid_llvm_type(self.get_operand_type_at(cond_operands, 0))
+                if self.value_types.contains_key(cond_val):
+                    cond_ty = self.valid_llvm_type(self.value_types[cond_val])
                 if cond_ty == "i1":
                     # Already boolean, use directly
                     self.builder.emit_cond_br(cond_val, "bb{then_id}", "bb{else_id}")
@@ -1088,8 +1107,15 @@ impl MirTextCodegen for MirToLlvm:
 
             case Switch(value, targets, default):
                 val value_operands: [MirOperand] = [value]
-                val discr_val = self.translate_operand_at(value_operands, 0)
+                val discr_raw = self.translate_operand_at(value_operands, 0)
                 val nit = self.native_int()
+                # emit_switch always types the discriminant as the native int,
+                # so coerce rather than assume: a discriminant loaded from an
+                # i1/i8 slot now carries that narrower type and would make
+                # `switch {nit} %lN` ill-typed. value_as_type re-reads the
+                # value's registered type and is a no-op when it already
+                # matches.
+                val discr_val = self.value_as_type(discr_raw, self.get_operand_type_at(value_operands, 0), nit)
                 val default_id = default.bootstrap_value()
                 if bootstrap_debug:
                     print "[mir-to-llvm] terminator:switch index={block_index} default={default_id} cases={targets.len()}"
@@ -2004,16 +2030,44 @@ impl MirTextCodegen for MirToLlvm:
         # typing loads/stores off those temps falls back to i64 and an f64
         # slot value round-trips through fptosi (10.0 -> 10, data loss).
         self.alloca_elem_types[dest_id] = llvm_ty
+        # Same fact, keyed by the emitted name -- the lookup that actually
+        # round-trips. See alloca_elem_type_for_value.
+        self.alloca_elem_types_by_name[dest_name] = llvm_ty
         self.alloca_elem_unsigned[dest_id] = self.is_unsigned_mir_kind(ty.kind)
         self.builder.emit_alloca(dest_name, llvm_ty)
 
     me operand_alloca_elem_type(ptr: MirOperand) -> text:
         """Element type of the alloca slot behind `ptr`, or "" if unknown."""
+        # MEASURED 2026-08-06: this local-id-keyed lookup is UNRELIABLE under
+        # the native-built stage2 -- it returns "" for slots alloca'd earlier
+        # in the SAME function. Converting it to the usual `contains_key` +
+        # index read made it strictly worse (module-wide `load ptr` 1016->708,
+        # `load i1` 1699->86), so the `.get()` form is kept here deliberately;
+        # do NOT "harden" it again without re-measuring those counts. The
+        # reliable path is alloca_elem_type_for_value(), keyed by the emitted
+        # value NAME (text keys, as value_types uses); this stays only as a
+        # fallback. See doc/07_guide/language/dict_native_pitfalls.md
         match ptr.kind:
             case Copy(local) | Move(local):
                 self.alloca_elem_types.get(self.local_id_value(local)) ?? ""
             case _:
                 ""
+
+    me alloca_elem_type_for_value(ptr_val: text) -> text:
+        """Element type of the alloca slot emitted as `ptr_val` (e.g. "%l112"),
+        or "" if unknown.
+
+        Keyed by the EMITTED NAME rather than the MIR local id. This is the
+        access pattern value_as_type already relies on against value_types
+        (text keys, contains_key + index read), and it is the only one that
+        reliably round-trips here -- see operand_alloca_elem_type for the
+        measurements that forced this. It also sidesteps the MirOperand-kind
+        question entirely: the name is whatever translate_operand resolved,
+        so a ptr operand that is neither Copy nor Move still matches."""
+        if self.alloca_elem_types_by_name.contains_key(ptr_val):
+            self.alloca_elem_types_by_name[ptr_val]
+        else:
+            ""
 
     me operand_alloca_elem_unsigned(ptr: MirOperand) -> bool:
         """Unsigned bit of the alloca slot behind `ptr` (see translate_alloc).
@@ -2032,7 +2086,10 @@ impl MirTextCodegen for MirToLlvm:
         # Prefer the alloca slot's element type: the dest is often an SSA-pass
         # temp with no tracked type (defaults i64), which would read an f64
         # slot's bits as an integer.
-        val slot_elem = self.operand_alloca_elem_type(ptr)
+        # Name-keyed first (reliable), local-id-keyed second (unreliable but
+        # kept as a fallback), dest's declared type last.
+        val named_elem = self.alloca_elem_type_for_value(ptr_val)
+        val slot_elem = if named_elem != "": named_elem else: self.operand_alloca_elem_type(ptr)
         val load_ty_raw = if slot_elem != "": slot_elem else: self.valid_llvm_type(self.get_local_type(dest_id))
         # See translate_alloc: void spill slots are materialized as i64.
         val load_ty = if load_ty_raw == "void": "i64" else: load_ty_raw
@@ -2052,8 +2109,12 @@ impl MirTextCodegen for MirToLlvm:
         val raw_ptr_val = self.translate_operand(ptr)
         val ptr_val = self.value_as_type(raw_ptr_val, self.get_operand_type(ptr), "ptr")
         val raw_value_val = self.translate_operand(value)
-        # Prefer the alloca slot's element type (see translate_load).
-        val slot_elem = self.operand_alloca_elem_type(ptr)
+        # Prefer the alloca slot's element type (see translate_load). Stores
+        # MUST use the same resolution order as loads -- fixing only loads
+        # would leave `store i64` writing into a `ptr` slot that is then read
+        # back as `ptr`, which links and corrupts at runtime.
+        val named_elem = self.alloca_elem_type_for_value(ptr_val)
+        val slot_elem = if named_elem != "": named_elem else: self.operand_alloca_elem_type(ptr)
         val store_ty_raw = if slot_elem != "": slot_elem else: self.valid_llvm_type(self.get_operand_type(value))
         # See translate_alloc: void spill slots are materialized as i64.
         val store_ty = if store_ty_raw == "void": "i64" else: store_ty_raw
