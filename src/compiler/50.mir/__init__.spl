@@ -48,10 +48,15 @@ export use compiler.mir.mir_contract.{LoopContext, ContractContext, LowererState
 export use compiler.interpreter.contracts.{ContractMode}
 
 # Re-exported from mir_effects.spl
+#
+# BOOTSTRAP SELF-HOST (2026-08-06, cycle 6 — THE ACTUAL FIX): `Effect` and
+# `EffectSet` are deliberately NOT re-exported here. See the long note at the
+# bottom of this file for the full traced dependency path and for why the
+# cycle-2/cycle-3 removals below were the wrong diagnosis.
 export use compiler.mir.mir_effects.{
     AsyncEffect, is_async, pipeline_safe,
     NogcInstr, nogc,
-    Effect, EffectSet, BuiltinFunc,
+    BuiltinFunc,
     builtin_effect, builtin_from_name
 }
 
@@ -66,9 +71,83 @@ export use compiler.mir.mir_json.{
 # Re-exported from mir_serialization.spl (binary serialization)
 export use compiler.mir.mir_serialization.{serialize_mir_module, serialize_mir_inst}
 
+# ============================================================================
+# BOOTSTRAP SELF-HOST — `Effect` facade collision: THE TRACED CAUSE
+# (2026-08-06, cycle 6). Read this BEFORE the cycle-2/cycle-3 notes below,
+# which record a theory that was tested by a real Stage 3 run and DISPROVED.
+# ============================================================================
+#
+# Symptom (3x, Stage 3 / in-process native-build of bootstrap_main.spl):
+#   error: HIR lowering error in src/compiler/mir/__init__.spl:
+#   enum payload dependency `Effect` conflicts:
+#     `compiler.hir.hir_types::Effect::struct`
+#     vs `compiler.mir.mir_effects::Effect::enum`
+#
+# The actual dependency path (traced through
+# 20.hir/hir_lowering/_Items/module_lowering.spl, not guessed):
+#
+#   1. `export use compiler.mir.mir_data.{MirModule, MirFunction, ...}` above
+#      (line ~18) is registered by register_imported_symbol(..., materialize_
+#      enum = TRUE) — every top-level named import materializes (call site
+#      module_lowering.spl:1572).
+#   2. `MirFunction`'s terminal declaration is mir_instruction_graph.spl:159,
+#      and it has the field `type_bindings: Dict<text, HirType>` (line 173).
+#      The composite branch walks every field's named dependencies
+#      (module_lowering.spl:753-761), so `HirType` is registered next, with
+#      materialize_enum still TRUE.
+#   3. `struct HirType` (hir_types.spl:730) has field `kind: HirTypeKind`, so
+#      the walk registers `HirTypeKind` — an ENUM — and the enum branch with
+#      materialize_enum=true calls register_materialized_enum_payload_
+#      dependencies (module_lowering.spl:795-799).
+#   4. `enum HirTypeKind` has the variant
+#      `Function(params: [HirType], ret: HirType, effects: [Effect])`
+#      (hir_types.spl:768). Walking that payload claims the local name
+#      `Effect` for `compiler.hir.hir_types::Effect::struct`
+#      (hir_types.spl:912) in materialized_payload_bindings.
+#   5. The later `export use compiler.mir.mir_effects.{... Effect ...}` then
+#      claims the SAME local name for `compiler.mir.mir_effects::Effect::enum`
+#      -> claim_materialized_payload_binding mismatch ->
+#      self.error(...) at module_lowering.spl:1175.
+#
+# So the collision is NOT caused by any re-exported FUNCTION. A callable's
+# parameter/return types are never materialized during import registration:
+# declared_surface_callable_type returns nil while
+# `self.registering_import_symbols` is set (module_lowering.spl:430-431). That
+# is precisely why the cycle-2 removal (synthetic-driver functions taking
+# `fn_: HirFunction`) and the cycle-3 removal (`MirLowering`/`MirError`,
+# reached through `lower_function(fn_: HirFunction)`) changed nothing: a full
+# Stage 3 replay pinned at commit 9bb8727cbc3 — which contains BOTH removals —
+# reproduced the identical error, byte for byte.
+#
+# `HirType` is load-bearing on `MirFunction`, and `MirFunction` is the whole
+# point of this facade (its only real consumer, 70.backend/codegen.spl:15,
+# imports it), so the hir-side `Effect` binding cannot be removed. The mir-side
+# one can: NOTHING in the tree imports `Effect` or `EffectSet` through this
+# facade. The only two `use compiler.mir.{...}` sites in the repo are
+# src/compiler/70.backend/codegen.spl:15 and
+# test/01_unit/compiler/mir_opt/target_family_package_surface_spec.spl:9, and
+# neither names `Effect`/`EffectSet`; every real user imports them from
+# `compiler.mir.mir_effects` directly. `EffectSet` has to go too, not just
+# `Effect`: its field `effects: [Effect]` (mir_effects.spl:160) would re-enter
+# the same materializing walk through the array-element branch
+# (module_lowering.spl:757-761) and re-raise the identical error.
+#
+# This is the `BackendKind`/`CompiledSymbolKind` remedy from the header of
+# src/compiler/70.backend/backend_types.spl: collapse the colliding name to ONE
+# terminal binding in this lowering scope. Here that terminal binding is
+# `compiler.hir.hir_types::Effect` (arriving transitively via MirFunction), and
+# the dead mir-side re-export is what gets dropped.
+#
+# doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md
+
 # Re-exported from mir_lowering.spl
 #
-# BOOTSTRAP SELF-HOST (2026-08-06, cycle 3): removed for the same reason as
+# BOOTSTRAP SELF-HOST (2026-08-06, cycle 3): SUPERSEDED DIAGNOSIS — kept for
+# the record. The removal itself is harmless (these re-exports really do have
+# zero callers), but it did NOT fix the Stage 3 failure; see the traced cause
+# above. Original reasoning follows.
+#
+# removed for the same reason as
 # the synthetic-driver re-exports below. `compiler.mir.{MirLowering}` /
 # `compiler.mir.{MirError}` (i.e. through THIS facade) have zero callers in
 # the tree (verified: grep for `compiler.mir.{...MirLowering...}` /
@@ -92,7 +171,14 @@ export use compiler.mir.mir_serialization.{serialize_mir_module, serialize_mir_i
 
 # FR-DRIVER-0001 static-registration synthesis planner + codegen
 #
-# BOOTSTRAP SELF-HOST (2026-08-06): these two re-exports used to live here,
+# BOOTSTRAP SELF-HOST (2026-08-06, cycle 2): SUPERSEDED DIAGNOSIS — kept for
+# the record. The dead-code claim is correct; the `Effect`-materialization
+# claim is NOT (a re-exported function's parameter types are never
+# materialized during import registration). A Stage 3 replay pinned at the
+# commit carrying this removal reproduced the identical error. See the traced
+# cause near the top of this section. Original reasoning follows.
+#
+# these two re-exports used to live here,
 # but every real caller (src/compiler/50.mir/_MirLowering/{asm_and_targets,
 # module_lowering,function_lowering,bootstrap_globals}.spl) already imports
 # `apply_synthetic_driver_codegen` directly from

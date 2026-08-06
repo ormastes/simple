@@ -6,6 +6,16 @@ Date: 2026-08-06
 Area: compiler / self-hosted HIR type resolution (`src/compiler`), bootstrap
 pipeline (`scripts/bootstrap/bootstrap-from-scratch.sh`)
 
+> **UPDATE 2026-08-06 (cycle 6) — read the `Effect` facade-collision section at
+> the bottom of this file first.** The `ByteOrder` error above was fixed and was
+> then replaced by an `Effect` facade collision in
+> `src/compiler/50.mir/__init__.spl`. Two earlier attempts (cycles 2 and 3) at
+> that collision were landed as commit `9bb8727cbc3` on a WRONG diagnosis and
+> did **not** fix it — a Stage 3 replay pinned at that exact commit reproduces
+> the identical error. Do not re-try the "a re-exported function taking
+> `fn_: HirFunction` materializes `Effect`" theory a fourth time; it is
+> disproved below.
+
 ## Summary
 
 A full `--full-bootstrap --deploy` run was executed to redeploy a genuine
@@ -113,6 +123,117 @@ per that doc's own caution about the flat-pipeline masking), classify each
 by (declaring-module count, reachability from the using file's import graph),
 and confirm whether `cache_validator.spl` is really the site needing the
 import, or whether the type-checker error location is wrong.
+
+## Follow-on blocker: `Effect` facade collision in `compiler.mir.__init__`
+
+After the `ByteOrder` import was added, Stage 3 fails one step later with:
+
+```
+[ERROR] phase 3 FAILED
+error: in-process native-build: HIR lowering error in src/compiler/mir/__init__.spl:
+  enum payload dependency `Effect` conflicts:
+  `compiler.hir.hir_types::Effect::struct` vs `compiler.mir.mir_effects::Effect::enum`
+```
+(3x identical.) Note the file in the message is the *module* path; the real file
+on disk is `src/compiler/50.mir/__init__.spl` (numbered-layer dirs are reached
+through a symlink, so `git` on the un-numbered path fails with "beyond a
+symbolic link").
+
+### Correcting the record: cycles 2 and 3 were the WRONG fix
+
+Commit `9bb8727cbc3` removed two blocks of re-exports from
+`src/compiler/50.mir/__init__.spl` on the theory that a re-exported FUNCTION
+taking `fn_: HirFunction` (whose `effects: [Effect]` field is
+`hir_types::Effect`) materialized the struct into the facade's lowering scope:
+
+- cycle 2: `synthetic_driver_registration.{SyntheticDriverRegistrationStatus,
+  SyntheticDriverRegistrationPlan, plan_synthetic_driver_registration}` and
+  `synthetic_driver_codegen.{apply_synthetic_driver_codegen}`
+- cycle 3: `mir_lowering.{MirLowering, MirError}`
+
+**That theory is false.** A callable's parameter and return types are never
+materialized during import registration:
+`HirLowering.declared_surface_callable_type` returns `nil` outright while
+`self.registering_import_symbols` is set
+(`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:430-431`), and the
+callable branch (`:874-877`) does no dependency walk at all. Only **composite
+fields** and **materialized enum payloads** are walked. Both removals were
+therefore no-ops for this error (they are harmless — those re-exports really do
+have zero callers — but they fix nothing).
+
+Proof, not reasoning: a Stage 3 replay of the exact recorded stage-3 command on
+the tree containing both removals reproduces the identical error, exit 1.
+
+### The actual traced dependency path
+
+Every step below is in
+`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`:
+
+1. Top-level named imports register with `materialize_enum = true` (`:1572`).
+   The facade's `export use compiler.mir.mir_data.{MirModule, MirFunction, ...}`
+   is one of them, and it appears **before** the `mir_effects` block — which is
+   why the struct is the `existing` side of the message and the enum the
+   `wanted` side.
+2. `MirFunction`'s terminal declaration is
+   `src/compiler/50.mir/mir_instruction_graph.spl:159`, carrying the field
+   `type_bindings: Dict<text, HirType>` (`:173`). The composite branch walks
+   each field's named dependencies (`:753-761`), so `HirType` is registered next
+   with `materialize_enum` still true.
+3. `struct HirType` (`src/compiler/20.hir/hir_types.spl:730`) has field
+   `kind: HirTypeKind`, so the walk registers `HirTypeKind` — an enum — and the
+   enum branch with `materialize_enum = true` calls
+   `register_materialized_enum_payload_dependencies` (`:795-799`).
+4. `enum HirTypeKind` has the variant
+   `Function(params: [HirType], ret: HirType, effects: [Effect])`
+   (`hir_types.spl:768`). Walking that payload claims the local name `Effect`
+   for `compiler.hir.hir_types::Effect::struct` (`hir_types.spl:912`).
+5. The later `export use compiler.mir.mir_effects.{... Effect ...}` claims the
+   same local name for `compiler.mir.mir_effects::Effect::enum`, and
+   `claim_materialized_payload_binding` raises the error at `:1175`.
+
+### The fix (cycle 6)
+
+`HirType` is load-bearing on `MirFunction`, and `MirFunction` is the facade's
+whole reason to exist, so the hir-side binding cannot be removed. The mir-side
+one can, because it is dead through this facade: the only two
+`use compiler.mir.{...}` sites in the repo are
+`src/compiler/70.backend/codegen.spl:15` and
+`test/01_unit/compiler/mir_opt/target_family_package_surface_spec.spl:9`, and
+neither names `Effect` or `EffectSet`; every real user imports them from
+`compiler.mir.mir_effects` directly.
+
+So `Effect` and `EffectSet` were dropped from the facade's `mir_effects`
+re-export list (the rest of that block — `AsyncEffect`, `is_async`,
+`pipeline_safe`, `NogcInstr`, `nogc`, `BuiltinFunc`, `builtin_effect`,
+`builtin_from_name` — is retained; none of those enums has an `Effect` payload,
+and the functions are callables, which are never walked). `EffectSet` had to go
+as well as `Effect`: its field `effects: [Effect]`
+(`src/compiler/50.mir/mir_effects.spl:160`) re-enters the same materializing
+walk through the array-element branch (`:757-761`) and re-raises the identical
+error on its own.
+
+This is the same remedy as the `BackendKind` / `CompiledSymbolKind` facade
+collision documented at the head of `src/compiler/70.backend/backend_types.spl`
+— collapse the colliding name to one terminal binding in the lowering scope.
+
+### RED → GREEN method (reusable)
+
+A full `--full-bootstrap` is not needed to exercise this. Every bootstrap output
+dir records the exact stage-3 invocation at
+`<out>/stage3/<triple>/stage3-command.transcript`, and keeps the `stage2-admitted`
+compiler and `stage2-runtime-authority` next to it — replaying that command
+against the working tree reproduces Stage 3 alone (~50 min to the HIR error,
+peak RSS ~55 GB). Replay driver used here:
+`sh <scratch>/replay_stage3.sh {red|green}`, output dir
+`build/bootstrap-t3-effect-fix-20260806/` (gitignored).
+
+Watch out for two environment traps while doing this:
+
+- `earlyoom` is live with `--prefer ^(simple|...)`, so it *preferentially* kills
+  the stage-3 compiler, which is named `simple`. A SIGTERM / exit 143 /
+  "Terminated" is that, not a compile error — always read the log.
+- `pkill -f "<pattern>"` where the pattern also matches the agent's own shell
+  command line kills the shell issuing it (observed here twice, exit 144).
 
 ## Related
 
