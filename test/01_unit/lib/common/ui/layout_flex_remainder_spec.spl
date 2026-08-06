@@ -1,0 +1,87 @@
+# @cover src/lib/common/ui/layout.spl 30%
+# @req FR-UI-LAYOUT-FLEX-REMAINDER
+#
+# layout_hbox() divides the free width into `flex_unit` per flex point and
+# hands the integer-division REMAINDER to one child. The remainder must be
+# awarded EXACTLY ONCE, or the children's widths sum to more than the box.
+#
+# `flex_idx` accumulates each child's flex weight, so the guard
+# `flex_idx >= total_flex` fires for the last child with flex > 0 AND again
+# for every trailing child with flex == 0 (adding 0 leaves flex_idx at
+# total_flex). A `flex="0"` child — reachable via `with_flex(node, 0)` or the
+# sdn `flex` prop — therefore collected a second copy of the remainder and
+# overflowed the container.
+#
+# Design call pinned here: the remainder goes to the LAST child that actually
+# takes space (flex > 0). A child that asked for zero width gets zero width.
+# That matches layout_vbox's `flex_idx == flex_count` remainder invariant
+# (awarded once, to the last space-taking child).
+
+use std.spec.{describe, it, expect, assert_true}
+use common.ui.widget.{WidgetNode, WidgetKind, WidgetRect}
+use common.ui.builder.{label, with_flex}
+use common.ui.layout.{compute_layout, find_rect}
+
+# A border-free hbox container: `row()` builds a WidgetKind.Panel, whose 1px
+# border would inset the width and make the arithmetic below off-by-2. Any
+# non-"panel" kind skips the border trim.
+fn _hbox(id: text, kids: [WidgetNode]) -> WidgetNode:
+    var node = WidgetNode.new(id, WidgetKind.Card.to_wire())
+    node = node.set_layout("hbox")
+    for k in kids:
+        node = node.add_child(k)
+    node
+
+# Width of a laid-out child, or 0 when it was given no rect at all (a
+# zero-width child is dropped by `if actual_w > 0`).
+fn _w(rects: [WidgetRect], id: text) -> i32:
+    match find_rect(rects, id):
+        case Some(r): r.w
+        # find_rect returns WidgetRect?, so the only other arm is nil, which
+        # means the child was dropped for having zero width — report 0.
+        case _: 0
+
+describe "layout_hbox flex remainder":
+    """The hbox flex remainder is awarded exactly once, to the last child with
+    flex > 0, so children's widths never sum past the container width."""
+
+    it "never awards the remainder twice — a flex=0 child gets no width":
+        # REGRESSION: box w=10, A flex=3, B flex=0.
+        # total_flex=3, flex_unit=3, flex_remainder=10-9=1.
+        # A: flex_idx 0->3, 3>=3 -> 3*3+1 = 10  (correct)
+        # B: flex_idx 3->3, 3>=3 -> 0*3+1 = 1   (WRONG: remainder again)
+        # 10+1 = 11px assigned into a 10px box.
+        val a = with_flex(label("flexrem_a", "A"), 3)
+        val b = with_flex(label("flexrem_b", "B"), 0)
+        val rects = compute_layout(_hbox("flexrem_root", [a, b]), 0, 0, 10, 4)
+        val a_w = _w(rects, "flexrem_a")
+        val b_w = _w(rects, "flexrem_b")
+        expect(b_w).to_equal(0)
+        expect(a_w).to_equal(10)
+        expect(a_w + b_w).to_equal(10)
+
+    it "gives all-positive flex children the same geometry as before (control)":
+        # Discriminating control: no flex=0 child, so the guard change cannot
+        # move these numbers. Must pass in BOTH directions — a green here with
+        # a red above proves the oracle discriminates instead of failing
+        # wholesale.
+        # total_flex=4, flex_unit=2, remainder=2.
+        # C1: flex_idx 0->3, 3<4  -> 3*2   = 6
+        # C2: flex_idx 3->4, 4>=4 -> 1*2+2 = 4
+        val c1 = with_flex(label("flexctl_c1", "1"), 3)
+        val c2 = with_flex(label("flexctl_c2", "2"), 1)
+        val rects = compute_layout(_hbox("flexctl_root", [c1, c2]), 0, 0, 10, 4)
+        expect(_w(rects, "flexctl_c1")).to_equal(6)
+        expect(_w(rects, "flexctl_c2")).to_equal(4)
+
+    it "was already correct with a LEADING flex=0 child (control)":
+        # Second control, also unchanged in both directions: with the zero
+        # child FIRST, flex_idx is still 0 when it is visited, so 0 >= 3 is
+        # false and the remainder was never double-awarded. This pins that the
+        # defect was specifically about TRAILING zero-flex children, not about
+        # flex=0 in general.
+        val b = with_flex(label("flexlead_b", "B"), 0)
+        val a = with_flex(label("flexlead_a", "A"), 3)
+        val rects = compute_layout(_hbox("flexlead_root", [b, a]), 0, 0, 10, 4)
+        expect(_w(rects, "flexlead_b")).to_equal(0)
+        expect(_w(rects, "flexlead_a")).to_equal(10)

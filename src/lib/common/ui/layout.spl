@@ -113,6 +113,14 @@ fn layout_vbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32) -> [Widge
         return rects
 
     # Calculate sizes: fixed-height items first, then distribute remaining
+    # TODO: vbox does not honour the `flex` prop at all — it counts children
+    # without a fixed height and divides equally, so with_flex(n, 3) is
+    # silently dropped here and with_flex(n, 0) still gets an equal share
+    # instead of zero. layout_hbox weights by get_flex(); the two axes agree
+    # only on the remainder invariant (awarded once, to the last space-taking
+    # child), not on weighting. Making this weight-aware changes existing vbox
+    # geometry for any node carrying a flex prop, so it is deliberately not
+    # bundled with the hbox remainder fix.
     var total_fixed: i32 = 0
     var flex_count: i32 = 0
 
@@ -194,7 +202,21 @@ fn layout_hbox(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32) -> [Widge
         else:
             val flex = get_flex(child)
             flex_idx = flex_idx + flex
-            if flex_idx >= total_flex:
+            # The integer-division remainder goes to the LAST child that
+            # actually takes space, i.e. the last one with flex > 0. Only such
+            # children advance flex_idx, so the first child to push it up to
+            # total_flex is exactly that child, and it is the only one that
+            # satisfies both halves of this guard.
+            #
+            # The `flex > 0` half is load-bearing: adding 0 leaves flex_idx AT
+            # total_flex, so without it every TRAILING flex="0" child re-armed
+            # `flex_idx >= total_flex` and collected a second copy of the
+            # remainder — w=10 with children flex=3 and flex=0 assigned 10+1
+            # = 11px into a 10px box. A child that asked for zero width gets
+            # zero width. This matches layout_vbox's `flex_idx == flex_count`
+            # invariant: remainder awarded exactly once, to the last
+            # space-taking child.
+            if flex > 0 and flex_idx >= total_flex:
                 actual_w = flex * flex_unit + flex_remainder
             else:
                 actual_w = flex * flex_unit
