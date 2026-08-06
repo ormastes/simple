@@ -82,3 +82,52 @@ sh -c '. scripts/lib/simple-compiler-select.shs; simple_compiler_select --root "
 build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple run --help
 # -> error: unknown command 'run'
 ```
+
+## Amendment 2026-08-06 (app/i18n lane, seed-path evidence)
+
+**Claim 1 above ("segfaults twice and still returns exit 0") is WRONG — retracted.**
+The two bare `Segmentation fault` lines are the probe *working*. The selector's
+own `--self-test` predicts rc=139 on exactly two candidates it must reject —
+`bootstrap/stage3/x86_64-unknown-linux-gnu/simple` and `bootstrap/stage2/simple`
+— and those are the two crashes observed. A probe that kills a known-bad
+candidate and then promotes a surviving one is fail-CLOSED behaviour, not a
+defect. Exit 0 with a path on stdout is the documented success contract.
+
+**The real defect is a contract divergence, and it is worse than filed.**
+The file header (lines 35-41) states the core tier means *"a host compiler that
+can run a .spl"*. The probe never tests `run`: its ladder is `check p.spl` then
+`native-build --entry p.spl`. So the tier advertises a capability it does not
+measure, and callers doing `"$SIMPLE_BIN" run <script>.spl` get the promoted
+binary's `error: unknown command 'run'` instead of a selection failure.
+
+**New fact not in the original report: NO staged binary in this tree implements
+`run` at all.** Measured on every default candidate:
+
+| candidate | `run --help` |
+|---|---|
+| `bootstrap/stage3/x86_64-unknown-linux-gnu/simple` | `error: unknown command 'run'` |
+| `bootstrap/stage3/simple` | `error: unknown command 'run'` |
+| `build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple` | `error: unknown command 'run'` |
+| `bootstrap/stage2/simple` | `error: unknown command 'run'` |
+| `release/x86_64-unknown-linux-gnu/simple` | SIGSEGV (core dumped) |
+| `bin/release/*-unknown-simpleos/simple` | SIGSEGV / cross-target |
+| `bin/release/x86_64-unknown-linux-gnu/simple` | works — but it is the Rust seed, rejected by identity |
+
+Root cause of the absence: `src/app/cli/bootstrap_main.spl:449-484` is the
+staged compilers' `main`. It dispatches `native-build`, `compile`, `--version`
+and `--help`, and nothing else — `run` was never part of the bootstrap CLI.
+
+Consequence: the **19** scripts that call `simple_compiler_select` and then
+`"$SIMPLE_BIN" run` are structurally red regardless of which candidate is
+promoted. Changing the selector cannot make them green; there is no binary for
+it to find. Fix options, none of which belong to a guard-script lane:
+
+1. Add `run` to `src/app/cli/bootstrap_main.spl` (then rebuild stage2/stage3).
+2. Give the selector an explicit `--require run` tier AND wire the 19 callers,
+   so they fail early with "no compiler can run a .spl" instead of late with
+   "unknown command 'run'".
+
+Option 2 alone is honesty, not a fix. Option 1 is the actual repair.
+
+**Not attempted here** because verifying either requires a stage2/stage3
+rebuild, and two Stage 3 builds were already live on this host.
