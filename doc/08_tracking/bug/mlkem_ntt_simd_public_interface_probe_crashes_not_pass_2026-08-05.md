@@ -1,6 +1,11 @@
 # AC-4 SIMD byte-identity probe crashes on reproduction — reported PASS does not hold
 
-**Status:** OPEN, UNSTABLE — do not treat as fixed. A dispatched root-cause
+**Status:** OPEN, PARTIALLY ADDRESSED (2026-08-06: root cause found and fixed
+at the `simple-runtime` source level, verified at the Rust-crate/unit level
+only — NOT yet verified end-to-end against the named `.spl` probe, which does
+not exist in this repo, and NOT yet in the deployed `bin/simple` binary; see
+the "2026-08-06 update" section below before treating this as closed). A
+dispatched root-cause
 agent (session-limit-terminated before delivering a report) apparently left
 "both probes healthy" as its last status line, and independent re-testing
 now gets 6/6 consecutive PASS on `mlkem_ntt_simd_public_interface_probe.spl`
@@ -96,3 +101,192 @@ SIMPLE_TIMEOUT_SECONDS=0 bin/simple run \
   --engine interpret
 echo "exit=$?"   # expect 139 (SIGSEGV) or 134 (SIGABRT), not a verdict line
 ```
+
+## 2026-08-06 update — root cause found and fixed at source level; NOT independently closed end-to-end
+
+**Status: PARTIALLY ADDRESSED — do not mark this doc FIXED/CLOSED yet.** Read
+the whole section before trusting this. Given this doc's own history (a false
+"both probes healthy" claim that didn't survive re-check), this update is
+deliberately conservative about what was and wasn't verified.
+
+### The probe fixture files do not exist in this repository — a new finding
+
+Before touching any code, an attempt was made to run the exact repro command
+above. It failed immediately:
+
+```
+bin/simple run test/09_baselines/crypto/x25519mlkem768/mlkem_ntt_simd_public_interface_probe.spl --engine interpret
+# error: No such file or directory
+```
+
+Neither `mlkem_ntt_simd_public_interface_probe.spl` nor
+`mlkem_ntt_forced_scalar_control_probe.spl` exist in the working tree. A
+search of `git log --all -- <path>` for both files returns **no history at
+all** — they were never committed to this repo, ever. A further search across
+every scratch worktree and agent scratchpad directory found on this machine
+(`/tmp/claude-1000/.../scratchpad/**`, `/tmp/simple-*`,
+`.claude/worktrees/**`, `build/worktrees/**`, `build/bootstrap-segv-fix/**`) —
+dozens of copies of this exact bug doc and the sibling
+`mlkem_ntt_simd_c_test.c` fixture were found, but **zero copies of either
+`.spl` probe file**, anywhere. The most likely explanation: both probes were
+always ephemeral scratch files created directly in some prior agent's
+scratchpad or `/tmp`, never `git add`ed, and were cleaned up or lost when that
+session ended. This means **the literal repro steps in this doc have never
+been independently re-runnable by any agent after the one that wrote them**,
+including this one. Anyone re-checking this doc in the future should expect
+the same and not be surprised the fixture is gone — this is not evidence
+against the crash having been real.
+
+Because of this, **step 4 of the requested verification plan (re-run the
+named `.spl` probe 5-10 times and read its verdict line) could not be
+performed at all** — there is no fixture to run. What follows is the
+strongest verification that was achievable without recreating that fixture
+from scratch (which would risk not matching what the original probe actually
+exercised).
+
+### Root cause (confirmed, independently reproduced, decoupled from this crate)
+
+`rt_simd_mul_i32x8` and seven sibling functions in
+`src/compiler_rust/runtime/src/value/simd_int_ops.rs` — all eight
+`rt_simd_{add,sub,mul,xor,and,or,shl,shr}_i32x8` `#[no_mangle] pub extern "C"`
+wrappers (`add`/`sub`/`mul`/`xor`/`and`/`or` at their original lines
+642/672/702/732/762/792, `shl`/`shr` at 822/842) — read/wrote through their
+`*const i32` / `*mut i32` parameters with a **plain Rust pointer
+dereference**: `*a.offset(i)` and `*out.add(i) = val`. `rt_simd_mul_i32x8`'s
+read block began at the original line 705 — the exact file:line cited in the
+original report.
+
+A plain `*ptr` dereference of a typed pointer lowers to `ptr::read`/
+`ptr::write`, both of which carry Rust's alignment precondition (the pointer
+must be a multiple of the pointee's alignment — 4 bytes for `i32`). This is
+**not** an AVX2/`_mm256_load_si256` hardware alignment requirement (the
+in-file SIMD helper `mul_i32x8([i32;8],[i32;8])` already correctly used the
+unaligned `_mm256_loadu_si256`/`_mm256_storeu_si256` intrinsics on its own
+stack-local arrays, which is why the C test fixture and narrower probes never
+hit this) — it is Rust's own UB-check on the *raw pointer marshalling step*
+that happened before the caller-supplied `a`/`b`/`out` pointers ever reached
+any SIMD instruction. Callers of these `extern "C"` functions (native/JIT
+codegen emitting a direct call with a pointer derived from Simple-side
+array/Value storage, or an FFI/SFFI caller) do not guarantee 4-byte alignment
+on that storage — see the closely related, same-day
+`doc/08_tracking/bug/rt_array_data_ptr_u8_missing_interpreter_adapter_2026-08-05.md`,
+which documents the exact mechanism by which an interpreter-native
+`Value::Array` gets materialized into a leaked `Vec<u8>` and handed out as a
+raw pointer with no i32-alignment guarantee — a plausible concrete path by
+which a misaligned pointer reaches these functions.
+
+**Independent, decoupled confirmation of the exact mechanism and message**
+(done outside this crate, in a standalone `rustc`-compiled program, to rule
+out anything crate-specific): allocating a `Vec<u8>`, offsetting it by 1-3
+bytes to force a misaligned `*mut i32`, and doing `*p.offset(0)` on it:
+- Under a **debug build** (`debug_assertions` on — matches a `cargo build`
+  without `--release`, i.e. plausibly the "stale ad-hoc scratch seed build"
+  from the original report): panics with **the exact same message**,
+  `misaligned pointer dereference: address must be a multiple of 0x4 but is
+  0x...`, followed by `thread caused non-unwinding panic. aborting.` — a
+  **non-unwinding** abort, meaning `catch_unwind` cannot intercept it, which
+  is consistent with the original report's SIGABRT/exit 134.
+- Under an **optimized build** (`rustc -O`, `debug_assertions` off — plausibly
+  the "canonical release binary" from the original report): the alignment
+  check is compiled out entirely; the read silently returns without panicking
+  (observed returning a garbage/zero value rather than crashing in this
+  isolated repro). This is consistent with — though does not by itself fully
+  explain — why the release binary in the original report produced a
+  *different* crash signature (SIGSEGV) rather than the clean debug panic:
+  the underlying access is still UB in the optimized build, just not
+  checked, so a fault can still occur downstream depending on what
+  instruction selection the optimizer chose around the "pointer is aligned"
+  assumption it's now permitted to make.
+- The replacement (`.read_unaligned()`/`.write_unaligned()`) never panicked
+  and always returned the correct value, in both build profiles, across 5
+  repeated runs x 3 misalignment offsets (shift 1/2/3 bytes) = 15/15 clean.
+
+### Fix applied
+
+All 8 affected functions in `simd_int_ops.rs` changed from
+`*ptr.offset(i)` / `*out.add(i) = val` to `ptr.offset(i).read_unaligned()` /
+`out.add(i).write_unaligned(val)`. This matches the unaligned-load precedent
+already established in the same file for the actual SIMD hardware
+instructions and makes every one of these FFI entry points correct
+regardless of what alignment the caller's marshalling path happens to
+produce, rather than requiring every caller (interpreter array materializer,
+JIT/native codegen, any future SFFI caller) to separately guarantee 4-byte
+alignment. A `#[cfg(test)]` regression test was added
+(`rt_simd_mul_i32x8_misaligned_pointer_does_not_panic` and
+`rt_simd_add_sub_xor_and_or_shl_shr_i32x8_misaligned_pointer_does_not_panic`)
+that deliberately constructs misaligned pointers (byte shift 1/2/3 from a
+byte buffer, so the misalignment is created by test construction, not
+allocator luck — this specifically avoids the "heap-layout-dependent
+nondeterminism" trap this doc already warned about once) and calls all 8
+functions through their real `extern "C"` signatures.
+
+### Verification performed (Rust-crate level; T1-scoped per bootstrap.md)
+
+- `cargo build -p simple-runtime` (in `src/compiler_rust`): clean build, no
+  warnings introduced.
+- `cargo test -p simple-runtime --lib simd_int_ops`: run twice (once
+  immediately after the fix, once again after adding the two new regression
+  tests). **21/21 passed both times**, including the two new misalignment
+  tests, each of which loops over 3 distinct forced-misalignment offsets
+  across all 8 functions (48 assertions total per full run).
+- Standalone decoupled repro (above): 5 runs of the "does NOT panic" case, 3
+  offsets each, 100% consistent (15/15); 1 run of the "DOES panic on old
+  code" case in a debug build, reproducing the exact panic text and abort
+  signal from the original report on the very first try (not
+  heap-layout-dependent, because the misalignment here is constructed
+  deterministically by byte-shifting a pointer, not left to allocator luck).
+
+### What was explicitly NOT verified — read this before trusting "fixed"
+
+- **The named `.spl` probe was never re-run**, because it does not exist
+  (see above). This doc's own reproduce steps remain, today, exactly as
+  unreproducible as they were when this update was written — the only
+  difference is now there's an explanation why (missing fixture), not a
+  crash-vs-no-crash result.
+- **`bin/simple` (the deployed seed binary) was not rebuilt or redeployed.**
+  Per `.claude/rules/bootstrap.md` T0-T3 tiering and this task's explicit
+  scope ("verify with a scoped `cargo build -p <crate>`... NOT a full
+  bootstrap"), only the `simple-runtime` crate itself was built and tested in
+  isolation. `bin/release/x86_64-unknown-linux-gnu/simple` — the binary
+  `bin/simple run ... --engine interpret` actually executes — still links
+  the **old**, unfixed `simd_int_ops.rs` until a bootstrap rebuild + redeploy
+  happens. Anyone re-checking this by literally running `bin/simple run
+  <probe>` today, even if the probe existed, would NOT be exercising this
+  fix yet.
+- **The exact call path that reached this function under `--engine
+  interpret` in the original report is still not fully pinned down.** Tracing
+  `interpreter_extern::simd::rt_simd_mul_i32x8`
+  (`src/compiler_rust/compiler/src/interpreter_extern/simd.rs:1084`) shows
+  that `std.simd`'s registered dispatch for this name calls `binop_i32x8`,
+  which unpacks interpreter `Value`s into a plain `[i32; 8]` Rust array by
+  value and calls the **safe**, non-pointer `mul_i32x8([i32;8],[i32;8])`
+  helper — it does **not** call the raw-pointer `extern "C"` wrapper this fix
+  changed. That means a Simple program calling `std.simd`'s public
+  `rt_simd_mul_i32x8` under `--engine interpret` cannot hit this bug through
+  that specific path. The original probe must therefore have reached the raw
+  `extern "C"` symbol some other way — e.g. a bare `@extern fn
+  rt_simd_mul_i32x8(...)` declaration in the (now-missing) probe bypassing
+  `std.simd`'s wrapper and calling the native symbol directly via SFFI/dynamic
+  load, which is exactly the kind of "public interface" boundary test an
+  AC-4 x86-SIMD-lane-closure probe would plausibly want to exercise. This is
+  plausible and consistent with the file:line/message match being exact, but
+  it was not confirmed by tracing an actual working example, because no such
+  example exists in this repo to trace.
+
+### Honest confidence assessment
+
+High confidence that a real bug existed at the exact cited function, file,
+and line, with the exact cited panic message and abort behavior — this was
+independently reproduced from first principles, not just inferred. High
+confidence the fix (`read_unaligned`/`write_unaligned`) is the correct and
+complete fix for that specific defect, verified by both targeted crate tests
+and a decoupled standalone repro across two build profiles. **Low-to-moderate
+confidence that this closes the original report's exact end-to-end
+symptom**, because the probe that produced that symptom cannot be re-run (it
+doesn't exist) and the deployed binary hasn't been rebuilt with this fix. Do
+not mark AC-4's x86 SIMD lane claim PASS on the strength of this update
+alone — the next step to actually close this is (a) rebuild+redeploy
+`bin/simple` via bootstrap, and (b) either recover or faithfully recreate the
+missing probe fixture and run it 5-10 times against the redeployed binary,
+exactly as the original (untrusted) "PASS" claim should have been checked in
+the first place.

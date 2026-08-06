@@ -642,28 +642,28 @@ pub extern "C" fn rt_simd_shr_i32x4(a0: i32, a1: i32, a2: i32, a3: i32, n: i64, 
 pub extern "C" fn rt_simd_add_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0),
-            *a.offset(1),
-            *a.offset(2),
-            *a.offset(3),
-            *a.offset(4),
-            *a.offset(5),
-            *a.offset(6),
-            *a.offset(7),
+            a.offset(0).read_unaligned(),
+            a.offset(1).read_unaligned(),
+            a.offset(2).read_unaligned(),
+            a.offset(3).read_unaligned(),
+            a.offset(4).read_unaligned(),
+            a.offset(5).read_unaligned(),
+            a.offset(6).read_unaligned(),
+            a.offset(7).read_unaligned(),
         ];
         let bv = [
-            *b.offset(0),
-            *b.offset(1),
-            *b.offset(2),
-            *b.offset(3),
-            *b.offset(4),
-            *b.offset(5),
-            *b.offset(6),
-            *b.offset(7),
+            b.offset(0).read_unaligned(),
+            b.offset(1).read_unaligned(),
+            b.offset(2).read_unaligned(),
+            b.offset(3).read_unaligned(),
+            b.offset(4).read_unaligned(),
+            b.offset(5).read_unaligned(),
+            b.offset(6).read_unaligned(),
+            b.offset(7).read_unaligned(),
         ];
         let r = add_i32x8(av, bv);
         for (i, &val) in r.iter().enumerate() {
-            *out.add(i) = val;
+            out.add(i).write_unaligned(val);
         }
     }
 }
@@ -672,28 +672,28 @@ pub extern "C" fn rt_simd_add_i32x8(a: *const i32, b: *const i32, out: *mut i32)
 pub extern "C" fn rt_simd_sub_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0),
-            *a.offset(1),
-            *a.offset(2),
-            *a.offset(3),
-            *a.offset(4),
-            *a.offset(5),
-            *a.offset(6),
-            *a.offset(7),
+            a.offset(0).read_unaligned(),
+            a.offset(1).read_unaligned(),
+            a.offset(2).read_unaligned(),
+            a.offset(3).read_unaligned(),
+            a.offset(4).read_unaligned(),
+            a.offset(5).read_unaligned(),
+            a.offset(6).read_unaligned(),
+            a.offset(7).read_unaligned(),
         ];
         let bv = [
-            *b.offset(0),
-            *b.offset(1),
-            *b.offset(2),
-            *b.offset(3),
-            *b.offset(4),
-            *b.offset(5),
-            *b.offset(6),
-            *b.offset(7),
+            b.offset(0).read_unaligned(),
+            b.offset(1).read_unaligned(),
+            b.offset(2).read_unaligned(),
+            b.offset(3).read_unaligned(),
+            b.offset(4).read_unaligned(),
+            b.offset(5).read_unaligned(),
+            b.offset(6).read_unaligned(),
+            b.offset(7).read_unaligned(),
         ];
         let r = sub_i32x8(av, bv);
         for (i, &val) in r.iter().enumerate() {
-            *out.add(i) = val;
+            out.add(i).write_unaligned(val);
         }
     }
 }
@@ -701,29 +701,40 @@ pub extern "C" fn rt_simd_sub_i32x8(a: *const i32, b: *const i32, out: *mut i32)
 #[no_mangle]
 pub extern "C" fn rt_simd_mul_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
+        // NOTE: `a`/`b`/`out` are raw i32 pointers marshalled in from the
+        // interpreter's array/Value representation, which does not guarantee
+        // 4-byte alignment for the backing storage (see
+        // doc/08_tracking/bug/mlkem_ntt_simd_public_interface_probe_crashes_not_pass_2026-08-05.md).
+        // A plain `*a.offset(i)` lowers to `ptr::read`, whose alignment
+        // precondition check panics with "misaligned pointer dereference" on
+        // an unaligned address instead of silently doing the wrong thing.
+        // Use explicit unaligned read/write so this function never requires
+        // the caller to guarantee alignment (matches the `_mm256_loadu_si256`
+        // / `_mm256_storeu_si256` unaligned-load precedent already used for
+        // the SIMD portion of this file, e.g. `mul_i32x8` below).
         let av = [
-            *a.offset(0),
-            *a.offset(1),
-            *a.offset(2),
-            *a.offset(3),
-            *a.offset(4),
-            *a.offset(5),
-            *a.offset(6),
-            *a.offset(7),
+            a.offset(0).read_unaligned(),
+            a.offset(1).read_unaligned(),
+            a.offset(2).read_unaligned(),
+            a.offset(3).read_unaligned(),
+            a.offset(4).read_unaligned(),
+            a.offset(5).read_unaligned(),
+            a.offset(6).read_unaligned(),
+            a.offset(7).read_unaligned(),
         ];
         let bv = [
-            *b.offset(0),
-            *b.offset(1),
-            *b.offset(2),
-            *b.offset(3),
-            *b.offset(4),
-            *b.offset(5),
-            *b.offset(6),
-            *b.offset(7),
+            b.offset(0).read_unaligned(),
+            b.offset(1).read_unaligned(),
+            b.offset(2).read_unaligned(),
+            b.offset(3).read_unaligned(),
+            b.offset(4).read_unaligned(),
+            b.offset(5).read_unaligned(),
+            b.offset(6).read_unaligned(),
+            b.offset(7).read_unaligned(),
         ];
         let r = mul_i32x8(av, bv);
         for (i, &val) in r.iter().enumerate() {
-            *out.add(i) = val;
+            out.add(i).write_unaligned(val);
         }
     }
 }
@@ -732,28 +743,28 @@ pub extern "C" fn rt_simd_mul_i32x8(a: *const i32, b: *const i32, out: *mut i32)
 pub extern "C" fn rt_simd_xor_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0),
-            *a.offset(1),
-            *a.offset(2),
-            *a.offset(3),
-            *a.offset(4),
-            *a.offset(5),
-            *a.offset(6),
-            *a.offset(7),
+            a.offset(0).read_unaligned(),
+            a.offset(1).read_unaligned(),
+            a.offset(2).read_unaligned(),
+            a.offset(3).read_unaligned(),
+            a.offset(4).read_unaligned(),
+            a.offset(5).read_unaligned(),
+            a.offset(6).read_unaligned(),
+            a.offset(7).read_unaligned(),
         ];
         let bv = [
-            *b.offset(0),
-            *b.offset(1),
-            *b.offset(2),
-            *b.offset(3),
-            *b.offset(4),
-            *b.offset(5),
-            *b.offset(6),
-            *b.offset(7),
+            b.offset(0).read_unaligned(),
+            b.offset(1).read_unaligned(),
+            b.offset(2).read_unaligned(),
+            b.offset(3).read_unaligned(),
+            b.offset(4).read_unaligned(),
+            b.offset(5).read_unaligned(),
+            b.offset(6).read_unaligned(),
+            b.offset(7).read_unaligned(),
         ];
         let r = xor_i32x8(av, bv);
         for (i, &val) in r.iter().enumerate() {
-            *out.add(i) = val;
+            out.add(i).write_unaligned(val);
         }
     }
 }
@@ -762,28 +773,28 @@ pub extern "C" fn rt_simd_xor_i32x8(a: *const i32, b: *const i32, out: *mut i32)
 pub extern "C" fn rt_simd_and_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0),
-            *a.offset(1),
-            *a.offset(2),
-            *a.offset(3),
-            *a.offset(4),
-            *a.offset(5),
-            *a.offset(6),
-            *a.offset(7),
+            a.offset(0).read_unaligned(),
+            a.offset(1).read_unaligned(),
+            a.offset(2).read_unaligned(),
+            a.offset(3).read_unaligned(),
+            a.offset(4).read_unaligned(),
+            a.offset(5).read_unaligned(),
+            a.offset(6).read_unaligned(),
+            a.offset(7).read_unaligned(),
         ];
         let bv = [
-            *b.offset(0),
-            *b.offset(1),
-            *b.offset(2),
-            *b.offset(3),
-            *b.offset(4),
-            *b.offset(5),
-            *b.offset(6),
-            *b.offset(7),
+            b.offset(0).read_unaligned(),
+            b.offset(1).read_unaligned(),
+            b.offset(2).read_unaligned(),
+            b.offset(3).read_unaligned(),
+            b.offset(4).read_unaligned(),
+            b.offset(5).read_unaligned(),
+            b.offset(6).read_unaligned(),
+            b.offset(7).read_unaligned(),
         ];
         let r = and_i32x8(av, bv);
         for (i, &val) in r.iter().enumerate() {
-            *out.add(i) = val;
+            out.add(i).write_unaligned(val);
         }
     }
 }
@@ -792,28 +803,28 @@ pub extern "C" fn rt_simd_and_i32x8(a: *const i32, b: *const i32, out: *mut i32)
 pub extern "C" fn rt_simd_or_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0),
-            *a.offset(1),
-            *a.offset(2),
-            *a.offset(3),
-            *a.offset(4),
-            *a.offset(5),
-            *a.offset(6),
-            *a.offset(7),
+            a.offset(0).read_unaligned(),
+            a.offset(1).read_unaligned(),
+            a.offset(2).read_unaligned(),
+            a.offset(3).read_unaligned(),
+            a.offset(4).read_unaligned(),
+            a.offset(5).read_unaligned(),
+            a.offset(6).read_unaligned(),
+            a.offset(7).read_unaligned(),
         ];
         let bv = [
-            *b.offset(0),
-            *b.offset(1),
-            *b.offset(2),
-            *b.offset(3),
-            *b.offset(4),
-            *b.offset(5),
-            *b.offset(6),
-            *b.offset(7),
+            b.offset(0).read_unaligned(),
+            b.offset(1).read_unaligned(),
+            b.offset(2).read_unaligned(),
+            b.offset(3).read_unaligned(),
+            b.offset(4).read_unaligned(),
+            b.offset(5).read_unaligned(),
+            b.offset(6).read_unaligned(),
+            b.offset(7).read_unaligned(),
         ];
         let r = or_i32x8(av, bv);
         for (i, &val) in r.iter().enumerate() {
-            *out.add(i) = val;
+            out.add(i).write_unaligned(val);
         }
     }
 }
@@ -822,18 +833,18 @@ pub extern "C" fn rt_simd_or_i32x8(a: *const i32, b: *const i32, out: *mut i32) 
 pub extern "C" fn rt_simd_shl_i32x8(a: *const i32, n: i64, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0),
-            *a.offset(1),
-            *a.offset(2),
-            *a.offset(3),
-            *a.offset(4),
-            *a.offset(5),
-            *a.offset(6),
-            *a.offset(7),
+            a.offset(0).read_unaligned(),
+            a.offset(1).read_unaligned(),
+            a.offset(2).read_unaligned(),
+            a.offset(3).read_unaligned(),
+            a.offset(4).read_unaligned(),
+            a.offset(5).read_unaligned(),
+            a.offset(6).read_unaligned(),
+            a.offset(7).read_unaligned(),
         ];
         let r = shl_i32x8(av, n);
         for (i, &val) in r.iter().enumerate() {
-            *out.add(i) = val;
+            out.add(i).write_unaligned(val);
         }
     }
 }
@@ -842,18 +853,18 @@ pub extern "C" fn rt_simd_shl_i32x8(a: *const i32, n: i64, out: *mut i32) {
 pub extern "C" fn rt_simd_shr_i32x8(a: *const i32, n: i64, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0),
-            *a.offset(1),
-            *a.offset(2),
-            *a.offset(3),
-            *a.offset(4),
-            *a.offset(5),
-            *a.offset(6),
-            *a.offset(7),
+            a.offset(0).read_unaligned(),
+            a.offset(1).read_unaligned(),
+            a.offset(2).read_unaligned(),
+            a.offset(3).read_unaligned(),
+            a.offset(4).read_unaligned(),
+            a.offset(5).read_unaligned(),
+            a.offset(6).read_unaligned(),
+            a.offset(7).read_unaligned(),
         ];
         let r = shr_i32x8(av, n);
         for (i, &val) in r.iter().enumerate() {
-            *out.add(i) = val;
+            out.add(i).write_unaligned(val);
         }
     }
 }
@@ -1009,5 +1020,117 @@ mod tests {
         let a = [1_i32, 2, 3, 4, 5, 6, 7, 8];
         let b = [2_i32, 3, 4, 5, 6, 7, 8, 9];
         assert_eq!(mul_i32x8(a, b), [2, 6, 12, 20, 30, 42, 56, 72]);
+    }
+
+    // Regression tests for
+    // doc/08_tracking/bug/mlkem_ntt_simd_public_interface_probe_crashes_not_pass_2026-08-05.md
+    //
+    // The `rt_simd_*_i32x8` extern "C" FFI wrappers take raw `*const i32` /
+    // `*mut i32` pointers that are marshalled in from caller-side storage
+    // (interpreter arrays, SFFI-marshalled buffers, etc.) whose 4-byte
+    // alignment is not guaranteed. Before the fix, these wrappers read/wrote
+    // through the pointers with a plain `*ptr.offset(i)`, which lowers to
+    // `ptr::read`/`ptr::write` and panics with "misaligned pointer
+    // dereference: address must be a multiple of 0x4 but is 0x..." whenever
+    // the incoming pointer isn't 4-byte aligned. These tests deliberately
+    // construct a misaligned `*const i32`/`*mut i32` (by byte-offsetting a
+    // byte buffer by 1..3 bytes) and confirm every `_i32x8` FFI wrapper
+    // handles it via unaligned read/write instead of panicking.
+    fn with_misaligned_i32x8<R>(byte_shift: usize, values: [i32; 8], f: impl FnOnce(*const i32) -> R) -> R {
+        // Oversized byte buffer so `byte_shift + 32` bytes always fits, and
+        // deliberately offset so the resulting pointer is NOT 4-byte aligned
+        // (byte_shift in 1..=3).
+        assert!(byte_shift >= 1 && byte_shift <= 3, "byte_shift must produce a misaligned i32 pointer");
+        let mut buf = vec![0_u8; byte_shift + 32 + 4];
+        unsafe {
+            let base = buf.as_mut_ptr().add(byte_shift) as *mut i32;
+            assert_ne!((base as usize) % 4, 0, "test setup must produce a misaligned pointer");
+            for (i, &v) in values.iter().enumerate() {
+                base.add(i).write_unaligned(v);
+            }
+            f(base as *const i32)
+        }
+    }
+
+    fn misaligned_out_buf(byte_shift: usize) -> (Vec<u8>, *mut i32) {
+        assert!(byte_shift >= 1 && byte_shift <= 3);
+        let mut buf = vec![0_u8; byte_shift + 32 + 4];
+        let ptr = unsafe { buf.as_mut_ptr().add(byte_shift) as *mut i32 };
+        assert_ne!((ptr as usize) % 4, 0);
+        (buf, ptr)
+    }
+
+    fn read_out_i32x8(ptr: *const i32) -> [i32; 8] {
+        unsafe {
+            [
+                ptr.offset(0).read_unaligned(),
+                ptr.offset(1).read_unaligned(),
+                ptr.offset(2).read_unaligned(),
+                ptr.offset(3).read_unaligned(),
+                ptr.offset(4).read_unaligned(),
+                ptr.offset(5).read_unaligned(),
+                ptr.offset(6).read_unaligned(),
+                ptr.offset(7).read_unaligned(),
+            ]
+        }
+    }
+
+    #[test]
+    fn rt_simd_mul_i32x8_misaligned_pointer_does_not_panic() {
+        for shift in 1..=3 {
+            let a = [1_i32, 2, 3, 4, 5, 6, 7, 8];
+            let b = [2_i32, 3, 4, 5, 6, 7, 8, 9];
+            with_misaligned_i32x8(shift, a, |a_ptr| {
+                with_misaligned_i32x8(shift, b, |b_ptr| {
+                    let (_out_buf, out_ptr) = misaligned_out_buf(shift);
+                    rt_simd_mul_i32x8(a_ptr, b_ptr, out_ptr);
+                    assert_eq!(read_out_i32x8(out_ptr), [2, 6, 12, 20, 30, 42, 56, 72]);
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn rt_simd_add_sub_xor_and_or_shl_shr_i32x8_misaligned_pointer_does_not_panic() {
+        for shift in 1..=3 {
+            let a = [1_i32, 2, 3, 4, 5, 6, 7, 8];
+            let b = [10_i32, 20, 30, 40, 50, 60, 70, 80];
+
+            with_misaligned_i32x8(shift, a, |a_ptr| {
+                with_misaligned_i32x8(shift, b, |b_ptr| {
+                    let (_o1, add_out) = misaligned_out_buf(shift);
+                    rt_simd_add_i32x8(a_ptr, b_ptr, add_out);
+                    assert_eq!(read_out_i32x8(add_out), [11, 22, 33, 44, 55, 66, 77, 88]);
+
+                    let (_o2, sub_out) = misaligned_out_buf(shift);
+                    rt_simd_sub_i32x8(b_ptr, a_ptr, sub_out);
+                    assert_eq!(read_out_i32x8(sub_out), [9, 18, 27, 36, 45, 54, 63, 72]);
+
+                    let (_o3, xor_out) = misaligned_out_buf(shift);
+                    rt_simd_xor_i32x8(a_ptr, a_ptr, xor_out);
+                    assert_eq!(read_out_i32x8(xor_out), [0, 0, 0, 0, 0, 0, 0, 0]);
+
+                    let (_o4, and_out) = misaligned_out_buf(shift);
+                    rt_simd_and_i32x8(a_ptr, a_ptr, and_out);
+                    assert_eq!(read_out_i32x8(and_out), a);
+
+                    let (_o5, or_out) = misaligned_out_buf(shift);
+                    rt_simd_or_i32x8(a_ptr, a_ptr, or_out);
+                    assert_eq!(read_out_i32x8(or_out), a);
+                });
+            });
+
+            let (_o6, shl_out) = misaligned_out_buf(shift);
+            with_misaligned_i32x8(shift, a, |a_ptr| {
+                rt_simd_shl_i32x8(a_ptr, 1, shl_out);
+            });
+            assert_eq!(read_out_i32x8(shl_out), [2, 4, 6, 8, 10, 12, 14, 16]);
+
+            let (_o7, shr_out) = misaligned_out_buf(shift);
+            with_misaligned_i32x8(shift, a, |a_ptr| {
+                rt_simd_shr_i32x8(a_ptr, 1, shr_out);
+            });
+            assert_eq!(read_out_i32x8(shr_out), [0, 1, 1, 2, 2, 3, 3, 4]);
+        }
     }
 }
