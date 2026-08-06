@@ -9,7 +9,7 @@
 # FormFactorProfile.scale_permille, which is meant to be fed straight into
 # compute_layout by callers that know the device's DPI scale.
 
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, assert_true}
 use common.ui.widget.{WidgetNode, WidgetKind}
 use common.ui.builder.{column, button}
 use common.ui.layout.{compute_layout, find_rect}
@@ -22,6 +22,11 @@ use common.ui.viewport.{new_viewport}
 # geometry. Build a border-free vbox container directly (any non-"panel"
 # kind skips the border trim) so the child-doubling assertions below are
 # exact instead of off-by-the-border-constant.
+#
+# The panel path itself is NOT exempt from scaling, though — it is only the
+# 1px border that stays unscaled. The "panel border insets the scaled rect"
+# example below pins that exactly, because the panel branch once inset the
+# RAW args and so dropped DPI scaling for every container subtree.
 fn _vbox(id: text, child: WidgetNode) -> WidgetNode:
     var node = WidgetNode.new(id, WidgetKind.Card.to_wire())
     node = node.set_layout("vbox")
@@ -66,6 +71,43 @@ describe "compute_layout scale_permille":
                         expect(c2x.w).to_equal(c1x.w * 2)
                         expect(c2x.h).to_equal(c1x.h * 2)
                     case _: assert_true(false)
+            case _: assert_true(false)
+
+    it "insets a panel's 1px border from the SCALED rect, not the raw one":
+        # REGRESSION: `column()` builds a WidgetKind.Panel, so this is the
+        # common container path. The panel branch used to compute
+        # inner = (x+1, y+1, w-2, h-2) from the UNSCALED args, which placed
+        # the child at the 1x inner rect no matter what scale was asked for —
+        # a child drawn at half size in the top-left corner at 2.0x DPI.
+        val root = column("scale_panel_root", [button("scale_panel_child", "C", "a")])
+        val rects_2x = compute_layout(root, 10, 20, 100, 50, 2000)
+        match find_rect(rects_2x, "scale_panel_root"):
+            case Some(r):
+                expect(r.x).to_equal(20)
+                expect(r.y).to_equal(40)
+                expect(r.w).to_equal(200)
+                expect(r.h).to_equal(100)
+            case _: assert_true(false)
+        # inner = scaled rect inset by the unscaled 1px border on each side
+        match find_rect(rects_2x, "scale_panel_child"):
+            case Some(c):
+                expect(c.x).to_equal(21)
+                expect(c.y).to_equal(41)
+                expect(c.w).to_equal(198)
+                expect(c.h).to_equal(98)
+            case _: assert_true(false)
+
+    it "leaves the panel path untouched at identity scale (control)":
+        # Discriminating control: must hold both before and after the fix, so
+        # a green above cannot come from the oracle passing wholesale.
+        val root = column("scale_panel_id_root", [button("scale_panel_id_child", "C", "a")])
+        val rects_1x = compute_layout(root, 10, 20, 100, 50, 1000)
+        match find_rect(rects_1x, "scale_panel_id_child"):
+            case Some(c):
+                expect(c.x).to_equal(11)
+                expect(c.y).to_equal(21)
+                expect(c.w).to_equal(98)
+                expect(c.h).to_equal(48)
             case _: assert_true(false)
 
 describe "FormFactorProfile.scale_permille":
