@@ -28,6 +28,15 @@
 #
 # Usage: sh scripts/check/check-keyword-identifier-bindings.shs
 # Exit 0 = clean, 1 = violations listed as file:line, 2 = could not scan.
+#
+# OUTPUT CONTRACT
+#   PASS  — <n> .spl file(s) checked      (n is ALWAYS > 0)
+#   FAIL  — <n> .spl file(s) checked, <k> violation(s), exit 1
+#   ERROR — nothing was checked, exit 2
+# The count is what makes a vacuous run visible: this guard used to print a bare
+# "OK: no keyword bindings", which is indistinguishable from a run that scanned
+# zero files. That bare-OK is why it sat in guard_wiring_optout.txt instead of
+# gating. Never remove the count.
 
 set -u
 
@@ -49,7 +58,15 @@ file_list=$(git ls-files -- src test \
     | while IFS= read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done)
 
 if [ -z "$file_list" ]; then
-    echo "check-keyword-identifier-bindings: no tracked .spl files found under src/ test/" >&2
+    echo "check-keyword-identifier-bindings: ERROR — nothing was checked (no tracked .spl files found under src/ test/)" >&2
+    exit 2
+fi
+
+file_count=$(printf '%s\n' "$file_list" | grep -c .)
+# A tree this size always has thousands of tracked .spl files. Anything near
+# zero means the enumerator broke, not that the tree got clean.
+if [ "$file_count" -lt 500 ]; then
+    echo "check-keyword-identifier-bindings: ERROR — nothing was checked (only $file_count .spl file(s) enumerated, expected >= 500)" >&2
     exit 2
 fi
 
@@ -76,8 +93,9 @@ fi
 if [ -n "$src_violations" ]; then
     echo "FAIL: reserved keyword used as a binding identifier (seed accepts, self-hosted parser rejects — breaks bootstrap Stage 4):" >&2
     printf '%s\n' "$src_violations" >&2
+    echo "check-keyword-identifier-bindings: FAIL — $file_count .spl file(s) checked, $(printf '%s\n' "$src_violations" | grep -c .) violation(s)" >&2
     exit 1
 fi
 
-echo "OK: no keyword bindings"
+echo "check-keyword-identifier-bindings: PASS — $file_count .spl file(s) checked"
 exit 0
