@@ -830,6 +830,46 @@ fn try_skip_ident_generic_args():
         lex_snapshot_restore(snap_nums, snap_txts)
         parser_tok_restore(saved_tok_nums, saved_tok_text)
 
+# Nested tuple-index re-split: `pair.0.1`.
+#
+# The number scanner takes the maximal munch, so the source `.0.1` after a
+# member dot lexes as TOK_DOT + TOK_FLOAT_LIT("0.1") — never DOT INT DOT INT.
+# In member position a float literal cannot mean a number, so its raw lexeme is
+# re-split into the two tuple indices it actually spells.
+#
+# The split reads the token TEXT, not a decoded f64: `t.0.10` must yield index
+# 10, and the f64 payloads of `0.10` and `0.1` are identical.
+#
+# Returns [] (caller falls through to the existing "expected field name" error)
+# for anything that is not exactly `<digits>.<digits>` — e.g. `0.1e2`, so
+# exponent forms keep reporting rather than silently mis-indexing.
+# Digit test written out rather than reusing lexer_chars.is_digit so this file
+# gains no new module edge (parser_expr is already in the parser's mutual
+# recursion cluster; a fresh import there widens the load graph for no gain).
+fn tuple_index_digit(c: text) -> bool:
+    (c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or
+     c == "5" or c == "6" or c == "7" or c == "8" or c == "9")
+
+fn tuple_index_pair_split(t: text) -> [text]:
+    val n: i64 = t.len()
+    var dot: i64 = -1
+    var i: i64 = 0
+    while i < n:
+        val c: text = t[i:i + 1]
+        if c == ".":
+            if dot >= 0:
+                return []
+            dot = i
+        elif not tuple_index_digit(c):
+            return []
+        i = i + 1
+    if dot <= 0:
+        return []
+    if dot == n - 1:
+        return []
+    [t[0:dot], t[dot + 1:n]]
+
+
 # Struct literal tail: parse `{ field: value, ... }` after a type-path base
 # (bare ident or dotted path).  Simple blocks are colon+indent, never brace, so
 # `Ident {` in expression position is unambiguously a struct literal (a dict
@@ -935,6 +975,14 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                 parser_advance()
                 base = expr_field_access(base, ppo_idx_name, 0)
                 continue
+            # Nested tuple-field access: pair.0.1 (see tuple_index_pair_split)
+            if member_kind == 2:
+                val ppo_pair = tuple_index_pair_split(member_text)
+                if ppo_pair.len() == 2:
+                    parser_advance()
+                    base = expr_field_access(base, ppo_pair[0], 0)
+                    base = expr_field_access(base, ppo_pair[1], 0)
+                    continue
             # G25: accept keyword tokens as member names (e.g. .new, .type)
             var field_name = member_text
             val ppo_kw_name = tok_kind_name(member_kind)
@@ -1134,6 +1182,14 @@ fn parse_postfix() -> i64:
                 parser_advance()
                 base = expr_field_access(base, pp_idx_name, 0)
                 continue
+            # Nested tuple-field access: pair.0.1 (see tuple_index_pair_split)
+            if member_kind == 2:
+                val pp_pair = tuple_index_pair_split(member_text)
+                if pp_pair.len() == 2:
+                    parser_advance()
+                    base = expr_field_access(base, pp_pair[0], 0)
+                    base = expr_field_access(base, pp_pair[1], 0)
+                    continue
             # G25: accept keyword tokens as member names (e.g. .new, .type)
             var field_name = member_text
             val pp_kw_name = tok_kind_name(member_kind)
