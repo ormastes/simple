@@ -243,3 +243,119 @@ seeding assigned 6 reason strings to 347 guards by pattern, and at least 20 of
 those assignments were wrong. **Test an exemption by running the thing.** A
 reason that names a resource the script never invokes is a false exemption, and
 a false exemption is how a RED gate stays invisible.
+
+---
+
+## Follow-up 2026-08-06 (same day): three of this audit's own verdicts were wrong
+
+A follow-up lane took the three worst-class findings above and re-verified each
+at `origin/main` before acting. All three re-verifications changed the verdict.
+Recording them here because the rule this document establishes — *test an
+exemption by running the thing* — applies to this document too.
+
+### 1. The "real proof trust bypass" was a detector false positive
+
+`check-simpleos-critical-formal-proofs.shs` was RED on
+`FAIL verification/kernel_capabilities -- contains 1 proof trust bypass(es)
+outside comments`. There is **no bypass**. The hit is
+`src/verification/kernel_capabilities/KernelCapabilities/SingleUse.lean:3`,
+which reads *"a **sorry**-free proof of the"* inside a `/- ... -/` docstring.
+
+Root cause: `scripts/check/check-lean-proofs.shs:36` stripped only `--` LINE
+comments (`sed 's/--.*//'`) before the trust grep, so Lean block comments and
+docstrings survived it. A prose allowlist (`without sorry` / `no sorry` /
+`zero sorry`) covered some phrasings and missed `sorry-free`.
+
+Census across all 38 Lake projects: **21 `TRUST_RE` hits, every one of them
+prose inside a `/- -/` docstring**, of which 11 said "sorry-free" and were
+therefore unallowlisted. Two projects were falsely red — `kernel_capabilities`
+(1 hit) and `os_enforcement` (8).
+
+Fixed in `ecee1902710` by making the header's "excluding comments" contract
+true: an awk state machine strips block comments and docstrings with nesting
+depth, reset per file so an unterminated comment cannot swallow the next file.
+A bypass following a closed block comment on the same line is still counted.
+Self-test raised 5 → 7 fixtures. Full run after: `lean-proof-check: PASS — 38
+project(s), 99 .lean file(s) checked`.
+
+### 2. The five `*-formal-proofs.shs` "FALSE EXEMPTION, gate is GREEN" verdicts are wrong — the exemptions are GENUINE
+
+The toolchain re-test in the *"Toolchain re-test (the second-pass
+correction)"* section above is **invalid for every Lean gate**. It stripped
+`~/.elan/bin` from `PATH` — but `check-lean-proofs.shs` never consults `PATH`
+first:
+
+```sh
+elif [ -x "$HOME/.elan/bin/lake" ]; then
+    LAKE="$HOME/.elan/bin/lake"
+```
+
+It probes `$HOME/.elan/bin/lake` **directly**. Stripping `PATH` changed
+nothing; lake was used throughout. Re-run with `HOME` also neutralised
+(`env PATH=/usr/bin:/bin HOME=/nonexistent`), all six Lean gates exit 1 with
+`error: lake not found; install via elan or set LAKE_BIN`:
+`check-simpleos-{boundary,compiler-language,critical,memory-safety,storage,
+ui-policy}-formal-proofs.shs` and `check-cache-identity-formal-proofs.shs`.
+
+They genuinely need the Lean/lake toolchain and are **not** wirable in a
+checkout-only job. Their original *hardware* wording was still wrong (no QEMU,
+FPGA or board is involved), so the entries were corrected a second time — to a
+reason that is true.
+
+This is the same error shape the audit warned about one paragraph earlier, in
+the same paragraph that claimed to have controlled for it. A `PATH` strip only
+proves independence from `PATH`.
+
+### 3. `check-cuda-generated-2d-readback.shs` is not fail-open
+
+The two digests quoted above differ **by design**. They are provenance hashes
+of two distinct artifact FILES, `build/cuda_generated_2d_readback/`
+`{expected,actual}-u32.json` — both 1975 bytes and byte-identical except their
+`producer` key (`cuda-generated-2d-expected` vs `cuda-generated-2d-readback`).
+They are not an expected-vs-actual comparison and comparing them would make the
+gate permanently and wrongly red.
+
+The comparison that gates the script is element-wise in the CUDA driver helper:
+`expected_checksum=274983770116`, `actual_checksum=274983770116`,
+`mismatch_count=0`, over 64 pixels on a real device. Its exit 0 was earned.
+
+What was genuinely missing is what let this be misread: the script ended on a
+bare `[ "$(cuda_env_value ..._status)" = "pass" ]`, so its last stdout line was
+the unrelated digest pair and it had no verdict and no count. `4917c71d342`
+adds one, plus fail-closed branches that did not exist before for
+`status=pass` with a nonzero `mismatch_count` and for `status=pass` with a zero
+or missing pixel count.
+
+### 4. `qemu-frozen-source-admission.shs` is a library, not a fail-open gate
+
+It lives at `scripts/check/**lib**/` and defines only shell functions
+(`qemu_admission_begin` / `_publish` / `_source_snapshot` / `_sha256`), sourced
+by QEMU evidence producers. Executing it directly defines functions and
+returns; **printing nothing and exiting 0 is correct for a library**.
+
+The real defect is in the enumerator: `check-guard-wiring.shs:79` does
+`find "$_root/scripts/check" -type f -name '*.shs'` with no depth limit, so it
+sweeps `lib/` into the guard set and five sourced libraries appear as guards
+needing an opt-out. Not fixed here: excluding `scripts/check/lib/` would lower
+`guard_total` below the published 444 and must land together with removing the
+corresponding opt-out entries, or `optout_gone` fires. Filed, not silenced.
+
+Unrelated but noted: this library shells out to `python3`, which violates the
+repo's no-Python rule.
+
+### What this follow-up did NOT do
+
+`check-simpleos-critical-formal-proofs.shs` was **not** wired, contrary to the
+plan. Its Lean dependency is real (finding 2), and wiring it would put CI red
+for a genuine environment reason. Making the exemption *true* is the honest
+outcome; making the gate run where it cannot is not.
+
+The other 7 RED gates from the table above are untouched and still need owners.
+
+### Rule this adds
+
+**A capability re-test must remove the capability, not one route to it.** Both
+this document's `nvcc` correction and its `PATH`-strip correction were written
+to catch exactly this, and the `PATH` strip still missed a hardcoded
+`$HOME/.elan/bin` probe. Before claiming a script does not need a tool, grep
+the script for every path it could reach that tool by.
