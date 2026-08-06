@@ -2584,6 +2584,26 @@ impl MirLowering:
                             val fold_init_raw = self.lower_expr(args[0].value)
                             return self.lower_array_fold(unresolved_receiver_local, fold_init_raw, fold_lam_op)
 
+                    # `.first()`/`.last()` have no MethodResolver entry either
+                    # (same builtin-Array gap as push/map/filter/fold above),
+                    # so they always reach this Unresolved arm and used to
+                    # fall through to the generic "unresolved method call"
+                    # loud-fail below -- see
+                    # doc/08_tracking/bug/mir_lowering_codegen_error_first_call_zero_core_dump_2026-08-06.md.
+                    # Give them real lowering, parallel to push/map/filter/fold.
+                    # `lower_array_first_or_last` returns nil (rather than a
+                    # guessed-type lowering) when the element type can't be
+                    # determined -- fall through to the existing loud
+                    # placeholder below for that narrow case, same as
+                    # `map`/`filter` above already do when their lambda arg
+                    # doesn't match the liftable shape.
+                    if method == "first" and args.len() == 0:
+                        if val first_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, false):
+                            return first_result
+                    if method == "last" and args.len() == 0:
+                        if val last_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, true):
+                            return last_result
+
                 # Bug #149: `x.push(item)` never resolves via MethodResolver
                 # (try_instance_method/try_trait_method/try_ufcs in
                 # resolve_strategies.spl all require a symbol-bearing HIR
@@ -3454,6 +3474,154 @@ impl MirLowering:
         b_exit.switch_to_block(exit_block)
         self.builder = b_exit
         acc
+
+    me lower_array_first_or_last(receiver: HirExpr, arr: LocalId, want_last: bool) -> LocalId?:
+        """Real MIR lowering for `Array.first()`/`.last()` on a runtime
+        array, returning a genuine `Option<T>` handle -- mirrors
+        `Option.map`'s some/none/merge shape immediately above (the
+        `option_method_receiver` `"map"` arm), which is the established
+        pattern for constructing an `Option<T>` result from computed
+        control flow rather than a literal `Some(x)`/`nil` expression.
+
+        Length is checked explicitly (`rt_array_len`) rather than relying
+        on `rt_array_get`'s own out-of-bounds sentinel: `rt_array_get`
+        returns the RAW, UNDECODED bit pattern `3` for out-of-bounds, but a
+        present element is stored TAGGED (`push`'s `box_runtime_value`
+        call) and must be decoded (`decode_runtime_value`) before it is a
+        valid payload for `ensure_option_handle`. Decoding unconditionally
+        would corrupt the empty-array case: shifting the tag off `3` (the
+        canonical nil sentinel, `rt_core_nil()` in runtime_native.c) yields
+        `0`, silently turning `None` into a bogus `Some(0)` -- the exact
+        collision class this codebase already fixed once for the `NilLit`
+        literal itself (see `expr_dispatch.spl`'s `case NilLit`, bug
+        `native_i64opt_some0_collapses_to_nil`). So the two cases need two
+        different code paths, not one call with a shared decode step:
+          - non-empty: `rt_array_get(arr, idx)` (idx=0 for first,
+            `len - 1` for last -- `rt_array_get` also accepts a bare `-1`
+            and internally normalizes it via `idx = len + idx`, matching
+            `rt_array_last`'s own `rt_array_get(a, -1)` definition, but the
+            explicit `len - 1` here is computed once, alongside the length
+            check already being done, rather than re-deriving it inside
+            the runtime call), decoded via `decode_runtime_value`, then
+            promoted to a real Option handle via `ensure_option_handle`.
+          - empty: a nil-marked `emit_const_int(3)` local (registered in
+            `self.nil_locals` so `ensure_option_handle` picks discriminant
+            1/None, exactly like the `Option.map` none-arm above), also
+            promoted via `ensure_option_handle`.
+        Both arms store into a shared result temp and `goto` a merge block
+        (same store-in-each-branch pattern `NullCoalesce`/`Option.map` use
+        to avoid a bare `phi` mid-block), and the merge block finishes with
+        the same three bookkeeping calls `Option.map`'s merge block makes
+        (`mark_runtime_value_local`, `option_value_locals`,
+        `remember_local_hir_type`) so downstream `.unwrap()`/`??`/`.?`/
+        `is_some`/`is_none`/`match` consumers see a fully-formed Option
+        value, not a half-tagged raw local.
+        """
+        var elem_hir_type = HirType(kind: HirTypeKind.Error, span: receiver.span)
+        var have_elem_hir = false
+        if val arr_hir_type = self.find_local_hir_type(arr.id):
+            match arr_hir_type.kind:
+                case HirTypeKind.Array(found_elem_hir, _):
+                    elem_hir_type = found_elem_hir
+                    have_elem_hir = true
+                case HirTypeKind.Slice(found_elem_hir):
+                    elem_hir_type = found_elem_hir
+                    have_elem_hir = true
+                case _: ()
+        if not have_elem_hir:
+            if val recv_hir_type = self.receiver_declared_type(receiver):
+                match recv_hir_type.kind:
+                    case HirTypeKind.Array(found_elem_hir2, _):
+                        elem_hir_type = found_elem_hir2
+                        have_elem_hir = true
+                    case HirTypeKind.Slice(found_elem_hir2):
+                        elem_hir_type = found_elem_hir2
+                        have_elem_hir = true
+                    case _: ()
+
+        if not have_elem_hir:
+            # Neither the array local's own tracked HIR type nor the
+            # receiver expression's declared type could pin down the
+            # element type. Guessing (e.g. defaulting to `MirType.i64()`)
+            # is exactly how a `[text]` receiver would silently mis-decode:
+            # `decode_runtime_value`'s integer arm shifts a tagged string
+            # handle by 3, corrupting it, with nothing downstream to flag
+            # the wrong value (unlike a crash, which at least gets noticed).
+            # Fall through to the existing loud "unresolved method call"
+            # rt_panic placeholder below instead -- untyped/unrecognized
+            # receivers keep today's exact fail-closed behavior; only
+            # receivers whose element type IS known get real lowering.
+            return nil
+
+        var elem_type = MirType.i64()
+        match elem_hir_type.kind:
+            case HirTypeKind.Str:
+                elem_type = self.bootstrap_text_type()
+            case _:
+                elem_type = self.lower_type(elem_hir_type)
+
+        # A real element type was found (the `not have_elem_hir` guard above
+        # already returned nil otherwise), so it is always safe to wrap it
+        # in `Optional(...)` and remember it on the result local below --
+        # mirrors why `Option.map` above only calls `ensure_option_handle`
+        # when `map_value_type != nil` at all.
+        val option_type = HirType(kind: HirTypeKind.Optional(elem_hir_type), span: receiver.span)
+        val name_prefix = if want_last: "last" else: "first"
+
+        var b_len = self.builder
+        val len_call = b_len.emit_call(self.rt_array_len_operand(), [mir_operand_copy(arr)], MirType.i64())
+        val len_local = len_call ?? b_len.new_temp(MirType.i64())
+        self.builder = b_len
+
+        var b_split = self.builder
+        val zero = b_split.emit_const_int(0)
+        val nonempty = b_split.emit_binop(MirBinOp.Gt, mir_operand_copy(len_local), mir_operand_copy(zero), MirType.bool())
+        val some_block = b_split.new_block(Some("{name_prefix}_some"))
+        val none_block = b_split.new_block(Some("{name_prefix}_none"))
+        val merge_block = b_split.new_block(Some("{name_prefix}_merge"))
+        val result_local = b_split.new_temp(MirType.i64())
+        b_split.terminate_if(mir_operand_copy(nonempty), some_block, none_block)
+        self.builder = b_split
+
+        var b_some = self.builder
+        b_some.switch_to_block(some_block)
+        self.builder = b_some
+        var b_idx = self.builder
+        var idx_local = b_idx.emit_const_int(0)
+        if want_last:
+            val one = b_idx.emit_const_int(1)
+            idx_local = b_idx.emit_binop(MirBinOp.Sub, mir_operand_copy(len_local), mir_operand_copy(one), MirType.i64())
+        self.builder = b_idx
+        var b_get = self.builder
+        val get_call = b_get.emit_call(self.rt_array_get_operand(), [mir_operand_copy(arr), mir_operand_copy(idx_local)], MirType.i64())
+        val elem_tagged = get_call ?? b_get.new_temp(MirType.i64())
+        self.builder = b_get
+        val elem_decoded = self.decode_runtime_value(elem_tagged, elem_type)
+        val some_handle = self.ensure_option_handle(elem_decoded, option_type)
+        var b_some_end = self.builder
+        b_some_end.emit_copy(result_local, some_handle)
+        b_some_end.terminate_goto(merge_block)
+        self.builder = b_some_end
+
+        var b_none = self.builder
+        b_none.switch_to_block(none_block)
+        self.builder = b_none
+        val nil_local = b_none.emit_const_int(3)
+        self.builder = b_none
+        self.nil_locals[nil_local.id] = true
+        val none_handle = self.ensure_option_handle(nil_local, option_type)
+        var b_none_end = self.builder
+        b_none_end.emit_copy(result_local, none_handle)
+        b_none_end.terminate_goto(merge_block)
+        self.builder = b_none_end
+
+        var b_merge = self.builder
+        b_merge.switch_to_block(merge_block)
+        self.builder = b_merge
+        self.mark_runtime_value_local(result_local.id)
+        self.option_value_locals[result_local.id] = true
+        self.remember_local_hir_type(result_local.id, option_type)
+        result_local
 
     me lower_tuple_lit(elements: [HirExpr]) -> LocalId:
         """Lower tuple literal."""

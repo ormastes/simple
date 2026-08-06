@@ -193,6 +193,91 @@ rather than silently treating it as the same issue. Not investigated further
 here (out of scope for this change); flagged for follow-up before this fix
 (or any other native-build fix) can be binary-verified end to end.
 
+## Update (2026-08-06): real MIR lowering added for `Array.first()`/`.last()`
+
+Follow-up to the "Deliberately not fixed" note above. `Array.first()` /
+`Array.last()` now get real MIR lowering in `method_calls_literals.spl`
+(`lower_array_first_or_last`, called from the same `local_is_runtime_array`
+guard block that already special-cases `push`/`map`/`filter`/`fold`), instead
+of always falling through to the const-0-placeholder-then-`rt_panic` path.
+
+**Confirmed `Option` semantics** (read directly from source, not guessed):
+- The nil/None sentinel is the raw i64 `3` (`rt_core_nil()` in
+  `runtime_native.c` = `RT_VALUE_TAG_SPECIAL | (RT_VALUE_SPECIAL_NIL << 3)`).
+  `rt_is_none(value)` treats any raw value `== 3` as None regardless of
+  static element type. This is also the exact value `NilLit` materializes
+  (`expr_dispatch.spl`, `case NilLit`) and the value `rt_array_get` already
+  returns for an out-of-bounds index.
+- The **canonical** typed `Option<T>` representation used by real
+  `Some(x)`/`None` construction sites (not the narrower raw-flat-payload
+  fast path some Option-typed *locals* use) is an enum-id-1 handle built via
+  `rt_enum_new(enum_id=1, disc, payload)` where `disc` is `0` for Some / `1`
+  for None, unwrapped via `enum_payload_value`/`rt_unwrap_or_self`. The
+  existing helper `ensure_option_handle` (`switch_operators_calls.spl:406`)
+  builds this handle from a raw payload local (using `self.nil_locals` to
+  distinguish a compile-time-known nil from a real payload) and is the
+  general-purpose promotion path already used by `Option.map`
+  (`method_calls_literals.spl:775-869`, the closest existing precedent for
+  "construct an `Option<T>` result from computed control flow") and several
+  other call sites.
+
+**Implementation** (`lower_array_first_or_last`, added just after
+`lower_array_fold`): branches on `rt_array_len(arr) > 0`. Non-empty:
+`rt_array_get(arr, idx)` (idx=0 for first, `len-1` for last) →
+`decode_runtime_value` (the array element is stored TAGGED, via `push`'s
+`box_runtime_value` call, so it must be decoded before use as a payload) →
+`ensure_option_handle`. Empty: a nil-marked `emit_const_int(3)` local →
+`ensure_option_handle`. Both arms store into a shared result temp and `goto`
+a merge block (the same store-in-each-branch pattern `NullCoalesce`/
+`Option.map` already use to avoid a bare `phi` mid-block). The element's
+declared HIR type is looked up two ways (`find_local_hir_type(arr.id)`, then
+`receiver_declared_type(receiver)`); **if neither succeeds, the function
+returns `nil` and the call site falls through to the existing loud
+"unresolved method call" `rt_panic` placeholder** rather than guessing a
+type — a guessed `MirType.i64()` for, say, a `[text]` receiver would send
+`decode_runtime_value` down its integer arm, silently corrupting the string
+handle instead of failing loudly. So today: `.first()`/`.last()` on any
+receiver whose element type is statically known gets real Option-returning
+lowering; other receivers keep exactly today's fail-closed behavior.
+
+**Verification status: implemented, NOT execution-verified.** Every
+available `simple` executable turned out to be unable to exercise the edited
+`.spl` source:
+- `bin/simple` (`bin/release/x86_64-unknown-linux-gnu/simple`) is, despite
+  its name and the `bootstrap.md` policy ("NEVER copy Rust bootstrap binary
+  to `bin/release/simple`"), **currently the Rust seed** — running it prints
+  the seed's own "this Rust-built Simple binary is a bootstrap seed only"
+  warning. It is a compiled artifact and cannot read this edit at all; any
+  test run through it exercises the seed's own pre-existing
+  `rt_array_first`/`rt_array_last` native support (confirmed present in
+  `src/compiler_rust/compiler/src/codegen/**`), not this change. (Recording
+  this as a separate finding: there is currently no deployed pure-Simple
+  self-hosted binary, contrary to policy.)
+- `bootstrap/stage3/x86_64-unknown-linux-gnu/simple` is a real self-hosted
+  binary, but was built at 04:14 today, before this edit, so it also cannot
+  exercise it without a fresh bootstrap.
+- Running the seed directly against the compiler's own **source** (`seed
+  src/app/cli/compile_entry.spl compile --native -o out probe.spl`, the
+  "interpreted worker path" pattern from this bug's original fix) does load
+  and parse this edited file correctly (no parse/syntax errors across
+  several full-tree loads that walked past it), but `cli_compile` resolves
+  to `src/app/io/mod_stub.spl`'s stub (`"Error: compile requires Rust SFFI
+  support"`) rather than the real driver when the seed interprets the
+  compiler tree this way — codegen is unreachable through this route.
+- A full `bootstrap-from-scratch.sh` rebuild would produce a binary that
+  could actually exercise this change, but was judged out of scope for this
+  narrower change (see "No bootstrap unless essential").
+
+Side finding, unrelated to this change but discovered while probing it: a
+plain `bin/simple native-build hello.spl` (`fn main(): print("hello")`)
+**succeeded** (exit 0, ran, printed `hello`) on the current seed-as-`bin/
+simple` setup, taking ~150s. This is evidence *against* this bug's earlier
+"native-build currently SIGSEGVs on every invocation, including trivial
+`hello.spl`" blocker being live right now -- but since that run also went
+through the seed, not a rebuilt self-hosted stage3, it does not by itself
+retire that blocker for the self-hosted binary; it only shows the seed
+itself is not universally broken this way today.
+
 ## Why the original "core-dumps" description pointed at the wrong layer
 
 The task that surfaced this bug reasonably assumed the crash was in MIR
