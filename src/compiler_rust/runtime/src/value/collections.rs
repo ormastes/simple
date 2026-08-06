@@ -1791,6 +1791,189 @@ pub extern "C" fn rt_array_free(array: RuntimeValue) {
     }
 }
 
+/// Bounds the planner's own memory; exceeding it refuses rather than grows.
+/// Same value as `RT_CORE_DEEP_FREE_MAX_NODES` in runtime_native.c.
+const RT_DEEP_FREE_MAX_NODES: usize = 1 << 22;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeepFreeKind {
+    Array,
+    String,
+}
+
+enum DeepFreeClass {
+    /// Nothing to free and nothing to strand.
+    Leaf,
+    /// Not provably freeable — refuses the WHOLE call.
+    Refuse,
+    Node(*mut HeapHeader, DeepFreeKind),
+}
+
+/// Classify one element slot for `rt_array_free_deep`.
+///
+/// Every dereference is gated on a registry membership test (a pure pointer
+/// comparison inside `get_typed_ptr_mut`), so a raw i64 that merely aliases the
+/// heap tag is never dereferenced. Twin of `rt_core_deep_free_classify`
+/// (runtime_native.c:5311).
+fn deep_free_classify(value: RuntimeValue) -> DeepFreeClass {
+    // Immediates (int / float / nil / bool) hold no heap reference. Mirrors the
+    // C `raw < 4096` + `tag != TAG_HEAP` leaf tests.
+    if !value.is_heap() {
+        return DeepFreeClass::Leaf;
+    }
+    if let Some(ptr) = get_typed_ptr_mut::<RuntimeArray>(value, HeapObjectType::Array) {
+        return DeepFreeClass::Node(ptr as *mut HeapHeader, DeepFreeKind::Array);
+    }
+    if let Some(ptr) = get_typed_ptr_mut::<RuntimeString>(value, HeapObjectType::String) {
+        // RT_STRING_FLAG_SHARED marks the process-wide short-string cache and
+        // the literal intern table, whose objects are handed to unrelated
+        // holders — rt_string_free's own rule.
+        if unsafe { (*ptr).header.reserved & RT_STRING_FLAG_SHARED } != 0 {
+            return DeepFreeClass::Refuse;
+        }
+        return DeepFreeClass::Node(ptr as *mut HeapHeader, DeepFreeKind::String);
+    }
+    // Heap-tagged but neither a registered array nor a freeable registered
+    // string: dicts, tuples, objects, closures, enums, foreign pointers,
+    // already-freed pointers, and raw i64 payloads that alias the tag bits.
+    // Freeing the holding buffer would strand them irreversibly, so refuse.
+    DeepFreeClass::Refuse
+}
+
+/// Deep (recursive) array free. Returns 1 only if the ENTIRE reachable
+/// structure was reclaimed, 0 if the call was refused having freed NOTHING.
+///
+/// Rust-side twin of `rt_array_free_deep` in src/runtime/runtime_native.c
+/// (:5335), matching its contract bit for bit so the C-linked self-hosted lane
+/// and the Rust seed/JIT lane resolve the same symbol with the same semantics.
+/// `rt_array_free` above is SHALLOW: it releases the outer buffer and header
+/// and leaks every heap element the buffer pointed at.
+///
+/// PARTIAL-FREE POLICY: ALL-OR-NOTHING, decided in two phases. Phase 1 walks
+/// the whole structure READ-ONLY and classifies every reachable node, freeing
+/// nothing; if any node is not provably freeable the call returns 0 having
+/// freed nothing at all. Only a fully-provable structure reaches phase 2.
+///
+/// Rejecting the "free the outer buffer anyway" alternative: a refused element
+/// is reachable ONLY through the buffer that holds it, so freeing the buffer
+/// makes it simultaneously unreachable AND unfreeable — a permanent leak.
+/// Refusing also leaks, but reversibly: the caller still holds the root and can
+/// retry, free the elements individually, or fall back to `rt_array_free`. A
+/// reversible leak strictly dominates an irreversible one.
+///
+/// Provably freeable: byte-packed / u64-packed payloads (no heap references by
+/// construction, element scan skipped), immediate elements, non-shared
+/// registered heap strings, and registered arrays recursively under these same
+/// rules. Everything else refuses.
+///
+/// ALIASING AND CYCLES: `RuntimeValue` is `Copy`, so an element may be the
+/// array itself or appear twice. Phase 1 keeps a `seen` pointer set and the
+/// second sighting of any node refuses the whole call, proving the reachable
+/// structure is a TREE — which is what makes freeing it safe. That can only
+/// rule out aliases INTERNAL to the structure: an interior node aliased from
+/// OUTSIDE is undetectable here, exactly as `rt_string_free` cannot detect a
+/// second holder. The caller must own the whole subtree, not merely the root.
+/// Likewise not thread-safe against a concurrent free of the same objects.
+#[no_mangle]
+pub extern "C" fn rt_array_free_deep(value: RuntimeValue) -> i64 {
+    // The root must be a registered array; a string root belongs to
+    // rt_string_free, not here.
+    let Some(root) = get_typed_ptr_mut::<RuntimeArray>(value, HeapObjectType::Array) else {
+        return 0;
+    };
+
+    // `plan` doubles as the BFS worklist, so this is iterative — a deeply
+    // nested structure cannot blow the stack.
+    let mut plan: Vec<(*mut HeapHeader, DeepFreeKind)> = vec![(root as *mut HeapHeader, DeepFreeKind::Array)];
+    let mut seen: HashSet<usize> = HashSet::new();
+    seen.insert(root as usize);
+
+    // Phase 1: read-only breadth-first classification.
+    let mut refused = false;
+    let mut index = 0usize;
+    while !refused && index < plan.len() {
+        let (ptr, kind) = plan[index];
+        index += 1;
+        if kind != DeepFreeKind::Array {
+            continue;
+        }
+        let array = ptr as *mut RuntimeArray;
+        let slots: Vec<RuntimeValue> = unsafe {
+            if (*array).is_byte_packed() || (*array).is_u64_packed() || (*array).data.is_null() {
+                continue;
+            }
+            (*array).as_slice().to_vec()
+        };
+        for slot in slots {
+            match deep_free_classify(slot) {
+                DeepFreeClass::Leaf => continue,
+                DeepFreeClass::Refuse => {
+                    refused = true;
+                    break;
+                }
+                DeepFreeClass::Node(child, child_kind) => {
+                    // Second sighting = alias or cycle: refuse.
+                    if !seen.insert(child as usize) {
+                        refused = true;
+                        break;
+                    }
+                    if plan.len() >= RT_DEEP_FREE_MAX_NODES {
+                        refused = true;
+                        break;
+                    }
+                    plan.push((child, child_kind));
+                }
+            }
+        }
+    }
+
+    if refused {
+        return 0;
+    }
+
+    // Phase 2: commit. Reached only when every node is provably freeable, so no
+    // partial state is observable. Freeing top-down is safe because phase 1
+    // already copied out every child pointer.
+    for (ptr, kind) in plan {
+        unsafe {
+            match kind {
+                DeepFreeKind::Array => {
+                    let array = ptr as *mut RuntimeArray;
+                    if !unregister_heap_ptr_checked(ptr) {
+                        continue;
+                    }
+                    if !(*array).data.is_null() {
+                        let data_layout = if (*array).is_byte_packed() {
+                            byte_array_data_layout((*array).capacity)
+                        } else {
+                            array_data_layout((*array).capacity)
+                        };
+                        note_aux_free(HeapObjectType::Array as u8, data_layout.size() as u64);
+                        std::alloc::dealloc((*array).data as *mut u8, data_layout);
+                        (*array).data = std::ptr::null_mut();
+                    }
+                    let header_layout =
+                        std::alloc::Layout::from_size_align(std::mem::size_of::<RuntimeArray>(), 8).unwrap();
+                    std::alloc::dealloc(ptr as *mut u8, header_layout);
+                }
+                DeepFreeKind::String => {
+                    let string = ptr as *mut RuntimeString;
+                    // Read len BEFORE unregistering: it sizes the dealloc
+                    // layout and must match `alloc_runtime_string` exactly.
+                    let len = (*string).len;
+                    if !unregister_heap_ptr_checked(ptr) {
+                        continue;
+                    }
+                    let size = std::mem::size_of::<RuntimeString>() + len as usize;
+                    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+                    std::alloc::dealloc(ptr as *mut u8, layout);
+                }
+            }
+        }
+    }
+    1
+}
+
 /// Free a heap string. Returns 1 if the object was reclaimed, 0 if refused.
 ///
 /// Rust-side twin of `rt_string_free` in src/runtime/runtime_native.c, matching
@@ -5446,5 +5629,159 @@ mod aux_byte_accounting_tests {
             freed <= grown - BYTES,
             "free must return capacity bytes: grown={grown} freed={freed}"
         );
+    }
+}
+
+/// Contract tests for `rt_array_free_deep`, the Rust twin of the C primitive at
+/// src/runtime/runtime_native.c:5335.
+///
+/// The two runtimes must agree bit for bit or the same `.spl` leaks on one
+/// backend and frees on the other — the exact divergence class the
+/// `rt_string_free` twin tests above exist to catch. These assert the
+/// all-or-nothing policy: a refused call must leave the registry EXACTLY where
+/// it was, because a partial free is the irreversible failure the contract is
+/// built to prevent.
+///
+/// The heap registry is process-global and `cargo test` runs in parallel, so
+/// every case serializes on GUARD and asserts on registry DELTAS.
+#[cfg(test)]
+mod array_free_deep_contract_tests {
+    use super::{
+        rt_array_free_deep, rt_array_get, rt_array_new, rt_array_push, rt_byte_array_new, rt_string_len, rt_string_new,
+        rt_string_new_literal,
+    };
+    use crate::value::dict::rt_dict_new;
+    use crate::value::heap::rt_heap_registry_count;
+    use crate::value::RuntimeValue;
+    use std::sync::Mutex;
+
+    static GUARD: Mutex<()> = Mutex::new(());
+
+    fn mkstr(s: &str) -> RuntimeValue {
+        rt_string_new(s.as_ptr(), s.len() as u64)
+    }
+
+    #[test]
+    fn array_of_strings_is_freed_whole_and_registry_returns_to_baseline() {
+        let _g = GUARD.lock().unwrap();
+        let before = rt_heap_registry_count();
+        let a = rt_array_new(4);
+        assert!(rt_array_push(a, mkstr("deep free element one, long enough to avoid the cache")));
+        assert!(rt_array_push(a, mkstr("deep free element two, long enough to avoid the cache")));
+        assert!(rt_array_push(a, mkstr("deep free element three, long enough to avoid the cache")));
+        assert_eq!(rt_heap_registry_count(), before + 4, "array + three strings register");
+        assert_eq!(rt_array_free_deep(a), 1, "tree of non-shared strings is reclaimed");
+        assert_eq!(rt_heap_registry_count(), before, "every node returned to the registry baseline");
+    }
+
+    #[test]
+    fn nested_arrays_are_freed_recursively() {
+        let _g = GUARD.lock().unwrap();
+        let before = rt_heap_registry_count();
+        let inner = rt_array_new(4);
+        assert!(rt_array_push(inner, mkstr("nested deep free leaf string, unique and long")));
+        let outer = rt_array_new(4);
+        assert!(rt_array_push(outer, inner));
+        assert!(rt_array_push(outer, RuntimeValue::from_int(41)));
+        assert_eq!(rt_heap_registry_count(), before + 3, "outer + inner + leaf string");
+        assert_eq!(rt_array_free_deep(outer), 1, "nested tree is reclaimed");
+        assert_eq!(rt_heap_registry_count(), before, "recursion reached every level");
+    }
+
+    #[test]
+    fn immediate_only_array_is_freed_and_needs_no_element_scan() {
+        let _g = GUARD.lock().unwrap();
+        let before = rt_heap_registry_count();
+        let a = rt_array_new(4);
+        for n in 0..4i64 {
+            assert!(rt_array_push(a, RuntimeValue::from_int(n)));
+        }
+        assert_eq!(rt_array_free_deep(a), 1, "immediates are leaves, nothing to strand");
+        assert_eq!(rt_heap_registry_count(), before);
+    }
+
+    #[test]
+    fn byte_packed_array_is_freed_without_reading_payload_as_values() {
+        let _g = GUARD.lock().unwrap();
+        let before = rt_heap_registry_count();
+        let a = rt_byte_array_new(64);
+        assert_eq!(rt_array_free_deep(a), 1, "packed payload holds no heap refs by construction");
+        assert_eq!(rt_heap_registry_count(), before);
+    }
+
+    /// The load-bearing case: a dict element cannot be freed here (no free path
+    /// that would not strand its entries buffer), so the WHOLE call must refuse
+    /// and the sibling string must remain both registered and readable.
+    #[test]
+    fn dict_element_refuses_whole_call_and_frees_nothing() {
+        let _g = GUARD.lock().unwrap();
+        let survivor = mkstr("sibling that must survive a refused deep free, unique");
+        let a = rt_array_new(4);
+        assert!(rt_array_push(a, survivor));
+        assert!(rt_array_push(a, rt_dict_new(8)));
+        let before = rt_heap_registry_count();
+        assert_eq!(rt_array_free_deep(a), 0, "unfreeable element refuses the call");
+        assert_eq!(rt_heap_registry_count(), before, "ALL-OR-NOTHING: nothing was freed");
+        assert!(rt_string_len(rt_array_get(a, 0)) > 0, "survivor still readable");
+    }
+
+    /// A shared (interned literal) string is handed to unrelated holders, so it
+    /// refuses exactly as `rt_string_free` refuses it — and takes the whole
+    /// call with it.
+    #[test]
+    fn shared_string_element_refuses_whole_call() {
+        let _g = GUARD.lock().unwrap();
+        let lit = "an interned literal that other holders share, rust twin";
+        let interned = rt_string_new_literal(lit.as_ptr(), lit.len() as u64);
+        let a = rt_array_new(4);
+        assert!(rt_array_push(a, mkstr("ordinary sibling of a shared string, unique")));
+        assert!(rt_array_push(a, interned));
+        let before = rt_heap_registry_count();
+        assert_eq!(rt_array_free_deep(a), 0, "SHARED element refuses");
+        assert_eq!(rt_heap_registry_count(), before, "nothing freed");
+        assert!(rt_string_len(interned) > 0, "interned literal still readable");
+    }
+
+    /// Phase 1's `seen` set proves the reachable structure is a TREE. A self
+    /// reference is the smallest cycle; freeing it bottom-up would double-free.
+    #[test]
+    fn self_referencing_array_refuses() {
+        let _g = GUARD.lock().unwrap();
+        let a = rt_array_new(4);
+        assert!(rt_array_push(a, a));
+        let before = rt_heap_registry_count();
+        assert_eq!(rt_array_free_deep(a), 0, "cycle refuses");
+        assert_eq!(rt_heap_registry_count(), before, "nothing freed");
+    }
+
+    #[test]
+    fn duplicated_element_alias_refuses() {
+        let _g = GUARD.lock().unwrap();
+        let shared_child = mkstr("one string reachable through two slots, unique and long");
+        let a = rt_array_new(4);
+        assert!(rt_array_push(a, shared_child));
+        assert!(rt_array_push(a, shared_child));
+        let before = rt_heap_registry_count();
+        assert_eq!(rt_array_free_deep(a), 0, "internal alias refuses");
+        assert_eq!(rt_heap_registry_count(), before, "nothing freed");
+        assert!(rt_string_len(shared_child) > 0, "aliased string still readable");
+    }
+
+    #[test]
+    fn non_array_root_and_double_free_are_refused() {
+        let _g = GUARD.lock().unwrap();
+        assert_eq!(
+            rt_array_free_deep(mkstr("a string root belongs to rt_string_free, unique")),
+            0,
+            "string root refused"
+        );
+        assert_eq!(rt_array_free_deep(RuntimeValue::from_int(7)), 0, "immediate root refused");
+        assert_eq!(rt_array_free_deep(RuntimeValue::NIL), 0, "nil root refused");
+        let a = rt_array_new(4);
+        assert!(rt_array_push(a, mkstr("freed exactly once by the deep path, unique")));
+        assert_eq!(rt_array_free_deep(a), 1);
+        let after_first = rt_heap_registry_count();
+        assert_eq!(rt_array_free_deep(a), 0, "double deep-free refused");
+        assert_eq!(rt_heap_registry_count(), after_first, "refusal does not decrement");
     }
 }

@@ -240,6 +240,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_array_new", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_free", &[I64], &[]),
+    // Deep (recursive) array free. Unlike rt_array_free it RETURNS i64
+    // (1 = whole structure reclaimed, 0 = refused having freed nothing) --
+    // the rt_string_free shape below, not the void shape above.
+    RuntimeFuncSpec::new("rt_array_free_deep", &[I64], &[I64]),
     // Unlike rt_array_free, this RETURNS i64 (1 = reclaimed, 0 = refused).
     RuntimeFuncSpec::new("rt_string_free", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_byte_array_new", &[I64], &[I64]),

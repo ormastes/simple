@@ -441,6 +441,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         // Array operations
         "rt_array_new" => simple_runtime::rt_array_new as *const () as usize,
         "rt_array_free" => value::rt_array_free as *const () as usize,
+        "rt_array_free_deep" => value::rt_array_free_deep as *const () as usize,
         "rt_string_free" => value::rt_string_free as *const () as usize,
         "rt_array_push" => simple_runtime::rt_array_push as *const () as usize,
         "rt_array_get" => simple_runtime::rt_array_get as *const () as usize,

@@ -1315,3 +1315,187 @@ and is wired in at `driver_orchestration.spl:132-134` and
 `driver_hir_pipeline_lowering.spl:161-163`. The 2026-08-02 facade-hint guard
 landed (`20.hir/hir_lowering/module_surface.spl:818`). Neither is affected by
 anything above.
+
+## UPDATE 2026-08-06 (later, second session): steps 1-3 of the ordered plan
+## LANDED and test-verified. Step 4 (`rt_dict_free`/`rt_object_free`) is still
+## OPEN and still blocked on `runtime_native.c` being another lane's live file.
+
+This continues the ordered plan at the end of the previous update and does
+**steps 1, 2 and 3 only**. It deliberately does not touch
+`src/runtime/runtime_native.c` or `src/runtime/runtime.h`: both were checked at
+the start AND at the end of this session and `runtime_native.c` was **still
+dirty** in the shared working copy, i.e. another lane is still mid-flight on it.
+See "Step 4 status" at the bottom.
+
+Unlike the previous update, everything below was **executed**, not reasoned. The
+verification method for each claim is stated inline: `measured` means a number
+was read out of a run, `reasoned` means it follows from source that was read.
+
+### Step 1 -- hazard 1 and hazard 3, fixed with regression specs
+
+**Hazard 1: `evict_mir_module` left `bootstrap_entry_mir` dangling.**
+
+The previous update proposed matching on the evicted name. That is not
+sufficient on its own, and the reason is worth recording: the alias cannot be
+recognised by comparing `MirModule.name`, because the bootstrap flat lane builds
+`MirModule(name: "", ...)` (`50.mir/_MirLowering/bootstrap_globals.spl:784`) and
+stores it under a real key. The name in the dict and the name in the struct are
+not the same thing.
+
+So `CompileContext` gained one field, `bootstrap_entry_mir_name: text`
+(`driver_types.spl`), recording the key the alias was registered under, plus a
+`set_bootstrap_entry_mir(name, module)` setter used by every site that writes
+BOTH the dict and the alias:
+
+- `driver_pipeline_lowering.spl` -- all four branches (skip-lower, bootstrap
+  fixed-entry, `--entry-closure` direct, HIR-map fallback).
+- `driver_bootstrap.spl` -- the flat closure path and the globals path.
+
+`driver_pipeline_lowering.spl`'s `SIMPLE_BOOTSTRAP` branch and
+`driver_bootstrap.spl:498` were deliberately left alone: they set the alias
+WITHOUT inserting into `mir_modules`, so there is no dict entry whose eviction
+could invalidate them, and registering a key there would let an unrelated
+eviction clear a live alias.
+
+`evict_mir_module` now clears the alias when, and only when, the evicted name is
+the registered entry key -- mirroring `evict_hir`, which already cleared
+`bootstrap_entry_hir`.
+
+**Hazard 3: `both` + `--low-memory` silently lost SMF output.**
+
+Fixed at the decision point rather than at the eviction sites, so it is
+testable: `driver_mir_eviction_enabled(low_memory, format)` in
+`00.common/driver_core_modes.spl` returns `low_memory and not is_both(format)`,
+and `driver_aot_native_output.spl` computes its `low_memory` local from it.
+Both eviction call sites (`:338` cache-hit and `:426` post-compile) read that
+one local, so a future third call site cannot miss the rule. Skipping eviction
+was chosen over reordering the phases or hard-erroring: it is the smallest
+change, it needs no new failure mode, and `both` is by construction the format
+that cannot afford to drop MIR. Eviction is an optimisation; correct output is
+not.
+
+**Regression spec** (`measured`):
+`test/01_unit/compiler/driver/mir_eviction_hazards_spec.spl` -- 7 examples,
+7 passed. Sabotage-checked: with the two fixes reverted in place the run is
+`7 examples, 2 failures`, failing exactly "clears the bootstrap entry alias when
+the entry module is evicted" and "disables MIR eviction under --output-format
+both"; restoring them returns 7/7. The spec also pins the two directions a naive
+fix gets wrong -- evicting a DIFFERENT module must NOT clear the alias, and
+`--low-memory` must still evict for `native`/`smf`/`self-contained`.
+
+Note for anyone extending that spec: `CompileOptions` must be imported from its
+defining module `compiler.common.driver_compile_options`, not through the
+`driver_core_types` facade. Through the facade, `CompileContext.create` dies
+with ``class `CompileOptions` has no field named `mode` `` -- a module-resolution
+defect, not a missing field.
+
+### Step 2 -- the Rust twin of `rt_array_free_deep`
+
+`rt_array_free_deep` now exists in
+`src/compiler_rust/runtime/src/value/collections.rs`, beside `rt_array_free` /
+`rt_string_free`, exported from `value/mod.rs`. It matches the C contract at
+`runtime_native.c:5335` clause for clause: two-phase, read-only classify then
+commit; all-or-nothing (a refusal frees NOTHING); byte-/u64-packed payloads skip
+the element scan; immediates are leaves; non-shared registered strings and
+registered arrays recurse; everything else -- dicts, tuples, objects, closures,
+enums, foreign pointers, already-freed pointers, and raw i64s that merely alias
+the heap tag -- refuses the whole call. A `seen` pointer set refuses on any
+internal alias or cycle, proving the reachable structure is a tree. It reuses
+the existing registry helpers (`get_typed_ptr_mut`,
+`unregister_heap_ptr_checked`) rather than reinventing membership tests; every
+dereference is gated on registry membership, which is what makes a tag-aliasing
+i64 safe.
+
+**Verification** (`measured`): nine contract tests in
+`mod array_free_deep_contract_tests` in that file -- 9 passed. Every case reads
+`rt_heap_registry_count()` before and after and asserts on the DELTA, because a
+verdict of 1 that did not shrink the registry would be the primitive lying.
+Sabotage-checked: turning the catch-all `Refuse` into `Leaf` fails 7 of the 9.
+The full `cargo test -p simple-runtime --lib` run has 7 pre-existing failures
+(executor threads, loader package format, native lib manager, dict invalid
+value, low-heap tagged values, heap attribution); the identical 7 fail with this
+module skipped, so none are caused by this change.
+
+### Step 3 -- reachable from `.spl`, with a caller
+
+The previous update was right that the extern was the gap, but understated it:
+declaring `extern fn rt_array_free_deep` is NOT enough to make it callable. The
+symbol has to be registered in four more places or the compiler rejects the
+declaration outright with `semantic: unknown extern function:
+rt_array_free_deep` -- which is exactly how the new spec failed on its first
+run, before any assertion executed. Landed:
+
+- `.spl` extern + wrapper: `70.backend/sffi_minimal.spl`, beside `rt_string_free`.
+- Interpreter dispatch: `interpreter_extern/sffi_array.rs`
+  (`rt_array_free_deep_fn`) + `interpreter_extern/mod.rs`.
+- Cranelift/JIT ABI: `codegen/runtime_sffi.rs` (`&[I64] -> &[I64]`, NOT
+  `rt_array_free`'s void shape) and `elf_utils.rs` symbol resolution.
+- LLVM declares, all three emitters that special-case `rt_string_free`:
+  `llvm_backend.spl`, `llvm_lib_translate.spl`,
+  `_MirToLlvm/asm_constraints_helpers.spl`, plus the Cranelift adapter's
+  i64-returning branch in `cranelift_codegen_adapter.spl` -- taking the
+  `rt_array_free` void branch there would have discarded the all-or-nothing
+  verdict the caller must read.
+
+**No production call site was added, deliberately.** Every array-shaped
+candidate in the driver fails the same aliasing bar the rest of this
+investigation applies: `uncached_names` / `object_files` (`[text]`) hold the
+SAME text values as the `mir_modules` dict keys, so freeing them would free
+strings the dict still owns -- and `rt_array_free_deep` cannot detect an alias
+from OUTSIDE the structure, so it would accept the call and corrupt the keys.
+`collect_smf_bytes`'s `[u8]` accumulator is genuinely large and genuinely
+garbage after each `concat`, but arrays are value types here and each
+intermediate is reachable from the previous binding, so unsharedness is not
+provable by reading the source. Forcing a call site through that bar to avoid a
+"dead extern" would have been the exact cover-up this bug file exists to prevent.
+The extern therefore lands with a **regression spec as its caller**, which the
+previous update's own step 3 allows for.
+
+**Verification** (`measured`, two ways):
+
+1. `test/01_unit/runtime/array_free_deep_spec.spl` -- 6 examples, 6 passed. It
+   asserts only what is true on EVERY lane (reachability, strict binary verdict,
+   never grows the registry, second free refuses, and the implication
+   `verdict == 1` => the registry dropped by at least `elements + 1`). It does
+   NOT assert an unconditional reclaim, and the file says why: on the
+   interpreter lane an array is `Value::Array`, a Rust Vec with no runtime heap
+   object behind it, so the honest verdict there is 0 and an unconditional
+   assertion would pass or fail on which lane ran rather than on correctness.
+2. An `evict_probe.spl`-style `heap_registry` delta, run directly (<1s, no
+   corpus). 2000 unique dynamically-built strings in a `[text]`:
+
+   | lane | `delta_fill` | `verdict` | `delta_free` |
+   |---|---|---|---|
+   | JIT (default) | 4249 | **1** | **2001** |
+   | `SIMPLE_EXECUTION_MODE=interpret` | 0 | 0 | 0 |
+
+   2001 = 2000 element strings + 1 array header, i.e. the deep free reclaimed
+   the elements the shallow `rt_array_free` would have stranded. The interpret
+   row registering nothing at all is the direct confirmation of the lane
+   reasoning above.
+
+   Reproduce: build a `[text]`, read `rt_heap_registry_count()` before/after,
+   call `rt_array_free_deep`, and run it with the REBUILT seed
+   (`src/compiler_rust/target/debug/simple`). Running it through the deployed
+   `bin/simple` instead reports `verdict=0` and `unknown extern function` --
+   the deployed binary predates this change. That is the usual
+   binary-provenance trap, not a defect in the primitive.
+
+### Step 4 status: still OPEN, still out of scope
+
+`rt_dict_free` + `rt_object_free`/`rt_free_deep` in `runtime_native.c` remain
+unwritten, and they are still the step that actually unblocks `evict_ast` /
+`evict_hir` / `evict_mir_module`. Nothing above changes that: hazards 1 and 3
+were latent correctness bugs, and `rt_array_free_deep` cannot touch a
+`Dict<text, MirModule>`.
+
+`git status src/runtime/runtime_native.c` was re-checked after this session's
+work and still reports ` M` -- the other lane's edits are still uncommitted, so
+step 4 is **not yet unblocked**. Whoever picks it up should re-check that status
+first; when it comes back clean, step 4 can proceed against the same
+refuse-biased, all-or-nothing contract, and the Rust twin now landed here is the
+template for the matching Rust side it will also need.
+
+Hazards 2 (`_bootstrap_mir_functions` retaining `MirFunction`s past codegen) and
+4 (`MirFunction.name` sharing heap strings with HIR/AST and the SymbolTable) are
+untouched and remain as described in the previous update.

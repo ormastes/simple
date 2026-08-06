@@ -8,9 +8,9 @@ use simple_runtime::value::RuntimeValue;
 
 // Import actual SFFI functions from runtime
 use simple_runtime::value::{
-    rt_array_clear, rt_array_data_ptr_u8, rt_array_extend_i64, rt_array_free, rt_array_get, rt_array_len,
-    rt_array_new, rt_array_pop, rt_array_push, rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set,
-    rt_typed_bytes_u8_push, rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set,
+    rt_array_clear, rt_array_data_ptr_u8, rt_array_extend_i64, rt_array_free, rt_array_free_deep, rt_array_get,
+    rt_array_len, rt_array_new, rt_array_pop, rt_array_push, rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at,
+    rt_bytes_u8_set, rt_typed_bytes_u8_push, rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set,
     rt_typed_words_u32_unchecked, rt_typed_words_u64_at, rt_typed_words_u64_unchecked,
 };
 
@@ -640,6 +640,29 @@ pub fn rt_array_len_fn(args: &[Value]) -> Result<Value, CompileError> {
     let arr = RuntimeValue::from_raw(arr_raw as u64);
     let len = rt_array_len(arr);
     Ok(Value::Int(len))
+}
+
+/// Interpreter bridge for `rt_array_free_deep` (1 = the ENTIRE structure was
+/// reclaimed, 0 = refused having freed nothing).
+///
+/// An interpreter-native `Value::Array` is a Rust `Vec<Value>` with no runtime
+/// heap object and no registry entry behind it, so there is nothing this can
+/// reclaim: it REFUSES with 0 rather than reporting a free that did not happen.
+/// That is the same bias `rt_string_free_fn` applies to `Value::Str`, and it
+/// keeps the return value an honest binary on every lane. Only a raw tagged
+/// value (`Value::Int`, the shape JIT/native code passes) reaches the real
+/// primitive.
+pub fn rt_array_free_deep_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(value) = args.first() else {
+        return Err(CompileError::semantic_with_context(
+            "rt_array_free_deep expects 1 argument".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        ));
+    };
+    match value.clone().deref_pointer() {
+        Value::Int(raw) => Ok(Value::Int(rt_array_free_deep(RuntimeValue::from_raw(raw as u64)))),
+        _ => Ok(Value::Int(0)),
+    }
 }
 
 pub fn rt_array_len_safe_fn(args: &[Value]) -> Result<Value, CompileError> {
