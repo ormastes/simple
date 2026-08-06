@@ -719,7 +719,16 @@ fn run_tests_via_daemon(
     Falls back to direct execution if daemon is unavailable.
     """
     var results: [TestFileResult] = []
-    val clean = options.clean
+    # `--no-cache` must bypass the daemon's own incremental result cache, not
+    # just file-discovery caching (that's the separate `use_cache` check in
+    # run_test_cli above). Before this fix, `clean` was `options.clean` alone
+    # (the explicit `--clean` flag), so a `--no-cache` request still hit
+    # handle_run_single's freshness check and got a stale TRESP_CACHED replay
+    # of whatever an EARLIER daemon-served run recorded (e.g. a genuine
+    # timeout from a slow render) -- fast (cache lookup only, no re-execution)
+    # and, per the bug below, silently missing its own diagnostic text. See
+    # doc/08_tracking/bug/wm_showcase_session_capture_spec_no_examples_executed_2026-08-06.md.
+    val clean = options.clean or options.no_cache
 
     if options.session_debug:
         print "  [session] Routing {files.len()} test(s) through daemon"
@@ -740,7 +749,13 @@ fn run_tests_via_daemon(
                 pending: 0,
                 duration_ms: if daemon_result.duration_ms > 0: daemon_result.duration_ms else: duration_ms,
                 setup_ms: 0,
-                error: if daemon_result.status == TRESP_FAILED: daemon_result.output else: "",
+                # A TRESP_CACHED replay of a stale FAILED run must not go
+                # silent: before this fix only TRESP_FAILED copied `.output`
+                # into `.error`, so a cached failure (daemon_result.failed >
+                # 0) displayed as a bare "0 passed, 1 failed" with no `Error:`
+                # line at all -- the exact "no examples executed, zero
+                # diagnostic output" symptom in the bug doc referenced above.
+                error: if daemon_result.status == TRESP_FAILED or (daemon_result.status == TRESP_CACHED and daemon_result.failed > 0): daemon_result.output else: "",
                 timed_out: false,
                 cached: daemon_result.cached
             )
