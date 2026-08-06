@@ -56,7 +56,6 @@ extern fn rt_time_now_monotonic_ms() -> i64
 
 use lib.log.{log_dispatch_text, subsys_from_scope, LOG_INFO, LOG_WARN}
 use std.failsafe.timeout.{Deadline}
-use std.array.{array_sort_by}
 
 val _RING_CAP: i64 = 256
 
@@ -381,8 +380,33 @@ fn _sorted_timer_stats() -> [_TimerStat]:
         if _g_timer_stats.contains_key(label):
             val s = _g_timer_stats[label]
             stats.push(s)
-    # descending by total_ms (stdlib sort — no duplicate sort implementation)
-    array_sort_by(stats, \a, b: b.total_ms - a.total_ms)
+    # Descending by total_ms, as an explicit insertion sort rather than
+    # `array_sort_by(stats, \a, b: b.total_ms - a.total_ms)`.
+    #
+    # NOT a style preference and NOT a duplicate sort implementation to be
+    # "cleaned up" back into the stdlib call: that lambda made this function
+    # create a closure, and the JIT's closure ABI cannot tag-box lambda
+    # arguments/results, so Cranelift refuses the whole MODULE and drops it —
+    # together with its entire callee tree — to the tree-walk interpreter
+    # (~10-1000x). Because diag.spl is co-compiled with the compositor/render
+    # path, this one diagnostics-only lambda was silently interpreting the
+    # whole WM render lane. Measured: `wm_showcase` GUI window open 119,018 ms
+    # with the lambda present. See doc/09_report/render_pipeline_profile_2026-08-06.md.
+    #
+    # Restoring the lambda re-arms that fallback. If a closure-capable JIT ABI
+    # lands, this can go back to array_sort_by — verify with the
+    # `[jit-fallback]` / "falling back to interpreter" line being ABSENT, not
+    # by the sort's output alone.
+    var i = 1
+    while i < stats.len():
+        val cur = stats[i]
+        var j = i - 1
+        while j >= 0 and stats[j].total_ms < cur.total_ms:
+            stats[j + 1] = stats[j]
+            j = j - 1
+        stats[j + 1] = cur
+        i = i + 1
+    stats
 
 # One "label count=N total=Tms max=Mms" line per label, sorted by total
 # descending, plus one "counter <label> = N" line per counter.

@@ -178,6 +178,44 @@ describe "std.diag timers and counters":
         expect(dbg_summary()).to_contain("paint count=2")
         expect(dbg_summary()).to_contain("style count=1")
 
+    it "orders summary lines by total_ms descending":
+        # The assertions above check only that both labels APPEAR, so they stay
+        # green even with the sort deleted outright. This one pins the order,
+        # which is the actual contract of `_sorted_timer_stats`.
+        #
+        # `_sorted_timer_stats` used a lambda comparator; that made the function
+        # a closure, which the JIT closure ABI cannot compile, so the whole
+        # module and its callee tree fell back to the interpreter (~10-1000x)
+        # -- silently interpreting the WM render lane, since diag.spl is
+        # co-compiled with it. It is now an explicit insertion sort. This
+        # example is what proves the replacement still sorts.
+        dbg_diag_reset()
+        dbg_force_facet("timers")
+
+        # "slow" must accumulate strictly more total_ms than "fast", so the
+        # ordering is decided by the comparison and not by insertion order.
+        # Note the deliberate insertion order: fast FIRST, so a no-op sort
+        # would leave "fast" at the front and fail this example.
+        dbg_time_begin("fast")
+        dbg_time_end("fast")
+
+        dbg_time_begin("slow")
+        var acc: i64 = 0
+        var i: i64 = 0
+        while i < 3000000:
+            acc = acc + i
+            i = i + 1
+        dbg_time_end("slow")
+        assert_true(acc > 0)
+
+        val slow_ms = dbg_timer_stats("slow").total_ms
+        val fast_ms = dbg_timer_stats("fast").total_ms
+        # Anti-vacuity: if the burn were optimized away both totals could be 0
+        # and any order would satisfy the assertion below.
+        assert_true(slow_ms > fast_ms)
+
+        expect(dbg_summary()).to_start_with("slow count=1")
+
 describe "std.diag provenance (always-on)":
     it "reports a mismatch even with every facet disabled":
         dbg_diag_reset()
