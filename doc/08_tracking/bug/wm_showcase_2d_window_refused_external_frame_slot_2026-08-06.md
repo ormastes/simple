@@ -1,7 +1,7 @@
 # wm_showcase 2D window refused an external frame slot (cap 4 vs 5 declared windows)
 
 - **Date:** 2026-08-06
-- **Status:** FIXED
+- **Status:** FIXED — 12/12 examples pass (was 6/12)
 - **Spec:** `test/03_system/gui/wm_showcase_session_capture_spec.spl`
 - **Signature:** `rejects=2d=external-frame-slot-refused`, `accepted=4` of 5,
   `rect_px=0 field_px=0`
@@ -176,6 +176,54 @@ meet it.
   window's content rect clears the taskbar.
 - `src/app/wm_showcase/session.spl` (`capture()`) — unmatched content rects
   are now named rather than silently reducing a count.
+
+## Verdicts (verbatim)
+
+Command (direct path; the session daemon runs children under the debug Rust
+seed and dies at 12s):
+
+```
+bin/simple test test/03_system/gui/wm_showcase_session_capture_spec.spl \
+  --no-session-daemon --sequential --timeout 1800 --no-cache --no-cover-check
+```
+
+**Before** (baseline, slot cap 4):
+
+```
+wm_showcase_open declared=5 open=5 accepted=4 rejects=2d=external-frame-slot-refused
+wm_showcase_palette rect_px=0 field_px=0
+12 examples, 6 failures
+```
+
+**After slot-cap fix only** — 10/12, residual taskbar occlusion:
+
+```
+wm_showcase_open declared=5 open=5 accepted=5 rejects=
+wm_showcase_palette rect_px=1344 field_px=13088
+wm_showcase_rect_unmatched 2d@20,320+240x90
+12 examples, 2 failures
+Results: 12 total, 10 passed, 2 failed
+```
+
+**After both fixes** — 12/12:
+
+```
+wm_showcase_open declared=5 open=5 accepted=5 rejects=
+wm_showcase_rendered rendered=5 declared=5 open=5
+wm_showcase_palette rect_px=1344 field_px=20256
+wm_showcase_palette_moved before=1344 after=1344
+12 examples, 0 failures
+Passed: 12
+Failed: 0
+Results: 12 total, 12 passed, 0 failed
+```
+
+The final numbers independently confirm the occlusion diagnosis:
+`field_px = 20256` is exactly the predicted 21600 - 1344 (the full 240x90
+scene minus its rect), where before it was 13088. And
+`palette_moved before=1344 after=1344` is now area-preserving, as moving a
+rect physically must be; the earlier `after=144` was the moved rect being
+clipped by the taskbar.
 
 ## Both defects share one shape
 
