@@ -67,3 +67,45 @@ to avoid the unsupported constructs.
 - rv32 emission blocker: doc/08_tracking/bug/riscv32_cranelift_emission_blocker_2026-07-20.md
 - Bidirectional serial harness (ready, pending a bootable ELF):
   scripts/qemu/check_simpleos_rv64_serial_shell.shs
+
+## Update 2026-08-06: still blocked, gap moved further down the closure
+
+Re-tried while pushing the riscv64 toolchain-payload boot campaign forward
+(cross-built `bin/release/riscv64-unknown-simpleos/simple` userland payload
+landed today, never booted — see
+`doc/03_plan/os/simpleos/in_guest_simple_toolchain_multiarch_plan.md`). Built
+directly with the Rust seed (mirroring the x86_64 UEFI harness pattern,
+bypassing the `bin/simple os build` scenario runner — see the separate
+harness-probe-timeout note below):
+
+```
+SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$(pwd)/src" src/compiler_rust/target/release/simple \
+  native-build --source build/os/generated --source src/os --source src/lib \
+  --backend cranelift --entry-closure \
+  --entry src/os/kernel/arch/riscv64/boot.spl \
+  --target riscv64-unknown-none -o build/os/simpleos_riscv64.elf \
+  --linker-script src/os/kernel/arch/riscv64/linker.ld
+```
+
+The two 2026-07-20 blockers (`interrupt.spl` Deref lvalue,
+`privilege_bridge.spl` `bridge_has_mirror`) are **not** what stops the build
+now — the closure gets further before failing on a different file/symbol:
+
+```
+FAILED FILES (1):
+  - src/os/kernel/ipc/cspace_spawn.spl => codegen: Module error: codegen:
+    1 function body/bodies failed to compile: [SingleUseLedger.is_armed];
+    set SIMPLE_ALLOW_STUB_FALLBACK to emit empty stubs instead (unsafe —
+    binary will silently misbehave)
+```
+
+Root cause is visible earlier in the log:
+`[CODEGEN-STUB-FALLBACK] body compilation failed for 'SingleUseLedger.is_armed':
+ModuleError("... Unsupported feature: should be implemented in ISLE: inst =
+\`v63 = vany_true.i64x2 v62\`, type = \`Some(types::I8)\`")` — the cranelift
+rv64 backend has no ISLE lowering for a 128-bit `vany_true` vector-any-true
+reduction. Same "not a workaround" rule applies: `SIMPLE_ALLOW_STUB_FALLBACK`
+is explicitly unsafe and was not used. Net: rv64 full-kernel boot (and
+therefore booting the cross-built toolchain payload) is still blocked purely
+in the compiler backend — a real ISLE lowering gap for `vany_true.i64x2`, not
+a riscv64-silicon or QEMU/OpenSBI issue.
