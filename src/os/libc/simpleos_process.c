@@ -107,6 +107,28 @@ pid_t getsid(pid_t pid) {
     return -1;
 }
 
+/* SimpleOS has no process-group state at all (note setsid() above just returns
+ * the caller's pid, and getsid() reports ESRCH). So the ONLY setpgid() request
+ * that is truthfully satisfiable is the one that asks a process to become the
+ * leader of its own group -- which is already the standing arrangement here.
+ * That case returns 0 because it is genuinely true, not as a courtesy.
+ *
+ * Every other request would move a process between groups that do not exist.
+ * Returning 0 for those would be a fake success of exactly the kind that made
+ * the path-based filesystem syscalls untrustworthy (success written over
+ * uninitialized state), so they fail closed with EPERM -- the errno POSIX
+ * already defines for "cannot place that process in that group". */
+int setpgid(pid_t pid, pid_t pgid) {
+    pid_t self = getpid();
+    pid_t target = (pid == 0) ? self : pid;
+    pid_t group = (pgid == 0) ? target : pgid;
+    if (target == self && group == self) {
+        return 0;
+    }
+    errno = EPERM;
+    return -1;
+}
+
 int gethostname(char *name, size_t len) {
     const char host[] = "simpleos";
     if (!name || len == 0) {

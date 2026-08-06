@@ -48,7 +48,7 @@ for src in \
     simpleos_fs_walk.c simpleos_glob_stub.c simpleos_pwd_stub.c \
     simpleos_strfmon.c simpleos_fork.c simpleos_ipc.c \
     simpleos_socket.c simpleos_filelock.c simpleos_statvfs.c \
-    simpleos_utsname.c
+    simpleos_utsname.c simpleos_posix_ext.c
 do
     "$CC" $CFLAGS -c "$LIBC_DIR/$src" -o "$LIBC_BUILD/${src%.c}.o"
 done
@@ -188,16 +188,55 @@ rm -f "$SYSROOT/lib/libsimpleos_c.a"
 cp "$LIBC_BUILD/simpleos_crt0.o" "$SYSROOT/lib/crt0.o"
 echo "[sysroot-rv64] Installed libsimpleos_c.a + crt0.o"
 
+# -- Real Simple C runtime, cross-compiled for riscv64 ------------------------
+#
+# Mirrors the x86_64 lane in src/os/port/llvm/sysroot.shs (which builds
+# lib/libsimple_runtime_native.a). Without it the riscv64 payload link fails on
+# exactly the same 20 undefined symbols the x86_64 lane hit — 17 `rt_*` plus
+# `simple_contract_check` and `spl_wffi_call_i64`; see
+# doc/08_tracking/bug/simpleos_payload_link_missing_20_rt_symbols_2026-08-06.md.
+# The pure-Simple simple-core archive supplies a DIFFERENT ~291-symbol `rt_*`
+# set and does not overlap these, so it is not a substitute.
+#
+# One object per source file, deliberately: archive members are the linker's
+# granularity, so a reference to one runtime entry point does not drag the rest
+# in. Do NOT partial-link (ld -r) these, and do NOT put them in
+# libsimpleos_c.a — a plain C/C++ link must never pull the Simple runtime in
+# (doc/08_tracking/bug/simpleos_libc_leaks_simple_runtime_syms_2026-08-06.md).
+# They go into libsimpleos_all.a instead, which is served to the Simple linker
+# through the `-print-libgcc-file-name` slot by cc-riscv64-simpleos, because
+# simpleos_user_runtime_paths() in the seed linker is x86_64-gated.
+echo "[sysroot-rv64] Cross-compiling real Simple runtime for riscv64..."
+RT_BUILD="$LIBC_BUILD/simple_runtime_native"
+mkdir -p "$RT_BUILD"
+RT_CFLAGS="--target=$TRIPLE_CC -march=rv64gc -mabi=lp64d -mcmodel=medany \
+    -ffreestanding -nostdlib -nostdlibinc -fno-builtin -fno-stack-protector \
+    -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables \
+    -ffunction-sections -fdata-sections -O2 -D__simpleos__=1 \
+    -isystem $LIBC_DIR/include"
+for rt_src in runtime_native runtime_simd_utf8 runtime_contracts \
+              runtime_memory runtime_time runtime_timestamp \
+              runtime_pool runtime_memtrack
+do
+    "$CC" $RT_CFLAGS -c "$REPO_ROOT/src/runtime/$rt_src.c" \
+        -o "$RT_BUILD/$rt_src.o" || {
+            echo "[sysroot-rv64] ERROR: failed to cross-compile $rt_src.c" >&2
+            exit 1
+        }
+done
+echo "[sysroot-rv64] Built riscv64 C runtime objects ($(ls "$RT_BUILD"/*.o | wc -l))"
+
 # -- Merged link archive (served via the -print-libgcc-file-name slot) -------
 rm -f "$SYSROOT/lib/libsimpleos_all.a"
 if [ -d "$CORE_OBJ_DIR" ]; then
     "$AR" rcs "$SYSROOT/lib/libsimpleos_all.a" \
         "$LIBC_BUILD"/*.o \
+        "$RT_BUILD"/*.o \
         "$CORE_OBJ_DIR"/*/*.o
-    echo "[sysroot-rv64] Installed libsimpleos_all.a (libc + simple-core runtime + crt0)"
+    echo "[sysroot-rv64] Installed libsimpleos_all.a (libc + C runtime + simple-core runtime + crt0)"
 else
-    "$AR" rcs "$SYSROOT/lib/libsimpleos_all.a" "$LIBC_BUILD"/*.o
-    echo "[sysroot-rv64] WARNING: core runtime objects missing ($CORE_OBJ_DIR); libsimpleos_all.a is libc-only"
+    "$AR" rcs "$SYSROOT/lib/libsimpleos_all.a" "$LIBC_BUILD"/*.o "$RT_BUILD"/*.o
+    echo "[sysroot-rv64] WARNING: core runtime objects missing ($CORE_OBJ_DIR); libsimpleos_all.a is libc + C runtime only"
 fi
 
 # -- CC wrapper ---------------------------------------------------------------

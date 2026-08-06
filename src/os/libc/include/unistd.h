@@ -74,6 +74,7 @@ pid_t getpid(void);
 pid_t getppid(void);
 pid_t setsid(void);
 pid_t getsid(pid_t pid);
+int   setpgid(pid_t pid, pid_t pgid);
 int   gethostname(char *name, size_t len);
 int   getpagesize(void);
 unsigned int alarm(unsigned int seconds);
