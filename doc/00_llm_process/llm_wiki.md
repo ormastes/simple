@@ -237,6 +237,65 @@ skipped after an upstream bootstrap failure as PASS. Keep documentation,
 executable-spec, QEMU-functional, real-IOMMU, and physical-device evidence as
 separate claim levels.
 
+## SimpleOS toolchain self-host / "clang on SimpleOS" / clang+Simple migration
+
+- **Canonical meaning:** building an `x86_64-unknown-simpleos` LLVM/clang/lld
+  cross toolchain whose outputs are *guest-runnable*, plus a Simple payload that
+  links and runs in-guest. Campaign lane:
+  `.spipe/simpleos_clang_simple_migration/state.md` (10 ACs). Plan of record:
+  `doc/03_plan/os/simpleos/toolchain_selfhost_bootstrap_plan.md`.
+- **Expert notes:**
+  `doc/00_llm_process/feature_expert/simpleos_toolchain_selfhost/skill.md`,
+  `doc/00_llm_process/layer_expert/llvm_toolchain_port/skill.md` (fork, cross
+  CMake toolchain, sysroot, libc/crt0),
+  `doc/00_llm_process/layer_expert/os_kernel_exec/skill.md` (VMM, FS-exec ring-3
+  loader, FAT32, image builder).
+- **Guide:** `doc/07_guide/os/simpleos_llvm_toolchain.md`.
+- **Guest-runnable contract:** `Type=EXEC`, entry `0x40000000`, **zero INTERP
+  segments**, static. Produced by `-static` + `-Wl,-T,<sysroot>/share/simpleos/
+  simpleos.ld` in `src/os/toolchain/llvm/simpleos_cross_toolchain.cmake`.
+  `src/os/port/llvm/clang_static.shs` is **DEPRECATED** — it existed only because
+  those flags were missing, which let the host clang driver defer the link to gcc
+  and emit a Linux-dynamic ELF.
+- **LLVM fork:** `github.com/ormastes/llvm-project` branch `simpleos` (Clang 20),
+  pinned by `LLVM_REVISION` in `src/os/port/llvm/build.spl`.
+
+### Status rule — do not overstate
+
+In-guest **COMPILE** is proven under real OVMF-pflash firmware
+(`[ok] L4 in-guest clang compiled /hello.o under OVMF`,
+`[oo-nvme] persist /hello.o -> OK`, `[syscall] exit status=0`). **Not** proven:
+byte-exactness of that object (host-side `getfile` retrieval returns empty),
+in-guest LINK+RUN, the install-image live gate, and the physical board. The
+`bin/release/x86_64-unknown-simpleos/simple` payload is **seed-built staging
+evidence**, not self-hosted evidence — it was produced by the Rust bootstrap seed
+as the D1 route-around and has been **linked, not run**.
+
+### Evidence rule — positive markers only
+
+Never accept an **absence** condition ("the failure line is gone") as proof a
+kernel fix worked: `config/freestanding_fabricated_stub_baseline.sdn` has zero
+rows for `simpleos_ssh_ring3_uefi128.elf` and `src/compiler_rust/compiler/src/pipeline/native_project/stubs.rs:299-314` only WARNS for
+an unbaselined entry, so the channel can fabricate weak no-op bodies and still
+build green. Require the positive marker, `nm` for `T` (not `W`), and a
+`FABRICATED-NEW` diff across the change.
+
+### Diagnostic rules for this area
+
+- A CMake `check_*_compiles` FATAL_ERROR names the **probe**, not the cause —
+  read `CMakeFiles/CMakeConfigureLog.yaml` (observed: two false "libstdc++ too
+  old"/"needs libatomic" reports hiding an undefined `rt_array_len`).
+- Derived archive copies reproduce fixed errors: `libm.a` is a `cp` of
+  `libsimpleos_c.a` (`sysroot.shs:266`). When a fix "doesn't take", `cmp` them.
+- Archive members link **per object**, so a bridge sharing a TU with core libc
+  makes its dependency mandatory. Localise with `nm -u` per member, not per
+  archive. One `.o` per source, never `ld -r`.
+- A log marker that does not identify its **writer** cannot distinguish two
+  implementations — two VMM paths printed byte-identical `[VMM]` banners while
+  the consumer read a never-written global whose `vmm_init` had zero callers.
+- `file(1)` reports "dynamically linked" for a `--export-dynamic` static binary.
+  Use `readelf -l <bin> | grep -c INTERP` (must be 0) plus `readelf -h`.
+
 ## PostgreSQL mimic / Simple DB server
 
 - **Protocol/session owner:** `std.database.postgres_mimic`.

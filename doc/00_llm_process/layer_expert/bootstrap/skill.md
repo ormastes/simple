@@ -227,6 +227,19 @@ above went from "whole-tree parse-state defect, unreproducible in isolation" to 
 warning banner). Use it, not `bin/simple`, when asking "what is the correct
 behaviour?" during bootstrap work.
 
+## Downstream feature experts depending on this layer (2026-08-06)
+
+- [feature_expert/simpleos_toolchain_selfhost](../../feature_expert/simpleos_toolchain_selfhost/skill.md)
+  — the SimpleOS clang+Simple migration. It depends on **exactly the seed-vs-
+  self-hosted distinction this layer owns**: because the deployed self-hosted
+  `bin/release/simple` SEGVs on `native-build` (**D1**,
+  `deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`), its
+  `bin/release/x86_64-unknown-simpleos/simple` payload was built by
+  `src/compiler_rust/target/bootstrap/simple` as a route-around. That makes the
+  payload **staging evidence, never self-hosted evidence** — a redeploy landing
+  here is what upgrades it. Related layer:
+  [llvm_toolchain_port](../llvm_toolchain_port/skill.md).
+
 ## Update Rule
 
 After any bootstrap, JIT stability, or redeploy-gate change, refresh this skill
