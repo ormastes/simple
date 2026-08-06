@@ -220,7 +220,15 @@ if ! grep -qa "oo-nvme\] persist /hello.o -> OK" "$SERIAL" 2>/dev/null; then
     # Name the actual stage reached — "compile incomplete" alone sent one
     # investigation after a phantom exec failure when the real state was a
     # timeout mid-stream of a 127 MB binary.
-    if grep -qa "heap:stream-open-ok" "$SERIAL" 2>/dev/null \
+    # Order matters: check for a DEFINITE failure before inferring a timeout.
+    # A spawn that failed and returned to the accept loop looks identical to
+    # "still streaming" if you only test for the absence of a success marker —
+    # that mis-diagnosis cost a cycle on 2026-08-06, where the real cause was
+    # create_user_address_space failing while the message blamed the budget.
+    if grep -qaE "spawn\] FAIL user-AS|spawn returned rc=-1|VMM not initialized" "$SERIAL" 2>/dev/null; then
+        echo "[uefi-scp] FAIL: ring-3 spawn REJECTED the image — this is NOT a timeout, do not raise CLANG_WAIT"
+        grep -aoE "\[VMM\][^;]{0,70}|\[spawn\][^;]{0,60}|ring3 deferred[^;]{0,50}" "$SERIAL" 2>/dev/null | tail -4
+    elif grep -qa "heap:stream-open-ok" "$SERIAL" 2>/dev/null \
        && ! grep -qa "ring3 program exited" "$SERIAL" 2>/dev/null; then
         echo "[uefi-scp] FAIL: clang image opened but never finished (accel=$ACCEL_MODE, waited ${j}s of ${CLANG_WAIT}s)"
         echo "[uefi-scp]       payload is $(stat -c%s "$CLANG_BIN" 2>/dev/null) bytes; raise CLANG_WAIT or enable KVM"
