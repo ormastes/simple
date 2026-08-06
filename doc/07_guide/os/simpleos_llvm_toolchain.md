@@ -1,22 +1,61 @@
 # SimpleOS LLVM/Clang Toolchain — Where It Lives & How To Build Hello World
 
 Quick-find guide for the LLVM→SimpleOS port. If you are asked to "build hello
-world with clang for SimpleOS", start here — the toolchain is **already built**,
-just not on the `PATH` and not under the name the disk-bake gate expects.
+world with clang for SimpleOS", start here.
+
+> **Build status (verified on-disk 2026-08-06): the cross toolchain is NOT
+> prebuilt. You must build it before any `clang`/`ld.lld` command in this guide
+> will run.** Three-stage status as measured:
+>
+> | Stage | Output | State today |
+> |---|---|---|
+> | 1 `host-tools` | `build/os/llvm/host-tools/` | **PRESENT** — `bin/` has `llvm-tblgen`, `clang-tblgen`, `llvm-min-tblgen`, `llvm-lit`; `build.ninja` present |
+> | 2 `cross` | `build/os/llvm/cross-<triple>/` | **NOT BUILT** — x86_64 dir holds only `CMakeCache.txt`/`CMakeFiles`/`CPack*.cmake`: no `bin/`, no `build.ninja`. aarch64 dir does not exist at all |
+> | 3 `compiler-rt` | `build/os/sysroot/lib/clang/<ver>/lib/<triple>/*.a` | not staged |
+>
+> `build/os/clang_static/` and `build/os/.bake_include_toolchain` are **ABSENT**.
+> The sysroot (`build/os/sysroot/`) **is** present and usable — see the table below.
+>
+> Build it with:
+>
+> ```sh
+> LLVM_SRC=/home/ormastes/llvm-project sh src/os/port/llvm/build.shs
+> # or a single stage: … build.shs host-tools | cross | compiler-rt
+> # per-target:        SIMPLE_TARGET=aarch64-unknown-simpleos … build.shs
+> ```
+>
+> Rebuilding the cross stage is Lane C1 of
+> `doc/03_plan/os/simpleos/toolchain_selfhost_bootstrap_plan.md`.
+
+## LLVM source fork
+
+The port builds from a **fork**, not upstream LLVM:
+
+- Repo: `https://github.com/ormastes/llvm-project.git`, branch **`simpleos`** (Clang 20).
+- Local checkout: `/home/ormastes/llvm-project` (branch `simpleos`, HEAD
+  `59612206386553df81efc06ec0421acf646d49ef` = `596122063`).
+- `src/os/port/llvm/build.spl:71` pins `LLVM_REVISION` to that **same sha**, so the
+  pin and the fork tip agree as of 2026-08-06. (`build.spl:70` holds `LLVM_REPO`.)
+  `build.shs` instead uses whatever `$LLVM_SRC` (default `~/llvm-project`) points
+  at — it does not itself checkout the pin, so verify the checkout's HEAD when
+  using the shell driver.
 
 ## Locations (the hard-to-find part)
 
 | What | Path | Notes |
 |------|------|-------|
-| LLVM/Clang **source** | `/home/ormastes/llvm-project` | Host home dir, **outside the repo**. Clang 20. Used as `LLVM_EXTERNAL_CLANG_SOURCE_DIR`. |
-| **Cross clang/lld** (host-run, targets SimpleOS) | `build/os/llvm/cross-x86_64-unknown-simpleos/bin/` | `clang-20` (131 MB), `ld.lld`, `lld`, `llvm-nm`. ~954 MB. This is the compiler you use. |
-| aarch64 cross variant | `build/os/llvm/cross-aarch64-unknown-simpleos/` | Same layout for arm64. |
-| Host LLVM tblgen tools | `build/os/llvm/host-tools/bin/` | Bootstrap only (tblgen etc.), not clang. |
-| **Sysroot** | `build/os/sysroot/` | `lib/crt0.o`, `lib/libsimpleos_c.a`, `share/simpleos/simpleos.ld`. |
+| LLVM/Clang **source** | `/home/ormastes/llvm-project` | **PRESENT.** Host home dir, **outside the repo**. `ormastes/llvm-project` branch `simpleos`, Clang 20. Used as `LLVM_EXTERNAL_CLANG_SOURCE_DIR`. |
+| **Cross clang/lld** (host-run, targets SimpleOS) | `build/os/llvm/cross-x86_64-unknown-simpleos/bin/` | **NOT BUILT — directory holds only CMakeCache/CMakeFiles.** Once stage `cross` runs it holds `clang-20`, `ld.lld`, `lld`, `llvm-nm` (expect ~131 MB clang, ~954 MB tree). This is the compiler the rest of this guide assumes. |
+| aarch64 cross variant | `build/os/llvm/cross-aarch64-unknown-simpleos/` | **ABSENT** (not even configured). Same layout as x86_64 once built via `SIMPLE_TARGET=aarch64-unknown-simpleos`. |
+| Host LLVM tblgen tools | `build/os/llvm/host-tools/bin/` | **PRESENT** (`llvm-tblgen`, `clang-tblgen`, `llvm-min-tblgen`, `llvm-lit`). Bootstrap only — not clang. |
+| **Sysroot** | `build/os/sysroot/` | **PRESENT.** `lib/{crt0.o,libsimpleos_c.a,libc++.a,libm.a,simple_entry.o}`, `share/simpleos/{simpleos.ld,target-triple.txt}`, `include/`. |
+| Guest-native static clang | `build/os/clang_static/` | **ABSENT.** Deprecated for desktop SimpleOS — see launch-policy section. |
+| Disk-bake toolchain marker | `build/os/.bake_include_toolchain` | **ABSENT.** |
+| Build driver (shell, stages) | `src/os/port/llvm/build.shs` | `LLVM_SRC=/home/ormastes/llvm-project sh src/os/port/llvm/build.shs` → stages `host-tools`, `cross`, `compiler-rt`. |
 | Build driver (Simple) | `src/os/port/llvm/build.spl` | Clones/builds LLVM; `--target x86_64-unknown-simpleos`. |
 | Deploy + status | `src/os/port/deploy_toolchains.spl` | `bin/simple run … -- --status` prints the gate report. |
 
-The cross `clang-20` is a **host executable** (Linux ELF) that emits
+When built, the cross `clang-20` is a **host executable** (Linux ELF) that emits
 `x86_64-unknown-simpleos` code — a cross-compiler, not a guest-native binary.
 
 ## Simple-native toolchain (distinct from clang)
@@ -28,7 +67,7 @@ SimpleOS. `TargetOS::SimpleOS = 5` is a first-class target OS beside
 
 | What | Path | Notes |
 |------|------|-------|
-| Per-arch Simple compiler for SimpleOS | `bin/release/<arch>-unknown-simpleos/simple` | ~4 MB static EXEC, one per arch; built + boot-proven 2026-07-14 |
+| Per-arch Simple compiler for SimpleOS | `bin/release/<arch>-unknown-simpleos/simple` | **ABSENT today** — `x86_64-` and `riscv64-unknown-simpleos/` dirs exist but are **EMPTY**, and there is no `aarch64-` dir (verified 2026-08-06). Rebuild with `bin/simple build simpleos`. When built: ~4 MB static EXEC per arch; boot-proven 2026-07-14 (historical) |
 | Builder (opt-in subcommand) | `bin/simple build simpleos [arch...]` → `scripts/ci/build-simpleos-toolchain.shs` → `src/app/ci/build_simpleos_toolchain.spl` | per-arch native-build → fail-closed `readelf` gate → stamp → install |
 
 `bin/simple build simpleos` builds all three SimpleOS arches (optionally filter
@@ -50,13 +89,18 @@ status:
 `doc/03_plan/os/in_guest_clang_selfhost_board_plan.md` (§ Simple compiler/loader
 on SimpleOS).
 
-## Current status (2026-07-13): clang object emission proven under OVMF
+## HISTORICAL, COMMIT-PINNED (2026-07-13): clang object emission proven under OVMF
 
-The full ladder is proven under **OVMF pflash (real UEFI firmware, no QEMU
-`-kernel`)**: GRUB-EFI → multiboot → ring-3 sshd → in-guest
-`clang -cc1 -emit-obj /hello.c → /hello.o` on the FAT32 volume → `getfile`
-retrieves a byte-exact ET_REL/EM_X86_64 object → host link → exit 7. Landed
-commit `7cf0b6aec3a`. Reproduce:
+**Evidence class: commit-pinned historical proof at `7cf0b6aec3a`. The artifacts
+it produced are NOT on disk today** (the cross clang/lld it used are unbuilt, see
+build status above), so this is not a claim about the current tree. Re-proving it
+against a fresh build is Lane C3 of the toolchain self-host bootstrap plan.
+
+As proven at commit `7cf0b6aec3a`, the full ladder ran under **OVMF pflash (real
+UEFI firmware, no QEMU `-kernel`)**: GRUB-EFI → multiboot → ring-3 sshd →
+in-guest `clang -cc1 -emit-obj /hello.c → /hello.o` on the FAT32 volume →
+`getfile` retrieves a byte-exact ET_REL/EM_X86_64 object → host link → exit 7.
+Reproduce (requires the cross toolchain to be built first):
 
 ```sh
 SKIP_STAGE=0 SKIP_KERNEL=0 sh scripts/os/scp_retrieve_over_ssh_uefi.shs
@@ -83,9 +127,10 @@ Remaining: in-guest link/execute proof and physical mini-PC bring-up — see
 
 ## Previous filesystem-exec status (2026-07-11, superseded)
 
-The guest candidate now exists at
-`build/os/clang_static/bin/clang_static` (122,233,168-byte static ELF), but it
-has **not** passed mounted-filesystem execution. The production x86_64 loader
+A guest candidate was once produced at
+`build/os/clang_static/bin/clang_static` (122,233,168-byte static ELF). **That
+file is absent today** — `build/os/clang_static/` does not exist (verified
+2026-08-06) — and it never passed mounted-filesystem execution. The production x86_64 loader
 now opens the exact requested FAT32 path, retains only a bounded ELF header and
 program-header prefix, and streams every PT_LOAD directly into its mapped user
 frames. It rejects short reads and no longer consults the unkeyed boot preload.
@@ -109,7 +154,16 @@ links user programs against the SimpleOS sysroot; the current deployed
 self-hosted runner still times out before focused specs execute. Do not fall
 back to the seed.
 
-## Build + link hello world (verified)
+## Build + link hello world — NOT currently reproducible (toolchain unbuilt)
+
+These are the correct invocations, and they are kept verbatim, but **`$BIN` below
+does not exist until the `cross` stage is built** (see build status at the top).
+Run `LLVM_SRC=/home/ormastes/llvm-project sh src/os/port/llvm/build.shs` first.
+
+There is no commit-pinned evidence attached to this particular block: the
+`7cf0b6aec3a` proof covers the in-guest `-cc1` ladder above, **not** this
+host-side compile+link sequence. Treat the sample `llvm-nm` output below as
+illustrative of the expected shape, not as a recorded run.
 
 ```sh
 BIN=build/os/llvm/cross-x86_64-unknown-simpleos/bin
@@ -126,8 +180,11 @@ $BIN/llvm-nm /tmp/hello.elf | grep -E ' _start| main'
 #   0000000010000080 T main
 ```
 
-Result: a valid, statically-linked `x86_64-unknown-simpleos` ELF. **Compile and
-link work today.**
+Expected result once built: a valid, statically-linked
+`x86_64-unknown-simpleos` ELF. Note the `_start`/`main` addresses shown above are
+from an older `0x10000000` link base; the current `simpleos.ld` links ring-3
+payloads at `0x40000000` (see the layout facts above), so re-verify the numbers
+rather than copying them.
 
 ## Running it in-guest — source path implemented, live proof blocked
 
@@ -140,12 +197,15 @@ yet provable**. Two tracked blockers:
 2. **Guest-native `clang_static`** — the disk bake / SSH live lane want
    `build/os/clang_static/bin/clang_static` (a static clang that runs **on**
    SimpleOS, not the host cross-compiler above) plus
-   `build/os/.bake_include_toolchain`. `--status` gate =
+   `build/os/.bake_include_toolchain` — **both absent on disk today (verified
+   2026-08-06)**. `--status` gate =
    `guest-toolchain-exec-gate BLOCKED`. Historical `build_clang_disk.shs`
    evidence proves LLVM bitcode only. The current lane requests
    `-emit-obj /hello.o` and fails unless the guest dump is x86-64 ELF REL with
-   `main` and exit status 0. Embedded LLD now builds into the guest binary, the
-   static relink has zero undefined symbols, and the wrapper has fail-closed
+   `main` and exit status 0. As of the last recorded build (not reproducible
+   today — `build/os/clang_static/` is gone), embedded LLD built into the guest
+   binary and the static relink had zero undefined symbols; the wrapper has
+   fail-closed
    guest object/link/execute phases. It has not produced live proof because the
    available pure-Simple CLIs fail while native-building the QEMU kernel before
    guest boot; see

@@ -170,6 +170,123 @@ fn fat32_parse_lfn_slot(entry_data: [u8], offset: i32) -> text:
         name = name + c13
     name
 
+# -- Directory-entry attribute bits --------------------------------------------
+
+val FAT32_ATTR_DIRECTORY: u32 = 0x10
+
+# -- Path + directory-scan helpers (wave-4f: subdirectory traversal) -----------
+#
+# Free functions, not methods: the component walk in resolve_path() already
+# nests three loops deep, and keeping these out of the class keeps each call
+# frame shallow (kernel-stack budget).
+#
+# Text handling here uses `.slice()` / `.upper()`, exactly like the pre-existing
+# `_find_root_entry`.  That is safe for this class because it is NOT on the
+# freestanding kernel path today: the in-guest FS path goes through the
+# `simpleos_fat32_stream_open` C stub, and this driver has no `src/` caller.
+# The `[u8]`-via-`rt_bytes_u8_at` discipline required for freestanding code
+# cannot be used here — those externs are unregistered in the host interpreter
+# the specs run on, which would make every assertion vacuous.
+
+struct Fat32DirEntryLoc:
+    """Located 32-byte directory entry, plus its on-disk address.
+
+    `found` is carried explicitly rather than wrapping the offset in `i32?`:
+    an entry at byte offset 0 collides with the interpreter's nil/0 ambiguity
+    (see the note in test/01_unit/os/kernel/fs/fat32_dirent_spec.spl).
+    """
+    found: bool
+    dir_cluster: u32        # First cluster of the directory that holds the entry
+    entry_offset: i32       # Byte offset of the entry within that directory's data
+    dirent_sector: u64      # Absolute LBA of the sector holding the entry
+    dirent_offset: i32      # Byte offset of the entry within that sector
+    start_cluster: u32      # First cluster of the named file/dir
+    file_size: u32          # Size in bytes (0 for directories)
+    is_dir: bool            # ATTR_DIRECTORY bit
+
+fn fat32_split_path(path: text) -> [text]:
+    """Split "/A/B/C.O" into ["A", "B", "C.O"]. Empty components are dropped,
+    so "//A//B/" and "/A/B" split identically. "/" splits to []."""
+    var parts: [text] = []
+    var cur = ""
+    var i = 0
+    while i < path.len():
+        val ch = path.slice(i, i + 1)
+        if ch == "/":
+            if cur.len() > 0:
+                parts.push(cur)
+                cur = ""
+        else:
+            cur = cur + ch
+        i = i + 1
+    if cur.len() > 0:
+        parts.push(cur)
+    parts
+
+fn fat32_dir_find_entry(dir_data: [u8], name: text) -> i32:
+    """Scan one directory's raw bytes for `name`; return its byte offset, or -1.
+
+    Matches the accumulated long filename (LFN) first, then the 8.3 short name;
+    both case-insensitively. Honours the 0x00 end-of-directory marker and skips
+    0xE5 deleted entries (orphaning any partially accumulated LFN).
+    """
+    val upper = name.upper()
+    val total_entries = dir_data.len() / 32
+    var idx = 0
+    var lfn_name = ""
+    while idx < total_entries:
+        val off = idx * 32
+        val first_byte = dir_data[off]
+        if first_byte == 0x00u8:
+            return -1                   # end of directory — not found
+        if first_byte == 0xE5u8:
+            lfn_name = ""               # orphan any pending LFN
+            idx = idx + 1
+            continue                    # deleted entry
+        val attr = dir_data[off + 11]
+        if attr == 0x0Fu8:
+            # Walk highest-seq → lowest-seq: prepend each fragment.
+            val fragment = fat32_parse_lfn_slot(dir_data, off)
+            lfn_name = fragment + lfn_name
+            idx = idx + 1
+            continue
+        # 8.3 entry. Match accumulated LFN first (the long name),
+        # then fall back to the 8.3 short name.
+        if lfn_name.len() > 0 and lfn_name.upper() == upper:
+            return off
+        var entry_name = ""
+        var ni = 0
+        while ni < 8:
+            val ch = dir_data[off + ni]
+            if ch != 0x20u8 and ch != 0x00u8:
+                entry_name = entry_name + ch.chr()
+            ni = ni + 1
+        var ext = ""
+        var ei = 0
+        while ei < 3:
+            val ch = dir_data[off + 8 + ei]
+            if ch != 0x20u8 and ch != 0x00u8:
+                ext = ext + ch.chr()
+            ei = ei + 1
+        if ext.len() > 0:
+            entry_name = entry_name + "." + ext
+        if entry_name.upper() == upper:
+            return off
+        lfn_name = ""
+        idx = idx + 1
+    -1
+
+fn fat32_entry_start_cluster(dir_data: [u8], off: i32) -> u32:
+    """Decode first-cluster (hi at +20..21, lo at +26..27) from a dirent."""
+    val cluster_high = (dir_data[off + 21].to_u32() << 8) | dir_data[off + 20].to_u32()
+    val cluster_low  = (dir_data[off + 27].to_u32() << 8) | dir_data[off + 26].to_u32()
+    (cluster_high << 16) | cluster_low
+
+fn fat32_entry_file_size(dir_data: [u8], off: i32) -> u32:
+    """Decode the u32 little-endian file size at dirent offset +28..31."""
+    ((dir_data[off + 31].to_u32() << 24) | (dir_data[off + 30].to_u32() << 16) |
+     (dir_data[off + 29].to_u32() << 8)  |  dir_data[off + 28].to_u32())
+
 # -- Driver state --------------------------------------------------------------
 
 class Fat32Filesystem:
@@ -388,52 +505,161 @@ impl Fat32Filesystem:
         var name = path
         if name.len() > 0 and name.slice(0, 1) == "/":
             name = name.slice(1, name.len())
-        val upper = name.upper()
-        val total_entries = self.root_dir_data.len() / 32
-        var idx = 0
-        var lfn_name = ""
-        while idx < total_entries:
-            val off = idx * 32
-            val first_byte = self.root_dir_data[off]
-            if first_byte == 0x00u8:
-                return Ok(None)   # end of directory — not found
-            if first_byte == 0xE5u8:
-                lfn_name = ""           # orphan any pending LFN
-                idx = idx + 1
-                continue                # deleted entry
-            val attr = self.root_dir_data[off + 11]
-            if attr == 0x0Fu8:
-                # Walk highest-seq → lowest-seq: prepend each fragment.
-                val fragment = fat32_parse_lfn_slot(self.root_dir_data, off)
-                lfn_name = fragment + lfn_name
-                idx = idx + 1
+        val off = fat32_dir_find_entry(self.root_dir_data, name)
+        if off < 0:
+            return Ok(None)
+        Ok(Some(off))
+
+    fn _read_dir_data(self, dev: BlockDevice, cluster: u32) -> Result<[u8], i32>:
+        """Read a whole directory's bytes by walking its cluster chain.
+
+        Returns Err(EIO=-5) on an invalid start cluster or any device/chain
+        failure. The returned array is the concatenation of every cluster in
+        chain order, so a byte offset maps back to a cluster via
+        offset / cluster_size (see _dir_chain_for below).
+        """
+        if cluster < 2u32:
+            return Err(EIO)
+        val chain_result = self.read_cluster_chain(dev, cluster)
+        if chain_result.is_err():
+            return Err(EIO)
+        val chain = chain_result.unwrap()
+        val spc = self.sectors_per_cluster.to_u64()
+        val bps = self.bytes_per_sector.to_i32()
+        var out: [u8] = []
+        var ci = 0
+        while ci < chain.len():
+            val first_sector = self.data_start_sector.to_u64() + (chain[ci] - 2u32).to_u64() * spc
+            var s: u64 = 0u64
+            while s < spc:
+                val r = dev.read_sector(first_sector + s)
+                if r.is_err():
+                    return Err(EIO)
+                val sec = r.unwrap()
+                var bi = 0
+                while bi < bps:
+                    out.push(sec[bi])
+                    bi = bi + 1
+                s = s + 1u64
+            ci = ci + 1
+        Ok(out)
+
+    fn resolve_path(self, dev: BlockDevice, path: text) -> Result<Fat32DirEntryLoc, i32>:
+        """Resolve a nested absolute path such as "/A/B/C/FILE.O" (wave-4f).
+
+        Walks one component at a time: each non-final component must be a
+        directory (ATTR_DIRECTORY), and its first cluster becomes the next
+        directory to scan (via _read_dir_data, which follows the cluster
+        chain). "." is a no-op; ".." resolves through the on-disk ".." entry,
+        whose recorded cluster is 0 when the parent is the root directory —
+        that 0 is remapped to self.root_cluster, as FAT32 requires.
+
+        The root directory itself is read from the root_dir_data cache stashed
+        at mount() when present, otherwise from the device.
+
+        Returns Err(ENOENT=-2) when any component is missing or a non-final
+        component is not a directory; Err(EINVAL=-22) for a path with no
+        components (e.g. "/"); Err(EIO=-5) on device failure.
+        """
+        val parts = fat32_split_path(path)
+        if parts.len() == 0:
+            return Err(EINVAL)
+
+        var dir_cluster = self.root_cluster
+        var dir_chain: [u32] = [self.root_cluster]
+        var dir_data = self.root_dir_data
+        if dir_data.len() == 0:
+            val d = self._read_dir_data(dev, dir_cluster)
+            if d.is_err():
+                return Err(d.unwrap_err())
+            dir_data = d.unwrap()
+            val c = self.read_cluster_chain(dev, dir_cluster)
+            if c.is_err():
+                return Err(EIO)
+            dir_chain = c.unwrap()
+
+        val last = parts.len() - 1
+        var pi = 0
+        while pi <= last:
+            val comp = parts[pi]
+            if comp == ".":
+                pi = pi + 1
                 continue
-            # 8.3 entry. Match accumulated LFN first (the long name),
-            # then fall back to the 8.3 short name.
-            if lfn_name.len() > 0 and lfn_name.upper() == upper:
-                return Ok(Some(off))
-            # Build 8.3 name string
-            var entry_name = ""
-            var ni = 0
-            while ni < 8:
-                val ch = self.root_dir_data[off + ni]
-                if ch != 0x20u8 and ch != 0x00u8:
-                    entry_name = entry_name + ch.chr()
-                ni = ni + 1
-            var ext = ""
-            var ei = 0
-            while ei < 3:
-                val ch = self.root_dir_data[off + 8 + ei]
-                if ch != 0x20u8 and ch != 0x00u8:
-                    ext = ext + ch.chr()
-                ei = ei + 1
-            if ext.len() > 0:
-                entry_name = entry_name + "." + ext
-            if entry_name.upper() == upper:
-                return Ok(Some(off))
-            lfn_name = ""
-            idx = idx + 1
-        Ok(None)
+            val off = fat32_dir_find_entry(dir_data, comp)
+            if off < 0:
+                return Err(ENOENT)
+            val attr_bits = dir_data[off + 11].to_u32()
+            val is_dir = (attr_bits & FAT32_ATTR_DIRECTORY) != 0u32
+            var start = fat32_entry_start_cluster(dir_data, off)
+            if pi == last:
+                # Map the entry's flat offset back to an absolute LBA using the
+                # containing directory's own cluster chain.
+                val cluster_bytes = self.cluster_size.to_i32()
+                val chain_idx = off / cluster_bytes
+                val in_cluster = off % cluster_bytes
+                val bps_i = self.bytes_per_sector.to_i32()
+                val host_cluster = dir_chain[chain_idx]
+                val cluster_lba = self.data_start_sector.to_u64() +
+                                  (host_cluster - 2u32).to_u64() * self.sectors_per_cluster.to_u64()
+                val d_sector = cluster_lba + (in_cluster / bps_i).to_u64()
+                return Ok(Fat32DirEntryLoc(
+                    found: true,
+                    dir_cluster: dir_cluster,
+                    entry_offset: off,
+                    dirent_sector: d_sector,
+                    dirent_offset: in_cluster % bps_i,
+                    start_cluster: start,
+                    file_size: fat32_entry_file_size(dir_data, off),
+                    is_dir: is_dir
+                ))
+            # Non-final component: must be a directory we can descend into.
+            if not is_dir:
+                return Err(ENOENT)
+            if start == 0u32:
+                start = self.root_cluster      # ".." pointing at the root dir
+            val nd = self._read_dir_data(dev, start)
+            if nd.is_err():
+                return Err(nd.unwrap_err())
+            val nc = self.read_cluster_chain(dev, start)
+            if nc.is_err():
+                return Err(EIO)
+            dir_data = nd.unwrap()
+            dir_chain = nc.unwrap()
+            dir_cluster = start
+            pi = pi + 1
+        Err(ENOENT)
+
+    fn open_at(self, dev: BlockDevice, path: text) -> Result<FileHandle, i32>:
+        """Open a file at a nested path (wave-4f). Directories are rejected
+        with ENOENT — use resolve_path/stat_at to inspect them."""
+        val loc_result = self.resolve_path(dev, path)
+        if loc_result.is_err():
+            return Err(loc_result.unwrap_err())
+        val loc = loc_result.unwrap()
+        if loc.is_dir:
+            return Err(ENOENT)
+        Ok(FileHandle(
+            fd: 0u64,
+            start_cluster: loc.start_cluster,
+            current_cluster: loc.start_cluster,
+            offset: 0u64,
+            file_size: loc.file_size.to_u64(),
+            is_open: true,
+            dirent_sector: loc.dirent_sector,
+            dirent_offset: loc.dirent_offset
+        ))
+
+    fn stat_at(self, dev: BlockDevice, path: text) -> Result<FileStat, i32>:
+        """Metadata for a nested path (wave-4f). Unlike stat(), is_dir is real."""
+        val loc_result = self.resolve_path(dev, path)
+        if loc_result.is_err():
+            return Err(loc_result.unwrap_err())
+        val loc = loc_result.unwrap()
+        Ok(FileStat(
+            size: loc.file_size.to_u64(),
+            is_dir: loc.is_dir,
+            mtime: 0u64
+        ))
 
     fn _read_fat_entry(self, dev: BlockDevice, cluster: u32) -> Result<u32, text>:
         """Read the 28-bit FAT32 entry for cluster from the FAT region on dev."""

@@ -73,8 +73,19 @@ sha256_file() {
 }
 
 # ---- find compiler ----
+# COMPILER_EXPLICIT distinguishes an operator-chosen compiler from one this
+# script discovered on its own. The seed guard below only applies to the
+# discovered case: its purpose is to stop the build ACCIDENTALLY falling back
+# to the Rust bootstrap seed, not to forbid a deliberate, documented
+# route-around. Defect D1
+# (doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md)
+# makes such a route-around mandatory today: the tracked
+# release/x86_64-unknown-linux-gnu/simple SEGVs on native-build via a stale
+# 2-arg rt_env_set ABI, and it is the FIRST entry in the discovery glob below.
 COMPILER="${SIMPLE_BUILD_COMPILER:-}"
+COMPILER_EXPLICIT=1
 if [ -z "$COMPILER" ]; then
+  COMPILER_EXPLICIT=0
   for candidate in release/*/simple bin/release/*/simple build/bootstrap/stage3/*/simple; do
     if [ -x "$candidate" ]; then
       COMPILER="$candidate"
@@ -90,8 +101,12 @@ fi
 PROVENANCE="$($COMPILER --version 2>&1 || true)"
 case "$PROVENANCE" in
   *"bootstrap seed only"*)
-    echo "error: refusing Rust bootstrap seed: $COMPILER" >&2
-    exit 1
+    if [ "$COMPILER_EXPLICIT" = "0" ]; then
+      echo "error: refusing auto-discovered Rust bootstrap seed: $COMPILER" >&2
+      echo "hint: set SIMPLE_BUILD_COMPILER explicitly to choose a builder" >&2
+      exit 1
+    fi
+    echo "warning: building with the Rust bootstrap seed (explicitly selected): $COMPILER" >&2
     ;;
 esac
 
@@ -100,7 +115,15 @@ esac
 # --target at lines ~686-693 even though it is missing from the printed
 # --help block). Probe the flag directly instead of grepping stale --help
 # text, which always misses it and would wrongly abort every build.
-TARGET_PROBE="$($COMPILER native-build --target "$TARGET" --help 2>&1 || true)"
+TARGET_PROBE="$($COMPILER native-build --target "$TARGET" --help 2>&1)" && PROBE_RC=0 || PROBE_RC=$?
+# A crashing compiler produces NO output, so the pattern match below silently
+# passes it (fail-open). bootstrap/stage3/x86_64-unknown-linux-gnu/simple
+# core-dumps on this exact probe; without this check the build proceeds with a
+# compiler that cannot run. Signal deaths report as 128+signo.
+if [ "$PROBE_RC" -ge 128 ]; then
+  echo "error: selected compiler crashed on native-build probe (rc=$PROBE_RC): $COMPILER" >&2
+  exit 1
+fi
 case "$TARGET_PROBE" in
   *"unknown"*"--target"*|*"unrecognized"*"--target"*)
     echo "error: selected self-hosted compiler lacks native-build --target: $COMPILER" >&2

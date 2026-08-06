@@ -30,7 +30,7 @@ every lane below is QEMU-with-real-firmware until they clear.
 | `build/os/llvm/cross-x86_64-unknown-simpleos/` | CMakeCache only — **no bin/, no build.ninja** | filesystem |
 | `build/os/clang_static/` | ABSENT | filesystem |
 | LLVM fork | EXISTS: `github.com/ormastes/llvm-project` branch `simpleos`, checkout `/home/ormastes/llvm-project` (Clang 20, ~9 SimpleOS commits) | `src/os/port/llvm/build.spl:70` |
-| Fork pin | `LLVM_REVISION=3b33ba807` — 2 commits behind fork tip `92fa40246` | `src/os/port/llvm/build.spl:71` |
+| Fork pin | RESOLVED 2026-08-06 (lane F1): fork tip and pin both `596122063`. The 30 uncommitted freestanding-ification files that existed only on local disk are now committed and pushed. | `src/os/port/llvm/build.spl:71` |
 | Sysroot | EXISTS: `build/os/sysroot/` (crt0.o, libsimpleos_c.a, libc++.a, ~35 headers, `simpleos.ld` ENTRY `_start` @0x40000000, static-only) | `src/os/port/llvm/sysroot.shs` |
 | lld in-guest link ladder | AUTHORED, NEVER EXECUTED (rungs 3–6, `PREPARED-POSTPONED`) | `scripts/os/ssh_lld_link_uefi.shs`, `doc/03_plan/os/in_guest_lld_link_ladder.md` |
 | Guest FS | FAT32 **root-directory-only, 8.3 names** (LFN parsed, no subdir traversal) | `src/os/kernel/fs/fat32.spl` |

@@ -369,62 +369,10 @@ FILE *stdin  = &_stdin_f;
 FILE *stdout = &_stdout_f;
 FILE *stderr = &_stderr_f;
 
-/* Canonical argv fallback for SimpleOS C-only programs.  Every symbol is weak:
- * when SimpleCore is linked its strong provider owns the same ABI and storage.
- * Keeping the aliases together prevents crt0 publication through rt_set_args
- * from being read back through an unrelated sys_get_args/rt_get_args store. */
-static int64_t simpleos_cli_argc;
-static int64_t simpleos_cli_argv;
-extern int64_t rt_array_new(int64_t cap);
-extern int8_t rt_array_push(int64_t array, int64_t value);
-extern int64_t rt_array_len(int64_t array);
-extern int64_t rt_string_new(int64_t bytes, int64_t len);
-
-int64_t rt_array_len_safe(int64_t value) {
-    if (value == 0 || value == 3) return 0;
-    return rt_array_len(value);
-}
-
-__attribute__((weak)) void rt_set_args(int64_t argc, int64_t argv) {
-    simpleos_cli_argc = argc;
-    simpleos_cli_argv = argv;
-}
-
-__attribute__((weak)) void spl_init_args(int argc, char **argv) {
-    rt_set_args((int64_t)argc, (int64_t)(uintptr_t)argv);
-}
-
-__attribute__((weak)) int64_t rt_cli_arg_count(void) {
-    return simpleos_cli_argc;
-}
-
-__attribute__((weak)) int64_t rt_cli_arg_at(int64_t index) {
-    char **argv = (char **)(uintptr_t)simpleos_cli_argv;
-    if (index < 0 || index >= simpleos_cli_argc) {
-        return rt_string_new(0, 0);
-    }
-    const char *arg = argv && argv[index] ? argv[index] : "";
-    return rt_string_new((int64_t)(uintptr_t)arg, (int64_t)strlen(arg));
-}
-
-__attribute__((weak)) int64_t rt_cli_get_args(void) {
-    char **argv = (char **)(uintptr_t)simpleos_cli_argv;
-    int64_t args = rt_array_new(simpleos_cli_argc);
-    for (int64_t i = 0; i < simpleos_cli_argc; i++) {
-        const char *arg = argv && argv[i] ? argv[i] : "";
-        rt_array_push(args, rt_string_new((int64_t)(uintptr_t)arg,
-                                          (int64_t)strlen(arg)));
-    }
-    return args;
-}
-
-__attribute__((weak)) int64_t rt_get_args(void) {
-    return rt_cli_get_args();
-}
-
-__attribute__((weak)) int64_t sys_get_args(void) {
-    return rt_cli_get_args();
-}
+/* The Simple-runtime argv bridge (rt_set_args / rt_cli_* / rt_get_args /
+ * sys_get_args / rt_array_len_safe) lives in simpleos_cli_args.c so that a
+ * plain C/C++ link never pulls the Simple runtime dependency in through this
+ * object. Do not move it back here. */
 
 ssize_t write(int fd, const void *buf, size_t count) {
     if (running_on_linux_host()) {

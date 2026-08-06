@@ -18,7 +18,8 @@ CFLAGS  = -target x86_64-unknown-none-elf \
 ASFLAGS = -target x86_64-unknown-none-elf \
           -ffreestanding -nostdlib
 
-C_SRCS  = simpleos_libc.c simpleos_math.c simpleos_math_ext.c simpleos_fs.c \
+C_SRCS  = simpleos_libc.c simpleos_cli_args.c \
+          simpleos_math.c simpleos_math_ext.c simpleos_fs.c \
           simpleos_pthread.c simpleos_alloc.c simpleos_process.c \
           simpleos_string_ext.c simpleos_stdlib_ext.c \
           simpleos_time.c simpleos_printf_float.c simpleos_cxxabi.c \
