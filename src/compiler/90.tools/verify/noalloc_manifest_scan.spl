@@ -1,0 +1,188 @@
+# Noalloc manifest scan — populates a real NoallocCapabilityManifest from
+# source text under src/lib/nogc_async_mut_noalloc and runs it through
+# noalloc_checker.check_all_noalloc_fns for real.
+#
+# This is the first genuinely-reachable driver for check_all_noalloc_fns.
+# Before this file, the only two tree-wide hits for that function name were
+# its own definition and its export (see noalloc_checker.spl survey note).
+#
+# SCOPE (stated plainly, do not overclaim):
+#   - This is a TEXT-based fact extractor, not an AST/HIR/MIR pass. There is
+#     no self-hosted Simple binary in this tree to drive a real parse (see
+#     effect_verifier.spl's own "Deferred" note — same constraint applies
+#     here), so direct-alloc detection is line-pattern matching, same tier of
+#     honesty as noalloc_reachable.spl's import-prefix scan.
+#   - Direct-alloc detection covers exactly two patterns it can recognize
+#     reliably from text alone, reusing noalloc_checker's own tag vocabulary:
+#       "new"           — ` new `, `= new `, `(new ` on a line
+#       "interpolation" — a `{` appearing inside a `"..."` text literal
+#     It deliberately does NOT attempt array/dict-literal or string-concat
+#     detection from text alone — `[` and `{` are used for far too many
+#     non-allocating constructs (type annotations, blocks, indexing) to
+#     classify safely without a real parser. That gap is real; it is not
+#     hidden.
+#   - Transitive-call detection only sees allocation status for functions
+#     this same scan registered (i.e. other @noalloc fns under the same
+#     root). It cannot see across the wider call graph without a link to
+#     alloc_inference over full HIR, which does not run standalone here.
+#
+# Any @noalloc function this scan finds with a real "new" or "interpolation"
+# site in its body is a genuine, non-fabricated violation.
+
+use compiler.semantics.noalloc_checker.{
+    NoallocCapabilityManifest, check_all_noalloc_fns, format_noalloc_violations
+}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+val NOALLOC_ROOT = "src/lib/nogc_async_mut_noalloc"
+
+struct ScannedFn:
+    """One @noalloc-annotated function found by the text scan."""
+    name: text
+    expr_tags: [text]
+    callees: [text]
+
+fn _indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.len() and line[n:n + 1] == " ":
+        n = n + 1
+    n
+
+fn _is_fn_decl(line: text) -> bool:
+    val t = line.trim()
+    t.starts_with("fn ") or t.starts_with("me ") or t.starts_with("static fn ")
+
+fn _fn_name(line: text) -> text:
+    val t = line.trim()
+    var rest = t
+    if rest.starts_with("static fn "):
+        rest = rest[10:rest.len()]
+    else if rest.starts_with("fn "):
+        rest = rest[3:rest.len()]
+    else if rest.starts_with("me "):
+        rest = rest[3:rest.len()]
+    var idx = 0
+    while idx < rest.len() and rest[idx:idx + 1] != "(":
+        idx = idx + 1
+    rest[0:idx]
+
+fn _has_interpolation(line: text) -> bool:
+    """Detect a '{' inside a quoted text literal (crude but reusable)."""
+    var in_str = false
+    var i = 0
+    while i < line.len():
+        val ch = line[i:i + 1]
+        if ch == "\"":
+            in_str = not in_str
+        else if ch == "{" and in_str:
+            return true
+        i = i + 1
+    false
+
+fn _has_new_call(line: text) -> bool:
+    line.contains(" new ") or line.starts_with("new ") or line.contains("(new ")
+
+fn _extract_callees(line: text) -> [text]:
+    var callees: [text] = []
+    var ident = ""
+    var i = 0
+    while i < line.len():
+        val ch = line[i:i + 1]
+        val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+        val is_digit = ch >= "0" and ch <= "9"
+        if is_alpha or (is_digit and ident != ""):
+            ident = ident + ch
+        else:
+            if ch == "(" and ident != "":
+                callees.push(ident)
+            ident = ""
+        i = i + 1
+    callees
+
+fn scan_noalloc_functions() -> [ScannedFn]:
+    """Walk NOALLOC_ROOT, find @noalloc fns, extract body facts by indentation."""
+    var results: [ScannedFn] = []
+    for path in dir_walk(NOALLOC_ROOT):
+        if not path.ends_with(".spl"):
+            continue
+        if path.ends_with("_spec.spl"):
+            continue
+        val content = file_read(path)
+        val lines = content.split("\n")
+        var i = 0
+        var pending_noalloc = false
+        while i < lines.len():
+            val line = lines[i]
+            val trimmed = line.trim()
+            if trimmed.starts_with("@noalloc"):
+                pending_noalloc = true
+                i = i + 1
+                continue
+            if _is_fn_decl(line):
+                val is_noalloc = pending_noalloc
+                pending_noalloc = false
+                val name = _fn_name(line)
+                val header_indent = _indent_of(line)
+                var expr_tags: [text] = []
+                var callees: [text] = []
+                var j = i + 1
+                while j < lines.len():
+                    val body_line = lines[j]
+                    val body_trim = body_line.trim()
+                    if body_trim != "" and _indent_of(body_line) <= header_indent:
+                        break
+                    if _has_new_call(body_line):
+                        expr_tags.push("new")
+                    if _has_interpolation(body_line):
+                        expr_tags.push("interpolation")
+                    for callee in _extract_callees(body_line):
+                        callees.push(callee)
+                    j = j + 1
+                if is_noalloc:
+                    results.push(ScannedFn(name: name, expr_tags: expr_tags, callees: callees))
+                i = j
+                continue
+            pending_noalloc = false
+            i = i + 1
+    results
+
+fn run_noalloc_manifest_scan() -> [text]:
+    """Build a real NoallocCapabilityManifest from scanned source and check it.
+
+    Returns formatted violation strings (empty means clean or no @noalloc fns
+    found at all — both are reported distinctly by print_noalloc_manifest_scan).
+    """
+    val scanned = scan_noalloc_functions()
+    val manifest = NoallocCapabilityManifest.new()
+    for entry in scanned:
+        manifest.register(entry.name, true, false, "")
+
+    var fn_bodies: [{text: [text]}] = []
+    var fn_callees: [{text: [text]}] = []
+    for entry in scanned:
+        var body_map: {text: [text]} = {}
+        body_map[entry.name] = entry.expr_tags
+        fn_bodies.push(body_map)
+
+        var callee_map: {text: [text]} = {}
+        callee_map[entry.name] = entry.callees
+        fn_callees.push(callee_map)
+
+    val violations = check_all_noalloc_fns(fn_bodies, fn_callees, manifest)
+    format_noalloc_violations(violations)
+
+extern fn rt_exit(code: i64)
+
+fn main():
+    val scanned = scan_noalloc_functions()
+    val messages = run_noalloc_manifest_scan()
+    if scanned.len() == 0:
+        print "noalloc manifest scan: found 0 @noalloc-annotated functions under {NOALLOC_ROOT}"
+        return
+    if messages.len() == 0:
+        print "noalloc manifest scan: {scanned.len()} @noalloc fn(s) checked, 0 violations"
+        return
+    for message in messages:
+        print message
+    rt_exit(1)

@@ -56,8 +56,9 @@ fi
 tree_guard="$repo_root/scripts/check/check-no-conflict-tree-push.shs"
 markers_guard="$repo_root/scripts/check/check-no-conflict-markers-push.shs"
 size_guard="$repo_root/scripts/check/check-tree-size-push.shs"
+jit_guard="$repo_root/scripts/check/check-jit-closure-blockers.shs"
 
-for g in "$tree_guard" "$markers_guard" "$size_guard"; do
+for g in "$tree_guard" "$markers_guard" "$size_guard" "$jit_guard"; do
     [ -f "$g" ] || {
         echo "pre-push: guard script missing at $g — refusing to push blind" >&2
         exit 1
@@ -66,6 +67,11 @@ done
 
 zero='0000000000000000000000000000000000000000'
 status=0
+
+# JIT closure-blocker gate runs once per push (not per-ref, not range-bound):
+# it statically scans the hot render/UI lanes on disk for lambda/`_`-closure
+# forms the seed JIT refuses to compile (see the guard's own header). Unlike
+# the three guards above it does not inspect the outgoing commit range.
 
 # Run one guard, capture to a FILE (never a pipe — a pipeline's $? is the last
 # command's, which has already caused an agent to record GUARD_EXIT=0 while the
@@ -134,5 +140,7 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
         run_guard "$markers_guard" "$markers_range" "$markers_range"
     fi
 done
+
+run_guard "$jit_guard" "hot lanes (full scan, not range-bound)"
 
 exit $status

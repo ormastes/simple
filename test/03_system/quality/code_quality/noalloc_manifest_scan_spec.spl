@@ -1,0 +1,29 @@
+# noalloc_manifest_scan_spec
+#
+# Verifies the noalloc capability-manifest scan runs check_all_noalloc_fns for
+# real against source text under src/lib/nogc_async_mut_noalloc, and that a
+# genuine @noalloc violation (a real 'new' call) is caught end-to-end — not
+# merely a cosmetic manifest that always passes.
+
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val PROBE_PATH = "src/lib/nogc_async_mut_noalloc/collections/_sabotage_probe_spec_fixture.spl"
+val PROBE_SOURCE = "# spec-owned sabotage fixture — deleted after each run\n\n@noalloc\nfn probe_violates_noalloc_spec_fixture() -> i64:\n    val bad = new BadThing()\n    1\n"
+
+describe "noalloc manifest scan":
+
+    it "reports a clean run when no @noalloc violation exists":
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/noalloc_manifest_scan.spl"])
+        expect(result.2).to_equal(0)
+
+    it "catches a real @noalloc violation (direct 'new' call) end-to-end":
+        file_write(PROBE_PATH, PROBE_SOURCE)
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/noalloc_manifest_scan.spl"])
+        file_delete(PROBE_PATH)
+
+        expect(result.2).to_equal(1)
+        expect(result.0).to_contain("direct-alloc")
+        expect(result.0).to_contain("heap allocation via 'new'")
