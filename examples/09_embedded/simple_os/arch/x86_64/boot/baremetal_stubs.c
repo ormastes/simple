@@ -16505,6 +16505,7 @@ __attribute__((weak)) int64_t spl_handle_clock_gettime(uint64_t, uint64_t, uint6
 __attribute__((weak)) int64_t spl_handle_sleep(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_fork(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_exec(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+__attribute__((weak)) int64_t spl_handle_spawn_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_waitpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_pipe(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_dup2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -16566,21 +16567,87 @@ extern int64_t rt_x86_ring3_resume_valid(void);
 static uint64_t _user_heap_bump(uint64_t len);  /* defined below */
 static void _bare_exec_reset_files(void);
 
+/* ---------------------------------------------------------------------------
+ * Lane B3 — nested SpawnWait (syscall 70) bookkeeping.
+ *
+ * ponytail: this is a SYNCHRONOUS run-to-completion spawn, not fork. Ceiling:
+ * the parent is suspended for the child's whole lifetime (no concurrency), the
+ * only parent/child channel is the child's exit status plus the shared RAM file
+ * table, there are no pipes and no signals, and nesting is capped at
+ * BARE_SPAWN_MAX_DEPTH. That is exactly enough for a `clang` driver to run
+ * `clang -cc1` and then `ld.lld`, which is the B3 goal — and nothing more.
+ * Upgrade path: once FS-exec processes are real scheduler Tasks with
+ * register_task_vmspace() entries, _handle_fork/_handle_waitpid in
+ * src/os/kernel/ipc/syscall_process.spl become reachable AS THEY ALREADY ARE
+ * and this whole layer is deleted. It is unreachable today only because the
+ * FS-exec ring-3 process is not a Task at all (see x86_64_fs_exec_ring3.spl).
+ *
+ * What must be saved across a nested spawn: the child's rt_user_heap_init
+ * would otherwise (a) reset the bump allocator the PARENT is still using and
+ * (b) wipe the shared RAM file table, destroying both the parent's open fds and
+ * any output the child produced for it. And _bare_exec_halt_on_exit must be 0
+ * for the child so its exit(2) longjmps back instead of halting QEMU.
+ * ------------------------------------------------------------------------ */
+#define BARE_SPAWN_MAX_DEPTH 4
+static int      _bare_spawn_depth = 0;
+static uint64_t _bare_spawn_heap_save[BARE_SPAWN_MAX_DEPTH][3];
+static int      _bare_spawn_halt_save[BARE_SPAWN_MAX_DEPTH];
+
+/* 0 on success, -11 (EAGAIN) when the nesting cap is reached. */
+int64_t rt_bare_spawn_enter(void) {
+    if (_bare_spawn_depth >= BARE_SPAWN_MAX_DEPTH) return -11;
+    _bare_spawn_heap_save[_bare_spawn_depth][0] = _user_heap_base;
+    _bare_spawn_heap_save[_bare_spawn_depth][1] = _user_heap_cur;
+    _bare_spawn_heap_save[_bare_spawn_depth][2] = _user_heap_end;
+    _bare_spawn_halt_save[_bare_spawn_depth]    = _bare_exec_halt_on_exit;
+    _bare_spawn_depth++;
+    return 0;
+}
+
+void rt_bare_spawn_leave(void) {
+    if (_bare_spawn_depth <= 0) return;
+    _bare_spawn_depth--;
+    _user_heap_base = _bare_spawn_heap_save[_bare_spawn_depth][0];
+    _user_heap_cur  = _bare_spawn_heap_save[_bare_spawn_depth][1];
+    _user_heap_end  = _bare_spawn_heap_save[_bare_spawn_depth][2];
+    _bare_exec_halt_on_exit = _bare_spawn_halt_save[_bare_spawn_depth];
+}
+
+int64_t rt_bare_spawn_depth(void) { return _bare_spawn_depth; }
+
 void rt_user_heap_init(uint64_t base, uint64_t size) {
     _user_heap_base = base;
     _user_heap_cur  = base;
     _user_heap_end  = base + size;
     _bare_exec_mode = 1;
+    if (_bare_spawn_depth > 0) {
+        /* Nested child: MUST return to the suspended parent on exit, and MUST
+         * NOT wipe the file table they share. */
+        _bare_exec_halt_on_exit = 0;
+        return;
+    }
     _bare_exec_halt_on_exit = 1;
     _bare_exec_reset_files();
 }
 
+/* Same as rt_user_heap_init but the program's exit(2) RESUMES the suspended
+ * kernel frame (longjmp through the enter_user_first savepoint) instead of
+ * taking the machine down via outb(0xF4)/hlt. Every caller that reaches ring 3
+ * through _x86_64_fs_exec_enter_ring3 wants this: the sshd accept loop must go
+ * on to serve the next command (getfile / the next link step), and the two bare
+ * boot entries print the returned rc and terminate themselves. Halting here is
+ * also not board-runnable — isa-debug-exit does not exist outside QEMU's ISA
+ * bridge, and under OVMF the outb is simply ignored, so the guest wedged in
+ * `cli; hlt` with a perfectly healthy-looking serial log. */
 void rt_user_heap_init_returning(uint64_t base, uint64_t size) {
     _user_heap_base = base;
     _user_heap_cur  = base;
     _user_heap_end  = base + size;
     _bare_exec_mode = 1;
     _bare_exec_halt_on_exit = 0;
+    /* Nested child: MUST NOT wipe the file table it shares with the suspended
+     * parent (same rule as rt_user_heap_init's depth>0 branch). */
+    if (_bare_spawn_depth > 0) return;
     _bare_exec_reset_files();
 }
 
@@ -16622,6 +16689,11 @@ static int _bare_next_fd = 3;
  * re-persists run 1's stale output. Called by the Simple-side spawn entries
  * (x86_64_fs_exec_spawn / _spawn_heap) BEFORE entering ring 3. */
 void simpleos_bare_exec_reset(void) {
+    /* Lane B3: a NESTED spawn shares the RAM file table with its suspended
+     * parent — that table is the only place the child's output (e.g. a `.o`)
+     * can land where the parent can still see it, and the parent's own open
+     * fds must survive. Resetting is a top-level-spawn-only operation. */
+    if (_bare_spawn_depth > 0) return;
     for (int i = 0; i < BARE_MAX_FILES; i++) {
         _bare_files[i].used = 0;
         _bare_files[i].is_output = 0;
@@ -16714,7 +16786,10 @@ static int _bare_exec_handle(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2
     (void)a5;
     switch (num) {
         case 0:   /* exit(status) — dump RAM outputs, then QEMU isa-debug-exit */
-            _bare_dump_all_outputs();
+            /* A nested child's outputs stay in the shared RAM table for its
+             * parent to consume; only the outermost exit dumps them to serial,
+             * otherwise every level re-dumps the same objects. */
+            if (_bare_spawn_depth == 0) _bare_dump_all_outputs();
             serial_puts("[syscall] exit status=");
             serial_put_dec((int64_t)a0);
             serial_puts("\r\n");
@@ -16759,7 +16834,35 @@ static int _bare_exec_handle(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2
             struct bare_file *nf = &_bare_files[slot];
             uint64_t flags = a2;
             if (flags & 0x40u) {                       /* O_CREAT => output */
-                if (_bare_out_taken) { *out = -24; return 1; }
+                /* Log creates too. Only input opens were traced, so a linker's
+                 * unique-temp create was INVISIBLE in the serial log and the
+                 * resulting -EMFILE looked like slot exhaustion when 3 of 8
+                 * slots were free (lane C4 rung 4 mis-diagnosis, 2026-08-06). */
+                _bare_dbg_path("[sc] create path=", a0, a1);
+                if (_bare_out_taken) {
+                    /* There is exactly ONE output buffer, but a linker needs
+                     * TWO O_CREATs: llvm::sys::fs::createUniqueFile CREATES
+                     * `<output>-<rnd>.tmp` purely to mint a unique name, never
+                     * writes a byte into it, and then the real output path is
+                     * opened at commit(). That second open used to return
+                     * -EMFILE, which lld reports as
+                     *   error: failed to write output '/HELLO.ELF': Too many open files
+                     * (lane C4 rung 4). So RECYCLE an output slot that carries
+                     * no data: it is a placeholder by construction, and giving
+                     * it the new name is exactly what the rename handler
+                     * (case 44) would have done had lld renamed instead of
+                     * re-opening. An output that HAS bytes is never recycled —
+                     * that would silently drop a produced artifact. */
+                    for (int i = 0; i < BARE_MAX_FILES; i++) {
+                        struct bare_file *ef = &_bare_files[i];
+                        if (ef->used && ef->is_output && ef->size == 0) {
+                            ef->pos = 0;
+                            _bare_copy_name(ef->name, a0, a1);
+                            *out = 3 + i; return 1;
+                        }
+                    }
+                    *out = -24; return 1;
+                }
                 _bare_out_taken = 1;
                 nf->used = 1; nf->is_output = 1;
                 nf->data = _bare_out_buf; nf->cap = BARE_OUT_CAP;
@@ -17201,6 +17304,18 @@ int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case 51: return spl_handle_sleep(a0, a1, a2, a3, a4, a5);
         case 57: return spl_handle_fork(a0, a1, a2, a3, a4, a5);
         case 59: return spl_handle_exec(a0, a1, a2, a3, a4, a5);
+        /* Lane B3 — SpawnWait, syscall 120 (moved down here with the other
+         * high numbers; 70 is already net_socket). Deliberately NOT 57/59: on the FS-exec ring-3
+         * path those two are unreachable (the process is not a scheduler Task,
+         * so _handle_fork's clone_task/_handle_exec's exec_image have nothing
+         * to act on), and giving 57 posix_spawn semantics here would collide
+         * with the real scheduler fork that the full kernel still serves.
+         * NOT handled in _bare_exec_handle either — it falls through to here so
+         * the whole implementation stays in Simple.
+         * ABI: a0=path ptr, a1=path len, a2=argv blob ptr (NUL-separated),
+         *      a3=argv blob len, a4=argv count. Returns the child's exit
+         *      status (>=0) or a negative errno. */
+        case 120: return spl_handle_spawn_wait(a0, a1, a2, a3, a4, a5);
         case 60:
             /* DebugWrite — implemented natively in the boot layer (matching
              * the riscv boot dispatchers). The Simple-side handler chain
@@ -17596,6 +17711,14 @@ __attribute__((weak)) int64_t spl_handle_fork(uint64_t a0, uint64_t a1, uint64_t
 }
 
 __attribute__((weak)) int64_t spl_handle_exec(uint64_t a0, uint64_t a1, uint64_t a2,
+                                               uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return -38;
+}
+
+/* Lane B3 SpawnWait (syscall 70). Strong override lives in
+ * src/os/kernel/loader/x86_64_fs_exec_spawn.spl; ENOSYS when not linked. */
+__attribute__((weak)) int64_t spl_handle_spawn_wait(uint64_t a0, uint64_t a1, uint64_t a2,
                                                uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     return -38;

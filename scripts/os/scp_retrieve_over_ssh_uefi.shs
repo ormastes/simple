@@ -59,7 +59,15 @@ mkdir -p build/os/generated/generated build/os/elfexec/stageD "$SCRATCH"
 # ---- 1. Payload image with clang_static (linked at 0x40000000) + hello.c ----
 if [ "${SKIP_STAGE:-1}" != "1" ] || [ ! -f "$IMG" ]; then
     [ -f "$CLANG_BIN" ] || { echo "[uefi-scp] missing $CLANG_BIN (relink clang_static at 0x40000000 first)"; exit 1; }
-    printf 'int main(void){ return 7; }\n' > build/os/elfexec/stageD/hello.c
+    # `puts` is declared by hand rather than #include'd: `clang -cc1` is invoked
+    # in-guest with no -I, so there is no header search path. Both libcs supply
+    # the symbol (guest: libsimpleos_c.a `puts`, which routes fd 1 through
+    # syscall 60 per-char onto the serial console; host: system libc). The
+    # `return 7` oracle is UNCHANGED, so this file still proves the L5 round
+    # trip byte-exactly — the puts() only adds an observable stdout artifact for
+    # lane C4, where the same object is linked and RUN in-guest.
+    printf 'int puts(const char *);\nint main(void){ puts("hello, world"); return 7; }\n' \
+        > build/os/elfexec/stageD/hello.c
     SIZE="$(stat -c%s "$CLANG_BIN")"; echo "$SIZE" > build/os/elfexec/payload_size.txt
     MKOUT="$(SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SEED" run scripts/os/fsexec_mkimg_big.spl 2>&1)"
     TOTAL="$(echo "$MKOUT" | sed -n 's/.*total_bytes=\([0-9][0-9]*\).*/\1/p' | tail -1)"

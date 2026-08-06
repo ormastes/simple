@@ -215,7 +215,21 @@ if [ "${SKIP_KERNEL:-0}" != "1" ] || [ ! -f "$KERNEL" ]; then
         --linker-script "$KLINKER" 2>&1 | tail -20
     [ -f "$KERNEL" ] || { echo "[lld-link] KERNEL BUILD FAILED"; exit 1; }
 fi
-sh scripts/check/check-simpleos-x86-kernel-elf.shs "$KERNEL"
+# NOT check-simpleos-x86-kernel-elf.shs: that guard asserts Class ELF64 +
+# Machine x86-64, which is the contract for the EFI-stub kernels. THIS kernel is
+# handed to GRUB's **multiboot1** loader, whose header format is 32-bit, so
+# linker_128mb.ld deliberately emits an ELF32/i386 image — the proven sibling
+# gate (scp_retrieve_over_ssh_uefi.shs) produces a byte-for-byte equivalent
+# ELF32 kernel and boots it fine. Applying the ELF64 guard here failed the lane
+# for the wrong reason. Verify the property this lane actually depends on
+# instead: the load base must be 128 MiB, so GRUB-EFI's multiboot1 relocator has
+# a free low scratch slot (a 1 MiB base faults #UD under OVMF).
+KBASE="$(readelf -l "$KERNEL" 2>/dev/null | awk '/LOAD/{print $3; exit}')"
+echo "[lld-link] kernel first PT_LOAD vaddr = $KBASE (want 0x08000000)"
+case "$KBASE" in
+    0x08000000|0x0000000008000000) : ;;
+    *) echo "[lld-link] FAIL: kernel load base is $KBASE, not the 128 MiB multiboot1 base"; exit 1 ;;
+esac
 echo "[lld-link] kernel=$KERNEL ($(stat -c%s "$KERNEL") bytes)"
 
 # ---- 3. ESP: self-contained BOOTX64.EFI (kernel in memdisk) ----------------
@@ -247,9 +261,23 @@ fi
 echo "[lld-link] host ssh port = $SSH_PORT -> guest 22"
 
 # ---- 5. Boot under OVMF pflash (NOT -kernel). ESP via vvfat, payload on NVMe.
+# Accelerator: same auto-selection as scp_retrieve_over_ssh_uefi.shs. lld is a
+# 64 MB image that the guest STREAMS in full before executing a byte of it, so
+# TCG turns rung 3 into a multi-minute wait that looks identical to a failure.
+# ACCELERATOR AND CPU MODEL ARE SEPARATE VARIABLES: keep `-cpu qemu64`.
+# `accel=kvm -cpu host` faults the kernel in ring 0 during boot.
+# QEMU_ACCEL=tcg forces the slow path for A/B comparison.
+QEMU_ACCEL="${QEMU_ACCEL:-auto}"
+ACCEL_ARGS="-machine q35 -cpu qemu64"
+ACCEL_MODE="tcg"
+if [ "$QEMU_ACCEL" != "tcg" ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    ACCEL_ARGS="-machine q35,accel=kvm -cpu qemu64"
+    ACCEL_MODE="kvm"
+fi
+echo "[lld-link] qemu acceleration = $ACCEL_MODE (correctness gate; TCG is valid but slow)"
 rm -f "$SERIAL"
 qemu-system-x86_64 -no-user-config -monitor none -nographic -no-reboot \
-    -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
+    $ACCEL_ARGS -m "$QEMU_MEM" \
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
     -drive "if=pflash,format=raw,file=$OVMF_VARS" \
     -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
@@ -302,7 +330,16 @@ rung "LLD [0-9]" "rung3 /LLD.ELF started via FS-exec, printed version"
 # using the staged linker script -- persisted to NVMe by fat32_write_file,
 # which is ROOT-ONLY + 8.3 (constraint A), hence /HELLO.ELF and not a path.
 # Marker convention: baremetal_stubs.c prints "[oo-nvme] persist <name> -> OK".
-LLD_CMD="/LLD.ELF -flavor gnu -T /SIMPLEOS.LD -o /HELLO.ELF /CRT0.O /HELLO.O /LIBC.A"
+# --no-mmap-output-file is REQUIRED, not an optimisation (this is the escape
+# hatch anticipated in constraint C of the header, now confirmed necessary by a
+# real run). With the default FileOutputBuffer, lld creates `<output>-<rnd>.tmp`
+# first; the bare-exec RAM file layer has exactly ONE output buffer
+# (`_bare_out_taken`, baremetal_stubs.c), so the temp consumes it and the
+# subsequent open of the real name returns -EMFILE. Observed verbatim:
+#   LLD.ELF: error: failed to open /HELLO.ELF: Too many open files
+# The flag routes lld through InMemoryBuffer, writing the final 8.3 root name
+# directly with no temp and no rename.
+LLD_CMD="/LLD.ELF -flavor gnu --no-mmap-output-file -T /SIMPLEOS.LD -o /HELLO.ELF /CRT0.O /HELLO.O /LIBC.A"
 echo "[lld-link] rung4: ssh -p $SSH_PORT root@127.0.0.1 $LLD_CMD"
 sshpass -p simpleos ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
@@ -330,15 +367,26 @@ while [ $m -lt 60 ]; do
 done
 kill "$QEMU_PID" 2>/dev/null || true; sleep 1
 
+# Rung-6 acceptance is the PROGRAM'S OWN ARTIFACT, not a generic dispatch line.
+# `returned rc=0|exit 0` was unusable: `[sshd] ring3 deferred heap-stream spawn
+# returned rc=0` is printed by the rung-3 and rung-4 lld spawns too, so it went
+# green even if /HELLO.ELF never ran. The hello payload prints via libsimpleos_c
+# `puts` (fd 1 -> syscall 60 per-char -> serial) and exits 7, so BOTH its stdout
+# text and its exact status are checkable and belong to it alone.
+HELLO_EXPECT_OUT="${HELLO_EXPECT_OUT:-hello, world}"
+HELLO_EXPECT_STATUS="${HELLO_EXPECT_STATUS:-7}"
 echo "===== exec ladder (serial) ====="
 rung "heap:stream-open-ok path=/HELLO.ELF" "rung5 /HELLO.ELF started via FS-exec"
-rung "returned rc=0\|exit 0" "rung6 /HELLO.ELF returned the expected status"
+rung "$HELLO_EXPECT_OUT" "rung6a /HELLO.ELF printed its own stdout ('$HELLO_EXPECT_OUT')"
+rung "syscall\] exit status=$HELLO_EXPECT_STATUS" "rung6b /HELLO.ELF exited $HELLO_EXPECT_STATUS"
 echo "===== serial tail ====="
 sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$SERIAL" | grep -a . | tail -40
 
 if grep -qaE "LLD [0-9]" "$SERIAL" 2>/dev/null \
    && grep -qaiE "persist .*HELLO\.ELF -> OK" "$SERIAL" 2>/dev/null \
-   && grep -qaE "returned rc=0|exit 0" "$SERIAL" 2>/dev/null; then
+   && grep -qa "heap:stream-open-ok path=/HELLO.ELF" "$SERIAL" 2>/dev/null \
+   && grep -qa "$HELLO_EXPECT_OUT" "$SERIAL" 2>/dev/null \
+   && grep -qa "syscall] exit status=$HELLO_EXPECT_STATUS" "$SERIAL" 2>/dev/null; then
     echo "PASS: in-guest lld linked and ran /HELLO.ELF under OVMF (board proxy)"
 else
     echo "FAIL: one or more ladder rungs 3-6 not observed (see serial tail above)"

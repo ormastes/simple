@@ -57,6 +57,10 @@ extern fn rt_text_copy_to_phys(s: text, phys: u64) -> i64
 # by real programs (clang); the trivial FDR test payload's syscall-60/exit go
 # through the same path.
 extern fn rt_user_heap_init(base: u64, size: u64)
+# Identical, EXCEPT the ring-3 program's exit(2) resumes the suspended kernel
+# frame instead of outb(0xF4)/hlt. This is what every _x86_64_fs_exec_enter_ring3
+# caller needs — see the comment on the C definition in baremetal_stubs.c.
+extern fn rt_user_heap_init_returning(base: u64, size: u64)
 # Multi-command SSH: rt_x86_enter_user_first saves a kernel savepoint before
 # iretq'ing to CPL3; on the ring-3 program's exit(2) syscall the kernel longjmps
 # back here (so arch_x86_64_enter_user_task RETURNS) and stashes the exit status.
@@ -393,11 +397,16 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
 
     # OPT-IN anonymous user heap (map_heap=true, i.e. the *_heap_ring3 entry
     # only): pre-map a fixed high-canonical RW region and register its bounds
-    # with the boot user-exec syscall dispatcher (rt_user_heap_init). Real libc
-    # programs (clang) mmap/brk off it. CAUTION: rt_user_heap_init also flips
-    # the bare-exec dispatch flag, which reroutes exit(0) to isa-debug-exit —
-    # QEMU halts at payload exit instead of longjmp-resuming, so the default
-    # SSH multi-command spawn path must NOT set map_heap. 64 MiB (16384 pages);
+    # with the boot user-exec syscall dispatcher. Real libc programs (clang,
+    # lld) mmap/brk off it. We use rt_user_heap_init_RETURNING, never plain
+    # rt_user_heap_init: the plain one sets _bare_exec_halt_on_exit=1, which
+    # reroutes the payload's exit(0) to outb(0xF4)+`cli; hlt` instead of
+    # longjmp-resuming the kernel frame below. Under OVMF there is no
+    # isa-debug-exit device, so that write is silently ignored and the guest
+    # WEDGES — the serial log ends on a healthy `[syscall] exit status=0` with
+    # no fault, and the sshd accept loop never runs again, so every command
+    # after the first (getfile, the next link step) times out with an empty
+    # result. 64 MiB (16384 pages);
     # disjoint from clang's link range (0x40000000..) and stack (0x8000200000).
     if map_heap:
         val HEAP_VA: u64 = 0x9000000000
@@ -419,7 +428,7 @@ fn _x86_64_fs_exec_enter_ring3(binary_path: text, blob: u64, hdr_len: u64, file_
                 serial_println("[spawn] FAIL heap map page={hp}")
                 return -6
             hp = hp + 1
-        rt_user_heap_init(HEAP_VA, HEAP_PAGES * HEAP_PAGE_SZ)
+        rt_user_heap_init_returning(HEAP_VA, HEAP_PAGES * HEAP_PAGE_SZ)
         serial_println("[spawn] user heap mapped base=0x{HEAP_VA} pages={HEAP_PAGES}")
 
     val ctx = TaskContext(
@@ -463,10 +472,10 @@ pub fn x86_64_fs_exec_enter_stream_ring3(binary_path: text, header_blob: u64, hd
     _x86_64_fs_exec_enter_ring3(binary_path, header_blob, hdr_len, file_len, true, false, argv, envp)
 
 pub fn x86_64_fs_exec_enter_stream_heap_ring3(binary_path: text, header_blob: u64, hdr_len: u64, file_len: u64, argv: [text], envp: [text]) -> i64:
-    """Stream + a 64 MiB anonymous user heap (rt_user_heap_init) for real libc
-    programs (clang). OPT-IN because rt_user_heap_init's bare-exec flag makes
-    exit(0) halt QEMU instead of longjmp-resuming the kernel — the default SSH
-    multi-command spawn must use x86_64_fs_exec_enter_stream_ring3."""
+    """Stream + a 64 MiB anonymous user heap for real libc programs (clang,
+    lld). OPT-IN because the heap costs 64 MiB of pmm frames per spawn; the
+    payload's exit(0) resumes this kernel frame either way (the heap is
+    registered via rt_user_heap_init_returning, not rt_user_heap_init)."""
     serial_println("[spawn] stream+heap path={binary_path} hdr_len={hdr_len} file_len={file_len}")
     _x86_64_fs_exec_enter_ring3(binary_path, header_blob, hdr_len, file_len, true, true, argv, envp)
 
