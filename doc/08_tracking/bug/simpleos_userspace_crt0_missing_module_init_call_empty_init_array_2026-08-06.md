@@ -1,13 +1,15 @@
 # AC-6 rc=70 root cause pinned and FIXED: `/usr/bin/simple`'s freestanding crt0 never called `__simple_call_module_inits` — its `.init_array` is empty, so no heap-backed constant global was ever initialized
 
 - **ID:** simpleos_userspace_crt0_missing_module_init_call_empty_init_array_2026-08-06
-- **Status:** FIXED — `src/os/libc/simpleos_crt0.S` now calls
-  `__simple_call_module_inits` (weak-guarded) before `main`, verified by a
-  real end-to-end QEMU-user-mode sabotage test (pre-fix reproduces the bug,
-  post-fix fixes it — see "Fix landed" below). The double-invoke risk that
-  blocked the first pass does not apply: the actual fix locus,
-  `src/os/libc/simpleos_crt0.S`, is a SimpleOS-only file never linked into
-  any of the 7 other (hosted) platforms — see "Correction" below for why the
+- **Status:** FIXED on both x86_64 and aarch64 — `src/os/libc/simpleos_crt0.S`
+  and `src/os/libc/simpleos_crt0_aarch64.S` both now call
+  `__simple_call_module_inits` (weak-guarded) before `main`, each verified by
+  a real end-to-end QEMU-user-mode sabotage test (pre-fix reproduces the bug,
+  post-fix fixes it — see "Fix landed" / "aarch64 fix landed" below). The
+  double-invoke risk that blocked the first pass does not apply: the actual
+  fix locus, `src/os/libc/simpleos_crt0.S` (and its aarch64 mirror), is a
+  SimpleOS-only file never linked into any of the 7 other (hosted)
+  platforms — see "Correction" below for why the
   first pass's proposed fix locus was wrong.
 - **Severity:** high — blocks AC-6 (in-guest `/usr/bin/simple` FS-exec) and, by
   the mechanism below, would silently corrupt any freestanding `x86_64-unknown-simpleos`
@@ -400,3 +402,74 @@ the compiled call sequence is `__libc_init_array` → weak-guarded
 - `doc/08_tracking/bug/any_slot_holds_untagged_scalar_2026-08-05.md`,
   `doc/08_tracking/bug/any_receiver_element_read_shift_and_tag_2026-08-06.md`
   (related but confirmed-distinct JIT/tagging bugs, cross-linked above)
+
+## aarch64 fix landed: `src/os/libc/simpleos_crt0_aarch64.S`
+
+The x86_64 fix above ("Fix landed") explicitly flagged aarch64 as unverified.
+Confirmed by inspection that `src/os/libc/simpleos_crt0_aarch64.S` had the
+identical gap: `bl __libc_init_array` followed directly by the `main` call
+sequence, no reference anywhere to `__simple_call_module_inits`.
+
+Fixed by mirroring the x86_64 pattern in AArch64 GAS syntax, reusing the
+weak-symbol-branch idiom this same file already uses for `rt_set_args`:
+
+```asm
+    bl      __libc_init_array
+
+    ldr     x9, =__simple_call_module_inits
+    cbz     x9, .Lmodule_inits_done
+    blr     x9
+.Lmodule_inits_done:
+
+    /* Call main(argc, argv, envp) */
+```
+
+plus `.weak __simple_call_module_inits` alongside the file's other weak
+forward references.
+
+### Empirical verification (two tiers, both completed)
+
+1. **Live qemu-aarch64 user-mode sabotage test**, same method as the x86_64
+   pass: a mock aggregator (`__libc_init_array` no-op, `__module_init_mock`
+   sets `global_ready = 1`, `__simple_call_module_inits` calls it) linked
+   against both the pre-fix and post-fix `simpleos_crt0_aarch64.S`
+   (`-static -nostdlib`, raw `svc`-based `write`/`exit` to avoid any glibc
+   `_init`/`_fini`/`_DYNAMIC` link noise), run under `qemu-aarch64`:
+   ```
+   $ qemu-aarch64 ./pre_fix.elf     # unmodified simpleos_crt0_aarch64.S
+   GLOBAL_NOT_READY_BUG
+   $ qemu-aarch64 ./post_fix.elf    # fixed simpleos_crt0_aarch64.S
+   GLOBAL_WAS_READY_IN_MAIN
+   ```
+   `objdump -d` of `post_fix.elf` confirms the compiled sequence is
+   `bl __libc_init_array` → weak-guarded `ldr x9`/`cbz`/`blr x9` → `bl main`.
+
+2. **Rebuilt the real shipped artifact end to end** —
+   `sh scripts/os/simpleos-sysroot-aarch64.shs` (reassembles
+   `simpleos_crt0_aarch64.S` into `build/os/sysroot-aarch64/lib/crt0.o`) then
+   `sh scripts/os/simpleos-native-build-aarch64.shs` (native-build via
+   `build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple`, cranelift
+   backend, `--gc-sections` on the freestanding link line) →
+   `bin/release/aarch64-unknown-simpleos/simple` (2675 KB). `objdump -d` of
+   the shipped binary's real `_start` at `0x50000000` shows the same
+   `bl __libc_init_array` → `ldr x9, [__simple_call_module_inits addr]` /
+   `cbz` / `blr x9` (target `0x501f51b4`, non-zero) → `bl main` sequence, and
+   `readelf -sW` shows 128 `__module_init_*` bodies plus a non-empty
+   `__simple_call_module_inits` all survived `--gc-sections` — same
+   mechanism the x86_64 pass worried about, confirmed not a problem here
+   either. Cleanliness gates unregressed: `readelf -l` shows 0 `INTERP`
+   segments, `readelf --dyn-syms` shows 0 undefined symbols (matches the
+   `9db6f804fbcd` baseline).
+
+### Noted, not fixed here (out of scope for this pass)
+
+`environ` is declared `.globl` in `simpleos_crt0_aarch64.S` vs `.weak` in the
+x86_64 file (which was deliberately changed to `.weak` there to avoid a
+`duplicate symbol: environ` link error against `simpleos_process.c`'s own
+definition — see the x86_64 file's `environ` comment). The aarch64 rebuild in
+this pass linked clean with `.globl` (`readelf -sW` shows a single resolved
+`environ` symbol, no duplicate-symbol error), so this is not blocking. Flagged
+here in case a future aarch64 libc change reintroduces the same collision the
+x86_64 side already hit once.
+
+Fix commit: `1e9311483f70f34447ba7950f2c73e1a56c6fc11`.
