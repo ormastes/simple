@@ -18,7 +18,7 @@
 # TRUE drops real pixels (a stale-pixel bug), while a false FALSE only costs a
 # missed optimisation. Cases below pin both directions.
 
-use std.spec.{describe, context, it, expect, step}
+use std.spec.{describe, context, it, expect, expect_not, assert_true, step}
 use os.compositor.compositor.{wm_rect_covered, wm_set_occlusion_culling, wm_occlusion_culling_enabled}
 
 fn _covered(rx: i32, ry: i32, rw: i32, rh: i32, occ: [i32]) -> bool:
@@ -41,87 +41,79 @@ describe "WS-D6 occlusion coverage predicate":
 
     context "degenerate inputs":
         it "an empty or inverted rect is trivially covered":
-            expect(_covered(10, 10, 0, 40, [])).to_equal(true)
-            expect(_covered(10, 10, 40, 0, [])).to_equal(true)
-            expect(_covered(10, 10, -5, 40, [])).to_equal(true)
+            assert_true(_covered(10, 10, 0, 40, []))
+            assert_true(_covered(10, 10, 40, 0, []))
+            assert_true(_covered(10, 10, -5, 40, []))
 
         it "a real rect with NO occluders is never covered":
             step("this is the empty-desktop case; a true here culls everything")
-            expect(_covered(10, 10, 40, 30, [])).to_equal(false)
+            expect_not(_covered(10, 10, 40, 30, []))
 
     context "single occluder":
         it "exact same rect covers":
-            expect(_covered(10, 10, 40, 30, [10, 10, 40, 30])).to_equal(true)
+            assert_true(_covered(10, 10, 40, 30, [10, 10, 40, 30]))
 
         it "strictly larger occluder covers":
-            expect(_covered(10, 10, 40, 30, [0, 0, 100, 100])).to_equal(true)
+            assert_true(_covered(10, 10, 40, 30, [0, 0, 100, 100]))
 
         it "one pixel short on width does NOT cover":
-            expect(_covered(10, 10, 40, 30, [10, 10, 39, 30])).to_equal(false)
+            expect_not(_covered(10, 10, 40, 30, [10, 10, 39, 30]))
 
         it "one pixel short on height does NOT cover":
-            expect(_covered(10, 10, 40, 30, [10, 10, 40, 29])).to_equal(false)
+            expect_not(_covered(10, 10, 40, 30, [10, 10, 40, 29]))
 
         it "one pixel offset on x does NOT cover":
-            expect(_covered(10, 10, 40, 30, [11, 10, 40, 30])).to_equal(false)
+            expect_not(_covered(10, 10, 40, 30, [11, 10, 40, 30]))
 
         it "one pixel offset on y does NOT cover":
-            expect(_covered(10, 10, 40, 30, [10, 11, 40, 30])).to_equal(false)
+            expect_not(_covered(10, 10, 40, 30, [10, 11, 40, 30]))
 
         it "a disjoint occluder does NOT cover":
-            expect(_covered(10, 10, 40, 30, [200, 200, 40, 30])).to_equal(false)
+            expect_not(_covered(10, 10, 40, 30, [200, 200, 40, 30]))
 
         it "an edge-adjacent occluder (touching, not overlapping) does NOT cover":
             step("half-open rects: x+w is exclusive")
-            expect(_covered(10, 10, 40, 30, [50, 10, 40, 30])).to_equal(false)
+            expect_not(_covered(10, 10, 40, 30, [50, 10, 40, 30]))
 
         it "a strictly contained occluder does NOT cover":
-            expect(_covered(10, 10, 40, 30, [15, 15, 10, 10])).to_equal(false)
+            expect_not(_covered(10, 10, 40, 30, [15, 15, 10, 10]))
 
     context "multiple occluders — the union cases":
         it "two halves that tile the rect exactly DO cover":
             step("neither alone covers; together they do")
-            expect(_covered(10, 10, 40, 30, [10, 10, 20, 30, 30, 10, 20, 30])).to_equal(true)
+            assert_true(_covered(10, 10, 40, 30, [10, 10, 20, 30, 30, 10, 20, 30]))
 
         it "two halves with a one-pixel gap do NOT cover":
-            expect(_covered(10, 10, 40, 30, [10, 10, 19, 30, 30, 10, 20, 30])).to_equal(false)
+            expect_not(_covered(10, 10, 40, 30, [10, 10, 19, 30, 30, 10, 20, 30]))
 
         it "overlapping halves still cover":
-            expect(_covered(10, 10, 40, 30, [10, 10, 25, 30, 25, 10, 25, 30])).to_equal(true)
+            assert_true(_covered(10, 10, 40, 30, [10, 10, 25, 30, 25, 10, 25, 30]))
 
         it "four quadrants tiling the rect DO cover":
-            expect(_covered(0, 0, 20, 20,
-                            [0, 0, 10, 10, 10, 0, 10, 10,
-                             0, 10, 10, 10, 10, 10, 10, 10])).to_equal(true)
+            assert_true(_covered(0, 0, 20, 20, [0, 0, 10, 10, 10, 0, 10, 10, 0, 10, 10, 10, 10, 10, 10, 10]))
 
         it "three of four quadrants do NOT cover":
-            expect(_covered(0, 0, 20, 20,
-                            [0, 0, 10, 10, 10, 0, 10, 10, 0, 10, 10, 10])).to_equal(false)
+            expect_not(_covered(0, 0, 20, 20, [0, 0, 10, 10, 10, 0, 10, 10, 0, 10, 10, 10]))
 
         it "a donut of occluders leaving a centre hole does NOT cover":
             step("classic false-positive shape for a bounding-box test")
-            expect(_covered(0, 0, 30, 30,
-                            [0, 0, 30, 10, 0, 20, 30, 10,
-                             0, 0, 10, 30, 20, 0, 10, 30])).to_equal(false)
+            expect_not(_covered(0, 0, 30, 30, [0, 0, 30, 10, 0, 20, 30, 10, 0, 0, 10, 30, 20, 0, 10, 30]))
 
         it "the same donut plus the centre patch DOES cover":
-            expect(_covered(0, 0, 30, 30,
-                            [0, 0, 30, 10, 0, 20, 30, 10,
-                             0, 0, 10, 30, 20, 0, 10, 30,
-                             10, 10, 10, 10])).to_equal(true)
+            val donut_plus_centre = [0, 0, 30, 10, 0, 20, 30, 10,
+                                     0, 0, 10, 30, 20, 0, 10, 30, 10, 10, 10, 10]
+            assert_true(_covered(0, 0, 30, 30, donut_plus_centre))
 
         it "three horizontal bands tiling the rect DO cover":
-            expect(_covered(5, 5, 50, 30,
-                            [5, 5, 50, 10, 5, 15, 50, 10, 5, 25, 50, 10])).to_equal(true)
+            assert_true(_covered(5, 5, 50, 30, [5, 5, 50, 10, 5, 15, 50, 10, 5, 25, 50, 10]))
 
         it "three horizontal bands with a middle gap do NOT cover":
-            expect(_covered(5, 5, 50, 30,
-                            [5, 5, 50, 10, 5, 16, 50, 9, 5, 25, 50, 10])).to_equal(false)
+            expect_not(_covered(5, 5, 50, 30, [5, 5, 50, 10, 5, 16, 50, 9, 5, 25, 50, 10]))
 
     context "the production toggle":
         it "defaults to enabled and round-trips":
-            expect(wm_occlusion_culling_enabled()).to_equal(true)
+            assert_true(wm_occlusion_culling_enabled())
             wm_set_occlusion_culling(false)
-            expect(wm_occlusion_culling_enabled()).to_equal(false)
+            expect_not(wm_occlusion_culling_enabled())
             wm_set_occlusion_culling(true)
-            expect(wm_occlusion_culling_enabled()).to_equal(true)
+            assert_true(wm_occlusion_culling_enabled())
