@@ -34,14 +34,83 @@ is_rust_seed_simple() {
 }
 
 if [ "${1:-}" = "--self-test" ]; then
-    seed_path="$ROOT_DIR/build/riscv_fpga_sidecar_contract_selftest/src/compiler_rust/fake/simple"
-    self_hosted_path="$ROOT_DIR/bin/release/simple"
-    if is_rust_seed_simple "$seed_path" && ! is_rust_seed_simple "$self_hosted_path"; then
-        echo "STATUS: PASS riscv-fpga-sidecar-contract self-test"
-        exit 0
+    # HERMETIC. Every fixture is synthesised in a temp dir.
+    #
+    # The previous self-test used the REAL `bin/release/simple` as its
+    # known-not-a-seed fixture. That made the verdict depend on build state, not
+    # on the classifier: on 2026-08-06 this working copy's `bin/release/simple`
+    # was a wrapper that exits nonzero with "refusing non-production Simple
+    # runtime", so is_rust_seed_simple took its fail-closed branch (line 25:
+    # `|| return 0`), classified it as a seed, and the self-test went RED.
+    #
+    # It reported `STATUS: FAIL riscv-fpga-sidecar-contract self-test`, which
+    # reads as "the classifier is broken". The classifier was correct; the
+    # fixture was not hermetic. Three gates
+    # (check-riscv-formal-dual-track.shs, check-simpleos-byl-sby-artifacts.shs,
+    # check-riscv-rtl-sby-proof.shs) call this self-test and all three inherited
+    # the misleading verdict.
+    #
+    # A self-test proves the CLASSIFIER. Whether a usable self-hosted binary is
+    # deployed is a separate precondition, and the main path below still checks
+    # it and still fails loudly when it is absent.
+    st_dir="$(mktemp -d)" || exit 2
+    trap 'rm -rf "$st_dir"' EXIT
+    st_fail=0
+    st_checked=0
+
+    st_bin() { # <name> <exit-code> <version-text>
+        mkdir -p "$st_dir/bin"
+        {
+            echo '#!/bin/sh'
+            printf 'printf %s%s%s\n' "'" "$3" "'"
+            echo "exit $2"
+        } > "$st_dir/bin/$1"
+        chmod +x "$st_dir/bin/$1"
+        printf '%s\n' "$st_dir/bin/$1"
+    }
+
+    st_assert() { # <desc> <seed|notseed> <path>
+        st_checked=$((st_checked + 1))
+        if is_rust_seed_simple "$3"; then _got=seed; else _got=notseed; fi
+        if [ "$_got" != "$2" ]; then
+            echo "SELFTEST FAILED: $1 (expected $2, got $_got)" >&2
+            st_fail=1
+        fi
+    }
+
+    # Path-shape rule: a compiler_rust path is a seed regardless of existence.
+    st_assert "compiler_rust path is a seed" seed \
+        "$st_dir/src/compiler_rust/fake/simple"
+    # Not runnable and not a compiler_rust path: NOT reported as a seed, because
+    # we never ran it. The caller's own missing-binary branch handles it.
+    st_assert "absent non-seed path is not reported as a seed" notseed \
+        "$st_dir/does/not/exist/simple"
+    # Identity probe, both polarities.
+    st_assert "production version string is not a seed" notseed \
+        "$(st_bin production 0 'Simple 0.1.0 (self-hosted, production)')"
+    st_assert "bootstrap-seed banner is a seed" seed \
+        "$(st_bin seedbanner 0 'simple 0.1.0 bootstrap seed only')"
+    st_assert "Rust-built banner is a seed" seed \
+        "$(st_bin rustbuilt 0 'simple (Rust-built)')"
+    st_assert "debug-build banner is a seed" seed \
+        "$(st_bin debugbuild 0 'simple 0.1.0 debug build')"
+    # Fail-closed branches: unverifiable means forbidden, never "trusted".
+    st_assert "nonzero --version is fail-closed to seed" seed \
+        "$(st_bin refuses 1 'error: refusing non-production Simple runtime')"
+    st_assert "empty --version is fail-closed to seed" seed \
+        "$(st_bin silent 0 '')"
+
+    if [ "$st_checked" -lt 8 ]; then
+        echo "STATUS: ERROR riscv-fpga-sidecar-contract self-test — nothing was checked:" \
+             "only $st_checked fixture(s) ran (expected >= 8)" >&2
+        exit 2
     fi
-    echo "STATUS: FAIL riscv-fpga-sidecar-contract self-test" >&2
-    exit 1
+    if [ "$st_fail" -ne 0 ]; then
+        echo "STATUS: FAIL riscv-fpga-sidecar-contract self-test — $st_checked fixture(s) checked" >&2
+        exit 1
+    fi
+    echo "STATUS: PASS riscv-fpga-sidecar-contract self-test — $st_checked fixture(s) checked"
+    exit 0
 fi
 
 if [ "${SIMPLE_BIN:-}" = "" ]; then
@@ -160,10 +229,48 @@ check_bundle() {
 rm -rf "$BUILD_ROOT"
 mkdir -p "$BUILD_ROOT"
 
-"$SIMPLE_BIN" run "$ROOT_DIR/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl" "$BUILD_ROOT/default" >/dev/null
-"$SIMPLE_BIN" run "$ROOT_DIR/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl" "$BUILD_ROOT/mlk" --board=mlk_s02_100t >/dev/null
+# The two generator invocations used to be bare commands with stdout sent to
+# /dev/null under `set -e`. When the generator failed, this script died at that
+# line having printed NOTHING AT ALL and exit 1 -- no verdict, no reason, not
+# even the failing command. Observed 2026-08-06: `simple run
+# generate_riscv_fpga_bundle.spl` exits nonzero with empty stderr, and the gate
+# was indistinguishable from a crash. Report which step failed and with what.
+generate_bundle() { # <out-dir> <extra-arg...>
+    _gb_out="$1"
+    shift
+    # `if ! cmd` would make $? the negation's status (always 0), not the
+    # command's; the else-branch form preserves the real exit code.
+    if "$SIMPLE_BIN" run \
+        "$ROOT_DIR/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl" \
+        "$_gb_out" "$@" >"$BUILD_ROOT/generate.out" 2>"$BUILD_ROOT/generate.err"; then
+        :
+    else
+        _gb_rc=$?
+        echo "STATUS: FAIL riscv-fpga-sidecar-contract reason=bundle-generation-failed" \
+             "out=$_gb_out exit=$_gb_rc compiler=$SIMPLE_BIN" >&2
+        echo "-- generator stderr --" >&2
+        tail -20 "$BUILD_ROOT/generate.err" >&2 || :
+        echo "-- generator stdout --" >&2
+        tail -20 "$BUILD_ROOT/generate.out" >&2 || :
+        exit 1
+    fi
+}
 
+generate_bundle "$BUILD_ROOT/default"
+generate_bundle "$BUILD_ROOT/mlk" --board=mlk_s02_100t
+
+BUNDLES_CHECKED=0
 check_bundle "$BUILD_ROOT/default" "xilinx_generic"
+BUNDLES_CHECKED=$((BUNDLES_CHECKED + 1))
 check_bundle "$BUILD_ROOT/mlk" "mlk_s02_100t"
+BUNDLES_CHECKED=$((BUNDLES_CHECKED + 1))
 
-echo "STATUS: PASS riscv-fpga-sidecar-contract"
+# Vacuity floor: both board bundles must have been walked. Two is the whole
+# population here, so this is an exact count, not a heuristic.
+if [ "$BUNDLES_CHECKED" -lt 2 ]; then
+    echo "STATUS: ERROR riscv-fpga-sidecar-contract — nothing was checked: only" \
+         "$BUNDLES_CHECKED of 2 board bundle(s) walked" >&2
+    exit 2
+fi
+echo "STATUS: PASS riscv-fpga-sidecar-contract — $BUNDLES_CHECKED board bundle(s) checked" \
+     "(xilinx_generic, mlk_s02_100t), compiler=$SIMPLE_BIN"
