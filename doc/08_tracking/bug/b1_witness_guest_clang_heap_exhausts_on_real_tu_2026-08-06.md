@@ -1,7 +1,14 @@
-# B1 witness: in-guest clang -cc1 aborts (SIGABRT/134) partway through a real TU — guest 64 MiB heap likely too small
+# B1 witness: in-guest clang -cc1 aborts (SIGABRT/134) partway through a real TU — heap-size hypothesis DISCONFIRMED
 
 Status: OPEN. Filed 2026-08-06, lane B1 (clang self-compile witness),
 follow-up to `doc/08_tracking/bug/bare_in_cap_silently_truncates_guest_input_files_2026-08-06.md`.
+**Update 2026-08-06 (same day, follow-up round):** the "undersized 64 MiB
+heap" theory below (§2) was tested and DISCONFIRMED — see
+"Heap-bump experiment result" at the end of this doc. The guest still
+SIGABRTs at the **exact same source line** (`TU1.I:8061`) after an 8x heap
+increase (64 MiB -> 512 MiB), and heap utilization at the crash point was
+~28 MiB either way, nowhere near either capacity. Root cause is still open;
+leading candidate is now guest **stack** depth (8 MiB, unchanged), not heap.
 
 ## Summary
 
@@ -162,3 +169,72 @@ correctness gap in the templated `<chrono>` literal operators specifically.
   stage → OVMF boot → `-cc1` compile → `getfile` retrieval → tier-1/tier-2
   compare pipeline from
   `doc/03_plan/os/simpleos/b1_clang_selfcompile_witness.md` §5.
+
+## Heap-bump experiment result (2026-08-06, same day follow-up)
+
+Bumped `HEAP_PAGES` in
+`src/os/kernel/loader/x86_64_fs_exec_ring3.spl:413` from `16384` (64 MiB) to
+`131072` (512 MiB) — an 8x increase, safely within budget: the identity pool
+backing `pmm_alloc_page_raw()` spans the full `pmm_init_identity_range(0x80000000, ...)`
+= 2 GiB (matches `QEMU_MEM=2G`), not just the 384 MiB kernel/clang_static
+reservation, and the heap VA (`0x9000000000`) is a disjoint high-canonical
+region from clang's link range and stack. Rebuilt the kernel fresh
+(`SKIP_KERNEL=0`; confirmed `build/os/simpleos_ssh_ring3_uefi128.elf` mtime
+09:25 UTC, after the 09:23 UTC source edit) and reran
+`scripts/os/ssh_b1_witness_uefi.shs` end-to-end under real OVMF UEFI.
+
+**Result: crash point is byte-for-byte identical to the pre-bump run.**
+`build/os/ssh_b1_witness_uefi.serial.log` shows the same 12
+`-Wuser-defined-literals` warnings for `TU1.I` lines 8028-8061 (the
+`<chrono>` templated `operator""h/min/s/ms/us/ns` literal definitions), then
+`[syscall] exit status=134` / `[spawn] ring3 program exited rc=134`
+immediately after the line-8061 warning — same line, same warning count, same
+immediate-abort position as the original 64 MiB run.
+
+**Heap was nowhere near exhausted at the crash point either way.** The
+guest's `[heap] alloc sz=... off_before=... off_after=...` trace shows only
+4 allocations total before the abort, ending at `off_after=0x1c15790` =
+~28.15 MiB — far under both the old 64 MiB cap and the new 512 MiB cap. An
+8x capacity increase with ~28 MiB actually in use at crash time, and zero
+change in crash location, is strong evidence the abort is **not caused by
+`operator new` returning NULL from heap exhaustion** at this point in the
+TU, contradicting the working theory in §2 above.
+
+(Caveat: the `[heap] alloc` trace's source could not be located in
+`src/**` in this round — it may be gated to log only large allocations, so it
+is not proof small mallocs stayed low too. But the identical-crash-line
+result alone, independent of that trace, already disconfirms heap size as
+the controlling variable: doubling capacity 8x moved nothing.)
+
+**Status:** heap-size hypothesis in §2 is DISCONFIRMED as the root cause
+(the 64 MiB -> 512 MiB bump is still landed as a real, harmless robustness
+improvement — a real C++ TU compile should not be running that close to any
+heap ceiling regardless — but it does not fix B1). The abort is a hard
+`abort()` from `src/os/libc/simpleos_cxxabi.c:109,115`
+(`operator new`/`operator new[]` returning NULL), called from *somewhere*
+immediately after parsing/instantiating the 12th and last templated
+`operator""` chrono literal at exactly `TU1.I:8061`, every time, regardless
+of available heap. Candidates not yet ruled out:
+
+- **Guest stack overflow, not heap.** The guest stack is a fixed 8 MiB
+  (`STACK_PAGES = 2048` in `x86_64_fs_exec_ring3.spl:360`), unchanged by this
+  experiment. A stack-overflow write into an adjacent guard/unmapped page
+  could plausibly be misreported as the `operator new` NULL-return abort path
+  if the guest's exception/fault handler routes an unhandled fault through
+  the same `abort()` call, or if `operator new`'s own internal recursion (via
+  libc++abi's exception-handling machinery, even with `-fno-rtti`) blows the
+  stack at exactly this point — the 12 templated `operator""` definitions in
+  a row is exactly the kind of repetitive template-instantiation load that
+  can build stack depth in `Sema`/`CodeGen` recursion.
+- **A genuine guest libc/libc++ correctness gap specific to this construct**
+  (e.g. mis-sized allocator metadata, a corrupted heap header from an earlier
+  allocation triggering a false NULL/overflow check on the *next* alloc
+  regardless of total capacity — this would explain "same line every time,
+  independent of heap cap" just as well as a stack overflow would).
+
+**Not yet done, explicitly deferred to avoid an unbounded investigation
+loop:** instrumenting the guest abort path to print which of the two
+`abort()` call sites and file:line fired would immediately distinguish these
+theories from further heap-cap changes; next lane should start there rather
+than trying larger heap sizes again — this experiment shows that axis is
+exhausted as a lever.
