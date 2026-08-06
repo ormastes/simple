@@ -88,38 +88,59 @@ The two engines are exactly **inverted**, so neither is a control for the other.
 - **Is the trait boundary required?** **NO.** Neither a trait, a second module,
   nor a package is required — a single file with two plain `fn`s reproduces it.
 
-### Localization
+### Localization — two SEPARATE claims, do not conflate them
 
-The force-unwrap is parsed as `ExprKind.ForceUnwrap` and lowered to
-`HirExprKind.Unwrap` (`src/compiler/20.hir/hir_lowering/expressions.spl:809`),
-carried through resolve (`src/compiler/35.semantics/resolve.spl:451`) — and then
-**there is no `Unwrap` arm anywhere in MIR lowering.** Its three Option siblings
-all have explicit, heavily-commented arms that branch on `rt_is_some` and
-re-attach payload provenance (`NullCoalesce` and `ExistsCheck` in
-`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:2938+`, `ExistsCheck`
-again in `mir_lowering_stmts.spl:1518`). `Unwrap` has none, so it reaches the
-default arm and passes the operand through unchanged — the Option wrapper is
-never stripped, and the match then reads the wrapper's discriminant instead of
-the enum's. That is a precise fit for "no arm fires, nothing throws".
+**(a) The measured defect — Rust bootstrap seed, JIT.** Every number in the
+table above came from the seed binary. Behaviourally, `!` does not strip the
+Option wrapper under the JIT: the match then reads the wrapper's tag rather
+than the enum's, so no declared variant is recognized and `case _` catches it.
+Line 1 vs line 2 differ only by the Option round trip, within a single
+declaration in a single compilation unit — so the **dual-keyed enum registry is
+NOT implicated**, and neither is module or package identity. This lives in
+`src/compiler_rust/**`, which is out of scope by policy; the mechanism above is
+*consistent with* the observations, not proven at the IR level.
 
-The dual-keyed enum registry is **not** implicated: the same enum, same module,
-same declaration matches correctly on line 1 and fails on line 2 within one
-compilation unit.
+**(b) An independent structural finding — pure-Simple compiler, unverified.**
+Force-unwrap is parsed as `ExprKind.ForceUnwrap`
+(`src/compiler/10.frontend/parser_types_expr.spl:344`), lowered to
+`HirExprKind.Unwrap` (`20.hir/hir_lowering/expressions.spl:810`) and carried
+through resolve (`35.semantics/resolve.spl:451`) and the safety checker
+(`35.semantics/safety_checker.spl:630`) — and then **there is no `Unwrap` arm
+anywhere in MIR lowering.** Its three Option siblings all have explicit arms
+that branch on `rt_is_some` and re-attach payload provenance (`NullCoalesce`,
+`ExistsCheck` at `50.mir/_MirLoweringExpr/expr_dispatch.spl:2938+`, `ExistsCheck`
+again at `mir_lowering_stmts.spl:1518`). The MIR default arm
+(`expr_dispatch.spl:3380`) is a **loud** unsupported-expression-kind failure,
+not a pass-through — so this predicts a *compile error*, not the silent
+mismatch measured in (a). `parser_expr.spl:1058` marks the panic codegen as
+deferred milestone "M12", so the gap looks deliberate-but-unfinished. This
+could not be verified: no pure-Simple binary exists in this tree
+(`bin/simple` is the seed).
 
 ### Why no fix is landed here
 
 The measured failure is in the **Rust seed's JIT**, and `src/compiler_rust/**`
-is out of scope by policy. The pure-Simple mirror of the bug (the missing MIR
-`Unwrap` arm) is in scope, but no pure-Simple binary is currently built in this
-tree (`bin/simple` is the seed), so a new lowering arm could not be compiled or
-proved. Adding one blind — to a path where the sibling arms needed struct-name
-provenance fixes to be correct — is exactly the speculative change this bug
-does not need. **What to change:** give `HirExprKind.Unwrap` its own MIR arm
-modelled on `NullCoalesce`'s: branch on `rt_is_some`, extract the payload via
-`enum_payload_value`, re-attach the Option's declared inner type provenance via
-`option_inner_hir_type_for_local`, and panic on the None branch. Then re-run the
-fixture; line 2 and 3 must print `A7` / `Green`. Line 4 (interpreter matching an
-Option directly) is a **separate, opposite** defect and should be filed apart.
+is out of scope by policy. Finding (b) is in scope but is a *different* symptom
+(loud error, not silent mismatch) and could not be compiled or proved — no
+pure-Simple binary exists here. Adding a lowering arm blind, on a path where
+every sibling arm needed struct-name provenance work to be correct, is exactly
+the speculative type-identity change to avoid.
+
+**What to change, when a pure-Simple build is available:** give
+`HirExprKind.Unwrap` its own MIR arm modelled on `NullCoalesce`'s — branch on
+`rt_is_some`, extract the payload via `enum_payload_value`, re-attach the
+Option's declared inner type provenance via `option_inner_hir_type_for_local`,
+and panic on the None branch. Then run the fixture under that binary; lines 2
+and 3 must print `A7` / `Green`.
+
+**Workaround available today:** never `match` a value that came out of `!`.
+Match the `T?` directly under the interpreter, or restructure so the enum is
+never round-tripped through an Option. Neither is engine-portable — see line 4.
+
+**Separate defect, not yet filed:** line 4 is the exact inverse — the
+*interpreter* fails to match arms when the scrutinee is an `E?` matched
+directly, while the JIT handles it. Same silent-wrong-answer class. Needs its
+own bug entry.
 
 ## Suspected cause (ORIGINAL — refuted, see update above)
 
