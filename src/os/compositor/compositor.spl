@@ -98,9 +98,10 @@ fn _ps2_wm_pointer_button_code(left_btn: bool, right_btn: bool, middle_btn: bool
 #
 # `Compositor.surfaces` is stored bottom-to-top (`focused_idx` is set to
 # `surfaces.len() - 1` on create/raise, so the LAST entry is the topmost
-# window). A window whose whole rect is covered by the union of the opaque
-# rects of the windows ABOVE it contributes nothing to the framebuffer, so all
-# of its chrome and content rasterisation can be skipped.
+# window). A window whose whole PAINTED EXTENT — its rect plus the chrome drop
+# shadow, see WM_WINDOW_SHADOW_D{X,Y} below — is covered by the union of the
+# opaque body rects of the windows ABOVE it contributes nothing to the
+# framebuffer, so all of its chrome and content rasterisation can be skipped.
 #
 # `_wm_rect_covered` is an EXACT region-subtraction test, not a bounding-box
 # approximation: a rect is covered iff every one of the (up to four) strips
@@ -110,6 +111,24 @@ fn _ps2_wm_pointer_button_code(left_btn: bool, right_btn: bool, middle_btn: bool
 # skipped only when it is provably invisible — which is what keeps the
 # whole-framebuffer equivalence in
 # `test/01_unit/os/compositor/compositor_occlusion_spec.spl` true.
+
+# Drop-shadow offset used by draw_shared_mdi_window_chrome
+# (`shared_mdi_framebuffer_scene.spl:75` — `fill_rect(x+5, y+6, w, h)`). Kept in
+# sync with that call site; if the chrome shadow offset grows, this must grow
+# with it or the occlusion pre-pass will start culling visible shadow pixels.
+val WM_WINDOW_SHADOW_DX: i32 = 5
+val WM_WINDOW_SHADOW_DY: i32 = 6
+
+# The chrome title is drawn at `x + 66` with NO clip to the window rect — the
+# backends clip to the SCREEN, not to the surface — so a long enough title
+# paints past `x + w`. That extra ink has no rectangle the pre-pass can bound
+# without knowing the backend's glyph advance, so the tested footprint is
+# widened to cover the worst-case title run. 16 is a deliberate UPPER bound on
+# per-glyph advance (the 8x16 chrome font advances 8); over-estimating here
+# only costs a missed cull, never a dropped pixel.
+val WM_TITLE_TEXT_X: i32 = 66
+val WM_TITLE_MAX_GLYPH_ADVANCE: i32 = 16
+
 # Test/diagnostic switch. Production always leaves this ON; the
 # whole-framebuffer equivalence spec turns it OFF to render the full-redraw
 # reference frame that the culled frame must match pixel-for-pixel.
@@ -126,6 +145,18 @@ fn _wm_max_i32(a: i32, b: i32) -> i32:
 
 fn _wm_min_i32(a: i32, b: i32) -> i32:
     if a < b: a else: b
+
+pub fn wm_rect_covered(rx: i32, ry: i32, rw: i32, rh: i32,
+                       ox: [i32], oy: [i32], ow: [i32], oh: [i32],
+                       start: i32) -> bool:
+    """Public alias of the occlusion coverage predicate, for direct spec use.
+
+    `render_all()` is interpreter-bound on this tree (a `jit-fallback` drops
+    the web-engine module), so the whole-framebuffer equivalence spec is slow;
+    this entry point lets the predicate itself be exercised exhaustively and
+    fast. It is the SAME function, not a copy — a spec against it is not a
+    shim-vacuity test of a local clone."""
+    _wm_rect_covered(rx, ry, rw, rh, ox, oy, ow, oh, start)
 
 fn _wm_rect_covered(rx: i32, ry: i32, rw: i32, rh: i32,
                     ox: [i32], oy: [i32], ow: [i32], oh: [i32],
@@ -1392,8 +1423,20 @@ class Compositor:
         # cpu-lane-loop-ok: top-down z-order walk; bound is the surface count
         while t >= 0:
             val ts = self.surfaces[t]
-            if _wm_occlusion_culling_enabled and ts.visible and ts.width > 0 and ts.height > 0:
-                if _wm_rect_covered(ts.x, ts.y, ts.width, ts.height,
+            val title_fits = WM_TITLE_TEXT_X + WM_TITLE_MAX_GLYPH_ADVANCE * ts.title.len().to_i32() <= ts.width
+            if _wm_occlusion_culling_enabled and ts.visible and ts.width > 0 and ts.height > 0 and title_fits:
+                # A window paints OUTSIDE its own rect: draw_shared_mdi_window_chrome
+                # (shared_mdi_framebuffer_scene.spl:75) lays a drop shadow at
+                # (x+5, y+6, w, h) BEFORE the body fill. So the footprint that has
+                # to be covered before culling is legal is the painted extent,
+                # not the window rect — culling on the rect alone would silently
+                # drop the shadow band. Conservative on both sides: the tested
+                # footprint is widened by the shadow offset, while only the
+                # unconditional opaque body fill (x, y, w, h) is offered as an
+                # occluder. Both errors point at "render anyway".
+                if _wm_rect_covered(ts.x, ts.y,
+                                    ts.width + WM_WINDOW_SHADOW_DX,
+                                    ts.height + WM_WINDOW_SHADOW_DY,
                                     occ_x, occ_y, occ_w, occ_h, 0):
                     occluded[t] = true
                 else:

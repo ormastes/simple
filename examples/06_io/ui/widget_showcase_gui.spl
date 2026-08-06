@@ -1,15 +1,17 @@
-# widget_showcase_gui.spl — GUI sanity app: a comprehensive gallery of the
-# common UI widgets drawn directly on the pure-Simple Engine2D CPU lane and
-# presented to an on-screen window.
+# widget_showcase_gui.spl — GUI sanity app: the shared UI widget showcase,
+# rendered on the pure-Simple Engine2D lane and presented to an on-screen
+# window.
 #
 # This is one of the three main GUI check apps (see .claude/skills/lib/spipe_ui.md):
 #   1. 2D rendering  — engine2d_shapes_gui.spl
 #   2. GUI widgets   — THIS app
 #   3. HTML rendering — web_render_file_gui.spl
 #
-# Draws widgets with engine2d primitives (rect/rounded_rect/line/circle/triangle/
-# text) rather than the web layout path, so it renders fast and is a reliable
-# visual sanity check of widget chrome + legible glyph text on the CPU lane.
+# Since campaign task B4 the widget content is NOT hand-drawn. It is the same
+# target-agnostic tree every showcase target uses (app.ui_showcase.showcase_core)
+# turned into a DrawIrV3Scene, which this app walks into Engine2D primitives.
+# Engine2D is this target's HAL: only that last hop differs from the 2d / web /
+# wm targets, which is exactly the campaign's claim.
 #
 # Launch (window):
 #   SIMPLE_GUI_RUN_SKIP_NUDGE=1 scripts/gui/macos-gui-run.shs examples/06_io/ui/widget_showcase_gui.spl
@@ -25,7 +27,27 @@ use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 use std.common.science_math.perf_sugar.{alloc_i64}
 use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity}
-use common.ui.widget.{UITree, WidgetNode, WidgetKind}
+use common.ui.widget.{UITree, WidgetNode, WidgetKind, UIState}
+# --- shared showcase pipeline (campaign task B4) --------------------------
+# The widget content of this app is NO LONGER hand-drawn. It comes from the
+# same target-agnostic tree + reducer every other showcase target uses:
+#   showcase_build_sized -> showcase_apply -> showcase_scene (DrawIrV3Scene)
+# Only the LAST hop differs per target, which is the whole point of the
+# campaign: this target's HAL is Engine2D, so `paint_scene_engine2d` below
+# walks the shared DrawIrV3 scene into Engine2D primitives instead of the
+# pure-Simple software rasterizer used by the display-less hosts.
+use app.ui_showcase.showcase_core.{showcase_build_sized, showcase_scene, showcase_apply}
+use common.ui.host_input_event.{
+    host_pointer_down, host_pointer_up, host_pointer_move, host_key_down,
+    HOST_BTN_LEFT
+}
+use common.ui.draw_ir_v3.{
+    DrawIrV3Scene,
+    draw_ir_v3_geometry_at, draw_ir_v3_paint_at, draw_ir_v3_text_run_at,
+    draw_ir_v3_glyph_at, draw_ir_v3_has_flag,
+    DRAW_IR_V3_KIND_RECT, DRAW_IR_V3_KIND_TEXT, DRAW_IR_V3_KIND_EDGE,
+    DRAW_IR_V3_FLAG_HIDDEN, DRAW_IR_V3_NO_ID
+}
 use common.ui.wm_app_process_contract.{WM_APP_MODE_ENV, WM_BRIDGE_FILE_ENV, WM_FRAME_FILE_ENV, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV, WM_CLIENT_HOLD_ENV, WIDGET_SHOWCASE_APP_SOURCE, widget_showcase_window_title, wm_app_mode_is_client, wm_widget_showcase_bridge_request_sized, wm_widget_showcase_bridge_request_sized_with_backend, wm_fs_bridge_encode, wm_widget_showcase_event_path, wm_widget_showcase_frame_seq_path, wm_fs_app_event_seq_path, wm_fs_app_event_decode}
 
 val W: i32 = 3840
@@ -57,9 +79,23 @@ struct ShowcaseState:
     slider_value: i32
     progress_value: i32
     slider_dragging: bool
+    # The SHARED showcase widget tree + its reducer state. This is what the
+    # frame is actually built from now; the scalar fields above survive only
+    # as this app's own synthetic-event bookkeeping (SHOWCASE_EVENTS, WM
+    # bridge) and no longer feed any drawing.
+    ui: UIState
+    # Viewport the shared tree is laid out / hit-tested against. Carried on
+    # the state so `showcase_on_pointer` keeps its existing signature at all
+    # six call sites while still being able to call `showcase_apply`.
+    vw: i32
+    vh: i32
 
-fn showcase_state_default() -> ShowcaseState:
-    ShowcaseState(button_count: 0, button_pressed: false, checkbox_on: true, switch_on: true, slider_value: 60, progress_value: 62, slider_dragging: false)
+# Prefix isolating this example's nodes in the global widget store. It must
+# differ from the `scgui` used by src/app/ui_showcase/hosts/main_gui.spl.
+val SHOWCASE_PREFIX: text = "exgui"
+
+fn showcase_state_sized(vw: i32, vh: i32) -> ShowcaseState:
+    ShowcaseState(button_count: 0, button_pressed: false, checkbox_on: true, switch_on: true, slider_value: 60, progress_value: 62, slider_dragging: false, ui: showcase_build_sized(SHOWCASE_PREFIX, 10, 6), vw: vw, vh: vh)
 
 fn showcase_ui_tree(st: ShowcaseState) -> UITree:
     var root = WidgetNode.new("showcase_root", WidgetKind.Panel.to_wire())
@@ -77,15 +113,31 @@ fn showcase_ui_tree(st: ShowcaseState) -> UITree:
 
 # Pure reducer: one synthetic event -> new state (widget_interact_model style).
 fn apply_showcase_event(st: ShowcaseState, ev: text) -> ShowcaseState:
+    var out = st
+    # Each synthetic event is also driven through the SHARED reducer, aimed at
+    # the cell the event names, so the next frame's scene actually differs --
+    # that is what the before/after pixel-diff gates measure.
+    val cell = showcase_event_cell(ev)
+    if cell >= 0:
+        val px = 24 + cell * 40
+        out.ui = showcase_apply(out.ui, host_pointer_down(px, 24, HOST_BTN_LEFT), out.vw, out.vh)
+        out.ui = showcase_apply(out.ui, host_pointer_up(px, 24, HOST_BTN_LEFT), out.vw, out.vh)
     if ev == "click:button":
-        return ShowcaseState(button_count: st.button_count + 1, button_pressed: not st.button_pressed, checkbox_on: st.checkbox_on, switch_on: st.switch_on, slider_value: st.slider_value, progress_value: st.progress_value, slider_dragging: false)
+        out.button_count = out.button_count + 1
+        out.button_pressed = not out.button_pressed
+        out.slider_dragging = false
+        return out
     if ev == "toggle:switch":
-        return ShowcaseState(button_count: st.button_count, button_pressed: st.button_pressed, checkbox_on: st.checkbox_on, switch_on: not st.switch_on, slider_value: st.slider_value, progress_value: st.progress_value, slider_dragging: false)
+        out.switch_on = not out.switch_on
+        out.slider_dragging = false
+        return out
     if ev == "advance:progress":
-        var pct = st.progress_value + 20
+        var pct = out.progress_value + 20
         if pct > 100:
             pct = 100
-        return ShowcaseState(button_count: st.button_count, button_pressed: st.button_pressed, checkbox_on: st.checkbox_on, switch_on: st.switch_on, slider_value: st.slider_value, progress_value: pct, slider_dragging: false)
+        out.progress_value = pct
+        out.slider_dragging = false
+        return out
     print "unknown showcase event: {ev}"
     st
 
@@ -145,6 +197,16 @@ fn showcase_on_pointer(state: ShowcaseState, kind: text, x: i32, y: i32, pressed
     if kind == "tick":
         return showcase_on_tick(state)
     var out = state
+    # Ingress -> SHARED reducer. This is what makes an input visible in the
+    # next frame now: showcase_apply rewrites the probe pane's labels, so the
+    # scene (and therefore the framebuffer checksum) changes on every real
+    # input batch. The scalar bookkeeping below no longer affects any pixel.
+    if kind == "down":
+        out.ui = showcase_apply(out.ui, host_pointer_down(x, y, HOST_BTN_LEFT), out.vw, out.vh)
+    else if kind == "up":
+        out.ui = showcase_apply(out.ui, host_pointer_up(x, y, HOST_BTN_LEFT), out.vw, out.vh)
+    else if kind == "move":
+        out.ui = showcase_apply(out.ui, host_pointer_move(x, y), out.vw, out.vh)
     if kind == "down" and pressed and hit_rect(x, y, 12, 56, 60, 18):
         out.button_pressed = true
     if kind == "down" and pressed and hit_rect(x, y, 268, 186, 130, 28):
@@ -184,333 +246,103 @@ fn showcase_event_cell(ev: text) -> i32:
         return 3
     -1
 
-# section label above each widget cell
-# Returns the engine: paints made through an Engine2D class PARAM are lost to
-# the caller on the deployed interpreter lane (param handle detaches; mut
-# alone does not write back — see graphics_2d_showcase.spl's draw_showcase
-# for the original root-cause writeup). Every widget helper below threads
-# the engine back explicitly through its return value.
-fn label(mut b: Engine2D, x: i32, y: i32, name: text, s: i32) -> Engine2D:
-    b.draw_text(x, y, name, MUTED, sc1(6, s))
-    b
+# =========================================================================
+# DrawIrV3 -> Engine2D adapter (this target's HAL hop)
+# =========================================================================
+#
+# Mirrors the semantics of src/app/ui_showcase/hosts/scene_raster.spl's
+# `raster_scene_into` command-for-command -- HIDDEN flag, NO_ID guards, RECT
+# and EDGE both taking the rect path, milli stroke widths -- but issues
+# Engine2D primitives instead of writing pixels in pure Simple. Engine2D IS
+# this target's rasterizer, so routing the shared scene through it is the
+# intended per-target hop, not a bypass.
+#
+# It cannot use `raster_scene_argb` directly: RasterSurface's static ctor is
+# an unresolved external symbol under JIT, which drops that whole module to
+# the interpreter (measured ~294 us/pixel -- a 5,000-px fill_rect took 1.47s).
+# At this app's 3840x2160 default that is many hours per frame. See the report.
+#
+# Charset copy: glyph ids in this pipeline are indices into
+# common.ui.glyph_bitmap_5x7's FONT_CHARSET, which that module does not
+# export. The literal below is a verbatim copy of it, kept so text runs can
+# be reassembled into strings for Engine2D's real font path.
+val SCENE_CHARSET: text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,:;!?-_()[]/\\'\"+=#%&@*<>abcdefghijklmnopqrstuvwxyz"
 
-fn w_button(mut b: Engine2D, x: i32, y: i32, st: ShowcaseState, s: i32) -> Engine2D:
-    b = label(b, x, y, "Button", s)
-    if st.button_pressed:
-        b.draw_rect_filled(x, y + sc(10, s), sc(60, s), sc(18, s), ACCENT_D)
-        b.draw_rect(x, y + sc(10, s), sc(60, s), sc(18, s), WHITE)
-        b.draw_text(x + sc(16, s), y + sc(15, s), "Run", AMBER, sc1(7, s))
-    else:
-        b.draw_rect_filled(x, y + sc(10, s), sc(60, s), sc(18, s), ACCENT)
-        b.draw_rect(x, y + sc(10, s), sc(60, s), sc(18, s), ACCENT_D)
-        b.draw_text(x + sc(16, s), y + sc(15, s), "Run", WHITE, sc1(7, s))
-    # secondary (outline)
-    b.draw_rect(x + sc(70, s), y + sc(10, s), sc(60, s), sc(18, s), MUTED)
-    b.draw_text(x + sc(82, s), y + sc(15, s), "Cancel", FG, sc1(7, s))
-    b.draw_text(x + sc(18, s), y + sc(33, s), "Clicks {st.button_count}", MUTED, sc1(6, s))
-    b
+fn scene_glyph_char(gid: i32) -> text:
+    if gid < 0 or gid >= SCENE_CHARSET.len():
+        return "?"
+    SCENE_CHARSET.substring(gid, gid + 1)
 
-fn w_checkbox(mut b: Engine2D, x: i32, y: i32, st: ShowcaseState, s: i32) -> Engine2D:
-    b = label(b, x, y, "Checkbox / Radio", s)
-    b.draw_rect(x, y + sc(12, s), sc(13, s), sc(13, s), MUTED)
-    if st.checkbox_on:
-        b.draw_rect_filled(x + sc(3, s), y + sc(15, s), sc(7, s), sc(7, s), GREEN)
-    b.draw_text(x + sc(18, s), y + sc(14, s), "On", FG, sc1(7, s))
-    b.draw_rect(x + sc(50, s), y + sc(12, s), sc(13, s), sc(13, s), MUTED)
-    if not st.checkbox_on:
-        b.draw_rect_filled(x + sc(53, s), y + sc(15, s), sc(7, s), sc(7, s), AMBER)
-    b.draw_text(x + sc(68, s), y + sc(14, s), "Off", FG, sc1(7, s))
-    # radio
-    b.draw_circle(x + sc(100, s), y + sc(18, s), sc1(7, s), MUTED)
-    b.draw_circle_filled(x + sc(100, s), y + sc(18, s), sc1(3, s), ACCENT)
-    b.draw_circle(x + sc(124, s), y + sc(18, s), sc1(7, s), MUTED)
-    b
-
-fn w_switch(mut b: Engine2D, x: i32, y: i32, on: bool, s: i32) -> Engine2D:
-    b = label(b, x, y, "Toggle switch", s)
-    # first switch reflects state
-    if on:
-        b.draw_rect_filled(x, y + sc(12, s), sc(34, s), sc(16, s), GREEN)
-        b.draw_circle_filled(x + sc(26, s), y + sc(20, s), sc1(6, s), WHITE)
-    else:
-        b.draw_rect_filled(x, y + sc(12, s), sc(34, s), sc(16, s), TRACK)
-        b.draw_circle_filled(x + sc(8, s), y + sc(20, s), sc1(6, s), MUTED)
-    # second stays off (static reference)
-    b.draw_rect_filled(x + sc(44, s), y + sc(12, s), sc(34, s), sc(16, s), TRACK)
-    b.draw_circle_filled(x + sc(52, s), y + sc(20, s), sc1(6, s), MUTED)
-    b
-
-fn w_input(mut b: Engine2D, x: i32, y: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Text input", s)
-    b.draw_rect(x, y + sc(11, s), sc(150, s), sc(18, s), MUTED)
-    b.draw_text(x + sc(5, s), y + sc(16, s), "name...", MUTED, sc1(7, s))
-    b
-
-fn w_dropdown(mut b: Engine2D, x: i32, y: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Dropdown", s)
-    b.draw_rect(x, y + sc(11, s), sc(130, s), sc(18, s), MUTED)
-    b.draw_text(x + sc(5, s), y + sc(16, s), "Option A", FG, sc1(7, s))
-    b.draw_triangle_filled(x + sc(116, s), y + sc(16, s), x + sc(124, s), y + sc(16, s), x + sc(120, s), y + sc(22, s), FG)
-    b
-
-fn w_slider(mut b: Engine2D, x: i32, y: i32, value: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Slider", s)
-    val fill = sc(130 * value / 100, s)
-    b.draw_rect_filled(x, y + sc(18, s), sc(130, s), sc(4, s), TRACK)
-    b.draw_rect_filled(x, y + sc(18, s), fill, sc(4, s), ACCENT)
-    b.draw_circle_filled(x + fill, y + sc(20, s), sc1(6, s), WHITE)
-    b
-
-fn w_progress(mut b: Engine2D, x: i32, y: i32, pct: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Progress", s)
-    b.draw_rect_filled(x, y + sc(14, s), sc(130, s), sc(10, s), TRACK)
-    b.draw_rect_filled(x, y + sc(14, s), sc(130 * pct / 100, s), sc(10, s), ACCENT)
-    b.draw_text(x + sc(136, s), y + sc(14, s), "{pct}%", MUTED, sc1(6, s))
-    b
-
-fn w_search(mut b: Engine2D, x: i32, y: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Search bar", s)
-    b.draw_rect(x, y + sc(11, s), sc(150, s), sc(18, s), MUTED)
-    b.draw_circle(x + sc(12, s), y + sc(19, s), sc1(4, s), MUTED)
-    b.draw_line(x + sc(15, s), y + sc(22, s), x + sc(19, s), y + sc(26, s), MUTED, sc1(1, s))
-    b.draw_text(x + sc(24, s), y + sc(16, s), "Search...", MUTED, sc1(7, s))
-    b
-
-fn w_tabs(mut b: Engine2D, x: i32, y: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Tabs", s)
-    b.draw_text(x + sc(4, s), y + sc(14, s), "Home", FG, sc1(7, s))
-    b.draw_text(x + sc(44, s), y + sc(14, s), "Edit", MUTED, sc1(7, s))
-    b.draw_text(x + sc(80, s), y + sc(14, s), "View", MUTED, sc1(7, s))
-    b.draw_rect_filled(x + sc(2, s), y + sc(26, s), sc(32, s), sc(2, s), ACCENT)
-    b.draw_line(x, y + sc(27, s), x + sc(150, s), y + sc(27, s), LINE, sc1(1, s))
-    b
-
-fn w_segmented(mut b: Engine2D, x: i32, y: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Segmented", s)
-    b.draw_rect(x, y + sc(11, s), sc(120, s), sc(18, s), MUTED)
-    b.draw_rect_filled(x + sc(2, s), y + sc(13, s), sc(38, s), sc(14, s), ACCENT)
-    b.draw_text(x + sc(8, s), y + sc(16, s), "Day", WHITE, sc1(6, s))
-    b.draw_text(x + sc(50, s), y + sc(16, s), "Week", MUTED, sc1(6, s))
-    b.draw_text(x + sc(90, s), y + sc(16, s), "Mo", MUTED, sc1(6, s))
-    b
-
-fn w_list(mut b: Engine2D, x: i32, y: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "List", s)
-    b.draw_text(x + sc(2, s), y + sc(14, s), "- First item", FG, sc1(7, s))
-    b.draw_text(x + sc(2, s), y + sc(26, s), "- Second item", FG, sc1(7, s))
-    b.draw_text(x + sc(2, s), y + sc(38, s), "- Third item", MUTED, sc1(7, s))
-    b
-
-fn w_tree(mut b: Engine2D, x: i32, y: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Tree", s)
-    b.draw_triangle_filled(x + sc(2, s), y + sc(12, s), x + sc(2, s), y + sc(20, s), x + sc(8, s), y + sc(16, s), FG)
-    b.draw_text(x + sc(12, s), y + sc(13, s), "src", FG, sc1(7, s))
-    b.draw_text(x + sc(22, s), y + sc(26, s), "main.spl", MUTED, sc1(7, s))
-    b.draw_text(x + sc(22, s), y + sc(38, s), "lib.spl", MUTED, sc1(7, s))
-    b
-
-fn w_table(mut b: Engine2D, x: i32, y: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Table", s)
-    b.draw_rect_filled(x, y + sc(11, s), sc(150, s), sc(12, s), TRACK)
-    b.draw_text(x + sc(4, s), y + sc(13, s), "Name", FG, sc1(6, s))
-    b.draw_text(x + sc(80, s), y + sc(13, s), "Size", FG, sc1(6, s))
-    b.draw_text(x + sc(4, s), y + sc(27, s), "a.spl", MUTED, sc1(6, s))
-    b.draw_text(x + sc(80, s), y + sc(27, s), "1.2k", MUTED, sc1(6, s))
-    b.draw_text(x + sc(4, s), y + sc(39, s), "b.spl", MUTED, sc1(6, s))
-    b.draw_text(x + sc(80, s), y + sc(39, s), "3.4k", MUTED, sc1(6, s))
-    b.draw_line(x, y + sc(23, s), x + sc(150, s), y + sc(23, s), LINE, sc1(1, s))
-    b.draw_line(x + sc(74, s), y + sc(11, s), x + sc(74, s), y + sc(48, s), LINE, sc1(1, s))
-    b
-
-fn w_card(mut b: Engine2D, x: i32, y: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Card", s)
-    b.draw_rect_filled(x + sc(3, s), y + sc(14, s), sc(130, s), sc(44, s), 0xFF0C0C12u32)
-    b.draw_rect(x, y + sc(11, s), sc(130, s), sc(44, s), LINE)
-    b.draw_rect_filled(x + sc(1, s), y + sc(12, s), sc(128, s), sc(42, s), CARD)
-    b.draw_text(x + sc(8, s), y + sc(18, s), "Title", FG, sc1(7, s))
-    b.draw_text(x + sc(8, s), y + sc(32, s), "Body text here", MUTED, sc1(6, s))
-    b
-
-fn w_chip(mut b: Engine2D, x: i32, y: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Badge / Chip", s)
-    b.draw_rect_filled(x, y + sc(12, s), sc(40, s), sc(14, s), GREEN)
-    b.draw_text(x + sc(8, s), y + sc(14, s), "New", WHITE, sc1(6, s))
-    b.draw_rect_filled(x + sc(48, s), y + sc(12, s), sc(44, s), sc(14, s), AMBER)
-    b.draw_text(x + sc(55, s), y + sc(14, s), "Beta", 0xFF1A1A1Au32, sc1(6, s))
-    b
-
-fn w_tooltip(mut b: Engine2D, x: i32, y: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Tooltip", s)
-    b.draw_rect_filled(x, y + sc(12, s), sc(88, s), sc(18, s), 0xFF2D2D3Au32)
-    b.draw_text(x + sc(6, s), y + sc(17, s), "Helpful hint", FG, sc1(6, s))
-    b.draw_triangle_filled(x + sc(12, s), y + sc(30, s), x + sc(22, s), y + sc(30, s), x + sc(17, s), y + sc(35, s), 0xFF2D2D3Au32)
-    b
-
-fn w_dialog(mut b: Engine2D, x: i32, y: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Dialog / Modal", s)
-    b.draw_rect(x, y + sc(11, s), sc(150, s), sc(50, s), LINE)
-    b.draw_rect_filled(x + sc(1, s), y + sc(12, s), sc(148, s), sc(48, s), CARD)
-    b.draw_text(x + sc(8, s), y + sc(17, s), "Delete file?", FG, sc1(7, s))
-    b.draw_text(x + sc(8, s), y + sc(30, s), "This cannot be undone.", MUTED, sc1(6, s))
-    b.draw_rect_filled(x + sc(60, s), y + sc(42, s), sc(36, s), sc(14, s), TRACK)
-    b.draw_text(x + sc(66, s), y + sc(45, s), "No", FG, sc1(6, s))
-    b.draw_rect_filled(x + sc(102, s), y + sc(42, s), sc(40, s), sc(14, s), RED)
-    b.draw_text(x + sc(108, s), y + sc(45, s), "Yes", WHITE, sc1(6, s))
-    b
-
-fn w_scrollbar(mut b: Engine2D, x: i32, y: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Scrollbar", s)
-    b.draw_rect_filled(x, y + sc(11, s), sc(8, s), sc(60, s), TRACK)
-    b.draw_rect_filled(x, y + sc(14, s), sc(8, s), sc(26, s), MUTED)
-    b
-
-fn w_avatar(mut b: Engine2D, x: i32, y: i32, s: i32) -> Engine2D:
-    b = label(b, x, y, "Avatar", s)
-    b.draw_circle_filled(x + sc(16, s), y + sc(26, s), sc1(14, s), ACCENT)
-    b.draw_text(x + sc(11, s), y + sc(22, s), "JS", WHITE, sc1(7, s))
-    b
-
-# Column-major cell position: cells flow down a column, then wrap to the
-# next. Keeps every widget inside the viewport at low resolutions (G1.3).
-fn cell_pos(i: i32, rows: i32, col_w: i32, header: i32, step: i32) -> (i32, i32):
-    val c = i / rows
-    val r = i % rows
-    (12 + c * col_w, header + r * step)
-
-# Grid layout constants shared by draw_frame and the event-diff oracle.
-val GRID_HEADER: i32 = 46
-val GRID_FOOTER: i32 = 14
-val GRID_STEP: i32 = 66
-val GRID_CELLS: i32 = 18
-val WM_CLIENT_DRAIN_LIMIT: i32 = 64
-
-fn wm_client_log_enabled() -> bool:
-    (env_get("SIMPLE_WM_CLIENT_LOG") ?? "") == "1"
-
-fn wm_client_log(msg: text):
-    if wm_client_log_enabled():
-        print msg
-
-# (rows, col_w, step, header, s) for a given viewport — must match
-# draw_frame's grid. `s` is the permille density scale (1000 = 1.0x) applied
-# to widget chrome via sc()/sc1(). Baseline (narrow/short) viewports keep the
-# exact historical rows-first formula byte-for-byte at s=1000 (low-res gates
-# + interaction hit-tests depend on it). Wide/tall viewports (4K/8K default)
-# where the rows-first formula collapses to a single very wide column are
-# rebalanced across both axes AND scaled to SHOWCASE_DPI (default 300) so the
-# 18 widget cells spread across the whole canvas with crisp, generously sized
-# chrome instead of clustering in one tall strip of tiny widgets.
-fn grid_params(w: i32, h: i32) -> (i32, i32, i32, i32, i32):
-    var rows = (h - GRID_HEADER - GRID_FOOTER) / GRID_STEP
-    if rows < 1:
-        rows = 1
-    val ncols = (GRID_CELLS + rows - 1) / rows
-    var col_w = (w - 12) / ncols
-    # ponytail: below ~170px columns widgets overlap; accept clipping there
-    if col_w < 170:
-        col_w = 170
-    if ncols > 1:
-        return (rows, col_w, GRID_STEP, GRID_HEADER, 1000)
-    # Rebalance: pick a column count that fills width and height together
-    # (sqrt of cells scaled by aspect ratio), then derive rows/col_w/step from
-    # that instead of the degenerate single-column result above. Also derive
-    # the density scale from SHOWCASE_DPI so widget chrome grows with it.
-    val s = showcase_dpi() * 1000 / 96
-    val header = sc(GRID_HEADER, s)
-    val footer = sc(GRID_FOOTER, s)
-    val step_min = sc(GRID_STEP, s)
-    val col_min = sc(170, s)
-    val cells_f = GRID_CELLS.to_f64()
-    val cols_f = (cells_f * w.to_f64() / h.to_f64()).sqrt()
-    var cols = (cols_f + 0.5).to_i32()
-    if cols < 1:
-        cols = 1
-    if cols > GRID_CELLS:
-        cols = GRID_CELLS
-    val rows2 = (GRID_CELLS + cols - 1) / cols
-    var col_w2 = (w - 12) / cols
-    if col_w2 < col_min:
-        col_w2 = col_min
-    var step2 = (h - header - footer) / rows2
-    if step2 < step_min:
-        step2 = step_min
-    (rows2, col_w2, step2, header, s)
+fn paint_scene_engine2d(mut b: Engine2D, scene: DrawIrV3Scene) -> (Engine2D, i64):
+    """Walk the shared scene into Engine2D. Returns the engine (paints made
+    through an Engine2D param are lost to the caller on the interpreter lane
+    -- see the note above `label`) and the count of commands that actually
+    produced output, so a caller can tell an empty scene from a painted one
+    WITHOUT inspecting pixels."""
+    var painted: i64 = 0
+    var i: i64 = 0
+    val n = scene.commands.len().to_i64()
+    while i < n:
+        val cmd = scene.commands[i]
+        if not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
+            if cmd.kind == DRAW_IR_V3_KIND_RECT or cmd.kind == DRAW_IR_V3_KIND_EDGE:
+                if cmd.geometry_id != DRAW_IR_V3_NO_ID:
+                    val geom = draw_ir_v3_geometry_at(scene.geometry, cmd.geometry_id)
+                    val paint = draw_ir_v3_paint_at(scene.paint, cmd.paint_id)
+                    if geom.present and paint.present and geom.width > 0 and geom.height > 0:
+                        b.draw_rect_filled(geom.x, geom.y, geom.width, geom.height, paint.fill_color)
+                        val stroke_px = paint.stroke_width_milli / 1000
+                        if stroke_px > 0:
+                            b.draw_rect(geom.x, geom.y, geom.width, geom.height, paint.stroke_color, stroke_px)
+                        painted = painted + 1
+            else if cmd.kind == DRAW_IR_V3_KIND_TEXT:
+                if cmd.text_run_id != DRAW_IR_V3_NO_ID:
+                    val run = draw_ir_v3_text_run_at(scene.text_runs, cmd.text_run_id)
+                    if run.present and run.glyph_count != 0u32:
+                        val start = run.glyph_start.to_i64()
+                        val count = run.glyph_count.to_i64()
+                        var s_out = ""
+                        var first_x = run.baseline_x
+                        var g: i64 = 0
+                        while g < count:
+                            val glyph = draw_ir_v3_glyph_at(scene.text_runs, (start + g) as u32)
+                            if glyph.present:
+                                if g == 0:
+                                    first_x = glyph.x
+                                s_out = s_out + scene_glyph_char(glyph.glyph_id.to_i64() as i32)
+                            g = g + 1
+                        if s_out != "":
+                            # Glyph y is a BASELINE in this pipeline; Engine2D
+                            # draw_text takes the cell TOP, so subtract the
+                            # font size (milli -> px, floored at 1).
+                            var fs = run.font_size_milli / 1000
+                            if fs < 1:
+                                fs = 1
+                            b.draw_text(first_x, run.baseline_y - fs, s_out, run.color, fs)
+                            painted = painted + 1
+        i = i + 1
+    (b, painted)
 
 fn draw_frame(mut b: Engine2D, w: i32, h: i32, st: ShowcaseState) -> Engine2D:
+    """One showcase frame, from the SHARED widget tree. Before task B4 this
+    hand-drew a 24-cell gallery with engine2d primitives; the gallery now
+    comes from `showcase_scene`, so this target's visual content is the same
+    tree the 2d / web / wm targets render."""
     b.clear(BG)
-    # Adaptive grid: 18 cells, rows per column from available height,
-    # column count from cell count, column width from viewport width. `s` is
-    # the density scale (1000 = 1x baseline; SHOWCASE_DPI-derived for the
-    # wide/tall 4K/8K default) applied to the menubar/title/statusbar chrome
-    # below and to every widget cell via sc()/sc1().
-    val gp = grid_params(w, h)
-    val rows = gp.0
-    val col_w = gp.1
-    val step = gp.2
-    val header = gp.3
-    val s = gp.4
-
-    # menubar
-    b.draw_rect_filled(0, 0, w, sc(16, s), CARD)
-    b.draw_text(sc(6, s), sc(4, s), "File  Edit  View  Help", FG, sc1(7, s))
-    # title
-    b.draw_text(sc(8, s), sc(22, s), "Widget Showcase (Engine2D CPU lane)", FG, sc1(8, s))
-    b.draw_line(sc(8, s), sc(38, s), w - sc(8, s), sc(38, s), LINE, sc1(1, s))
-
-    val p0 = cell_pos(0, rows, col_w, header, step)
-    b = w_button(b, p0.0, p0.1, st, s)
-    val p1 = cell_pos(1, rows, col_w, header, step)
-    b = w_switch(b, p1.0, p1.1, st.switch_on, s)
-    val p2 = cell_pos(2, rows, col_w, header, step)
-    b = w_dropdown(b, p2.0, p2.1, s)
-    val p3 = cell_pos(3, rows, col_w, header, step)
-    b = w_progress(b, p3.0, p3.1, st.progress_value, s)
-    val p4 = cell_pos(4, rows, col_w, header, step)
-    b = w_tabs(b, p4.0, p4.1, s)
-    val p5 = cell_pos(5, rows, col_w, header, step)
-    b = w_list(b, p5.0, p5.1, s)
-    val p6 = cell_pos(6, rows, col_w, header, step)
-    b = w_table(b, p6.0, p6.1, s)
-    val p7 = cell_pos(7, rows, col_w, header, step)
-    b = w_chip(b, p7.0, p7.1, s)
-    val p8 = cell_pos(8, rows, col_w, header, step)
-    b = w_dialog(b, p8.0, p8.1, s)
-    val p9 = cell_pos(9, rows, col_w, header, step)
-    b = w_checkbox(b, p9.0, p9.1, st, s)
-    val p10 = cell_pos(10, rows, col_w, header, step)
-    b = w_input(b, p10.0, p10.1, s)
-    val p11 = cell_pos(11, rows, col_w, header, step)
-    b = w_slider(b, p11.0, p11.1, st.slider_value, s)
-    val p12 = cell_pos(12, rows, col_w, header, step)
-    b = w_search(b, p12.0, p12.1, s)
-    val p13 = cell_pos(13, rows, col_w, header, step)
-    b = w_segmented(b, p13.0, p13.1, s)
-    val p14 = cell_pos(14, rows, col_w, header, step)
-    b = w_tree(b, p14.0, p14.1, s)
-    val p15 = cell_pos(15, rows, col_w, header, step)
-    b = w_card(b, p15.0, p15.1, s)
-    val p16 = cell_pos(16, rows, col_w, header, step)
-    b = w_tooltip(b, p16.0, p16.1, s)
-    val p17 = cell_pos(17, rows, col_w, header, step)
-    b = w_scrollbar(b, p17.0, p17.1, s)
-    b = w_avatar(b, p17.0 + sc(76, s), p17.1, s)
-
-    # statusbar
-    b.draw_rect_filled(0, h - sc(14, s), w, sc(14, s), CARD)
-    b.draw_text(sc(6, s), h - sc(11, s), "Ready", MUTED, sc1(6, s))
-    b.draw_text(w - sc(60, s), h - sc(11, s), "Ln 1, Col 1", MUTED, sc1(6, s))
+    val scene = showcase_scene(st.ui, w, h)
+    val (next_b, painted) = paint_scene_engine2d(b, scene)
+    b = next_b
+    # Non-vacuity oracle: a scene that painted nothing must be visible in the
+    # log rather than shipping a plausible-looking blank frame.
+    print "showcase_scene_commands={scene.commands.len()};painted={painted}"
     b
 
 fn draw_g1_1_frame(mut b: Engine2D, w: i32, h: i32, st: ShowcaseState) -> Engine2D:
-    b.clear(BG)
-    b.draw_rect_filled(0, 0, w, 16, CARD)
-    b.draw_text(6, 4, "File  Edit", FG, 7)
-    b.draw_text(8, 22, "Widget Showcase", FG, 8)
-    b.draw_line(8, 38, w - 8, 38, LINE, 1)
-    b = w_button(b, 12, 46, st, 1000)
-    b.draw_rect_filled(0, h - 14, w, 14, CARD)
-    b.draw_text(6, h - 11, "Ready", MUTED, 6)
-    b
+    """SHOWCASE_G1_1_COMPACT variant. Since task B4 the frame content comes
+    from the shared showcase tree in both modes, so the compact lane is the
+    same scene at whatever viewport it is given -- there is no second,
+    divergent hand-drawn frame to keep in sync any more."""
+    draw_frame(b, w, h, st)
 
 # Rendering backend key. `--backend=<name>` CLI flag wins, then the
 # SIMPLE_GUI_BACKEND env (e.g. "metal", "vulkan"); default "software" keeps the
@@ -579,7 +411,7 @@ fn build_frame_state(w: i32, h: i32, st: ShowcaseState) -> [u32]:
     pixels
 
 fn build_frame_sized(w: i32, h: i32) -> [u32]:
-    build_frame_state(w, h, showcase_state_default())
+    build_frame_state(w, h, showcase_state_sized(w, h))
 
 fn build_frame() -> [u32]:
     build_frame_sized(W, H)
@@ -681,7 +513,7 @@ fn frame_percentile_ns(values: [i64], percentile: i32) -> i64:
 
 fn run_widget_showcase_perf_probe(w: i32, h: i32, frames: i64, prefix: text) -> i64:
     var b = Engine2D.create_with_backend(w, h, showcase_backend_key())
-    b = draw_frame(b, w, h, showcase_state_default())
+    b = draw_frame(b, w, h, showcase_state_sized(w, h))
     val warmup_frames = 12
     var warmup = 0
     while warmup < warmup_frames:
@@ -775,7 +607,7 @@ fn count_diffs_all(before: [u32], after: [u32]) -> i64:
 # synthetic event with a re-render, then verify the before/after frames differ
 # ONLY inside the targeted widgets' grid cells (region-scoped oracle).
 fn run_showcase_events(w: i32, h: i32, events_raw: text) -> i64:
-    var st = showcase_state_default()
+    var st = showcase_state_sized(w, h)
     val before = build_frame_state(w, h, st)
     if before.len() < w * h:
         return 1
@@ -907,7 +739,7 @@ fn run_wm_client() -> i64:
     val event_path = wm_env_path_or(wm_widget_showcase_event_path(frame_path), WM_EVENT_FILE_ENV)
     val seq_path = wm_env_path_or(wm_widget_showcase_frame_seq_path(frame_path), WM_FRAME_SEQ_FILE_ENV)
     val state_path = frame_path + ".state"
-    var state = showcase_state_default()
+    var state = showcase_state_sized(W / showcase_ppm_scale(), H / showcase_ppm_scale())
     val _tree = showcase_ui_tree(state)
     var frame_seq = 1
     val frame_scale = showcase_ppm_scale()
@@ -1002,6 +834,14 @@ fn apply_native_input(input: WinitInput, mouse_x: i32, mouse_y: i32, state: Show
             dirty = true
             print "[widget-showcase] input left_button pressed={pressed} x={fx} y={fy} clicks={out.button_count} checkbox={out.checkbox_on} switch={out.switch_on} slider={out.slider_value}"
         ci = ci + 1
+    # Keys go through the SHARED reducer too. Without this a keyboard-only
+    # input batch would leave the scene byte-identical and the live loop's
+    # "every real input changes the frame" gate would fail.
+    var ki = 0
+    while ki < input.keys.len():
+        out.ui = showcase_apply(out.ui, host_key_down(input.keys[ki], "", 0), out.vw, out.vh)
+        dirty = true
+        ki = ki + 1
     (out, mx, my, dirty, running)
 
 fn main() -> i64:
@@ -1033,8 +873,8 @@ fn main() -> i64:
         print "Widget showcase GUI — synthetic event mode {fw}x{fh}"
         return run_showcase_events(fw, fh, events_raw)
 
-    print "Widget showcase GUI — render {fw}x{fh} via Engine2D {showcase_backend_key()} lane"
-    var state = showcase_state_default()
+    print "Widget showcase GUI — render {fw}x{fh} via the shared showcase tree -> DrawIrV3 -> Engine2D {showcase_backend_key()} lane"
+    var state = showcase_state_sized(fw, fh)
     val _tree = showcase_ui_tree(state)
     # ONE persistent render session for the app's whole lifetime (created once,
     # reused across every redraw, shut down on every exit path) — never a
