@@ -69,6 +69,25 @@ _start:
     /* Initialize C++ constructors and libc (.init_array) */
     bl      __libc_init_array
 
+    /*
+     * Run Simple module-global initializers (native_project/linker.rs
+     * generate_init_caller). __libc_init_array above only walks
+     * .init_array, which cranelift/native-project codegen never populates
+     * for this freestanding aarch64-unknown-simpleos userspace target (see
+     * doc/08_tracking/bug/simpleos_userspace_crt0_missing_module_init_call_empty_init_array_2026-08-06.md,
+     * which fixed the identical gap on x86_64 in simpleos_crt0.S).
+     * Weak-guarded exactly like the x86_64 userspace crt0 fix and the
+     * SimpleOS kernel's own boot crt0
+     * (examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s), using the
+     * same weak-symbol-branch idiom already used above for rt_set_args, so a
+     * link with no module-init functions to aggregate still resolves
+     * cleanly.
+     */
+    ldr     x9, =__simple_call_module_inits
+    cbz     x9, .Lmodule_inits_done
+    blr     x9
+.Lmodule_inits_done:
+
     /* Call main(argc, argv, envp) */
     mov     x0, x19
     mov     x1, x20
@@ -88,6 +107,7 @@ _start:
 .weak __bss_start
 .weak __bss_end
 .weak rt_set_args
+.weak __simple_call_module_inits
 
 /*
  * environ: real .bss storage for the POSIX environment pointer (see the
