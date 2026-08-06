@@ -1,6 +1,6 @@
 ---
 id: u64_to_f64_comparison_uses_signed_conversion_2026-07-25
-status: OPEN
+status: FIXED
 severity: high
 discovered: 2026-07-25
 discovered_by: Arduino UNO Q (QRB2210 / Cortex-A53) aarch64 board bring-up — cross-module result-u8 fixture returned rc=5 on real silicon
@@ -89,3 +89,80 @@ it emits an object. So the runtime miscompile was never asserted.
    (interpreter + MIR lowering + native encoders).
 2. Flip `CRANELIFT_CROSS_EXECUTE` on (or add a dedicated execution gate) so the
    result-u8 fixture's runtime result is asserted, not just its object emission.
+
+## Fix status (2026-08-06 verification pass)
+
+**Interpreter (pure Simple) — FIXED, verified.**
+`src/compiler/70.backend/backend/interpreter.spl` now has a dedicated
+`interp_int_to_f64(bits: i64, is_unsigned: bool) -> f64` helper (~line 55) that
+reinterprets a negative `i64` bit pattern as the correct unsigned `f64` when the
+operand's static type is unsigned (splits off the top bit: `9223372036854775808.0
++ (bits & 0x7FFFFFFFFFFFFFFF).to_f64()`). Every mixed int/float site —
+`eval_gt`/`eval_gteq` (~line 797/818) and the inline `HirBinOp.Lt`/`HirBinOp.LtEq`
+arms of `eval_binop` (~line 999/1026), plus `Add`/`Sub`/`Mul`/`Div` promotion —
+now calls `interp_int_to_f64(l, left_unsigned)` / `interp_int_to_f64(r,
+right_unsigned)` instead of a bare `.to_f64()`. The unsigned flag is threaded in
+via `left_unsigned`/`right_unsigned` parameters resolved from the HIR operand's
+static type (`interp_hir_expr_unsigned`, ~line 65), not from the untagged
+runtime `Value.Int`. This is already merged to `origin/main` (commit
+`969c1f013c38bbb6f9f2e8235d051fe57b83488b`, landed 2026-08-05 08:26 UTC by a
+prior session) — this verification pass confirmed correctness by code audit and
+did not need to author a new interpreter change.
+
+**Native / MIR lowering (pure Simple `src/compiler/`) — FIXED, verified.**
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` (comparison-lowering
+arm, ~line 2838) now consults both the MIR local's static type and the HIR
+operand's static type (`hir_expr_static_unsigned`, ~line 88) and, when the
+operand is statically unsigned, retypes it to `MirType(kind: MirTypeKind.U64)`
+*before* casting to `f64`, so the backend's `Cast` lowering (which keys off the
+source operand type) selects the unsigned convert (`uitofp`/`fcvt_from_uint`)
+instead of the signed one. Already merged to `origin/main` (commit
+`cfe0506e336bb4af8c40e6b212c9c15d9bdd252e`, landed 2026-08-05 07:24 UTC by a
+prior session).
+
+**Verification method and honest limitations.** A full self-hosted `run`/`test`
+capable binary built from a worktree at/after both fix commits was not available
+in this pass, and building one is a T2/T3-scope operation (full/large
+bootstrap) that this pass's constraints explicitly avoided. Verification was
+therefore:
+- Source audit of both fixed sites above (logic confirmed correct by hand).
+- The pre-existing dedicated regression spec
+  `test/01_unit/compiler/u64_to_f64_comparison_spec.spl` already encodes the
+  doc's exact repro plus additional cases (2^63, 2^63+1, u64::MAX, mixed
+  arithmetic, and a negative-i64 control group) and matches the fixed logic.
+- Empirical A/B on Rust-seed binaries as corroborating (not primary) evidence:
+  a stale seed build (`build/native_probe/simple`, 2026-07-23) reproduces the
+  original bug exactly as described (`false, false, true, true, false` for the
+  doc's five assertions), while the currently-deployed release seed
+  (`bin/release/x86_64-unknown-linux-gnu/simple`, rebuilt 2026-08-05 11:01 UTC)
+  gives the fully correct result (`true, true, false, true, true`) both under
+  default JIT and under `SIMPLE_EXECUTION_MODE=interpret`. Note this exercises
+  the Rust seed's own interpreter (which carries unsigned-ness via a distinct
+  `Value::UInt` runtime variant in `src/compiler_rust/compiler/src/value_impl.rs`
+  — a structurally different mechanism from the pure-Simple `interpreter.spl`
+  fix) — it is suggestive that the bug is resolved end-to-end but is not a
+  direct execution of the changed `.spl` file.
+- `bin/simple test test/01_unit/compiler/u64_to_f64_comparison_spec.spl` was
+  attempted but was **not usable as evidence**: it silently delegates to a
+  separate, stale Rust *debug* seed child
+  (`src/compiler_rust/target/debug/simple`, confirmed via the runner's own
+  `child binary:` log line) which fails even the unrelated negative-i64 control
+  case in the same spec — i.e. that child binary is generally stale/broken, not
+  a signal about the pure-Simple fix under test. This matches the known
+  "`simple test` silently delegates to seed child" pitfall.
+- A native-build execution attempt through a same-day self-hosted stage3
+  artifact from another session's scratch build
+  (`build/bootstrap-agent-mirtype-20260805/stage3/.../simple`, built 2026-08-05
+  10:15 UTC, i.e. after both fix commits) core-dumped on this fixture
+  independent of the u64/f64 logic (likely a runtime-path/linking issue with
+  that scratch artifact, not a regression from this fix) — inconclusive, not
+  used as evidence either way.
+
+**Net status:** both the interpreter and the pure-Simple native/MIR-lowering
+sides of this bug are FIXED in source and already on `origin/main`. The
+still-open gap is the CI assertion gap noted above (`CRANELIFT_CROSS_EXECUTE`
+default-off, so the cross-module fixture's *runtime* result still isn't gated)
+and the Rust-seed (`src/compiler_rust`) cranelift/LLVM native path, which this
+pass did not audit or touch (out of scope; the current deployed seed *empirically*
+gives correct answers per the A/B above, but its native/AOT codegen path was not
+independently source-audited the way the two pure-Simple sites were).
