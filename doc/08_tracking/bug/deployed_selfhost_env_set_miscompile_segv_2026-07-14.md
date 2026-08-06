@@ -546,3 +546,27 @@ x86-64, entry `0x40000000`. `nm -u`: 3 weak symbols, 0 strong. Real shell guard:
 **PASS**. The build is reproducible in structure (723/0/0 both runs) though the
 digest differs between runs, so the payload is not bit-reproducible — worth its
 own investigation, not a D1 blocker.
+
+### Family enumeration — sibling scripts still carry the unhardened discovery
+
+D1 fixed `scripts/os/simpleos-native-build.shs` only. The same
+compiler-discovery shape exists elsewhere and is **not** fixed; recorded here so
+the sweep is not left half-done (these files are owned by other lanes and were
+deliberately not edited by D1):
+
+- Same `for candidate in … release/*/simple` glob, so the stale `04a38e21…`
+  binary is a live candidate for them:
+  - `scripts/check/check-electron-mdi-evidence.shs`
+  - `scripts/check/check-simpleos-hardening-evidence-matrix.shs`
+  - `scripts/check/check-simpleos-wm-visible-display-evidence.shs`
+  - `scripts/check/check-tauri-mobile-mdi-evidence.shs`
+- `scripts/os/simpleos-native-build-riscv64.shs:23` is weaker still —
+  `COMPILER="${SIMPLE_BUILD_COMPILER:-bin/release/simple}"` with **no** seed
+  check and **no** capability probe, so it will silently build its riscv64
+  payload with whatever sits at that path, including the Rust seed. Its payload
+  would then fail the same two provenance guards.
+
+Follow-up: factor the hardened `is_bootstrap_seed` + `compiler_can_build_target`
+pair (identity skip, banner check, and the env-write probe that is the only
+check which actually rejects the stale ABI) into one shared helper these scripts
+source, rather than re-implementing the fail-open glob in each.
