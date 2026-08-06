@@ -15,6 +15,8 @@ val ENOENT: i32 = -2    # file not found
 val ENOSPC: i32 = -28   # no space left on device
 val EEXIST: i32 = -17   # path already exists
 val ENOTDIR: i32 = -20  # a path component is not a directory
+val EISDIR: i32 = -21   # target is a directory where a file was expected
+val ENOTEMPTY: i32 = -39  # directory holds entries other than "." / ".."
 
 # -- BPB boot sector signature -------------------------------------------------
 
@@ -277,6 +279,57 @@ fn fat32_dir_find_entry(dir_data: [u8], name: text) -> i32:
         lfn_name = ""
         idx = idx + 1
     -1
+
+fn fat32_dir_list_entries(dir_data: [u8]) -> [text]:
+    """Enumerate every live (non-deleted) entry name in one directory's raw
+    bytes, in on-disk order — the readdir() primitive `fat32_dir_find_entry`
+    never needed. Reuses the same LFN-accumulation / 8.3-decode logic so a
+    name written by `_link_entry`'s LFN path reads back identically here.
+    Includes "." and ".." when present (real subdirectories carry them)."""
+    var names: [text] = []
+    val total_entries = dir_data.len() / 32
+    var idx = 0
+    var lfn_name = ""
+    while idx < total_entries:
+        val off = idx * 32
+        val first_byte = dir_data[off]
+        if first_byte == 0x00u8:
+            return names          # end of directory
+        if first_byte == 0xE5u8:
+            lfn_name = ""         # orphan any pending LFN
+            idx = idx + 1
+            continue
+        val attr = dir_data[off + 11]
+        if attr == 0x0Fu8:
+            val fragment = fat32_parse_lfn_slot(dir_data, off)
+            lfn_name = fragment + lfn_name
+            idx = idx + 1
+            continue
+        var name = ""
+        if lfn_name.len() > 0:
+            name = lfn_name
+        else:
+            var entry_name = ""
+            var ni = 0
+            while ni < 8:
+                val ch = dir_data[off + ni]
+                if ch != 0x20u8 and ch != 0x00u8:
+                    entry_name = entry_name + ch.chr()
+                ni = ni + 1
+            var ext = ""
+            var ei = 0
+            while ei < 3:
+                val ch = dir_data[off + 8 + ei]
+                if ch != 0x20u8 and ch != 0x00u8:
+                    ext = ext + ch.chr()
+                ei = ei + 1
+            if ext.len() > 0:
+                entry_name = entry_name + "." + ext
+            name = entry_name
+        names.push(name)
+        lfn_name = ""
+        idx = idx + 1
+    names
 
 fn fat32_entry_start_cluster(dir_data: [u8], off: i32) -> u32:
     """Decode first-cluster (hi at +20..21, lo at +26..27) from a dirent."""
@@ -1643,6 +1696,104 @@ impl Fat32Filesystem:
         val _fd = fd
         ENOSYS
 
+    fn readdir_at(self, dev: BlockDevice, path: text) -> Result<[text], i32>:
+        """List every live entry name in the directory at `path` ("/" for
+        root). Reuses resolve_path for nested directories and the stashed
+        root cluster for "/" itself (resolve_path only walks named
+        components, so it cannot resolve the root)."""
+        var cluster = self.root_cluster
+        if path != "/" and path.len() > 0:
+            val loc_r = self.resolve_path(dev, path)
+            if loc_r.is_err():
+                return Err(loc_r.unwrap_err())
+            val loc = loc_r.unwrap()
+            if not loc.is_dir:
+                return Err(ENOTDIR)
+            cluster = loc.start_cluster
+        val data_r = self._read_dir_data(dev, cluster)
+        if data_r.is_err():
+            return Err(data_r.unwrap_err())
+        Ok(fat32_dir_list_entries(data_r.unwrap()))
+
+    fn _mark_dirent_deleted(self, dev: BlockDevice, sector: u64, offset: i32) -> Result<(), i32>:
+        """Write the 0xE5 deleted-entry marker into byte 0 of a 32-byte dirent
+        and keep the stashed root_dir_data cache coherent — same cache-sync
+        guard as _update_dirent, so a delete on a cached root entry is visible
+        to a subsequent stat()/readdir_at() without a remount."""
+        val sec_result = dev.read_sector(sector)
+        if sec_result.is_err():
+            return Err(EIO)
+        var sec = sec_result.unwrap()
+        sec[offset] = 0xE5u8
+        val wr = dev.write_sector(sector, sec)
+        if wr.is_err():
+            return Err(EIO)
+        val root_dir_lba = self.data_start_sector.to_u64() + (self.root_cluster - 2u32).to_u64() * self.sectors_per_cluster.to_u64()
+        if sector < root_dir_lba:
+            return Ok(())
+        if sector >= root_dir_lba + self.sectors_per_cluster.to_u64():
+            return Ok(())
+        val cache_base = ((sector - root_dir_lba) * self.bytes_per_sector.to_u64()).to_i32() + offset
+        if cache_base >= 0 and cache_base < self.root_dir_data.len():
+            self.root_dir_data[cache_base] = 0xE5u8
+        Ok(())
+
+    fn unlink_at(self, dev: BlockDevice, path: text) -> Result<(), i32>:
+        """Remove a file: free its whole cluster chain in the FAT, then mark
+        its directory entry deleted. Refuses a directory (EISDIR) — use
+        rmdir_at for those."""
+        val loc_r = self.resolve_path(dev, path)
+        if loc_r.is_err():
+            return Err(loc_r.unwrap_err())
+        val loc = loc_r.unwrap()
+        if loc.is_dir:
+            return Err(EISDIR)
+        if loc.start_cluster >= 2u32:
+            val chain_r = self.read_cluster_chain(dev, loc.start_cluster)
+            if chain_r.is_err():
+                return Err(EIO)
+            var chain = chain_r.unwrap()
+            var ci = 0
+            while ci < chain.len():
+                val fr = self._write_fat_entry(dev, chain[ci], 0u32)
+                if fr.is_err():
+                    return Err(EIO)
+                ci = ci + 1
+        self._mark_dirent_deleted(dev, loc.dirent_sector, loc.dirent_offset)
+
+    fn rmdir_at(self, dev: BlockDevice, path: text) -> Result<(), i32>:
+        """Remove a directory. Refuses ENOTDIR on a file and ENOTEMPTY unless
+        the directory holds only "." and "..". Frees the directory's own
+        cluster chain (its content clusters, not its parent's) before marking
+        the dirent deleted."""
+        val loc_r = self.resolve_path(dev, path)
+        if loc_r.is_err():
+            return Err(loc_r.unwrap_err())
+        val loc = loc_r.unwrap()
+        if not loc.is_dir:
+            return Err(ENOTDIR)
+        val data_r = self._read_dir_data(dev, loc.start_cluster)
+        if data_r.is_err():
+            return Err(data_r.unwrap_err())
+        val names = fat32_dir_list_entries(data_r.unwrap())
+        var ni = 0
+        while ni < names.len():
+            if names[ni] != "." and names[ni] != "..":
+                return Err(ENOTEMPTY)
+            ni = ni + 1
+        if loc.start_cluster >= 2u32:
+            val chain_r = self.read_cluster_chain(dev, loc.start_cluster)
+            if chain_r.is_err():
+                return Err(EIO)
+            var chain = chain_r.unwrap()
+            var ci = 0
+            while ci < chain.len():
+                val fr = self._write_fat_entry(dev, chain[ci], 0u32)
+                if fr.is_err():
+                    return Err(EIO)
+                ci = ci + 1
+        self._mark_dirent_deleted(dev, loc.dirent_sector, loc.dirent_offset)
+
     static fn make_for_chain_test(fat_start_sector: u32, bytes_per_sector: u32, data_clusters: u32) -> Fat32Filesystem:
         """Create a pre-configured Fat32Filesystem for read_cluster_chain unit tests.
 
@@ -1723,3 +1874,58 @@ impl Fat32Filesystem:
             data_clusters:       data_clusters,
             root_dir_data:       initial_root_dir
         )
+
+# ============================================================================
+# Kernel-global mounted filesystem — published once at boot
+#
+# Mirrors the g_cwd_table lazy-scalar pattern in syscall_file.spl and the
+# vmm_publish_kernel_pml4 pattern in vmm_core.spl: freestanding kernel code
+# cannot rely on struct-literal module-level initializers (they never run —
+# see doc/07_guide/os/baremetal/baremetal_simple_codegen_landmines.md), so
+# state is published imperatively into module scalars/nullable fields behind
+# a `bool` ready-flag instead of being constructed at declaration time.
+#
+# `Fat32Filesystem` and `BlockDevice` are both reference (class) types here,
+# so the Option-typed globals below hold a plain nullable pointer (0 = None)
+# rather than a boxed struct — the specific landmine #1 case the guide warns
+# about (an Option<struct> reading nil on the hit path) does not apply to a
+# pointer-sized reference type. No `if val` binding-if is used on them, only
+# explicit `!= nil` checks, per the guide's own workaround.
+# ============================================================================
+
+var g_fat32_mount_ready: bool = false
+var g_fat32_mount_fs: Fat32Filesystem? = nil
+var g_fat32_mount_dev: BlockDevice? = nil
+
+fn fat32_mount_publish(fs: Fat32Filesystem, dev: BlockDevice):
+    """Publish a freshly-mounted Fat32Filesystem + its backing BlockDevice as
+    kernel-global state. Called once from the boot filesystem-mount path
+    (see os.kernel.boot.boot_fs_mount.boot_fs_mount_fat32_from_device) after
+    `Fat32Filesystem.mount()` succeeds. Idempotent: a later call replaces the
+    previous mount (e.g. a remount), it does not stack."""
+    g_fat32_mount_fs = fs
+    g_fat32_mount_dev = dev
+    g_fat32_mount_ready = true
+
+fn fat32_mount_ready() -> bool:
+    """True once fat32_mount_publish has run. syscall_file.spl handlers must
+    check this before touching fat32_mount_fs()/fat32_mount_dev() — reading
+    either while false is a caller bug, not a recoverable error."""
+    g_fat32_mount_ready
+
+fn fat32_mount_fs() -> Fat32Filesystem:
+    """The published Fat32Filesystem. Caller MUST have checked
+    fat32_mount_ready() first."""
+    g_fat32_mount_fs.unwrap()
+
+fn fat32_mount_dev() -> BlockDevice:
+    """The published BlockDevice backing the mounted filesystem. Caller MUST
+    have checked fat32_mount_ready() first."""
+    g_fat32_mount_dev.unwrap()
+
+fn fat32_mount_clear():
+    """Test-only: reset published mount state between specs so one test's
+    mount cannot leak into another's assertions."""
+    g_fat32_mount_ready = false
+    g_fat32_mount_fs = nil
+    g_fat32_mount_dev = nil

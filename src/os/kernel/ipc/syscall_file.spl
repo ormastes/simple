@@ -12,6 +12,10 @@ use os.kernel.memory.vmm.{vmm_verify_user_write}
 use os.kernel.boot.mmio.{mmio_write8}
 use os.kernel.fd_io.{posix_close, posix_read, posix_write, posix_lseek}
 use os.kernel.ipc.syscall.{MAX_BINARY_PATH_LEN, _is_userspace_range}
+use os.kernel.fd_table.{fd_alloc, fd_set, O_CREAT}
+use os.kernel.fs.fat32.{
+    fat32_mount_ready, fat32_mount_fs, fat32_mount_dev
+}
 
 extern fn rt_copy_user_byte(ptr_addr: u64) -> u8
 
@@ -117,6 +121,18 @@ fn _fs_copy_user_bytes(ptr_addr: u64, len: u64) -> [u8]:
         i = i + 1
     bytes
 
+fn _bytes_to_text(b: [u8]) -> text:
+    """Build `text` from raw path bytes one byte at a time via `.chr()` —
+    the same forward-concatenation pattern fat32.spl uses to decode 8.3/LFN
+    names, chosen because `text` byte-indexing is unreliable on dynamically
+    built strings in this freestanding kernel (see module doc above)."""
+    var out = ""
+    var i: u64 = 0
+    while i < b.len():
+        out = out + b[i].chr()
+        i = i + 1
+    out
+
 fn _path_is_absolute(p: [u8]) -> bool:
     """True when the path's first byte is '/'."""
     if p.len() == 0:
@@ -219,50 +235,93 @@ fn path_resolve(task_id: u64, raw: [u8]) -> [u8]:
 # while the call reported success. Those sends are removed here rather than
 # re-plumbed: the transport was never the binding constraint.
 #
-# UPDATE 2026-08-06: `os.kernel.fs.fat32.Fat32Filesystem` now has real
-# freestanding-safe `open_at`/`create_at`/`mkdir_at`/`stat`/`write`/`flush`
-# methods against a `BlockDevice` (42 passing examples in
-# test/01_unit/os/kernel/fs/fat32_{subdir,write_path}_spec.spl), so the
-# "no reachable primitive" claim below no longer holds at the fat32.spl layer.
-# What is still missing is INTEGRATION: no kernel boot path ever constructs a
-# `Fat32Filesystem` and stores it as persistent kernel state (grep
-# `Fat32Filesystem(` under src/os/ — every construction site is inside
-# fat32.spl's own impl/specs), so this module has no handle to call `open_at`/
-# `mkdir_at`/`stat` *on*. `os.services.vfs` has a hosted dispatch layer with
-# equivalent read-side calls (`g_vfs_file_size`, `g_vfs_read_file_bytes`), but
-# that layer is explicitly hosted-only and out of bounds for this freestanding
-# IPC module (see the import boundary comment in
-# src/os/kernel/boot/boot_fs_mount.spl). readdir/unlink/rename/rmdir have no
-# primitive at any layer yet — Fat32Filesystem does not implement them.
-# Required next step: mount a `Fat32Filesystem` into freestanding kernel-global
-# state (mirroring the g_cwd_table pattern below) during boot, then have the
-# handlers below call it directly instead of returning ENOSYS.
+# UPDATE 2026-08-06 (integration landed): `os.kernel.fs.fat32` now publishes a
+# kernel-global mounted `Fat32Filesystem` (`fat32_mount_publish`/`_ready`/`_fs`/
+# `_dev`, see fat32.spl's "Kernel-global mounted filesystem" section), set from
+# `os.kernel.boot.boot_fs_mount.boot_fs_mount_fat32_from_device` after a real
+# `mount()` call. `open`/`stat`/`mkdir`/`readdir`/`unlink`/`rmdir` below now
+# call it directly and return real data/errno instead of ENOSYS. `rename` is
+# still ENOSYS — see its own docstring for why. `readdir`/`unlink`/`rmdir` are
+# backed by new `Fat32Filesystem.readdir_at`/`unlink_at`/`rmdir_at` methods.
+#
+# STILL-OPEN GAP (see doc/08_tracking/bug/path_based_fs_syscalls_fake_success_2026-08-06.md):
+# `boot_fs_mount_fat32_from_device` itself has no caller anywhere in the live
+# boot sequence (verified: `grep -rn boot_fs_mount_fat32_from_device src/os/`
+# outside boot_fs_mount.spl is empty) — a pre-existing gap this change does
+# not close. Until something in the real boot path calls it (or calls
+# `fat32_mount_publish` directly with a real disk BlockDevice), these handlers
+# still return -ENOSYS on real hardware/QEMU, honestly, via the
+# `fat32_mount_ready()` guard on every handler below — never a fake success.
+# A second gap: a fd returned by `open` today does not make `read`/`write`
+# reach the FAT32 driver — see the KNOWN GAP note in `_handle_file_open`.
 # ============================================================================
 
+val _FD_TYPE_FILE: u8 = 1
+
+fn _open_flags_want_create(flags: u32) -> bool:
+    (flags & O_CREAT) != 0
+
 fn _handle_file_open(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
-    """Open a file. Routed to VFS service via IPC.
+    """Open a file against the kernel-global mounted Fat32Filesystem.
 
     Args:
       arg0: path pointer (userspace)
       arg1: path length
       arg2: flags
+
+    UPDATE 2026-08-06: real, no longer ENOSYS-only. Resolves the path against
+    the caller's cwd, calls `Fat32Filesystem.open_at` (or `create_at` when
+    O_CREAT is set and the file does not exist), and allocates a REAL fd via
+    `os.kernel.fd_table`. `posix_open` (fd_io.spl) stays dead/unused here —
+    it IPC-sends to a "VFS service" that is never spawned in production.
+
+    KNOWN GAP (documented, not papered over): the fd this returns is typed
+    FD_TYPE_FILE like any other file fd, but `posix_read`/`posix_write` route
+    FD_TYPE_FILE through `os.kernel.async_io_rw.sync_read/sync_write` ->
+    `sosix_sync_read/sosix_sync_write`, a wholly separate subsystem from
+    `Fat32Filesystem`. A fd opened here is real (open() itself does real disk
+    I/O and the path really resolves through FAT32), but a subsequent
+    read()/write() syscall on it will NOT reach the FAT32 driver until that
+    separate integration lands — see
+    doc/08_tracking/bug/path_based_fs_syscalls_fake_success_2026-08-06.md.
     """
     val path_ptr = args.arg0 as u64
     val path_len = args.arg1 as u64
+    val flags = args.arg2 as u32
     if path_ptr == 0 or path_len == 0:
         return SyscallResult(value: _FS_EINVAL)
     if path_len > MAX_BINARY_PATH_LEN:
         return SyscallResult(value: _FS_ENAMETOOLONG)
     if not _is_userspace_range(path_ptr, path_len):
         return SyscallResult(value: _FS_EFAULT)
-    # `Fat32Filesystem.open_at`/`create_at` exist (fat32.spl) but no kernel-global
-    # mounted-filesystem handle reaches this module (see module doc comment
-    # above). `posix_open` (fd_io.spl) is a separate dead path: it IPC-sends to
-    # a "VFS service" at port 1 that init_services.spl documents as never
-    # spawned in production, so it would block forever, not fake success.
-    # Returning ENOSYS is mandatory: returning 0 would hand the caller fd 0
-    # (stdin) as if it were a newly created file.
-    SyscallResult(value: _FS_ENOSYS)
+    if not fat32_mount_ready():
+        # Honest: no boot path has published a mounted filesystem yet. Never
+        # fabricate fd 0 (stdin) as a fake success.
+        return SyscallResult(value: _FS_ENOSYS)
+    var sched = scheduler
+    val current = sched.get_current()
+    val raw = _fs_copy_user_bytes(path_ptr, path_len)
+    val resolved_path = _bytes_to_text(path_resolve(current.id, raw))
+    var fs = fat32_mount_fs()
+    val dev = fat32_mount_dev()
+    var open_r = fs.open_at(dev, resolved_path)
+    if open_r.is_err():
+        val err = open_r.unwrap_err()
+        if err == -2 and _open_flags_want_create(flags):
+            open_r = fs.create_at(dev, resolved_path)
+        if open_r.is_err():
+            return SyscallResult(value: open_r.unwrap_err() as i64)
+    val handle = open_r.unwrap()
+    val fd = fd_alloc()
+    if fd < 0:
+        return SyscallResult(value: fd as i64)
+    # backend_handle carries the fat32 dirent's start_cluster so a future
+    # FAT32 fd-io route can find the handle again; posix_read/write do not
+    # consult it today (see KNOWN GAP above).
+    val set_r = fd_set(fd, _FD_TYPE_FILE, flags, handle.start_cluster as u64)
+    if set_r < 0:
+        return SyscallResult(value: set_r as i64)
+    SyscallResult(value: fd as i64)
 
 fn _handle_file_read(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
     """Read from a file descriptor through the active POSIX fd backend.
@@ -306,13 +365,67 @@ fn _handle_file_close(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) 
     """
     SyscallResult(value: posix_close(args.arg0 as i32) as i64)
 
+# -- struct stat layout (src/os/libc/include/sys/stat.h, natural x86_64
+#    alignment): dev_t/ino_t u64 @0/@8, mode_t u32 @16, nlink_t u64 @24
+#    (padded), uid_t/gid_t u32 @32/@36, dev_t u64 @40, off_t i64 @48,
+#    blksize_t/blkcnt_t i64 @56/@64, atime/mtime/ctime i64 @72/@80/@88.
+#    96 bytes total, well inside the 128-byte caller buffer.
+val _STAT_OFF_MODE: u64 = 16
+val _STAT_OFF_NLINK: u64 = 24
+val _STAT_OFF_SIZE: u64 = 48
+val _STAT_OFF_MTIME: u64 = 80
+val _STAT_SIZE: u64 = 96
+val _S_IFDIR: u32 = 0x4000  # 0040000 octal
+val _S_IFREG: u32 = 0x8000  # 0100000 octal
+val _MODE_DIR: u32 = _S_IFDIR | 0x1EDu32   # S_IFDIR | 0755
+val _MODE_REG: u32 = _S_IFREG | 0x1A4u32   # S_IFREG | 0644
+
+fn _stat_patch_u32(buf: [u8], off: u64, v: u32):
+    buf[off]     = (v & 0xFFu32).to_u8()
+    buf[off + 1] = ((v >> 8u32)  & 0xFFu32).to_u8()
+    buf[off + 2] = ((v >> 16u32) & 0xFFu32).to_u8()
+    buf[off + 3] = ((v >> 24u32) & 0xFFu32).to_u8()
+
+fn _stat_patch_u64(buf: [u8], off: u64, v: u64):
+    buf[off]     = (v & 0xFFu64).to_u8()
+    buf[off + 1] = ((v >> 8u64)  & 0xFFu64).to_u8()
+    buf[off + 2] = ((v >> 16u64) & 0xFFu64).to_u8()
+    buf[off + 3] = ((v >> 24u64) & 0xFFu64).to_u8()
+    buf[off + 4] = ((v >> 32u64) & 0xFFu64).to_u8()
+    buf[off + 5] = ((v >> 40u64) & 0xFFu64).to_u8()
+    buf[off + 6] = ((v >> 48u64) & 0xFFu64).to_u8()
+    buf[off + 7] = ((v >> 56u64) & 0xFFu64).to_u8()
+
+fn _stat_bytes(is_dir: bool, size: u64, mtime: u64) -> [u8]:
+    """Build the raw `struct stat` byte image for a single stat() result.
+    Zeroed fields (dev/ino/uid/gid/rdev/blksize/blocks/atime/ctime) are real
+    zero content, not leaked kernel memory — every byte is written."""
+    var buf: [u8] = []
+    var i: u64 = 0
+    while i < _STAT_SIZE:
+        buf.push(0u8)
+        i = i + 1
+    var mode = _MODE_REG
+    if is_dir:
+        mode = _MODE_DIR
+    _stat_patch_u32(buf, _STAT_OFF_MODE, mode)
+    _stat_patch_u64(buf, _STAT_OFF_NLINK, 1u64)
+    _stat_patch_u64(buf, _STAT_OFF_SIZE, size)
+    _stat_patch_u64(buf, _STAT_OFF_MTIME, mtime)
+    buf
+
 fn _handle_file_stat(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
-    """Stat a file. Routed to VFS service via IPC.
+    """Stat a file against the kernel-global mounted Fat32Filesystem.
 
     Args:
       arg0: path pointer (userspace)
       arg1: path length
       arg2: stat buffer pointer (userspace, ~128 bytes)
+
+    UPDATE 2026-08-06: real. Calls `Fat32Filesystem.stat_at`, builds a real
+    `struct stat` byte image (mode/nlink/size/mtime; see layout note above),
+    and writes it into the caller's buffer byte-by-byte via `mmio_write8`
+    (the same primitive `_handle_getcwd` already uses for a userspace write).
     """
     val path_ptr = args.arg0 as u64
     val path_len = args.arg1 as u64
@@ -323,21 +436,36 @@ fn _handle_file_stat(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
         return SyscallResult(value: _FS_ENAMETOOLONG)
     if not vmm_verify_user_write(stat_buf, 128):
         return SyscallResult(value: _FS_EFAULT)
-    # The buffer is write-verified but NOT written, so it must not be reported
-    # as filled. Previously this returned send()'s 0 and the caller read
-    # uninitialised memory as a valid struct stat. `Fat32Filesystem.stat` (-> a
-    # `FileStat` with a real kind/size) already exists in fat32.spl; the
-    # missing piece is a mounted kernel-global instance to call it on (see
-    # module doc comment above).
-    SyscallResult(value: _FS_ENOSYS)
+    if not fat32_mount_ready():
+        return SyscallResult(value: _FS_ENOSYS)
+    var sched = scheduler
+    val current = sched.get_current()
+    val raw = _fs_copy_user_bytes(path_ptr, path_len)
+    val resolved_path = _bytes_to_text(path_resolve(current.id, raw))
+    var fs = fat32_mount_fs()
+    val dev = fat32_mount_dev()
+    val stat_r = fs.stat_at(dev, resolved_path)
+    if stat_r.is_err():
+        return SyscallResult(value: stat_r.unwrap_err() as i64)
+    val st = stat_r.unwrap()
+    val bytes = _stat_bytes(st.is_dir, st.size, st.mtime)
+    var i: u64 = 0
+    while i < bytes.len():
+        mmio_write8(stat_buf + i, bytes[i])
+        i = i + 1
+    SyscallResult(value: 0)
 
 fn _handle_file_mkdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
-    """Create a directory. Routed to VFS service via IPC.
+    """Create a directory against the kernel-global mounted Fat32Filesystem.
 
     Args:
       arg0: path pointer (userspace)
       arg1: path length
-      arg2: mode (permissions)
+      arg2: mode (permissions) — accepted but not persisted; FAT32 has no
+        POSIX permission bits.
+
+    UPDATE 2026-08-06: real, no longer ENOSYS-only. Calls
+    `Fat32Filesystem.mkdir_at` (real cluster allocation + "." / ".." entries).
     """
     val path_ptr = args.arg0 as u64
     val path_len = args.arg1 as u64
@@ -345,47 +473,125 @@ fn _handle_file_mkdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) 
         return SyscallResult(value: _FS_EINVAL)
     if path_len > MAX_BINARY_PATH_LEN:
         return SyscallResult(value: _FS_ENAMETOOLONG)
-    # `Fat32Filesystem.mkdir_at` already exists in fat32.spl (real cluster
-    # allocation, "." / ".." entries, -EEXIST / -ENOENT on a missing parent —
-    # see test/01_unit/os/kernel/fs/fat32_subdir_spec.spl), but no kernel-global
-    # mounted-filesystem instance reaches this module to call it on (see module
-    # doc comment above).
-    SyscallResult(value: _FS_ENOSYS)
+    if not fat32_mount_ready():
+        return SyscallResult(value: _FS_ENOSYS)
+    var sched = scheduler
+    val current = sched.get_current()
+    val raw = _fs_copy_user_bytes(path_ptr, path_len)
+    val resolved_path = _bytes_to_text(path_resolve(current.id, raw))
+    var fs = fat32_mount_fs()
+    val dev = fat32_mount_dev()
+    val mkdir_r = fs.mkdir_at(dev, resolved_path)
+    if mkdir_r.is_err():
+        return SyscallResult(value: mkdir_r.unwrap_err() as i64)
+    SyscallResult(value: 0)
+
+fn _readdir_names_to_nul_bytes(names: [text]) -> [u8]:
+    """Encode entry names as consecutive NUL-terminated byte runs, in order."""
+    var out: [u8] = []
+    var ni = 0
+    while ni < names.len():
+        val name = names[ni]
+        var ci: u64 = 0
+        while ci < name.len():
+            out.push(name.byte_at(ci))
+            ci = ci + 1
+        out.push(0u8)
+        ni = ni + 1
+    out
 
 fn _handle_file_readdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
-    """Read directory entries. Routed to VFS service via IPC.
+    """Read directory entries against the kernel-global mounted Fat32Filesystem.
 
     Args:
-      arg0: directory fd or path pointer
-      arg1: buffer pointer (userspace) for directory entries
-      arg2: buffer size
+      arg0: directory path pointer (userspace)
+      arg1: directory path length
+      arg2: buffer pointer (userspace) for NUL-separated entry names
+      arg3: buffer size
+
+    UPDATE 2026-08-06: real, no longer ENOSYS-only (and the arg layout grew a
+    path-length slot the original IPC-stub version never needed, since a real
+    implementation must copy the path bytes in). Calls
+    `Fat32Filesystem.readdir_at`, which real-enumerates the directory's raw
+    bytes (LFN + 8.3, deleted-entry aware — see `fat32_dir_list_entries`),
+    encodes the names as consecutive NUL-terminated runs, writes them into
+    the caller buffer, and returns the entry COUNT (not the byte count).
+    Returns -ERANGE, not a silent truncation, when the encoded names do not
+    fit in the caller's buffer.
     """
-    val buf_ptr = args.arg1 as u64
-    val buf_size = args.arg2 as u64
-    if buf_ptr == 0 or buf_size == 0:
+    val path_ptr = args.arg0 as u64
+    val path_len = args.arg1 as u64
+    val buf_ptr = args.arg2 as u64
+    val buf_size = args.arg3 as u64
+    if path_ptr == 0 or path_len == 0 or buf_ptr == 0 or buf_size == 0:
         return SyscallResult(value: _FS_EINVAL)
+    if path_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: _FS_ENAMETOOLONG)
     if not vmm_verify_user_write(buf_ptr, buf_size):
         return SyscallResult(value: _FS_EFAULT)
-    # d_name was never written; returning 0 made libc report "one entry read"
-    # over uninitialised memory. Required primitive: a directory cursor, e.g.
-    # simpleos_fat32_opendir(path) -> handle and
-    # simpleos_fat32_readdir(handle, out_name_ptr, out_cap) -> i64 name length.
-    SyscallResult(value: _FS_ENOSYS)
+    if not fat32_mount_ready():
+        return SyscallResult(value: _FS_ENOSYS)
+    var sched = scheduler
+    val current = sched.get_current()
+    val raw = _fs_copy_user_bytes(path_ptr, path_len)
+    val resolved_path = _bytes_to_text(path_resolve(current.id, raw))
+    var fs = fat32_mount_fs()
+    val dev = fat32_mount_dev()
+    val list_r = fs.readdir_at(dev, resolved_path)
+    if list_r.is_err():
+        return SyscallResult(value: list_r.unwrap_err() as i64)
+    val names = list_r.unwrap()
+    val encoded = _readdir_names_to_nul_bytes(names)
+    if encoded.len() as u64 > buf_size:
+        return SyscallResult(value: _FS_ERANGE)
+    var i: u64 = 0
+    while i < encoded.len():
+        mmio_write8(buf_ptr + i, encoded[i])
+        i = i + 1
+    SyscallResult(value: names.len() as i64)
 
 fn _handle_file_unlink(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
-    """Remove a file. Routed to VFS service via IPC method 8 (UNLINK)."""
+    """Remove a file against the kernel-global mounted Fat32Filesystem.
+
+    UPDATE 2026-08-06: real, no longer ENOSYS-only. Calls
+    `Fat32Filesystem.unlink_at`, which frees the file's whole FAT cluster
+    chain before marking its directory entry 0xE5-deleted. Rejects a
+    directory with -EISDIR (use rmdir for those)."""
     val path_ptr = args.arg0 as u64
     val path_len = args.arg1 as u64
     if path_ptr == 0 or path_len == 0:
         return SyscallResult(value: _FS_EINVAL)
     if path_len > MAX_BINARY_PATH_LEN:
         return SyscallResult(value: _FS_ENAMETOOLONG)
-    # Required primitive: simpleos_fat32_unlink(path) -> i64 (free the cluster
-    # chain and mark the directory entry 0xE5).
-    SyscallResult(value: _FS_ENOSYS)
+    if not fat32_mount_ready():
+        return SyscallResult(value: _FS_ENOSYS)
+    var sched = scheduler
+    val current = sched.get_current()
+    val raw = _fs_copy_user_bytes(path_ptr, path_len)
+    val resolved_path = _bytes_to_text(path_resolve(current.id, raw))
+    var fs = fat32_mount_fs()
+    val dev = fat32_mount_dev()
+    val unlink_r = fs.unlink_at(dev, resolved_path)
+    if unlink_r.is_err():
+        return SyscallResult(value: unlink_r.unwrap_err() as i64)
+    SyscallResult(value: 0)
 
 fn _handle_file_rename(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
-    """Rename a file or directory. Routed to VFS service via IPC method 9 (RENAME)."""
+    """Rename a file or directory. STILL ENOSYS — deliberately not attempted
+    in this lane (open/stat/mkdir/readdir/unlink/rmdir were; see the module
+    doc comment above for what changed 2026-08-06).
+
+    Unlike unlink/rmdir (mark-deleted, a single-byte patch reusing existing
+    `_link_entry`/`resolve_path` machinery) or readdir (pure read enumeration),
+    a real rename must rewrite a directory entry's LFN + 8.3 slots IN PLACE
+    while preserving start_cluster and size — `Fat32Filesystem` has no
+    primitive for that (`_link_entry` only APPENDS new slots; nothing edits
+    or relocates existing ones), and fabricating rename as
+    "create the new name, delete the old" would be observably wrong the
+    moment either half fails partway (a caller can end up with both names,
+    or neither, for what POSIX guarantees is atomic). Left as ENOSYS rather
+    than a fake or partially-correct implementation.
+    """
     val old_ptr = args.arg0 as u64
     val old_len = args.arg1 as u64
     val new_ptr = args.arg2 as u64
@@ -394,21 +600,32 @@ fn _handle_file_rename(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager)
         return SyscallResult(value: _FS_EINVAL)
     if old_len > MAX_BINARY_PATH_LEN or new_len > MAX_BINARY_PATH_LEN:
         return SyscallResult(value: _FS_ENAMETOOLONG)
-    # Required primitive: simpleos_fat32_rename(old, new) -> i64 (rewrite the
-    # LFN + 8.3 slots in place, preserving the start cluster and size).
     SyscallResult(value: _FS_ENOSYS)
 
 fn _handle_file_rmdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
-    """Remove a directory. Routed to VFS service via IPC method 14 (RMDIR)."""
+    """Remove a directory against the kernel-global mounted Fat32Filesystem.
+
+    UPDATE 2026-08-06: real, no longer ENOSYS-only. Calls
+    `Fat32Filesystem.rmdir_at`, which returns -ENOTEMPTY unless the directory
+    holds only "." and ".." and -ENOTDIR on a file."""
     val path_ptr = args.arg0 as u64
     val path_len = args.arg1 as u64
     if path_ptr == 0 or path_len == 0:
         return SyscallResult(value: _FS_EINVAL)
     if path_len > MAX_BINARY_PATH_LEN:
         return SyscallResult(value: _FS_ENAMETOOLONG)
-    # Required primitive: simpleos_fat32_rmdir(path) -> i64 (-ENOTEMPTY unless
-    # the directory holds only "." and "..").
-    SyscallResult(value: _FS_ENOSYS)
+    if not fat32_mount_ready():
+        return SyscallResult(value: _FS_ENOSYS)
+    var sched = scheduler
+    val current = sched.get_current()
+    val raw = _fs_copy_user_bytes(path_ptr, path_len)
+    val resolved_path = _bytes_to_text(path_resolve(current.id, raw))
+    var fs = fat32_mount_fs()
+    val dev = fat32_mount_dev()
+    val rmdir_r = fs.rmdir_at(dev, resolved_path)
+    if rmdir_r.is_err():
+        return SyscallResult(value: rmdir_r.unwrap_err() as i64)
+    SyscallResult(value: 0)
 
 fn _handle_lseek(args: SyscallArgs) -> SyscallResult:
     """Reposition read/write file offset via POSIX fd layer.

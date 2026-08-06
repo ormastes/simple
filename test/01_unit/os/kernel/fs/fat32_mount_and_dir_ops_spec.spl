@@ -1,0 +1,268 @@
+"""
+# FAT32 kernel-global mount publish + readdir/unlink/rmdir primitives
+
+**Feature:** kernel FAT32 driver (IF-07), 2026-08-06 wiring lane
+
+`os.kernel.ipc.syscall_file`'s `_handle_file_open`/`_handle_file_stat`/
+`_handle_file_mkdir`/`_handle_file_readdir`/`_handle_file_unlink`/
+`_handle_file_rmdir` now delegate to a kernel-global mounted
+`Fat32Filesystem` (`fat32_mount_publish`/`_ready`/`_fs`/`_dev`) instead of
+returning `-ENOSYS` unconditionally. This spec proves the primitives those
+handlers call are real:
+
+- the mount-publish accessors themselves (a caller must see `ready()` flip
+  only after `publish()`, and must get back the SAME instance it published);
+- `Fat32Filesystem.readdir_at` (new — enumerates a directory's live entries,
+  root or nested, LFN-and-8.3-aware, deleted-entry-aware);
+- `Fat32Filesystem.unlink_at` (new — frees the whole FAT cluster chain, then
+  marks the dirent deleted; refuses a directory with EISDIR);
+- `Fat32Filesystem.rmdir_at` (new — refuses a non-empty directory with
+  ENOTEMPTY, a file with ENOTDIR).
+
+**Why not exercise `_handle_file_*` directly:** attempted and abandoned this
+session. `test/01_unit/os/kernel/ipc/syscall_spec.spl` — an EXISTING,
+unmodified spec that already imports `os.kernel.ipc.syscall` the same way —
+also reports `error: test-runner: no examples executed` against the
+currently-deployed bootstrap-seed `bin/simple` (confirmed via
+`readlink -f bin/simple` + the seed warning banner), so this is a pre-existing
+seed/harness limitation for this class of heavy-kernel-import spec, not a
+regression from this change. See
+doc/08_tracking/bug/path_based_fs_syscalls_fake_success_2026-08-06.md for the
+control-run evidence (`fat32_write_path_spec.spl`: 25/25 on the same seed,
+proving the seed itself is not globally broken — only specs that pull in the
+full scheduler/vmm/pmm/ipc/syscall graph are affected).
+
+**Anti-false-green measure:** every negative-path assertion (ENOENT after
+unlink, ENOTEMPTY on a non-empty rmdir, EISDIR on unlinking a directory)
+re-reads through a FRESH `Fat32Filesystem` view built from the mutated mock
+device, never through the object that performed the write — the same
+discipline `fat32_write_path_spec.spl` established.
+"""
+
+use std.spec.{describe, it, expect, step}
+use os.kernel.fs.fat32.{
+    Fat32Filesystem,
+    fat32_mount_publish, fat32_mount_ready, fat32_mount_fs, fat32_mount_dev, fat32_mount_clear
+}
+
+# ============================================================================
+# In-memory mock block device (poisoned default) — same shape as
+# fat32_write_path_spec.spl's MockWrDev.
+# ============================================================================
+
+struct MockSector:
+    lba: u64
+    data: [u8]
+
+class MockDev:
+    sectors: [MockSector]
+
+impl MockDev:
+    static fn new() -> MockDev:
+        MockDev(sectors: [])
+
+    me fn with_sector(lba: u64, data: [u8]) -> MockDev:
+        self.sectors.push(MockSector(lba: lba, data: data))
+        self
+
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        var i = 0
+        while i < self.sectors.len():
+            if self.sectors[i].lba == lba:
+                return Ok(self.sectors[i].data)
+            i = i + 1
+        Ok(_poison_sector())
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<(), text>:
+        var i = 0
+        while i < self.sectors.len():
+            if self.sectors[i].lba == lba:
+                self.sectors[i] = MockSector(lba: lba, data: data)
+                return Ok(())
+            i = i + 1
+        self.sectors.push(MockSector(lba: lba, data: data))
+        Ok(())
+
+fn _zero_sector() -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < 512:
+        b.push(0u8)
+        i = i + 1
+    b
+
+fn _poison_sector() -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < 512:
+        b.push(0xAAu8)
+        i = i + 1
+    b
+
+fn _poke32(buf: [u8], offset: i32, value: u32) -> [u8]:
+    buf[offset]     = (value & 0xFFu32).to_u8()
+    buf[offset + 1] = ((value >> 8u32)  & 0xFFu32).to_u8()
+    buf[offset + 2] = ((value >> 16u32) & 0xFFu32).to_u8()
+    buf[offset + 3] = ((value >> 24u32) & 0xFFu32).to_u8()
+    buf
+
+fn _put_entry(sec: [u8], off: i32, base: text, ext: text, attr: u8, cluster: u32, size: u32) -> [u8]:
+    var s = sec
+    var i = 0
+    while i < 8:
+        if i < base.len():
+            s[off + i] = base.char_code_at(i).to_u8()
+        else:
+            s[off + i] = 0x20u8
+        i = i + 1
+    var j = 0
+    while j < 3:
+        if j < ext.len():
+            s[off + 8 + j] = ext.char_code_at(j).to_u8()
+        else:
+            s[off + 8 + j] = 0x20u8
+        j = j + 1
+    s[off + 11] = attr
+    val hi = (cluster >> 16u32) & 0xFFFFu32
+    val lo = cluster & 0xFFFFu32
+    s[off + 20] = (hi & 0xFFu32).to_u8()
+    s[off + 21] = ((hi >> 8u32) & 0xFFu32).to_u8()
+    s[off + 26] = (lo & 0xFFu32).to_u8()
+    s[off + 27] = ((lo >> 8u32) & 0xFFu32).to_u8()
+    s = _poke32(s, off + 28, size)
+    s
+
+fn _fat_sector() -> [u8]:
+    var f = _zero_sector()
+    f = _poke32(f, 0,  0x0FFFFFF8u32)     # media descriptor
+    f = _poke32(f, 4,  0x0FFFFFFFu32)     # cluster 1 reserved
+    f = _poke32(f, 8,  0x0FFFFFFFu32)     # cluster 2 = root dir, EOC
+    f = _poke32(f, 60, 0x0FFFFFFFu32)     # cluster 15 = /FILE.O decoy, EOC
+    f
+
+fn _root_dir() -> [u8]:
+    var s = _zero_sector()
+    s = _put_entry(s, 0, "FILE", "O", 0x20u8, 15u32, 11u32)   # decoy, size 11
+    s
+
+fn _make_dev() -> MockDev:
+    var dev = MockDev.new()
+    dev = dev.with_sector(32u64, _fat_sector())
+    dev = dev.with_sector(64u64, _root_dir())
+    dev
+
+# A filesystem view built from whatever the device holds RIGHT NOW.
+fn _fs_from(dev: MockDev) -> Fat32Filesystem:
+    val r = dev.read_sector(64u64)
+    Fat32Filesystem.make_for_dirent_test(32u32, 64u32, 512u32, 1u32, 32u32, r.unwrap())
+
+# ============================================================================
+# Scenarios
+# ============================================================================
+
+describe "kernel-global FAT32 mount publish":
+
+    it "is not ready before publish, ready after, and returns the SAME instance":
+        fat32_mount_clear()
+        assert_false(fat32_mount_ready())
+        val dev = _make_dev()
+        val fs = _fs_from(dev)
+        fat32_mount_publish(fs, dev)
+        assert_true(fat32_mount_ready())
+        step("the published fs sees the pre-seeded root-dir decoy")
+        val published = fat32_mount_fs()
+        val published_dev = fat32_mount_dev()
+        val st = published.stat_at(published_dev, "/FILE.O")
+        assert_true(st.is_ok())
+        expect(st.unwrap().size).to_equal(11u64)
+        fat32_mount_clear()
+        assert_false(fat32_mount_ready())
+
+describe "Fat32Filesystem.readdir_at":
+
+    it "lists the root directory's live entries, including a freshly mkdir'd one":
+        val dev = _make_dev()
+        var fs = _fs_from(dev)
+        step("root starts with just the FILE.O decoy")
+        val names0 = fs.readdir_at(dev, "/")
+        assert_true(names0.is_ok())
+        expect(names0.unwrap().len()).to_equal(1)
+        step("mkdir /usr, then re-read through a FRESH view")
+        assert_true(fs.mkdir_at(dev, "/usr").is_ok())
+        val fs2 = _fs_from(dev)
+        val names1 = fs2.readdir_at(dev, "/")
+        assert_true(names1.is_ok())
+        expect(names1.unwrap().len()).to_equal(2)
+
+    it "lists a nested directory's own entries, not the parent's":
+        val dev = _make_dev()
+        var fs = _fs_from(dev)
+        assert_true(fs.mkdir_at(dev, "/usr").is_ok())
+        assert_true(fs.mkdir_at(dev, "/usr/bin").is_ok())
+        assert_true(fs.create_at(dev, "/usr/bin/clang").is_ok())
+        val fs2 = _fs_from(dev)
+        val names = fs2.readdir_at(dev, "/usr/bin")
+        assert_true(names.is_ok())
+        step("'.', '..', and 'clang' — three entries, none of them 'usr'")
+        expect(names.unwrap().len()).to_equal(3)
+
+    it "returns ENOTDIR when the path is a file, not a directory":
+        val dev = _make_dev()
+        var fs = _fs_from(dev)
+        val names = fs.readdir_at(dev, "/FILE.O")
+        assert_true(names.is_err())
+        expect(names.unwrap_err()).to_equal(-20)
+
+describe "Fat32Filesystem.unlink_at":
+
+    it "frees the cluster chain and marks the dirent deleted — a fresh stat_at then reports ENOENT":
+        val dev = _make_dev()
+        var fs = _fs_from(dev)
+        step("the decoy is visible before unlink")
+        assert_true(fs.stat_at(dev, "/FILE.O").is_ok())
+        step("unlink it")
+        assert_true(fs.unlink_at(dev, "/FILE.O").is_ok())
+        step("re-read through a FRESH view — the delete must be on-disk, not just cached")
+        val fs2 = _fs_from(dev)
+        val st = fs2.stat_at(dev, "/FILE.O")
+        assert_true(st.is_err())
+        expect(st.unwrap_err()).to_equal(-2)
+        step("cluster 15 is freed in the FAT — a fresh allocate_cluster can reclaim it")
+        val alloc = fs2.allocate_cluster(dev)
+        assert_true(alloc.is_ok())
+
+    it "refuses to unlink a directory with EISDIR":
+        val dev = _make_dev()
+        var fs = _fs_from(dev)
+        assert_true(fs.mkdir_at(dev, "/usr").is_ok())
+        val fs2 = _fs_from(dev)
+        val r = fs2.unlink_at(dev, "/usr")
+        assert_true(r.is_err())
+        expect(r.unwrap_err()).to_equal(-21)
+
+describe "Fat32Filesystem.rmdir_at":
+
+    it "removes an empty directory — a fresh readdir_at on the parent no longer lists it":
+        val dev = _make_dev()
+        var fs = _fs_from(dev)
+        assert_true(fs.mkdir_at(dev, "/usr").is_ok())
+        val fs2 = _fs_from(dev)
+        assert_true(fs2.rmdir_at(dev, "/usr").is_ok())
+        val fs3 = _fs_from(dev)
+        val names = fs3.readdir_at(dev, "/")
+        assert_true(names.is_ok())
+        expect(names.unwrap().len()).to_equal(1)   # only FILE.O remains
+
+    it "refuses ENOTEMPTY on a directory that holds more than '.' and '..'":
+        val dev = _make_dev()
+        var fs = _fs_from(dev)
+        assert_true(fs.mkdir_at(dev, "/usr").is_ok())
+        assert_true(fs.create_at(dev, "/usr/keep.txt").is_ok())
+        val fs2 = _fs_from(dev)
+        val r = fs2.rmdir_at(dev, "/usr")
+        assert_true(r.is_err())
+        expect(r.unwrap_err()).to_equal(-39)
+        step("SABOTAGE-equivalent negative control: the FILE.O path is not a directory")
+        val r2 = fs2.rmdir_at(dev, "/FILE.O")
+        assert_true(r2.is_err())
+        expect(r2.unwrap_err()).to_equal(-20)

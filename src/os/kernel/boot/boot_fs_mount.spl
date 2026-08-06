@@ -43,7 +43,7 @@ use std.fs_driver.nvfs_superblock.{
 use std.db.dbfs_engine.superblock.{
     dbfs_superblock_set_device, dbfs_superblock_probe_disk, dbfs_superblock_read_from_disk
 }
-use os.kernel.fs.fat32.{parse_bpb}
+use os.kernel.fs.fat32.{parse_bpb, Fat32Filesystem, fat32_mount_publish}
 
 # ============================================================================
 # Mount-result enum — no spawn, no PID, no hosted state
@@ -252,9 +252,20 @@ fn boot_fs_mount_fat32_from_device(dev: BlockDevice, provider: text, pure_simple
     if bpb.is_err():
         log_raw_println("[boot-fs-mount] No FAT32 BPB at LBA 0")
         return Err("boot-fs-mount: no FAT32 BPB")
+    # Beyond the BPB probe above (geometry validation only), actually mount a
+    # driver instance and publish it as kernel-global state so freestanding
+    # IPC syscall handlers (os.kernel.ipc.syscall_file) have a real
+    # Fat32Filesystem to call open_at/stat/mkdir_at/readdir_at/unlink_at/
+    # rmdir_at on. See doc/08_tracking/bug/path_based_fs_syscalls_fake_success_2026-08-06.md.
+    val fs = Fat32Filesystem.new(0u64)
+    val mount_r = fs.mount(dev)
+    if mount_r.is_err():
+        log_raw_println("[boot-fs-mount] FAT32 BPB parsed but mount() failed")
+        return Err("boot-fs-mount: FAT32 mount failed")
+    fat32_mount_publish(fs, dev)
     _fs_mount_done = true
     _fs_mount_type = FsMountType.Fat32
-    log_raw_println("[boot-fs-mount] FAT32 BPB confirmed")
+    log_raw_println("[boot-fs-mount] FAT32 BPB confirmed and filesystem mounted")
     Ok(FsMountResult(mounted: true, fs_type: FsMountType.Fat32, provider: provider, pure_simple: pure_simple))
 
 fn boot_fs_mount_provider_is_pure_simple(provider: text) -> bool:
