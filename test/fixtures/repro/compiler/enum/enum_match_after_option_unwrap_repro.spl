@@ -1,0 +1,69 @@
+# Repro: `match` on an enum matches NO declared arm after the value has been
+# force-unwrapped out of an Option (`e!`).
+#
+# Bug: doc/08_tracking/bug/enum_match_no_arm_when_entry_in_same_package_2026-08-06.md
+#
+# The bug was originally filed as "entry point in the same package"; that axis
+# is a CONFOUND. There is no package, no module split and no trait here — a
+# single file reproduces it. The real trigger is the `?`-to-`!` round trip: the
+# force-unwrap does not strip the Option wrapper under the JIT, so the match
+# reads the wrapper's discriminant instead of the enum's.
+#
+# The two engines are exactly INVERTED, so neither is a control for the other:
+#
+#   line                          JIT (default)   interpret
+#   1 direct                      A7              A7
+#   2 match after `!`             FALLTHROUGH     A7          <- JIT defect
+#   3 payloadless after `!`       FALLTHROUGH     Green       <- payload irrelevant
+#   4 match the Option directly   A7              FALLTHROUGH <- interpreter defect
+#
+# `case _` DOES fire, so the match statement executes and simply recognizes no
+# declared variant. Without a `case _` the reducer would fall out of the match
+# and return unchanged state with no error, warning or crash.
+#
+# Measured 2026-08-06 with the Rust bootstrap seed
+# bin/release/x86_64-unknown-linux-gnu/simple (md5 ed53cc5f255e269ca27c4cd83b17aef9).
+#
+# Run:
+#   bin/simple run test/fixtures/repro/compiler/enum/enum_match_after_option_unwrap_repro.spl
+#   SIMPLE_EXECUTION_MODE=interpret bin/simple run <same>
+
+enum E:
+    A(x: i32)
+    C
+
+enum P:
+    Red
+    Green
+    Blue
+
+fn opt_e(v: E) -> E?:
+    v
+
+fn opt_p(v: P) -> P?:
+    v
+
+fn name_e(e: E) -> text:
+    match e:
+        E.A(x): return "A{x}"
+        E.C: return "C"
+        case _: return "FALLTHROUGH"
+    "NOARM"
+
+fn name_p(p: P) -> text:
+    match p:
+        P.Red: return "Red"
+        P.Green: return "Green"
+        P.Blue: return "Blue"
+        case _: return "FALLTHROUGH"
+    "NOARM"
+
+fn main():
+    print "1 direct              = " + name_e(E.A(x: 7))
+    print "2 payload after !     = " + name_e(opt_e(E.A(x: 7))!)
+    print "3 payloadless after ! = " + name_p(opt_p(P.Green)!)
+    val o = opt_e(E.A(x: 7))
+    match o:
+        E.A(x): print "4 match Option direct = A{x}"
+        E.C: print "4 match Option direct = C"
+        case _: print "4 match Option direct = FALLTHROUGH"

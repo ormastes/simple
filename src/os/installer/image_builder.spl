@@ -125,6 +125,82 @@ struct PartitionLayout:
 
 var _image_builder_rootfs_backend: text = "fat32"
 
+# === Screen selection staging (WS-A A5) ===
+#
+# `/etc/rc.conf` accepts `screen_type`, `screen_res` and `screen_simd`; the
+# reader lives in `src/os/kernel/boot/rc_conf.spl`. These module vars carry the
+# build-time request into `_rc_conf_template()`.
+#
+# EMPTY means "not requested": the template then emits TODAY'S literal
+# byte-for-byte, so a default image is unchanged and the guest still resolves
+# `wm` via `rc_conf_normalize_screen_type(nil)`. Only an explicit request adds
+# keys. Value lists mirror rc_conf.spl deliberately (array scan, never a Dict —
+# dict reads are corrupt under native codegen) so the installer does not have to
+# depend on the kernel boot module.
+val _IMAGE_SCREEN_TYPES: [text] = ["wm", "2d", "web", "gui"]
+val _IMAGE_SCREEN_SIMD_VALUES: [text] = ["auto", "on", "off", "sse2", "avx2", "neon"]
+
+var _image_builder_screen_type: text = ""
+var _image_builder_screen_res: text = ""
+var _image_builder_screen_simd: text = ""
+
+fn _image_builder_reset_screen():
+    """Clear any screen request. Called wherever `_image_builder_rootfs_backend`
+    is reset, so build N+1 never inherits build N's screen type."""
+    _image_builder_screen_type = ""
+    _image_builder_screen_res = ""
+    _image_builder_screen_simd = ""
+
+fn _validated_screen_type(raw: text) -> Result<text, text>:
+    """Build-time validation. Unlike the boot-time reader this FAILS instead of
+    normalizing: silently staging `wm` for a requested `2d` would produce an
+    image labelled 2d that boots wm."""
+    val value = raw.trim().to_lower()
+    if value == "":
+        return Result.Ok("")
+    for t in _IMAGE_SCREEN_TYPES:
+        if value == t:
+            return Result.Ok(value)
+    Result.Err("SimpleOS image screen_type invalid: \"{raw}\" (want wm|2d|web|gui)")
+
+fn _validated_screen_simd(raw: text) -> Result<text, text>:
+    val value = raw.trim().to_lower()
+    if value == "":
+        return Result.Ok("")
+    for s in _IMAGE_SCREEN_SIMD_VALUES:
+        if value == s:
+            return Result.Ok(value)
+    Result.Err("SimpleOS image screen_simd invalid: \"{raw}\" (want auto|on|off|sse2|avx2|neon)")
+
+fn _validated_screen_res(raw: text) -> Result<text, text>:
+    """Accepts only `WxH` with positive decimal dimensions — the single spelling
+    `rc_conf_parse_screen_res` accepts."""
+    val value = raw.trim().to_lower()
+    if value == "":
+        return Result.Ok("")
+    val parts = value.split("x")
+    if parts.len() != 2:
+        return Result.Err("SimpleOS image screen_res invalid: \"{raw}\" (want WxH)")
+    val w = parts[0].to_i64()
+    val h = parts[1].to_i64()
+    if w <= 0 or h <= 0:
+        return Result.Err("SimpleOS image screen_res invalid: \"{raw}\" (want WxH)")
+    Result.Ok("{w}x{h}")
+
+pub fn image_builder_set_screen(screen_type: text, screen_res: text, screen_simd: text) -> Result<bool, text>:
+    """Request a boot screen configuration for the NEXT image build.
+
+    Pass "" for any field to leave it out of `/etc/rc.conf` entirely. Returns
+    Err on an unrecognized value and leaves the previous request untouched.
+    """
+    val t = _validated_screen_type(screen_type)?
+    val r = _validated_screen_res(screen_res)?
+    val s = _validated_screen_simd(screen_simd)?
+    _image_builder_screen_type = t
+    _image_builder_screen_res = r
+    _image_builder_screen_simd = s
+    Result.Ok(true)
+
 class ImageBuilder:
     config: ImageConfig
     layout: PartitionLayout
@@ -207,7 +283,10 @@ impl ImageBuilder:
 
         write_text("{rootfs_root}/etc/hostname", "simpleos\n")
         write_text("{rootfs_root}/etc/fstab", _fstab_template())
+        # rc.conf carries the screen request; the request is CONSUMED here so a
+        # second build in the same process cannot inherit build N's screen type.
         write_text("{rootfs_root}/etc/rc.conf", _rc_conf_template())
+        _image_builder_reset_screen()
         write_text("{rootfs_root}/etc/pkg/repos.sdn", _pkg_repo_template())
         write_text("{rootfs_root}/etc/shell/profile.sdn", "shell = \"/bin/shell\"\n")
         write_text("{rootfs_root}/etc/rootfs.sdn", _rootfs_backend_payload(_image_builder_rootfs_backend))
@@ -494,6 +573,9 @@ fn _print_image_usage():
     print "  --packages=DIR    Directory containing .spk packages"
     print "  --simple-binary=PATH  Target-native SimpleOS Simple ELF/SMF payload"
     print "  --rootfs=NAME     Runtime rootfs backend marker (fat32, dbfs, nvfs)"
+    print "  --screen-type=T   Stage screen_type into /etc/rc.conf (wm, 2d, web, gui)"
+    print "  --screen-res=WxH  Stage screen_res into /etc/rc.conf (e.g. 1024x768)"
+    print "  --screen-simd=S   Stage screen_simd (auto, on, off, sse2, avx2, neon)"
     print "  --installer       Build install-media artifact"
     print "  -h                Show this help"
 
@@ -517,6 +599,9 @@ fn run_image_builder(args: [text]) -> i32:
     var simple_binary = ""
     var installer = false
     var rootfs_backend = "fat32"
+    var screen_type = ""
+    var screen_res = ""
+    var screen_simd = ""
 
     var i = 1
     while i < args.len():
@@ -535,6 +620,12 @@ fn run_image_builder(args: [text]) -> i32:
             simple_binary = arg.slice(16, arg.len())
         else if arg.starts_with("--rootfs="):
             rootfs_backend = arg.slice(9, arg.len())
+        else if arg.starts_with("--screen-type="):
+            screen_type = arg.slice(14, arg.len())
+        else if arg.starts_with("--screen-res="):
+            screen_res = arg.slice(13, arg.len())
+        else if arg.starts_with("--screen-simd="):
+            screen_simd = arg.slice(14, arg.len())
         else if arg == "--installer":
             installer = true
         i = i + 1
@@ -544,6 +635,11 @@ fn run_image_builder(args: [text]) -> i32:
         print "Error: {e}"
         return 1
     val arch = arch_result.unwrap()
+
+    val screen_result = image_builder_set_screen(screen_type, screen_res, screen_simd)
+    if val Err(e) = screen_result:
+        print "Error: {e}"
+        return 1
 
     val result = if installer:
         val config = ImageConfig(
@@ -973,7 +1069,26 @@ fn _rootfs_boot_marker_payload(rootfs_backend: text) -> text:
     out
 
 fn _rc_conf_template() -> text:
-    "hostname=\"simpleos\"\nsshd_enable=\"NO\"\nsimpleos_desktop=\"YES\"\n"
+    _rc_conf_template_with_screen(
+        _image_builder_screen_type,
+        _image_builder_screen_res,
+        _image_builder_screen_simd
+    )
+
+fn _rc_conf_template_with_screen(screen_type: text, screen_res: text, screen_simd: text) -> text:
+    """Base rc.conf plus any REQUESTED screen keys.
+
+    With no request the returned text is byte-identical to the pre-A5 template;
+    the guest then defaults to `wm` through `rc_conf_normalize_screen_type(nil)`.
+    """
+    var out = "hostname=\"simpleos\"\nsshd_enable=\"NO\"\nsimpleos_desktop=\"YES\"\n"
+    if screen_type != "":
+        out = out + "screen_type=\"{screen_type}\"\n"
+    if screen_res != "":
+        out = out + "screen_res=\"{screen_res}\"\n"
+    if screen_simd != "":
+        out = out + "screen_simd=\"{screen_simd}\"\n"
+    out
 
 fn _pkg_repo_template() -> text:
     "[repositories]\nlocal = \"/var/cache/pkg/local\"\n"
