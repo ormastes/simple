@@ -248,3 +248,34 @@ Watch out for two environment traps while doing this:
   this failure (surfacing even in the flat pipeline) is not that artifact
 - `src/compiler_rust/linker/native_binary/stubs.rs` — unrelated, explicitly
   out of scope for this task, not touched
+
+## UPDATE 2026-08-06 (RXM1 lane): Stage 3 now REACHES this error in 127s instead of never — and it surfaces in `watcher_client.spl`, not `cache_validator.spl`
+
+Until commit `548f2d3b1f6`, Stage 3 could not reach this blocker at all. It was
+**non-terminating**: `find_reexport_source`
+(`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:1053`) had no
+memo and re-walked a cyclic import graph to its `depth > 8` cap, so the run
+climbed to `VmRSS` 39.4 GB over 26 minutes, frozen at `tasks_done=2/6`, with no
+signal and no diagnostic, until something external killed it. Full analysis:
+`stage3_selfhost_nonterminating_reexport_chase_2026-08-06.md`.
+
+With that fixed, Stage 3 reaches the HIR phase and **fails fast (127s, exit 1)**
+here. Two things the next lane should note:
+
+1. **The file is `src/compiler/driver/watcher/watcher_client.spl`**, not
+   `cache_validator.spl` as recorded above. Same error text
+   (`unresolved type: ByteOrder`). This is either a sibling instance the earlier
+   fix did not cover, or evidence that the recorded fix addressed only the
+   `cache_validator.spl` path. **Confirm which before assuming this doc's
+   earlier "was fixed" line still holds.** (Note the real tracked path is
+   numbered — `src/compiler/80.driver/` — since `src/compiler/driver` is a
+   symlink and git pathspecs on it fail; error messages report the MODULE path.)
+
+2. **This error is NOT caused by the RXM1 memo.** A wrongly-memoized miss would
+   produce exactly this symptom, so it was tested rather than argued: the
+   level-gated trace `SIMPLE_HIR_REEXPORT_TRACE_NAME=ByteOrder` recorded **zero**
+   MEMO-SUPPRESSED events for `ByteOrder` across a full run. Re-run that trace
+   before suspecting the memo.
+
+This is now the first blocker Stage 3 actually reports, so it is the live head
+of task #18.
