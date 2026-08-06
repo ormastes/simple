@@ -16,8 +16,13 @@
   a 2026-08-06 discriminator probe shows every tested `.first()`/`.last()`
   call (empty/non-empty, `i64`/`text`/struct element types, including a
   plainly explicitly-typed `[i64]` local) still falls through to the OLD
-  "unresolved method call" placeholder. Open defect, root cause not yet
-  pinned — see "Update (2026-08-06, later)" below for the exact repro and
+  "unresolved method call" placeholder. **Root cause since pinned and
+  source-fixed** (missing `Some(...)` wrap on the function's success return
+  — see "Update (2026-08-06, later still)" below); binary/execution
+  verification remains blocked, now confirmed to be blocked by a THIRD,
+  distinct self-compile crash (`runtime error: field access on nil
+  receiver`) on top of the two SIGSEGVs already on file, not merely
+  unattempted. See "Update (2026-08-06, later)" below for the exact repro and
   investigation leads. Verification was also complicated throughout by an
   unrelated, already-broader, pre-existing native-build SIGSEGV described
   below (which the discriminator-probe technique works around, since MIR
@@ -415,6 +420,111 @@ in `lower_array_first_or_last`'s type-resolution fallback chain, not merely
 precisely enough to fix blind, and no fast rebuild path exists to verify a
 fix) — flagging for the next lane with the exact function names, line
 ranges, and a working repro/probe technique above.
+
+## Update (2026-08-06, later still): root cause pinned — missing `Some(...)` wrap on the success return
+
+Fresh session, `git fetch origin main` first (tip `21875c735e11`, confirmed
+current). Reused the four post-`c49bb56` self-hosted binaries recorded above
+(`~/dev/simple-s3clean` et al.) — `git log -1 -- .../method_calls_literals.spl`
+on `origin/main` also resolves to `c49bb5606dea`, matching those worktrees
+exactly, so the binaries are still current for this file.
+
+Read `lower_array_first_or_last` in full this time, including the tail
+(`method_calls_literals.spl:3569-3624`, previously only read through 3569).
+The dispatch site (`method_calls_literals.spl:2600-2605`) is correctly wired
+in the same `local_is_runtime_array` guard block as `push`/`map`/`filter`/
+`fold`, and the prior lane's own probe evidence (`[mir-method-call]
+unresolved-array method=first` printed from inside that guard) already proved
+control reaches the `if method == "first" ...` check — ruling out dispatch
+order, a name mismatch, and the receiver-type-recognition failure modes.
+That leaves only the `if val first_result = self.lower_array_first_or_last(...)`
+binding itself as the remaining suspect.
+
+**Root cause:** `lower_array_first_or_last`'s declared return type is
+`LocalId?`, and its early-exit (type-not-found) path correctly `return`s
+`nil` (line 3554) — but its success path's final expression, after building
+the Option handle in the merge block, was a **bare** `result_local`
+(`LocalId`), not `Some(result_local)`. Every other `-> LocalId?` function in
+this subsystem wraps its success value explicitly:
+`try_lower_global_read` (`expr_dispatch.spl:212`, `return Some(dest)`) and
+`try_lower_bitfield_get` (`switch_operators_calls.spl`, `return
+Some(result)`) are two directly-grepped examples, and no counterexample of a
+bare-value success return from a `-> T?` function was found anywhere in
+`src/compiler/50.mir/`. So the convention in this codebase is that a bare
+value does NOT reliably auto-promote to `Some(value)` at a `T?` return
+site — the `if val first_result = ...` at the call site never bound,
+because the un-wrapped return value was not a valid `Option` handle. Falling
+through to the existing "unresolved method call" placeholder was itself
+working exactly as designed (the fail-closed path for a nil/unbound
+result) — this explains why the failure was **uniform across every element
+type tested** (`i64`/`text`/`Point`, including an explicitly-annotated
+`[i64]`), which is inconsistent with the previously-suspected
+`find_local_hir_type`/`receiver_declared_type` fallback-chain theory (that
+chain IS type-dependent and DOES succeed for an explicit `[i64]` annotation,
+per the "live path" trace in the prior update) and consistent with a defect
+that fires identically regardless of which branch of the function computes
+the element type.
+
+**Fix:** one-line change, `method_calls_literals.spl:3624`:
+```
+-        result_local
++        Some(result_local)
+```
+
+**Verification status: source-fixed, NOT execution-confirmed — the rebuild
+path itself is now confirmed closed, not merely "not attempted".** Two
+independent attempts this session to produce a fresh self-hosted binary from
+the patched source both failed, and a third data point from an earlier
+lane's own leftover build artifacts shows the identical failure:
+- Direct `bootstrap/stage2/simple native-build ... src/app/cli/bootstrap_main.spl`
+  with a fresh empty cache/runtime dir: immediate SIGSEGV, zero log output
+  (an environment/cold-cache artifact, not informative on its own).
+- Re-run using `~/dev/simple-s3clean/build/clean/stage2-simple` (a
+  provenance-verified stage2 binary from a `Build complete: 3 compiled, 724
+  cached` run earlier today, BuildID `fe5c2e9b...`) with its own warm
+  `native-objects-BvXGkY` cache dir, same target: the compiler crashes
+  **while stage2 is self-compiling `src/app/cli/bootstrap_main.spl` (i.e.
+  compiling the compiler's own source tree, before ever reaching the
+  `.first()`/`.last()` test files this bug is about)** — `runtime error:
+  field access on nil receiver`, `timeout: the monitored command dumped
+  core`. Log shows normal MIR-lowering trace output for dozens of unrelated
+  method calls (`.replace()`, `.ends_with()`, etc.) immediately before the
+  crash, so this is deep into a real self-compile, not a startup failure.
+- `~/dev/simple-s3clean/build/clean/stage3.log` (mtime 20:45, an **unrelated
+  prior lane's own leftover artifact**, predating this session) shows the
+  **exact same** `runtime error: field access on nil receiver` crash
+  message at the same point in its own stage2-self-compiling-stage3 attempt.
+  Three independent runs, two different sessions, identical symptom.
+
+This `runtime error: field access on nil receiver` crash (during stage2's
+self-compile of the compiler) is a **distinct symptom** from both SIGSEGVs
+already on file for this binary chain — the `0x118`
+`uname`-subprocess-adjacent fault and the `si_addr=NULL` fault after the
+4th `[ERROR] MIR error:` line (both described in the "Update (2026-08-06,
+later)" section above, and in
+`stage3_native_build_segv_generic_codegen_link_path_2026-08-06.md`). This
+one is not a SIGSEGV at all (no signal — a Simple-level "runtime error"
+message, then the process separately dumps core), and it happens during
+**self-compilation of the compiler**, not during a compiled program's
+execution — i.e. it blocks producing ANY new stage3/stage2 binary from
+current source via this binary chain, regardless of this bug's fix. Recording
+this explicitly since it is new information affecting every lane that needs
+a fresh self-hosted rebuild right now, not just this one.
+
+**Sabotage-verify: not performed, and not fakeable given the above** — there
+is no rebuild path to revert-and-recompare against. The already-recorded
+2026-08-06 discriminator probe (all 4 calls across 3 element-typed files →
+old placeholder, on a binary built from source identical to this fix minus
+the single `Some(...)` wrap) stands as the pre-fix negative control; a
+post-fix positive control could not be obtained this session.
+
+**Confidence in the fix without execution verification:** high, on grounds
+of source-level convention analysis (every sibling function in the same
+file/subsystem uses the explicit-wrap pattern; this was the only exception)
+combined with the probe evidence's uniformity across element types (which
+this fix explains and the previously-suspected type-resolution theory does
+not). Not claimed as "confirmed" — flagged accordingly for the next lane
+that has a working rebuild path.
 
 ## Why the original "core-dumps" description pointed at the wrong layer
 
