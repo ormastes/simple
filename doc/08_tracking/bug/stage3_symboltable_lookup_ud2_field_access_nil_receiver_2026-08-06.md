@@ -1,6 +1,7 @@
 # Stage-3 native-build crash: `SymbolTable.lookup` traps "field access on nil receiver" (ud2), distinct from the offset-0x118 / NULL-deref SIGSEGVs
 
-Status: OPEN (diagnosed, not fixed — full-rebuild verification too slow for this session)
+Status: OPEN — real bug, but the original "codegen drops the guard" root-cause
+theory below is WRONG (disproven by binary provenance, see 2026-08-06 update).
 Date: 2026-08-06
 Owner: unassigned
 
@@ -163,3 +164,135 @@ contains-check-not-gating-the-read codegen issue described above.
 - `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl` (`lower_enum_construct_named`, caller)
 - `src/compiler/50.mir/_MirLowering/bootstrap_globals.spl` (`bootstrap_lower_flat_hir_module_to_mir`, `bootstrap_flat_symbol_table`)
 - `~/dev/simple-s3clean/build/clean/stage3.log`, `stage3-gdb.log` (crash evidence, not in repo — local build artifacts)
+
+## Update (2026-08-06, later): root-cause premise disproven — binary provenance mismatch, guard already tried and reverted upstream
+
+Followed the task's cheapest-diagnostic instruction (write a minimal
+standalone reproducer, native-build it in isolation) before doing a slow full
+self-compile. The reproducer (`struct`+`Dict`+guard-then-bracket-read in a
+loop, `lookup(t, name)` called twice, once with a deliberately-unregistered
+scope id) behaved **correctly under the interpreter** — the guard fired,
+printed a message, and broke the loop as intended (`bin/simple run` output:
+`guard fired: break (scope_id=1 not in scopes)` / `not found (expected via
+guard break)`).
+
+`native-build` on that same reproducer, and even on an **existing, known-good
+repo fixture** (`test/fixtures/compiler/stage4_struct_enum_array_probe.spl`,
+already covered by `scripts/check/check-cranelift-aot-aggregates.shs`) and on
+a **trivial `struct Point` hello-world**, all failed identically with
+`unresolved name: <every identifier in the file>` from the self-hosted
+worker. This is a harness-broken-in-this-checkout finding, not a defect in
+the reproducer: `bin/simple` in this worktree currently prints the Rust-seed
+warning banner (`WARNING: this Rust-built Simple binary is a bootstrap seed
+only`) even though `.claude/rules/bootstrap.md`/CLAUDE.md says the deployed
+tool should be the pure-Simple self-hosted binary — the deployed binary here
+is not what it claims to be, and/or `src/compiler/**` is mid-edit by
+concurrent sessions in this shared repo (`git status` at session start showed
+it heavily modified). Native-build could not be used to test the isolated
+guard-codegen hypothesis in this checkout. **Do not repeat this attempt in
+this worktree without first re-verifying `bin/simple`'s provenance
+(`readlink -f`, and does it still print the seed banner).**
+
+Escalated instead of continuing to guess at flags. That surfaced the real
+answer via a much simpler check the original repro never did: **verify the
+binary that was actually disassembled was built from the source this doc
+quotes.** It was not.
+
+`stage3-gdb.log`/`stage3.log` (the evidence this doc's "Root cause" section
+above is built on) came from `~/dev/simple-s3clean/build/clean/stage2-simple`
+— **a separate git clone**, not this repo
+(`/home/ormastes/dev/pub/simple`), created 2026-08-06 20:20 and rebuilt
+2026-08-06 20:41:55. Checking that clone's actual
+`src/compiler/20.hir/hir_types.spl` at the time of the build:
+
+```
+$ grep -n "rt_dict_contains(self.scopes" ~/dev/simple-s3clean/src/compiler/20.hir/hir_types.spl
+(no output — the guard is NOT present)
+
+$ sed -n '373,391p' ~/dev/simple-s3clean/src/compiler/20.hir/hir_types.spl
+            # DO NOT re-add an `if not rt_dict_contains(self.scopes,
+            # scope_id.id): break` guard here. It was added as
+            # "defense-in-depth" by 1ea6599e8fb and it broke the Stage 3
+            # self-host outright: ... rt_dict_contains under-reports
+            # membership on this struct-valued `Dict<i64, Scope>` ...
+            # The guard therefore ended the chain immediately and made
+            # lookup() a constant nil ...
+            val scope = self.scopes[scope_id.id]
+```
+
+`~/dev/simple-s3clean` has its own git history (`.git` present, distinct
+worktree) with two relevant commits:
+
+- `1ea6599e8fb` "fix(compiler): stop try_lower_bitfield_construct SIGSEGV,
+  guard SymbolTable scope-chain reads" (2026-08-06 13:52:27) — added
+  **exactly** the `rt_dict_contains(self.scopes, scope_id.id)` guard this
+  doc's original "Root cause" section quotes as source, to fix
+  `stage3_native_build_segv_generic_codegen_link_path_2026-08-06`.
+- `030ff43e330` "fix(compiler): remove SymbolTable scope guard that
+  stack-overflowed Stage 3" (2026-08-06 15:27:11) — **reverted it**, with a
+  detailed writeup: the guard made `lookup()` return constant `nil` because
+  `rt_dict_contains` under-reports membership on this struct-valued
+  `Dict<i64, Scope>` (the documented native Dict pitfall class, see
+  `doc/07_guide/language/dict_native_pitfalls.md`), which silently disabled
+  the *only* re-entrancy breakers in a mutual-recursion cycle
+  (`lower_type -> lower_named_kind -> try_register_bootstrap_global_symbol ->
+  register_imported_symbol -> ... -> lower_type`), causing unbounded
+  recursion and a stack-overflow SIGSEGV. In-source "DO NOT re-add" comments
+  were left specifically to stop exactly what happened next.
+
+Both commits are on `origin/main` (`git merge-base --is-ancestor 030ff43e330
+origin/main` → true) as of this session. **This repo's local checkout
+(`/home/ormastes/dev/pub/simple`) has an uncommitted working-copy edit that
+re-adds the exact reverted guard**, with a *different* justification comment
+(citing the SIGSEGV bug doc, not knowing about the revert). `git log --all -S
+"rt_dict_contains(self.scopes"` in this repo confirms the guard is not the
+committed state anywhere on this repo's line of history either — it exists
+only as an uncommitted WC diff here, `git diff origin/main --
+src/compiler/20.hir/hir_types.spl` showed the **entire** diff was this one
+guard hunk (59 lines, both `lookup` and `lookup_or_invalid`), byte-for-byte
+the inverse of `030ff43e330`.
+
+**Conclusion: the "codegen dropped the guard" theory (hypothesis 2 from the
+task framing) is disproven.** The disassembly in the original "Root cause"
+section is *exactly consistent with its actual source* — there is no
+`rt_dict_contains` call before the crash site because the binary that was
+disassembled was built from a checkout where that call genuinely is not in
+the source. The doc's mistake was assuming the disassembled `stage2-simple`
+was built from this repo's WC (with the guard) when it was actually built
+from an unrelated sibling clone (without the guard, deliberately, for a
+documented reason).
+
+**Action taken:** reverted this repo's WC to match `origin/main` exactly for
+`src/compiler/20.hir/hir_types.spl` (`git show origin/main:... >
+src/compiler/20.hir/hir_types.spl`; diff against `origin/main` is now empty).
+Re-adding the `rt_dict_contains`-based guard is not a safe fix — it was
+already tried, and already causes a documented, worse failure (unbounded
+recursion / stack overflow) via the same struct-valued-Dict membership-check
+defect this session's task description also flagged as worth checking against
+`dict_native_pitfalls.md`.
+
+**This means the underlying bug is real and still genuinely OPEN on
+`origin/main` as of this session** — hypothesis 1 (scope-tracking bug),
+refined: `current_scope` can legitimately reference a scope id `bootstrap_flat_symbol_table`
+never pushed into `scopes` (per `030ff43e330`'s own commit message,
+`new()`/`declare()` DO populate an id-0 root scope correctly, so this is
+likely a narrower/rarer case than "always nil", consistent with the ud2 crash
+being much less frequently hit than the guard-caused stack overflow was).
+Without a safe way to test scope-id membership on this struct-valued dict
+under native codegen (`rt_dict_contains`/`.contains_key()` both go through
+the same runtime call and are the only documented membership check;
+`.keys()` + linear scan was not attempted or verified here), no fix is landed
+in this session. The two known-bad options are: (a) no guard → nil-scope ud2
+crash (this doc), (b) `rt_dict_contains` guard → false membership-check
+failure → stack-overflow crash (`030ff43e330`). Next lane needs either (i) a
+verified-correct membership check for `Dict<i64, Scope>` under native codegen
+(test in isolation once native-build is usable in a clean worktree — this one
+currently is not, see above), or (ii) a fix at the source: make
+`bootstrap_flat_symbol_table`/its callers never set `current_scope` to an id
+absent from `scopes` in the first place, which sidesteps the need for a
+runtime guard entirely.
+
+Not done in this session (blocked by the native-build harness issue in this
+checkout): confirming whether `scope_id.id` is genuinely absent from
+`self.scopes` at the ud2 crash site (the task's suggested `eprintln`
+diagnostic), and testing a `.keys()`-based membership check in isolation.
