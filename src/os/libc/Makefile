@@ -32,7 +32,7 @@ C_SRCS  = simpleos_libc.c simpleos_cli_args.c \
           simpleos_glob_stub.c simpleos_pwd_stub.c simpleos_strfmon.c \
           simpleos_fork.c simpleos_ipc.c simpleos_socket.c \
           simpleos_filelock.c simpleos_statvfs.c simpleos_utsname.c \
-          simpleos_termios.c
+          simpleos_termios.c simpleos_netdb.c simpleos_posix_ext.c
 ASM_SRCS = simpleos_crt0.S simpleos_syscall.S simpleos_setjmp.S
 
 C_OBJS  = $(C_SRCS:.c=.o)

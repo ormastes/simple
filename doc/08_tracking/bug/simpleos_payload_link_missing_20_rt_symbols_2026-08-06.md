@@ -1,6 +1,7 @@
 # SimpleOS Simple payload fails to link: 20 `rt_*` symbols exist in no target runtime
 
-Status: OPEN
+Status: FIXED 2026-08-06 — see "Resolution" at the end. All 20 symbols now
+resolve and the SimpleOS payload links as a static ET_EXEC ELF64.
 Found: 2026-08-06, Lane S1 of
 `doc/03_plan/os/simpleos/toolchain_selfhost_bootstrap_plan.md`
 Blocks: S1 (cross Simple payload), and therefore S2/S3/S4/P1/P2.
@@ -283,3 +284,155 @@ error against D1 and stop the lane"), the lane is stopped here.
   `|| true` and matched only "unknown"/"unrecognized" in the output. A crashing
   compiler emits no output, so it PASSED the gate — the core-dumping stage3
   binary above would have been accepted and used. Now rejected on rc >= 128.
+
+## Resolution (2026-08-06) — option 1, the real runtime port
+
+The genuine `src/runtime/*.c` runtime is now cross-compiled for
+`x86_64-unknown-simpleos`. No symbol was stubbed or fabricated.
+
+### Acceptance: the LINK, not a symbol count
+
+```
+sh scripts/os/simpleos-native-build.shs      # SIMPLE_BUILD_COMPILER = bootstrap seed
+  -> Build complete: 723 compiled, 0 cached, 0 failed
+  -> SUCCESS: bin/release/x86_64-unknown-simpleos/simple (2246 KiB)
+```
+
+```
+readelf -h bin/release/x86_64-unknown-simpleos/simple
+  Class:   ELF64
+  Type:    EXEC (Executable file)
+  Machine: Advanced Micro Devices X86-64
+  Entry point address:  0x40000000
+  statically linked, 0 PT_INTERP segments
+```
+
+Provenance (a seed-built payload is NOT self-hosting evidence):
+
+| | sha256 |
+|---|---|
+| artifact `bin/release/x86_64-unknown-simpleos/simple` | `190b23528e79cfb436250cd8b7c89b76aedf862d112e1ad518ce0ca66608b19b` |
+| builder `src/compiler_rust/target/bootstrap/simple` (Rust seed) | `13ebe5dd22f0cabf37ab72e3b6f89b9f6271682587f848a205b5252ac4dc2e2d` |
+
+`nm -u` on the final binary reports only three **weak** symbols — `_Z4mainiPPc`,
+`_Z4mainv` (crt0's C++-main probes) and `simpleos_entropy_seed_u64` (declared
+`__attribute__((weak))` and null-guarded at `simpleos_cxxabi.c:206`). All are
+pre-existing optional hooks, not `rt_*`.
+
+### What was built
+
+- **`libsimple_runtime_native.a`** — 8 objects cross-compiled from
+  `src/runtime/`: `runtime_native`, `runtime_simd_utf8`, `runtime_contracts`,
+  `runtime_memory`, `runtime_time`, `runtime_timestamp`, `runtime_pool`,
+  `runtime_memtrack`. Built by `src/os/port/llvm/sysroot.shs`. One object per
+  source file — members stay independently selectable so an `rt_sort` reference
+  does not drag in the socket/DNS code. Deliberately NOT merged into
+  `libsimpleos_c.a`, so a plain C/C++ link never pulls the Simple runtime in.
+- **`runtime_native.c` compiles clean for SimpleOS** once the header gaps below
+  are closed. It needed no `#ifdef` surgery.
+
+### Link-line constraint that dictated the packaging
+
+The seed linker hardcodes exactly three SimpleOS inputs — `crt0.o`,
+`lib/libsimple_runtime.a`, `lib/libsimpleos_c.a` (see
+`simpleos_user_runtime_paths()` in
+`src/compiler_rust/compiler/src/pipeline/native_project/linker.rs:207`). There is
+no fourth slot, and `simpleos-native-build.shs` overwrites
+`libsimple_runtime.a` with the simple-core archive on every run. So the script
+now `ar r`-merges the C runtime objects into that archive *after* the copy.
+`ar r` preserves per-object members, so linker granularity survives the merge.
+
+### libc gaps closed (real implementations)
+
+`sigpending`, `fdopen`, `pread`, `pwrite`, `strcasestr`, `inet_ntop`,
+`inet_pton`, `getaddrinfo`, `freeaddrinfo`, `gai_strerror`, plus headers
+`netdb.h`, `arpa/inet.h`, `netinet/tcp.h` and declaration gaps in
+`signal.h` (`sig_atomic_t`), `pthread.h` (`PTHREAD_CREATE_DETACHED`),
+`stdio.h` (`fdopen`/`popen`/`pclose`), `unistd.h` (`pread`/`pwrite`/`fsync`),
+`string.h` (`strcasestr`), `sys/socket.h` (`SO_BROADCAST`).
+
+`sigpending` is not a stub: SimpleOS's `sigprocmask` is a documented no-op, so
+nothing is ever blocked and nothing can ever be pending — the empty set is the
+truthful answer.
+
+### The three that had no C implementation anywhere
+
+`rt_pop`, `rt_clear`, `rt_env_remove` existed only in the Rust runtime. They are
+now implemented **inside `runtime_native.c`**, beside their siblings, because
+`RtCoreArray`, `rt_core_as_array`, `rt_core_array_ptr` and
+`rt_refuse_non_text_receiver` are file-local statics — re-declaring the struct
+in a new TU is exactly the layout drift that links cleanly and corrupts later.
+
+Layout was established from the C side, not the Rust side. Note `struct
+SplArray` in `runtime.h:126` is a **decoy**: `runtime_native.c` never
+dereferences it, converting via `rt_core_array_ptr()` to the file-local
+`RtCoreArray { kind; flags; reserved; transient_scope_id; len; cap; data }`.
+Elements are flag-dependent (default = 3-bit-tagged values, `FLAG_BYTES` = raw
+bytes), so both array bodies delegate to the existing, already-correct
+`rt_array_pop`/`rt_array_clear` rather than re-deriving element handling.
+
+**`rt_clear` is NOT an alias for `rt_array_clear`.** `rt_array_clear` returns
+`1`; `rt_clear` must return the receiver. Returning that `1` would decode as
+`RT_VALUE_TAG_HEAP | 0` — a heap pointer to address 0 that links cleanly and
+segfaults on first use.
+
+### Accepted limitations, stated rather than hidden
+
+- **`fsync`/`fdatasync` return `-1`/`ENOSYS`.** Tracing `write(2)` from
+  `syscall.spl:413` to the NVMe driver shows the FAT32 file size is never
+  written back to the directory entry (`fat32_core.spl:1478` updates only the
+  in-memory record; `fat32_close` does not touch the dirent), and the device
+  write cache is never flushed (`BlockDevice` has no flush; NVMe FLUSH exists
+  but is unreachable from the FS path). There is no VFS_SYNC opcode. Returning
+  `0` would claim durability nothing in the tree provides.
+
+  **Blast radius on THIS payload: none.** `rt_file_write_atomic()` — the only
+  `fsync` caller in `runtime_native.c` — is verified absent from the linked
+  binary (`nm --defined-only bin/release/x86_64-unknown-simpleos/simple |
+  grep -c rt_file_write_atomic` → `0`), so no reachable code path calls
+  `fsync` today. The limitation applies to any FUTURE closure that pulls
+  atomic file writes in: it would report failure rather than silently lose
+  data. To make `fsync` return 0 honestly SimpleOS needs dirent size
+  writeback, a `BlockDevice.flush` issuing NVMe FLUSH, and a VFS_SYNC opcode.
+- **`pread`/`pwrite` are seek-based and therefore not atomic** w.r.t. the file
+  offset — SimpleOS has no pread/pwrite syscall (table has 31=Read, 32=Write,
+  46=Lseek only). Correct for a single-threaded caller; two threads sharing one
+  fd can observe the temporarily moved offset. Needs a real syscall to fix.
+- **`getaddrinfo` resolves numeric IPv4 literals and the AI_PASSIVE wildcard
+  only**, returning `EAI_NONAME` for anything needing DNS. SimpleOS has no
+  resolver; failing truthfully beats inventing an address.
+
+### Follow-up defect found on the way
+
+`doc/08_tracking/bug/simpleos_libc_file_struct_odr_mismatch_2026-08-06.md` —
+`struct __simpleos_FILE` is defined twice with incompatible layouts (4 bytes in
+`simpleos_libc.c`, 16 in `simpleos_fs.c`), so `fread`/`fwrite` on
+stdin/stdout/stderr write past the end of a 4-byte static. `fdopen` was placed
+in `simpleos_fs.c` to work around it rather than depend on it.
+
+### Not yet done
+
+The payload has been LINKED, not RUN. Booting it in-guest and on the dev board
+per `.claude/rules/board-runnable.md` is the next step, and the `fsync` ENOSYS
+consequence above is the first thing to exercise there.
+
+### `rt_pop` text-branch semantics (verified, not inferred)
+
+The array branches of `rt_pop`/`rt_clear` delegate to existing C siblings, and
+`rt_env_remove` clones `rt_env_set`. The one body with self-derived logic is
+`rt_pop`'s TEXT branch, so it was checked against the interpreter — which is the
+spec — rather than assumed:
+
+- `interpreter_method/string.rs:212` — "Returns the LAST CHARACTER, and does not
+  modify the string (strings are immutable)"; empty text yields the empty text;
+  result is a bare text, never `Some(..)`.
+- `interpreter_method/mod.rs:1870` — pop's receiver write-back is applied only
+  to `Value::Array`, never to text.
+
+So text being PURE while the array branch mutates is the specified behaviour,
+and the C implementation matches on all three points (last *character* not byte,
+empty→empty, bare text).
+
+Risk is further bounded: the only `rt_pop` caller in this payload is
+`compiler__backend__backend__env__Environment_dot_pop_scope`, which pops an
+array scope stack. The text branch is not reached by anything in the closure.

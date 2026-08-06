@@ -35,6 +35,7 @@
 #define SO_ERROR      4
 #define SO_RCVTIMEO   20
 #define SO_SNDTIMEO   21
+#define SO_BROADCAST  6
 
 /* shutdown() how values (POSIX/BSD numbering). */
 #define SHUT_RD   0

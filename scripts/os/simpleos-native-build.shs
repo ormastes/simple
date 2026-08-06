@@ -150,6 +150,30 @@ if [ "$TARGET" = "x86_64-unknown-simpleos" ]; then
   [ -s "$TARGET_RUNTIME" ] || { echo "error: target Simple-core archive missing: $TARGET_RUNTIME" >&2; exit 1; }
   mkdir -p build/os/sysroot/lib
   cp "$TARGET_RUNTIME" build/os/sysroot/lib/libsimple_runtime.a
+
+  # The seed linker hardcodes exactly three SimpleOS inputs — crt0.o,
+  # lib/libsimple_runtime.a and lib/libsimpleos_c.a (see
+  # simpleos_user_runtime_paths() in
+  # src/compiler_rust/compiler/src/pipeline/native_project/linker.rs). There is
+  # no fourth slot, and the copy above overwrites libsimple_runtime.a wholesale.
+  # So the cross-compiled C runtime has to be merged INTO that archive here,
+  # after the copy, or it would silently never reach the link line.
+  #
+  # `ar r` adds each object as its own member, so linker granularity is
+  # preserved: the simple-core Simple objects and the C runtime objects stay
+  # independently selectable. libsimpleos_c.a is deliberately left untouched so
+  # a plain C/C++ link never drags the Simple runtime in.
+  RUNTIME_NATIVE="build/os/sysroot/lib/libsimple_runtime_native.a"
+  if [ -f "$RUNTIME_NATIVE" ]; then
+    RT_MEMBER_DIR="build/os/simple-core-simpleos/rt-members"
+    rm -rf "$RT_MEMBER_DIR"; mkdir -p "$RT_MEMBER_DIR"
+    ( cd "$RT_MEMBER_DIR" && "${AR:-llvm-ar}" x "../../../../$RUNTIME_NATIVE" )
+    "${AR:-llvm-ar}" r build/os/sysroot/lib/libsimple_runtime.a "$RT_MEMBER_DIR"/*.o
+    echo "merged C runtime members into libsimple_runtime.a: $(ls "$RT_MEMBER_DIR"/*.o | wc -l)"
+  else
+    echo "error: missing $RUNTIME_NATIVE — run src/os/port/llvm/sysroot.shs first" >&2
+    exit 1
+  fi
 fi
 
 # ---- run native-build ----

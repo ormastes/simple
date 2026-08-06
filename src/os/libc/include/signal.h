@@ -84,7 +84,11 @@ int sigismember(const sigset_t *set, int signum);
 #define SIG_SETMASK 2
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+int sigpending(sigset_t *set);
 char *strsignal(int sig);
+
+/* C99 requires sig_atomic_t here; runtime_native.c uses it for handler flags. */
+typedef int sig_atomic_t;
 
 #ifdef __cplusplus
 }

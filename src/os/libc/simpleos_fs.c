@@ -244,6 +244,49 @@ FILE *fopen(const char *path, const char *mode) {
     return fp;
 }
 
+/*
+ * fdopen — wrap an ALREADY-OPEN fd in a FILE.
+ *
+ * Deliberately defined here, not in simpleos_libc.c: this translation unit
+ * owns the 16-byte `struct __simpleos_FILE { fd; eof; error; mode; }` that
+ * fopen() malloc()s and that fread/fwrite/feof/ferror read. simpleos_libc.c
+ * declares an INCOMPATIBLE 4-byte `{ int fd; }` for its stdin/stdout/stderr
+ * statics, so defining fdopen there would hand fread/fwrite a short object.
+ * (That pre-existing mismatch is filed separately.)
+ *
+ * Unlike fopen this opens nothing; it takes ownership of `fd` for fclose.
+ */
+FILE *fdopen(int fd, const char *mode) {
+    if (fd < 0) { errno = EBADF; return NULL; }
+
+    int flags;
+    if (strcmp(mode, "r") == 0 || strcmp(mode, "rb") == 0)
+        flags = O_RDONLY;
+    else if (strcmp(mode, "w") == 0 || strcmp(mode, "wb") == 0)
+        flags = O_WRONLY;
+    else if (strcmp(mode, "a") == 0 || strcmp(mode, "ab") == 0)
+        flags = O_WRONLY | O_APPEND;
+    else if (strcmp(mode, "r+") == 0 || strcmp(mode, "rb+") == 0 ||
+             strcmp(mode, "r+b") == 0 || strcmp(mode, "w+") == 0 ||
+             strcmp(mode, "wb+") == 0 || strcmp(mode, "w+b") == 0)
+        flags = O_RDWR;
+    else if (strcmp(mode, "a+") == 0 || strcmp(mode, "ab+") == 0 ||
+             strcmp(mode, "a+b") == 0)
+        flags = O_RDWR | O_APPEND;
+    else {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    FILE *fp = (FILE *)malloc(sizeof(struct __simpleos_FILE));
+    if (!fp) { errno = ENOMEM; return NULL; }
+    fp->fd    = fd;
+    fp->eof   = 0;
+    fp->error = 0;
+    fp->mode  = flags;
+    return fp;
+}
+
 int fclose(FILE *fp) {
     if (!fp) return EOF;
     int fd = fp->fd;

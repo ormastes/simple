@@ -6615,6 +6615,67 @@ int64_t rt_array_pop(SplArray* a) {
     return value;
 }
 
+/* pop / clear: receiver-dispatched spellings of rt_array_pop/rt_array_clear.
+ *
+ * These had NO C definition anywhere (only the Rust runtime's
+ * value/collections.rs), so the SimpleOS cross-link could not resolve them.
+ * They are written HERE, beside their siblings, because RtCoreArray,
+ * rt_core_as_array, rt_core_array_ptr and rt_refuse_non_text_receiver are all
+ * file-local statics -- re-declaring RtCoreArray in a new translation unit is
+ * exactly the layout-drift that links cleanly and corrupts silently.
+ *
+ * Dispatch shape follows rt_reverse above; the array bodies delegate to the
+ * existing, already-correct rt_array_pop / rt_array_clear rather than
+ * re-deriving element handling (default elements are 3-bit-tagged values,
+ * FLAG_BYTES elements are raw bytes -- rt_array_pop already distinguishes
+ * them).
+ */
+int64_t rt_pop(int64_t receiver) {
+    SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (arr) return rt_array_pop(arr);
+
+    RtCoreString* s = rt_core_as_string(receiver);
+    if (!s) rt_refuse_non_text_receiver("pop");
+    /* Text pops the last CHARACTER, not the last byte: slicing a byte off a
+     * multi-byte codepoint would emit invalid UTF-8.
+     *
+     * Text is PURE here while the array branch above mutates, and that
+     * asymmetry is the spec, not an oversight. interpreter_method/string.rs:212
+     * -- "Returns the LAST CHARACTER, and does not modify the string (strings
+     * are immutable)" -- and interpreter_method/mod.rs:1870 applies pop's
+     * receiver write-back only to `Value::Array`, never to text.
+     *
+     * Two further details copied from that arm rather than invented: an empty
+     * text yields the EMPTY TEXT (unambiguous, since no real character is the
+     * empty text), and the result is a bare text, never an Option -- text used
+     * to be the only `pop` returning `Some(..)` and that was deliberately
+     * removed as unreachable outside the interpreter. */
+    if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
+    uint64_t last = 0;
+    for (uint64_t i = 0; i < s->len;) {
+        uint64_t w = rt_utf8_width(s->data, i, s->len);
+        last = i;
+        i += w;
+    }
+    return rt_string_new((const uint8_t*)(s->data + last),
+                         s->len - last);
+}
+
+/* clear returns the RECEIVER, which is why this is not an alias for
+ * rt_array_clear. rt_array_clear's spec is &[I64] -> &[I8]; it returns 1 on
+ * success. Returning that 1 from rt_clear would be decoded as a heap-tagged
+ * pointer to address 0 (RT_VALUE_TAG_HEAP | 0) and segfault on first use --
+ * a link-clean, corrupt-later bug. */
+int64_t rt_clear(int64_t receiver) {
+    SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (arr) {
+        rt_array_clear(arr);
+        return receiver;
+    }
+    if (!rt_core_as_string(receiver)) rt_refuse_non_text_receiver("clear");
+    return rt_string_new((const uint8_t*)"", 0);
+}
+
 int64_t rt_index_get(int64_t collection, int64_t idx) {
     RtCoreArray* a = rt_core_as_array(collection);
     if (a) {
@@ -7909,6 +7970,25 @@ bool rt_env_set(const uint8_t* key_ptr, uint64_t key_len, const uint8_t* value_p
     free(key);
     free(value);
     return ok;
+}
+
+/* rt_env_remove — delete a variable from the environment.
+ *
+ * Had no C definition anywhere (only the interpreter-side Rust in
+ * interpreter_extern/system.rs, which is not an extern "C" symbol), so the
+ * SimpleOS cross-link could not resolve it. Signature is the (ptr,len) text
+ * ABI, matching rt_env_set directly above: &[I64,I64] -> &[I8]. */
+int8_t rt_env_remove(const uint8_t* key_ptr, uint64_t key_len) {
+    char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
+    if (!key) return 0;
+#if defined(_WIN32)
+    /* Windows deletes a variable by assigning it an empty value. */
+    bool ok = _putenv_s(key, "") == 0;
+#else
+    bool ok = unsetenv(key) == 0;
+#endif
+    free(key);
+    return ok ? 1 : 0;
 }
 
 /* rt_file_write, rt_file_copy, rt_file_size, rt_file_stat, rt_file_append

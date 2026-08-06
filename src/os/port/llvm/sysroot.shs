@@ -129,6 +129,44 @@ build_libc_runtime() {
             rm -f "$SYSROOT/lib/libsimple_runtime_compat.a" "$SYSROOT/lib/libsimple_runtime.a"
             "$AR" rcs "$SYSROOT/lib/libsimple_runtime_compat.a" "$LIBC_BUILD/simpleos_simple_runtime.o"
             cp "$SYSROOT/lib/libsimple_runtime_compat.a" "$SYSROOT/lib/libsimple_runtime.a"
+
+            # -- Real Simple runtime, cross-compiled for SimpleOS ------------
+            # The compat shim above defines only 21 symbols and had drifted far
+            # behind the symbol set the compiler actually emits, which broke the
+            # SimpleOS payload link with 20 undefined rt_* symbols. This builds
+            # the GENUINE runtime from src/runtime/*.c against the SimpleOS
+            # sysroot headers instead of hand-maintaining a subset.
+            #
+            # One object per source file, deliberately: archive members are the
+            # linker's granularity, so keeping them split means a reference to
+            # (say) rt_sort does not drag in the socket/DNS code. Do NOT
+            # partial-link (ld -r) these into a single blob, and do NOT merge
+            # them into libsimpleos_c.a — a plain C/C++ link must never pull the
+            # Simple runtime in. See
+            # doc/08_tracking/bug/simpleos_libc_leaks_simple_runtime_syms_2026-08-06.md
+            echo "[sysroot] Cross-compiling real Simple runtime for $TRIPLE..."
+            RT_BUILD="$LIBC_BUILD/simple_runtime_native"
+            mkdir -p "$RT_BUILD"
+            RT_CFLAGS="--target=x86_64-unknown-none-elf -ffreestanding -nostdlib \
+                -nostdlibinc -fno-builtin -mno-red-zone -fno-stack-protector \
+                -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables \
+                -ffunction-sections -fdata-sections -O2 -D__simpleos__=1 \
+                -isystem $LIBC_DIR/include"
+            RT_OBJS=""
+            for rt_src in runtime_native runtime_simd_utf8 runtime_contracts \
+                          runtime_memory runtime_time runtime_timestamp \
+                          runtime_pool runtime_memtrack
+            do
+                "$CC" $RT_CFLAGS -c "$REPO_ROOT/src/runtime/$rt_src.c" \
+                    -o "$RT_BUILD/$rt_src.o" || {
+                        echo "[sysroot] ERROR: failed to cross-compile $rt_src.c" >&2
+                        exit 1
+                    }
+                RT_OBJS="$RT_OBJS $RT_BUILD/$rt_src.o"
+            done
+            rm -f "$SYSROOT/lib/libsimple_runtime_native.a"
+            "$AR" rcs "$SYSROOT/lib/libsimple_runtime_native.a" $RT_OBJS
+            echo "[sysroot] Built libsimple_runtime_native.a ($(echo $RT_OBJS | wc -w) members)"
             ;;
         aarch64-*)
             echo "[sysroot] Building SimpleOS libc for $TRIPLE..."

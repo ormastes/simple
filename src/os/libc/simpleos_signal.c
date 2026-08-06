@@ -105,6 +105,26 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     return 0;
 }
 
+/*
+ * sigpending — report signals that are blocked AND undelivered.
+ *
+ * This is not a stub. It is the correct result for SimpleOS's signal model:
+ * sigprocmask() above is a documented no-op, so no signal is ever blocked,
+ * so no signal can ever be left pending — every signal is delivered at once.
+ * The pending set is therefore genuinely empty, and clearing the caller's set
+ * reports that truthfully.
+ *
+ * Consumer: rt_signal_check() in src/runtime/simple_core/core_process.spl
+ * calls sigpending() then sigismember(). It correctly observes "not pending".
+ *
+ * If SimpleOS ever gains real signal blocking, sigprocmask() must start
+ * tracking a mask and this function must report (blocked & raised) from it.
+ */
+int sigpending(sigset_t *set) {
+    if (!set) { errno = EFAULT; return -1; }
+    return sigemptyset(set);
+}
+
 /* ====================================================================
  * kill / raise
  * ==================================================================== */
