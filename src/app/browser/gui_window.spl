@@ -1,0 +1,42 @@
+# Simple Browser — real GUI window launch.
+#
+# Renders the page through the same real engine used by render_adapter.spl's
+# text/HTML output (browser_engine_pixels_at -> render_html_to_pixel_array,
+# the DOM/CSS/layout/paint pipeline verified in
+# doc/08_tracking/bug/browser_text_node_blanks_frame_2026-08-05.md), then
+# blits the genuine pixel buffer into a real OS window via GuiRenderer — the
+# same backend-isolated winit facade `app.ui.browser.app` uses (no raw
+# rt_winit_* externs here, see gui_renderer.spl's header for why). Requires
+# `build/sffi/libspl_winit.<so|dylib|dll>` (build with
+# scripts/build/build_spl_winit.shs) and a reachable display (X11/Wayland on
+# Linux; macOS additionally needs SIMPLE_GUI=1 so winit runs on the main
+# thread). Headless environments without a display: run under Xvfb (or a
+# container providing one), same as app.ui.browser.
+
+use app.browser.render_adapter.{browser_engine_pixels_at}
+use nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GUI_EVT_CLOSE}
+
+pub fn run_browser_window_gui(url: text, width: i32, height: i32) -> i64:
+    """Open a real window, paint one real-engine frame into it, and block
+    until the user closes the window. Returns 0 on a clean close, 1 on any
+    window/render failure (GuiRenderer already prints an honest reason)."""
+    val pixels = browser_engine_pixels_at(url, width, height)
+
+    val created = GuiRenderer.create("auto", width, height, "Simple Browser - {url}")
+    match created:
+        case None:
+            return 1
+        case Some(gui):
+            var g = gui
+            if not g.present_argb_u32(width.to_i64(), height.to_i64(), pixels):
+                print "Error: failed to present the rendered frame to the window"
+                g.close()
+                return 1
+
+            var running = true
+            while running:
+                val ev = g.poll_event()
+                if ev.kind == GUI_EVT_CLOSE:
+                    running = false
+            g.close()
+            0

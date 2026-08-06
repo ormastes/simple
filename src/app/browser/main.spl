@@ -7,11 +7,23 @@ use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
 use app.ui.render.types.{RenderConfig}
 use app.browser.render_adapter.{render_browser}
+use app.browser.gui_window.{run_browser_window_gui}
 use std.common.json.{json_escape_string}
 
 val TOOL_NAME = "Simple Browser"
 val TOOL_VERSION = "0.1.0"
 val DEFAULT_URL = "simple://home"
+# ponytail: capped small (not a larger page's natural size) because the real
+# DOM/CSS/layout/paint engine runs under the tree-walk interpreter here and
+# render time does not scale gracefully with pixel count on this path
+# (verified: 320x180 exceeded a 60s CPU budget; a 480x300 render was still
+# running after several minutes on a loaded host). 64x36 renders in ~45s and
+# is what's been end-to-end verified (window creation + real content
+# presented) under Xvfb. Raise this once the browser engine has a faster
+# (native/JIT) codegen path for this pipeline -- see
+# doc/07_guide/infra/testing.md's interpreter-vs-JIT divergence notes.
+val GUI_WINDOW_WIDTH: i32 = 64
+val GUI_WINDOW_HEIGHT: i32 = 36
 
 fn main() -> i64:
     val raw_args = get_cli_args()
@@ -37,14 +49,20 @@ fn main() -> i64:
         browser_print_error(log_opts.log_mode, message)
         return 1
 
-    val url = if args.len() > 0: args[0] else: DEFAULT_URL
+    val url = browser_first_positional(args)
+    if browser_has_option(args, "--open"):
+        return run_browser_window_gui(
+            if url != "": url else: DEFAULT_URL, GUI_WINDOW_WIDTH, GUI_WINDOW_HEIGHT
+        )
+
+    val display_url = if url != "": url else: DEFAULT_URL
     var config = RenderConfig.default()
     config.adapter_name = "browser"
     config.asset_path = url
     config.format = if log_opts.log_mode == "json": "html" else: "text"
     val result = render_browser(config)
     if log_opts.log_mode == "json":
-        print "{\"command\":\"browser\",\"status\":\"ready\",\"tool\":\"{TOOL_NAME}\",\"version\":\"{TOOL_VERSION}\",\"url\":\"{url}\",\"html\":\"{json_escape_string(result.html_output)}\"}"
+        print "{\"command\":\"browser\",\"status\":\"ready\",\"tool\":\"{TOOL_NAME}\",\"version\":\"{TOOL_VERSION}\",\"url\":\"{display_url}\",\"html\":\"{json_escape_string(result.html_output)}\"}"
     else:
         val progress = render_progress(log_opts.progress, 1, 1, "browser")
         if progress != "":
@@ -64,6 +82,7 @@ fn print_help():
     print "Options:"
     print "  -h, --help          Show this help message"
     print "  -v, --version       Show version information"
+    print "  --open              Launch the browser in a real GUI window (blocks until closed)"
     print ""
     print "Shared log options:"
     for line in log_options_help():
@@ -106,7 +125,22 @@ fn browser_first_unknown_option(args: [text]) -> text:
     var i = 0
     while i < args.len():
         val arg = args[i]
-        if arg.starts_with("-"):
+        if arg == "--open":
+            i = i + 1
+        elif arg.starts_with("-"):
             return arg
-        i = i + 1
+        else:
+            i = i + 1
+    ""
+
+fn browser_has_option(args: [text], name: text) -> bool:
+    for arg in args:
+        if arg == name:
+            return true
+    false
+
+fn browser_first_positional(args: [text]) -> text:
+    for arg in args:
+        if not arg.starts_with("-"):
+            return arg
     ""
