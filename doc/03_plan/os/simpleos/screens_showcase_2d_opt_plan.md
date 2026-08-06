@@ -79,6 +79,16 @@ Deps: E1→E2→E3→E4.
 - A, C, D, E are mutually independent; B blocks on B1 only.
 - Critical path: B1 → C1 → C2 → C5 (input on real screen) and D1 → D3 → D6 (perf).
 
+## Successor perf/compiler plan (2026-08-06)
+
+The deeper render-performance redesign now lives in
+`doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md` (diagnosis:
+`doc/01_research/ui/perf/render_perf_diagnosis_2026-08-06.md`). It supersedes
+this plan's WS-D damage-consumer and SIMD-knob mechanisms (see its §12
+reconciliation table); WS-A/B/C/E stay authoritative here. Its performance
+critical path is F1 (class reference semantics) → F2 (packed span ABI) →
+F3 (direct column arena writer).
+
 ## Global gates
 - Each fix pushed to GH immediately after landing (standing rule).
 - Bench evidence on pinned worktree + deployed native binary only (measurement-trap rules).

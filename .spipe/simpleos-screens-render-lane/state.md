@@ -232,7 +232,32 @@ and the 4 duplicate SDL `parse_virtual_key` copies should call the shared mapper
   one `fn simd_blend_row` exists. Nothing to delete. D2 is the real work.
 - Umbrella WS-D task IDs are off-by-one against the detail plan; the detail plan wins.
 
+## Successor goals (2026-08-06): render-perf redesign critical path
+
+From `doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md` (diagnosis:
+`doc/01_research/ui/perf/render_perf_diagnosis_2026-08-06.md`). Fail-closed ACs:
+
+- **F1 class reference semantics** — class-field assignment is
+  reference-preserving and struct assignment value-preserving on interpreter,
+  seed JIT, and pure-Simple JIT/AOT. AC: one shared reducer corpus produces
+  identical hashes on every engine; the sabotage variant (value-copy class
+  assignment) turns the gate red. Evidence anchor: the workaround note at
+  `src/lib/nogc_sync_mut/ui/draw_ir_v3_native_writer.spl:14-19` becomes
+  deletable.
+- **F2 packed span ABI** — `BufferSpanRef` → one-shot native resolution, C-side
+  `SimplePackedSpanV1`. AC: native kernel observes the original backing
+  address; allocation and copy counters are 0 across a batch; a stale
+  generation is refused (typed error, not nil). Interpreter mode routes to the
+  scalar oracle and must not report SIMD identity.
+- **F3 direct column arena writer (V2)** — new `ui_scene_column_arena_v2.spl` +
+  `draw_ir_v3_direct_writer_v2.spl`; frozen v3 schema untouched. AC: two warm
+  generations with unchanged allocation counter and zero commit-copy bytes;
+  partition overflow yields a typed refusal; producer IDs arena-absolute.
+- Gate for all three: perf receipts name the engine identity (F0) and fail
+  closed on interpreter/seed identity for performance claims.
+
 ## Plans
+- Perf redesign (successor): `doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md`
 - Umbrella: `doc/03_plan/os/simpleos/screens_showcase_2d_opt_plan.md`
 - Detail (per workstream, `doc/03_plan/os/simpleos/screens/`):
   - `ws_a_config_screen_selection_detail.md`
