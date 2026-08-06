@@ -16,7 +16,7 @@ Complements (does not replace) `doc/03_plan/os/simpleos_multiconfig_vulkan_wm_pl
   (width/height/clear/fill_rect/draw_text/blit_pixels/present/present_rect).
   Implementors: hosted (winit/win32/cocoa/sdl2), browser, engine2d overlay, GPU.
   **Correction (WS-A detail, verified):** `FramebufferBackend`
-  (`fb_backend.spl:121`) implements `RenderBackend`, **not** `CompositorBackend` —
+  (`fb_backend.spl:133`) implements `RenderBackend`, **not** `CompositorBackend` —
   the factory's four arms are therefore not uniform and the fb arm needs an
   adapter. Constructor signatures differ per arm (`GpuCompositorBackend.new`,
   `Engine2dCompositorBackend.create_named/create_from_env`,
@@ -41,7 +41,14 @@ Complements (does not replace) `doc/03_plan/os/simpleos_multiconfig_vulkan_wm_pl
   `ui_gui_packed_producer.spl`. Web: `ui_web_packed_producer.spl`. Same output type.
 - `app.ui.render` is a string (text/html) contract for ~20 CLI apps — unrelated seam.
 - Three divergent "HALs": `RenderBackend` trait (`common/ui/backend.spl`) — imported
-  by **8** targets (WS-B verified; §1 previously said 7), **never impl'd**;
+  by **8** targets (WS-B verified; §1 previously said 7).
+  **REFUTED (cross-review, verified against source):** the earlier "never impl'd"
+  claim is **FALSE** — there are two real implementations at
+  `src/os/compositor/fb_backend.spl:133` and `browser_backend.spl:307`. Also **two
+  live traits share the name `RenderBackend`** (`common.ui.backend` vs the engine2d
+  one) — do not conflate them. This strengthens the additive-not-rename decision:
+  real implementors must keep working. Both files are currently owned by **no
+  workstream** — WS-B disclaims them to WS-A/WS-C and neither lists them.
   `GuiRenderer.present_argb_u32`+`poll_event` (raw pixels,
   `src/app/browser/gui_window.spl`); WM file/env process contract
   (`wm_app_process_contract.spl`).
@@ -49,12 +56,15 @@ Complements (does not replace) `doc/03_plan/os/simpleos_multiconfig_vulkan_wm_pl
   (`fb_backend.spl:15`, `browser_backend.spl:16`). Consequence: `ScreenHost` is
   **additive, not a rename** — renaming would drag WS-B into WS-A/WS-C's files.
   All 8 keep their existing import unchanged.
-- **Fail-open specs (WS-B verified):** `common.ui.backend_factory` does not exist
-  repo-wide, yet seven specs import `create_backend` from it. An unresolved `use`
-  is only a WARN, so those specs prove nothing and must not be cited as coverage.
-- **`WmFsAppEvent{seq,kind,x,y,button,pressed}` carries no key/char/wheel field** —
-  keytype-on-WM (AC-5) is physically blocked until the struct is extended
-  (`key_code`, `ch`, `mods`, `wheel`, defaulted).
+- **Missing module (verified, corrected):** `common.ui.backend_factory` does not
+  exist repo-wide, yet **four** specs import `create_backend` from it (not seven —
+  three further files only mention it in `@cover` comments). Those specs **fail
+  loudly**, not fail-open: `container_detect_spec.spl` yields `error: test-runner:
+  no examples executed` / `1 total, 0 passed, 1 failed`.
+- **`WmFsAppEvent{seq,kind,x,y,button,pressed}`** — keytype-on-WM is **NOT** blocked
+  (earlier claim refuted): `wm_fs_key_event:241` already ships keycodes as
+  `kind="key"` + `button=keycode` and the codec round-trips `button`. Residual gap
+  is only character, modifier, and wheel encoding.
 - **`ShowcaseSurface` is `Standalone|HostWm|SimpleOsWm`** — no Web, no 2D variant,
   so "flip the readiness bits" was unimplementable as written; the enum needs a
   schema change first.
@@ -105,9 +115,11 @@ or `interpreter_extern/simd.rs` (interpreted). Ranked defects:
 5. No batching, no double buffer, no layer cache; `read_pixels()` copies per-pixel
    interpreted.
 - Facade inconsistency: `gc_async_mut` simd facades point at two different owner
-  trees; canonical owner is `nogc_sync_mut/gpu/engine2d/`. **Worse than described
-  (WS-D verified):** `nogc_async_mut/gpu/engine2d/` carries its own full
-  `simd_kernels.spl` + `simd_provider.spl` *bodies*, not facades — a real second
+  trees; canonical owner is `nogc_sync_mut/gpu/engine2d/`. **REFUTED by WS-D implementation
+  (2026-08-06):** the claimed second implementation does NOT exist —
+  `nogc_async_mut/gpu/engine2d/` holds a 21-line and a 9-line FACADE, and exactly one
+  `fn simd_blend_row` exists tree-wide. Nothing to delete; D1 closed as a no-op. Prior
+  wording below is retained only to mark the refutation. NOT a real second
   implementation to delete, not a `use` to repoint.
 - **Representation constraint (WS-D verified):** pixel words are **boxed
   `int64_t`** (`engine2d_box_pixel`/`unbox_pixel`), not `uint32_t*`. Every new C

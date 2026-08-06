@@ -135,6 +135,38 @@ fn derived_engine2d_vulkan_status(raw: text) -> text:
         return "blocked:missing-qemu-gpu-readback"
     "pass"
 
+# Lane-keyed classification of the QEMU virtio-gpu device string.
+#
+# "legacy-2d"  -> transitional/legacy virtio-gpu-pci. 2D transport only: it has
+#                 no host renderer and can never expose VIRTIO_GPU_F_VIRGL or a
+#                 Venus capset, so it must NEVER back a Vulkan/Venus claim.
+# "venus-gl"   -> modern virtio-gpu-gl-pci with venus + context_init + blob, the
+#                 only form that can carry a Vulkan bridge.
+# "unknown"    -> anything else. Fail closed.
+fn qemu_gpu_device_class(device: text) -> text:
+    if device == "virtio-gpu-pci,disable-modern=on,disable-legacy=off":
+        return "legacy-2d"
+    if not device.starts_with("virtio-gpu-gl-pci"):
+        return "unknown"
+    if not device.contains("venus=true"):
+        return "unknown"
+    if not device.contains("context_init=true"):
+        return "unknown"
+    if not device.contains("blob=true"):
+        return "unknown"
+    "venus-gl"
+
+# Device gate for a Vulkan/Venus-asserting lane. Only "venus-gl" may pass.
+fn vulkan_lane_qemu_gpu_device_status(device: text) -> text:
+    if device == "":
+        return "blocked:missing-qemu-virtio-gpu-device"
+    val device_class = qemu_gpu_device_class(device)
+    if device_class == "legacy-2d":
+        return "blocked:legacy-2d-device-cannot-support-venus"
+    if device_class != "venus-gl":
+        return "blocked:unrecognized-qemu-gpu-device"
+    "pass"
+
 fn derived_engine2d_vulkan_bridge_status(raw: text) -> text:
     if evidence_text_or(raw, "simpleos_engine2d_bridge_profile", "") != "qemu-riscv64-desktop":
         return "blocked:missing-engine2d-bridge-profile"
@@ -142,8 +174,9 @@ fn derived_engine2d_vulkan_bridge_status(raw: text) -> text:
         return "blocked:missing-qemu-virtio-gpu-drawing-backend"
     if evidence_text_or(raw, "simpleos_engine2d_processing_backend", "") != "vulkan":
         return "blocked:missing-engine2d-vulkan-processing-backend"
-    if evidence_text_or(raw, "simpleos_engine2d_qemu_gpu_device", "") != "virtio-gpu-pci,disable-modern=on,disable-legacy=off":
-        return "blocked:missing-qemu-virtio-gpu-device"
+    val device_status = vulkan_lane_qemu_gpu_device_status(evidence_text_or(raw, "simpleos_engine2d_qemu_gpu_device", ""))
+    if device_status != "pass":
+        return device_status
     if evidence_text_or(raw, "simpleos_engine2d_scene", "") != "vulkan-engine2d":
         return "blocked:missing-vulkan-engine2d-scene"
     if evidence_text_or(raw, "simpleos_simple2d_command_path", "") != "draw_ir-to-engine2d":

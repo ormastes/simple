@@ -14,6 +14,18 @@ struct WmFsAppBridgeRequest:
     event_path: text
     frame_seq_path: text
 
+# Event crossing the WM file bridge.
+#
+# The first six fields are the historic layout and must keep their meaning:
+# `kind == "key"` has always shipped the keycode in `button`, and readers
+# depend on that. The trailing four are ADDITIVE (defaulted, appended last in
+# the wire encoding) so a document written by an older producer still decodes:
+# - key_code: the keycode, duplicated out of `button` for clarity. 0 means
+#             "not set" and readers fall back to `button`.
+# - ch:       the printable character for a key event ("" = none). Must not
+#             contain a newline; the line-oriented encoder strips them.
+# - mods:     HOST_MOD_* bit flags (common.ui.host_input_event).
+# - wheel:    wheel notches, positive = content scrolls down.
 struct WmFsAppEvent:
     seq: i64
     kind: text
@@ -21,6 +33,10 @@ struct WmFsAppEvent:
     y: i32
     button: i64
     pressed: bool
+    key_code: i64 = 0
+    ch: text = ""
+    mods: i64 = 0
+    wheel: i32 = 0
 
 struct WmFsFrameReceipt:
     event_seq: i64
@@ -236,15 +252,40 @@ fn wm_fs_bridge_decode(doc: text) -> WmFsAppBridgeRequest:
     )
 
 fn wm_fs_app_event(seq: i64, kind: text, x: i32, y: i32, button: i64, pressed: bool) -> WmFsAppEvent:
-    WmFsAppEvent(seq: seq, kind: kind, x: x, y: y, button: button, pressed: pressed)
+    wm_fs_app_event_full(seq, kind, x, y, button, pressed, 0, "", 0, 0)
+
+fn wm_fs_app_event_full(seq: i64, kind: text, x: i32, y: i32, button: i64, pressed: bool, key_code: i64, ch: text, mods: i64, wheel: i32) -> WmFsAppEvent:
+    WmFsAppEvent(
+        seq: seq, kind: kind, x: x, y: y, button: button, pressed: pressed,
+        key_code: key_code, ch: ch, mods: mods, wheel: wheel
+    )
 
 fn wm_fs_key_event(seq: i64, keycode: i64, pressed: bool) -> WmFsAppEvent:
-    wm_fs_app_event(seq, "key", 0, 0, keycode, pressed)
+    wm_fs_app_event_full(seq, "key", 0, 0, keycode, pressed, keycode, "", 0, 0)
+
+fn wm_fs_key_char_event(seq: i64, keycode: i64, ch: text, mods: i64, pressed: bool) -> WmFsAppEvent:
+    """Key event carrying a printable character and modifier flags."""
+    wm_fs_app_event_full(seq, "key", 0, 0, keycode, pressed, keycode, ch, mods, 0)
+
+fn wm_fs_wheel_event(seq: i64, x: i32, y: i32, wheel: i32) -> WmFsAppEvent:
+    """Wheel event. Positive `wheel` scrolls content down."""
+    wm_fs_app_event_full(seq, "wheel", x, y, 0, false, 0, "", 0, wheel)
+
+fn wm_fs_resize_event(seq: i64, w: i32, h: i32) -> WmFsAppEvent:
+    """Surface resize; the new size travels in x / y."""
+    wm_fs_app_event_full(seq, "resize", w, h, 0, false, 0, "", 0, 0)
+
+fn _wm_event_ch_sanitized(ch: text) -> text:
+    """The bridge encoding is line-oriented, so a `ch` may not carry newlines."""
+    ch.replace("\n", "").replace("\r", "")
 
 fn wm_fs_app_event_encode(ev: WmFsAppEvent) -> text:
     val x_text = "{ev.x}"
     val y_text = "{ev.y}"
-    "seq={ev.seq}\nkind={ev.kind}\nx={x_text}\ny={y_text}\nbutton={ev.button}\npressed={ev.pressed}\n"
+    val ch_text = _wm_event_ch_sanitized(ev.ch)
+    # The historic six keys keep their order first, so an older reader that
+    # scans for them still parses; the additive four are appended.
+    "seq={ev.seq}\nkind={ev.kind}\nx={x_text}\ny={y_text}\nbutton={ev.button}\npressed={ev.pressed}\nkey_code={ev.key_code}\nch={ch_text}\nmods={ev.mods}\nwheel={ev.wheel}\n"
 
 fn wm_fs_app_event_decode(doc: text) -> WmFsAppEvent:
     WmFsAppEvent(
@@ -253,7 +294,11 @@ fn wm_fs_app_event_decode(doc: text) -> WmFsAppEvent:
         x: _wm_bridge_i32(doc, "x"),
         y: _wm_bridge_i32(doc, "y"),
         button: _wm_bridge_i64(doc, "button", 0),
-        pressed: _wm_bridge_value(doc, "pressed") == "true"
+        pressed: _wm_bridge_value(doc, "pressed") == "true",
+        key_code: _wm_bridge_i64(doc, "key_code", 0),
+        ch: _wm_bridge_value(doc, "ch"),
+        mods: _wm_bridge_i64(doc, "mods", 0),
+        wheel: _wm_bridge_i32(doc, "wheel")
     )
 
 fn wm_widget_showcase_client_env(bridge_path: text, frame_path: text) -> {text: text}:

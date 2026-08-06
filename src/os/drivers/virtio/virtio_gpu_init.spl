@@ -6,6 +6,10 @@
 use os.kernel.types.device_mem_types.{DeviceGrant}
 use os.userlib.syscall_raw.{syscall}
 use os.kernel.log.klog_api.{log_info}
+use os.drivers.virtio.virtio_gpu_capset.{
+    gpu_negotiate_features, gpu_features_have_3d, gpu_features_have_blob,
+    gpu_features_have_ctx_init, gpu_features_venus_capable
+}
 use os.drivers.virtio.virtio_gpu.{
     VirtioGpuDriver, VirtioGpuInitResult,
     STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_FEATURES_OK, STATUS_DRIVER_OK, STATUS_FAILED,
@@ -48,10 +52,25 @@ fn virtio_gpu_init_from_grant(drv_in: VirtioGpuDriver, grant: DeviceGrant) -> Vi
         drv.modern_write32(MODERN_COMMON_DEVICE_FEATURE_SELECT, 0)
         val host_features = drv.modern_read32(MODERN_COMMON_DEVICE_FEATURE)
         log_info("[virtio] " + "[virtio-gpu] modern host_features=0x{host_features}")
+        # WS-E1: ack the intersection of what the host offers and what we want
+        # (VIRGL | RESOURCE_BLOB | CONTEXT_INIT). When the host offers none of
+        # them this is exactly 0 — byte-identical to the previous hardcoded 0,
+        # which is the 2D regression guard.
+        val acked_lo = gpu_negotiate_features(host_features)
         drv.modern_write32(MODERN_COMMON_DRIVER_FEATURE_SELECT, 0)
-        drv.modern_write32(MODERN_COMMON_DRIVER_FEATURE, 0)
+        drv.modern_write32(MODERN_COMMON_DRIVER_FEATURE, acked_lo)
         drv.modern_write32(MODERN_COMMON_DRIVER_FEATURE_SELECT, 1)
         drv.modern_write32(MODERN_COMMON_DRIVER_FEATURE, 1)
+
+        drv.acked_features = acked_lo
+        drv.has_3d = gpu_features_have_3d(acked_lo)
+        drv.has_blob = gpu_features_have_blob(acked_lo)
+        drv.has_ctx_init = gpu_features_have_ctx_init(acked_lo)
+        log_info("[virtio] " + "[virtio-gpu] acked_features=0x{acked_lo} virgl={drv.has_3d} blob={drv.has_blob} ctx_init={drv.has_ctx_init}")
+        if gpu_features_venus_capable(acked_lo):
+            log_info("[virtio] " + "[virtio-gpu] venus-capable feature set negotiated (capset discovery still required)")
+        else:
+            log_info("[virtio] " + "[virtio-gpu] not venus-capable: host did not offer virgl+blob+context_init")
 
         val feat_status = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK
         drv.modern_write8(MODERN_COMMON_DEVICE_STATUS, feat_status)
@@ -141,7 +160,14 @@ fn virtio_gpu_init_from_grant(drv_in: VirtioGpuDriver, grant: DeviceGrant) -> Vi
 
     val host_features = drv.read_reg32(VIRTIO_PCI_HOST_FEATURES)
     log_info("[virtio] " + "[virtio-gpu] host_features=0x{host_features}")
+    # WS-E1: the legacy PCI transport cannot carry virgl/blob/context-init,
+    # so 3D is REFUSED here by construction rather than negotiated. Keeping
+    # the guest-feature write at 0 is deliberate, not an oversight.
     drv.write_reg32(VIRTIO_PCI_GUEST_FEATURES, 0)
+    drv.acked_features = 0
+    drv.has_3d = false
+    drv.has_blob = false
+    drv.has_ctx_init = false
 
     val ctrl_result = drv.setup_controlq()
     if val Err(msg) = ctrl_result:
@@ -240,7 +266,14 @@ fn virtio_gpu_init_legacy(drv_in: VirtioGpuDriver, bar0_phys: u64, bar0_size: u6
 
     val host_features = drv.read_reg32(VIRTIO_PCI_HOST_FEATURES)
     log_info("[virtio] " + "[virtio-gpu] host_features=0x{host_features}")
+    # WS-E1: the legacy PCI transport cannot carry virgl/blob/context-init,
+    # so 3D is REFUSED here by construction rather than negotiated. Keeping
+    # the guest-feature write at 0 is deliberate, not an oversight.
     drv.write_reg32(VIRTIO_PCI_GUEST_FEATURES, 0)
+    drv.acked_features = 0
+    drv.has_3d = false
+    drv.has_blob = false
+    drv.has_ctx_init = false
 
     val ctrl_result = drv.setup_controlq()
     if val Err(msg) = ctrl_result:

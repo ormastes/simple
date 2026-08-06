@@ -259,6 +259,56 @@ section should be read as "verified green".
 - [feature_expert/wm_gui_window_drawing](../../feature_expert/wm_gui_window_drawing/skill.md)
   — frame/provenance contract on the drawing side.
 
+## Session update 2026-08-06 (screens / render-lane campaign — boot screen selection)
+
+Lane: `.spipe/simpleos-screens-render-lane/` (10 ACs). Feature expert:
+[simpleos_screens_render_lane](../../feature_expert/simpleos_screens_render_lane/skill.md).
+New sibling layer: [ui_render](../ui_render/skill.md) (owns `DrawIrV3Scene`,
+`RenderBackend`/`ScreenHost`, `WidgetNode`, Engine2D kernels).
+
+Facts about **this** layer that the campaign verified against source — several
+correct earlier plan text, so prefer these over the detail plans:
+
+- **`CompositorBackend` is declared at `display_backend_core.spl:7` and is NOT
+  implemented there.** `FramebufferBackend` implements **`RenderBackend`** (the
+  `src/lib/common/ui/backend.spl` one) at **`fb_backend.spl:133`** — not `:121`,
+  and not `CompositorBackend`. **Backend factory arms are not uniform**: verify
+  the actual trait per arm before adding one. `CompositorBackend` does have 6+
+  implementors; the gap is a *factory + boot selection*, not implementors.
+- **Boot selection gap (WS-A):** `_init_display_service()` at
+  `src/os/kernel/boot/init_services.spl:179` hardcodes BGA 1024x768, and
+  `rc_conf.spl` is boolean-only + key-whitelisted so it cannot express
+  `screen_type` today. Plan adds string keys + `rc_conf_value(key) -> text?`, a
+  new `src/os/compositor/backend_factory.spl` registry, and a
+  `SIMPLE_SCREEN_TYPE` env mirror. Default `wm` must preserve today's boot
+  exactly, and the factory is fail-closed against `SimpleOsRuntimeProfile` caps.
+- **Input: no `HalInput` trait, and the ruling is not to add one.**
+  `hal_current.spl:36` is x86_64-hardwired; **`InputBackend`
+  (`src/os/compositor/input_backend.spl`) stays the abstraction.** IRQ1/IRQ12
+  wiring reuses `HalInterrupt.interrupt_set_handler` (`hal.spl:128` → `:386` →
+  `hal_current.spl:159` → `arch_adapt/x86_64/interrupt.spl:27`); PS/2 drivers
+  split into `isr_ingest()` / `decode_pending(queue)` with polling retained, and
+  `SIMPLE_PS2_IRQ=off` must yield an identical transcript. Known debt AC-6
+  clears: two incompatible `MouseEvent` types, and `InputEventQueue` with zero
+  consumers.
+- **`dirty_tiles` are marked at 6 sites and read by nobody** — `tile.spl`'s
+  `get_dirty_tiles()` is unwired. Damage-driven present consumes an existing
+  signal rather than adding one.
+- **Keytype across the WM boundary is NOT blocked** (an earlier blocker claim was
+  refuted): `wm_fs_key_event` (`wm_app_process_contract.spl:241`) already ships
+  keycodes as `kind="key"` + `button=keycode` and the encoder/decoder round-trips
+  losslessly (:244-257). Residual gap is narrow — no character, modifier, or
+  wheel channel (`WmFsAppEvent` fields at :17-23).
+- **`ScreenHost` is additive, not a rename** — but the design doc and the lane
+  instruction disagree on exactly this; see the conflict note in the
+  [ui_render](../ui_render/skill.md) entry before touching `backend.spl`.
+- **Vulkan evidence caveat:** `check_simpleos_multiconfig_live_evidence.spl:145`
+  hard-equals the legacy `disable-modern=on` 2D device, so **the bridge gate
+  cannot prove a Vulkan claim.** It is reached only via
+  `derived_engine2d_vulkan_bridge_status` (:138); the primary
+  `derived_engine2d_vulkan_status` (:117) never reads the device string. Any fix
+  must *tighten*, never loosen. Venus (`vulkan_icd_virtio.spl`) is fully modeled.
+
 ## Historical Handoff Notes (2026-07-03)
 
 - At that point both WM lanes routed through the shared CSS/GUI-web renderer

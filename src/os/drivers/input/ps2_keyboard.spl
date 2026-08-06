@@ -4,6 +4,20 @@
 # Requires: CapabilityKind.PortIO(base: 0x60, count: 4) capability
 #
 # Scancodes → UIEvent translation for compositor input.
+#
+# ISR/decode split (WS-C, C2 driver half)
+# ---------------------------------------
+# `isr_ingest()` is the ISR-safe half: read the status port, read at most ONE
+# scancode byte, store it in the fixed-capacity `raw_ring`, return. No
+# allocation, no `text`, no trait dispatch, no event construction — the ring is
+# preallocated in `new()`. `decode_pending()` is the task-side half: it drains
+# the ring, maps scancodes to `Key`, updates modifier state, and builds
+# `KeyEvent`s. `poll()` is now "call `isr_ingest()`, then `decode_pending()`",
+# so the polled and (future) IRQ-driven paths differ by exactly one line.
+#
+# Key code space: this driver emits PS/2 **scancode set 1** codes, mapped to
+# the local `Key` enum. It does NOT emit SDL keysyms or evdev codes. The
+# canonical cross-producer key vocabulary is not owned by this file.
 
 use os.kernel.types.capability_types.{CapabilityKind}
 
@@ -15,6 +29,9 @@ val PS2_COMMAND_PORT: u16 = 0x64
 # Status register bits
 val PS2_STATUS_OUTPUT_FULL: u8 = 0x01
 val PS2_STATUS_INPUT_FULL: u8 = 0x02
+
+# Raw scancode ring capacity (ISR side; fixed, never reallocated)
+val KBD_RING_CAPACITY: i64 = 64
 
 use os.kernel.boot.cpu.{port_inb, port_outb}
 
@@ -39,8 +56,18 @@ enum KeyEvent:
     Release(key: Key)
 
 fn scancode_to_key(code: u8) -> Key:
-    """Convert scancode set 1 to Key enum."""
-    match code:
+    """Convert scancode set 1 to Key enum.
+
+    The scrutinee is widened to i64 first, and that is load-bearing: a `match`
+    on a `u8` scrutinee does NOT match integer-literal patterns, so every arm
+    below fell through to `case _: Key.Unknown`. The effect was that the PS/2
+    keyboard decoded EVERY key to `Key.Unknown` — the driver produced no usable
+    keystroke at all — while 12 examples in `ps2_keyboard_spec.spl` recorded the
+    breakage as long-standing red. `virtio_input_ops.spl:146` notes the same
+    sidestep for evdev codes. Do not narrow this back to `match code:`.
+    """
+    val scan = code.to_i64()
+    match scan:
         case 0x01: Key.Escape
         case 0x02: Key.Num1
         case 0x03: Key.Num2
@@ -102,6 +129,12 @@ class Ps2Keyboard:
     ctrl_held: bool
     alt_held: bool
     caps_lock: bool
+    # ISR-side raw scancode ring (C2). Fixed capacity, allocated once in new().
+    raw_ring: [i64]
+    raw_head: i64
+    raw_tail: i64
+    raw_count: i64
+    raw_dropped: i64
 
 impl Ps2Keyboard:
     static fn new() -> Ps2Keyboard:
@@ -109,7 +142,12 @@ impl Ps2Keyboard:
             shift_held: false,
             ctrl_held: false,
             alt_held: false,
-            caps_lock: false
+            caps_lock: false,
+            raw_ring: [0; 64],
+            raw_head: 0,
+            raw_tail: 0,
+            raw_count: 0,
+            raw_dropped: 0
         )
 
     fn init():
@@ -127,22 +165,67 @@ impl Ps2Keyboard:
         # Enable scanning
         port_outb(PS2_DATA_PORT, 0xF4)
 
-    fn poll() -> KeyEvent?:
-        """Poll for keyboard event. Returns nil if no event pending."""
+    me poll() -> KeyEvent?:
+        """Poll for a keyboard event. Returns nil if no event pending.
+
+        Exactly two steps: drain the hardware into the raw ring via the SAME
+        `isr_ingest()` an interrupt handler will call, then decode. Under IRQ
+        mode the ingest call is simply not made here — that is the only
+        difference between the two modes.
+        """
+        self.isr_ingest()
+        self.decode_pending()
+
+    me isr_ingest() -> bool:
+        """ISR-safe half: read the status port, read at most ONE scancode byte.
+
+        Returns true when a byte was captured. No allocation, no `text`, no
+        trait dispatch, no event construction. On ring overflow the byte is
+        dropped and `raw_dropped` is incremented — the ISR never blocks.
+        """
         val status = port_inb(PS2_STATUS_PORT)
         if (status & PS2_STATUS_OUTPUT_FULL) == 0:
+            return false
+        val scancode = port_inb(PS2_DATA_PORT).to_i64()
+        self.feed_raw_byte(scancode)
+        true
+
+    me feed_raw_byte(scancode: i64) -> bool:
+        """Push one raw scancode into the ring. Returns false if it was dropped.
+
+        This is the store half of `isr_ingest()`, split out so specs (and any
+        replay harness) can drive the decoder without a live PS/2 controller.
+        """
+        if self.raw_count >= KBD_RING_CAPACITY:
+            self.raw_dropped = self.raw_dropped + 1
+            return false
+        self.raw_ring[self.raw_tail] = scancode
+        self.raw_tail = (self.raw_tail + 1) % KBD_RING_CAPACITY
+        self.raw_count = self.raw_count + 1
+        true
+
+    me decode_pending() -> KeyEvent?:
+        """Task-side half: pop one raw scancode and decode it to a KeyEvent.
+
+        Returns nil when the ring is empty. Modifier state is updated here,
+        not in the ISR. Any remaining bytes stay in the ring for the next
+        call, which is exactly the old `poll()` contract (one event per call).
+        """
+        if self.raw_count <= 0:
             return nil
 
-        val scancode = port_inb(PS2_DATA_PORT)
+        val scancode = self.raw_ring[self.raw_head]
+        self.raw_head = (self.raw_head + 1) % KBD_RING_CAPACITY
+        self.raw_count = self.raw_count - 1
 
         # Release event (bit 7 set)
         if (scancode & 0x80) != 0:
-            val key = scancode_to_key(scancode & 0x7F)
+            val key = scancode_to_key((scancode & 0x7F).to_u8())
             self.update_modifiers_release(key)
             return KeyEvent.Release(key: key)
 
         # Press event
-        val key = scancode_to_key(scancode)
+        val key = scancode_to_key(scancode.to_u8())
         self.update_modifiers_press(key)
         KeyEvent.Press(key: key)
 

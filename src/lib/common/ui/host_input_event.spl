@@ -1,0 +1,287 @@
+# Host -> widget input ingress type. SOLE definition site in the repo.
+#
+# `UIEvent` (common.ui.widget) stays the SEMANTIC app-event type. This module
+# is the INGRESS type: what a screen host (2d / gui / web / wm) hands to the
+# widget layer. It exists because `UIEvent.MouseEvent` carries `x: f64,
+# y: f64, button: text` while the widget layer consumes `i32, i32` and an
+# integral button (widget_hit.widget_dispatch_click). Every backend used to do
+# that f64->i32 + text->button conversion at its own call site, so each could
+# (and did) diverge on rounding, button naming and wheel sign. The conversion
+# now happens exactly once, here.
+#
+# Encoding notes:
+# - `button` and `mods` are `i64`, not enums: enum payload sub-patterns and
+#   Dict-of-enum are known-hazardous in this repo, and `i64` crosses the WM
+#   file bridge and the C / PS-2 driver boundary with no ABI question.
+# - `ch: text` (not a char) because both the WM bridge and the IME path are
+#   text-shaped. Empty `""` means "no printable character".
+# - `wheel` is in i32 notches, positive = content scrolls DOWN, matching the
+#   sign of `dy` in widget_hit.widget_dispatch_scroll(root, w, h, px, py, dy).
+#   This is the canonical convention; producers must not negate it.
+#
+# OPEN ISSUE — the `Key.code` space is UNASSIGNED. Three producers (PS/2 set-1
+# scancodes, SDL keysyms, evdev KEY_*) live in three code spaces and all feed
+# this one field, and no workstream currently owns picking the canonical one.
+# Until that is assigned, consumers should prefer `ch` whenever it is
+# non-empty and treat `code` as producer-local. `host_key_name` below encodes
+# a browser-ish/ASCII-ish mapping ONLY as a stopgap for the showcase hosts.
+
+use common.ui.widget.{UIEvent}
+use common.ui.wm_app_process_contract.{WmFsAppEvent}
+
+# --- Button codes ---------------------------------------------------------
+
+val HOST_BTN_NONE: i64 = 0
+val HOST_BTN_LEFT: i64 = 1
+val HOST_BTN_RIGHT: i64 = 2
+val HOST_BTN_MIDDLE: i64 = 3
+
+# --- Modifier bit flags (OR-combined) -------------------------------------
+
+val HOST_MOD_SHIFT: i64 = 1
+val HOST_MOD_CTRL: i64 = 2
+val HOST_MOD_ALT: i64 = 4
+val HOST_MOD_META: i64 = 8
+
+enum HostInputEvent:
+    Pointer(x: i32, y: i32, button: i64, pressed: bool, wheel: i32)
+    Key(code: i64, ch: text, down: bool, mods: i64)
+    Resize(w: i32, h: i32)
+
+# =========================================================================
+# Constructors — keep call sites from mis-ordering five positional args.
+# =========================================================================
+
+fn host_pointer_down(x: i32, y: i32, button: i64) -> HostInputEvent:
+    """Pointer press at (x, y) with `button` held."""
+    HostInputEvent.Pointer(x: x, y: y, button: button, pressed: true, wheel: 0)
+
+fn host_pointer_up(x: i32, y: i32, button: i64) -> HostInputEvent:
+    """Pointer release at (x, y)."""
+    HostInputEvent.Pointer(x: x, y: y, button: button, pressed: false, wheel: 0)
+
+fn host_pointer_move(x: i32, y: i32) -> HostInputEvent:
+    """Pointer motion: no button, not pressed, no wheel."""
+    HostInputEvent.Pointer(x: x, y: y, button: HOST_BTN_NONE, pressed: true, wheel: 0)
+
+fn host_pointer_wheel(x: i32, y: i32, wheel: i32) -> HostInputEvent:
+    """Wheel notches at (x, y). Positive `wheel` scrolls content DOWN."""
+    HostInputEvent.Pointer(x: x, y: y, button: HOST_BTN_NONE, pressed: false, wheel: wheel)
+
+fn host_key_down(code: i64, ch: text, mods: i64) -> HostInputEvent:
+    """Key press. `ch` is the printable character, or "" for non-printing keys."""
+    HostInputEvent.Key(code: code, ch: ch, down: true, mods: mods)
+
+fn host_key_up(code: i64, ch: text, mods: i64) -> HostInputEvent:
+    """Key release."""
+    HostInputEvent.Key(code: code, ch: ch, down: false, mods: mods)
+
+fn host_resize(w: i32, h: i32) -> HostInputEvent:
+    """Host surface resized to w x h."""
+    HostInputEvent.Resize(w: w, h: h)
+
+# =========================================================================
+# Button-name <-> button-code seam (single site).
+# =========================================================================
+
+fn host_button_from_name(name: text) -> i64:
+    """Map a UIEvent-style button name to a HOST_BTN_* code.
+
+    Anything unrecognised (including "" on move events) is HOST_BTN_NONE."""
+    val n = name.trim().lower()
+    if n == "left":
+        return HOST_BTN_LEFT
+    if n == "right":
+        return HOST_BTN_RIGHT
+    if n == "middle":
+        return HOST_BTN_MIDDLE
+    HOST_BTN_NONE
+
+fn host_button_name(button: i64) -> text:
+    """Inverse of host_button_from_name. HOST_BTN_NONE maps to ""."""
+    if button == HOST_BTN_LEFT:
+        return "left"
+    if button == HOST_BTN_RIGHT:
+        return "right"
+    if button == HOST_BTN_MIDDLE:
+        return "middle"
+    ""
+
+fn host_key_name(code: i64) -> text:
+    """Name for a non-printing key code, in the vocabulary that
+    widget_hit.widget_dispatch_key understands ("backspace", "left", ...).
+
+    Returns "" for codes with no widget-layer meaning; callers should prefer
+    the event's `ch` whenever it is non-empty."""
+    if code == 8:
+        return "backspace"
+    if code == 9:
+        return "tab"
+    if code == 13 or code == 10:
+        return "enter"
+    if code == 27:
+        return "escape"
+    if code == 32:
+        return "space"
+    if code == 35:
+        return "end"
+    if code == 36:
+        return "home"
+    if code == 37:
+        return "left"
+    if code == 38:
+        return "up"
+    if code == 39:
+        return "right"
+    if code == 40:
+        return "down"
+    if code == 46:
+        return "delete"
+    ""
+
+fn host_key_text(ev: HostInputEvent) -> text:
+    """The string a Key event should be dispatched to widget_dispatch_key as:
+    the printable character when there is one, else the key name."""
+    match ev:
+        HostInputEvent.Key(code, ch, down, mods):
+            if ch != "":
+                return ch
+            return host_key_name(code)
+        _:
+            return ""
+
+# =========================================================================
+# Lossy-seam adapters. THIS MODULE OWNS THEM — no other workstream redefines
+# these conversions (WS-C calls them, it does not write its own).
+# =========================================================================
+
+fn host_input_from_ui_event(ev: UIEvent) -> HostInputEvent?:
+    """Convert a semantic UIEvent into ingress form. f64 coords truncate to
+    i32; the button name maps through host_button_from_name. Returns nil for
+    UIEvent variants that carry no host input (Action, FetchResult, ...)."""
+    match ev:
+        UIEvent.MouseEvent(x, y, button, kind):
+            val k = kind.trim().lower()
+            val btn = host_button_from_name(button)
+            if k == "up":
+                return HostInputEvent.Pointer(
+                    x: x as i32, y: y as i32, button: btn, pressed: false, wheel: 0
+                )
+            # "down" and "move" are both "pressed" in ingress terms; a move
+            # carries HOST_BTN_NONE, which is how the reducer tells them apart.
+            return HostInputEvent.Pointer(
+                x: x as i32, y: y as i32, button: btn, pressed: true, wheel: 0
+            )
+        UIEvent.ScrollEvent(x, y, dx, dy):
+            return HostInputEvent.Pointer(
+                x: x as i32, y: y as i32, button: HOST_BTN_NONE,
+                pressed: false, wheel: dy as i32
+            )
+        UIEvent.TouchPress(x, y):
+            return HostInputEvent.Pointer(
+                x: x, y: y, button: HOST_BTN_LEFT, pressed: true, wheel: 0
+            )
+        UIEvent.TouchMove(x, y):
+            return HostInputEvent.Pointer(
+                x: x, y: y, button: HOST_BTN_NONE, pressed: true, wheel: 0
+            )
+        UIEvent.TouchRelease(x, y):
+            return HostInputEvent.Pointer(
+                x: x, y: y, button: HOST_BTN_LEFT, pressed: false, wheel: 0
+            )
+        UIEvent.KeyPress(key):
+            # A single-character key is printable; anything longer is a name.
+            if key.len() == 1:
+                return HostInputEvent.Key(code: 0, ch: key, down: true, mods: 0)
+            return HostInputEvent.Key(code: 0, ch: "", down: true, mods: 0)
+        UIEvent.Resize(width, height):
+            return HostInputEvent.Resize(w: width, h: height)
+        _:
+            return nil
+
+fn host_input_to_ui_event(ev: HostInputEvent) -> UIEvent?:
+    """Back-conversion for legacy RenderBackend / process_event consumers."""
+    match ev:
+        HostInputEvent.Pointer(x, y, button, pressed, wheel):
+            if wheel != 0:
+                return UIEvent.ScrollEvent(
+                    x: x.to_f64(), y: y.to_f64(), dx: 0.0, dy: wheel.to_f64()
+                )
+            var kind = "move"
+            if button != HOST_BTN_NONE:
+                kind = if pressed: "down" else: "up"
+            else if not pressed:
+                kind = "up"
+            return UIEvent.MouseEvent(
+                x: x.to_f64(), y: y.to_f64(),
+                button: host_button_name(button), kind: kind
+            )
+        HostInputEvent.Key(code, ch, down, mods):
+            if not down:
+                return nil
+            val name = host_key_text(ev)
+            if name == "":
+                return nil
+            return UIEvent.KeyPress(key: name)
+        HostInputEvent.Resize(w, h):
+            return UIEvent.Resize(width: w, height: h)
+
+fn host_input_from_wm_fs_event(ev: WmFsAppEvent) -> HostInputEvent?:
+    """Convert an event that crossed the WM file bridge into ingress form.
+
+    `kind` vocabulary (wm_app_process_contract): "key" carries a keycode in
+    `button` (historic layout, preserved) plus the newer `ch` / `mods`;
+    "wheel" carries notches in `wheel`; "resize" carries the new size in
+    x / y; anything else is a pointer event."""
+    val kind = ev.kind.trim().lower()
+    if kind == "key":
+        return HostInputEvent.Key(
+            code: if ev.key_code != 0: ev.key_code else: ev.button,
+            ch: ev.ch, down: ev.pressed, mods: ev.mods
+        )
+    if kind == "wheel" or kind == "scroll":
+        return HostInputEvent.Pointer(
+            x: ev.x, y: ev.y, button: HOST_BTN_NONE, pressed: false, wheel: ev.wheel
+        )
+    if kind == "resize":
+        return HostInputEvent.Resize(w: ev.x, h: ev.y)
+    if kind == "":
+        return nil
+    HostInputEvent.Pointer(
+        x: ev.x, y: ev.y, button: ev.button, pressed: ev.pressed, wheel: ev.wheel
+    )
+
+fn host_input_to_wm_fs_event(seq: i64, ev: HostInputEvent) -> WmFsAppEvent:
+    """Encode an ingress event for the WM file bridge (inverse of
+    host_input_from_wm_fs_event)."""
+    match ev:
+        HostInputEvent.Pointer(x, y, button, pressed, wheel):
+            if wheel != 0:
+                return WmFsAppEvent(
+                    seq: seq, kind: "wheel", x: x, y: y, button: HOST_BTN_NONE,
+                    pressed: false, key_code: 0, ch: "", mods: 0, wheel: wheel
+                )
+            return WmFsAppEvent(
+                seq: seq, kind: if pressed: "down" else: "up",
+                x: x, y: y, button: button, pressed: pressed,
+                key_code: 0, ch: "", mods: 0, wheel: 0
+            )
+        HostInputEvent.Key(code, ch, down, mods):
+            return WmFsAppEvent(
+                seq: seq, kind: "key", x: 0, y: 0, button: code, pressed: down,
+                key_code: code, ch: ch, mods: mods, wheel: 0
+            )
+        HostInputEvent.Resize(w, h):
+            return WmFsAppEvent(
+                seq: seq, kind: "resize", x: w, y: h, button: 0, pressed: false,
+                key_code: 0, ch: "", mods: 0, wheel: 0
+            )
+
+export HostInputEvent
+export HOST_BTN_NONE, HOST_BTN_LEFT, HOST_BTN_RIGHT, HOST_BTN_MIDDLE
+export HOST_MOD_SHIFT, HOST_MOD_CTRL, HOST_MOD_ALT, HOST_MOD_META
+export host_pointer_down, host_pointer_up, host_pointer_move, host_pointer_wheel
+export host_key_down, host_key_up, host_resize
+export host_button_from_name, host_button_name, host_key_name, host_key_text
+export host_input_from_ui_event, host_input_to_ui_event
+export host_input_from_wm_fs_event, host_input_to_wm_fs_event

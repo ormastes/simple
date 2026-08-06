@@ -9,8 +9,11 @@
 
 use os.services.vfs.vfs_init.{vfs_boot_init_production, vfs_service_start, vfs_is_ready}
 use os.services.netstack.netstack_init.{net_boot_init, net_service_start, net_is_ready}
-use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_dump_devices}
+use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_dump_devices, pcimgr_find_by_class_i64}
 use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
+use os.kernel.boot.rc_conf.{rc_conf_screen_type, rc_conf_screen_res, rc_conf_screen_type_marker}
+use os.compositor.backend_factory.{resolve_screen_type, create_screen_backend, screen_selection_reason_or_none}
+use os.simpleos_config_matrix.{SimpleOsRuntimeProfile}
 use os.kernel.ipc.spm_port.{spm_port_register, spm_port_is_registered}
 use os.kernel.privilege.privilege_bridge.{bridge_deposit_boot_mirrors}
 use os.kernel.memory.memory_leveling_manager.{simpleos_memory_leveling_config_default, simpleos_memory_leveling_config_for_physical_capacity}
@@ -176,18 +179,64 @@ fn init_spm_port() -> bool:
 # Display Init Helper
 # ============================================================================
 
-fn _init_display_service() -> bool:
-    """Initialize display using BGA framebuffer (bare-metal mode).
+fn boot_runtime_profile() -> SimpleOsRuntimeProfile:
+    """Runtime profile describing what THIS boot actually detected.
 
-    On QEMU Q35 with -vga std, the BGA adapter is at PCI bus 0.
-    Programs 1024x768x32bpp via I/O ports 0x01CE/0x01CF.
-    PCI BAR0 scan may fail (Cranelift large-constant codegen issue)
-    but falls back to 0xFD000000 which is correct for Q35.
+    Built kernel-side on purpose: the `qemu_*`/`fpga_*` profiles in
+    `simpleos_config_matrix` are the TEST-GATING contract and must never
+    become runtime policy. They and this value are two different inputs to the
+    same pure `resolve_screen_type`.
     """
-    log_raw_println("[display] Attempting BGA framebuffer init...")
-    val fb_info = bga_init_framebuffer(1024, 768, 32)
-    log_raw_println("[display] BGA framebuffer: 1024x768x32bpp initialized")
-    true
+    # PCI class 0x03 = display controller.
+    val has_gpu = pcimgr_find_by_class_i64(3, 0) >= 0
+    SimpleOsRuntimeProfile(
+        name: "boot",
+        arch: "host",
+        target_kind: "baremetal",
+        terminal_kind: "serial+graphical",
+        ssh_host_port: 0,
+        http_host_port: 0,
+        supports_gpu: has_gpu,
+        # BGA framebuffer programming is unconditional on this path today.
+        supports_framebuffer: true,
+        supports_wm: true,
+        supports_simple2d_engine2d: true,
+        requires_vulkan: false,
+        requires_renderdoc: false,
+        requires_host_wm_compare: false,
+        blocked_reason: ""
+    )
+
+fn _init_display_service() -> bool:
+    """Initialize the boot display for the rc.conf-selected screen type.
+
+    Absent or `screen_type="wm"` reproduces the historical path exactly:
+    BGA 1024x768x32bpp via `bga_init_framebuffer`. On QEMU Q35 with -vga std
+    the BGA adapter is at PCI bus 0, programmed via I/O ports 0x01CE/0x01CF.
+    PCI BAR0 scan may fail (Cranelift large-constant codegen issue) but falls
+    back to 0xFD000000 which is correct for Q35.
+
+    Selection is resolved BEFORE branching, and the branch is on the
+    *effective* type: anything that falls back lands on the verbatim BGA path
+    rather than reporting a display failure. There is never a blank screen.
+    """
+    val requested = rc_conf_screen_type()
+    val res = rc_conf_screen_res(1024, 768)
+    val w = res.0
+    val h = res.1
+    val profile = boot_runtime_profile()
+    val decided = resolve_screen_type(requested, profile)
+    val effective = decided.0
+    val reason = screen_selection_reason_or_none(decided.1)
+    log_raw_println(rc_conf_screen_type_marker())
+    log_raw_println("[screen] requested={requested} effective={effective} profile=boot reason={reason} res={w}x{h}")
+    if effective == "wm":
+        log_raw_println("[display] Attempting BGA framebuffer init...")
+        val fb_info = bga_init_framebuffer(w, h, 32)
+        log_raw_println("[display] BGA framebuffer: {w}x{h}x32bpp initialized")
+        return true
+    val sel = create_screen_backend(effective, w, h, profile)
+    sel.backend != nil
 
 # ============================================================================
 # Query Helpers
