@@ -284,6 +284,17 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("arc_box_strong_count", rc::arc_box_strong_count);
     insert_simple!("arc_box_weak_count", rc::arc_box_weak_count);
     insert_simple!("bytes_to_string", conversion::rt_bytes_to_text_fn);
+    // `rt_string_from_byte_array` is the freestanding-kernel-runtime name for
+    // the identical byte-array-to-text contract as `rt_bytes_to_text`/
+    // `bytes_to_string` above (see src/os/kernel/arch/riscv64/boot/
+    // freestanding_runtime.c's rt_string_from_byte_array). Several kernel
+    // `.spl` files (syscall_process.spl, syscall.spl, executable_source.spl,
+    // x86_64_fs_exec_spawn.spl, sosix/process.spl, sshd/dbd) declare it as an
+    // extern but no interpreter registry entry existed for it, so any hosted
+    // spec that reached it failed with "unknown extern function". Register it
+    // as an alias for the existing, already-implemented converter rather than
+    // duplicating logic.
+    insert_simple!("rt_string_from_byte_array", conversion::rt_bytes_to_text_fn);
     insert_simple!("bytes_to_u16_be", conversion::bytes_to_u16_be_fn);
     insert_simple!("bytes_to_u16_le", conversion::bytes_to_u16_le_fn);
     insert_simple!("bytes_to_u32_be", conversion::bytes_to_u32_be_fn);
@@ -1570,6 +1581,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_mmio_read_u8", memory::rt_mmio_read_u8);
     insert_simple!("rt_mmio_write_u8", memory::rt_mmio_write_u8);
     insert_simple!("rt_ptr_write_u8", memory::rt_ptr_write_u8);
+    insert_simple!("rt_copy_user_byte", memory::rt_copy_user_byte);
     insert_simple!("rt_random_getstate", random::rt_random_getstate_fn);
     insert_simple!("rt_random_hex", random::rt_random_hex_fn);
     insert_simple!("rt_random_i64", random::rt_random_i64_fn);

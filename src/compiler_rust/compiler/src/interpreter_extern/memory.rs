@@ -807,6 +807,31 @@ pub fn rt_mmio_write_u8(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+/// Read one byte from a raw address (hosted/interpreter counterpart of a
+/// kernel `copy_from_user`).
+///
+/// This is the same trust model as the other `rt_ptr_*`/`rt_mmio_*` raw
+/// accessors in this file: it performs an unvalidated volatile read of the
+/// given address. It does NOT walk page tables or check VMA permissions —
+/// callers on the OS kernel side (`_copy_user_bytes`/`_copy_user_u64`/
+/// `_copy_user_cstr` in `src/os/kernel/ipc/syscall_process.spl`) are
+/// responsible for validating the address range (via `_is_user_read_range`/
+/// `_is_userspace_range`) *before* calling this, exactly as the sibling
+/// `_vmm_read_physmap_byte` path validates via `vmm_pt_range_user_readable`
+/// before touching physical memory. Under the hosted interpreter (specs),
+/// "user" addresses are genuine addresses in the interpreter's own process
+/// (e.g. `rt_string_data(...)`), so a raw read is correct here, matching
+/// `rt_ptr_read_i64`/`rt_mmio_read_u8`.
+///
+/// Callable from Simple as: `rt_copy_user_byte(ptr_addr: u64) -> u8`
+pub fn rt_copy_user_byte(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_copy_user_byte requires 1 argument (ptr_addr)"));
+    }
+    let addr = args[0].as_int()? as usize;
+    unsafe { Ok(Value::Int((addr as *const u8).read_volatile() as i64)) }
+}
+
 /// Write u8 value at addr+offset.
 ///
 /// Callable from Simple as: `rt_ptr_write_u8(addr: i64, offset: i64, value: i64)`
