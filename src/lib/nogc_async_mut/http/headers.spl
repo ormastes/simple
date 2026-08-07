@@ -172,23 +172,41 @@ fn to_hex_text(n: i64) -> text:
         i = i - 1
     return parts.join("")
 
-# Decode chunked transfer encoded data
-fn decode_chunked(encoded: text) -> text:
+# Decode chunked transfer encoded data (RFC 7230 §4.1).
+#
+# Grammar: chunk = chunk-size [ chunk-ext ] CRLF chunk-data CRLF, with
+# chunk-size = 1*HEXDIG and last-chunk = 1*("0") [ chunk-ext ] CRLF.
+# A size line that is not 1*HEXDIG is a SYNTAX ERROR, not a zero-length chunk,
+# so it must never be read as end-of-body. Returning a truncated body for
+# invalid framing lets this recipient's view of the message boundary diverge
+# from an upstream proxy's (request smuggling). Per RFC 7230 §3.3.3 and §3.4 an
+# invalid or incomplete chunked body is unrecoverable and must be rejected, so
+# every framing error is surfaced as Err for the caller to answer 400.
+fn decode_chunked(encoded: text) -> Result<text, text>:
     var parts: [text] = []
     var pos = 0
+    var saw_last_chunk = false
 
     while pos < encoded.length():
         # Find end of chunk size line
         val size_end = common_index_of(encoded, "\r\n", pos)
 
         if size_end < 0:
-            break
+            return Err("chunk size line not terminated by CRLF")
 
-        # Parse chunk size
-        val size_str = encoded.substring(pos, size_end)
+        # chunk-ext is legal syntax; strip it before validating the size token
+        var size_str = encoded.substring(pos, size_end)
+        val semi = header_find_char(size_str, ";")
+        if semi >= 0:
+            size_str = size_str.substring(0, semi)
+
+        if not header_is_hex_digits(size_str):
+            return Err("invalid chunk size (RFC 7230 4.1: chunk-size = 1*HEXDIG)")
+
         val chunk_size = parse_hex_text(size_str)
 
         if chunk_size == 0:
+            saw_last_chunk = true
             break
 
         # Extract chunk data
@@ -196,15 +214,55 @@ fn decode_chunked(encoded: text) -> text:
         val data_end = data_start + chunk_size
 
         if data_end > encoded.length():
-            break
+            return Err("chunk data runs past end of body")
 
         val chunk_data = encoded.substring(data_start, data_end)
         parts.push(chunk_data)
 
+        # chunk-data is followed by CRLF; a mismatch means the declared size
+        # disagrees with the actual framing.
+        if data_end + 2 > encoded.length():
+            return Err("chunk data not terminated by CRLF")
+        if encoded.substring(data_end, data_end + 2) != "\r\n":
+            return Err("chunk data not terminated by CRLF")
+
         # Move past chunk data and trailing \r\n
         pos = data_end + 2
 
-    return parts.join("")
+    if not saw_last_chunk:
+        return Err("chunked body ended without a last-chunk")
+
+    Ok(parts.join(""))
+
+# Index of `ch` in `s`, or -1. Scans by index because text.index_of on a
+# substring()-derived receiver returns nil for a non-zero match position.
+fn header_find_char(s: text, ch: text) -> i64:
+    var i = 0
+    while i < s.length():
+        if s[i] == ch:
+            return i
+        i = i + 1
+    return -1
+
+# RFC 7230 §4.1 chunk-size = 1*HEXDIG, where HEXDIG is RFC 5234 §B.1.
+# An empty token is not 1*HEXDIG and is therefore invalid.
+fn header_is_hex_digits(s: text) -> bool:
+    if s.length() == 0:
+        return false
+    val hexdig = "0123456789abcdefABCDEF"
+    var i = 0
+    while i < s.length():
+        val ch = s[i]
+        var found = false
+        var j = 0
+        while j < hexdig.length():
+            if hexdig[j] == ch:
+                found = true
+            j = j + 1
+        if not found:
+            return false
+        i = i + 1
+    return true
 
 # Parse hex text to integer
 fn parse_hex_text(hex: text) -> i64:

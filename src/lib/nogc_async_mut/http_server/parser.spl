@@ -129,7 +129,17 @@ class HttpRequestParser:
                         val term = self.buffer.index_of("0\r\n\r\n")
                         if term >= 0:
                             val raw = self.buffer.slice(0, term + 5)
-                            self.body = decode_chunked(raw)
+                            # RFC 7230 §4.1/§3.3.3: an invalid chunk-size line
+                            # is a framing error, not an empty body. Rejecting
+                            # keeps this server's message boundary from
+                            # diverging from an upstream proxy's.
+                            match decode_chunked(raw):
+                                case Ok(decoded):
+                                    self.body = decoded
+                                case Err(reason):
+                                    self.error_message = "chunked framing error: " + reason
+                                    self.state = ParseState.Error
+                                    return Err(HttpServerError.ParseError(self.error_message))
                             consumed = consumed + term + 5
                             self.buffer = self.buffer.slice(term + 5, self.buffer.len())
                             self.state = ParseState.Complete

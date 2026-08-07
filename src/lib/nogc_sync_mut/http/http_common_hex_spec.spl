@@ -44,18 +44,66 @@ describe "parse_hex_text":
         expect(parse_hex_text("FF")).to_equal(255)
         expect(parse_hex_text("100")).to_equal(256)
 
+# Render a decode outcome as text so a wrong outcome is visible in BOTH
+# directions: an unexpected framing error shows up as "ERR:..." where a payload
+# was expected, and an unexpected success shows up as the payload where "ERR"
+# was expected. Never collapses the two into a single sentinel.
+fn decoded(enc: text) -> text:
+    match decode_chunked(enc):
+        case Ok(v): return v
+        case Err(e): return "ERR"
+
 describe "decode_chunked (RFC 7230 §4.1)":
     """The canonical chunked message body decodes to its original payload."""
 
     it "decodes the RFC 7230 4.1 example body":
         # 4/"Wiki" + 5/"pedia" + E/" in\r\n\r\nchunks." (14 octets) + 0 terminator
         val body = "4\r\nWiki\r\n5\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\n\r\n"
-        expect(decode_chunked(body)).to_equal("Wikipedia in\r\n\r\nchunks.")
+        expect(decoded(body)).to_equal("Wikipedia in\r\n\r\nchunks.")
 
     it "decodes a lowercase hex chunk size":
         val body = "a\r\n0123456789\r\n0\r\n\r\n"
-        expect(decode_chunked(body)).to_equal("0123456789")
+        expect(decoded(body)).to_equal("0123456789")
 
     it "decodes a two-digit uppercase hex chunk size":
         val body = "1A\r\nABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n0\r\n\r\n"
-        expect(decode_chunked(body)).to_equal("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        expect(decoded(body)).to_equal("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+    it "accepts a chunk-ext on the size line":
+        # RFC 7230 4.1: chunk = chunk-size [ chunk-ext ] CRLF chunk-data CRLF.
+        # chunk-ext is legal and must not make a well-formed body a framing error.
+        expect(decoded("5;name=value\r\nhello\r\n0\r\n\r\n")).to_equal("hello")
+
+describe "decode_chunked rejects invalid framing (RFC 7230 §4.1, §3.3.3)":
+    """An invalid chunk-size line is a framing error, never an end of body.
+
+    RFC 7230 4.1 defines chunk-size = 1*HEXDIG; a non-HEXDIG size token is a
+    syntax error, NOT the zero-length last-chunk. Reporting it as a successful
+    decode of an empty body is request-smuggling-adjacent: this recipient's
+    view of where the body ends can diverge from an upstream proxy's.
+    """
+
+    it "rejects a non-HEXDIG chunk size instead of returning an empty body":
+        # Regression: this returned "" with no error, so the caller saw a
+        # legitimate empty body rather than a malformed message.
+        expect(decoded("XYZ\r\nhello\r\n0\r\n\r\n")).to_equal("ERR")
+
+    it "rejects a chunk that declares more octets than are present":
+        # FF = 255 declared, 5 present. Previously returned "" as a success.
+        expect(decoded("FF\r\nhello\r\n0\r\n\r\n")).to_equal("ERR")
+
+    it "rejects a size line with no terminating CRLF":
+        expect(decoded("5hello")).to_equal("ERR")
+
+    it "rejects a body that ends without a last-chunk":
+        # RFC 7230 4.1 requires last-chunk; a truncated stream is incomplete.
+        expect(decoded("5\r\nhello\r\n")).to_equal("ERR")
+
+    it "rejects chunk-data not followed by CRLF":
+        # A declared size that disagrees with the actual framing must not be
+        # allowed to silently resynchronise the parser.
+        expect(decoded("5\r\nhelloXX0\r\n\r\n")).to_equal("ERR")
+
+    it "still decodes the well-formed control body":
+        # Both-directions control: if the good path breaks, this goes red.
+        expect(decoded("5\r\nhello\r\n0\r\n\r\n")).to_equal("hello")
