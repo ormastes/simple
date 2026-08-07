@@ -72,3 +72,15 @@ fr tracks are unimplemented (RED-by-design)"`) to assert the real
 
 OPEN — unimplemented, not merely surprising per CSS spec. Left RED per
 testing-rules RED protocol; do not weaken the assertion.
+
+## 2026-08-07 triage note (web_css RED sweep)
+
+Scope estimate: **large** — requires new `fr`-unit parsing in
+`normalized_grid_track_list` (`simple_web_html_layout_renderer_declarations.spl:828-836`,
+currently requires a literal `"px"` suffix on every token) plus a new
+flexible-track-sizing resolution pass (CSS Grid §11.5) feeding
+`grid_track_sizes`/`grid_track_offset`/`grid_track_span_size` in
+`simple_web_html_layout_renderer_layout.spl`. Not attempted this session —
+picked the narrower `text-overflow: ellipsis` Draw IR gap instead (single
+call-site fix, see `web_css_text_overflow_ellipsis_draw_ir_gap_2026-08-07.md`).
+Left RED, untouched.

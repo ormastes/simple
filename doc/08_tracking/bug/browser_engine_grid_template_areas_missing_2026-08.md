@@ -53,3 +53,18 @@ qualifier from their names.
 
 OPEN — unimplemented, not merely surprising per CSS spec. Left RED per
 testing-rules RED protocol; do not weaken the assertions.
+
+## 2026-08-07 triage note (web_css RED sweep)
+
+Scope estimate: **large** — two independent unimplemented subsystems bundled
+under this one bug record: (1) `grid-template-areas`/`grid-area` named-cell
+placement needs a template-string parser plus an area-name-to-cell map
+consulted before auto-placement; (2) `grid-auto-flow: column` needs the
+auto-placement candidate-cell walk to branch on flow mode (column-major vs
+the existing row-major only). Both are zero-occurrence in
+`simple_web_html_layout_renderer_*.spl` per the file-level grep already
+recorded above — new code, not a bug in existing code. Not attempted this
+session — picked the narrower `text-overflow: ellipsis` Draw IR gap instead
+(single call-site fix, see
+`web_css_text_overflow_ellipsis_draw_ir_gap_2026-08-07.md`). Left RED,
+untouched.

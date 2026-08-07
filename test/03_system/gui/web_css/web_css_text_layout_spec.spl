@@ -52,9 +52,13 @@ spec asserts directly instead of guessing past:
   `simple_web_html_layout_renderer_decl_apply.spl:1040-1042`. This spec tests
   that resolution (and is the sabotage target below), not on-canvas geometry.
 - Draw IR composition never splits one `#text` node into multiple line
-  commands. `overflow-wrap` and `text-overflow: ellipsis` therefore have zero
-  effect on the Draw IR tree today; both are asserted RED-by-design with bug
-  records filed (see the two `it` blocks below).
+  commands, so `overflow-wrap` still has zero effect on the Draw IR tree and
+  remains asserted RED-by-design (bug record below). `text-overflow:
+  ellipsis` was the same kind of gap but is narrower — it only needed
+  `_html_draw_ir_command` to call the already-existing
+  `ellipsize_text_for_width` before emitting/measuring the text run, not a
+  line-splitting subsystem — and is now fixed (2026-08-07); its `it` block
+  below is green.
 """
 
 use std.spec.*
@@ -229,15 +233,17 @@ describe "Web CSS text layout":
 
     it "text-overflow: ellipsis truncates a single-line overflowing box":
         """
-        RED-by-design: `ellipsize_text_for_width` (`simple_web_html_layout_
-        renderer_layout.spl:590`) is called only from the CPU-framebuffer
-        raster loops in `simple_web_html_layout_renderer_paint_layout.spl`
-        (`:1013`, `:1047`), never from `_html_draw_ir_command`
-        (`:1900`), which is the only text-command builder reachable from
-        `simple_web_layout_render_html_draw_ir`. The Draw IR text run
-        therefore always carries the full untruncated string and its full
-        measured width, regardless of `text-overflow: ellipsis`. Filed:
-        doc/08_tracking/bug/web_css_text_overflow_ellipsis_draw_ir_gap_2026-08-07.md
+        Fixed 2026-08-07: `_html_draw_ir_command`
+        (`simple_web_html_layout_renderer_paint_layout.spl:1900`) now calls
+        `ellipsize_text_for_width` (`simple_web_html_layout_
+        renderer_layout.spl:590`) on the node's text before emitting or
+        measuring the Draw IR text run, whenever `st.text_overflow_ellipsis`
+        is set — the same fixed-advance width model the CPU-framebuffer
+        raster loops already used at `:1013`/`:1047`. Previously this call
+        existed only in those raster loops, never in the Draw IR builder, so
+        the Draw IR text run always carried the full untruncated string and
+        its full measured width regardless of `text-overflow: ellipsis`.
+        History: doc/08_tracking/bug/web_css_text_overflow_ellipsis_draw_ir_gap_2026-08-07.md
         """
         step("Render a 30px-wide box with overflow:hidden, white-space:nowrap, and text-overflow:ellipsis over a long word")
         val html = (
