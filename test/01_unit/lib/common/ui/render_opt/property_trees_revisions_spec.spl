@@ -1,0 +1,186 @@
+# @cover src/lib/common/ui/render_opt/property_trees.spl 80%
+# @cover src/lib/common/ui/render_opt/revisions.spl 80%
+# @tag: unit, ui, render_perf, render_opt, o0, o1, o2
+#
+# Unit F3 (doc/03_plan/ui/testing/render_2d_vulkan_functional_coverage_plan_2026-08-07.md):
+# functional coverage for `paint_chunks_property_rev`, `paint_chunks_raster`,
+# `paint_chunks_sync`, `revisions_mark`, `revisions_chunk_grouping_rev`, and
+# both `create`s. `render_opt_invalidation_spec.spl` already covers the O0/O1/O2
+# gate scenarios (minimal-set propagation, transform-only no-rebuild, raster
+# skip proportionality) — this spec adds distinct assertions that were not
+# already exercised there: property-rev idempotence under an irrelevant
+# mutation, per-node revision isolation, raster count staying proportional to
+# revisions that actually matter (not to every dirty flag raised),
+# `revisions_mark` monotonicity across repeated calls, and grouping-rev order
+# independence.
+
+use std.spec
+use common.ui.render_opt.revisions.{
+    RenderRevisions,
+    revisions_mark,
+    revisions_chunk_grouping_rev,
+    REV_PAINT,
+    REV_LAYOUT,
+    REV_CLIP,
+    REV_RESOURCE,
+    REV_TRANSFORM,
+    REV_EVENT,
+    REV_OK
+}
+use common.ui.render_opt.property_trees.{
+    PropertyTrees,
+    PaintChunks,
+    RasterStats,
+    paint_chunks_property_rev,
+    paint_chunks_raster,
+    paint_chunks_sync,
+    PT_TRANSFORM,
+    PT_CLIP,
+    PT_EFFECT,
+    PT_OK
+}
+
+fn make_scene() -> PropertyTrees:
+    val t = PropertyTrees.create()
+    val root = t.add_node(PT_TRANSFORM, -1, 0, 0, 800, 600)
+    t.add_node(PT_TRANSFORM, root, 10, 20, 100, 50)
+    t.add_node(PT_CLIP, -1, 0, 0, 800, 600)
+    t.add_node(PT_CLIP, -1, 5, 5, 40, 40)
+    t.add_node(PT_EFFECT, -1, 255, 0, 0, 0)
+    t
+
+fn make_chunks() -> PaintChunks:
+    val c = PaintChunks.create()
+    c.add_chunk_sized(1, 1, 2, 4, 0, 7, 0, 100)
+    c.add_chunk_sized(2, 1, 2, 4, 0, 7, 1, 100)
+    c.add_chunk_sized(3, 1, 2, 4, 0, 8, 2, 100)
+    c
+
+describe "PropertyTrees.create / PaintChunks.create start empty and quiescent":
+    it "fresh trees and chunks report zero revisions and zero chunks":
+        val t = PropertyTrees.create()
+        val c = PaintChunks.create()
+        assert_true(t.revision(PT_CLIP) == 0)
+        assert_true(t.revision(PT_EFFECT) == 0)
+        assert_true(c.chunk_count == 0)
+        assert_true(c.rebuild_count == 0)
+        assert_true(paint_chunks_property_rev(t) == 0)
+
+describe "paint_chunks_property_rev unchanged input produces identical rev (idempotent)":
+    it "repeated calls with no mutation return the same value":
+        val t = make_scene()
+        assert_true(paint_chunks_property_rev(t) == paint_chunks_property_rev(t))
+        assert_true(paint_chunks_property_rev(t) == paint_chunks_property_rev(t))
+
+    it "a TRANSFORM-only mutation leaves property_rev unchanged":
+        val t = make_scene()
+        val before = paint_chunks_property_rev(t)
+        assert_true(t.set_translate(1, 200, 20) == PT_OK)
+        assert_true(t.set_translate(1, 300, 20) == PT_OK)
+        val after = paint_chunks_property_rev(t)
+        assert_true(before == after)
+
+describe "single node mutation bumps only the affected node's revision (count assertion)":
+    it "mutating one CLIP node bumps only that node, not its sibling clip node":
+        val t = make_scene()
+        # node 3 is the second CLIP node added in make_scene
+        assert_true(t.node_revision(2) == 0)
+        assert_true(t.node_revision(3) == 0)
+        assert_true(t.set_payload(3, 9, 9) == PT_OK)
+        assert_true(t.node_revision(3) == 1)
+        # sibling clip node and the unrelated effect/transform nodes stay at 0
+        assert_true(t.node_revision(2) == 0)
+        assert_true(t.node_revision(0) == 0)
+        assert_true(t.node_revision(1) == 0)
+        assert_true(t.node_revision(4) == 0)
+        # exactly one PT_CLIP bump recorded, not two
+        assert_true(t.revision(PT_CLIP) == 1)
+
+describe "paint_chunks_raster count is proportional to revisions that matter, not to every dirty flag":
+    it "an EVENT-only mark raises dirty accounting but triggers zero rebuilds":
+        val t = make_scene()
+        val c = make_chunks()
+        val r = RenderRevisions.create(4)
+        val primed: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(primed.rastered_count == 3)
+
+        # EVENT never propagates into PAINT/CLIP/RESOURCE (see revisions.spl
+        # matrix), so it must raise dirty-flag accounting without moving the
+        # chunk-grouping revision at all.
+        assert_true(r.mark(0, REV_EVENT) == REV_OK)
+        assert_true(r.mark_count > 0)
+        assert_true(revisions_chunk_grouping_rev(r) == 0)
+
+        val after: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(after.rastered_count == 0)
+        assert_true(after.skipped_count == 3)
+        assert_true(after.bytes_painted == 0)
+
+    it "a RESOURCE mark that DOES reach paint rasters every chunk together":
+        val t = make_scene()
+        val c = make_chunks()
+        val r = RenderRevisions.create(4)
+        val primed: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(primed.rastered_count == 3)
+        assert_true(r.mark(0, REV_RESOURCE) == REV_OK)
+        assert_true(revisions_chunk_grouping_rev(r) > 0)
+        val after: RasterStats = paint_chunks_raster(c, t, r, 1, 1, 1, 1, 1)
+        assert_true(after.rastered_count == 3)
+        assert_true(after.skipped_count == 0)
+
+describe "revisions_mark is monotonic and never reuses a rev":
+    it "repeated marks on the same kind strictly increase its revision counter":
+        val r = RenderRevisions.create(3)
+        assert_true(r.revision(REV_PAINT) == 0)
+        var prev: u32 = r.revision(REV_PAINT)
+        var i: i64 = 0
+        while i < 5:
+            assert_true(revisions_mark(r, i % 3, REV_PAINT) == REV_OK)
+            val cur = r.revision(REV_PAINT)
+            # strictly greater than the previous value: monotonic, and a
+            # constant-return sabotage of revisions_mark (never touching the
+            # counter) fails this immediately on the second iteration
+            assert_true(cur > prev)
+            prev = cur
+            i = i + 1
+        assert_true(r.revision(REV_PAINT) == 5)
+
+    it "distinct successive marks never repeat an already-seen revision value":
+        val r = RenderRevisions.create(2)
+        assert_true(revisions_mark(r, 0, REV_LAYOUT) == REV_OK)
+        val v1 = r.revision(REV_LAYOUT)
+        assert_true(revisions_mark(r, 1, REV_LAYOUT) == REV_OK)
+        val v2 = r.revision(REV_LAYOUT)
+        assert_true(revisions_mark(r, 0, REV_LAYOUT) == REV_OK)
+        val v3 = r.revision(REV_LAYOUT)
+        assert_true(v1 != v2)
+        assert_true(v2 != v3)
+        assert_true(v1 != v3)
+
+describe "revisions_chunk_grouping_rev is stable under reorder of unrelated nodes":
+    it "sums PAINT+CLIP+RESOURCE regardless of the order the marks were applied in":
+        val r1 = RenderRevisions.create(4)
+        assert_true(r1.mark(0, REV_PAINT) == REV_OK)
+        assert_true(r1.mark(2, REV_CLIP) == REV_OK)
+        assert_true(r1.mark(3, REV_RESOURCE) == REV_OK)
+
+        val r2 = RenderRevisions.create(4)
+        assert_true(r2.mark(3, REV_RESOURCE) == REV_OK)
+        assert_true(r2.mark(0, REV_PAINT) == REV_OK)
+        assert_true(r2.mark(2, REV_CLIP) == REV_OK)
+
+        assert_true(revisions_chunk_grouping_rev(r1) == revisions_chunk_grouping_rev(r2))
+
+    it "interleaving unrelated TRANSFORM/EVENT marks does not change the grouping rev":
+        val r1 = RenderRevisions.create(4)
+        assert_true(r1.mark(0, REV_PAINT) == REV_OK)
+        assert_true(r1.mark(2, REV_CLIP) == REV_OK)
+        val base = revisions_chunk_grouping_rev(r1)
+
+        val r2 = RenderRevisions.create(4)
+        assert_true(r2.mark(1, REV_TRANSFORM) == REV_OK)
+        assert_true(r2.mark(0, REV_PAINT) == REV_OK)
+        assert_true(r2.mark(3, REV_EVENT) == REV_OK)
+        assert_true(r2.mark(2, REV_CLIP) == REV_OK)
+
+        assert_true(revisions_chunk_grouping_rev(r2) == base)
