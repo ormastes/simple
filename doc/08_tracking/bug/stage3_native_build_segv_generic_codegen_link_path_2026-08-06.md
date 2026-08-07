@@ -982,3 +982,34 @@ Sampled `/proc/<pid>/status` `VmRSS` every second for a whole run:
 - Put positive-control markers in **string literals**, not comments — a comment
   marker does not reach `.rodata` and silently fails the control (that happened
   here on the first attempt).
+
+### PROBE3 — the seed-attribution above, converted from inference to direct evidence
+
+The claim "no `src/compiler` change can move a byte of `stage2-simple`" initially
+rested on an inference, and commit `61197205501` records a statement that cuts
+the other way ("the seed's native-build runs
+`src/app/cli/native_build_worker.spl`"). PROBE3 settles it. Every alternative
+explanation for PROBE2's zero trace lines was closed:
+
+- **Trace made unconditional.** The `field_name == "errors"` guard was removed;
+  `resolve_field_index` now prints `[fieldprobe-entry] QUUXMARKER field={...}` on
+  **every** entry, for every field of every type.
+- **Positive control passes.** `strings PROBE3/stage2-simple | grep -c QUUXMARKER`
+  = **1**. The edited file was read and compiled.
+- **The env var reached the build process.** `tr '\0' '\n' < /proc/<pid>/environ
+  | grep -c SIMPLE_MIR_FIELD_TRACE` = **1**, sampled live during the run — so
+  `env -i` did not strip it.
+- **stdout is captured.** `stage2.log` contains the build's own 4 output lines,
+  so prints would have landed there.
+- **There is no `.spl` worker to lose output to.** `pgrep -af native_build_worker`
+  = **0** during the run; the build process has exactly one child thread
+  (`simple-main`). The seed binary also contains **no** `native_build_worker`,
+  `field_map` or `struct_field_order` string at all.
+
+Result: **0** `[fieldprobe-entry]` lines across a 727-file compile.
+
+The pure-Simple `MirLowering.resolve_field_index` is therefore not executed at
+any point while the seed builds stage 2. The `0x58` in `stage2-simple` is
+seed-emitted, the stage-2-only recipe is blind to `src/compiler` changes, and
+`61197205501`'s worker statement does not hold for this build path
+(`SIMPLE_NATIVE_BUILD_RUST=1`).
