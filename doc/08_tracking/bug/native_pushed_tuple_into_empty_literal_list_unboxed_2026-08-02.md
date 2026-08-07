@@ -245,3 +245,107 @@ issue, and was not re-verified in this pass.
 Repro files for the fixed/still-open split above:
 `test/01_unit/language/tuple_to_text_native_repro_spec.spl` (interpreter- and
 documentation-only; `bin/simple test` cannot reach either native lane).
+
+---
+
+## 2026-08-07 update: AOT lane root-caused via LLVM IR dump — wrong backend, wrong root cause in the previous pass
+
+The 2026-08-07 pass above ruled out several LLVM-backend candidates in
+**`src/compiler_rust`** (the Rust seed's `inkwell`-based LLVM codegen). That
+was the wrong backend to chase: with `SIMPLE_BOOTSTRAP=1`, `native-build`
+actually compiles through the **pure-Simple LLVM backend**
+(`src/compiler/50.mir` + `src/compiler/70.backend`), which emits textual
+`.ll` and shells out to `llc`, not the Rust `inkwell` path. Confirmed via
+`SIMPLE_DUMP_IR=1 SIMPLE_DUMP_IR_FILTER=main`: the Rust-side dump hook
+(`codegen/llvm/functions.rs:830`) never fired (no `/tmp/llvm_ir_main.ll`
+produced); instead the pure-Simple backend logged `[llvm-tools] ir
+/tmp/simple_llvm_<pid>.ll` and that file contains the real generated IR for
+this repro.
+
+### Repro used
+```simple
+fn main():
+    val t = (7, 9)
+    print("field: {t.0}\n")
+    print("tuple: {t}\n")
+```
+Built with `SIMPLE_BOOTSTRAP=1 bin/simple native-build tt2.spl -o tt2.bin`
+(bin/simple here is the deployed seed at
+`bin/release/x86_64-unknown-linux-gnu/simple`). Run: `field: 7` (correct),
+`tuple: 103443101213344` (raw pointer, exit 0) — reproduces unchanged.
+
+### IR evidence
+Relevant excerpt from `/tmp/simple_llvm_<pid>.ll` for `__simple_main`:
+```llvm
+%t0 = call ptr @rt_alloc(i64 16)              ; tuple built as a raw 2x-i64 block
+%t1 = getelementptr inbounds i64, ptr %t0, i32 0
+store i64 %l0, ptr %t1, align 8               ; field 0 = 7
+%t2 = getelementptr inbounds i64, ptr %t0, i32 1
+store i64 %l1, ptr %t2, align 8               ; field 1 = 9
+%l2 = getelementptr i8, ptr %t0, i64 0        ; tuple ptr
+%l3 = getelementptr i8, ptr %l2, i64 0        ; copy (this is `t`)
+...
+%l7 = call ptr @rt_array_get(ptr %l3, i64 %l6)   ; {t.0} correctly reads via rt_array_get
+...
+%t9 = ptrtoint ptr %l3 to i64
+%l18 = call i64 @rt_raw_i64_to_string(i64 %t9)   ; {t} — WRONG: renders the pointer as a decimal int
+```
+
+Two distinct facts fall out of this IR:
+
+1. **Tuple representation itself has no runtime type tag.** The pure-Simple
+   AOT backend builds a tuple as a bare `rt_alloc(field_count * 8)` block with
+   raw GEP stores — it never calls any `rt_tuple_new`/`rt_tuple_set`/
+   `rt_tuple_len` runtime API (grepped: no such runtime symbols exist in
+   `src/runtime`; the `rt_tuple_get`/`rt_tuple_new` call-emission sites in
+   `src/compiler/50.mir/**` are all for the self-hosted **compiler's own**
+   enum-payload boxing, not for user-code tuple literals). So even a
+   perfectly-dispatched "stringify this value" call has no heap object header
+   to inspect — there is nothing in this AOT lane analogous to the JIT/runtime
+   `HeapObjectType::Tuple` that `heap_value_to_display_string`
+   (`src/compiler_rust/runtime/src/value/sffi/io_print.rs:533-550`) switches
+   on. Any fix must be static (arity/types known at the interpolation site),
+   not a generic runtime call.
+
+2. **Proximate cause — type tracking loses the Tuple type between the literal
+   and the variable read.** `lower_tuple_lit`
+   (`src/compiler/50.mir/_MirLoweringExpr/literals.spl:562-577`) does register
+   the literal's own result local with `MirTypeKind.Tuple(types)` correctly.
+   But the interpolation site reads `t` through
+   `bootstrap_coerce_to_raw_str` (`method_calls_literals.spl:2775-2800`) →
+   `coerce_concat_operand`
+   (`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:527-605`), and by
+   that point `self.local_mir_type_of(local)` — a scan of `self.builder.locals`
+   for the `t`-local's registered type
+   (`src/compiler/50.mir/mir_lowering_stmts.spl:146-155`) — returns
+   `MirTypeKind.I64`, not `Tuple`. `coerce_concat_operand`'s type switch
+   (`expr_dispatch.spl:566-572`) has no `Tuple` arm; `I64` falls into the
+   generic numeric-scalar case, so it renders `t`'s pointer bits through
+   `rt_raw_i64_to_string` — exactly the call the IR shows. Where the `val t =
+   (7, 9)` binding's local gets (re-)registered as plain `I64` instead of
+   inheriting the tuple-literal local's `Tuple` type was not traced further
+   (needs a walk of the `val`/binding lowering path that creates `t`'s local,
+   separate from `lower_tuple_lit` itself, which is not at fault).
+
+### Why no fix was applied here
+Both facts above mean a correct fix is two-part and non-trivial to verify
+safely in one pass:
+- Fix the type-tracking gap so `coerce_concat_operand` sees `t` as
+  `MirTypeKind.Tuple(...)` (or otherwise preserve the tuple type across the
+  `val` binding into `self.builder.locals`).
+- Add a `Tuple` arm to `coerce_concat_operand` that renders `(a, b, ...)`
+  syntax at compile time from the known field count/types (e.g. emit the
+  literal parens/commas and recursively coerce each `rt_tuple`-free field via
+  `rt_array_get`-style GEP reads, mirroring the `{t.0}` path that already
+  works) — there is no runtime function to delegate to per fact (1).
+
+Both edits are pure `.spl` (`src/compiler/50.mir/**`), not Rust-seed-only, so
+they are in-scope for a future pass, but changing `coerce_concat_operand`'s
+type dispatch is a shared path (text-concat `+`, `str()`, interpolation, and
+`.join()` all route through it per its docstring) and needs its own isolated
+regression check before landing. Left as root-caused/pending-fix rather than
+patched blind in this pass.
+
+**Verification status: repro re-confirmed on freshly built artifact,
+root cause localized to two specific `.spl` file:line pairs above,
+no code changed.**
