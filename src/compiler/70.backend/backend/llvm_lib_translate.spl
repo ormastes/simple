@@ -7,7 +7,7 @@
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, SwitchCase}
 use compiler.backend.backend.llvm_lib_type_mapper.{LlvmLibTypeMapper}
-use compiler.backend.backend.llvm_lib_translate_expr.{translate_instruction}
+use compiler.backend.backend.llvm_lib_translate_expr.{translate_instruction, translate_operand_llvm}
 use std.sffi.llvm.*
 
 # ============================================================================
@@ -52,13 +52,13 @@ pub fn translate_module_to_llvm(ctx: i64, mod_: i64, builder: i64, type_mapper: 
     for fname in names:
         val func = by_name[fname]
         val llvm_fn = func_map[func.name]
-        compile_function(ctx, mod_, builder, type_mapper, func, llvm_fn, func_map)
+        compile_function_llvm(ctx, mod_, builder, type_mapper, func, llvm_fn, func_map)
 
 # ============================================================================
 # Function Compilation
 # ============================================================================
 
-fn compile_function(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeMapper, func: MirFunction, llvm_fn: i64, func_map: {text: i64}):
+fn compile_function_llvm(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeMapper, func: MirFunction, llvm_fn: i64, func_map: {text: i64}):
     # Create basic blocks
     var block_map: {i64: i64} = {}
     for block in func.blocks:
@@ -126,7 +126,7 @@ fn compile_function(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeM
                     eprint("[llvm-lib] ERROR: Ret carries a value in void-declared function " + func.name + " — emitting ret_void and dropping the value")
                     llvm_build_ret_void(builder)
                 elif value.?:
-                    val ret_val = translate_operand(ctx, mod_, builder, type_mapper, value.unwrap(), value_map, local_types, func_map)
+                    val ret_val = translate_operand_llvm(ctx, mod_, builder, type_mapper, value.unwrap(), value_map, local_types, func_map)
                     # Coerce to the declared return type: string globals are ptr
                     # but text-returning signatures map to i64 (tagged values),
                     # and vice versa — an uncoerced ret fails IR verification
@@ -192,7 +192,7 @@ fn compile_function(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeM
                 llvm_build_br(builder, dest_bb)
                 terminator_already_emitted = true
             case If(cond, then_target, else_target):
-                precomputed_cond_val = translate_operand(ctx, mod_, builder, type_mapper, cond, value_map, local_types, func_map)
+                precomputed_cond_val = translate_operand_llvm(ctx, mod_, builder, type_mapper, cond, value_map, local_types, func_map)
                 val i1_ty = llvm_int1_type_in_context(ctx)
                 precomputed_final_cond = if precomputed_cond_val == 0:
                     # A null LLVMValueRef condition segfaults inside
@@ -221,7 +221,7 @@ fn compile_function(ctx: i64, mod_: i64, builder: i64, type_mapper: LlvmLibTypeM
                 llvm_build_cond_br(builder, precomputed_final_cond, precomputed_then_bb, precomputed_else_bb)
                 terminator_already_emitted = true
             case Switch(value, targets, default):
-                val discr_val = translate_operand(ctx, mod_, builder, type_mapper, value, value_map, local_types, func_map)
+                val discr_val = translate_operand_llvm(ctx, mod_, builder, type_mapper, value, value_map, local_types, func_map)
                 val default_bb = block_map[default]
                 val switch_inst = llvm_build_switch(builder, discr_val, default_bb, targets.len())
                 for switch_case_raw in targets:
@@ -330,6 +330,9 @@ fn declare_runtime_functions(ctx: i64, mod_: i64, tm: LlvmLibTypeMapper):
     # (1 = whole structure reclaimed, 0 = refused, nothing freed) -- the
     # rt_string_free shape, NOT the void/ptr shape rt_array_free uses.
     declare_fn(mod_, "rt_array_free_deep", llvm_function_type(i64_ty, [i64_ty], false))
+    # rt_dict_free_deep / rt_free_deep share that same (i64)->i64 verdict shape.
+    declare_fn(mod_, "rt_dict_free_deep", llvm_function_type(i64_ty, [i64_ty], false))
+    declare_fn(mod_, "rt_free_deep", llvm_function_type(i64_ty, [i64_ty], false))
     declare_fn(mod_, "rt_array_len", llvm_function_type(i64_ty, [ptr_ty], false))
     declare_fn(mod_, "rt_array_get", llvm_function_type(ptr_ty, [ptr_ty, i64_ty], false))
     declare_fn(mod_, "rt_array_set", llvm_function_type(void_ty, [ptr_ty, i64_ty, ptr_ty], false))
