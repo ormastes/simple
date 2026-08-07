@@ -209,6 +209,25 @@ impl MirLowering:
             val dest = b_glob.new_temp(static_.type_)
             b_glob.emit(MirInst(kind: MirInstKind.LoadGlobal(dest, static_.symbol), span: nil))
             self.builder = b_glob
+            # Register struct provenance for the loaded local, mirroring every
+            # other struct-value-producing site (mir_lowering_stmts.spl:291,
+            # method_calls_literals.spl:537, etc). Every other such site
+            # registers `struct_value_syms` so `resolve_field_index`'s first
+            # (name-keyed) lookup can succeed without depending on HIR type
+            # inference; this global-read path did not. Tested via
+            # SIMPLE_MIR_FIELD_TRACE=1 against a minimal @repr("C") global
+            # struct probe: the HIR-type-annotation fallback in
+            # resolve_field_index already resolves this case correctly on the
+            # x86_64 JIT host, so this omission is NOT confirmed as the cause
+            # of the aarch64 field-misread defect (see the 2026-08-07 entry in
+            # doc/08_tracking/bug/aarch64_real_firmware_boot_gap_and_seed_defects_2026-07-14.md
+            # for the full discriminating test and the surviving candidates).
+            # Landed anyway as a genuine, low-risk provenance-consistency gap.
+            match static_.type_.kind:
+                case Struct(struct_sym):
+                    if val struct_symbol_raw = self.symbols.get_symbol_raw(struct_sym.id):
+                        self.struct_value_syms[dest.id] = struct_symbol_raw.name
+                case _: ()
             return Some(dest)
         # Immutable (`val`) case: no real storage (lower_static gates on
         # is_mutable) -- inline the folded constant value/type instead, the

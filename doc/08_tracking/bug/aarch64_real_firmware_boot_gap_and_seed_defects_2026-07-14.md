@@ -735,3 +735,119 @@ constitutes that proof for the actual shipped defect.
 - Layer 1 memory-subsystem porting past the `memory_init` milestone stub —
   unchanged, still explicitly out of scope (same note as the prior
   session).
+
+## Root-cause investigation of the struct-global field-access defect (2026-08-07)
+
+Investigated the "aarch64/cranelift codegen defect ... worked around here, not
+fixed at the root" gap flagged above. **Result: one real, landed consistency
+fix; the aarch64-specific root cause is still open** — a plausible hypothesis
+was formed by static reading, then tested with an executed discriminating
+probe and REFUTED for the case that could actually be run in this checkout
+(x86_64 host JIT). Recording both the ruled-out path and the surviving
+candidates so the next session doesn't re-walk the same one.
+
+### Hypothesis (static reading), and what testing it showed
+
+`resolve_field_index` (`src/compiler/50.mir/_MirLowering/function_lowering.spl:1028-1070`)
+resolves a `.field` access's field INDEX two ways: (1) a name-keyed lookup in
+`self.struct_value_syms[base_local.id]`, populated by every struct-value-
+producing lowering site except one; (2) a HIR-type-annotation lookup via
+`expr_type_symbol(base)` (`base.type_.kind == Named(symbol, _)`). If BOTH
+miss, it silently returns the hardcoded literal `0`
+(function_lowering.spl:1070, "Default fallback when type is unknown") — every
+field would then read back as field index 0 regardless of name, matching the
+reported symptom exactly. This "silently defaulted to 0" failure mode recurs
+in ~15 comments elsewhere in this layer for other struct-provenance gaps
+(`grep resolve_field_index src/compiler/50.mir/`), so it looked like a strong
+prior.
+
+The gap found: `try_lower_global_read`
+(`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:202-212`, before this
+fix) created the MIR local for a module-level `var` struct's `LoadGlobal` and
+returned it WITHOUT registering `self.struct_value_syms[dest.id]` — unlike
+every other struct-producing site (`mir_lowering_stmts.spl:291`,
+`method_calls_literals.spl:537`, `expr_dispatch.spl:1315`, etc.). So lookup
+(1) always misses for a global struct value, leaving lookup (2) — HIR type
+inference on the global's `Var` node — to carry the whole burden alone.
+
+**Tested, not just reasoned about.** `resolve_field_index` has a built-in
+trace (`SIMPLE_MIR_FIELD_TRACE=1` prints `[field-idx-fallback0] field=...`
+exactly on the 0-fallback path). Ran a minimal repro
+(`@repr("C") struct BootRequest { magic, id, revision, response: u64 }`,
+module-level `var g_req = BootRequest(...)`, print all four fields) through
+`SIMPLE_MIR_FIELD_TRACE=1 bin/simple run <probe>.spl` — which reaches the
+Cranelift JIT (`run` ≠ `test`; `test` is tree-walk and never reaches this
+code at all) — **both with and without the `struct_value_syms` fix**. In
+BOTH cases: no `[field-idx-fallback0]` trace, and all four fields (magic=
+3350322480 / 0xC7B1DD30, id=42, revision=3, response=0) printed correctly.
+**This refutes the hypothesis for this case**: lookup (2) — the HIR-type-
+annotation fallback — already resolves a plain module-level `@repr("C")`
+global struct correctly on the x86_64 JIT host, so the missing
+`struct_value_syms` registration was never the active cause here. The
+"freestanding/extern-facing module context breaks HIR type inference on the
+global" guess from the first draft of this section was asserted, not shown,
+and testing did not support it.
+
+### What this leaves as the surviving candidates for the actual aarch64 bug
+
+Since the field-INDEX resolution tests correctly even on the untouched code,
+the real aarch64 defect is more likely downstream, in
+`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl`, and/or in
+something genuinely aarch64-specific that this x86_64-host JIT run cannot
+exercise:
+
+1. **Uniform `field * 8` stride** (`GetField`/`SetField`, lines 595/607) —
+   every field is assumed to occupy exactly 8 bytes regardless of declared
+   width; a `@repr("C")` struct promises real C layout (mixed `u8`/`u16`/
+   `u32`/`u64` widths, natural alignment/padding), which this stride ignores.
+   Self-consistent for structs built via this compiler's own `Aggregate`
+   lowering (which also always pads fields to 8 bytes), but likely wrong for
+   any C-ABI-compatible layout a firmware/bootloader interop struct needs.
+2. **Unconditional `band(addr, -8)` tag-strip** (lines 594/605) — applied to
+   EVERY struct base pointer, including one from `LoadGlobal` on a
+   `@repr("C")` global, which was never heap-tagged (only the `Aggregate::
+   Struct` heap-alloc construction path at lines 623-633 ORs in a `heap_tag =
+   1`). On an already 8-aligned address this AND is a no-op, so it would only
+   corrupt the address for an odd/misaligned one — worth checking whether
+   the Limine-supplied/aarch64-declared global data address actually has
+   this property (e.g. via a `.limine_reqs`-style section placement, or
+   differing default data-section alignment on aarch64 vs x86_64 in this
+   codegen's `cranelift_declare_global_data` path).
+3. **Genuinely aarch64-target-specific**, i.e. not reachable at all through
+   `bin/simple run` on an x86_64 host regardless of source-level correctness
+   — would require the aarch64 native-build once the current unresolved-name
+   regression in this checkout (being fixed by another session) is resolved,
+   then disassembling the field-read sequence the way the original report
+   did.
+
+### Fix landed anyway
+
+`try_lower_global_read` now registers `self.struct_value_syms[dest.id]` with
+the struct's symbol name (resolved via `static_.type_.kind == Struct(symbol)`
+→ `self.symbols.get_symbol_raw(symbol.id).name`) immediately after emitting
+`LoadGlobal`, mirroring every other struct-value provenance site. This is a
+genuine consistency gap (this was the only struct-producing site that skipped
+the registration) and is low-risk/no-op-on-success, but per the test above it
+is **not confirmed to be the fix for the aarch64 defect** — kept as a
+standing correctness improvement, not a closed bug. File:
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`.
+
+**Verification status:**
+- Executed, discriminating: `SIMPLE_MIR_FIELD_TRACE=1 bin/simple run` against
+  the minimal probe above, with the fix present and reverted — see above.
+  This is real evidence, not a static claim, and it is negative for this
+  hypothesis on this host/target.
+- `bin/simple test test/01_unit/compiler/global_c_repr_struct_field_read_spec.spl`
+  passes (5 examples, 0 failures) but — confirmed by the trace test above —
+  this spec does NOT discriminate the fix: `bin/simple test` runs the
+  tree-walk interpreter, which never reaches `resolve_field_index` or
+  `try_lower_global_read` at all, so it passes identically with the fix
+  present or reverted. Kept as a documentation-style regression spec for the
+  surface field-read contract, not as a gate on this defect; its header
+  states this caveat explicitly.
+- `bin/simple lint` on the edited file did not complete (timed out at 180s in
+  this checkout) but `bin/simple run`/`bin/simple test` both compiled and ran
+  the edited tree successfully, so the edit itself is not the cause of the
+  lint hang.
+- Real aarch64 verification is still blocked on the native-build regression
+  noted above (separate, in-flight fix by another session).
