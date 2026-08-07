@@ -38,7 +38,7 @@ use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_wa
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
 use compiler.core.tokens.{TOK_KW_AS, TOK_KW_CE, TOK_PIPE, TOK_ASSIGN, tok_kind_name}
-use compiler.core.tokens.{TOK_IDENT, TOK_COMMA}
+use compiler.core.tokens.{TOK_IDENT, TOK_COMMA, TOK_MINUS}
 
 # Import from sibling split modules
 use compiler.frontend.core.parser_expr.{parse_expr, parse_int_text}
@@ -124,6 +124,123 @@ fn parse_layer_decl(loop_index: i64) -> i64:
     args.push(expr_string_lit(uses_list.join(","), 0))
     val marker = expr_call(helper, args, 0)
     decl_val_binding("_expr_layer_" + int_to_str(loop_index), -1, marker, -1)
+
+# ===== WP-A: `resource` declarations + `@sffi(...)` attribute =====
+# doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md §1
+# doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md
+#
+# `resource` is a CONTEXTUAL (soft) keyword, exactly like `layer`/`cli` above:
+# it is NOT a lexer token and NOT a reserved word. 112 identifier uses of
+# `resource` exist in src/ today (`var resource = ""` in 85.mdsoc/security.spl,
+# `resource: text` fields in 85.mdsoc/weaving/join_point_kind.spl, ...),
+# including inside the compiler's own source -- a hard keyword would break the
+# compiler's own rebuild. Recognition is declaration-start position only.
+fn current_ident_is_resource_decl() -> bool:
+    var pos = lex_token_end_get()
+    val source_len = lex_source_len()
+    var saw_space = false
+    while pos < source_len:
+        val ch = lex_source_char_at(pos)
+        if ch == " " or ch == "\t":
+            saw_space = true
+            pos = pos + 1
+            continue
+        break
+    if not saw_space or pos >= source_len:
+        return false
+    is_ident_start_char(lex_source_char_at(pos))
+
+# `@sffi(...)` metadata pending for the NEXT `resource` declaration. Captured
+# by the module-body decorator arm; consumed and RESET by parse_resource_decl.
+# Keys are exactly the design doc §1 schema -- unknown keys are a parse error
+# (fail-closed), never silently ignored.
+var PENDING_SFFI: i64 = 0
+var PENDING_SFFI_KEYS: [text] = []
+var PENDING_SFFI_VALUES: [text] = []
+
+fn parser_reset_pending_sffi():
+    PENDING_SFFI = 0
+    PENDING_SFFI_KEYS = []
+    PENDING_SFFI_VALUES = []
+
+fn sffi_known_keys() -> [text]:
+    ["prefix", "handle", "invalid", "retain", "release", "sharing", "thread_safe"]
+
+fn parser_sffi_record_key(key: text, value: text):
+    if not sffi_known_keys().contains(key):
+        parser_error("unknown `@sffi` key `" + key + "`; expected one of prefix, handle, invalid, retain, release, sharing, thread_safe")
+        return
+    PENDING_SFFI_KEYS.push(key)
+    PENDING_SFFI_VALUES.push(value)
+
+fn parser_sffi_value_get(key: text) -> text:
+    var i: i64 = 0
+    while i < PENDING_SFFI_KEYS.len():
+        if PENDING_SFFI_KEYS[i] == key:
+            return PENDING_SFFI_VALUES[i]
+        i = i + 1
+    ""
+
+# Reads one `@sffi` argument value token run. Handles the four shapes the
+# schema actually uses: string ("rt_file"), identifier (rt_image_ref, foreign,
+# false), integer (0), and a leading minus for negative sentinels (-1). A
+# minus-int is TWO tokens; treating it as one would silently drop `invalid: -1`.
+fn parse_sffi_arg_value() -> text:
+    var prefix_sign = ""
+    if par_kind_get() == TOK_MINUS:
+        prefix_sign = "-"
+        parser_advance()
+    val k = par_kind_get()
+    if k == 3 or k == 6 or k == 1 or k == 2 or k == 4:
+        val raw = parser_decorator_arg_text(par_text_get())
+        parser_advance()
+        return prefix_sign + raw
+    parser_error("expected a value after `@sffi` key")
+    prefix_sign
+
+# Parses `resource Name` (Grammar A, design §1). The `@sffi(...)` attribute
+# that precedes it has already been captured into PENDING_SFFI_* by the
+# decorator arm of parse_module_body.
+#
+# Scope is WP-A: parse + validate + pre-register the type name. NO lowering,
+# NO drop edges, NO RC, NO borrow enforcement (those are WP-C/E/G). The decl is
+# therefore lowered to an inert `__resource_decl(name, meta_csv)` marker, the
+# same trick `layer` uses -- module_assembly.spl drops it, so a `resource`
+# declaration currently produces zero HIR/MIR/codegen output.
+#
+# Metadata carried on the marker (per design Appendix A, verified 2026-08-07):
+# ownership strategy is selected by per-resource `@sffi` metadata (`sharing:`,
+# presence of `retain:`/`release:`) plus the use-site sigil (R / *R / @R) --
+# NOT by the defining tier. Tier only constrains legality later.
+fn parse_resource_decl(loop_index: i64) -> i64:
+    parser_advance()  # consume soft keyword 'resource'
+    var resource_name = ""
+    if par_kind_get() != TOK_IDENT:
+        parser_error("expected resource name after 'resource'")
+    else:
+        resource_name = par_text_get()
+        parser_advance()
+    if PENDING_SFFI != 1:
+        parser_error("`resource " + resource_name + "` requires an `@sffi(prefix: \"...\")` attribute")
+    elif parser_sffi_value_get("prefix") == "":
+        parser_error("`@sffi` on `resource " + resource_name + "` is missing the required `prefix:` key")
+    # Pre-register the name so `File`, `*File`, `File?` resolve as a type
+    # during parsing (same reason parse_struct_decl/parse_enum_decl do it --
+    # without it, type annotations fall through to TYPE_VOID).
+    if resource_name != "":
+        named_type_register(resource_name, [], [])
+    var meta_parts: [text] = []
+    var i: i64 = 0
+    while i < PENDING_SFFI_KEYS.len():
+        meta_parts.push(PENDING_SFFI_KEYS[i] + "=" + PENDING_SFFI_VALUES[i])
+        i = i + 1
+    parser_reset_pending_sffi()
+    val helper = expr_ident("__resource_decl", 0)
+    var args: [i64] = []
+    args.push(expr_string_lit(resource_name, 0))
+    args.push(expr_string_lit(meta_parts.join(";"), 0))
+    val marker = expr_call(helper, args, 0)
+    decl_val_binding("_expr_resource_" + int_to_str(loop_index), -1, marker, -1)
 
 fn parse_enum_decl() -> i64:
     parser_advance()
@@ -379,6 +496,9 @@ fn parse_module_decl_with_visibility(loop_index: i64, visibility: text) -> i64:
         return parse_mod_decl_with_visibility(visibility)
     if par_kind_get() == 6 and par_text_get() == "layer" and current_ident_is_layer_decl():
         return finalize_decl_visibility(parse_layer_decl(loop_index), visibility)
+    if par_kind_get() == 6 and par_text_get() == "resource" and current_ident_is_resource_decl():
+        # WP-A: `pub resource File` -- soft keyword, see current_ident_is_resource_decl().
+        return finalize_decl_visibility(parse_resource_decl(loop_index), visibility)
     parser_error("expected declaration after visibility modifier")
     -1
 
@@ -424,6 +544,11 @@ fn parser_reset_pending_vhdl_decorators():
     PENDING_UNSAFE = 0
     PENDING_UNSAFE_REASON = ""
     PENDING_UNSAFE_CAPS = []
+    # WP-A: an `@sffi` that never reached a `resource` decl must not leak onto
+    # a later one. The decorator arm itself does NOT call this reset (pending
+    # decorators must survive to the decl they annotate), so clearing here is
+    # per-declaration, matching the other PENDING_* slots.
+    parser_reset_pending_sffi()
 
 fn parse_module_body():
     parser_reset_pending_vhdl_decorators()
@@ -611,6 +736,15 @@ fn parse_module_body():
             if layer_d >= 0:
                 module_add_decl(layer_d)
                 parser_reset_pending_vhdl_decorators()
+        elif par_kind_get() == 6 and par_text_get() == "resource" and current_ident_is_resource_decl():
+            # WP-A: `@sffi(...) resource Name` ("resource" is a soft keyword,
+            # not reserved -- 112 identifier uses of `resource` exist in src/,
+            # including the compiler's own source; see
+            # current_ident_is_resource_decl()).
+            val res_d = parse_resource_decl(i)
+            if res_d >= 0:
+                module_add_decl(res_d)
+                parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and par_text_get() == "cli" and current_ident_is_cli_decl():
             # cli Name: declarative arg parsing block ("cli" is a soft
             # keyword, not reserved, so it never shadows identifiers like
@@ -711,6 +845,25 @@ fn parse_module_body():
                         PENDING_VHDL_GENERIC_ARGS.push(parse_expr())
                         if par_kind_get() == 160:
                             parser_advance()
+                    elif decorator_name == "sffi":
+                        # WP-A: @sffi(prefix: "rt_file", invalid: -1, ...)
+                        # Keyed args only; unknown keys are a hard parse error
+                        # (design §1 schema is closed, fail-closed by design).
+                        if par_kind_get() == 6:
+                            val s_key = par_text_get()
+                            parser_advance()
+                            if par_kind_get() == 161 or par_kind_get() == 100:
+                                parser_advance()
+                                parser_sffi_record_key(s_key, parse_sffi_arg_value())
+                            else:
+                                parser_error("`@sffi` arguments must be `key: value` pairs; got bare `" + s_key + "`")
+                        elif par_kind_get() == 160:
+                            parser_advance()
+                        else:
+                            parser_error("`@sffi` arguments must be `key: value` pairs")
+                            parser_advance()
+                        if par_kind_get() == 160:
+                            parser_advance()
                     elif decorator_name == "unsafe":
                         # @unsafe(reason: "...", capabilities: [raw_ptr, ffi, mmio])
                         # Metadata-only capture; unknown arg forms are skipped.
@@ -744,6 +897,10 @@ fn parse_module_body():
             parser_skip_newlines_and_semicolons()
             if decorator_name == "hardware":
                 PENDING_HARDWARE = 1
+            elif decorator_name == "sffi":
+                # Args already collected into PENDING_SFFI_* above; mark the
+                # attribute present so the NEXT `resource` decl consumes it.
+                PENDING_SFFI = 1
             elif decorator_name == "clocked":
                 # Args already collected into PENDING_CLOCKED_ARGS above.
                 pass_dn
