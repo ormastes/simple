@@ -67,7 +67,14 @@ val GC_ALIAS_MANIFEST: [GcAliasManifestEntry] = [
     # Exposed as `std.gpu` (nogc_async_mut/gpu path) — gc-backed despite prefix
     GcAliasManifestEntry(alias_path: "gpu", effective_family: "gc_async_mut"),
     # Same file exposed under its canonical nogc_async_mut.gpu path
-    GcAliasManifestEntry(alias_path: "nogc_async_mut.gpu", effective_family: "gc_async_mut")
+    GcAliasManifestEntry(alias_path: "nogc_async_mut.gpu", effective_family: "gc_async_mut"),
+    # src/lib/pure/{tensor,tensor_ops,autograd,training}.spl are forwarding
+    # facades: every export is `export use std.gc_async_mut.pure.<mod>.*`
+    # (added 2026-07-25 to stop `std.pure.*` shadowing the real gc-backed
+    # implementation — see file header comments in src/lib/pure/*.spl).
+    # `std.pure` therefore resolves to gc_async_mut, not to a standalone
+    # "pure" runtime family — there is no un-aliased "pure" family.
+    GcAliasManifestEntry(alias_path: "pure", effective_family: "gc_async_mut")
 ]
 
 fn resolve_gc_alias(module_path: text) -> text:
@@ -93,10 +100,66 @@ fn resolve_gc_alias(module_path: text) -> text:
 
 val RUNTIME_FAMILY_MANIFEST: [RuntimeFamilyManifestEntry] = [
     RuntimeFamilyManifestEntry(family: "common", gc_mode: "neutral", rank: 0, allocates: false, noalloc: false),
+
+    # nogc_async_mut_noalloc submodule rows — MUST come before the family-level
+    # row below: runtime_family_manifest_entry matches the FIRST row whose
+    # family is an exact or dot-boundary prefix of the path, so a submodule
+    # row only takes effect if it is listed ahead of its family's catch-all.
+    #
+    # WP-13 (the library-side half of this defect, landed 977a401a05cc)
+    # audited what these submodules actually do at the pointer level:
+    #
+    #   - baremetal/allocator.spl (BumpAllocator/FreeListAllocator/
+    #     FixedBlockAllocator/MultiPoolAllocator) and mimalloc.spl DO
+    #     sub-allocate — but only within a caller-supplied `(base, size)`
+    #     region via rt_mmio_*/rt_ptr_* primitives, no malloc/mmap/brk/libc
+    #     anywhere. Real call sites pass hard-coded static bases. They carry
+    #     allocates: true so a @noalloc fn calling into them trips
+    #     FamilyImport (see
+    #     doc/08_tracking/bug/noalloc_family_manifest_prefix_match_exempts_its_own_allocators_2026-08-07.md).
+    #     Scoped to `.baremetal.allocator`, not the whole `.baremetal` family
+    #     (which also holds HAL/NVIC/PLIC/interrupt code that never touches
+    #     memory) — matches the real import sites, which are all via
+    #     `nogc_async_mut_noalloc.baremetal.allocator.*`, not the re-export.
+    #   - memory/refc_binary.spl's SharedHeap.allocate() returns a LOGICAL
+    #     BinaryRef{id, offset, len} computed from counters — it never
+    #     returns a memory address and allocates nothing. Deliberately NOT
+    #     given an allocating override here; it falls through to the
+    #     family-level `allocates: false` row below. (WP-13's first pass
+    #     called this "arena-bound" and had to retract that as an overclaim —
+    #     do not re-introduce it as a false positive.)
+    #
+    # noalloc: true is kept on the allocating rows below — these submodules
+    # are still part of the no-GC, no-heap-by-default family and must not
+    # import gc_* families either.
+    #
+    # CAVEAT: "bounded/static-region sub-allocation" and "unbounded heap
+    # allocation" both collapse to the same `allocates: true` boolean here —
+    # this manifest has no way to express that distinction. WP-12's five-class
+    # lattice is where that would live; until it lands, `allocates: true` is
+    # the closest available classification and is deliberately the
+    # conservative (reject-more) choice for a @noalloc gate.
+    RuntimeFamilyManifestEntry(family: "nogc_async_mut_noalloc.baremetal.allocator", gc_mode: "nogc", rank: 1, allocates: true, noalloc: true),
+    RuntimeFamilyManifestEntry(family: "nogc_async_mut_noalloc.mimalloc", gc_mode: "nogc", rank: 1, allocates: true, noalloc: true),
+
+    # Family-level catch-all: everything else in the family (async, collections,
+    # execution, hash, io, log, math, memory, path, qemu, replay, sort, string,
+    # and the non-allocator parts of baremetal) is genuinely allocation-free.
     RuntimeFamilyManifestEntry(family: "nogc_async_mut_noalloc", gc_mode: "nogc", rank: 1, allocates: false, noalloc: true),
     RuntimeFamilyManifestEntry(family: "nogc_async_mut", gc_mode: "nogc", rank: 2, allocates: true, noalloc: false),
     RuntimeFamilyManifestEntry(family: "nogc_async_immut", gc_mode: "nogc", rank: 2, allocates: true, noalloc: false),
     RuntimeFamilyManifestEntry(family: "nogc_sync_immut", gc_mode: "nogc", rank: 2, allocates: true, noalloc: false),
+    # "async" — reserved/no-op row: there is no top-level `src/lib/async/`
+    # directory and nothing in the tree imports a bare "async.*" module path
+    # (verified 2026-08-07). The only `async` that exists on disk is the
+    # submodule `nogc_async_mut_noalloc.async`, and that is matched by the
+    # `nogc_async_mut_noalloc` family-level row above (dot-boundary matching
+    # on that row's "nogc_async_mut_noalloc" prefix), so it never reaches
+    # this row at all. This row is therefore currently dead — matching only
+    # an exact "async" path or an "async." prefix, neither of which occurs
+    # anywhere today. Kept, not deleted, so a future top-level `async` family
+    # lands with its classification already in place instead of silently
+    # falling through to "unknown".
     RuntimeFamilyManifestEntry(family: "async", gc_mode: "nogc", rank: 3, allocates: true, noalloc: false),
     RuntimeFamilyManifestEntry(family: "nogc_sync_mut", gc_mode: "nogc", rank: 3, allocates: true, noalloc: false),
     RuntimeFamilyManifestEntry(family: "gc_async_mut", gc_mode: "gc", rank: 4, allocates: true, noalloc: false),
@@ -128,16 +191,32 @@ fn normalized_family_path(module_path: text) -> text:
         path = path[4:path.len()]
     path
 
+fn family_path_matches(path: text, family: text) -> bool:
+    """Return true when `path` IS `family`, or is a dot-delimited submodule of it.
+
+    Dot-boundary matching (not raw `starts_with`) so a family name is never
+    mistaken for a prefix of an unrelated family that happens to share the
+    same leading characters (e.g. "async" must not match "asynchronous_x", and
+    "nogc_sync_mut" must not swallow a hypothetical "nogc_sync_mut2").
+    """
+    if path == family:
+        return true
+    path.starts_with("{family}.")
+
 fn runtime_family_manifest_entry(module_path: text) -> RuntimeFamilyManifestEntry:
     """Return the manifest entry for a runtime family path.
 
     Unknown paths return an entry with rank `-1` and `gc_mode == "unknown"`.
-    The manifest is ordered from most-specific to least-specific names so
-    `nogc_async_mut_noalloc` is classified before `nogc_async_mut`.
+    The manifest is ordered from most-specific to least-specific names, and
+    matching is exact-or-dot-boundary (see `family_path_matches`) so a listed
+    submodule row (e.g. `nogc_async_mut_noalloc.mimalloc`) is classified
+    before falling through to its family's catch-all row
+    (`nogc_async_mut_noalloc`), and `nogc_async_mut_noalloc` is in turn
+    classified before the shorter `nogc_async_mut`.
     """
     val path = normalized_family_path(module_path)
     for entry in RUNTIME_FAMILY_MANIFEST:
-        if path.starts_with(entry.family):
+        if family_path_matches(path, entry.family):
             return entry
     RuntimeFamilyManifestEntry(family: "", gc_mode: "unknown", rank: -1, allocates: false, noalloc: false)
 
