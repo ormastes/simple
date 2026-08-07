@@ -1,0 +1,66 @@
+use std.spec.*
+
+# Regression guard for
+# doc/08_tracking/bug/try_operator_early_return_matches_neither_ok_nor_err_2026-08-07.md
+#
+# The `?` (try) operator must EARLY-RETURN the whole Result when the operand is
+# `Err`. The Rust seed's HIR lowering (`lower_try`, control.rs) instead emitted a
+# bare `rt_enum_payload(inner)` -- an unconditional payload extract with no
+# discriminant test and no early return -- so on the JIT path `?` bound the ERROR
+# payload to the value binding and let execution fall through. The caller then
+# observed `Ok(<error payload>)`.
+#
+# NON-VACUITY: these examples assert on the *value*, not on presence of output.
+# Under the defect `try_err_text` returns `Ok("boom")`, so the `Err` arm below
+# genuinely fails rather than silently not running.
+
+fn _inner_text(bad: bool) -> Result<text, text>:
+    if bad:
+        return Err("boom")
+    return Ok("payload")
+
+fn _inner_i64(bad: bool) -> Result<i64, text>:
+    if bad:
+        return Err("boom")
+    return Ok(7)
+
+# `val x = f()?` -- binding form
+fn _try_bind(bad: bool) -> Result<text, text>:
+    val p = _inner_text(bad)?
+    return Ok("bound:" + p)
+
+# `f()?` in statement position with no binding -- must still early-return
+fn _try_stmt(bad: bool) -> Result<text, text>:
+    _inner_text(bad)?
+    return Ok("fellthrough")
+
+# non-text payload: under the defect the error payload (a pointer) was
+# reinterpreted as i64 and produced garbage
+fn _try_i64(bad: bool) -> Result<text, text>:
+    val n = _inner_i64(bad)?
+    return Ok("n=" + n.to_text())
+
+fn _tag(r: Result<text, text>) -> text:
+    match r:
+        case Ok(v): return "OK:" + v
+        case Err(e): return "ERR:" + e
+    return "NEITHER"
+
+describe "try operator error propagation":
+    it "propagates Err out of a `val x = f()?` binding":
+        expect _tag(_try_bind(true)) to_equal "ERR:boom"
+
+    it "still returns Ok on the success path of a binding":
+        expect _tag(_try_bind(false)) to_equal "OK:bound:payload"
+
+    it "early-returns from a bare `f()?` statement with no binding":
+        expect _tag(_try_stmt(true)) to_equal "ERR:boom"
+
+    it "falls through a bare `f()?` statement when Ok":
+        expect _tag(_try_stmt(false)) to_equal "OK:fellthrough"
+
+    it "does not reinterpret the Err payload as the Ok payload type":
+        expect _tag(_try_i64(true)) to_equal "ERR:boom"
+
+    it "unwraps a non-text Ok payload correctly":
+        expect _tag(_try_i64(false)) to_equal "OK:n=7"

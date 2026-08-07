@@ -1,6 +1,7 @@
 # `?` early-return produces a value that matches neither Ok nor Err (seed)
 
 - **Status:** OPEN
+- **Root cause found:** 2026-08-07 (see "Root cause" below)
 - **Found:** 2026-08-07
 - **Area:** `?` (try) operator — seed runtime, observed via `bin/simple run`
 - **Severity:** high — an error propagated with `?` is silently LOST at the call
@@ -91,3 +92,167 @@ deliberately left out so the next lane is not pointed down an unverified path.
 
 Once fixed, revert `http1.decode_chunked` to the `?` form and re-run the probe
 above; it must print `try bad : ERR:[boom]`.
+
+---
+
+# Root cause (2026-08-07)
+
+## It is worse than "matches neither arm": `?` emits NO BRANCH AT ALL
+
+The original report inferred an early return whose value was mis-tagged. There
+is no early return. Probe (`print` on both sides of the `?`):
+
+```simple
+fn outer(bad: bool) -> Result<text, text>:
+    print("  before")
+    val p = inner(bad)?
+    print("  after: [" + p + "]")
+    return Ok(p)
+```
+
+JIT output for `bad=true`:
+
+```
+  before
+  after: [boom]        <-- execution CONTINUED past the `?`
+caller OK:[boom]       <-- the ERROR PAYLOAD came back as the Ok payload
+```
+
+`?` unwraps the payload **unconditionally**. On `Err` it binds the *error*
+payload to the value binding and falls through. The caller's `match` does select
+the `Ok` arm — the original "neither arm" reading was an artifact of the
+tuple-typed repro reinterpreting a `text` payload.
+
+Corroborating matrix (JIT, `bad=true` for each):
+
+| operand type | expected | observed |
+|---|---|---|
+| `Result<text, text>` | `ERR:boom` | `OK:[boom]` — error payload returned as success |
+| `Result<i64, text>`  | `ERR:boom` | `OK:[n=5867001622113]` — payload pointer read as `i64` |
+| `Result<tuple, text>`| `ERR:boom` | blank — `text` payload indexed as a tuple |
+| bare `f()?` stmt, no binding | `ERR:boom` | `OK:[done]` — fell straight through |
+
+The fault is **not** payload-type dependent, **not** binding-form dependent, and
+**not** cross-module dependent.
+
+## The exact defect (Rust seed)
+
+`src/compiler_rust/compiler/src/hir/lower/expr/control.rs:2194`, `lower_try`:
+
+```rust
+pub(super) fn lower_try(&mut self, inner: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+    let inner_hir = self.lower_expr(inner, ctx)?;
+    let payload_ty = self.result_like_payload_type(inner_hir.ty).unwrap_or(TypeId::ANY);
+    Ok(HirExpr {
+        kind: HirExprKind::BuiltinCall {
+            name: "rt_enum_payload".to_string(),
+            args: vec![inner_hir],
+        },
+        ty: payload_ty,
+    })
+}
+```
+
+`expr?` becomes a bare `rt_enum_payload(expr)` — no `rt_enum_discriminant` test,
+no branch, no return. That is precisely the observed behaviour.
+
+## The correct implementation exists in the seed and is UNREACHABLE
+
+`MirInst::TryUnwrap` is fully implemented on every backend:
+
+- `src/compiler_rust/compiler/src/codegen/instr/result.rs` — `compile_try_unwrap`
+  does the right thing: `rt_enum_discriminant(v) == variant_disc("Err")` →
+  `brif` to the caller-supplied `error_block`, else `rt_enum_payload(v)`.
+- `codegen/instr/mod.rs:1058` (cranelift), `codegen/llvm/functions.rs:1777`
+  (LLVM), `codegen/dispatch.rs:294`, `mir/inst_enum.rs:643`.
+- Unit tests in `codegen/codegen_instr_tests.rs:675`,
+  `codegen/codegen_shared_tests/memory_tests.rs:482`.
+
+**Nothing in MIR lowering ever emits `MirInst::TryUnwrap`.** A grep for
+`TryUnwrap` across `src/compiler_rust/compiler/src/` returns only the
+implementations above and their unit-test constructions. The whole `?`
+early-return machinery is dead code that `lower_try` routes around. The unit
+tests are green because they hand-build the MIR instruction themselves — a
+textbook fail-open: the instruction is proven correct and proven never used.
+
+## The pure-Simple compiler is CORRECT
+
+`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:2501`,
+`lower_try_expr`, emits `try_err` / `try_ok` blocks and calls
+`terminate_return(res_local)` on the Err path — the sanctioned semantics. The
+headline is therefore inverted from the usual: **the pure-Simple lowering is
+right; the seed that everyone actually runs is wrong.** No pure-Simple fix is
+required. (This could not be executed to confirm — Stage 3 is blocked, so there
+is no deployed pure-Simple binary. The claim is a source reading, not a run.)
+
+## Per-engine behaviour
+
+| engine | selector | verdict |
+|---|---|---|
+| interpreter | `SIMPLE_EXECUTION_MODE=interpret` | **CORRECT.** `interpreter/expr.rs:390` raises `CompileError::TryError` and propagates. Probe prints `caller ERR:[boom]`. |
+| JIT (default for `bin/simple run`) | anything not `interpret` | **SILENTLY WRONG**, as above. |
+| native AOT | `bin/simple compile --native` | **REFUSED** (fail-closed): `error: ... 2 function(s) contain constructs that require the interpreter: - outer: [TryOperator]`. `compilability.rs:620` / `src/compiler/80.driver/compilability.spl:32`. `?` has never been AOT-compilable. |
+
+Note: an earlier `native-build` attempt failed with an unrelated worker error;
+the `compile --native` refusal above is the real native verdict.
+
+## Blast radius
+
+Approximately **4,548 postfix-`)?` sites across 526 `.spl` files** in `src/`
+(excluding `vendor/`; a separate 103 `.?` sites are a different operator). Every
+one of them has a broken error path under the JIT. Concentrations:
+`src/lib/nogc_sync_mut` (146 files), `src/lib/nogc_async_mut` (85),
+`src/compiler_rust/lib` (72 — the seed's own bundled Simple library is exposed
+to the seed's own bug), `src/lib/gc_async_mut` (39),
+`src/compiler/70.backend` (28), `src/app/interpreter` (28).
+
+## Regression spec
+
+`test/01_unit/try_operator_error_propagation_spec.spl` — 6 examples covering the
+binding form, the bare-statement form, and a non-`text` payload, in both
+directions.
+
+```
+SPEC FILE VERDICT: ... try_operator_error_propagation_spec.spl declared>=6 executed=6 passed=6 failed=0 dropped=0
+```
+
+Proven non-vacuous by sabotage (replacing the `?` in `_try_bind` with a `match`
+that binds the error payload as if it were the Ok payload — i.e. reproducing the
+defect by hand): `declared>=6 executed=6 passed=5 failed=1 dropped=0`, exactly
+the one intended example.
+
+**It is green for the wrong reason and does not guard this bug.**
+`bin/simple test` hard-defaults to the tree-walk interpreter
+(`.claude/rules/testing.md`: "`run` and `test` are DIFFERENT ENGINES"), and the
+interpreter is the one engine where `?` is correct. The spec guards the
+semantics and would catch an interpreter or pure-Simple regression; catching the
+*JIT* defect needs a probe that runs under `bin/simple run`.
+
+## Fix direction (not landed)
+
+Make `lower_try` reach the already-correct `MirInst::TryUnwrap`, or reproduce
+its shape in HIR. Every piece needed is present in the seed:
+`HirExprKind::Block(Vec<HirStmt>)`, `HirStmt::Let { local_index, ty, value }`,
+`HirStmt::If { condition, then_block, else_block }`, `HirStmt::Return(Option<..>)`,
+and `HirExprKind::Local(usize)` — and `control.rs:1668` already uses
+`HirExprKind::Block(vec![HirStmt::Return(value)])` in expression position as
+precedent. Shape:
+
+```
+Block([
+  Let  { tmp = <inner> },
+  If   { rt_enum_discriminant(tmp) == variant_disc("Err") => [Return(Some(tmp))] },
+  Expr ( rt_enum_payload(tmp) ),
+])
+```
+
+Use the hashed `variant_disc` convention from `codegen/instr/result.rs` (the
+same hash `create_enum_value` uses at construction) — **not** `rt_is_ok`-style
+helpers, and not a positional index.
+
+Not landed here because it is Rust seed surgery requiring a full rebuild, and
+the shared `bin/release/x86_64-unknown-linux-gnu/simple` is in use by ~10
+parallel sessions and must not be overwritten to prove a fix.
+
+Once the seed is fixed, revert `http1.decode_chunked` to the `?` form and re-run
+the probe; it must print `try bad : ERR:[boom]`.
