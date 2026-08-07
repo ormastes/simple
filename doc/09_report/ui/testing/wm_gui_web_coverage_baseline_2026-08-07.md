@@ -991,3 +991,238 @@ Artifacts: `/tmp/corecov/base_full_renderer.sdn`,
 `/tmp/corecov/base_pure_helpers.sdn` (append-mode combined-run artifact,
 also independently confirms the union), `/tmp/corecov/new.sdn`. New spec sha
 (`git hash-object`): `861827d094fafadd278ac250815a93c7998ed3ea`.
+
+## `paint_layout.spl` (U4.5) closure + enumeration of remaining below-target files — 2026-08-07 (session N+3)
+
+### Scope note
+
+This unit was scoped to enumerate files below their **U4.4/U4.5** targets
+specifically (not the whole baseline table) and pick the worst
+coverage-to-size ratio among them, excluding the four files other concurrent
+sessions were actively working on (`core.spl`, `layout.spl`,
+`paint_primitives.spl`, `containment.spl`). The U4.4/U4.5 target set has
+exactly five files; excluding those four leaves exactly one:
+**`simple_web_html_layout_renderer_paint_layout.spl`**, the U4.5 target
+(>=85% line coverage), which is therefore this unit's pick (not a ratio
+contest among many candidates — the exclusion list collapses the U4.4/U4.5
+set to one file). The broader enumeration across all units (U1.2/U4.2/U4.3)
+is given at the end of this section for completeness, since a wider read of
+this report's below-target files is also useful context.
+
+### Baseline (re-measured fresh, artifact-backed — do not trust the report's prior 42%)
+
+Method: throwaway single-`@cover` copy of the shared
+`simple_web_html_layout_renderer_coverage_spec.spl` (never committed, deleted
+after measurement — same method U1.2/U4.3 used), scoped to only this file's
+`@cover` line, run with `SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=... bin/simple
+test ... --coverage --no-cache`.
+
+```
+Results: 39 total, 39 passed, 0 failed
+coverage: src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 49% (714/1433 lines)
+```
+
+The tree has moved since the U4.4/U4.5 appendix's 42% (610/1432) entry —
+other sessions' unrelated fixes (e.g. commit `34095840bbd`, "Draw IR
+text-overflow:ellipsis truncation") raised the real baseline to 49% and all
+39 examples are now green (the appendix's prior sessions saw 28-29/29 on a
+narrower spec slice). This is the third independent confirmation in this
+report's history that a stale banner number must be re-measured, not
+trusted, before being used as a unit's starting point (`containment.spl` and
+`paint_primitives.spl` both hit the same pattern above).
+
+Cross-checked directly against the artifact bytes
+(`/tmp/engcov/pl_baseline.sdn`, distinct `(file, line)` rows with
+`hit_count>0`): **714 distinct lines**, exactly matching the stdout banner —
+unlike an earlier measurement this session on a different file
+(`engine2d/engine.spl`, see appendix below) where writing two runs into the
+same artifact path inflated the artifact's distinct-line count above the
+banner; that discrepancy is attributed to run accumulation on a reused
+output path, not a tool defect, and is called out explicitly so it is not
+mistaken for one.
+
+### Per-function gap analysis and new spec
+
+`paint_layout.spl` is almost entirely plain module-level `fn`s (no
+enclosing `class`), so — unlike `engine2d/engine.spl`'s `class Engine2D`
+`me` methods (see appendix) — its functions attribute real hit lines when
+called directly. Diffing the baseline artifact's hit-line set against
+`^fn `/`^pub fn ` boundaries found a long tail of small pure helpers with
+zero baseline coverage: the DrawIR numeric-clamp/saturate helpers
+(`_html_draw_ir_non_negative`, `_html_draw_ir_clamp_i64`,
+`_html_draw_ir_abs_i32`, `_html_draw_ir_saturated_i32`), the CSS
+shadow-layer-count and background-edge/offset math
+(`_html_draw_ir_shadow_layer_count`, `_html_draw_ir_background_edge`,
+`_html_draw_ir_background_offset`), the tile-op hash/abs helpers
+(`_tile_style_hash`, `_tile_abs_i32`), the input-text byte-boundary walker
+and truncator (`_input_text_source_boundaries`, `input_text_prefix`), the
+input caret/selection color resolvers (`input_caret_color`,
+`input_selection_color`), the `text-decoration-line` serializer
+(`_text_decoration_line_text`), and the overflow-clip existence scan
+(`has_visible_overflow_clip`).
+
+New spec:
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout_coverage_closure_spec.spl`
+(38 `it` blocks, `assert_true`/`assert_false`/`assert_equal` throughout, no
+assertion-free calls; uses `renderer_default_style()` as the `Style` fixture,
+per-field-mutated for each branch). Every oracle was hand-traced against the
+source before landing (e.g. `_html_draw_ir_background_offset`'s percentage
+sentinel: `value <= -1000` encodes `pct = -1000 - value`, so `-1050` with
+`free_space=200` resolves to `200*50/100=100`; `input_selection_color`'s
+`0x66` alpha composed with `caret_color`'s rgb bits).
+
+```
+Results: 38 total, 38 passed, 0 failed
+coverage: src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 3% (52/1433 lines)
+```
+
+Because `SIMPLE_COVERAGE_OUTPUT` overwrites rather than accumulates (per
+this report's own prior finding), the **union** of the baseline and new-spec
+hit-line sets was computed directly from the two artifacts
+(`/tmp/engcov/pl_baseline.sdn`, `/tmp/engcov/pl_closure.sdn`), matched on
+the exact filename suffix `simple_web_html_layout_renderer_paint_layout.spl`
+(not a bare substring — `paint_tiles.spl`/`paint_primitives.spl` rows are
+present in the same artifact and would otherwise inflate the count): 714
+baseline lines, 54 new-spec lines, 30 already overlapping the baseline, 24
+genuinely new.
+
+**Before: 49% (714/1433). After: 51% (738/1433, computed union of two
+artifact-confirmed runs).** +24 lines / +1.68 percentage points. Still well
+short of the >=85% U4.5 target — the low yield relative to 38 passing
+examples matches this report's own documented pattern (first seen on
+`containment.spl:126`): several targeted functions are single-expression
+bodies immediately following their signature line (`_tile_abs_i32`,
+`_html_draw_ir_abs_i32`, `input_caret_color`) and the collector does not
+emit a hit row for that shape even though the passing assertions prove the
+line executed. The remaining ~700-line gap is concentrated in `paint`
+(lines 649-1085, the main per-node box/border/shadow/widget painter),
+`paint_tiled`, and the large `_html_draw_ir_commands`/
+`_html_draw_ir_visible_nodes` DOM-tree-walking functions — all already
+partially exercised by the shared coverage spec and requiring full
+node/style array fixtures to close further, not attempted in this unit.
+
+### Sabotage note
+
+Not performed on the shared `paint_layout.spl` source (a prior sabotage
+attempt on a different file this session — see appendix — left the shared
+working copy sabotaged across two tool-timeout windows before being
+restored, sha256-verified against `origin/main`; that risk was not repeated
+here). The spec's assertions are real hand-traced oracle values, not
+smoke/existence checks, cross-checked against the source at write time
+instead.
+
+### Provenance
+
+Binary: `readlink -f bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`
+(Rust seed). Artifacts: `/tmp/engcov/pl_baseline.sdn`,
+`/tmp/engcov/pl_closure.sdn`. New spec sha (`git hash-object`):
+`5c0229a085a6c3d626b002645680e93cf94da373`.
+
+### Appendix: opportunistic secondary unit, `engine2d/engine.spl` (outside U4.4/U4.5 scope)
+
+Before the scope correction above, this session initially measured
+`src/lib/gc_async_mut/gpu/engine2d/engine.spl` (U1.2 table entry, no
+U4.4/U4.5 target recorded for it — not this unit's proper scope, kept here
+as a secondary opportunistic result rather than discarded). Baseline via
+`test/01_unit/os/compositor/engine2d_damage_report_spec.spl`:
+`coverage: .../engine2d/engine.spl 2% (27/1110 lines)` — reproducing the
+existing U1.2 table entry exactly.
+
+**Instrumentation-gap finding (second independent confirmation of the U4.2
+finding above):** this file is one large `class Engine2D:` with ~120 `me`
+methods. A throwaway probe that directly called 6 real `Engine2D` instance
+methods (`clear`, `draw_rect`, `draw_rect_filled`, `draw_line`,
+`draw_circle`, `draw_circle_filled`, `present`) — all real dispatch calls
+that executed successfully — produced **zero new hit lines**; even
+`create_with_backend` (the constructor, called explicitly by every spec
+that uses this class) only credited 3 of its ~30 body lines. This is the
+same "impl-method bodies undercounted" gap U4.2 first documented on
+`host_gui_event_router.spl`/`hosted_backend.spl`, now reproduced on a second,
+much larger file — the collector systematically undercounts externally
+invoked `me`-method bodies inside a `class`, independent of file size.
+
+Given that gap, only this file's 6 plain module-level `fn`s (lines 92-181,
+outside the class) are reliably attributable. 4 of the 6 had no dedicated
+spec anywhere in the tree (`engine2d_env_get`,
+`engine2d_shutdown_has_typed_route`, `engine2d_scale_pixel_alpha`,
+`engine2d_default_font_config_for`; the other 2 already have dedicated
+specs and were not duplicated). New spec:
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/engine_coverage_closure_spec.spl`
+(11 `it` blocks, real oracles — e.g. `engine2d_env_get("SIMPLE_COVERAGE")`
+against the test process's own env, alpha-scaling arithmetic cross-checked
+by hand). `Results: 11 total, 11 passed, 0 failed`,
+`coverage: .../engine2d/engine.spl 0% (11/1110 lines)` solo. Sabotage
+(`scaled_a` divisor changed 1000->500 in the live file, restored and
+sha256-verified byte-identical to `origin/main` afterward):
+`Results: 11 total, 9 passed, 2 failed` — exactly the two
+opacity-scaling examples affected by the divisor change went red, all
+others (including the divisor-insensitive opacity_milli=0 case) stayed
+green.
+
+Union with baseline (computed, same method as above, suffix-matched on
+`gpu/engine2d/engine.spl`): baseline 67 distinct artifact lines (banner said
+27 — see the discrepancy note above; both counting methods are reported
+here rather than silently picking the flattering one), new-spec-alone 11
+lines, 0 overlap, union 78 lines. **Before: 6.04% (67/1110) by artifact
+count / 2% (27/1110) by banner. After: 7.03% (78/1110) by artifact count.**
+Not a target-bearing unit (no U4.4/U4.5 target recorded for this file), kept
+as a real, sabotage-verified secondary result. New spec sha (`git
+hash-object`): `1a59124e49dd1d636df89437319a0430dc677ce3`.
+
+### Full enumeration of remaining below-target files (all units, for context)
+
+**U4.4/U4.5 (this unit's actual scope), >=90%/>=85% line targets:**
+- `simple_web_html_layout_renderer_layout.spl` — excluded, in-flight by a
+  concurrent session this session observed land at 96-98%.
+- `simple_web_html_layout_renderer_core.spl` — excluded, in-flight;
+  concurrent sessions landed it at 75% (1558/2075) as of this unit's
+  landing, still short of >=90%.
+- `containment.spl` — excluded, already closed to 96% (31/32) per the
+  earlier U4.4 section, MET.
+- `simple_web_html_layout_renderer_paint_layout.spl` — **this unit**: 49%
+  -> 51% (738/1433), still short of >=85%.
+- `simple_web_html_layout_renderer_paint_primitives.spl` — excluded,
+  in-flight; a concurrent session (session 3) landed it at 57% baseline
+  (512/891, one pre-existing unrelated failure) with a closure spec
+  reaching 27% (243/891) solo, union not yet computed by that session as of
+  this report's read — still short of >=85%.
+
+**U4.2, >=90% line target (both capped by the impl-method instrumentation
+gap, not verifiable with the current tool per that unit's own honest gate):**
+- `src/os/compositor/host_gui_event_router.spl` — 7% (6/80), not
+  independently re-measured this session.
+- `src/os/compositor/hosted_backend.spl` — 6% (6/97), not independently
+  re-measured this session.
+
+**U4.3, >=95% line target:**
+- `simple_web_html_layout_renderer_style.spl` — 30% (123/409).
+- `style_block.spl` — 34% (102/300).
+- `style_block_parse.spl` — 90% (439/488, computed union) — closest to
+  target of the U4.3 set.
+- `style_block_resolve.spl` — 65% (206/317).
+- `simple_web_html_layout_renderer_declarations.spl` — 0% (unmeasured
+  floor; no closure spec attempted by U4.3).
+
+**U1.2 baseline table (no formal target recorded, informational only):**
+- `src/os/compositor/compositor_engine2d.spl` — 26% (31/115).
+- `src/lib/gc_async_mut/gpu/engine2d/engine.spl` — 2% banner / 6-7% by
+  artifact count (this unit's secondary appendix above).
+- `src/os/compositor/host_compositor_core.spl` — 8-12% (multiple specs,
+  102-126/1234).
+- `src/lib/gc_async_mut/gpu/browser_engine/layout_inline.spl` — 0%
+  (0/38), all 3 referencing specs fail every example (pre-existing,
+  unrelated to coverage tooling).
+- `src/lib/gc_async_mut/gpu/browser_engine/html_tree_builder.spl` — 51-53%
+  (144-148/277).
+- `src/lib/gc_async_mut/gpu/browser_engine/dom.spl` — 0% (0/79), same
+  failing-spec caveat as layout_inline.spl.
+- `src/lib/gc_async_mut/gpu/browser_engine/layout_table.spl` — 0%
+  (0/99), same failing-spec caveat.
+- `src/lib/common/ui/wm_window_state.spl` — 47% (10/21).
+
+None of the above (outside this unit's own paint_layout.spl and engine.spl
+work) were re-measured this session; the percentages are as last recorded
+in this report and may already be stale per the repeated pattern this
+report documents (containment.spl, paint_primitives.spl, and
+paint_layout.spl above all drifted from their last-recorded number by the
+time they were re-measured).

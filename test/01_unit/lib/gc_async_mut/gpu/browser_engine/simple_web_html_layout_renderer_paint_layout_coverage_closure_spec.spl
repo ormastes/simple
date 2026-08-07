@@ -1,0 +1,216 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 15%
+# @tag: unit, ui, browser_engine, coverage-closure
+#
+# Coverage-closure spec for `paint_layout.spl`'s U4.5 line-coverage target
+# (>=85%, see doc/09_report/ui/testing/wm_gui_web_coverage_baseline_2026-08-07.md
+# "U4.4 / U4.5 closure"). The baseline for this file (measured by the
+# combined `simple_web_html_layout_renderer_coverage_spec.spl`) was 42%
+# (610/1432 measured lines) — the report's own U4.4/U4.5 appendix. This spec
+# targets the pure, no-DOM-fixture helper functions in this file that no
+# existing spec exercises directly: the DrawIR numeric-clamp helpers, the
+# CSS shadow-layer/background-edge/background-offset math, the tile-op
+# hashing/abs helpers, the input-text byte-boundary walkers, and the
+# input caret/selection color and text-decoration-line serializers.
+#
+# `paint`/`paint_tiled`/`_html_draw_ir_commands` (the large DOM-tree-walking
+# functions) are already exercised by the combined coverage spec and are not
+# duplicated here.
+
+use std.spec.{describe, it, assert_true, assert_false, assert_equal}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_layout.{
+    has_visible_overflow_clip,
+    _html_draw_ir_non_negative, _html_draw_ir_shadow_layer_count,
+    _html_draw_ir_clamp_i64, _html_draw_ir_abs_i32, _html_draw_ir_saturated_i32,
+    _html_draw_ir_background_offset, _html_draw_ir_background_edge,
+    _tile_abs_i32, _tile_style_hash,
+    input_text_prefix, _input_text_source_boundaries,
+    input_caret_color, input_selection_color, _text_decoration_line_text
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
+    Style, renderer_default_style
+}
+
+describe "has_visible_overflow_clip":
+    """True when any style in the list has overflow_hidden/overflow_auto_y
+    set and is not display:none; false otherwise."""
+
+    it "is false for an empty style list":
+        assert_false(has_visible_overflow_clip([]))
+
+    it "is false when no style clips overflow":
+        val st = renderer_default_style()
+        assert_false(has_visible_overflow_clip([st, st]))
+
+    it "is true when one style in the list clips overflow and is visible":
+        var st_clip = renderer_default_style()
+        st_clip.overflow_hidden = true
+        assert_true(has_visible_overflow_clip([renderer_default_style(), st_clip]))
+
+    it "ignores a clipping style that is display:none":
+        var st_clip = renderer_default_style()
+        st_clip.overflow_hidden = true
+        st_clip.display = "none"
+        assert_false(has_visible_overflow_clip([st_clip]))
+
+describe "_html_draw_ir_non_negative":
+    it "clamps a negative value to 0":
+        assert_equal(_html_draw_ir_non_negative(-5), 0)
+
+    it "passes a non-negative value through unchanged":
+        assert_equal(_html_draw_ir_non_negative(7), 7)
+        assert_equal(_html_draw_ir_non_negative(0), 0)
+
+describe "_html_draw_ir_shadow_layer_count":
+    it "is 0 for an empty shadow value":
+        assert_equal(_html_draw_ir_shadow_layer_count(""), 0)
+
+    it "counts one layer for a single shadow with no top-level comma":
+        assert_equal(_html_draw_ir_shadow_layer_count("2px 2px 4px #000"), 1)
+
+    it "counts each top-level-comma-separated shadow as its own layer":
+        assert_equal(
+            _html_draw_ir_shadow_layer_count("2px 2px 4px #000, 0 0 2px red"), 2)
+
+describe "_html_draw_ir_clamp_i64":
+    it "clamps a value below the low bound up to low":
+        assert_equal(_html_draw_ir_clamp_i64(-10i64, 0i64, 100i64), 0i64)
+
+    it "clamps a value above the high bound down to high":
+        assert_equal(_html_draw_ir_clamp_i64(200i64, 0i64, 100i64), 100i64)
+
+    it "passes an in-range value through unchanged":
+        assert_equal(_html_draw_ir_clamp_i64(50i64, 0i64, 100i64), 50i64)
+
+describe "_html_draw_ir_abs_i32":
+    it "negates a negative value into i64":
+        assert_equal(_html_draw_ir_abs_i32(-9), 9i64)
+
+    it "passes a non-negative value through as i64":
+        assert_equal(_html_draw_ir_abs_i32(9), 9i64)
+        assert_equal(_html_draw_ir_abs_i32(0), 0i64)
+
+describe "_html_draw_ir_saturated_i32":
+    it "saturates a value above i32::MAX down to i32::MAX":
+        assert_equal(_html_draw_ir_saturated_i32(9999999999i64), 2147483647)
+
+    it "saturates a value below i32::MIN up to i32::MIN":
+        assert_equal(_html_draw_ir_saturated_i32(0i64 - 9999999999i64), 0 - 2147483647 - 1)
+
+    it "passes an in-range i64 through as i32":
+        assert_equal(_html_draw_ir_saturated_i32(42i64), 42)
+
+describe "_html_draw_ir_background_offset":
+    it "passes a normal (non-sentinel) value through unchanged":
+        assert_equal(_html_draw_ir_background_offset(10, 200), 10)
+
+    it "resolves a percentage-sentinel value against free_space":
+        # value <= -1000 encodes a percentage: pct = -1000 - value, offset =
+        # free_space * pct / 100. -1050 encodes 50%, so with free_space=200
+        # the offset is 200 * 50 / 100 = 100.
+        assert_equal(_html_draw_ir_background_offset(0 - 1050, 200), 100)
+
+describe "_html_draw_ir_background_edge":
+    it "returns the full box span unchanged for border-box":
+        val edge = _html_draw_ir_background_edge("border-box", 10, 100, 2, 3, 4, 5)
+        assert_equal(edge.0, 10)
+        assert_equal(edge.1, 100)
+
+    it "insets by border+padding on both sides for content-box":
+        val edge = _html_draw_ir_background_edge("content-box", 10, 100, 2, 3, 4, 5)
+        # start = box_start + border_start + padding_start = 10 + 2 + 4 = 16
+        assert_equal(edge.0, 16)
+        # size = box_size - inset_start - border_end - padding_end = 100 - 6 - 3 - 5 = 86
+        assert_equal(edge.1, 86)
+
+    it "insets by border only for the padding-box default case":
+        val edge = _html_draw_ir_background_edge("padding-box", 10, 100, 2, 3, 4, 5)
+        assert_equal(edge.0, 12)
+        assert_equal(edge.1, 95)
+
+    it "never returns a negative size (clamped by non_negative)":
+        val edge = _html_draw_ir_background_edge("content-box", 0, 5, 10, 10, 10, 10)
+        assert_equal(edge.1, 0)
+
+describe "_tile_abs_i32":
+    it "negates a negative value":
+        assert_equal(_tile_abs_i32(-3), 3)
+
+    it "passes a non-negative value through unchanged":
+        assert_equal(_tile_abs_i32(3), 3)
+        assert_equal(_tile_abs_i32(0), 0)
+
+describe "_tile_style_hash":
+    it "differs when bg differs and matches when every hashed field matches":
+        var a = renderer_default_style()
+        var b = renderer_default_style()
+        assert_equal(_tile_style_hash(a), _tile_style_hash(b))
+        a.bg = 0xFF0000FFu32
+        assert_true(_tile_style_hash(a) != _tile_style_hash(b))
+
+    it "differs when opacity_pct differs":
+        var a = renderer_default_style()
+        var b = renderer_default_style()
+        a.opacity_pct = 50
+        assert_true(_tile_style_hash(a) != _tile_style_hash(b))
+
+describe "input_text_prefix":
+    it "returns the empty text when max_glyphs is 0 or negative":
+        assert_equal(input_text_prefix("hello", 0), "")
+        assert_equal(input_text_prefix("hello", -1), "")
+
+    it "returns the value unchanged when it already fits within max_glyphs":
+        assert_equal(input_text_prefix("hi", 5), "hi")
+
+    it "truncates to the first max_glyphs codepoints on an ASCII value":
+        assert_equal(input_text_prefix("hello world", 5), "hello")
+
+describe "_input_text_source_boundaries":
+    it "starts with a leading 0 boundary for an empty value":
+        val b = _input_text_source_boundaries("")
+        assert_equal(b.len(), 1)
+        assert_equal(b[0], 0i64)
+
+    it "records one boundary per ASCII byte plus the leading 0":
+        val b = _input_text_source_boundaries("abc")
+        assert_equal(b.len(), 4)
+        assert_equal(b[0], 0i64)
+        assert_equal(b[1], 1i64)
+        assert_equal(b[2], 2i64)
+        assert_equal(b[3], 3i64)
+
+describe "input_caret_color":
+    it "returns the style's explicit caret_color when set":
+        var st = renderer_default_style()
+        st.caret_color = 0xFF112233u32
+        assert_equal(input_caret_color(st), 0xFF112233u32)
+
+    it "falls back to fg when caret_color is unset (0)":
+        var st = renderer_default_style()
+        st.fg = 0xFF445566u32
+        st.caret_color = 0u32
+        assert_equal(input_caret_color(st), 0xFF445566u32)
+
+describe "input_selection_color":
+    it "composes the fixed selection alpha with the caret color's rgb":
+        var st = renderer_default_style()
+        st.caret_color = 0xFF112233u32
+        # INPUT_TEXT_SELECTION_ALPHA (0x66) shifted into the alpha byte, rgb
+        # taken from caret_color with its own alpha byte masked off.
+        assert_equal(input_selection_color(st), 0x66112233u32)
+
+describe "_text_decoration_line_text":
+    it "reports none when no decoration line is set":
+        val st = renderer_default_style()
+        assert_equal(_text_decoration_line_text(st), "none")
+
+    it "reports a single active decoration line":
+        var st = renderer_default_style()
+        st.text_decoration_underline = true
+        assert_equal(_text_decoration_line_text(st), "underline")
+
+    it "joins multiple active decoration lines in canonical order":
+        var st = renderer_default_style()
+        st.text_decoration_underline = true
+        st.text_decoration_overline = true
+        st.text_decoration_line_through = true
+        assert_equal(_text_decoration_line_text(st), "underline overline line-through")
