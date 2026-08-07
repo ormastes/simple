@@ -38,10 +38,34 @@ use std.nogc_sync_mut.io.file_ops.{file_read}
 val NOALLOC_ROOT = "src/lib/nogc_async_mut_noalloc"
 
 struct ScannedFn:
-    """One @noalloc-annotated function found by the text scan."""
+    """One function found by the text scan (not only @noalloc ones — every
+    function under NOALLOC_ROOT is scanned so its module/family is known and
+    can be looked up when it turns up as a CALLEE of an @noalloc function).
+    """
     name: text
+    module_path: text
+    is_noalloc: bool
     expr_tags: [text]
     callees: [text]
+
+fn _module_path_from_file(path: text) -> text:
+    """Derive a RUNTIME_FAMILY_MANIFEST-shaped dotted module path from a file
+    path under NOALLOC_ROOT, e.g. "src/lib/nogc_async_mut_noalloc/mimalloc.spl"
+    -> "nogc_async_mut_noalloc.mimalloc", and
+    "src/lib/nogc_async_mut_noalloc/baremetal/allocator.spl" ->
+    "nogc_async_mut_noalloc.baremetal.allocator". A trailing "__init__"
+    segment (the package's own module) collapses onto its directory, matching
+    the family-level manifest row.
+    """
+    var p = path
+    if p.starts_with("src/lib/"):
+        p = p[8:p.len()]
+    if p.ends_with(".spl"):
+        p = p[0:p.len() - 4]
+    p = p.replace("/", ".")
+    if p.ends_with(".__init__"):
+        p = p[0:p.len() - 9]
+    p
 
 fn _indent_of(line: text) -> i64:
     var n = 0
@@ -101,13 +125,24 @@ fn _extract_callees(line: text) -> [text]:
     callees
 
 fn scan_noalloc_functions() -> [ScannedFn]:
-    """Walk NOALLOC_ROOT, find @noalloc fns, extract body facts by indentation."""
+    """Walk NOALLOC_ROOT, recording EVERY function (not only @noalloc ones).
+
+    Every function is kept — not just @noalloc-annotated ones — so a callee
+    reached from an @noalloc function's body can be looked up by name and
+    resolved to the module/family it actually lives in. Restricting this to
+    @noalloc fns only (the previous behaviour) left every callee unregistered,
+    which made `NoallocViolationKind.FamilyImport` structurally unreachable
+    through this driver — see
+    doc/08_tracking/bug/noalloc_family_manifest_prefix_match_exempts_its_own_allocators_2026-08-07.md
+    "New gap found while landing this fix".
+    """
     var results: [ScannedFn] = []
     for path in dir_walk(NOALLOC_ROOT):
         if not path.ends_with(".spl"):
             continue
         if path.ends_with("_spec.spl"):
             continue
+        val module_path = _module_path_from_file(path)
         val content = file_read(path)
         val lines = content.split("\n")
         var i = 0
@@ -139,8 +174,13 @@ fn scan_noalloc_functions() -> [ScannedFn]:
                     for callee in _extract_callees(body_line):
                         callees.push(callee)
                     j = j + 1
-                if is_noalloc:
-                    results.push(ScannedFn(name: name, expr_tags: expr_tags, callees: callees))
+                results.push(ScannedFn(
+                    name: name,
+                    module_path: module_path,
+                    is_noalloc: is_noalloc,
+                    expr_tags: expr_tags,
+                    callees: callees
+                ))
                 i = j
                 continue
             pending_noalloc = false
@@ -150,17 +190,25 @@ fn scan_noalloc_functions() -> [ScannedFn]:
 fn run_noalloc_manifest_scan() -> [text]:
     """Build a real NoallocCapabilityManifest from scanned source and check it.
 
+    Every scanned function (not only @noalloc ones) is registered so that
+    when an @noalloc function calls a non-@noalloc function defined elsewhere
+    under NOALLOC_ROOT (e.g. mimalloc_alloc, heap_init), the checker can look
+    that callee up and see its real family_module — making
+    NoallocViolationKind.FamilyImport reachable through this driver.
+
     Returns formatted violation strings (empty means clean or no @noalloc fns
     found at all — both are reported distinctly by print_noalloc_manifest_scan).
     """
     val scanned = scan_noalloc_functions()
     val manifest = NoallocCapabilityManifest.new()
     for entry in scanned:
-        manifest.register(entry.name, true, false, "")
+        manifest.register(entry.name, entry.is_noalloc, false, entry.module_path)
 
     var fn_bodies: [{text: [text]}] = []
     var fn_callees: [{text: [text]}] = []
     for entry in scanned:
+        if not entry.is_noalloc:
+            continue
         var body_map: {text: [text]} = {}
         body_map[entry.name] = entry.expr_tags
         fn_bodies.push(body_map)
@@ -176,12 +224,16 @@ extern fn rt_exit(code: i64)
 
 fn main():
     val scanned = scan_noalloc_functions()
+    var noalloc_count = 0
+    for entry in scanned:
+        if entry.is_noalloc:
+            noalloc_count = noalloc_count + 1
     val messages = run_noalloc_manifest_scan()
-    if scanned.len() == 0:
+    if noalloc_count == 0:
         print "noalloc manifest scan: found 0 @noalloc-annotated functions under {NOALLOC_ROOT}"
         return
     if messages.len() == 0:
-        print "noalloc manifest scan: {scanned.len()} @noalloc fn(s) checked, 0 violations"
+        print "noalloc manifest scan: {noalloc_count} @noalloc fn(s) checked, 0 violations"
         return
     for message in messages:
         print message

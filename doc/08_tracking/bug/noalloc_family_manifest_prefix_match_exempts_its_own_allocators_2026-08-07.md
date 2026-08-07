@@ -147,3 +147,129 @@ crossing. `check_gc_boundary_imports` only emits a warning (this pass is
 warnings-not-errors by design, per its own file header), so this is not a
 build break, but it is a real, previously-invisible finding worth a look —
 not addressed here, out of scope for the manifest fix.
+
+## Fix (2026-08-07, WP-12a) — driver made callee-aware, first real annotations landed
+
+Addressed both halves of the "New gap found while landing this fix" note
+above.
+
+**(a) Driver now derives `family_module` per callee.**
+`src/compiler/90.tools/verify/noalloc_manifest_scan.spl`:
+`scan_noalloc_functions()` now records **every** function under
+`NOALLOC_ROOT` (not only `@noalloc`-annotated ones) together with the
+`family_module` derived from its own file path (`_module_path_from_file`,
+e.g. `src/lib/nogc_async_mut_noalloc/baremetal/allocator.spl` →
+`nogc_async_mut_noalloc.baremetal.allocator`). `run_noalloc_manifest_scan()`
+registers all of them in the `NoallocCapabilityManifest`, so when an
+`@noalloc` function's body calls a name that resolves to a function defined
+elsewhere in the tree, `manifest.lookup(callee)` now returns its real
+`family_module` instead of the empty string every callee got before. This is
+exactly the "callee's source location" option named in WP-12a's task
+description — verified to be what the codebase actually supports (there are
+no per-file `use`-statement-derived import tables available to this
+text-scan driver).
+
+Also fixed a **second, sibling** vacuity bug found while wiring this up:
+`scripts/audit/noalloc_manifest_scan.spl` (the repo-facing wrapper) had its
+own stale copy of the "is anything found" check —
+`if scanned.len() == 0: print "found 0 ..."` — written against the OLD
+`scan_noalloc_functions()` contract (which returned only `@noalloc` fns, so
+`scanned.len()` was a valid proxy for "how many `@noalloc` fns"). Once
+`scan_noalloc_functions()` was widened to return *every* function (needed
+for (a) above), `scanned.len()` became the total function count (1254) and
+the wrapper printed `"1254 @noalloc fn(s) checked"` even with **zero**
+`@noalloc` annotations anywhere in the tree — a second false-green surface,
+caught only by cross-checking `grep -rl "@noalloc"` (0 files) against the
+audit's own claimed count before trusting it. Fixed by counting
+`entry.is_noalloc` explicitly in both the wrapper and the library driver's
+`main()`.
+
+**(b) First real `@noalloc` annotations landed**, so the checker has
+something to check. Audited and annotated 19 genuinely allocation-free leaf
+functions:
+- `src/lib/nogc_async_mut_noalloc/hash/mod.spl` — all 4 functions
+  (`fnv1a_hash_bytes`, `fnv1a_hash_i64`, `crc32_byte`, `crc32_bytes`): pure
+  integer arithmetic over passed-in arrays, only self-calls.
+- `src/lib/nogc_async_mut_noalloc/math/mod.spl` — all 8 functions
+  (`bm_abs`, `bm_min`, `bm_max`, `bm_clamp`, `bm_pow`, `bm_isqrt`, `bm_gcd`,
+  `bm_lcm`): pure `i64` arithmetic, only self-calls.
+- `src/lib/nogc_async_mut_noalloc/string/mod.spl` — 7 of 8 functions
+  (`bm_str_len`, `bm_str_eq`, `bm_str_starts_with`, `bm_str_ends_with`,
+  `bm_str_find`, `bm_str_to_int`, `bm_hex_to_int`): character-indexed scans
+  over `text` views, no allocation.
+
+**Real finding, deliberately NOT annotated, NOT suppressed:**
+`bm_int_to_str` in the same `string/mod.spl` file uses string interpolation
+(`"{n}"`) to build its return value — a genuine heap allocation at runtime,
+inside a family the manifest otherwise correctly classifies
+`allocates: false`. Left unannotated with an inline comment explaining why,
+per this WP's explicit instruction not to annotate away a real allocation.
+
+**Second real finding, out of scope for this WP, not fixed:** every file
+under `src/lib/nogc_async_mut_noalloc/collections/` (`fixed_array.spl`,
+`fixed_stack.spl`, `fixed_map.spl`, `fixed_set.spl`, `ring_buffer.spl`)
+documents itself as "no heap allocation" / "no heap growth", but every one is
+actually backed by a real growable `[T]` array (`items: [i64]` /
+`data: [i64]`) populated via `.push()` in `new()` and reset via `self.items =
+[]` in `clear()` — both genuine heap operations under Simple's runtime array
+model. The manifest's `allocates` boolean has no way to distinguish
+"allocates once at construction, bounded thereafter" (their actual behaviour)
+from "allocates on every call" — this is precisely the gap WP-12's five-class
+lattice (`none`/`init_only`/`bounded_pool`/`unbounded`/`unknown`) is meant to
+close. Not annotated `@noalloc` here (would be false), not fixed to avoid the
+underlying array allocation (out of scope), and not silently left invisible:
+recorded here as WP-12 input.
+
+**Regression proof, THROUGH the driver, not just a direct unit call**
+(`test/03_system/quality/code_quality/noalloc_manifest_scan_spec.spl`, new
+third `it` block): a spec-owned fixture function
+`probe_family_import_spec_fixture` (written into
+`src/lib/nogc_async_mut_noalloc/collections/`, run through
+`bin/simple run scripts/audit/noalloc_manifest_scan.spl` as a real subprocess,
+then deleted) is annotated `@noalloc` and calls the real
+`heap_init(base: u32, size: u32)` function defined in
+`baremetal/allocator.spl`. The audit process exits 1 and its stdout contains
+`family-import`, `heap_init`, and `allocating family` — proving
+`FamilyImportViolation` is reachable through the actual driver binary, the
+exact case WP-11 fixed in the manifest but could not yet surface.
+`Results: 3 total, 3 passed, 0 failed`.
+
+**Counts and audit output, before/after:**
+- `@noalloc`-annotated functions in the tree: **0 before → 19 after**
+  (`grep -rl "@noalloc" src/lib/nogc_async_mut_noalloc/` now lists
+  `hash/mod.spl`, `math/mod.spl`, `string/mod.spl`).
+- `bin/simple run scripts/audit/noalloc_manifest_scan.spl`:
+  - Before: `noalloc manifest scan: found 0 @noalloc-annotated functions
+    under src/lib/nogc_async_mut_noalloc` (both before AND after the driver
+    change alone, until real annotations landed — the wrapper-bug detour
+    above briefly showed a false `1254 @noalloc fn(s) checked` in between,
+    caught before commit).
+  - After (driver fix + wrapper fix + 19 real annotations):
+    `noalloc manifest scan: 19 @noalloc fn(s) checked, 0 violations`.
+
+**Verification:** `bin/simple lint` on all six changed files: 0 errors (only
+pre-existing warnings, e.g. `RAW-RT-001` on the pre-existing `rt_exit`
+extern, unrelated to this change). Specs run:
+`noalloc_manifest_scan_spec.spl` `Results: 3 total, 3 passed, 0 failed`;
+`noalloc_family_manifest_regression_spec.spl` (WP-11, unaffected)
+`Results: 4 total, 4 passed, 0 failed`; `noalloc_checker_spec.spl`
+`Results: 43 total, 43 passed, 0 failed`; `gc_boundary_check_spec.spl`
+`Results: 17 total, 17 passed, 0 failed`.
+
+**Gate-wiring recommendation: NOT YET.** `scripts/audit/noalloc_manifest_scan.spl`
+remains referenced by nothing in `scripts/check/` or `.github/` — still an
+offline audit, not a CI gate, and this WP deliberately leaves it that way.
+Reasons: (1) the `collections/` finding above is a real, currently-uncaught
+gap between documented and actual allocation behaviour in code that ships
+today — wiring the gate before WP-12's allocation-class lattice exists would
+either force a wave of unreviewed `@noalloc` removals/no-ops or leave the
+gate blind to exactly the cases it should catch; (2) the annotation rollout
+so far covers only 19 of ~1254 functions in the family — a gate today would
+protect a sliver of the tier while implying full coverage. Once WP-12 lands
+class-aware checking (so `init_only`/`bounded_pool` allocation in
+`collections/` can be correctly classified instead of forced into a binary
+`allocates` choice), re-evaluate wiring `noalloc_manifest_scan.spl` into
+`scripts/check/`.
+
+Tracked as WP-12a in
+`doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`.
