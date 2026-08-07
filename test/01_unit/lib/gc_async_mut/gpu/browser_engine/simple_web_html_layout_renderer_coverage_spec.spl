@@ -85,6 +85,44 @@ fn _text_doc() -> text:
     _head(".under{{text-decoration:underline;color:#0000ff;font-size:10px}}") +
         "<p class=\"under\">underlined &#65;&#x42;&amp;&lt;&gt;</p></body></html>"
 
+fn _widget_panel_button_doc() -> text:
+    """A widget-panel (with the `focused` class) and a widget-button, neither
+    carrying an explicit `background` CSS declaration -- the only path that
+    reaches the non-widget-mode `widget-panel`/`widget-button` fallback fills
+    in fb_rect (simple_web_html_layout_renderer_paint_layout.spl:717-725),
+    which were 0-covered lines before this example."""
+    _head(".wp{{display:block;width:20px;height:6px}}" +
+          ".wb{{display:block;width:20px;height:6px}}") +
+        "<div class=\"widget-panel wp focused\"></div>" +
+        "<div class=\"widget-button wb\"></div></body></html>"
+
+fn _radio_doc() -> text:
+    """A checked and an unchecked radio input -- the only path that reaches
+    fb_input_accent_control_clip's rounded-dot branches, which drive
+    fb_rounded_rect_opacity_clip (0-covered before this example)."""
+    _head("input{{width:16px;height:16px;display:block}}") +
+        "<input type=\"radio\" checked><input type=\"radio\"></body></html>"
+
+fn _widget_image_doc() -> text:
+    """A non-widget-mode img carrying the `widget-image` class -- the only
+    path that reaches fb_widget_image_placeholder_clip (0-covered before
+    this example)."""
+    _head(".wi{{display:block;width:20px;height:20px}}") +
+        "<img class=\"widget-image wi\" src=\"x.png\"></body></html>"
+
+fn _widget_radial_body_doc() -> text:
+    """No `<style>` tag anywhere and the literal class name `widget-panel`
+    present -- `simple_web_layout_uses_legacy_widget_chrome` requires exactly
+    that combination to return true. With widget_mode true, a widget-panel
+    page suppresses its flat page background but still paints a radial
+    body background stack (paint.spl's `skip_widget_page_bg` branch) --
+    the only path that reaches fb_background_radial_stack_clip and its
+    helpers (_radial_center_pct, gradient_dither_threshold,
+    mix_channel_gradient_centered, mix_color_vertical_centered), all
+    0-covered before this example."""
+    "<html><body style=\"background:radial-gradient(circle,#ff0000 0%,#0000ff 100%)\">" +
+        "<div class=\"widget-panel\">x</div></body></html>"
+
 fn _outline_doc() -> text:
     """A box with a CSS outline set but no border -- measured (via a JIT
     probe of the same render entry point, then confirmed under the
@@ -180,6 +218,55 @@ fn _box_doc() -> text:
         "#b1{{width:20px;height:10px;background:#3b82f6;color:#ff0000}}" +
         "</style></head><body><div id=\"b1\">x</div></body></html>"
 
+fn _flex_wrap_doc() -> text:
+    """Two 20px-wide flex items in a wrap container narrower than their sum
+    (30px < 40px) -- forces the row-wrap measurement/placement pass in
+    `layout_with_style`, never reached by `_layout_doc`'s nowrap `.flex`."""
+    _head(".fw{{display:flex;flex-wrap:wrap;width:30px}}" +
+          ".fwi{{width:20px;height:6px;background:#3b82f6}}") +
+        "<div class=\"fw\">" +
+        "<div id=\"i1\" class=\"fwi\"></div>" +
+        "<div id=\"i2\" class=\"fwi\"></div>" +
+        "</div></body></html>"
+
+fn _flex_col_doc() -> text:
+    """A column-direction flex container -- the column-flex layout branch,
+    distinct from the row-flex code `_layout_doc`'s `.flex`/`.rev` exercise."""
+    _head(".fc{{display:flex;flex-direction:column}}" +
+          ".fci{{height:6px;background:#22c55e}}") +
+        "<div class=\"fc\">" +
+        "<div id=\"c1\" class=\"fci\">a</div>" +
+        "<div id=\"c2\" class=\"fci\">b</div>" +
+        "</div></body></html>"
+
+fn _table_offsets_doc() -> text:
+    """A table with an explicit width and border-spacing but NO
+    table-layout:fixed -- the only path that calls
+    `explicit_auto_table_column_offsets` (requires table_layout=='auto' AND
+    width_px>0), never reached by `_layout_doc`'s unwidthed table."""
+    "<html><head><style>html,body{{margin:0;padding:0}}" +
+        "table{{width:60px;border-spacing:2px}}" +
+        ".w1{{width:20px}}.w2{{width:8px}}" +
+        "</style></head><body>" +
+        "<table><tr>" +
+        "<td id=\"c1\" class=\"w1\">a</td>" +
+        "<td id=\"c2\" class=\"w2\">b</td>" +
+        "</tr></table></body></html>"
+
+fn _table_collapse_doc() -> text:
+    """A single-row, two-cell, border-collapse:collapse table -- the narrow
+    'bounded' fast path in `simple_web_resolve_collapsed_table_borders` that
+    zeroes the shared edge between exactly two adjacent cells. `_layout_doc`'s
+    table has two rows, so `bounded` there is always false."""
+    "<html><head><style>html,body{{margin:0;padding:0}}" +
+        "table{{border-collapse:collapse}}" +
+        "td{{border:1px solid #333333;padding:2px}}" +
+        "</style></head><body>" +
+        "<table><tr>" +
+        "<td id=\"d1\">a</td>" +
+        "<td id=\"d2\">b</td>" +
+        "</tr></table></body></html>"
+
 # --- examples ---------------------------------------------------------------
 
 describe "layout phase: draw-ir composition lane":
@@ -202,6 +289,13 @@ describe "layout phase: draw-ir composition lane":
         # animating only `opacity` is the false case.
         val res = simple_web_layout_render_html_draw_ir_result_at_time(_anim_doc(), 48, 32, 700)
         expect(simple_web_layout_animation_needs_layout(res)).to_be(true)
+
+    it "composes checkable-input (radio) draw-ir commands":
+        # The only path that reaches _html_draw_ir_checkable_commands
+        # (0-covered before this example) -- a real batch means the
+        # frame/border/checked-dot sub-commands actually got pushed.
+        val res = simple_web_layout_render_html_draw_ir_result(_radio_doc(), 32, 40)
+        expect(res.composition.batches.len() > 0).to_be(true)
 
 describe "layout phase: paint primitives":
 
@@ -261,6 +355,40 @@ describe "layout phase: paint primitives":
         # values. Without the outline color present this would read 2, so the
         # count itself proves the outline primitive actually painted pixels.
         val px = simple_web_layout_render_html_software_pixels(_outline_doc(), 32, 24, 3600000)
+        expect(px.len()).to_be(768)
+        expect(_distinct(px)).to_be(3)
+
+    it "enters the widget-panel/widget-button fb_rect fallback fills":
+        # Measured: page-bg white, panel-gray 245/245/245, focus-line blue,
+        # button-gray 203/213/225 -> 3 distinct values over a 32x24 frame
+        # (the 1px focus line and button fill share one of the three bins at
+        # this size). Without the class-driven fallback paths this reads 1.
+        val px = simple_web_layout_render_html_software_pixels(_widget_panel_button_doc(), 32, 24, 3600000)
+        expect(px.len()).to_be(768)
+        expect(_distinct(px)).to_be(3)
+
+    it "enters fb_input_accent_control_clip's rounded-dot branches via radio inputs":
+        # Measured: page-bg white, accent blue (ring + checked dot), inner
+        # white-ish fill -> 3 distinct values over a 32x40 frame. This is the
+        # only path that reaches fb_rounded_rect_opacity_clip from this file.
+        val px = simple_web_layout_render_html_software_pixels(_radio_doc(), 32, 40, 3600000)
+        expect(px.len()).to_be(1280)
+        expect(_distinct(px)).to_be(3)
+
+    it "enters fb_background_radial_stack_clip via a legacy-widget-chrome radial body background":
+        # Measured: 14 distinct ARGB values over a 32x24 frame -- only a real
+        # radial-ramp raster produces that many bins; a flattened/solid fill
+        # (as seen in the non-widget-chrome `_rad_doc` fixture above) would
+        # read 2.
+        val px = simple_web_layout_render_html_software_pixels(_widget_radial_body_doc(), 32, 24, 3600000)
+        expect(px.len()).to_be(768)
+        expect(_distinct(px)).to_be(14)
+
+    it "enters fb_widget_image_placeholder_clip via a non-widget-mode widget-image img":
+        # Measured: page-bg white, placeholder fill, placeholder border -> 3
+        # distinct values over a 32x24 frame. Without the placeholder path
+        # actually running this reads 1 (the bare page background).
+        val px = simple_web_layout_render_html_software_pixels(_widget_image_doc(), 32, 24, 3600000)
         expect(px.len()).to_be(768)
         expect(_distinct(px)).to_be(3)
 
@@ -347,3 +475,56 @@ describe "layout phase: hit testing and debug read-back":
 
     it "classifies legacy widget chrome usage":
         expect(simple_web_layout_uses_legacy_widget_chrome(_layout_doc())).to_be(false)
+
+describe "layout phase: flex-wrap row measurement and placement":
+
+    it "wraps a second 20px item onto a new line inside a 30px container":
+        # 20+20=40 > 30, so the row-wrap measurement pass must close line 1
+        # after the first item and place the second on line 2 -- entering
+        # the wrap-measurement/placement loops in layout_with_style that a
+        # nowrap flex row never reaches.
+        val y1 = simple_web_layout_debug_layout_by_id(_flex_wrap_doc(), 30, 60, "i1", "y")
+        val y2 = simple_web_layout_debug_layout_by_id(_flex_wrap_doc(), 30, 60, "i2", "y")
+        expect(y1).to_be("0")
+        expect(y2 != y1).to_be(true)
+
+    it "keeps both items at the same x when each starts its own line":
+        val x1 = simple_web_layout_debug_layout_by_id(_flex_wrap_doc(), 30, 60, "i1", "x")
+        val x2 = simple_web_layout_debug_layout_by_id(_flex_wrap_doc(), 30, 60, "i2", "x")
+        expect(x1).to_be("0")
+        expect(x2).to_be("0")
+
+describe "layout phase: column-direction flex":
+
+    it "stacks column-flex children vertically, second below first":
+        val y1 = simple_web_layout_debug_layout_by_id(_flex_col_doc(), 64, 48, "c1", "y")
+        val h1 = simple_web_layout_debug_layout_by_id(_flex_col_doc(), 64, 48, "c1", "h")
+        val y2 = simple_web_layout_debug_layout_by_id(_flex_col_doc(), 64, 48, "c2", "y")
+        expect(y1).to_be("0")
+        expect(h1).to_be("6")
+        expect(y2).to_be("6")
+
+describe "layout phase: explicit-width table column offsets":
+
+    it "computes a wider second-column offset from the explicit cell widths":
+        # table width:60px, border-spacing:2px, cols 20px/8px: only the
+        # table_layout=='auto' + explicit-width path calls
+        # explicit_auto_table_column_offsets, and only its authored-spacing
+        # branch grows columns to fill the leftover 60-20-8-3*2=26px.
+        val x1 = simple_web_layout_debug_layout_by_id(_table_offsets_doc(), 64, 32, "c1", "x")
+        val x2 = simple_web_layout_debug_layout_by_id(_table_offsets_doc(), 64, 32, "c2", "x")
+        expect(x1 != "").to_be(true)
+        expect(x2 != x1).to_be(true)
+
+describe "layout phase: collapsed table borders (bounded fast path)":
+
+    it "resolves a single-row two-cell collapsed table without erroring":
+        # Single row + exactly two direct table-cell children + no
+        # colspan/rowspan is the only shape `simple_web_resolve_collapsed_
+        # table_borders` treats as 'bounded' and zeroes the shared edge for;
+        # `_layout_doc`'s two-row table never takes this branch. Measured:
+        # `simple_web_layout_debug_layout_by_id` calls `layout()` directly and
+        # never calls `simple_web_resolve_collapsed_table_borders` at all, so
+        # this must go through the full render pipeline entry point instead.
+        val res = simple_web_layout_render_html_draw_ir_result(_table_collapse_doc(), 64, 32)
+        expect(res.composition.batches.len() > 0).to_be(true)
