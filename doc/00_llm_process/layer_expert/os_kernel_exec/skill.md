@@ -222,6 +222,48 @@ has a narrower root-cause set as of `606bae83998`:
   the aarch64 field-misread fixed (different engine, currently unreachable per
   the SIGSEGV blocker).
 
+## 2026-08-07 landing: WP-21, `exec_cap_check` gets real logic, caller identity still not threaded
+
+`src/os/kernel/loader/cap_exec_gate.spl`'s `exec_cap_check(caller, path)` used
+to build a fresh, empty `os.kernel.ipc.capability.CapabilityManager` per call
+(`records: []`), so ANY nonzero caller was unconditionally denied — not
+"checked", stuck permanently at deny regardless of real capabilities. The old
+header comment ("this gate never denies") was backwards and incomplete: an
+always-empty manager can also never allow, which made a deny-only spec
+against it vacuous.
+
+- **Fixed:** added `exec_cap_check_caps(caps: CapabilitySet, path: text) ->
+  i32` — real logic on `CapabilitySet.has(...)`, the SAME model
+  `TaskControlBlock.capabilities` / `spawn_authority.spl` already use in
+  production (not the dead `ipc.cap_manager`/`TaskCapRecord` store — see the
+  sibling `execve_spec_blocked_by_dead_ipc_cap_gate...` bug doc, a DIFFERENT
+  dead capability store than this one). Proven both directions,
+  sabotage-verified: `test/01_unit/os/kernel/loader/cap_exec_gate_spec.spl`, 8/8.
+- **Still open:** threading a caller's real `CapabilitySet` into
+  `exec_cap_check(caller: i64, ...)` itself. None of `fs_exec_spawn_as` /
+  `fs_exec_spawn_with_recipe` / `fs_exec_spawn_ring3_with_recipe`
+  (`fs_exec_spawn.spl`) carry a `Scheduler`/`TaskControlBlock` handle — the
+  fs-exec bridge builds its own throwaway bootstrap `Scheduler` internally
+  (`_fs_exec_new_bootstrap_scheduler`), so there is nowhere to look up
+  `caller`'s real capabilities from. Full detail + the reachability audit
+  (confirmed: no userspace-reachable path calls the caller-less wrappers
+  today, only kernel console shell-launch and boot probes do) in
+  `doc/08_tracking/bug/exec_cap_check_caller_identity_not_threaded_2026-08-07.md`.
+- **Found along the way, not this layer's gap:** the REAL userspace-reachable
+  exec/spawn syscalls (`_handle_exec_state`, `_handle_spawn_binary_state`,
+  `_handle_spawn_state` in `src/os/kernel/ipc/syscall_process.spl`) already
+  thread genuine caller identity via `scheduler.get_current()`
+  (`_ambient_spawn_caller` :106) — they never go through `fs_exec_spawn` at
+  all. `Scheduler.get_current() -> TaskId`
+  (`scheduler/_Scheduler/scheduler_lifecycle.spl:355`) is a real, already-used
+  current-task-identity primitive; it just isn't reachable from inside the
+  fs-exec bridge's own throwaway scheduler.
+- **`minimum_assurance` gating via `SimpleArtifactManifest` (WP-19, `53c5eb96997`):
+  checked, absent.** `SimpleArtifactManifest`'s fields
+  (`src/os/kernel/loader/artifact_manifest.spl:198-207`) have no
+  assurance/minimum_assurance field — not more tractable than the
+  caller-identity route, just a different gap.
+
 ## Verification Commands
 
 ```sh
