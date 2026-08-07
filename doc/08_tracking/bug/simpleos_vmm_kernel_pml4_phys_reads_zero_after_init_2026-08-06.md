@@ -135,9 +135,61 @@ is load-bearing, not vacuous.
 
 ## Still open
 
-- **L5** host-side `getfile` retrieval returns an empty object. The serial ends
-  healthy (`exit status=0`, object base64 present, no fault), so this is the
-  retrieval transport, not the VMM/ring-3 path.
+- **L5 correction 2026-08-07 — not reproducing as of source clean vs HEAD:**
+  the "empty object" observation above predates two later runs of the exact
+  same gate, both on source that is clean vs the current HEAD for every file
+  in the chain (`ssh_session.spl`, `baremetal_stubs.c`,
+  `scp_retrieve_over_ssh_uefi.shs` — verified via `git status --porcelain` /
+  `git log`): `build/os/l5_fix_run.log` (2026-08-06 06:01,
+  `retrieved_uefi.o size=712`) and the matched pair
+  `build/os/l5_printing_hello.log` + `build/os/scp_retrieve_over_ssh_uefi.serial.log`
+  (both 2026-08-06 06:03) — guest and host agree in that run: serial shows
+  `[sshd-session] getfile path=/hello.o fsize=1000 bytes=1000`, host shows
+  `retrieved_uefi.o size=1000`, `Machine: EM_X86_64`, host exit code `7` (the
+  expected `a.out` return value), and the script prints
+  `PASS: clang-over-SSH-under-OVMF VERIFIED`. `baremetal_stubs.c` picked up two
+  further unrelated fixes after these runs (`7dd587ba2f5` at 06:14,
+  `c3f5d82c9f1` at 08:41, the latter removing a 1 MiB guest-`open()`
+  truncation) — neither reintroduces this symptom.
+  **Do not write "FIXED"** — no commit is attributable to a fix; the
+  reproduction the "Still open" note was based on (05:48) may have been a
+  transient/timing condition, and the correct confirming action going forward
+  is a fresh run of `sh scripts/os/scp_retrieve_over_ssh_uefi.shs`, expecting
+  the same markers (`retrieved_uefi.o size=<nonzero>`, `Machine: EM_X86_64`,
+  `retrieved.o host exit code = 7`, `PASS: ...VERIFIED`).
+  - **Chain traced** (for the next reader): SSH `getfile <path>` command →
+    `ssh_session.spl:923` (`0x67` byte match) →
+    `_scp_read_file_bytes` (`ssh_session.spl:235`) →
+    `simpleos_fat32_stream_open` / `simpleos_fat32_stream_read_at`
+    (`baremetal_stubs.c:2917`, `:2965`) — synchronous, unbuffered,
+    per-sector NVMe reads. Write side: ring-0 syscall-exit handler
+    `_bare_dump_all_outputs` (`baremetal_stubs.c:16762`) →
+    `fat32_write_file` (`baremetal_stubs.c:3157`) →
+    `_fat32_write_cluster` / `_fat32_write_fat_entry`
+    (`baremetal_stubs.c:2527`, `:2561`) → `_nvme_write_sector_impl`
+    (`baremetal_stubs.c:2096`) — also synchronous, unbuffered, one NVMe I/O
+    command per 512-byte sector, no write-back cache to flush. **This chain is
+    entirely separate from the newer Simple-native FAT32 layer**
+    (`src/os/kernel/fs/fat32.spl` / `fat32_fd_table.spl`,
+    `Fat32Filesystem.rename_at`) — that layer has zero callers in this getfile
+    path, so the "mount-accessor persistence wall" flush hypothesis for that
+    layer does not apply here; there is no dirty-cluster cache in the chain
+    above to flush, which is consistent with the retrieval already succeeding.
+  - **Real residual bound found while tracing (not yet hit by /hello.o):**
+    `_scp_read_file_bytes` (`ssh_session.spl:237`) hard-fails
+    (`return ([], -1)`) whenever `fsize > 4194304` (4 MiB), and the getfile
+    dispatcher (`ssh_session.spl:928`) turns any `fsize <= 0` into an exit-1
+    response with **zero bytes** — a genuine empty host-side retrieval,
+    exactly the L5 symptom, for any file over 4 MiB. `/hello.o` (712–1000
+    bytes) never exercises this. The next artifact this campaign retrieves
+    (e.g. `/hello.elf`, a linked output) should be checked against this bound
+    before assuming L5 is fully closed.
+  - **Spec step skipped, and why:** the getfile chain is freestanding C behind
+    `@cfg(x86_64)` `extern fn` declarations (`simpleos_fat32_stream_open`,
+    `simpleos_fat32_stream_read_at`) with no in-process/interpreter path —
+    there is nothing to construct without booting real (or QEMU) hardware. A
+    spec against `fat32_fd_table.spl` / `Fat32Filesystem` would test a layer
+    this trace shows is not part of the getfile chain, so none was added.
 - **Follow-up:** the two VMM implementations with identical banners should be
   consolidated. Leaving both is exactly what made this defect cost two lanes a
   day; merging was out of scope for the fix.

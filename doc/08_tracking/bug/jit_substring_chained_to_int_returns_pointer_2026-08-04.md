@@ -101,3 +101,68 @@ lane.
 Workaround until then: bind the intermediate to a typed `val`. Do **not** treat
 that as the normal spelling — the chained form is valid Simple and works on the
 interpreter.
+
+## Addendum 2026-08-07: defect is method-specific, not chain-shape-generic
+
+Re-probed with a lambda-free minimal repro
+(`/tmp/.../scratchpad/probe.spl`, `probe2.spl`) using
+`SIMPLE_TIMEOUT_SECONDS=0 bin/simple run <file>` against the currently
+deployed `bin/simple` (which prints "this Rust-built Simple binary is a
+bootstrap seed only" — i.e. this evidence is about the **Rust seed**, see
+binary-identity note below):
+
+```
+"  42  ".trim().to_i64()          -> 42   (correct, even chained)
+"--timeout=800".substring(10).to_int() -> 5939881247105 (garbage pointer)
+"  42  ".trim().to_int()          -> 42   (correct)
+"--timeout=800".substring(10).to_i64() -> 6017459030465 (garbage pointer)
+```
+
+So the *cast name* (`to_int` vs `to_i64`) is irrelevant — both are equally
+broken/fine depending on the **producing method**: `trim()`'s result vreg
+gets a type recorded in the seed's `vreg_types` map (so the `to_ty ==
+from_ty` short-circuit in `methods.rs:131` does NOT fire and the correct
+`rt_string_to_int` path is taken), while `substring()`'s result vreg does
+not. This sharpens the root-cause statement above ("its vreg carries no
+recorded type" is not a blanket property of *all* chained text methods — it
+is specific to which builtin produced the receiver, most likely wherever
+`substring`'s codegen path returns without calling
+`ctx.vreg_types.insert(...)` for its destination vreg, unlike `trim`'s path).
+Not chased further to an exact insert-vs-no-insert line pair in this lane;
+the fix direction in "Why not fixed now" above (stop defaulting an unknown
+receiver to `TypeId::I64`) still fully covers this, since it does not depend
+on which builtin produced the receiver.
+
+**Binary identity / pure-Simple path:** the task that produced this addendum
+was asked to fix this in the pure-Simple self-hosted compiler's `.spl`
+codegen (`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl`).
+That file's `Cast` lowering (`cl_translate_cast`, line ~1150) and its
+`operand_type()` helper (line ~1406) are structurally different from the
+seed: they read a MIR local's **declared static type** (`local_type(...)`)
+rather than a runtime `vreg_types` cache with an `unwrap_or(TypeId::I64)`
+default, so the specific failure mode described above (unknown-receiver
+defaults to i64) has no obvious analogue there — chained-call result locals
+in MIR are typed at construction, not looked up lazily. This could not be
+verified end-to-end: the deployed `bin/simple` is the seed (no
+`simple.build_stamp` next to it, unlike the SimpleOS target triples), and
+the pure-Simple self-hosted candidate on disk
+(`bootstrap/stage3/simple`, `bootstrap/stage3/x86_64-unknown-linux-gnu/simple`)
+only supports `compile`/`native-build` (no `run`), and `native-build` on a
+standalone repro file above failed with `MIR error: unresolved method call:
+substring` / `to_int` — it needs the full stdlib-resolution context that
+`bin/simple run`/`test` set up, which a bare `native-build` invocation on an
+isolated file does not provide. **No `.spl` edit was made** — editing
+`cranelift_codegen_adapter.spl` on unverified belief that the pure-Simple
+path shares this bug (or editing it and being unable to prove the edit does
+anything) would be worse than leaving this open. If this defect needs a
+pure-Simple-verified fix, the prerequisite is restoring a working
+`bootstrap/stage3` (or freshly-built self-hosted) binary that can execute
+`run`/`test` on an isolated file so an A/B is possible.
+
+**Test coverage added:** `test/01_unit/language/text_chained_method_to_int_repro_spec.spl`
+covers the trim/substring chained-to-numeric shape via `bin/simple test`
+(tree-walk interpreter only — cannot reach the JIT/seed, see
+`doc/07_guide/infra/testing.md` "run and test are different engines"). It
+passes today (`Results: 3 total, 3 passed, 0 failed`) regardless of whether
+this defect is open, and is not a gate for it — the runnable probes above,
+via `bin/simple run`, are the real gate.
