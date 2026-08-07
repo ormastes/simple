@@ -902,7 +902,7 @@ impl MirLowering:
 
                     case Assign(target, op, value):
                         val value_local = self.lower_expr(value)
-                        self.lower_assign(target, op, value_local)
+                        self.lower_assign(target, op, value_local, value.kind)
 
                     case Block(block):
                         self.lower_block(block)
@@ -913,7 +913,7 @@ impl MirLowering:
                     case _:
                         ()
 
-    me lower_assign_var(symbol_id: i64, op: HirAssignOp?, value_local: LocalId, span: Span):
+    me lower_assign_var(symbol_id: i64, op: HirAssignOp?, value_local: LocalId, span: Span, value_kind: HirExprKind):
         """Emit the write-back for an assignment to a local variable target
         (shared by the `Var` and `NamedVar` lvalue cases)."""
         if symbol_id < 0:
@@ -1010,7 +1010,21 @@ impl MirLowering:
                         case _:
                             ()
                 var b = self.builder
-                b.emit_copy(local, assigned_value)
+                # Bug iso_transfer_sites_missing_move_return_assign_field
+                # (2026-08-06), CONFLICT-FLAG (mir_lowering_stmts.spl is
+                # fenced, touched per the fence rule's "CONFLICT-FLAG if
+                # must touch" allowance): reassignment to an existing var
+                # (`b = a`) was always emit_copy, even when `a` is an
+                # iso-typed PLACE read -- the exact same transfer the
+                # let-binding site above (mir_hir_type_is_isolated wiring,
+                # LANE ISO1) already handles. Mirror that guard here so the
+                # NLL checker sees a real Move fact for `var`-reassignment
+                # too; non-iso code (found type not Isolated, or a fresh
+                # construction rather than a place read) is unaffected.
+                if mir_expr_kind_is_place(value_kind) and mir_hir_type_is_isolated(self.find_local_hir_type(assigned_value.id)):
+                    b.emit_move(local, assigned_value)
+                else:
+                    b.emit_copy(local, assigned_value)
                 self.builder = b
                 if self.is_runtime_value_local(assigned_value.id):
                     self.mark_runtime_value_local(local.id)
@@ -1049,11 +1063,11 @@ impl MirLowering:
                 else:
                     self.array_element_struct_syms = self.array_element_struct_syms.remove(local.id)
 
-    me lower_assign(target: HirExpr, op: HirAssignOp?, value_local: LocalId):
+    me lower_assign(target: HirExpr, op: HirAssignOp?, value_local: LocalId, value_kind: HirExprKind):
         """Lower assignment."""
         match target.kind:
             case Var(symbol):
-                self.lower_assign_var(mir_stmt_symbol_id_value(symbol), op, value_local, target.span)
+                self.lower_assign_var(mir_stmt_symbol_id_value(symbol), op, value_local, target.span, value_kind)
 
             case NamedVar(symbol, name):
                 # HIR lowering emits NamedVar(symbol, name) for every resolved
@@ -1063,7 +1077,7 @@ impl MirLowering:
                 # catch-all and the write-back Copy was silently dropped --
                 # loop-carried updates (`i = i + 1`) were lost, producing
                 # non-terminating loops on the native path. Mirror the Var arm.
-                self.lower_assign_var(mir_stmt_symbol_id_value(symbol), op, value_local, target.span)
+                self.lower_assign_var(mir_stmt_symbol_id_value(symbol), op, value_local, target.span, value_kind)
 
             case Field(base, field, resolved):
                 # Field assignment: obj.field = value
@@ -1117,8 +1131,31 @@ impl MirLowering:
                                     assigned_field_value = self.ensure_option_handle(rhs_value, declared_field_type)
                                 case _:
                                     ()
+                # Bug iso_transfer_sites_missing_move_return_assign_field
+                # (2026-08-06), CONFLICT-FLAG (mir_lowering_stmts.spl is
+                # fenced, touched per the fence rule's "CONFLICT-FLAG if
+                # must touch" allowance): emit_set_field takes a bare
+                # MirOperand with no instruction backing it, so a struct
+                # field store (`obj.f = a`) of an iso-typed PLACE read had
+                # no Move fact at all -- mirrors the call-argument fix
+                # (switch_operators_calls.spl's `case HirTypeKind.
+                # Isolated(_):` arm in the call-arg loop): insert a
+                # synthetic emit_move(fresh, assigned_field_value) ahead of
+                # the store so the NLL checker's moved_now propagation
+                # picks it up, then store the fresh local's value instead.
+                # Scoped to the plain (non-compound, `op` nil) store only --
+                # a compound `obj.f += a` combines through a binop and is
+                # never itself a place-read transfer of `a`.
+                var store_value = assigned_field_value
+                if not op.? and mir_expr_kind_is_place(value_kind) and mir_hir_type_is_isolated(self.find_local_hir_type(assigned_field_value.id)):
+                    var b_fmove = self.builder
+                    val fmove_ty = self.local_mir_type_of(assigned_field_value) ?? MirType.i64()
+                    val fmove_local = b_fmove.new_temp(fmove_ty)
+                    b_fmove.emit_move(fmove_local, assigned_field_value)
+                    self.builder = b_fmove
+                    store_value = fmove_local
                 var b = self.builder
-                b.emit_set_field(mir_operand_copy(receiver), field_index, mir_operand_copy(assigned_field_value))
+                b.emit_set_field(mir_operand_copy(receiver), field_index, mir_operand_copy(store_value))
                 self.builder = b
 
             case Index(base, index):
@@ -1152,6 +1189,25 @@ impl MirLowering:
                         if val dict_raw = dict_get_res:
                             val dict_current = self.decode_runtime_value(dict_raw, dict_elem_type)
                             dict_value = self.lower_compound_combine(dict_current, op.unwrap(), value_local, dict_elem_type)
+                    # Bug iso_transfer_sites_missing_move_return_assign_field
+                    # (2026-08-06 follow-up), CONFLICT-FLAG (mir_lowering_stmts.spl
+                    # is fenced, touched per the fence rule's "CONFLICT-FLAG if
+                    # must touch" allowance): `d[k] = a` reaches storage via a
+                    # runtime-call emission (rt_dict_set below), the same shape
+                    # as an ordinary call argument -- box_runtime_value/
+                    # emit_call take a bare MirOperand with no instruction to
+                    # hang a Move on, so an iso value stored into a dict was
+                    # silently Copy-only. Mirror the struct-field-store fix:
+                    # insert a synthetic emit_move ahead of boxing. Scoped to
+                    # the plain (non-compound) store only, same rationale as
+                    # the field-store site.
+                    if not op.? and mir_expr_kind_is_place(value_kind) and mir_hir_type_is_isolated(self.find_local_hir_type(dict_value.id)):
+                        var b_dmove = self.builder
+                        val dmove_ty = self.local_mir_type_of(dict_value) ?? MirType.i64()
+                        val dmove_local = b_dmove.new_temp(dmove_ty)
+                        b_dmove.emit_move(dmove_local, dict_value)
+                        self.builder = b_dmove
+                        dict_value = dmove_local
                     self.note_container_elem_type(receiver, dict_value)
                     val boxed_value = self.box_runtime_value(dict_value)
                     val dict_set_op = MirOperand(kind: MirOperandKind.Const(
@@ -1218,6 +1274,20 @@ impl MirLowering:
                     if val array_raw = array_get_res:
                         val elem_current = self.decode_runtime_value(array_raw, elem_type)
                         elem_value = self.lower_compound_combine(elem_current, op.unwrap(), value_local, elem_type)
+                # Bug iso_transfer_sites_missing_move_return_assign_field
+                # (2026-08-06 follow-up), CONFLICT-FLAG (mir_lowering_stmts.spl
+                # is fenced): `arr[i] = a` is the array-store twin of the
+                # dict-store fix just above -- rt_array_set below is also a
+                # runtime-call emission with no instruction to hang a Move
+                # on, so an iso value stored into an array was silently
+                # Copy-only. Same guard, same scoping (plain store only).
+                if not op.? and mir_expr_kind_is_place(value_kind) and mir_hir_type_is_isolated(self.find_local_hir_type(elem_value.id)):
+                    var b_amove = self.builder
+                    val amove_ty = self.local_mir_type_of(elem_value) ?? MirType.i64()
+                    val amove_local = b_amove.new_temp(amove_ty)
+                    b_amove.emit_move(amove_local, elem_value)
+                    self.builder = b_amove
+                    elem_value = amove_local
                 self.note_container_elem_type(receiver, elem_value)
                 val boxed_value = self.box_runtime_value(elem_value)
 

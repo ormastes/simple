@@ -4150,6 +4150,31 @@ impl MirLowering:
                         # misreads it. box_runtime_value no-ops for an
                         # already-tagged/str/array/dict local.
                         arg_local = self.box_runtime_value(arg_local)
+                    case HirTypeKind.Isolated(_):
+                        # WP-M (2026-08-06): an iso-typed call argument is an
+                        # ownership TRANSFER into the callee, same as the
+                        # iso-typed variable-to-variable let-binding site
+                        # (mir_lowering_stmts.spl's mir_hir_type_is_isolated
+                        # wiring). Prior to this, every call argument reached
+                        # arg_operands as a bare `mir_operand_copy(arg_local)`
+                        # OPERAND reference with no MIR instruction backing it
+                        # at all (see the TODO comment above this function),
+                        # so the NLL borrow checker never saw a Move fact for
+                        # `f(a)` and a subsequent `val c = a` use-after-move
+                        # went undetected. Insert a synthetic
+                        # emit_move(fresh, arg_local) ahead of the call so the
+                        # checker's moved_now forward-propagation
+                        # (borrow_graph.spl:459) picks it up, then pass the
+                        # fresh local as the argument. Scoped to this
+                        # direct-call arg loop only -- indirect/lambda callee
+                        # shapes (arg_operands.push at lines 4104/4116 above)
+                        # are unaffected and remain open gaps (filed).
+                        var b_move = self.builder
+                        val moved_ty = self.local_mir_type_of(arg_local) ?? MirType.i64()
+                        val moved_local = b_move.new_temp(moved_ty)
+                        b_move.emit_move(moved_local, arg_local)
+                        self.builder = b_move
+                        arg_local = moved_local
                     case _:
                         ()
                 # SF1 (c), 2026-07-28 — flag-gated, DEFAULT OFF: under
