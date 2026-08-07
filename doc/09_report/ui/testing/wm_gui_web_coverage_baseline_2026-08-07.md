@@ -224,3 +224,96 @@ from the layout/paint-primitive ones) before attempting closure specs.
 ### Disk
 
 `df -h /`: 238G free before, 238G free after (no cargo/bootstrap run).
+
+## U4.4 / U4.5 — timeout unblocked, real measurements obtained — 2026-08-07 (session 2)
+
+Follow-up to the "NOT MET, honest gate report" section above. The blocker was
+the coverage spec (`simple_web_html_layout_renderer_coverage_spec.spl`) dying
+at the test runner's 120s hard timeout before printing any `coverage:` line
+for the four target files.
+
+### `slow_it` fix verified to genuinely raise the ceiling
+
+Commit `423c0c46b834f4caec6a7fd7a479806515b7b6f0` (earlier this session) fixed
+`run_one_via_daemon`'s deadline computation in
+`src/app/test_runner_new/test_runner_client.spl` to consult
+`effective_timeout_secs()` (600s floor when the spec source contains
+`"slow_it "`) per-path inside the daemon-lane request loop, not once per batch
+from the un-bumped CLI default. Verified empirically, not assumed:
+
+- Baseline (no `slow_it` in the file): `bin/simple test <spec> --coverage
+  --no-cache`, `SIMPLE_COVERAGE=1` -> **`Process timed out` / `error:
+  test-runner: file timed out`, `Duration: 120210ms`, exit 1, zero `coverage:`
+  lines, zero example output.** Confirms the 120s death is still real.
+- After marking one `it` block `slow_it` (`use std.spec.{describe, it,
+  slow_it, expect}` + the "blends a soft box shadow" example) and re-running
+  the identical command: **completed in `real 3m44.877s`, exit 0, `Results: 28
+  total, 28 passed, 0 failed`, 10 `coverage: <path> NN% (H/T)` lines printed,
+  and a 898,856-byte `SIMPLE_COVERAGE_OUTPUT` artifact (8,254 rows) backing
+  them.** The fix lifts the ceiling for the daemon lane as designed.
+
+### Real per-file line coverage (artifact-backed, `/tmp/u44_cov_slowit.sdn`
+### then `/tmp/u44_cov_closure1.sdn` after the closure example below)
+
+| Target file | Line coverage | Target | Met? |
+|---|---|---|---|
+| `simple_web_html_layout_renderer_layout.spl` (U4.4) | 40% (658/1634) | >=90% | **NOT MET** |
+| `simple_web_html_layout_renderer_core.spl` (U4.4) | 54% (1123/2075) | >=90% | **NOT MET** |
+| `simple_web_html_layout_renderer_paint_layout.spl` (U4.5) | 42% (610/1432) | >=85% | **NOT MET** |
+| `simple_web_html_layout_renderer_paint_primitives.spl` (U4.5) | 35% (319/907) | >=85% | **NOT MET** |
+
+(Line counts in this table are the coverage collector's instrumentable-line
+denominators, which are smaller than raw `wc -l` — e.g. `_layout.spl` is 2613
+raw lines but 1634 measured lines — consistent with how `containment.spl`'s
+denominator, 32, was already smaller than its raw line count in the prior
+section.)
+
+These are the first artifact-backed line-coverage numbers ever obtained for
+these four files — previously "unmeasured", now measured and honestly UNMET.
+Closing a ~2000-line and a ~1400-line module family each from ~40-54% to 90%
+and ~85% respectively is multiple further closure units of work (the same
+scale as U4.1-U4.6 combined); this session did not attempt to pad past that
+with assertion-free calls or inflate the denominator.
+
+### One real closure example landed (paint_primitives.spl), sabotage-verified
+
+Added `"enters fb_outline_clip via a box with a CSS outline set"` to
+`simple_web_html_layout_renderer_coverage_spec.spl` (new fixture
+`_outline_doc()`: a box with `outline: 2px solid #ff0000` and no border).
+`fb_outline_clip` (`simple_web_html_layout_renderer_paint_primitives.spl:905-914`)
+was 0/10 lines covered; `fb_border`/`fb_border_sides` (dead code, zero
+callers anywhere in `browser_engine/`) were confirmed unreachable and are not
+targeted. Oracle: 3 distinct ARGB values (page-bg white, box-bg blue, outline
+red) over a 32x24 frame -- first measured via a throwaway `bin/simple run`
+JIT probe (`/tmp/probe_outline.spl`), then independently confirmed under the
+interpreter engine actually used by `bin/simple test`.
+
+Re-measured after adding the example: `paint_primitives.spl` 34% (311/907) ->
+**35% (319/907)**, `Results: 29 total, 29 passed, 0 failed`.
+
+Sabotage (in-tree, per the shared-WC worktree caveat -- `git worktree add
+HEAD` gives an incomplete checkout here since `src/lib/gc_async_mut/**` is
+staged-but-uncommitted): `fb_outline_clip` was made an unconditional
+`return fb` no-op. Re-run: `Results: 29 total, 28 passed, 1 failed`, failure
+`expected 2 to equal 3` on exactly `"enters fb_outline_clip via a box with a
+CSS outline set"` -- every other example, including the other 4 paint-
+primitive examples, stayed green. Restored; `sha256sum` of the file matched
+both the pre-sabotage value and `git show origin/main:<path>` exactly
+(`698622002e7bcce616ccf5f283e0b230b00f6ccafe76de2838fb980de6d2dbb9`), and
+`git diff --no-index` against the origin/main blob was empty.
+
+### Remaining gap
+
+`_layout.spl`, `_core.spl`, `_paint_layout.spl` now have zero new closure
+examples this session (only `paint_primitives.spl` got one, as a proof of the
+now-unblocked methodology). Reaching >=90%/>=85% on all four files is a
+multi-unit follow-up; not scoped or attempted here beyond unblocking
+measurement itself and landing one verified example. Tracked in
+`doc/08_tracking/bug/simple_web_html_layout_renderer_layout_paint_coverage_gap_2026-08-07.md`.
+
+### Provenance / disk
+
+Binary: `readlink -f bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`
+(Rust seed, per repo policy for `test`). `df -h /`: 238G free before, 238G
+free after (no cargo/bootstrap run). Spec runs took ~3m45s-3m47s each (well
+under the new 600s slow_it ceiling and the 900s tool budget).

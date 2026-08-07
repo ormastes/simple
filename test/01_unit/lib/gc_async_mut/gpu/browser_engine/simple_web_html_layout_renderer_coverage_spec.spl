@@ -31,7 +31,7 @@ earlier revision of this spec past 25 minutes.
 @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_style.spl
 """
 
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, slow_it, expect}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir_result,
     simple_web_layout_render_html_draw_ir_result_at_time,
@@ -84,6 +84,14 @@ fn _round_doc() -> text:
 fn _text_doc() -> text:
     _head(".under{{text-decoration:underline;color:#0000ff;font-size:10px}}") +
         "<p class=\"under\">underlined &#65;&#x42;&amp;&lt;&gt;</p></body></html>"
+
+fn _outline_doc() -> text:
+    """A box with a CSS outline set but no border -- measured (via a JIT
+    probe of the same render entry point, then confirmed under the
+    interpreter here) to be the only fixture in this file that reaches
+    `fb_outline_clip`, which was 0/10 lines covered before this example."""
+    _head(".bx{{width:20px;height:12px;background:#3b82f6;outline:2px solid #ff0000;outline-offset:1px}}") +
+        "<div class=\"bx\"></div></body></html>"
 
 fn _anim_doc() -> text:
     "<html><head><style>" +
@@ -212,7 +220,7 @@ describe "layout phase: paint primitives":
                 n = n + 1
         n
 
-    it "blends a soft box shadow across many intermediate values":
+    slow_it "blends a soft box shadow across many intermediate values":
         # The load-bearing one: 78 distinct values over a 32x24 frame can only
         # come from `fb_soft_box_shadow` actually running its falloff. A solid
         # fill would leave 2 or 3.
@@ -247,6 +255,14 @@ describe "layout phase: paint primitives":
         val px = simple_web_layout_render_html_software_pixels(_text_doc(), 40, 24, 3600000)
         expect(px.len()).to_be(960)
         expect(_distinct(px)).to_be(2)
+
+    it "enters fb_outline_clip via a box with a CSS outline set":
+        # Measured: background blue, outline red, page-bg white -> 3 distinct
+        # values. Without the outline color present this would read 2, so the
+        # count itself proves the outline primitive actually painted pixels.
+        val px = simple_web_layout_render_html_software_pixels(_outline_doc(), 32, 24, 3600000)
+        expect(px.len()).to_be(768)
+        expect(_distinct(px)).to_be(3)
 
 describe "layout phase: software raster lane":
 
