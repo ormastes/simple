@@ -227,3 +227,63 @@ U2 remains blocked on the same, already-understood, already-out-of-scope
 interpreted-lane HIR-lowering defect. No sabotage test performed (no green
 baseline exists to sabotage). This is a legitimate, expected "nothing changed"
 result, not a stale or skipped re-check.
+
+## T17 execution — re-verified against the freshly redeployed binary (2026-08-07, 22:42-22:46Z)
+
+Per `doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md` T17
+("Unblock the WM/web showcase child-frame timeout" — acceptance: "an actual
+verdict line (not a timeout) is produced"). `bin/simple` had just been
+redeployed (`bin/release/x86_64-unknown-linux-gnu/simple`,
+sha256 `e43c31a8a14d98ebfebab34e2fedb16808ff04481f336b31c83df9028d6efe9`,
+mtime 2026-08-07 22:39Z) with this session's unrelated parser fix
+(`fix(parser): accept comma-separated args in bare-ident-string-call form`).
+T17's own premise — that the internal 10s `examples/**` watchdog is what was
+masking the real verdict — was **already refuted by this doc's own prior
+re-verifications** (23:12-23:15 the day before): both used
+`SIMPLE_TIMEOUT_SECONDS=1750` to disable that watchdog and already got the
+real `child-frame-timeout:missing` FAIL verdict, twice. There is no new
+"deploy-blocked" premise specific to T17 visible in the plan doc or this bug
+doc; the only actionable content of T17 given that prior state is to
+**re-confirm the verdict still reproduces cleanly against the just-redeployed
+binary** (ruling out that the redeploy silently changed this path), which is
+what this entry records.
+
+Ran the exact repro command from "Reproduction" above:
+
+```
+SIMPLE_WM_HEADLESS_CAPTURE=1 SIMPLE_TIMEOUT_SECONDS=1750 \
+  bin/simple run examples/06_io/ui/wm_web_standards_showcase_gui.spl
+```
+
+wrapped in an external `timeout 900` (well above the internal 10s watchdog,
+which is disabled here, and above the observed ~3.3min wall time — the
+external timeout was not the limiting factor, consistent with this doc's
+opening finding). Wall clock 22:42:33Z-22:45:54Z (~3m21s), process exit code
+1 (an application-level FAIL exit, not 124/137/143 — no timeout/kill
+occurred). Full log: `/tmp/t17_run.log` (4295 lines, scratch, not committed).
+
+Real verdict lines, present and unambiguous:
+
+```
+wm_web_standards_showcase_host_headless_status=fail
+wm_web_standards_showcase_host_headless_reason=child-frame-timeout:missing
+```
+
+Root cause unchanged: the same
+`[jit-fallback] HIR lowering error: ... SimpleWebEngine2DStaticPixelCache.retain_result_for_html: struct 'SimpleWebLayoutEngine2DReadbackResult' field 'resolved_backend': whole module dropped to the interpreter`
+line fires twice, as in every prior run. Node progress this run:
+`[font-inherit-trace] index=87` of 149 (`of=149` from the
+`[web-style-producer]` trace lines), i.e. **87/149 ≈ 58%** styled before the
+host's child-frame deadline fired — matching the prior run's 86/149 (58%)
+almost exactly. `uptime` at completion showed load average 24.31/19.21/11.53
+(5+ concurrent shared-WC sessions), comparable to the prior 17-27 range, so
+the matching node count is consistent (same contention regime), not evidence
+of a regression or improvement from the redeploy.
+
+**T17 acceptance is satisfied**: a real verdict line was produced, not a
+timeout, on the freshly redeployed binary. **No code change was made** — per
+this doc's existing scope note, fixing the underlying interpreted-lane
+per-node cost is a separate, already-tracked, multi-session defect
+(`doc/08_tracking/bug/web_style_producer_4s_per_node_interpreted_lane_2026-07-29.md`)
+and remains out of scope for T17, whose acceptance bar is only "a real
+verdict exists," which it does and continues to.
