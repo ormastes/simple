@@ -109,52 +109,27 @@ fn semi_write_raw(data_addr: i32, len: i32) -> i32:
 fn semi_write_string_raw(text_addr: i32):
     semi_host_call(SYS_WRITE0, text_addr, 0)
 
+# Semihosting host call (SYS_* operation dispatch via the debugger trap).
+#
+# The trap instruction is per-architecture (thumbv7m `bkpt #0xAB`, arm
+# `svc #0x123456`, riscv `ebreak` inside the magic NOP sandwich) and there is
+# no equivalent on x86_64. Emitting all four variants unconditionally, as this
+# function previously did, produced assembly that is invalid on EVERY target:
+# an arm build choked on the riscv blocks exactly as an x86_64 build choked on
+# all of them. The placeholders were never bound either -- `{op}` reached the
+# assembler literally, because the bare `asm """..."""` form carries no operand
+# list (the bound form is `asm volatile("...{op}...", op = in(reg) value)`).
+#
+# Selecting one variant per target needs conditional compilation, and the
+# `@cfg("target_arch", ...)` attribute is currently parsed but INERT -- it gates
+# nothing. Until that is fixed this call reports "unavailable" rather than
+# emitting wrong-architecture instructions or silently faking success.
+#
+# TODO: restore the per-architecture trap once `@cfg("target_arch", ...)` gates
+# code generation. See
+# doc/08_tracking/bug/asm_template_placeholders_never_bind_2026-08-07.md
 fn semi_host_call(op: i32, arg0: i32, arg1: i32) -> i32:
-    var result = 0
-
-    # @cfg("target_arch", "thumbv7m")
-    asm """
-        mov r0, {op}
-        mov r1, {arg0}
-        bkpt #0xAB
-        mov {result}, r0
-    """
-
-    # @cfg("target_arch", "arm")
-    asm """
-        mov r0, {op}
-        mov r1, {arg0}
-        svc #0x123456
-        mov {result}, r0
-    """
-
-    # @cfg("target_arch", "riscv64")
-    asm """
-        mv a0, {op}
-        mv a1, {arg0}
-        .option push
-        .option norvc
-        slli zero, zero, 0x1f
-        ebreak
-        srai zero, zero, 7
-        .option pop
-        mv {result}, a0
-    """
-
-    # @cfg("target_arch", "riscv32")
-    asm """
-        mv a0, {op}
-        mv a1, {arg0}
-        .option push
-        .option norvc
-        slli zero, zero, 0x1f
-        ebreak
-        srai zero, zero, 7
-        .option pop
-        mv {result}, a0
-    """
-
-    result
+    -1
 
 fn test_start():
     semi_print(HANDLE_TEST_START)

@@ -34,6 +34,12 @@ var semihost_buf_initialized: bool = false
 var semihost_uart_base: i32 = 0x10000000  # QEMU virt UART0
 var semihost_uart_initialized: bool = false
 
+# Portable MMIO byte access. The UART register reads/writes below used to be
+# hand-written per-architecture inline assembly; these runtime primitives
+# (src/runtime/runtime.h) are the canonical, architecture-neutral spelling.
+extern fn rt_volatile_read_u8(addr: i64) -> i64
+extern fn rt_volatile_write_u8(addr: i64, value: i64)
+
 val RAW_BINARY_MAGIC: i32 = 0x53          # 'S' frame magic
 
 var semihost_capabilities: i32 = 0
@@ -118,53 +124,12 @@ fn semihost_uart_init():
 
 # reason: positional baremetal semihost_transport API
 fn semihost_uart_write_reg(offset: i32, value: i32):
-    var addr = semihost_uart_base + offset
-
-    # @cfg("target_arch", "riscv32")
-    asm """
-        sb {value}, 0({addr})
-    """
-
-    # @cfg("target_arch", "riscv64")
-    asm """
-        sb {value}, 0({addr})
-    """
-
-    # @cfg("target_arch", "arm")
-    asm """
-        strb {value}, [{addr}]
-    """
-
-    # @cfg("target_arch", "thumbv7m")
-    asm """
-        strb {value}, [{addr}]
-    """
+    val addr = semihost_uart_base + offset
+    rt_volatile_write_u8(addr.to_i64(), value.to_i64())
 
 fn semihost_uart_read_reg(offset: i32) -> i32:
-    var addr = semihost_uart_base + offset
-    var result = 0
-
-    # @cfg("target_arch", "riscv32")
-    asm """
-        lbu {result}, 0({addr})
-    """
-
-    # @cfg("target_arch", "riscv64")
-    asm """
-        lbu {result}, 0({addr})
-    """
-
-    # @cfg("target_arch", "arm")
-    asm """
-        ldrb {result}, [{addr}]
-    """
-
-    # @cfg("target_arch", "thumbv7m")
-    asm """
-        ldrb {result}, [{addr}]
-    """
-
-    result
+    val addr = semihost_uart_base + offset
+    rt_volatile_read_u8(addr.to_i64()).to_i32()
 
 fn semihost_uart_write_byte(byte_val: i32):
     if not semihost_uart_initialized:
@@ -272,30 +237,8 @@ fn semihost_open_stdout() -> i32:
     fd
 
 fn uart_probe_lsr(base: i32) -> i32:
-    var addr = base + UART_LSR
-    var result = 0xFF
-
-    # @cfg("target_arch", "riscv32")
-    asm """
-        lbu {result}, 0({addr})
-    """
-
-    # @cfg("target_arch", "riscv64")
-    asm """
-        lbu {result}, 0({addr})
-    """
-
-    # @cfg("target_arch", "arm")
-    asm """
-        ldrb {result}, [{addr}]
-    """
-
-    # @cfg("target_arch", "thumbv7m")
-    asm """
-        ldrb {result}, [{addr}]
-    """
-
-    result
+    val addr = base + UART_LSR
+    rt_volatile_read_u8(addr.to_i64()).to_i32()
 
 fn semihost_probe_capabilities() -> i32:
     var caps = CAP_WRITEC  # WRITEC always assumed available
@@ -338,52 +281,27 @@ fn semihost_auto_select():
 fn semihost_get_capabilities() -> i32:
     semihost_capabilities
 
+# Semihosting host call (SYS_* operation dispatch via the debugger trap).
+#
+# The trap instruction is per-architecture (thumbv7m `bkpt #0xAB`, arm
+# `svc #0x123456`, riscv `ebreak` inside the magic NOP sandwich) and there is
+# no equivalent on x86_64. Emitting all four variants unconditionally, as this
+# function previously did, produced assembly that is invalid on EVERY target:
+# an arm build choked on the riscv blocks exactly as an x86_64 build choked on
+# all of them. The placeholders were never bound either -- `{op}` reached the
+# assembler literally, because the bare `asm """..."""` form carries no operand
+# list (the bound form is `asm volatile("...{op}...", op = in(reg) value)`).
+#
+# Selecting one variant per target needs conditional compilation, and the
+# `@cfg("target_arch", ...)` attribute is currently parsed but INERT -- it gates
+# nothing. Until that is fixed this call reports "unavailable" rather than
+# emitting wrong-architecture instructions or silently faking success.
+#
+# TODO: restore the per-architecture trap once `@cfg("target_arch", ...)` gates
+# code generation. See
+# doc/08_tracking/bug/asm_template_placeholders_never_bind_2026-08-07.md
 # reason: positional baremetal semihost_transport API
 fn semi_host_call(op: i32, arg0: i32, arg1: i32) -> i32:
-    var result = 0
-
-    # @cfg("target_arch", "thumbv7m")
-    asm """
-        mov r0, {op}
-        mov r1, {arg0}
-        bkpt #0xAB
-        mov {result}, r0
-    """
-
-    # @cfg("target_arch", "arm")
-    asm """
-        mov r0, {op}
-        mov r1, {arg0}
-        svc #0x123456
-        mov {result}, r0
-    """
-
-    # @cfg("target_arch", "riscv64")
-    asm """
-        mv a0, {op}
-        mv a1, {arg0}
-        .option push
-        .option norvc
-        slli zero, zero, 0x1f
-        ebreak
-        srai zero, zero, 7
-        .option pop
-        mv {result}, a0
-    """
-
-    # @cfg("target_arch", "riscv32")
-    asm """
-        mv a0, {op}
-        mv a1, {arg0}
-        .option push
-        .option norvc
-        slli zero, zero, 0x1f
-        ebreak
-        srai zero, zero, 7
-        .option pop
-        mv {result}, a0
-    """
-
-    result
+    -1
 
 export CAP_INTERNED, CAP_UART, CAP_WRITE, CAP_WRITE0, CAP_WRITEC, LSR_THR_EMPTY, OP_OPEN, OP_WRITE, OP_WRITE0, OP_WRITEC, RAW_BINARY_MAGIC, TRANSPORT_BATCH_N, TRANSPORT_BUFFERED, TRANSPORT_INTERNED, TRANSPORT_RAW_BINARY, TRANSPORT_UART, TRANSPORT_WRITE, TRANSPORT_WRITE0, TRANSPORT_WRITEC, UART_IER, UART_LCR, UART_LSR, UART_THR
