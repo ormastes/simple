@@ -200,6 +200,22 @@ output-cap truncation — `lab_hardening.spl`, 7/7), and **L4** (`/api/test/...`
 S4 contract on `lab_server.spl`; 4/5 — one real, filed gap: the generic
 `/api/test/click` handler doesn't invoke `SimpleLabApp`'s actual `add_cell()`,
 see `doc/08_tracking/bug/lab_test_api_click_does_not_invoke_simple_lab_app_add_cell_2026-08-07.md`).
+**H3** (robustness evidence, `doc/09_report/notebook_lanes_robustness_evidence_2026-08-07.md`):
+load smoke (200/200 authenticated `GET /api/lab/status`) and the 100-cell soak
+(100/100 real cell executions via `.../execute`) both pass with real measured
+latencies. **A CRITICAL bug was found and fixed during H3**:
+`src/lib/nogc_sync_mut/http_server/parser.spl` calls `stream.read_bytes(...)`
+for any request with a body, but `TcpStream` had no `read_bytes` method at
+all — under the interpreter this crashed the ENTIRE server process on any
+POST/PUT with a body (confirmed via direct raw-socket repro: server gone from
+`ps`, next connection refused). Not Simple-Lab-specific — any consumer of
+`parse_request_with_limits` with a body was affected. Fixed:
+`TcpStream.read_bytes(count: i32)` added to `src/lib/nogc_sync_mut/io/tcp.spl`
+as a thin wrapper over `read_exact` + `rt_bytes_to_text`. Re-verified H1's
+spec 7/7 after the fix. One remaining fuzz-lite gap, root-caused and refiled:
+`read_line_chunked` silently truncates an oversized header line at 8192 bytes
+instead of erroring (`doc/08_tracking/bug/lab_http_parser_oversized_header_line_silently_truncated_not_rejected_2026-08-07.md`) —
+not a crash, left RED rather than weakened.
 
 Not yet started or still landing: K5-K6 (blocked on the GPU plan's D1 —
 `src/lib/common/svmg/ref_vm.spl` doesn't exist yet, so B3/B4/C3 can't land
