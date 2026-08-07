@@ -1,0 +1,203 @@
+# SVM-G Task D4 unit spec — checked-HIR test-body lowering to SGP bytecode.
+#
+# Design doc: doc/05_design/runtime/gpu_remote_interpreter_architecture.md
+# §4.4. Bodies below are hand-built genuine `compiler.hir` nodes (HirExpr /
+# HirStmt / HirBlock -- the real checked AST the frontend's HIR lowering
+# pass produces, same precedent as
+# test/01_unit/compiler/backend/llvm_mutable_global_static_spec.spl), fed
+# into `compiler.backend.svmg_lowering.lower_svmg_program`, and the emitted
+# code is executed on Task D2's host reference VM
+# (`std.common.svmg.ref_vm.assemble_and_run`) exactly the way D1/D2's own
+# spec (test/01_unit/lib/svmg/ref_vm_spec.spl) executes hand-assembled
+# programs -- proving the lowering pass produces bytecode the real
+# interpreter accepts and runs correctly, not just bytes that happen to
+# satisfy this pass's own encoder.
+
+use std.spipe.*
+use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind, MethodResolution}
+use compiler.hir.hir_definitions.{
+    HirExpr, HirExprKind, HirStmt, HirStmtKind, HirBlock,
+    HirBinOp, HirAssignOp, HirCallArg, HirParam, HirInterpolation,
+}
+use compiler.common.diagnostics.span.{Span}
+use compiler.backend.svmg_lowering.{SvmgHelperFn, LoweredProgram, lower_svmg_program}
+use std.common.svmg.ref_vm.{assemble_and_run, read_records}
+
+# ============================================================================
+# HIR construction helpers (span/type are irrelevant to lowering -- always
+# the same placeholders, matching the precedent spec's approach).
+# ============================================================================
+
+fn ty() -> HirType:
+    HirType(kind: HirTypeKind.Int(bits: 32, signed: true), span: Span.empty())
+
+fn e(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: ty(), span: Span.empty())
+
+fn s(kind: HirStmtKind) -> HirStmt:
+    HirStmt(kind: kind, span: Span.empty())
+
+fn int_lit(v: i64) -> HirExpr:
+    e(HirExprKind.IntLit(value: v, suffix: nil))
+
+fn var_(sym: SymbolId) -> HirExpr:
+    e(HirExprKind.Var(symbol: sym))
+
+fn named_var(sym: SymbolId, name: text) -> HirExpr:
+    e(HirExprKind.NamedVar(symbol: sym, name: name))
+
+fn binop(op: HirBinOp, l: HirExpr, r: HirExpr) -> HirExpr:
+    e(HirExprKind.Binary(op: op, left: l, right: r))
+
+fn call_arg(v: HirExpr) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: v, span: Span.empty())
+
+fn call(callee: HirExpr, args: [HirExpr]) -> HirExpr:
+    var call_args: [HirCallArg] = []
+    for a in args:
+        call_args = call_args.push(call_arg(a))
+    e(HirExprKind.Call(callee: callee, args: call_args, type_args: []))
+
+fn expect_to_equal(actual: HirExpr, expected: HirExpr) -> HirExpr:
+    val expect_call = call(named_var(SymbolId(id: 9000), "expect"), [actual])
+    e(HirExprKind.MethodCall(receiver: expect_call, method: "to_equal", args: [call_arg(expected)], resolution: MethodResolution.Unresolved))
+
+fn block_no_tail(stmts: [HirStmt]) -> HirBlock:
+    HirBlock(stmts: stmts, has: false, value: int_lit(0), span: Span.empty())
+
+fn block_with_tail(stmts: [HirStmt], tail: HirExpr) -> HirBlock:
+    HirBlock(stmts: stmts, has: true, value: tail, span: Span.empty())
+
+fn param(sym: SymbolId, name: text) -> HirParam:
+    HirParam(symbol: sym, name: name, type_: ty(), has_default: false, default: int_lit(0), span: Span.empty())
+
+# ============================================================================
+# Positive cases
+# ============================================================================
+
+describe "SVM-G Task D4 lowering — expect(add(1,2)).to_equal(3)":
+    it "lowers a non-recursive helper-fn call plus expect().to_equal() and executes it correctly on D2's VM":
+        val a_sym = SymbolId(id: 1)
+        val b_sym = SymbolId(id: 2)
+        val add_fn = SvmgHelperFn(
+            name: "add",
+            params: [param(a_sym, "a"), param(b_sym, "b")],
+            body: block_with_tail([], binop(HirBinOp.Add, var_(a_sym), var_(b_sym))),
+        )
+        val body = block_no_tail([
+            s(HirStmtKind.Expr(expr: expect_to_equal(
+                call(named_var(SymbolId(id: 10), "add"), [int_lit(1), int_lit(2)]),
+                int_lit(3),
+            ))),
+        ])
+        val prog = lower_svmg_program(body, [add_fn], 1000)
+        assert_true(prog.ok)
+        val result = assemble_and_run(prog.code, prog.step_budget, prog.entry_pc)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 1)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, 3)
+
+describe "SVM-G Task D4 lowering — bounded for-range loop":
+    it "sums 0..5 (exclusive) via a bounded for loop and checks the total with expect().to_equal()":
+        val i_sym = SymbolId(id: 1)
+        val sum_sym = SymbolId(id: 2)
+        val range_expr = e(HirExprKind.Range(start: int_lit(0), end: int_lit(5), inclusive: false, step: nil))
+        val loop_body = block_no_tail([
+            s(HirStmtKind.Assign(target: var_(sum_sym), op: HirAssignOp.Add, value: var_(i_sym))),
+        ])
+        val body = block_no_tail([
+            s(HirStmtKind.Let(symbol: sum_sym, type_: ty(), init: int_lit(0))),
+            s(HirStmtKind.Expr(expr: e(HirExprKind.For(var_: i_sym, iter: range_expr, body: loop_body, label: nil)))),
+            s(HirStmtKind.Expr(expr: expect_to_equal(var_(sum_sym), int_lit(10)))),
+        ])
+        val prog = lower_svmg_program(body, [], 5000)
+        assert_true(prog.ok)
+        val result = assemble_and_run(prog.code, prog.step_budget, prog.entry_pc)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 1)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, 10)
+
+describe "SVM-G Task D4 lowering — fixed-size array sum":
+    it "sums a fixed-size array via for-x-in-array and checks the total with expect().to_equal()":
+        val arr_sym = SymbolId(id: 1)
+        val x_sym = SymbolId(id: 2)
+        val sum_sym = SymbolId(id: 3)
+        val arr_lit = e(HirExprKind.ArrayLit(elements: [int_lit(1), int_lit(2), int_lit(3), int_lit(4), int_lit(5)], type_: nil))
+        val body = block_no_tail([
+            s(HirStmtKind.Let(symbol: arr_sym, type_: ty(), init: arr_lit)),
+            s(HirStmtKind.Let(symbol: sum_sym, type_: ty(), init: int_lit(0))),
+            s(HirStmtKind.Expr(expr: e(HirExprKind.For(var_: x_sym, iter: var_(arr_sym), body: block_no_tail([
+                s(HirStmtKind.Assign(target: var_(sum_sym), op: HirAssignOp.Add, value: var_(x_sym))),
+            ]), label: nil)))),
+            s(HirStmtKind.Expr(expr: expect_to_equal(var_(sum_sym), int_lit(15)))),
+        ])
+        val prog = lower_svmg_program(body, [], 5000)
+        assert_true(prog.ok)
+        val result = assemble_and_run(prog.code, prog.step_budget, prog.entry_pc)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 1)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, 15)
+
+# ============================================================================
+# Rejection cases — one per design §4.4 excluded construct
+# ============================================================================
+
+describe "SVM-G Task D4 lowering — rejects excluded constructs (design doc §4.4)":
+    it "rejects closures (Lambda)":
+        val body = block_no_tail([
+            s(HirStmtKind.Expr(expr: e(HirExprKind.Lambda(params: [], body: int_lit(0), captures: [])))),
+        ])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "closures")
+
+    it "rejects GC types (struct-literal construction)":
+        val struct_ty = HirType(kind: HirTypeKind.Named(symbol: SymbolId(id: 99), args: []), span: Span.empty())
+        val body = block_no_tail([
+            s(HirStmtKind.Expr(expr: e(HirExprKind.StructLit(type_: struct_ty, fields: [])))),
+        ])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "GC types")
+
+    it "rejects actors/async (await)":
+        val body = block_no_tail([
+            s(HirStmtKind.Expr(expr: e(HirExprKind.Await(expr: int_lit(0))))),
+        ])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "actors/async")
+
+    it "rejects text manipulation beyond literals (string interpolation)":
+        val interp = HirInterpolation(expr: int_lit(1), has_format: false, format: "", span: Span.empty())
+        val body = block_no_tail([
+            s(HirStmtKind.Expr(expr: e(HirExprKind.StringLit(value: "x={0}", interpolations: [interp])))),
+        ])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "text manipulation")
+
+    it "rejects dictionaries (DictLit)":
+        val body = block_no_tail([
+            s(HirStmtKind.Expr(expr: e(HirExprKind.DictLit(entries: [], key_type: ty(), value_type: nil)))),
+        ])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "dictionaries")
+
+    it "rejects recursion (a helper fn calling itself)":
+        val n_sym = SymbolId(id: 1)
+        val bad_fn = SvmgHelperFn(
+            name: "bad",
+            params: [param(n_sym, "n")],
+            body: block_with_tail([], call(named_var(SymbolId(id: 20), "bad"), [var_(n_sym)])),
+        )
+        val body = block_no_tail([
+            s(HirStmtKind.Expr(expr: expect_to_equal(call(named_var(SymbolId(id: 21), "bad"), [int_lit(1)]), int_lit(1)))),
+        ])
+        val prog = lower_svmg_program(body, [bad_fn], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "recursion")

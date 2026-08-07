@@ -527,6 +527,42 @@ B1-B6 CUDA, C2-C3 Vulkan, D1-D4 SVM-G, E1-E2 docs/CI) not started.
   failed`), file byte-identical to the recovered source again.
 - Landed via the same plumbing-commit pattern as D1/D2.
 
+## Status: D4 (test-body lowering to SVM-G) -- landed 2026-08-07
+
+- `src/compiler/70.backend/svmg_lowering.spl` (`lower_svmg_program`,
+  design §4.4 subset -> SGP blob) + `test/01_unit/compiler/backend/svmg_lowering_spec.spl`,
+  recovered from the same `a05020fed04` commit as D3, byte-identical
+  (verified both before and after the sabotage-probe round trip below).
+  Fail-fast diagnostics name the unsupported construct (`self.fail(...)`)
+  rather than silently falling back, matching the VHDL-backend rule the
+  design doc calls out (§4.4).
+- Lowers `expect(actual).to_equal(expected)` to `SYS_RESULT`, integer/float
+  arithmetic and comparisons to their `OP_*` opcodes, bounded loops and
+  non-recursive calls into control-flow opcodes, and rejects one
+  representative construct per excluded category (closures, GC types,
+  actors/async, recursion beyond the fixed frame count, text manipulation
+  beyond literals).
+- Verify: `bin/simple test test/01_unit/compiler/backend/svmg_lowering_spec.spl`
+  -> `Results: 9 total, 9 passed, 0 failed`. `bin/simple lint` on both
+  files: 0 `error[...]` diagnostics.
+- **Sabotage probe:** cross-wired `binop_opcode`'s `HirBinOp.Add` arm to
+  emit `OP_SUB` instead of `OP_ADD` -> RED (`9 total, 8 passed, 1 failed`);
+  reverted -> GREEN (`9 total, 9 passed, 0 failed`), file byte-identical to
+  the recovered source again.
+- Landed via the same plumbing-commit pattern as D1/D2/D3. **All four of
+  D1/D2/D3/D4 are now present and green on `origin/main`** (verify with
+  `bin/simple test test/01_unit/lib/svmg/ test/02_integration/svmg/
+  test/01_unit/compiler/backend/svmg_lowering_spec.spl` sequentially, per
+  `.claude/rules/testing.md`'s "Test database sequential access" rule --
+  do not run these as parallel invocations).
+- **Process note for future recovery work:** every one of D1-D4's files in
+  this session came from git history that was never merged to `main`, not
+  from re-authoring. Before re-implementing something this plan says is
+  "landed" but absent from the working tree, check `git log --all
+  --oneline -- <path>` first -- it is often faster and more faithful to
+  recover a verified-working past version than to rewrite from the design
+  doc.
+
 ## Affected Layers
 
 - [[test_runner]] — `doc/00_llm_process/layer_expert/test_runner/skill.md`
