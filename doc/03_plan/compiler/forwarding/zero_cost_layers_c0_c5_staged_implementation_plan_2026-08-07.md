@@ -50,12 +50,15 @@ milestone's acceptance check is explicit about this.
 
 | Artifact | State |
 |---|---|
-| `src/compiler/35.semantics/layer_eq_checker.spl` (98 lines) | Landed. Structural proof engine over **declared** `LayerEqType`/`LayerEqField` facts — obligations 1-4 of the design doc (field count, name mapping, per-field type+offset+size, whole-type size+align). Self-contained; not fed by real compiler layout computation yet. |
+| `src/compiler/35.semantics/layer_eq_checker.spl` (**189 lines** as of `248291b5caa2`) | Landed. Structural proof engine over **declared** `LayerEqType`/`LayerEqField` facts. **All 8 obligations now implemented** (1-4 field count / name mapping / per-field type+offset+size / whole-type size+align; 5-8 enum discriminants, ownership, address space, unit-color-alpha tags — `248291b5caa2`, M3). **Still NOT fed by real compiler layout computation** — see the M2 note below; `6d65d7d7142d` added a real-layout *spec* only, not production wiring. |
 | `test/01_unit/compiler/semantics/layer_eq_checker_spec.spl` | 7 specs, seed-green, sabotage-tested (type check skipped → rejection specs went red, reverted). |
 | `src/compiler/35.semantics/effect_verifier.spl` (385 lines) | Landed, 16/16 green this session. `@copy_budget(N)`/`@bounded_loop` verdict engine over **extracted facts** (`CopySite`, loop descriptors) — explicitly documents it is not yet fed by real MIR extraction ("driver/MIR work that cannot be verified in this tree"). |
 | `src/app/desugar/forwarding.spl` (504 lines) | The CURRENT forwarding mechanism — text-level source generation, four phases. This is what C2 replaces. Not a stub; it is the thing being obsoleted, so C2 must keep it as fallback until collapse is proven (design doc §6 item 4). |
 | `doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md` | Facet/dynSMF design C3 should extend, not duplicate. |
-| `layer` keyword / `@layer_eq` / `@layer_field` / `HirForwardDecl` in the parser or HIR | **Absent** — confirmed by grep this session (only hit is the checker file name itself). No `"layer"` token in `10.frontend` parsing at all. |
+| `layer` keyword in the parser | **LANDED 2026-08-07** — `8bf932d3f8d7` parses `layer NAME` / `layer NAME uses A, B` as a soft keyword; `37eeb0b54bce` wires the decls into `LayerDagRegistry` end-to-end as **real compile errors**. (This row previously read "Absent"; that is now false.) |
+| `@layer(NAME)` module tagging | **LANDED 2026-08-07** — `0cea0bb7dbe7`, exposed as `ParserModule.tagged_layer`. |
+| `HirForwardDecl` in HIR | **PARTIAL 2026-08-07** — `56093d1d9d11` adds `src/compiler/20.hir/hir_forward_decl.spl` (56L) + spec. The struct exists; it is **referenced by zero passes**. See M4. |
+| `@layer_eq` / `@layer_field` attribute parsing | **Still absent** — design doc §6 item 1 remains open; this is the un-landed half of M2. |
 
 The design doc's own §6 "Honestly deferred" list (6 items) is the TODO queue
 this plan schedules into milestones. Re-reading it before starting any
@@ -67,7 +70,15 @@ Numbering matches the sketch's C0-C5 lanes; each is split further where a
 single lane is still too large to be "smallest independently shippable."
 Fidelity intentionally drops after M3 — see §3.
 
-### M0 — `layer` declaration parsing + DAG validation (zero runtime effect)
+### M0 — `layer` declaration parsing + DAG validation (zero runtime effect) — **LANDED**
+
+**Status 2026-08-07: LANDED.** `e31cb8287393` (`src/compiler/35.semantics/layer_dag_checker.spl`,
+150L — registry + cycle detection + declared-upward rejection),
+`8bf932d3f8d7` (soft-keyword parsing of `layer NAME` / `layer NAME uses A, B`),
+`37eeb0b54bce` (decls wired into `LayerDagRegistry` end-to-end, surfacing as
+real compile errors). Both halves of the acceptance check are now satisfied —
+including the second half the landing note below recorded as unsatisfiable.
+
 
 **Scope:** parse `layer NAME` and `layer NAME uses A, B`; build the layer
 DAG; reject cycles and reject declared-upward `uses` edges. No `@layer(...)`
@@ -105,7 +116,9 @@ else.
   "zero runtime effect" isn't just asserted in prose — nothing downstream
   breaks when a codebase adds layer decls and does nothing else with them).
 
-  **2026-08-07 landing note:** the second half of this check ("compiles
+  **2026-08-07 landing note (SUPERSEDED — kept for history; the decl-dispatch
+  site it calls "still unidentified" was located and wired by `8bf932d3f8d7` +
+  `37eeb0b54bce` later the same day):** the second half of this check ("compiles
   through the full pipeline") is unsatisfiable as stated, per §0 above:
   `bin/simple` is the Rust seed, which does not parse `src/compiler/`
   (pure-Simple) source at all, and the `layer` keyword is not wired into
@@ -122,7 +135,17 @@ else.
   `doc/05_design/language/forwarding/layer_forwarding_and_layer_eq_types.md`
   §6 item 2.
 
-### M1 — `@layer(gui)` module tagging + same-layer/downward call rule
+### M1 — `@layer(gui)` module tagging + same-layer/downward call rule — **LANDED (WARN-level)**
+
+**Status 2026-08-07: LANDED.** M1a `0cea0bb7dbe7` (`@layer(NAME)` parsing →
+`ParserModule.tagged_layer`). M1b `e1f9ed31a770` (`src/compiler/90.tools/verify/layer_call_scan.spl`
+230L + `src/compiler/35.semantics/layer_call_direction_checker.spl` 183L, standalone)
+then `eab9b5f9c5b5` (whole-program wiring in `driver_source_pipeline_parsing.spl`).
+**Deliberately WARN-level, not gating** — the edge source is still a bare
+`ident(` text heuristic. Promotion to a real compile error requires AST/HIR-derived
+call edges; carved as unit **T13** in
+`doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md`.
+
 
 **Scope:** parse `@layer(NAME)` on `module` decls; resolve a symbol's owning
 layer; add the semantic check "a call target's layer must equal the caller's
@@ -232,7 +255,20 @@ Binary provenance: `readlink -f bin/simple` resolves to
 Rust bootstrap seed (`bin/simple --version` prints the seed warning) — same
 seed-vs-self-hosted caveat every other spec run in this doc already carries.
 
-### M2 — production-wire `layer_eq_checker.spl` to real layout, not fixtures
+### M2 — production-wire `layer_eq_checker.spl` to real layout, not fixtures — **PARTIAL (spec-side only)**
+
+**Status 2026-08-07: PARTIAL — do not treat as landed.** `6d65d7d7142d`
+("feed layer_eq_checker real compute_struct_layout output (M2)") is prefixed
+`test(compiler):` and its diffstat is **one file, +171**: it adds only
+`test/01_unit/compiler/semantics/layer_eq_checker_real_layout_spec.spl`.
+Production `layer_eq_checker.spl` still consumes **declared**
+`LayerEqType`/`LayerEqField` facts, and `@layer_eq`/`@layer_field` attribute
+parsing (§6 item 1) is still absent. The milestone's own load-bearing acceptance
+case — a compiler-inserted-padding difference that fixture-declared "same size"
+would wrongly pass — is therefore **not yet demonstrated against the production
+path**. Remaining work is unit **T14** in
+`doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md`.
+
 
 **Scope:** design doc §6 item 3, verbatim. Replace `LayerEqType`/
 `LayerEqField` fixture construction with values read from the compiler's
@@ -265,7 +301,14 @@ of item 1 not already covered by M0/M1).
   confirmed against the compiler's own layout computation as it exists in a
   live build (seed or self-hosted) — state which.
 
-### M3 — obligations 5-8 (enum discriminants, ownership, address space, unit/color/alpha tags)
+### M3 — obligations 5-8 (enum discriminants, ownership, address space, unit/color/alpha tags) — **LANDED**
+
+**Status 2026-08-07: LANDED.** `248291b5caa2` — `layer_eq_checker.spl` +109
+(now 189L), with `layer_eq_checker_spec.spl` +176 and
+`layer_eq_checker_real_layout_spec.spl` +12. All 8 obligations are implemented.
+Note the ordering wrinkle: M3 landed while M2 is still PARTIAL, so obligations
+5-8 are proven against **declared** facts, same caveat as 1-4.
+
 
 **Scope:** design doc §6 item 6. Parse `@unit`/`@space`/`@color`/`@alpha`
 tags; extend `check_layer_eq` with obligations 5-8 (currently only 1-4 are
@@ -286,7 +329,18 @@ compiler-pass work (a transitive forwarding graph, MIR-level chain collapse,
 AOP weaving, devirtualization) that this planning pass will not pretend to
 design in full. What follows is scope + sequencing + acceptance shape only.
 
-### M4 (= C2) — `HirForwardDecl` emission, phase-by-phase retirement of text-desugar
+### M4 (= C2) — `HirForwardDecl` emission, phase-by-phase retirement of text-desugar — **PARTIAL (struct only)**
+
+**Status 2026-08-07: PARTIAL.** `56093d1d9d11` ("HirForwardDecl data shape
+(C2/M4 first slice, unwired)") adds `src/compiler/20.hir/hir_forward_decl.spl`
+(56L) + `test/01_unit/compiler/hir/hir_forward_decl_spec.spl` (50L). The data
+shape exists and is spec-covered; **no pass references it** (grep: zero hits
+outside its defining file), and `src/app/desugar/forwarding.spl` (504L text
+generator) remains authoritative for all four phases. Emission for the
+plain-symbol phase is unit **T15** in
+`doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md`, sequenced
+after T14 (M2).
+
 
 Emit `HirForwardDecl` metadata for the *simplest* of `src/app/desugar/forwarding.spl`'s
 four phases first (`fn name = target` — no field-path projection, no trait
@@ -338,6 +392,11 @@ M0 (layer DAG) → M1 (call direction) → M2 (real layout) → M3 (tags/obligat
                                                                     ↓
                                               M7 (@zero_forward_path gate)
 ```
+
+Status overlay (2026-08-07): **M0 LANDED · M1 LANDED (WARN-level) · M2 PARTIAL
+(spec-side only) · M3 LANDED · M4 PARTIAL (struct only, unwired) · M5-M7
+DESIGNED-ONLY.** Note M3 landed ahead of M2's production wiring, so the chain
+below was not walked strictly in order — M2's gap is real and still open.
 
 M0-M3 are genuinely independent-shippable in the sense the task asked for:
 each has its own file list, its own spec target, its own sabotage-tested
