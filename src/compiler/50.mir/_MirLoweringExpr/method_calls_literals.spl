@@ -17,6 +17,7 @@ use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+use compiler.mir.mir_lowering_stmts.{mir_expr_kind_is_place}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.mir_instruction_support.{GpuBarrierScope, GpuMemoryScope}
 
@@ -904,6 +905,26 @@ impl MirLowering:
         temporary (pure-Simple equivalent of Rust seed bug #28).
         """
         eprint("[mir-method-call] start method={method} argc={args.len()}\n")
+        # WP-E (resource ownership): `.close()` on a `resource`-owned place
+        # is a CONSUMING drop, not an ordinary method call -- it lowers
+        # straight to a Drop edge and marks the local consumed so no
+        # scope-exit/return/`?` drop double-fires for it afterwards (see
+        # emit_pending_resource_drops). Checked first, ahead of every
+        # resolution-kind branch below, because `close` is never a real
+        # resolved method on a resource (WP-H/sffi_gen, which would
+        # generate that wrapper, has not landed) -- letting it fall through
+        # would just dead-end in the Unresolved arm's error path.
+        if method == "close" and mir_expr_kind_is_place(receiver.kind):
+            val close_recv_local = self.lower_expr(receiver)
+            if self.mir_hir_type_is_resource(self.find_local_hir_type(close_recv_local.id)):
+                var b_close = self.builder
+                b_close.emit_drop(close_recv_local)
+                self.builder = b_close
+                self.consumed_resource_locals[close_recv_local.id] = true
+                var b_close_unit = self.builder
+                val close_unit_local = b_close_unit.emit_const_int(0)
+                self.builder = b_close_unit
+                return close_unit_local
         val resolution_disc = rt_enum_discriminant(resolution)
         val resolution_is_unresolved = resolution_disc == rt_enum_discriminant(MethodResolution.Unresolved)
         val resolution_is_free_function = resolution_disc == rt_enum_discriminant(MethodResolution.FreeFunction(SymbolId(id: -1)))

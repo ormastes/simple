@@ -65,6 +65,8 @@ impl MirLowering:
         self.runtime_value_local_ids = []
         self.option_value_locals = {}
         self.nil_locals = {}
+        self.resource_owned_locals = []
+        self.consumed_resource_locals = {}
 
     me lower_function(fn_: HirFunction) -> MirFunction:
         val attr = fn_.func_attr
@@ -206,6 +208,16 @@ impl MirLowering:
             match param.type_.kind:
                 case HirTypeKind.Isolated(_):
                     self.remember_local_hir_type(local.id, param.type_)
+                    # WP-E (resource ownership): an `iso`-wrapped `resource`
+                    # parameter owns its handle for the duration of the
+                    # function body -- register it so
+                    # emit_pending_resource_drops can drop it at every real
+                    # exit unless it is moved out (let-binding move site
+                    # above), returned, or consumed by `.close()`.
+                    if self.mir_hir_type_is_resource(param.type_):
+                        var owned = self.resource_owned_locals
+                        owned.push(local)
+                        self.resource_owned_locals = owned
                 case _:
                     pass
             # Bug (native_me_receiver_no_mutate): a `me` method's implicit
@@ -379,16 +391,25 @@ impl MirLowering:
         var bldr2 = self.builder
         if not bldr2.current_block_has_explicit_terminator():
             if return_type.kind == MirTypeKind.Unit:
+                self.emit_pending_resource_drops(nil)
+                bldr2 = self.builder
                 bldr2.terminate_return(nil)
             elif result.?:
                 # Keep the coalesce out of the nested Some(call(...)) shape,
                 # but do not bind this struct optional with `if val`: compiled
                 # Stage4 can enter that arm without copying its LocalId payload.
                 val tail_local = result ?? LocalId(id: 0)
+                # WP-E: the function's own tail value moves the resource out
+                # to the caller on this exit -- exclude it from the drop
+                # sweep (see emit_pending_resource_drops's `returned_local`).
+                self.emit_pending_resource_drops(Some(tail_local))
+                bldr2 = self.builder
                 val tail_op = mir_operand_copy(tail_local)
                 val tail_box: MirOperand? = Some(tail_op)
                 bldr2.terminate_return(tail_box)
             else:
+                self.emit_pending_resource_drops(nil)
+                bldr2 = self.builder
                 bldr2.terminate_return(nil)
         self.builder = bldr2
 

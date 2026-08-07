@@ -12,6 +12,7 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+use compiler.frontend.resource_registry.{resource_is_declared}
 
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
@@ -66,6 +67,82 @@ fn mir_hir_type_is_isolated(t: HirType?) -> bool:
 # ============================================================================
 
 impl MirLowering:
+    me mir_hir_type_is_resource(t: HirType?) -> bool:
+        """WP-E (resource ownership, doc/03_plan/language/resource/
+        resource_parallel_agent_plan_2026-08-06.md): true when a HIR type is
+        the `iso` capability wrapper (HirTypeKind.Isolated, same wrapper
+        LANE ISO1 uses) around a `Named` type whose symbol name is a
+        declared `resource` (compiler.frontend.resource_registry, populated
+        by WP-C from `@sffi(...) resource Name` decls). Deliberately does
+        NOT introduce a new HirTypeKind or a struct field on HirType/HIR
+        module -- resource_registry.spl's own header explains why (avoids
+        inflating ParserModule/HirModule across five layers several of
+        which are owned by other in-flight sessions on this shared working
+        copy); this mirrors that side-table approach one layer further
+        down, at MIR lowering, using the symbol table MirLowering already
+        owns (self.symbols) to resolve the Named type's symbol id back to
+        its declared name."""
+        match t:
+            case Some(ht):
+                match ht.kind:
+                    case HirTypeKind.Isolated(inner):
+                        match inner.kind:
+                            case HirTypeKind.Named(sym, _):
+                                val found = self.symbols.get_symbol_raw(sym.id)
+                                if found.?:
+                                    resource_is_declared(found.name)
+                                else:
+                                    false
+                            case _:
+                                false
+                    case _:
+                        false
+            case nil:
+                false
+
+    me emit_pending_resource_drops(returned_local: LocalId?):
+        """WP-E: emit a Drop (MirInstKind.Drop, mir_instruction_kinds.spl)
+        for every resource-owned local registered in `self.
+        resource_owned_locals` that is still live at THIS control-flow
+        exit -- not already consumed by an earlier move/`.close()`/drop on
+        this same lowered path, and not the value being handed back to the
+        caller on this exact exit (`returned_local`): a resource-owned
+        local returned in tail/return position is a transfer out of the
+        function, not a drop, exactly like the emit_move/emit_copy split
+        above treats a returned `iso` place as a move rather than a use.
+
+        Called at every real MIR exit this lane wires: the function's
+        normal (implicit) fall-through return (function_lowering.spl),
+        an explicit `return` statement (expr_dispatch.spl's
+        lower_return_expr), and a `?` operator's None/Err early-return arm
+        (switch_operators_calls.spl). Consults (never SETS)
+        `consumed_resource_locals` here: that map only ever records a real,
+        unconditional-so-far ownership transfer (a move into another
+        binding, or `.close()`) recorded at ITS OWN site, which is
+        correctly permanent for every exit reachable afterwards. A drop
+        emitted here must NOT also mark the local consumed, because two
+        sibling early-return blocks (e.g. `?`'s Err arm and the Ok arm's
+        own later fall-through exit) are DIFFERENT, mutually-exclusive
+        control-flow paths through the SAME lowering pass -- each owns an
+        independent drop edge on its own path, and a block that has already
+        called `terminate_return` can never receive a second instruction
+        (this pass never revisits a finalized block), so there is no
+        same-path double-drop risk to guard against here. WP-E intentionally
+        does not attempt full per-branch liveness dataflow beyond that (real
+        NLL liveness is borrow-checker territory, out of scope per WP-G)."""
+        var i = 0
+        while i < self.resource_owned_locals.len():
+            val local = self.resource_owned_locals[i]
+            val already_consumed = self.consumed_resource_locals.contains(local.id)
+            val is_returned = match returned_local:
+                case Some(r): r.id == local.id
+                case nil: false
+            if not already_consumed and not is_returned:
+                var b = self.builder
+                b.emit_drop(local)
+                self.builder = b
+            i = i + 1
+
     me local_mir_type_of(local: LocalId) -> MirType?:
         """Look up a local's registered MIR type (mirrors the scan in
         local_is_runtime_array). Used to thread a runtime-array initializer's
@@ -741,6 +818,16 @@ impl MirLowering:
                                 # pre-existing HirTypeKind).
                                 if mir_expr_kind_is_place(let_init.kind) and mir_hir_type_is_isolated(found_init_hir_type):
                                     b2.emit_move(local, init_local)
+                                    # WP-E: a `val b = a` move of an owned
+                                    # resource local transfers ownership --
+                                    # `a` is consumed (no drop owed at `a`'s
+                                    # own scope exit) and `b` becomes the new
+                                    # owner needing its own drop edge.
+                                    if self.mir_hir_type_is_resource(found_init_hir_type):
+                                        self.consumed_resource_locals[init_local.id] = true
+                                        var owned = self.resource_owned_locals
+                                        owned.push(local)
+                                        self.resource_owned_locals = owned
                                 else:
                                     b2.emit_copy(local, init_local)
                                 self.builder = b2

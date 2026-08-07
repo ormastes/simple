@@ -2663,6 +2663,10 @@ impl MirLowering:
                     self.nil_locals[nil_result.id] = true
                     self.builder = b_none
                     val none_handle = self.ensure_option_handle(nil_result, base_type)
+                    # WP-E: `x.?` propagating None is a real early-return
+                    # exit -- drop every still-owned resource local on this
+                    # path (the None handle itself is never a resource).
+                    self.emit_pending_resource_drops(nil)
                     var b_none2 = self.builder
                     b_none2.terminate_return(Some(mir_operand_copy(none_handle)))
                     self.builder = b_none2
@@ -2699,8 +2703,15 @@ impl MirLowering:
         self.builder = b
         var b_err = self.builder
         b_err.switch_to_block(err_block)
-        b_err.terminate_return(Some(mir_operand_copy(res_local)))
         self.builder = b_err
+        # WP-E: `expr?` propagating an Err is a real early-return exit --
+        # drop every still-owned resource local on this path (res_local
+        # carries the Result/Err wrapper being returned, never a resource
+        # itself).
+        self.emit_pending_resource_drops(nil)
+        var b_err2 = self.builder
+        b_err2.terminate_return(Some(mir_operand_copy(res_local)))
+        self.builder = b_err2
         var b_ok = self.builder
         b_ok.switch_to_block(ok_block)
         val pf = MirOperand(kind: MirOperandKind.Const(
