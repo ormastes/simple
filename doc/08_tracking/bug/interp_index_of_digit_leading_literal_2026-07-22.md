@@ -88,3 +88,52 @@ passthrough), if-val (direct Store copy — a separate HIR pattern path from
 - native_i64opt_some0_collapses_to_nil (the 0-sentinel ancestor)
 - seed BoxInt <<3 enum heap-handle mangling (stage4 wall)
 - interpreter quirk ".? on 0-i64 → false" — likely the same lane, old sentinel
+
+## Re-verification 2026-08-07 — STILL OPEN, shared Dict/list decode fixes did NOT cover this
+
+Checked whether the 2026-08-07 Dict/list `.get()` decode fixes
+(`native_dict_get_struct_value_corrupt_option_2026-07-27.md`,
+`list_get_returns_tag_boxed_value_shifted_left_3_2026-07-28.md` — both landed
+in `expr_dispatch.spl`'s runtime-array/struct element decode paths, e.g.
+`elem_struct_name`/`elem_is_runtime_array` gating around
+`decode_runtime_value`) also closed defect 1 here. They do not: those fixes
+are about decoding boxed *container element* words (list/dict slot values);
+this defect is the flat, non-boxed `i64?` scalar lane
+(`HirType::Pointer{inner:i64}`) itself, a structurally different lowering
+path with no shared call site. `git diff origin/main -- src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`
+is empty (no local drift) — confirms the file matches origin and this probe
+reflects the current landed state, not a WIP edit.
+
+Minimal repro (`val a: i64? = 3; val b: i64? = nil`), run via
+`bin/simple run` (the deployed `bin/release/x86_64-unknown-linux-gnu/simple`,
+which prints the "bootstrap seed only" banner — this is the seed's Cranelift
+JIT, confirmed engaged via visible `cranelift_jit`-style IR dump in the run
+log; the pure-Simple self-hosted binary was NOT separately re-checked this
+session):
+
+| expression | JIT (seed, default) | `SIMPLE_EXECUTION_MODE=interpret` |
+|---|---|---|
+| `a == nil` (a=3) | `true` — WRONG | `false` — correct |
+| `u = a ?? -1; u == 3` | `false` — WRONG (value lost) | n/a, interpreter already correct |
+| `u = a ?? -1; u == -1` | `true` — WRONG (`??` itself takes the nil branch) | n/a |
+| `b == nil` (b=nil) | `true` — correct (coincidental) | `true` — correct |
+| `v = b ?? -1; v == -1` | `true` — correct | `true` — correct |
+
+Disambiguation note: an initial probe that `print`-interpolated `a ?? -1`
+directly showed `<value:0xffffffffffffffff>` for BOTH the `a` and `b` cases,
+which looked like a separate print/interpolation defect. Following up with
+non-interpolated equality checks (`u == 3`, `u == -1`) proved the `??`
+operator itself — not just its text formatting — resolves `Some(3)` to the
+`-1` default, i.e. this is exactly defect 1 as already documented above, not
+a sibling of the interpolation-only `jit_array_oob_read_leaks_raw_rt_nil_sentinel_2026-08-07.md`
+gap. That doc's raw-`3`-prints-as-text symptom is unrelated here since our
+`a`'s true payload (3) is being LOST, not printed verbatim.
+
+Verdict: defect 1 (payload-3 collision) is CONFIRMED STILL OPEN on the JIT
+lane, unchanged from the 2026-07-22 root-cause finding and the 2026-07-24
+re-confirmation. The interpreter lane remains correct. No code was changed
+here per the standing senior deferral ("an earlier boundary-boxing spot-patch
+was PROVEN WRONG... do not re-attempt"); this is a status re-confirmation
+only. Regression spec (interpreter-lane only, does not exercise the JIT
+lane where the defect actually lives — see caveat in the spec docstring):
+`test/01_unit/language/option_i64_value3_sentinel_spec.spl`.
