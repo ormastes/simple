@@ -12,14 +12,28 @@
 #      driver.spl parses source in the same session, so pulling lint-main into
 #      its graph reproduces exactly that hazard inside the real compiler.
 #
-# The profile-name table below therefore mirrors parse_lint_profile in
-# src/compiler/90.tools/lint/_LintMain/config_and_model.spl instead of calling
-# it. The alias set is frozen by definition (deprecated names never grow), so
-# drift risk is limited to NEW profile names — if you add one there, add it
-# here. Deprecation warn-once for old spellings stays the lint CLI's job; a
+# WP-3 (2026-08-07) resolved that WITHOUT inverting the dependency: the
+# profile-name table moved DOWN to `compiler.common.assurance.policy_names`,
+# which 00.common owns and every layer above may import. Reason 1 is satisfied
+# because 00.common is below 80.driver, not above it. Reason 2 was re-measured
+# and no longer reproduces (probe:
+# test/01_unit/compiler/assurance/policy_graph_contamination_probe_spec.spl);
+# policy_names.spl additionally carries zero `use` lines and zero module-level
+# state, which the bug record names as the likely trigger.
+#
+# What is left here is the DRIVER'S PROJECTION of that shared table onto
+# SafetyPassSeverity. It stays here deliberately: the same four names carry
+# three different meanings across the tree (lint -> level dict, driver ->
+# SafetyPassSeverity, interpreter -> bool), so the names converge and the
+# semantics do not.
+#
+# Deprecation warn-once for old spellings stays the lint CLI's job; a
 # build-time env knob repeating it would only add noise.
 #
 # See doc/08_tracking/bug/safety_checker_pass_never_invoked_2026-07-27.md.
+
+use compiler.common.assurance.policy_names.normalize_profile_name
+use compiler.common.assurance.policy_schema.{AssuranceStrictness, ResolvedAssurancePolicyV1}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -41,23 +55,42 @@ enum SafetyPassSeverity:
 # migration window. Unknown or empty resolves to Advisory, i.e. today's exact
 # behavior is preserved unless a caller opts in explicitly.
 pub fn safety_pass_severity_for_name(raw: text) -> SafetyPassSeverity:
-    # New ladder names (moderate | strict | robust | critical).
-    if raw == "robust":
+    # Aliases (lib -> strict, reliable -> robust, mission-critical ->
+    # critical) are resolved by the shared table, NOT re-listed here. That is
+    # the whole point of WP-3: adding a profile name in one place now reaches
+    # this projection automatically.
+    val canonical = normalize_profile_name(raw)
+    if canonical == "robust":
         return SafetyPassSeverity.Warn
-    if raw == "critical":
+    if canonical == "critical":
         return SafetyPassSeverity.Deny
-    # Deprecated aliases, frozen set — lib -> strict, reliable -> robust,
-    # mission-critical/mission_critical -> critical.
-    if raw == "reliable":
-        return SafetyPassSeverity.Warn
-    if raw == "mission-critical" or raw == "mission_critical":
-        return SafetyPassSeverity.Deny
-    # moderate, strict, lib, unset, and anything unrecognized: advisory.
+    # moderate, strict, unset, and anything unrecognized: advisory.
     SafetyPassSeverity.Advisory
 
-# Resolve the severity that gates the safety pass. Dedicated env knob
-# (SIMPLE_SAFETY_PROFILE), not engine_default_profile: mapping the safety
-# pass onto --engine=interpreter|jit|native is REQ-MC-012 plumbing, a
-# separate lane, not implemented here.
+# TYPED-STATE projection (WP-3). This is the form the driver should use once a
+# `ResolvedAssurancePolicyV1` is threaded down to it: severity becomes a
+# function of an in-process value that every command resolved identically and
+# can prove identical via `policy_hash()`, instead of a process-global string
+# that two components can read at two different times.
+pub fn safety_pass_severity_for_policy(policy: ResolvedAssurancePolicyV1) -> SafetyPassSeverity:
+    safety_pass_severity_for_strictness(policy.strictness)
+
+pub fn safety_pass_severity_for_strictness(strictness: AssuranceStrictness) -> SafetyPassSeverity:
+    match strictness:
+        AssuranceStrictness.Critical: SafetyPassSeverity.Deny
+        AssuranceStrictness.Robust: SafetyPassSeverity.Warn
+        AssuranceStrictness.Strict: SafetyPassSeverity.Advisory
+        AssuranceStrictness.Moderate: SafetyPassSeverity.Advisory
+
+# SUBPROCESS-BOUNDARY deserializer. After WP-3 the env var's only sanctioned
+# job is carrying an already-resolved policy across a process boundary
+# (`policy_env_value` is the writer). Kept because the driver still has no
+# threaded policy parameter of its own — every in-process caller that DOES
+# have one must call safety_pass_severity_for_policy instead, so the two
+# cannot drift the way premise 5b describes.
+#
+# Dedicated env knob (SIMPLE_SAFETY_PROFILE), not engine_default_profile:
+# mapping the safety pass onto --engine=interpreter|jit|native is REQ-MC-012
+# plumbing, a separate lane, not implemented here.
 pub fn safety_pass_severity() -> SafetyPassSeverity:
     safety_pass_severity_for_name(rt_env_get("SIMPLE_SAFETY_PROFILE") ?? "")

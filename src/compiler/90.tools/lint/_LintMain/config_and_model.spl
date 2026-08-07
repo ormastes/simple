@@ -18,6 +18,7 @@ use std.log.{error, info}
 # by the same module (canonical failure mode: compiler.tools.lint.main).
 use std.tooling.easy_fix.types.{EasyFix, LintLevel, LintCategory}
 use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
+use compiler.common.assurance.policy_names.{normalize_profile_name, deprecated_profile_alias_replacement}
 
 # File I/O wrapper
 
@@ -80,25 +81,30 @@ fn deprecated_profile_alias_warn_count(old_name: String) -> i64:
 
 # Parse a profile string into LintProfile. Returns nil for unknown strings.
 # Accepts both current names and deprecated pre-2026-07-28 aliases.
+#
+# WP-3 (2026-08-07): the name/alias table itself now lives in
+# compiler.common.assurance.policy_names — this function is lint's PROJECTION
+# of it onto LintProfile (the driver projects the same table onto
+# SafetyPassSeverity and the interpreter onto a bool; three meanings, one
+# table). The warn-once counter dict stays here on purpose: the driver's own
+# header says deprecation warnings are the lint CLI's job, and policy_names.spl
+# must keep zero module-level state.
 fn parse_lint_profile(profile_str: String) -> Option<LintProfile>:
     val lower = profile_str.lower()
-    if lower == "moderate":
-        return Some(LintProfile.Moderate)
-    if lower == "strict":
-        return Some(LintProfile.Strict)
-    if lower == "robust":
-        return Some(LintProfile.Robust)
-    if lower == "critical":
-        return Some(LintProfile.Critical)
+    val canonical = normalize_profile_name(lower)
+    if canonical == "":
+        return nil
     # --- Deprecated aliases (pre-rename spellings); warn once, keep working ---
-    if lower == "lib":
-        _warn_deprecated_profile_alias_once("lib", "strict")
+    val alias_target = deprecated_profile_alias_replacement(lower)
+    if alias_target != "":
+        _warn_deprecated_profile_alias_once(lower, alias_target)
+    if canonical == "moderate":
+        return Some(LintProfile.Moderate)
+    if canonical == "strict":
         return Some(LintProfile.Strict)
-    if lower == "reliable":
-        _warn_deprecated_profile_alias_once("reliable", "robust")
+    if canonical == "robust":
         return Some(LintProfile.Robust)
-    if lower == "mission-critical" or lower == "mission_critical":
-        _warn_deprecated_profile_alias_once(lower, "critical")
+    if canonical == "critical":
         return Some(LintProfile.Critical)
     nil
 

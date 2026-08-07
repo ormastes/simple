@@ -10,6 +10,7 @@
 
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
 use compiler.core.enum_discriminant_eval.{eval_enum_discriminant_expr}
+use compiler.common.assurance.policy_names.normalize_profile_name
 
 extern fn rt_env_get(key: text) -> text
 
@@ -271,17 +272,42 @@ fn eval_module() -> i64:
 
 # ===== Full Initialization =====
 
-# Mirrors the Deny half of safety_pass_severity_for_name in
-# src/compiler/80.driver/driver_safety_severity.spl (critical, and the frozen
-# mission-critical/mission_critical alias). Deliberately duplicated rather
-# than imported: driver_safety_severity.spl's own header says it must not be
-# pulled into a session that also runs parse_full_frontend, and eval_init runs
-# inside exactly that kind of interpreter session — see
-# doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md.
-# robust/reliable resolve to Warn there, not Deny, so they stay non-aborting
-# here too (default warn-only behaviour, unchanged).
+# The INTERPRETER'S PROJECTION of the shared assurance-profile table: a plain
+# bool ("does this rung abort on a match fall-through"), which is a different
+# mapping from the driver's SafetyPassSeverity and from lint's level dict. The
+# names are shared; the semantics are not, and WP-3 deliberately did not
+# flatten them.
+#
+# The alias list used to be re-typed here because
+# driver_safety_severity.spl's header said it must not be pulled into a session
+# that also runs parse_full_frontend
+# (doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md).
+# WP-3 moved the table down to 00.common instead: policy_names.spl has zero
+# imports and zero module-level state, and the pairing is covered by
+# test/01_unit/compiler/assurance/policy_graph_contamination_probe_spec.spl.
+#
+# robust/reliable resolve to Warn in the driver, not Deny, so they stay
+# non-aborting here too (default warn-only behaviour, unchanged).
 fn match_fallthrough_profile_is_deny(raw: text) -> bool:
-    raw == "critical" or raw == "mission-critical" or raw == "mission_critical"
+    normalize_profile_name(raw) == "critical"
+
+# Apply an assurance profile to the interpreter's diagnostic-severity flags.
+#
+# Premise 5b: eval_init used to READ SIMPLE_SAFETY_PROFILE inline and could
+# therefore never observe a policy resolved later — a latch. Splitting the
+# apply step out removes the latch: any caller holding a resolved policy calls
+# this with `policy_env_value(policy)` (or any accepted spelling) at any point
+# in the session, and the flags follow. eval_init still seeds it from the env
+# var so an unconfigured session behaves exactly as before, but the env read is
+# now only the DEFAULT, not the sole authority.
+pub fn eval_apply_assurance_profile(profile_name: text):
+    val deny = match_fallthrough_profile_is_deny(profile_name)
+    match_fallthrough_set_abort(deny)
+    # Same follow-up: surface the wildcard/bare-binder-catch diagnostic under
+    # Deny severity too. Warn-only for now (no abort variant) -- "wild card
+    # use even warning later error for compatibility" per the user request;
+    # the abort escalation is deferred, same as the MIR promotion TODO below.
+    match_wildcard_catch_set_enabled(deny)
 
 fn eval_init():
     val_reset()
@@ -292,15 +318,11 @@ fn eval_init():
     eval_reset()
     module_loader_init()
     # BUG-2026-08-01-match-fallthrough: promote the warn-only match
-    # fall-through diagnostic to a hard interpreter-tier error when
-    # SIMPLE_SAFETY_PROFILE resolves to Deny severity.
-    val safety_profile_deny = match_fallthrough_profile_is_deny(rt_env_get("SIMPLE_SAFETY_PROFILE") ?? "")
-    match_fallthrough_set_abort(safety_profile_deny)
-    # Same follow-up: surface the wildcard/bare-binder-catch diagnostic under
-    # Deny severity too. Warn-only for now (no abort variant) -- "wild card
-    # use even warning later error for compatibility" per the user request;
-    # the abort escalation is deferred, same as the MIR promotion TODO below.
-    match_wildcard_catch_set_enabled(safety_profile_deny)
+    # fall-through diagnostic to a hard interpreter-tier error when the
+    # assurance profile resolves to Deny severity. The env var is the DEFAULT
+    # seed only (subprocess serialization, WP-3); a caller with a resolved
+    # policy re-applies it via eval_apply_assurance_profile at any time.
+    eval_apply_assurance_profile(rt_env_get("SIMPLE_SAFETY_PROFILE") ?? "")
 
 # ===== Async/Await Expressions (Basic Stubs) =====
 # TODO [interp][P2]: Full state machine support requires desugaring to state machines

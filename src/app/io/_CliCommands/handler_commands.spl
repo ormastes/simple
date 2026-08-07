@@ -4,6 +4,7 @@ use app.io.cli_commands.*
 # Extracted from cli_ops.spl for modularity
 # Functions here reference helpers in cli_ops.spl (same directory, no imports needed)
 
+use compiler.common.assurance.policy_names.{normalize_profile_name, valid_profile_names_help}
 use compiler.driver.driver_api_core.{interpret_file, check_file}
 use compiler.driver.driver_types.{CompileResult}
 use app.io.cli_compile.{cli_compile}
@@ -81,32 +82,28 @@ fn cli_handle_diagram(args: [text]) -> i64:
 
 # REQ-MC-012 profile-aware execution: `--profile=<name>` for `bin/simple run`.
 #
-# Deliberately self-contained (does NOT import compiler.tools.lint.main /
-# config_and_model.spl's parse_lint_profile, even though this file already
-# imports LintConfig above for the unrelated `lint` command): *executing*
-# parse_lint_profile in the same interpreter session that later drives
-# frontend parsing (the in-process interpret_file fallback inside
-# cli_run_file) deterministically corrupts that later frontend call with
-# "semantic: type mismatch: cannot convert dict to int" -- see
-# doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md.
-# This table mirrors parse_lint_profile in
-# src/compiler/90.tools/lint/_LintMain/config_and_model.spl and the frozen
-# alias table in src/compiler/80.driver/driver_safety_severity.spl instead of
-# calling either; add new profile names to all three if any are ever added.
+# WP-3 (2026-08-07): the alias table that used to be re-typed here now lives
+# in compiler.common.assurance.policy_names, which 00.common owns. These two
+# wrappers keep their names so the `run` call sites are untouched, but they no
+# longer carry a copy of the table -- adding a profile name in 00.common now
+# reaches `run` automatically.
+#
+# Still does NOT import compiler.tools.lint.main / config_and_model.spl's
+# parse_lint_profile (even though this file imports LintConfig above for the
+# unrelated `lint` command): *executing* parse_lint_profile in the same
+# interpreter session that later drives frontend parsing (the in-process
+# interpret_file fallback inside cli_run_file) was reported to corrupt that
+# later frontend call with "semantic: type mismatch: cannot convert dict to
+# int" -- doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md.
+# policy_names.spl is safe where lint-main was not: zero `use` lines and zero
+# module-level state (the bug record names module-level Dict state as the
+# likely trigger), covered by
+# test/01_unit/compiler/assurance/policy_graph_contamination_probe_spec.spl.
 fn _run_normalize_profile_name(raw: text) -> text:
-    val lower = raw.lower()
-    if lower == "moderate" or lower == "strict" or lower == "robust" or lower == "critical":
-        return lower
-    if lower == "lib":
-        return "strict"
-    if lower == "reliable":
-        return "robust"
-    if lower == "mission-critical" or lower == "mission_critical":
-        return "critical"
-    ""
+    normalize_profile_name(raw)
 
 fn _run_valid_profile_names_help() -> text:
-    "moderate, strict, robust, critical (deprecated aliases: lib, reliable, mission-critical)"
+    valid_profile_names_help()
 
 # Minimal, self-contained reader for the CANONICAL simple.sdn form
 #
