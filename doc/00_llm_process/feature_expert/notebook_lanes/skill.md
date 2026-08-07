@@ -23,6 +23,16 @@ Implementation in progress, parallel-agent execution against
   queries/*.scm`, not `src/app/vscode_extension/` as the plan assumed — that extension
   only ships a hand-written TextMate grammar). Generator `scripts/gen_cm6_grammar.mjs`
   is SHA-gated against the `.scm` sources; Jest suite 4/4 green.
+- **X2** — extension core + LSP wiring: `kernel.ts` stamps `language_info` on the
+  notebook model (the kernel_wrapper doesn't send it, so CM6 highlighting never
+  resolved without this); `status.ts` real status-bar `ModeStatusWidget` (shows
+  `"local"` placeholder until X3 feeds live lane data); `lsp_server_spec.json` +
+  `install.shs` wire `jupyter-lsp` to `bin/simple run src/app/lsp/main.spl`, verified
+  end to end against a real `jupyter lab` (4.5.5) instance. Jest 19/19, `tsc -b` clean.
+  **Blocker filed:** the labextension has no `pyproject.toml`/`hatch-jupyter-builder`
+  packaging, so `jupyter labextension develop` can't load it — galata/browser
+  verification for X2/X3/X4 is blocked until that's added (see
+  `doc/08_tracking/bug/jupyter_labextension_missing_federated_build_packaging_2026-08-07.md`).
 
 - **K1** — `KernelSessionManager` + `NotebookExecutor` trait
   (`src/lib/nogc_sync_mut/notebook/{session_manager,executor,types}.spl`). GPU-A1's
