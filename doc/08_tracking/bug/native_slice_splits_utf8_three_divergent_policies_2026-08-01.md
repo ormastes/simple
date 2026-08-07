@@ -6,6 +6,41 @@ stage 4 (flip to a hard error) are NOT done: the flip is **deferred**, with the
 number that justifies deferring recorded below.
 Measured: 2026-08-01
 
+**Re-verified 2026-08-07, unchanged.** Ran the "Reproduce" probe below (`s =
+"aé€𝄞z"`, no imports) via `bin/simple run` (default engine — confirmed real
+Cranelift JIT engagement via `cranelift_jit::backend` "defining function" log
+lines, not a fallback) and again with `SIMPLE_EXECUTION_MODE=interpret`.
+Byte-exact reproduction of the original table:
+
+| expression | interpret `.len()` | default (JIT) `.len()` | bytes stored |
+|---|---|---|---|
+| `s[0:3]` (aligned control) | 3 | 3 | `61 c3a9` — valid, both engines |
+| `s[0:2]` (splits é) | 2 | 2 | `61 c3` — **invalid UTF-8**, both engines |
+| `s.slice(0,2)` | **4** | **2** | interp lossy U+FFFD (`61 efbfbd`) / default raw `61 c3` (**invalid**) |
+| `s.substring(0,2)` | **4** | **2** | same divergence as `.slice` |
+
+All three policies (raw-bytes JIT/native/bracket, lossy-U+FFFD interpreter
+`.slice`/`.substring`, and the aligned byte-for-byte agreement on safe
+boundaries) still hold exactly as measured on 2026-08-01/02. No regression, no
+fix landed since. `test/01_unit/bugs/text_slice_substring_spec.spl` §"Test
+Group 8: Multi-byte / UTF-8" already pins the interpreter-side lossy-U+FFFD
+behavior end to end and is GREEN (`Results: 76 total, 76 passed, 0 failed`,
+re-run 2026-08-07) — it does not and cannot cover the JIT/native raw-bytes
+policy, because `bin/simple test` hard-defaults to the interpreter engine
+(`.claude/rules/testing.md`); there is no test-harness path that drives
+`s[0:2]`-style bracket slicing through Cranelift/LLVM/native to pin the
+invalid-UTF-8-bytes behavior as a spec assertion. That gap is inherent to the
+harness, not a missing spec.
+
+No further action taken this pass: the existing root-cause analysis, the
+five-implementation family table, the byte-accessor (`byte_at`) prerequisite,
+and the "do not flip yet" recommendation below are all still current and
+correct. Patching the primitive (validate+adjust or fail-closed) would still
+break the ~891 remaining byte-stepping scanner call sites documented under
+"Stage 3 migration" — that risk has not changed since 2026-08-02, so no code
+change was made in this pass; see that section for the migration plan that
+must land first.
+
 ## Summary
 
 Slicing text at a byte offset that falls **inside** a multi-byte codepoint has
