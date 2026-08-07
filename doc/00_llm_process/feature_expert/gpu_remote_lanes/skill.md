@@ -6,11 +6,52 @@ Own feature-specific process knowledge for the `cuda`/`vulkan` remote test lanes
 (`interpreter(remote(cuda(sm80)))` family): current docs, source entry points, known
 constraints, and the pipeline artifacts to update as work progresses.
 
-## Status (2026-08-07)
+## Status (2026-08-07, updated — plan substantially implemented)
 
-Tasks A1 (grammar), A2 (GMB-1 mailbox library), B0 (CUDA interpreter adapter),
-and C1 (Vulkan lane session shell) landed. Remaining lane code (A3 routing,
-B1-B6 CUDA, C2-C3 Vulkan, D1-D4 SVM-G, E1-E2 docs/CI) not started.
+**Landed on `origin/main`:** A1 (grammar), A2 (GMB-1 mailbox library), A3
+(runner routing to `GpuLaneExecutor`), B0 (CUDA interpreter adapter), B1
+(CUDA lane session), B2 (CUDA JIT lane executor), B3 (SVM-G CUDA device
+kernel + executor, verified out-of-tree), C1 (Vulkan lane session shell), C2
+(Vulkan JIT lane executor), D1 (SVM-G ISA spec + assembler), D2 (host
+reference VM), D3 (conformance vector suite), D4 (test-body lowering to
+SVM-G). This is now the great majority of the plan's Streams A-D.
+
+**Not yet landed:** B4-B6 (further CUDA lane work), C3 (SVM-G Vulkan device
+executor — the Vulkan-side counterpart to B3), E2 (`doc/08_tracking/lane_matrix.md`
+does not exist yet). E1 (this doc-linking task) is in progress here.
+
+Status sections below are per-task, in landing order. Where a task's section
+was itself lost to shared-working-copy churn during this session and later
+recovered, that is noted in the section (see D1-D4 "Recovered, not
+rewritten").
+
+### A3 — landed
+- Runner routing: `route_gpu_lane`/`run_test_file_gpu_lane` (in
+  `std.test_runner.gpu_lane_common`) wired into
+  `src/lib/nogc_sync_mut/test_runner/test_executor_composite.spl`'s
+  `run_test_file_remote`, dispatching for `remote_backend` in
+  `{cuda, vulkan}` ahead of the pre-existing `.spl`/`.elf` branches. Verified
+  landed on `origin/main` via commit `3f3adeca435` ("A3/B1 — Slot 2
+  recovery"; A3/B1 were originally implemented and verified earlier in that
+  session — 13/13 and 4/4 passing specs, sabotage-probed — but lost to
+  repeated uncommitted-working-copy resets from a concurrent process, then
+  recovered from conversation context and re-landed).
+- Confirm current wiring: `grep -n "run_test_file_gpu_lane"
+  src/lib/nogc_sync_mut/test_runner/test_executor_composite.spl` shows both
+  the `use` import and the dispatch call site.
+
+### B1 — landed
+- `src/lib/gc_async_mut/gpu_lane/cuda_lane_session.spl` (`CudaLaneSession`):
+  wraps `crypto_accel/cuda_session.spl` with the 128 KiB GMB-1 arena plus
+  guard regions, per design §5.1's `GpuLaneExecutor` session contract that
+  B2's `CudaJitLaneExecutor` and B3's `CudaVmExecutor` both build on.
+  Landed in the same `3f3adeca435` recovery commit as A3 (see above).
+- Own spec: `test/02_integration/gpu_lane/cuda_lane_session_spec.spl`.
+  B2's status section (above) notes this spec started failing with a
+  deployed-binary/environment `CudaLaneSession not found` symptom during a
+  later session — attributed there to an unstable shared-WC/seed-vs-self-hosted
+  binary issue on that host, not a B1 code regression; re-run to confirm on a
+  freshly rebuilt self-hosted binary.
 
 ### B0 — landed
 - Added `rt_cuda_module_load_data_bytes_fn` to
@@ -326,7 +367,11 @@ B1-B6 CUDA, C2-C3 Vulkan, D1-D4 SVM-G, E1-E2 docs/CI) not started.
 - CUDA resident mode refused on watchdog devices unless `CUDA_RESIDENT_FORCE=1`.
 - `doc/08_tracking/lane_matrix.md` does not exist yet — plan Task E2 creates it;
   authoritative lane status today is
-  `doc/06_spec/03_system/hardware/remote_baremetal_lane_status_spec.md`.
+  `doc/06_spec/03_system/hardware/remote_baremetal_lane_status_spec.md`
+  (now cross-linked back to this skill doc, the design doc, and the plan —
+  see its "Related: GPU Remote Lanes" note, added for plan Task E1).
+- User-facing entry point: `doc/07_guide/testing/gpu_remote_lanes_testing.md`
+  (new, added for plan Task E1 — this domain had no guide before).
 
 ### C2 — landed (vulkan_jit lane executor)
 
