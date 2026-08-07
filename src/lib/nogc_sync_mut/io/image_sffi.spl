@@ -15,10 +15,52 @@ extern fn rt_image_channels(handle: i64) -> i64
 extern fn rt_image_get_pixel(handle: i64, x: i64, y: i64) -> i64
 
 # ============================================================================
-# Tier 2: Simple-Friendly Wrapper
+# Tier 2: Resource Wrapper (Owning Handle Class)
 # ============================================================================
 
-# Image load result
+# Image resource wrapper with double-close guard
+class Image:
+    handle: i64
+    width: i64
+    height: i64
+    channels: i64
+
+impl Image:
+    fn is_valid() -> bool:
+        self.handle != 0
+
+    fn pixel_count() -> i64:
+        self.width * self.height
+
+    fn size_bytes() -> i64:
+        self.width * self.height * self.channels
+
+    fn get_pixel(x: i64, y: i64) -> i64:
+        if not self.is_valid():
+            return 0
+        rt_image_get_pixel(self.handle, x, y)
+
+    fn close():
+        # Consuming drop: one-shot guard against double-close
+        if self.handle != 0:
+            rt_image_free(self.handle)
+            self.handle = 0
+
+# Load an image from disk. Returns nil on failure.
+fn load_image_resource(path: text) -> Image?:
+    val h = rt_image_load(path)
+    if h <= 0:
+        return nil
+    val w = rt_image_width(h)
+    val ht = rt_image_height(h)
+    val ch = rt_image_channels(h)
+    Image(handle: h, width: w, height: ht, channels: ch)
+
+# ============================================================================
+# Tier 3: Deprecated Aliases (Compatibility Layer)
+# ============================================================================
+
+# Image load result — DEPRECATED: use Image + close() instead
 class ImageData:
     handle: i64
     width: i64
@@ -41,6 +83,7 @@ impl ImageData:
         rt_image_get_pixel(self.handle, x, y)
 
 # Load an image from disk. Returns nil on failure.
+# DEPRECATED: use load_image_resource() instead
 fn load_image(path: text) -> ImageData?:
     val h = rt_image_load(path)
     if h <= 0:
@@ -50,11 +93,10 @@ fn load_image(path: text) -> ImageData?:
     val ch = rt_image_channels(h)
     ImageData(handle: h, width: w, height: ht, channels: ch)
 
-# Free image resources
+# Free image resources — DEPRECATED: use Image.close() instead
 fn free_image(img: ImageData):
     if img.is_valid():
         rt_image_free(img.handle)
 
-# Create an ImageData from dimensions (for testing/procedural generation)
-fn create_image_data(width: i64, height: i64) -> ImageData:
-    ImageData(handle: 0, width: width, height: height, channels: 4)
+# create_image_data removed — use image_data.spl's version instead
+# (both provided the same interface but with different underlying implementations)
