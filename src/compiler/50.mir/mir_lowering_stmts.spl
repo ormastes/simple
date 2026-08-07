@@ -759,19 +759,48 @@ impl MirLowering:
                         # outer.child`), maybe_copy_struct_value materializes a
                         # private per-binding copy instead (skipped for classes,
                         # which keep reference semantics).
-                        # TODO(LANE ISO1, mir_lowering_stmts.spl:600): an iso-typed
-                        # `struct` (not class) binding takes this
-                        # maybe_copy_struct_value path and is NOT wired to
-                        # emit_move -- it still emits emit_copy inside that
-                        # helper. Binding-transfer for class/primitive iso
-                        # types is covered below (mir_hir_type_is_isolated +
-                        # emit_move at the new_local+emit_copy fallback); iso
-                        # structs are scoped out of this lane per the "cover
-                        # binding-transfer only" guardrail.
+                        # WP-F0 (2026-08-06): the TODO below is now reachable
+                        # -- function_lowering.spl's new Isolated(Named(...))
+                        # param arm means struct_value_syms.get() can be
+                        # non-nil for an iso-typed struct local. A PLACE read
+                        # of such a local (`val b = a` where `a: iso S`) is a
+                        # true transfer, not a copy: route it through
+                        # emit_move (mirroring the scalar/class emit_move
+                        # sites at 840/1168/1297/1351/1431) into a fresh
+                        # struct-typed local instead of falling into
+                        # maybe_copy_struct_value's PLACE-read copy path.
+                        # Non-iso struct bindings are unaffected (struct_is_
+                        # place_iso is false whenever mir_hir_type_is_isolated
+                        # is false, i.e. every pre-existing case).
                         val struct_sym = self.struct_value_syms.get(init_local.id)
-                        val struct_copy = self.maybe_copy_struct_value(init_local, struct_sym, mir_expr_kind_is_place(let_init.kind))
+                        val struct_move_hir_type = self.find_local_hir_type(init_local.id)
+                        val struct_is_place_iso = struct_sym != nil and mir_expr_kind_is_place(let_init.kind) and mir_hir_type_is_isolated(struct_move_hir_type)
+                        val struct_copy = if struct_is_place_iso:
+                            nil
+                        else:
+                            self.maybe_copy_struct_value(init_local, struct_sym, mir_expr_kind_is_place(let_init.kind))
                         if val copy_local = struct_copy:
                             self.bind_local(symbol_value_id, copy_local)
+                        elif struct_is_place_iso:
+                            var b_smove = self.builder
+                            val smove_type = self.local_mir_type_of(init_local) ?? MirType.i64()
+                            val smove_local = b_smove.new_local(nil, smove_type, LocalKind.Var)
+                            self.struct_value_syms[smove_local.id] = struct_sym ?? ""
+                            b_smove.emit_move(smove_local, init_local)
+                            self.builder = b_smove
+                            self.bind_local(symbol_value_id, smove_local)
+                            val remembered_iso_type = struct_move_hir_type ?? HirType(kind: HirTypeKind.Error, span: span)
+                            self.remember_local_hir_type(smove_local.id, remembered_iso_type)
+                            # WP-E parity: an iso struct is exactly the shape
+                            # of a resource handle, so a move of one transfers
+                            # drop-ownership too (mirrors the scalar emit_move
+                            # branch's mir_hir_type_is_resource handling
+                            # around line 847).
+                            if self.mir_hir_type_is_resource(struct_move_hir_type):
+                                self.consumed_resource_locals[init_local.id] = true
+                                var owned3 = self.resource_owned_locals
+                                owned3.push(smove_local)
+                                self.resource_owned_locals = owned3
                         elif bf_sym != nil or struct_sym != nil:
                             self.bind_local(symbol_value_id, init_local)
                         else:

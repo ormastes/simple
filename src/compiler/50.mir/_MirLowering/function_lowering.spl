@@ -267,6 +267,35 @@ impl MirLowering:
                                     self.array_element_struct_syms[local.id] = element.name
                             case _:
                                 ()
+                case Isolated(inner):
+                    # WP-F0 (resource ownership unblock, 2026-08-06): an
+                    # iso-wrapped struct param (`x: iso S`) has type
+                    # Isolated(Named(...)), so it never matched the `Named`
+                    # arm below and never reached struct_value_syms
+                    # registration -- meaning `struct_value_syms.get(x)` could
+                    # never be true for an iso-typed struct local, which is
+                    # exactly what mir_lowering_stmts.spl's iso-struct-move
+                    # TODO needs to co-occur with `find_local_hir_type(x) ==
+                    # Isolated` to fire. Minimal fix: register the inner
+                    # Named struct's name in struct_value_syms directly, with
+                    # NO defensive per-call copy and NO alias-vs-copy
+                    # branching (the `me`/`mut`/class logic below exists to
+                    # decide whether the CALLER can still observe a mutation
+                    # through its own binding after the call returns -- an
+                    # `iso` param is move-only by construction, so the caller
+                    # has no live binding left to observe anything through;
+                    # the aliasing question the Named arm's branches resolve
+                    # does not apply here). Only affects params whose HIR type
+                    # is Isolated(Named(...)); no effect on plain/me/mut
+                    # struct params, which still hit the Named arm untouched.
+                    match inner.kind:
+                        case Named(type_symbol, _):
+                            val parameter_type = self.symbols.get_symbol_raw(type_symbol.id)
+                            val is_named_struct = parameter_type != nil and self.struct_field_order.has(parameter_type.name)
+                            if is_named_struct:
+                                self.struct_value_syms[local.id] = parameter_type.name
+                        case _:
+                            ()
                 case Named(type_symbol, _):
                     val parameter_type = self.symbols.get_symbol_raw(type_symbol.id)
                     val is_named_struct = parameter_type != nil and self.struct_field_order.has(parameter_type.name)
