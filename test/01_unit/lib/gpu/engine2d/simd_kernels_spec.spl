@@ -9,7 +9,8 @@ detection. Covers AC-6: CPU acceleration via SSE4.2/AVX2/NEON.
 
 use std.spec.{describe, context, it, expect}
 use std.io_runtime.{file_read}
-use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, cpu_simd_runtime_evidence, simd_fill_row, engine2d_simd_fill_buffer_u32, engine2d_simd_fill_rows_u32, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, engine2d_simd_blend_row_u32, simd_blend_row, simd_blit_row, _scalar_blend_row}
+use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, cpu_simd_runtime_evidence, cpu_simd_required_evidence_valid, CpuSimdRuntimeEvidence, simd_fill_row, engine2d_simd_fill_buffer_u32, engine2d_simd_fill_rows_u32, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, engine2d_simd_blend_row_u32, simd_blend_row, simd_blit_row, _scalar_blend_row, engine2d_simd_has_sse, engine2d_simd_has_avx2, engine2d_simd_has_neon, engine2d_simd_has_rvv, active_arch_text, active_feature_text, simd_config_mode, blit_rect, _scalar_blit_rect, scroll_region, _scalar_scroll_region}
+use std.env.variables.{env_set, env_unset}
 
 # ============================================================================
 # SimdLevel detection
@@ -254,3 +255,214 @@ describe "universal fallback":
         simd_fill_row(buf2, 0, 4, 0xFF112233)
         expect(buf1[0]).to_equal(buf2[0])
         expect(buf1[3]).to_equal(buf2[3])
+
+# ============================================================================
+# detect_simd_level — F6: consistency with the raw CPU-feature probes
+# ============================================================================
+
+describe "detect_simd_level vs raw feature probes":
+    it "F6: chosen level matches the highest-priority true probe (avx2 > sse > neon > rvv > none)":
+        val level_name = detect_simd_level().to_text()
+        val has_avx2 = engine2d_simd_has_avx2()
+        val has_sse = engine2d_simd_has_sse()
+        val has_neon = engine2d_simd_has_neon()
+        val has_rvv = engine2d_simd_has_rvv()
+        val expected = if has_avx2:
+            "AVX2"
+        elif has_sse:
+            "SSE4.2"
+        elif has_neon:
+            "NEON"
+        elif has_rvv:
+            "RVV"
+        else:
+            "None"
+        expect(level_name).to_equal(expected)
+
+    it "F6: active_arch_text/active_feature_text agree with the detected level":
+        val level = detect_simd_level()
+        expect(active_arch_text()).to_equal(level.arch_text())
+        expect(active_feature_text()).to_equal(level.feature_text())
+
+# ============================================================================
+# simd_config_mode — F6: env-driven branches
+# ============================================================================
+
+describe "simd_config_mode":
+    it "F6: empty/unset SIMPLE_2D_SIMD defaults to auto":
+        env_unset("SIMPLE_2D_SIMD")
+        expect(simd_config_mode()).to_equal("auto")
+
+    it "F6: SIMPLE_2D_SIMD=off is honored verbatim":
+        env_set("SIMPLE_2D_SIMD", "off")
+        expect(simd_config_mode()).to_equal("off")
+        env_unset("SIMPLE_2D_SIMD")
+
+    it "F6: an explicit ISA name passes through unmodified":
+        env_set("SIMPLE_2D_SIMD", "neon")
+        expect(simd_config_mode()).to_equal("neon")
+        env_unset("SIMPLE_2D_SIMD")
+        expect(simd_config_mode()).to_equal("auto")
+
+# ============================================================================
+# blit_rect — F6: rect-copy dispatch, row-by-row parity vs the scalar reference
+# ============================================================================
+
+fn make_ramp(n: i64) -> [u32]:
+    var out: [u32] = [0u32; n]
+    var i: i64 = 0
+    while i < n:
+        out[i.to_i32()] = (0xFF000000u32 | (i.to_u32() & 0xFFu32))
+        i = i + 1
+    out
+
+describe "blit_rect":
+    it "F6: dispatch path matches the scalar reference row-by-row":
+        val src = make_ramp(64)
+        var dst_dispatch: [u32] = [0u32; 64]
+        var dst_scalar: [u32] = [0u32; 64]
+        blit_rect(dst_dispatch, 8, 1, 1, src, 8, 0, 0, 5, 5)
+        _scalar_blit_rect(dst_scalar, 8, 1, 1, src, 8, 0, 0, 5, 5)
+        expect(dst_dispatch).to_equal(dst_scalar)
+        expect(dst_dispatch[9]).to_equal(src[0])
+
+    it "F6: overlapping src/dst regions (same underlying pixel values) stay in parity":
+        val shared = make_ramp(64)
+        var dst_dispatch: [u32] = shared
+        var dst_scalar: [u32] = shared
+        blit_rect(dst_dispatch, 8, 2, 2, shared, 8, 0, 0, 4, 4)
+        _scalar_blit_rect(dst_scalar, 8, 2, 2, shared, 8, 0, 0, 4, 4)
+        expect(dst_dispatch).to_equal(dst_scalar)
+
+    it "F6: zero-area rect (w<=0 or h<=0) is a no-op on both paths":
+        val src = make_ramp(16)
+        var dst_dispatch: [u32] = [0xFFFFFFFFu32; 16]
+        var dst_scalar: [u32] = [0xFFFFFFFFu32; 16]
+        blit_rect(dst_dispatch, 4, 0, 0, src, 4, 0, 0, 0, 3)
+        _scalar_blit_rect(dst_scalar, 4, 0, 0, src, 4, 0, 0, 0, 3)
+        expect(dst_dispatch).to_equal(dst_scalar)
+        expect(dst_dispatch[0]).to_equal(0xFFFFFFFFu32)
+
+# ============================================================================
+# scroll_region — F6: vertical scroll dispatch vs scalar reference
+#
+# The real signature (`stride, x, y, w, h, delta_y`) only ever moves rows
+# vertically — there is no delta_x parameter, so a "left/right" scroll is not
+# expressible through this API. Pinning that reality rather than the plan's
+# assumption of a horizontal variant (V1/F4 precedent).
+# ============================================================================
+
+describe "scroll_region":
+    it "F6: scroll up (negative delta_y) matches scalar reference":
+        val original = make_ramp(64)
+        var buf_dispatch: [u32] = original
+        var buf_scalar: [u32] = original
+        scroll_region(buf_dispatch, 8, 0, 0, 8, 8, -2)
+        _scalar_scroll_region(buf_scalar, 8, 0, 0, 8, 8, -2)
+        expect(buf_dispatch).to_equal(buf_scalar)
+        expect(buf_dispatch[0]).to_equal(original[16])
+
+    it "F6: scroll down (positive delta_y) matches scalar reference":
+        val original = make_ramp(64)
+        var buf_dispatch: [u32] = original
+        var buf_scalar: [u32] = original
+        scroll_region(buf_dispatch, 8, 0, 0, 8, 8, 3)
+        _scalar_scroll_region(buf_scalar, 8, 0, 0, 8, 8, 3)
+        expect(buf_dispatch).to_equal(buf_scalar)
+        expect(buf_dispatch[24]).to_equal(original[0])
+
+    it "F6: delta_y == 0 and delta_y >= h are no-ops on both paths":
+        val original = make_ramp(64)
+        var buf_zero: [u32] = original
+        var buf_zero_scalar: [u32] = original
+        scroll_region(buf_zero, 8, 0, 0, 8, 8, 0)
+        _scalar_scroll_region(buf_zero_scalar, 8, 0, 0, 8, 8, 0)
+        expect(buf_zero).to_equal(original)
+        expect(buf_zero).to_equal(buf_zero_scalar)
+
+        var buf_over: [u32] = original
+        var buf_over_scalar: [u32] = original
+        scroll_region(buf_over, 8, 0, 0, 8, 8, 8)
+        _scalar_scroll_region(buf_over_scalar, 8, 0, 0, 8, 8, 8)
+        expect(buf_over).to_equal(original)
+        expect(buf_over).to_equal(buf_over_scalar)
+
+# ============================================================================
+# cpu_simd_required_evidence_valid — F6: honest-gate evidence composition
+#
+# Fabricated-stub guard pattern: this is a pure predicate over evidence
+# fields, so we drive it directly with crafted CpuSimdRuntimeEvidence values
+# instead of trusting only the live host reading (which is a single sample).
+# ============================================================================
+
+describe "cpu_simd_required_evidence_valid":
+    it "F6: valid only when arch matches, all kernels executed, native SIMD ran bit-exact, and no fallback calls occurred":
+        val good = CpuSimdRuntimeEvidence(
+            arch: "aarch64", feature: "neon", level: "NEON",
+            x86_available: false, arm_available: true, riscv_available: false,
+            executed_fill: true, executed_copy: true, executed_alpha: true, executed_scroll: true,
+            checksum: 42, hit_summary: "ok", reason: "ok",
+            native_simd_executed: true, native_simd_bit_exact: true, native_simd_hits: 4
+        )
+        expect(cpu_simd_required_evidence_valid(good, "aarch64", 0)).to_equal(true)
+
+    it "F6: rejects a mismatched expected_arch":
+        val evidence = CpuSimdRuntimeEvidence(
+            arch: "aarch64", feature: "neon", level: "NEON",
+            x86_available: false, arm_available: true, riscv_available: false,
+            executed_fill: true, executed_copy: true, executed_alpha: true, executed_scroll: true,
+            checksum: 42, hit_summary: "ok", reason: "ok",
+            native_simd_executed: true, native_simd_bit_exact: true, native_simd_hits: 4
+        )
+        expect(cpu_simd_required_evidence_valid(evidence, "x86_64", 0)).to_equal(false)
+
+    it "F6: rejects when a kernel never executed (not-executed_all)":
+        val evidence = CpuSimdRuntimeEvidence(
+            arch: "aarch64", feature: "neon", level: "NEON",
+            x86_available: false, arm_available: true, riscv_available: false,
+            executed_fill: true, executed_copy: true, executed_alpha: true, executed_scroll: false,
+            checksum: 42, hit_summary: "ok", reason: "ok",
+            native_simd_executed: true, native_simd_bit_exact: true, native_simd_hits: 4
+        )
+        expect(cpu_simd_required_evidence_valid(evidence, "aarch64", 0)).to_equal(false)
+
+    it "F6: rejects a canned-success evidence that never ran native SIMD (fabricated-stub guard)":
+        val evidence = CpuSimdRuntimeEvidence(
+            arch: "aarch64", feature: "neon", level: "NEON",
+            x86_available: false, arm_available: true, riscv_available: false,
+            executed_fill: true, executed_copy: true, executed_alpha: true, executed_scroll: true,
+            checksum: 42, hit_summary: "ok", reason: "claimed success",
+            native_simd_executed: false, native_simd_bit_exact: true, native_simd_hits: 0
+        )
+        expect(cpu_simd_required_evidence_valid(evidence, "aarch64", 0)).to_equal(false)
+
+    it "F6: rejects when any fallback call occurred, even with otherwise-clean evidence":
+        val evidence = CpuSimdRuntimeEvidence(
+            arch: "aarch64", feature: "neon", level: "NEON",
+            x86_available: false, arm_available: true, riscv_available: false,
+            executed_fill: true, executed_copy: true, executed_alpha: true, executed_scroll: true,
+            checksum: 42, hit_summary: "ok", reason: "ok",
+            native_simd_executed: true, native_simd_bit_exact: true, native_simd_hits: 4
+        )
+        expect(cpu_simd_required_evidence_valid(evidence, "aarch64", 1)).to_equal(false)
+
+    it "F6: the live host evidence's own executed_all() agrees with the gate's fill/copy/alpha/scroll requirement":
+        val live = cpu_simd_runtime_evidence()
+        val gated = cpu_simd_required_evidence_valid(live, live.arch, 0)
+        if live.native_simd_executed and live.native_simd_bit_exact and live.native_simd_hits > 0:
+            expect(gated).to_equal(live.executed_all())
+        else:
+            expect(gated).to_equal(false)
+
+# ============================================================================
+# diagnostic_text — F6: names the active arch/feature honestly
+# ============================================================================
+
+describe "CpuSimdRuntimeEvidence.diagnostic_text":
+    it "F6: names the arch and feature actually detected on this host":
+        val evidence = cpu_simd_runtime_evidence()
+        val text_out = evidence.diagnostic_text()
+        expect(text_out).to_contain("arch=" + active_arch_text())
+        expect(text_out).to_contain("feature=" + active_feature_text())
+        expect(text_out).to_contain("native_simd_executed=")
+        expect(text_out).to_contain("native_simd_hits=" + evidence.native_simd_hits.to_text())
