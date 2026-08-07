@@ -6,12 +6,18 @@
   mechanism, and `test/01_unit/language/jit_lambda_and_fn_ref_value_spec.spl`
   for an interpreter-lane regression lock (`Results: 3 total, 3 passed, 0
   failed`).
-- **Status:** Open
-- **Severity:** High — defect 2 is a silent wrong answer with no diagnostic
+- **Status:** Defect 1 guarded (pre-existing); Defect 2 now GUARDED
+  (2026-08-07, unit T7 — see "T7 landed" below). The ABI itself (this doc's
+  "Fix direction" item 1) remains unfixed; the loud fallback (item 2) is
+  landed.
+- **Severity:** High — defect 2 was a silent wrong answer with no diagnostic;
+  it is now a loud, correct fallback.
 - **Component:** Rust seed JIT — `src/compiler_rust/compiler/src/codegen/jit.rs`
 - **Engine:** JIT (default). The interpreter is correct in every case below.
 - **Binary:** `bin/simple` → `bin/release/x86_64-unknown-linux-gnu/simple`, md5
-  `ed53cc5f255e269ca27c4cd83b17aef9` (the Rust bootstrap seed).
+  `ed53cc5f255e269ca27c4cd83b17aef9` (the Rust bootstrap seed) at filing time;
+  **now `8fb0a8781437b5cf37a2657611b0b1f0`** after the T7 guard landed
+  2026-08-07 (see below).
 
 ## Two defects, not one
 
@@ -225,3 +231,94 @@ direction" item 1), which removes both defects and makes a guard moot. No spec
 was written against `jit.rs` for this unit. This session pivoted to T9
 instead — see
 `doc/08_tracking/bug/gui_showcase_source_revision_spec_asserted_wrong_exit_code_2026-08-07.md`.
+
+## T7 landed (2026-08-07, later same day): condition 1 cleared by redeploy
+
+Condition 1 above ("deployed-binary rebuild/redeploy is forbidden") no longer
+held once `bin/simple` was redeployed at 22:39 with unrelated session fixes —
+that redeploy proved the rebuild/redeploy path was reachable in-session, and
+this session used it. Condition 2 (a text-scanner cannot see this defect) is
+unaffected and still true; the fix below is entirely a Rust-side MIR check.
+
+**Fix, per this doc's own "Fix direction" item 2** ("close the guard's hole
+... refuse on any callable-value construction, not only `HirExprKind::Lambda`"):
+a second guard, `Self::first_named_fn_value_load` in
+`src/compiler_rust/compiler/src/codegen/jit.rs` (called from `compile_module`
+right after the existing `first_lambda_function_impl` check), scans every
+`MirFunction`'s blocks for `MirInst::GlobalLoad { global_name, .. }` whose
+`global_name` is a declared **function** in `mir.functions` but NOT a declared
+**global variable** in `mir.globals`. That is exactly the shape
+`lower_global_expr`'s "static method reference" fallback
+(`src/compiler_rust/compiler/src/mir/lower/lowering_expr_ident.rs:32`) emits
+for a bare identifier that resolves to a function rather than a global — the
+same lowering this doc's Localization section already named as the entry
+point for Defect 2. Ordinary direct calls (`add_one(5)`) do NOT go through
+this path — they lower via `MirInst::Call`/`CallTarget` — so the guard does
+not over-refuse plain function calls; confirmed by fixtures f01 and f09
+(below) still JIT-compiling with no fallback message.
+
+A match returns the function name and `compile_module` refuses the whole
+module, matching Defect 1's existing loud-fallback shape (an
+`[INFO] ... falling back to interpreter` line naming the function, then
+correct execution on the interpreter).
+
+**Verification (binary md5 `8fb0a8781437b5cf37a2657611b0b1f0`, built via
+`cargo build --profile bootstrap --target x86_64-unknown-linux-gnu -p
+simple-driver` + `-p simple-native-all` + `-p simple-runtime
+--features runtime-symbol-table`, deployed to
+`bin/release/x86_64-unknown-linux-gnu/simple`):**
+
+Full fixture sweep, `test/fixtures/repro/compiler/jit_closure/*.spl` under
+`bin/simple run` (JIT engine, default):
+
+    f01_baseline_no_lambda.spl        -> f01 marker result=42            (JIT_OK, unchanged)
+    f02_lambda_stored_local.spl       -> [INFO] falling back ...; result=42  (Defect-1 guard, unchanged)
+    f03_lambda_noncapturing_arg.spl   -> [INFO] falling back ...; result=42  (unchanged)
+    f04_lambda_capturing.spl          -> [INFO] falling back ...; result=42  (unchanged)
+    f05_lambda_in_dead_function.spl   -> [INFO] falling back ...; result=42  (unchanged)
+    f06_named_fn_as_value.spl         -> [INFO] falling back ... 'main' loads a named
+                                          function as a callable value ...; result=42
+                                          (WAS: garbage, e.g. 140359598346673, no diagnostic)
+    f07_underscore_placeholder.spl    -> [INFO] falling back ...; result=3   (unchanged)
+    f08_lambda_returned.spl           -> [INFO] falling back ...; result=42  (unchanged)
+    f09_match_wildcards_not_closures.spl -> kind=number quote_len=1          (JIT_OK, unchanged; negative control for over-refusal)
+
+f06 is the only behavior change: garbage -> loud diagnostic + correct 42.
+f01/f09 (JIT_OK controls) staying JIT_OK confirms no over-refusal of ordinary
+calls or match wildcards.
+
+**Spec** (JIT-lane, out-of-process — `bin/simple test` alone is
+interpreter-only per `.claude/rules/testing.md` and would be vacuous against a
+JIT-only defect):
+`test/01_unit/compiler/jit_named_fn_ref_guard_spec.spl` +
+`test/01_unit/compiler/jit_named_fn_ref_guard_jit_probe.spl` (the probe,
+mirroring fixture f06, spawned under both `interpret` and `jit` engines via
+`src/lib/nogc_sync_mut/spec/engine_probe.spl`). Real run:
+
+    Results: 3 total, 3 passed, 0 failed
+
+**Sabotage** (removed the `first_named_fn_value_load` call + fn, rebuilt,
+redeployed, reran the same spec): the JIT recompiled `f06`'s shape and called
+the garbage function-pointer address again; the child probe process no longer
+returned in time and the test daemon reported
+`ERROR: test daemon timed out: test/01_unit/compiler/jit_named_fn_ref_guard_spec.spl`
+(exit 1) — RED, as expected of a guard whose absence lets JIT call garbage
+code. Guard restored, rebuilt, redeployed, reverified GREEN (3/3) before
+landing.
+
+**Rebuild caveat hit during verification:** an incremental `cargo build -p
+simple-driver` after restoring the guard **relinked in under 2 minutes and
+reported `Finished` with no error, but the resulting binary's strings did not
+contain the new guard's diagnostic text** — a stale-object false green (the
+binary silently kept the sabotaged, unguarded behavior). Confirmed via
+`strings <binary> | grep -c "loads a named function as a callable value"`
+returning `0` on the falsely-fresh binary vs `1` after `touch
+jit.rs` and a forced recompile (`Compiling simple-compiler` reappeared in the
+build log, 3m53s). **Lesson: after any Rust-seed edit in this shared
+working tree, verify the deployed binary's `strings` output for a
+change-specific literal — do not trust a fast, error-free `cargo build`
+alone, especially with concurrent cargo/test activity from other sessions
+sharing the same `target/` directory.**
+
+Related regression lock (interpreter lane only, unaffected by this change):
+`test/01_unit/language/jit_lambda_and_fn_ref_value_spec.spl`.

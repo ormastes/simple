@@ -117,6 +117,28 @@ impl JitCompiler {
             )));
         }
 
+        // Guard for Defect 2 (named-fn-as-value silent miscompile), see
+        // doc/08_tracking/bug/jit_closure_abi_refuses_lambdas_and_miscompiles_fn_refs_2026-08-06.md.
+        //
+        // `emit_global_load`'s "static method reference" fallback
+        // (cranelift_emitter.rs) treats any `GlobalLoad` whose name is not a
+        // declared global variable as a function reference, and emits a bare
+        // `func_addr` with no closure object, no `HeapHeader`, and no
+        // tag-boxing. `compile_indirect_call` then unconditionally treats
+        // that raw code address as a pointer to a closure struct and derefs
+        // it, calling garbage. There is no fix at `compile_indirect_call`
+        // alone (no provenance is carried through the vreg), so refuse the
+        // whole module here, matching Defect 1's fallback shape, whenever a
+        // `GlobalLoad` name resolves to a function rather than a global.
+        if let Some(name) = Self::first_named_fn_value_load(mir) {
+            return Err(BackendError::ModuleError(format!(
+                "function '{name}' loads a named function as a callable value; the JIT \
+                 closure ABI has no tag-boxed representation for a bare function pointer \
+                 (compile_indirect_call would deref the raw code address as a closure struct \
+                 and call garbage); deferring to interpreter"
+            )));
+        }
+
         // Compile all functions
         let functions = self.backend.compile_all_functions(mir)?;
 
@@ -202,6 +224,34 @@ impl JitCompiler {
                     .any(|inst| matches!(inst, crate::mir::MirInst::ClosureCreate { .. }))
                 {
                     return Some(func.name.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// Return the name of the first MIR function that loads a *named function*
+    /// as a callable value (a `GlobalLoad` whose name is not a declared
+    /// global variable — see `emit_global_load`'s "static method reference"
+    /// fallback), if any. This is Defect 2 from
+    /// doc/08_tracking/bug/jit_closure_abi_refuses_lambdas_and_miscompiles_fn_refs_2026-08-06.md:
+    /// unlike `ClosureCreate` (Defect 1, guarded above), this lowering path
+    /// emits no closure object at all, just a bare function-pointer value,
+    /// and currently sails through undetected into a miscompile.
+    fn first_named_fn_value_load(mir: &MirModule) -> Option<String> {
+        let global_names: std::collections::HashSet<&str> =
+            mir.globals.iter().map(|(name, _, _)| name.as_str()).collect();
+        let func_names: std::collections::HashSet<&str> =
+            mir.functions.iter().map(|f| f.name.as_str()).collect();
+        for func in &mir.functions {
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    if let crate::mir::MirInst::GlobalLoad { global_name, .. } = inst {
+                        let name = global_name.as_str();
+                        if !global_names.contains(name) && func_names.contains(name) {
+                            return Some(func.name.clone());
+                        }
+                    }
                 }
             }
         }

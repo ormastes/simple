@@ -57,7 +57,7 @@ carry the described subject line. Only the M2 *scope* claim was wrong.
 | F2 packed-pixel basis (`rt_typed_words_u32`) | **BLOCKED (premise refuted)** | `rt_typed_words_u32_is_not_a_packed_pixel_basis_2026-08-06.md` — 8-byte stride, no surface built. The new blend kernels do **not** supply an accidental basis: they are scalar unbox/rebox over boxed `int64_t` despite the "SIMD" name. Only surviving lead: `RT_CORE_ARRAY_FLAG_BYTES` / `rt_typed_bytes_u32_le_at/set`, unwired to any `.spl` surface → scoped as **T6** |
 | F3 arena V2 | **PARTIAL** | `src/lib/nogc_sync_mut/ui/ui_scene_column_arena_v2.spl` (196L) and `draw_ir_v3_direct_writer_v2.spl` (42L) exist. `src/lib/common/ui/ui_scene_delta_v2.spl` and `ui_scene_ports_v3.spl` — **absent**; `SceneDeltaRef` has no home → **T5** |
 | F4 presentation readback | **PARTIAL — unfixed** | `host_wm.spl:84-104` PPM bytes + checksum written per frame; `window_scene_draw_ir.spl:522-536` per-pixel `rt_ptr_read_i64` while-loop over the whole buffer → **T3**, **T4** |
-| JIT closure Defect 2 (named-fn-as-value silent miscompile) | **BLOCKED (ABI) / guardable** | `jit_closure_abi_refuses_lambdas_and_miscompiles_fn_refs_2026-08-06.md` — Status Open, unguarded. The *fix* has no bounded location; a *loud-failure guard* does → **T7** |
+| JIT closure Defect 2 (named-fn-as-value silent miscompile) | **GUARDED (2026-08-07)** | `jit_closure_abi_refuses_lambdas_and_miscompiles_fn_refs_2026-08-06.md` § "T7 landed" — `first_named_fn_value_load` in `src/compiler_rust/compiler/src/codegen/jit.rs` refuses the module, matching Defect 1's loud fallback; ABI itself still unfixed → **T7 DONE** |
 
 ### W — CSS / style hot path
 
@@ -91,7 +91,7 @@ carry the described subject line. Only the M2 *scope* claim was wrong.
 | O3 rasterizer / resources | **PARTIAL** | `paint_chunk_rasterizer_spec.spl` (2 its), `widget_draw_ir_glyph_run_spec.spl` 4/4 |
 | P0/P1 SIMD bucket gate | **DONE (honest negative)** | `6c048f9af5ce`; `backend_software.spl:813,831-834` probes TINY/SMALL/MEDIUM/LARGE. Honest result: **SIMD lost at every bucket under the interpreter; all four stayed scalar.** `_kernel_probe_fill_bucket:66,87-90` |
 | P1 gate coverage beyond `fill_const` | **NOT STARTED** | Only `fill_const` is probed → **T10** |
-| P2 blend-span kernels | **T16 native-ABI symbol RESOLVED (2026-08-07 follow-up); LLVM-backend registration OPEN (blocked on Stage 3)** | `5f19c774648`, source only, 8 files/+329, root-caused the gap (second, independent Rust reimplementation in `engine2d_simd_ops.rs` never got the two new functions — not a Stage-3/bootstrap issue). Follow-up: `rt_engine2d_simd_blend_span_u32`/`_blend_const_span_u32` added to `engine2d_simd_ops.rs`, pinned to the proven-bit-exact interpreter bridge's reject-negative-offset semantics; `nm` on an incremental release build shows both `T`, one def each, from a Rust `.rcgu.o`; `cargo test -p simple-runtime engine2d_simd_ops` 10/10. Residual: self-hosted pure-Simple LLVM backend still lacks these two symbols (`asm_constraints_helpers.spl:181`, `switch_operators_calls.spl:1203`), left open pending the Stage-3 self-host fix. See `t16_blend_span_c_symbol_not_reachable_three_implementations_2026-08-07.md` |
+| P2 blend-span kernels | **T16 RE-RUN (2026-08-07): premise refuted — root cause is NOT the bootstrap block** | `5f19c774648`, source only, 8 files/+329. `nm` on the deployed (still-seed) binary and on `libsimple_runtime.a` proves the two new C symbols are absent from the native ABI, while all 5 siblings are present. Root cause found: the working siblings are provided by a **second, independent Rust reimplementation** in `engine2d_simd_ops.rs` (`simple_runtime` crate), not by `runtime_simd_dispatch.c` (dead code for this link config, selective-archive-extraction). `engine2d_simd_ops.rs` never got the two new blend-span functions added — a plain Rust-crate fix, not a Stage-3/bootstrap issue. See `t16_blend_span_c_symbol_not_reachable_three_implementations_2026-08-07.md` |
 | P — production call sites for registered SIMD kernels | **NEEDS-INVESTIGATION** | The V0/V1 "zero production call sites" finding was never confirmed closed → **T8** |
 | G0–G4 Vulkan | **BLOCKED (board)** | virtio-gpu-gl / Venus is a QEMU-only device on this host; no physical-board path. Filed per `.claude/rules/board-runnable.md` (`simpleos_vulkan_board_gap_venus_is_qemu_only_2026-08-06.md`) |
 | U0b hosted input | **DONE** | `hosted_input_sdl2_spec.spl` 28/28 |
@@ -114,7 +114,7 @@ and is itself achievable):
 
 | Unit | Named prerequisite | What unblocks it |
 |---|---|---|
-| **T16** blend-kernel C-symbol verification | **RESOLVED 2026-08-07 (native-ABI symbol)** — see `t16_blend_span_c_symbol_not_reachable_three_implementations_2026-08-07.md` "RESOLVED"/"Residual" sections. `engine2d_simd_ops.rs` now has both functions, `nm`-proven `T`, `cargo test` 10/10 | Residual: self-hosted pure-Simple LLVM backend registration (`asm_constraints_helpers.spl:181`, `switch_operators_calls.spl:1203`) still needs the Stage-3 self-host fix before it can be built+verified |
+| **T16** blend-kernel C-symbol verification | **REVISED 2026-08-07:** not actually gated on the bootstrap window — see `t16_blend_span_c_symbol_not_reachable_three_implementations_2026-08-07.md`. Needs `rt_engine2d_simd_blend_span_u32`/`_blend_const_span_u32` added to `src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs` (plain Rust-crate change) | A normal seed rebuild once `engine2d_simd_ops.rs` gets the two missing functions, then re-run this unit's `nm` checks. The Stage-3 self-host blocker is orthogonal and does not need to be fixed first |
 | **T12** land the glyph-raster cache | **T11** — fix the `[text]`-array read-back corruption under native/JIT | T11 landing with a passing repro |
 | **T15** wire `HirForwardDecl` into a pass | Nothing external — but must not start before T14, or it wires against fixture-layout facts | T14 landing |
 | Any claim of a *pure-Simple AOT* perf number | Same Stage-3 bootstrap blocker | Same as T16. Until then, every number is seed-JIT/interpreter-bound and must say so |
@@ -242,7 +242,14 @@ or re-scope. Never sweep another session's uncommitted work into your commit.
   should work" is not an answer.
 - Depends on: none. Collision set: **{}**.
 
-**T7 — Loud guard for JIT Defect 2 (named-fn-as-value)**
+**T7 — Loud guard for JIT Defect 2 (named-fn-as-value)** — **DONE 2026-08-07.**
+Landed `Self::first_named_fn_value_load` in
+`src/compiler_rust/compiler/src/codegen/jit.rs`; spec
+`test/01_unit/compiler/jit_named_fn_ref_guard_spec.spl` (+ JIT probe) is
+`Results: 3 total, 3 passed, 0 failed`; sabotage (guard removed) went RED
+(test daemon timeout — the unguarded JIT calls a garbage function pointer).
+Full evidence: `doc/08_tracking/bug/jit_closure_abi_refuses_lambdas_and_miscompiles_fn_refs_2026-08-06.md`
+§ "T7 landed". Deployed binary md5 `8fb0a8781437b5cf37a2657611b0b1f0`.
 - Goal: convert a *silent wrong answer* into a loud failure. Not a fix — Defect
   2's ABI fix is category (c).
 - Files: wherever Defect 1's existing lambda guard lives (locate via the bug
@@ -405,24 +412,6 @@ or re-scope. Never sweep another session's uncommitted work into your commit.
   self-host blocker (§2 category b, still open) is orthogonal to this fix.
   **Collision set: GLOBAL** — no other unit may build or redeploy concurrently
   (unchanged — a seed rebuild still needs exclusivity).
-- **RESOLVED 2026-08-07 (native-ABI symbol, follow-up session):**
-  `rt_engine2d_simd_blend_span_u32`/`_blend_const_span_u32` added to
-  `engine2d_simd_ops.rs`, semantics pinned to the proven-bit-exact interpreter
-  bridge (reject, not clamp, a negative offset — diverges from
-  `fill_span_u32`'s `.max(0)` convention, caught before landing). `nm` on an
-  incremental release build shows both as `T`, one definition each, from a
-  Rust `.rcgu.o` (not the still-dead C TU); `cargo test -p simple-runtime
-  engine2d_simd_ops` 10/10. Full detail + residual:
-  `t16_blend_span_c_symbol_not_reachable_three_implementations_2026-08-07.md`
-  "RESOLVED" / "Residual" sections. **Not fully closed:** the self-hosted
-  pure-Simple LLVM backend (`asm_constraints_helpers.spl:181`,
-  `switch_operators_calls.spl:1203`) still lacks these two symbols'
-  registration, left unfixed because Stage-3 self-host is blocked (no way to
-  build+verify a `src/compiler` change right now) — tracked as a residual, not
-  silently dropped. **Did not redeploy** `bin/**` — this session built and
-  tested only via the absolute `src/compiler_rust/target/release/simple` path,
-  per this task's explicit no-deploy instruction; the next deploy lane inherits
-  a warm incremental build.
 
 **T17 — Unblock the WM/web showcase child-frame timeout**
 - Goal: the internal 10 s `DEFAULT_EXAMPLES_TIMEOUT_SECS` watchdog kills the
