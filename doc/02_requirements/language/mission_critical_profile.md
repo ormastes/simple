@@ -313,7 +313,36 @@ user decision date pattern.
 severity-table mechanism as `W-MC-REF-001`/`W-MC-VAL-001`, driver
 `80.driver/driver_safety_severity.spl`, lint `90.tools/lint/_LintMain/config_and_model.spl`).
 
-**Status: IMPLEMENTED, DORMANT pending lint redeploy (WP-3.5).**
+**Status: IMPLEMENTED and LIVE as of 2026-08-07** (this section previously
+read "DORMANT pending lint redeploy (WP-3.5)" — that is no longer true and
+has been corrected). Verified by positive capability probe: a bare acquire
+returned from a fn produces `warning[W-MC-RES-001]` under `bin/simple lint
+--profile=critical`, and is correctly silent under `--profile=moderate`.
+
+**Ownership *or* ref count both satisfy this rule.** A refcounted wrapper is
+accepted exactly like an affine owning wrapper — measured, and true
+incidentally rather than by design: the accept predicate recognises any
+`TypeName(...)` constructor and does not inspect which ownership discipline
+the wrapper implements. No `*R`/`@R` sigil detection is involved (and none is
+possible here — this is a text-level check, and per WP-G `@R`/`-R` erase to
+`Infer` even at HIR).
+
+**Blocker on the v2 `deny` promotion — do not promote on this
+implementation.** A 245-file sweep yields **208 findings across 78 files**,
+overwhelmingly false positives: the check matches an acquire *verb* and never
+establishes that the call returns an opaque handle, so it flags
+`rt_string_new` (a string value), `rt_array_new` (an array value),
+`rt_dir_create` (creates a directory, returns `bool`) and `rt_atomic_int_load`
+(an atomic read). The obvious narrowing — requiring a same-prefix paired
+release — is **unsound**, silencing genuine resources such as
+`rt_io_tcp_socket_create` and `rt_cuda_module_load` whose release lives under
+a different prefix; it would trade visible noise for invisible leaks. A sound
+rule must key on the declared handle type carried by `@sffi(handle: ...)` /
+`resource R`, i.e. a semantic check rather than a text scan. Full measurement,
+controls and unsoundness proof:
+`doc/08_tracking/bug/w_mc_res_001_overfires_verb_only_heuristic_2026-08-07.md`.
+The warn→deny phasing below should be re-evaluated only after that rework.
+
 `W-MC-RES-001` is a landed checker —
 `src/compiler/35.semantics/lint/unwrapped_foreign_resource.spl`
 (`check_unwrapped_foreign_resource`) — registered in
