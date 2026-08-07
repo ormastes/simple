@@ -180,6 +180,100 @@ tracked as WP-3/WP-4 in
 Old spellings keep parsing with a deprecation warning; removal is an edition decision.
 All rule phase notes in this doc map onto the new names (`mission-critical` → `critical`).
 
+## REQ-MC-023 — No unwrapped foreign resource (phase: WARN in critical now, deny at v2 — user decision 2026-08-07)
+
+Firmware-style rule, same shape as REQ-MC-002/011: a raw opaque handle
+acquired from an `extern fn`/SFFI boundary (typically a bare `i64`, per the
+Opaque Handle Pattern in `doc/07_guide/platform/ffi/sffi.md`) must not be
+passed around, stored, or returned without being wrapped in an owning Simple
+type whose release is a consuming drop — either the `resource R` declaration
+(`doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md`,
+`doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md`,
+**proposed, not implemented** — see that phase note below) or, until `resource`
+lands, a hand-written class whose only field is the handle and whose `close`/
+drop method calls the paired release extern exactly once.
+
+**Wrapped (OK):**
+
+```simple
+@sffi(prefix: "rt_file", invalid: -1)
+resource File
+
+fn read_config(path: text) -> text:
+    val file = File.open(path)?      # owning wrapper; auto-release on scope exit
+    file.read_all()
+```
+
+```simple
+# Until `resource` lands: hand-written wrapper is also compliant.
+class Database:
+    handle: i64                       # private field, not re-exposed
+
+    static fn open(path: text) -> Database:
+        Database(handle: spl_db_open(path))
+
+    fn query(sql: text) -> text:
+        spl_db_query(self.handle, sql)
+
+    fn close():
+        spl_db_close(self.handle)     # release fires exactly once
+```
+
+**Unwrapped (flagged):**
+
+```simple
+extern fn rt_file_open(path: text) -> i64
+extern fn rt_file_close(handle: i64) -> bool
+
+fn read_config(path: text) -> text:
+    val handle = rt_file_open(path)   # W-MC-RES-001 — bare handle escapes the FFI call site
+    val text = read_from(handle)      # handle threaded through app code unwrapped
+    text
+
+fn open_two(a: text, b: text) -> (i64, i64):
+    (rt_file_open(a), rt_file_open(b))  # W-MC-RES-001 — raw handles returned to caller
+```
+
+Rule `W-MC-RES-001 unwrapped_foreign_resource`. Levels: `allow` in
+moderate/strict/robust (would flood non-critical FFI glue), **warn** in
+`critical` profile now, **deny** at profile v2 — same warn-then-deny phasing
+as REQ-MC-002 (`W-MC-REF-001`) and REQ-MC-011 (`W-MC-VAL-001`), and the same
+user decision date pattern.
+
+**Exemptions**, mirroring REQ-MC-011's `@representation_boundary` carve-out:
+
+- The `extern fn` declaration itself, and the single call expression that
+  invokes it to acquire or release the handle — the rule flags the handle
+  *escaping* that call site, not the call.
+- Code inside an `@unsafe(reason: text, capabilities: [ffi])` boundary
+  (REQ-MC-004) or a generated SFFI adapter module (`90.tools/sffi_gen`
+  output) — this is the representation/FFI boundary carve-out; raw handles
+  are expected there.
+- The `resource` declaration's own generated adapter body once Phase 1 of
+  the design lands (it is the wrapper).
+
+**Enforcement phase:** compile-time lint, `critical` profile only (same
+severity-table mechanism as `W-MC-REF-001`/`W-MC-VAL-001`, driver
+`80.driver/driver_safety_severity.spl`, lint `90.tools/lint/_LintMain/config_and_model.spl`).
+
+**Status: SPECIFIED, NOT IMPLEMENTED.** No `W-MC-RES-001` checker exists in
+`src/compiler/90.tools/lint` or elsewhere as of this writing, and it has no
+entry in the lint registry (`lint_checks.spl`) the way `W-MC-VAL-001` does not
+either — REQ-MC-011 is itself only a rule-name reservation, not a landed
+checker; this rule is the same kind of reservation. It additionally depends on
+the `resource` declaration (Phase 1, not yet implemented — see
+`doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md`)
+for the primary wrapped-form example to be checkable as `resource`-typed
+rather than only as the hand-written-class fallback. Per REQ-MC-012's
+reachability caveat, even a landed checker enforces nothing through
+`bin/simple` until stage-3 self-host unblocks — `bin/simple` today is the
+Rust seed, which has no lint code for this family at all. The
+`doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`
+premises table (row 12b: "the enemy is reimplementation, not absence")
+applies here too — if a WARN-only text heuristic for this rule is ever added
+ahead of a real semantic checker, it must be named as the twin that dies when
+the semantic checker lands, not kept alongside it.
+
 ## Non-goals / design decisions honored
 
 - Short borrowing range: intended design, not a gap.

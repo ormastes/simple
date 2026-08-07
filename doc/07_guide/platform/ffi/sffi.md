@@ -167,6 +167,15 @@ class Database:
 > code behind this today — keep writing the opaque-handle pattern above. See
 > `doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md`
 > and `doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md`.
+>
+> **Related rule, also not implemented:** `REQ-MC-023` in
+> `doc/02_requirements/language/mission_critical_profile.md` specifies that,
+> in the `critical` profile, a bare handle returned by `rt_file_open` above
+> must not escape the acquire call site unwrapped (warn now, deny at profile
+> v2) — the `class Database` wrapper shown here is the compliant shape. No
+> `W-MC-RES-001` checker exists yet, and `bin/simple` (the Rust seed) has no
+> lint code for this family regardless — see the requirement's own
+> "SPECIFIED, NOT IMPLEMENTED" note before assuming this fires anywhere.
 
 ### Feature Detection Pattern
 
