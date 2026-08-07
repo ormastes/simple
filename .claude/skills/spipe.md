@@ -1479,6 +1479,31 @@ filesystem, use `std.io_runtime` (`file_read`, `file_size`, `file_exists`,
 not just "the call returned ok". Grep a spec's imports for `file_ops` before
 trusting it as evidence of real IO.
 
+## Prevention mocks — what the mock library already supports (2026-08-07)
+
+A full pure-Simple mock library exists at `src/lib/nogc_sync_mut/src/testing/`
+(facade: `mocking_core.spl`): `MockFunction` with call recording
+(`mock/builder.spl`), `verify_called(mockfn, times)` / `verify_called_with` /
+`Matcher` / `CallAnalyzer` (`mock/verification.spl`), and `Spy`
+(`mock/spy.spl`). The *prevention* idiom — a mock that must NEVER be called —
+is expressible today as `verify_called(m, 0)` asserted at the end of the `it`
+block; there is no auto-verification, so a forgotten check is fail-open.
+Two limits to know before trusting a prevention mock as evidence:
+
+- **No interception.** A mock only sees calls routed through it by
+  composition/DI. It cannot observe a direct `rt_file_write_text` or real
+  socket call — inject the mock at the seam, or use env-level probes
+  (`engine_probe.spl`) for engine-identity prevention.
+- **Mock-ban policy is separate.** `MockPolicy` / `MockMode`
+  (All/HalOnly/Disabled/Custom) bans mock *creation* in system tests — see
+  `doc/07_guide/infra/security/mock_policy_system_test_ban.md`. That prevents
+  mocks; it does not provide fail-on-forbidden-call.
+
+First-class `prevent`/`prevent_file` DSL + a directory-wide convention are
+planned: `doc/03_plan/infra/testing/sspec_prevention_mock_plan_2026-08-07.md`.
+Directory-wide scope is NOT specifiable today (runner has only the repo-level
+`config/simple.test.sdn`; no per-dir fixture hook).
+
 ## Hardware-model probes (riscv / link_mux) — runner + mode rules
 
 Hardware `.spl` probes (`test/01_unit/lib/hardware/**`) are plain `run` probes
