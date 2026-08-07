@@ -257,6 +257,7 @@ WP** → WP-12…15 → Wave 4.
 | WP-22 | `21154033918` | **Landed, but the filed premise was wrong.** `bin/simple inspect` exits **rc=1**, not rc=0 — measured across 7 token shapes; `main.rs:1674` has read `return 1` since introduction. Real (smaller) fix: the fall-through returned a flat `1`, indistinguishable from a genuine file-execution failure; now returns `2` for usage errors. Function-level RED→GREEN proven; **process-boundary verification impossible today** — no self-hosted binary is deployed |
 | REQ-MC-023 | `82fd43ad4df` | **Landed.** `W-MC-RES-001 unwrapped_foreign_resource`: allow in moderate/strict/robust, warn in `critical`, deny at v2 — same two-phase pattern as REQ-MC-002/011. Marked SPECIFIED-NOT-IMPLEMENTED with all three blockers named. Skipped REQ-MC-013…022 (reserved by WP-5). No `doc/06_spec` entry written: that tree is generated from `test/**` and no sspec source exists yet, so writing one would fabricate evidence of a test that does not run |
 | Foreign-resource migration | `c038cd1e6df` | **Blocked, correctly.** The tier→strategy hypothesis was **refuted**: strategy is selected by per-resource `@sffi` metadata + use-site sigil (`R`/`*R`/`@R`), NOT by defining tier — tier only constrains legality. Census: 85 release-families. Migration cannot proceed because `resource`/`@sffi` parsing does not exist (WP-A). Pilot spec left RED with a bug record rather than hand-rolling wrappers that would reproduce the boilerplate `resource` exists to delete |
+| WP-12a input (collections) | `57f7f44849f` | **Landed — real fix, not comment-only.** `FixedArray`/`FixedStack` now reserve full capacity in `new()` and write by index (no per-`push()` growth); `FixedMap` refactored from per-op `FixedMapEntry` allocation to parallel primitive arrays, matching `FixedSet`/`RingBuffer`'s already-correct pattern. Regression: `FixedArray`/`FixedStack` `items.len()` 0/3/0 → 8/8/8 (`4/4` pass); `FixedMap` `3/3` pass. Zero production consumers for `FixedArray`/`FixedStack`/`FixedMap`/`FixedSet` (test-only); `RingBuffer`'s one consumer (`src/os/realtime/scheduler.spl`) was already correct and untouched. Stays RED only where genuinely blocked: true inline/static storage needs `[T; N]` sized-array support, which parses but discards its size (`parser.spl:781-798`) — that gap is the WP-12 lattice's remaining dependency. Surfaced a second, more severe defect mid-investigation: `PoolLinkedList.push_back`/`push_front`/`pop_front`/`pop_back`/`remove_at` fail at runtime (`semantic: invalid assignment: complex indexed field receiver is not supported`), filed separately, never caught by its own spec (text-scan only) |
 
 **Method note earned the hard way:** the WP-22 premise came from a verification
 agent's report that was never independently measured before being filed as a bug.
@@ -271,6 +272,18 @@ Newly filed (2026-08-07):
   — premise 7b, the circular hole. Blocks WP-12.
 - `doc/08_tracking/bug/cli_unknown_subcommand_exits_zero_fail_open_2026-08-07.md`
   — `bin/simple <unknown>` exits **rc=0**. Paired with WP-22.
+- `doc/08_tracking/bug/noalloc_collections_backed_by_growable_heap_array_2026-08-07.md`
+  — `nogc_async_mut_noalloc/collections/*` claimed "no heap allocation" but
+  are backed by a real heap `[T]` array. FIXED for `FixedArray`/`FixedStack`/
+  `FixedMap` (reserve-once / parallel-array patterns, `57f7f44849f`); `FixedSet`/
+  `RingBuffer` were already correct. Stays RED only for true inline/static
+  storage, which needs a language feature that does not exist (`[T; N]` is
+  parsed but its size is discarded, `parser.spl:781-798`). WP-12 input.
+- `doc/08_tracking/bug/pool_linked_list_push_fails_complex_indexed_field_receiver_2026-08-07.md`
+  — `PoolLinkedList.push_back`/`push_front`/`pop_front`/`pop_back`/`remove_at`
+  fail at runtime with `semantic: invalid assignment: complex indexed field
+  receiver is not supported`. Found mid-investigation of the bug above; its own
+  spec never caught this because it's text-scan-only.
 
 Already tracked elsewhere — pointers, not new records:
 
