@@ -10,6 +10,55 @@ the design doc + the named files. Each WP states: files, task, acceptance
 check, and model tier. Agents MUST NOT touch files outside their WP (parallel
 sessions share the WC — see `.claude/rules/vcs.md`). Commit + push per WP.
 
+## #0.5 — YOUR ACCEPTANCE ORACLE IS PROBABLY UNREACHABLE (added 2026-08-07, read before WP-B/C/E/G/I/J)
+
+**WP-A landed** (`1a6a7da02f6`, `7c60ee34bc0`): `resource` declarations and the
+`@sffi` decorator now parse, implemented as a **soft keyword** so the 112
+identifier uses of `resource` in `src/` cannot break. Regression spec
+`test/01_unit/compiler/resource/resource_decl_spec.spl` is 18/18 and was proven
+non-vacuous by sabotage (injecting a `parser_error` turned it red; reverting
+restored green).
+
+**But the pilot spec is still RED, and that is correct.** It stays
+`Results: 1 total, 0 passed, 1 failed` after the parser landed, because:
+
+> `bin/simple test` re-execs a child **Rust seed**, and the seed's parser reads
+> the spec file's own module-level syntax. The pilot's error is Rust `Debug`
+> output from `src/compiler_rust/parser/src/error.rs:73`. **No pure-Simple
+> frontend change can make that spec parse.**
+
+Proven by positive control, not inference: a spec containing `layer ProbeLayer`
+— an **already-landed, working** pure-Simple soft keyword — fails identically
+with `function 'layer' not found`.
+
+### What this means for every remaining WP
+
+- **Do NOT write acceptance as "real source using the new syntax, in a spec
+  file."** WP-B, WP-C, WP-E, WP-G, WP-I and WP-J all state acceptance that way
+  today. Every one of them is unreachable as written. WP-I (interpreter/JIT
+  parity) is worst affected.
+- **Use the source-string harness instead** — the `const_spec.spl` shape: feed a
+  source string to `parse_module_body()` and assert on the resulting AST/HIR.
+  That is what WP-A's passing regression spec does.
+- **Production `src/**` code cannot adopt `resource` syntax yet either**, for the
+  same reason: the seed compiles the tree. Migrating library code is gated on
+  stage-3 self-host, not on this feature's own WPs. Land the pipeline behind the
+  syntax; migrate call sites after stage-3.
+
+### Other corrections from WP-A
+
+- **WP-0's "the new token is 222" is wrong.** `layer` and `cli` use no token
+  constant at all. Adding one is precisely the hard-keyword risk §0 warns about.
+- **WP-0's ~13-site wire-point checklist was not needed** — the inert-marker
+  path carries the metadata in two edits.
+- **WP-B is smaller than assumed:** `*T` in type-annotation position **already
+  parses** today (probed directly).
+- **Design §1 gap:** `invalid: -1` lexes as **two tokens**. Handling only single
+  tokens silently drops the sign.
+- The count in §0 says 115 identifier uses of `resource`; measured by
+  identifier-position regex it is **112** (raw word count 905 includes comments
+  and `resource_*` compounds). The conclusion is unchanged.
+
 ## #0 — Stage-3 self-host is the blocker above every WP below (read first)
 
 **No self-hosted `bin/simple` exists.** The deployed `bin/simple` /
