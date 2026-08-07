@@ -45,6 +45,24 @@ use os.kernel.types.capability_types.{
     CAP_RIGHT_DATASET_BUILD, CAP_RIGHT_QUEUE_RECV
 }
 use os.kernel.loader.spawn_authority.{spawn_effective_rights, spawn_rights_is_subset}
+# WP-19: content-hash verification reuses the SAME pure-Simple, baremetal-safe
+# SHA-256 the SSH/TLS stack already uses on this kernel path (`os.crypto.sha256`,
+# imported the identical bare-name way `ssh_kex_crypto.spl` does — see that
+# file's `use os.crypto.sha256.{sha256}`). Deliberately NOT `std.crypto.sha256`:
+# that one's `sha256_text` calls `extern fn rt_tls13_sha256`, which is proven to
+# return an empty digest under the Cranelift JIT (see
+# doc/08_tracking/bug/jit_rt_tls13_sha256_returns_empty_2026-08-05.md) and is not
+# the primitive this freestanding-adjacent module's own header discipline (no
+# unproven runtime dependencies) allows.
+use os.crypto.sha256.{sha256}
+
+# Same raw-byte-array accessor every other freestanding loader file in this
+# directory uses (elf_loader.spl, byte_utils.spl, fs_exec_resolve.spl,
+# process_image.spl) instead of `arr[i]` bracket indexing — bracket indexing
+# on a dynamically-produced `[u8]` is not proven safe on the x64 freestanding
+# path (see this file's own header + those modules' identical `extern fn
+# rt_bytes_u8_at` declarations).
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 # ============================================================================
 # Format version + artifact kinds (function-returning constants)
@@ -118,6 +136,18 @@ pub fn manifest_reason_signature_without_hash() -> text:
     """A signature is present but no content hash covers the bytes it signs —
     an unbound signature proves nothing, so it is rejected."""
     "signature_without_content_hash"
+
+pub fn manifest_reason_no_content_hash_declared() -> text:
+    """The manifest declares zero `content_hashes` entries. Fail closed: an
+    artifact with no declared hash can never be verified against real bytes,
+    so `manifest_verify_content_hash` refuses rather than vacuously passing."""
+    "no_content_hash_declared"
+
+pub fn manifest_reason_content_hash_mismatch() -> text:
+    """The SHA-256 of the ACTUAL artifact bytes does not match any entry in
+    `content_hashes`. This is the tamper/corruption detection outcome — the
+    security-relevant rejection this module exists to produce."""
+    "content_hash_mismatch"
 
 # ============================================================================
 # Value structs (no classes, no traits — plain data)
@@ -385,6 +415,61 @@ pub fn manifest_validate_for_target(
 pub fn manifest_validate(m: SimpleArtifactManifest) -> ManifestCheck:
     """Fail-closed validation against the running target."""
     manifest_validate_for_target(m, manifest_running_target())
+
+# ============================================================================
+# Real content-hash verification (WP-19) — the manifest's `content_hashes`
+# checked against the ACTUAL bytes of the artifact it describes, not just
+# presence-checked. Fail closed on every axis: no bytes, no declared hash, and
+# a mismatch are all rejections; only an exact hex-digest match passes.
+# ============================================================================
+
+fn _manifest_hex_digit(nibble: i64) -> text:
+    val hex_digits = "0123456789abcdef"
+    hex_digits.substring(nibble, nibble + 1)
+
+pub fn manifest_sha256_hex(bytes: [u8]) -> text:
+    """Hex-encoded SHA-256 digest of `bytes`, using the pure-Simple,
+    baremetal-safe `os.crypto.sha256.sha256` this kernel path already trusts
+    for SSH/TLS. One byte -> two hex chars, most-significant nibble first
+    (matches `std.common.crypto.sha256.sha256_text`'s encoding so a hash
+    computed host-side and one computed here are directly comparable)."""
+    val digest = sha256(bytes)
+    var pairs: [text] = []
+    var i: i64 = 0
+    val n = digest.len() as i64
+    while i < n:
+        val v = rt_bytes_u8_at(digest, i)
+        pairs.push(_manifest_hex_digit((v >> 4) & 15) + _manifest_hex_digit(v & 15))
+        i = i + 1
+    pairs.join("")
+
+fn _manifest_hash_list_contains(hashes: [text], want: text) -> bool:
+    var i: u64 = 0u64
+    while i < hashes.len():
+        if hashes[i] == want:
+            return true
+        i = i + 1u64
+    false
+
+pub fn manifest_verify_content_hash(m: SimpleArtifactManifest, actual_bytes: [u8]) -> ManifestCheck:
+    """The real production check: compute SHA-256 over `actual_bytes` (the
+    bytes read for THIS artifact off disk) and require it to match one of the
+    manifest's declared `content_hashes`.
+
+    Fail closed:
+      - zero declared hashes -> reject (`manifest_reason_no_content_hash_declared`),
+        never treated as "no opinion, pass".
+      - computed digest present but absent from `content_hashes` -> reject
+        (`manifest_reason_content_hash_mismatch`) — this is what catches a
+        tampered or corrupted artifact.
+      - computed digest matches an entry -> `manifest_reason_ok()`.
+    """
+    if m.content_hashes.len() == 0:
+        return ManifestCheck(ok: false, reason: manifest_reason_no_content_hash_declared())
+    val actual_hex = manifest_sha256_hex(actual_bytes)
+    if not _manifest_hash_list_contains(m.content_hashes, actual_hex):
+        return ManifestCheck(ok: false, reason: manifest_reason_content_hash_mismatch())
+    ManifestCheck(ok: true, reason: manifest_reason_ok())
 
 # ============================================================================
 # Rights — the executable policy ceiling and the §5.4 intersection

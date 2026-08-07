@@ -56,6 +56,7 @@ use os.kernel.loader.artifact_manifest.{
     manifest_reason_unknown_kind, manifest_reason_empty_entrypoint,
     manifest_reason_script_without_interpreter,
     manifest_reason_target_mismatch, manifest_reason_signature_without_hash,
+    manifest_reason_no_content_hash_declared, manifest_reason_content_hash_mismatch,
     manifest_running_target, manifest_target_matches,
     manifest_for_kind, manifest_kind_base_rights, manifest_kind_allowed_rights,
     manifest_with_entrypoint, manifest_with_interpreter, manifest_with_target,
@@ -65,8 +66,11 @@ use os.kernel.loader.artifact_manifest.{
     manifest_required_rights, manifest_effective_rights,
     manifest_rights_within_ceilings,
     manifest_kind_from_launch_entry_kind, manifest_from_launch_metadata,
-    manifest_summary
+    manifest_summary,
+    manifest_sha256_hex, manifest_verify_content_hash
 }
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # ---------------------------------------------------------------------------
 # Fixtures — every well-formed manifest is built from its own kind skeleton.
@@ -470,3 +474,50 @@ describe("unified SimpleArtifactManifest (master plan 5.3)"):
         )
         assert_true(there.ok)
         expect(there.reason).to_equal("ok")
+
+    # =======================================================================
+    # 6. WP-19 — REAL content-hash verification against ACTUAL bytes
+    # =======================================================================
+
+    it("computes the FIPS 180-4 published SHA-256 test vector for 'abc'"):
+        step("absolute oracle - the published KAT, not a self-referential compare")
+        val digest = manifest_sha256_hex(rt_text_to_bytes("abc"))
+        expect(digest).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
+    it("accepts a manifest whose declared hash matches the REAL artifact bytes"):
+        step("real bytes for a real artifact")
+        val real_bytes = rt_text_to_bytes("#!/usr/bin/simple\nprint \"hello from the real artifact\"\n")
+        val real_hex = manifest_sha256_hex(real_bytes)
+
+        step("manifest declares exactly that digest")
+        var m = _elf_ok()
+        m.content_hashes = [real_hex]
+
+        step("verification computes the SAME hash over the SAME bytes and passes")
+        val outcome = manifest_verify_content_hash(m, real_bytes)
+        assert_true(outcome.ok)
+        expect(outcome.reason).to_equal(manifest_reason_ok())
+
+    it("REJECTS a manifest when the artifact bytes were tampered with (security property)"):
+        step("the manifest was signed against the ORIGINAL bytes")
+        val original_bytes = rt_text_to_bytes("#!/usr/bin/simple\nprint \"hello from the real artifact\"\n")
+        val original_hex = manifest_sha256_hex(original_bytes)
+        var m = _elf_ok()
+        m.content_hashes = [original_hex]
+
+        step("but the bytes actually being loaded were TAMPERED - one byte flipped")
+        val tampered_bytes = rt_text_to_bytes("#!/usr/bin/simple\nprint \"hallo from the real artifact\"\n")
+        expect_not(manifest_sha256_hex(tampered_bytes) == original_hex)
+
+        step("real SHA-256 of the tampered bytes does not match the declared hash - REJECTED")
+        val outcome = manifest_verify_content_hash(m, tampered_bytes)
+        expect_not(outcome.ok)
+        expect(outcome.reason).to_equal(manifest_reason_content_hash_mismatch())
+        expect(manifest_reason_content_hash_mismatch()).to_equal("content_hash_mismatch")
+
+    it("fails closed when NO content hash is declared - never a vacuous pass"):
+        val m = _elf_ok()
+        expect(m.content_hashes.len()).to_equal(0)
+        val outcome = manifest_verify_content_hash(m, rt_text_to_bytes("anything"))
+        expect_not(outcome.ok)
+        expect(outcome.reason).to_equal(manifest_reason_no_content_hash_declared())
