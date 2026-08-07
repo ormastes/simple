@@ -40,6 +40,26 @@ fn body_has_errors(insts: [MirInst]) -> bool:
     checker.check_function(mk_body(insts))
     checker.errors.len() > 0
 
+fn mk_body_with_terminator(insts: [MirInst], terminator: MirTerminator) -> MirBody:
+    val block = MirBlock(
+        id: BlockId.new(0),
+        label: nil,
+        instructions: insts,
+        terminator: terminator
+    )
+    MirBody(
+        name: "move_spec_fn",
+        blocks: [block],
+        locals: [],
+        arg_count: 0,
+        return_ty: MirType.i64()
+    )
+
+fn body_has_errors_with_terminator(insts: [MirInst], terminator: MirTerminator) -> bool:
+    var checker = BorrowChecker.create()
+    checker.check_function(mk_body_with_terminator(insts, terminator))
+    checker.errors.len() > 0
+
 describe "BorrowGraph move dataflow":
     it "detects use-after-move at the same program point":
         # Guard: same-point detection worked before the dataflow fix and
@@ -115,3 +135,35 @@ describe "BorrowChecker MIR use-after-move":
             mk_inst(MirInstKind.Copy(l1, l0))
         ]
         assert_false(body_has_errors(insts))
+
+    it "errors on Move followed by returning the moved source (Ret terminator)":
+        # Terminator-borrows gap, half (b): the block-instruction loop in
+        # analyze_mir_borrows never looked at mir_block.terminator, so
+        # `return x` after moving `x` produced no use-fact at all. This is
+        # the reproduction for `analyze_terminator`'s `Ret` arm.
+        val l0 = LocalId(id: 0)
+        val l1 = LocalId(id: 1)
+        val insts = [
+            mk_inst(MirInstKind.Move(l1, l0))
+        ]
+        val term = MirTerminator.Ret(mir_operand_copy(l0))
+        assert_true(body_has_errors_with_terminator(insts, term))
+
+    it "accepts returning a re-initialized local after a move (Ret terminator)":
+        val l0 = LocalId(id: 0)
+        val l1 = LocalId(id: 1)
+        val insts = [
+            mk_inst(MirInstKind.Move(l1, l0)),
+            mk_inst(MirInstKind.Const(l0, MirConstValue.Int(1), MirType.i64()))
+        ]
+        val term = MirTerminator.Ret(mir_operand_copy(l0))
+        assert_false(body_has_errors_with_terminator(insts, term))
+
+    it "accepts returning a different local after a move (Ret terminator)":
+        val l0 = LocalId(id: 0)
+        val l1 = LocalId(id: 1)
+        val insts = [
+            mk_inst(MirInstKind.Move(l1, l0))
+        ]
+        val term = MirTerminator.Ret(mir_operand_copy(l1))
+        assert_false(body_has_errors_with_terminator(insts, term))

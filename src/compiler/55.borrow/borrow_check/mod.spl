@@ -156,6 +156,18 @@ class BorrowChecker:
                 self.analyze_instruction(inst, nll, point)
                 point = point + 1
 
+            # The terminator (`Ret`, `If`, `Switch`, `CallTerminator`) can
+            # consume/use a place too — e.g. `return x` after `x` was moved
+            # went unreported because the block-instruction loop above never
+            # looks past the last `MirInst`. Give the terminator its OWN
+            # point (continuing the same running sequence, one past the
+            # block's last instruction) rather than reusing the last
+            # instruction's point: reusing it would make a terminator use
+            # look concurrent with the last statement instead of strictly
+            # after it, which matters for point-ordered liveness/move facts.
+            self.analyze_terminator(mir_block.terminator, nll, point)
+            point = point + 1
+
     me analyze_instruction(inst: MirInst, nll: NLLChecker, point: i64):
         """Analyze a single MIR instruction for borrows."""
         match inst.kind:
@@ -195,8 +207,77 @@ class BorrowChecker:
             # same `record_assign`. The arm never matched and was dead.
             # See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
 
+            case Call(dest, func, args):
+                # Passing a moved-out local as a call ARGUMENT is a real use,
+                # but arguments ride as bare operands on the Call instruction
+                # and never become separate Copy/Move instructions. Without
+                # this arm `f(x)` after a move of `x` recorded no use-fact at
+                # all, so use-after-move through a call went unreported while
+                # the same misuse via a let-binding was caught.
+                # doc/08_tracking/bug/iso_use_after_move_invisible_as_call_argument_2026-08-07.md
+                self.record_operand_use(func, nll, point)
+                for arg in args:
+                    self.record_operand_use(arg, nll, point)
+                # A non-unit call (re)initializes its destination, which kills
+                # any moved-out state on that local, exactly as Copy/Const do.
+                if val dest_local = dest:
+                    nll.record_assign(point, Place.local(dest_local.id))
+
             case _:
                 pass_do_nothing
+
+    me analyze_terminator(term: MirTerminator, nll: NLLChecker, point: i64):
+        """Analyze a block terminator for the use/move facts its operands carry.
+
+        `Ret`, `If`, `Switch` and `CallTerminator` all name operands directly
+        on the terminator (mirroring how `Call` names its args as bare
+        operands, per `record_operand_use` above) — none of these ever
+        surface as a separate Copy/Move instruction, so without this arm a
+        moved-out value returned, branched on, or switched on produced no
+        use-fact at all.
+        doc/08_tracking/bug/iso_transfer_sites_missing_move_return_assign_field_2026-08-06.md
+        """
+        match term:
+            case Ret(value):
+                if val v = value:
+                    self.record_operand_use(v, nll, point)
+
+            case If(cond, _, _):
+                self.record_operand_use(cond, nll, point)
+
+            case Switch(value, _, _):
+                self.record_operand_use(value, nll, point)
+
+            case CallTerminator(dest, func, args, _, _):
+                self.record_operand_use(func, nll, point)
+                for arg in args:
+                    self.record_operand_use(arg, nll, point)
+                if val dest_local = dest:
+                    nll.record_assign(point, Place.local(dest_local.id))
+
+            case Goto(_):
+                pass_do_nothing("unconditional jump names no operand")
+
+            case Unreachable:
+                pass_do_nothing("no operand to analyze")
+
+            case Abort(_):
+                pass_do_nothing("carries only a diagnostic message, no MIR operand")
+
+    me record_operand_use(op: MirOperand, nll: NLLChecker, point: i64):
+        """Record the use/move fact an operand carries.
+
+        Operands are the only place a Call names its inputs. A `Const`
+        operand references no place, so it records nothing."""
+        match op.kind:
+            case Copy(local):
+                nll.record_use(point, Place.local(local.id))
+            case Move(local):
+                nll.record_move(point, Place.local(local.id))
+            case Const(_, _):
+                pass_do_nothing("a constant operand names no place, so it carries neither a use nor a move fact")
+            case _("MirOperandKind has only Copy/Move/Const; a new variant must decide its own use/move fact rather than defaulting to silence"):
+                pass_do_nothing("unreachable today; see the arm rationale above")
 
     fn convert_place(mir_place: MirPlace) -> Place:
         """Convert MIR place to borrow checker place."""
