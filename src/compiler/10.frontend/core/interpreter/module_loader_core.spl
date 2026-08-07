@@ -414,8 +414,19 @@ fn load_module_selective(module_name: text, imported_names: [text], current_file
     if module_is_loaded(module_name) == 1:
         return 1
 
-    # Optimization: if all requested names are already in function table,
-    # skip loading the module entirely (handles built-in functions)
+    # Full load FIRST. The requested module's own definitions must win.
+    # The old order skipped the load whenever every requested name was
+    # already in the (flat, bare-name) function table — so an unrelated
+    # module's same-named fn silently satisfied the import (sibling-module
+    # leak: file_size/ds_set_active family), and module_mark_loaded with an
+    # empty path poisoned later imports of OTHER names from this module.
+    # See doc/08_tracking/bug/mod_stub_local_file_ops_all_dead_correction_2026-08-07.md.
+    val load_ok = load_module(module_name, current_file)
+    if load_ok == 1:
+        return 1
+
+    # Fallback (module file unresolvable only): if every requested name is
+    # already registered, treat them as built-ins and accept the import.
     var all_available = true
     for name in imported_names:
         if func_table_lookup(name) < 0:
@@ -425,12 +436,7 @@ fn load_module_selective(module_name: text, imported_names: [text], current_file
         module_mark_loaded(module_name, "", imported_names)
         return 1
 
-    # Full load
-    val load_ok = load_module(module_name, current_file)
-    if load_ok == 0:
-        return 0
-
-    1
+    0
 
 # ===== GC Family Boundary Warnings =====
 #
