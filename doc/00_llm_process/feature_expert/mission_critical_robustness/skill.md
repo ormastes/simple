@@ -130,3 +130,63 @@ Miri-mode, editions, SBOM); ObserveContext wiring; signal-capture externs
   driver_types, log.spl reverted twice). ALWAYS diff against fresh origin and
   run the me/fn symbol-loss guard before committing; commit via temp
   `GIT_INDEX_FILE` reland when `.git/index.lock` is contested.
+
+---
+
+## Aerospace / `space-a` hardening — verified state 2026-08-07
+
+Plan: `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`
+Research: `doc/01_research/language/assurance/aerospace_grade_hardening_research_2026-08-07.md`
+
+**Settled:** no fifth strictness profile. `critical` stays canonical; compose
+strictness × runtime family × `aero-a`/`space-a` assurance grade × mission
+deployment SDN. `flight-core-v1` is a coding convention set, not a tier.
+
+**Four things a future agent will otherwise re-derive the hard way:**
+
+1. **Project-level profile pinning is non-functional today.** `load_from_sdn`
+   parses then returns defaults (`80.driver/project.spl:81-90`);
+   `set_active_profile` (`:133`) has zero callers; all three TOML-ish
+   `[lints] profile =` scanners (`_LintMain/config_and_model.spl:335-352`,
+   `_CliCommands/handler_commands.spl:114-131`,
+   `test_runner/test_runner_config.spl:48-71`) always return `""` because no
+   `simple.sdn` in the repo has a `lints` key. There is no legacy form to
+   migrate — delete the scanners, implement the documented `lints:`/`profile:`
+   form. `SIMPLE_SAFETY_PROFILE` is a process-global env var, re-read per call
+   by the driver but **latched once** by the interpreter (`eval_decls.spl:297`).
+
+2. **`@noalloc` has a circular hole.** `35.semantics/gc_boundary_check.spl:96`
+   hard-codes the noalloc family `allocates: false` and `:140` matches by
+   **prefix**, so that family's own exported `mimalloc_alloc` / `SharedHeap`
+   (`nogc_async_mut_noalloc/__init__.spl:152,:190`) classify as non-allocating.
+   Fix this before building anything on allocation classes. Filed:
+   `doc/08_tracking/bug/noalloc_family_manifest_prefix_match_exempts_its_own_allocators_2026-08-07.md`.
+
+3. **Sabotage is NOT a valid oracle for lint.** `bin/simple lint` runs the
+   deployed binary, which predates its source (contains `MEXH001`, not `MEXH006`
+   at `lint_checks.spl:65`). A `println` inserted into a **proven-wired**
+   function did not appear while its diagnostic still fired. Use a positive call
+   graph (`main_and_help.spl:322` → `cli_lint_commands.spl:46` →
+   `entry_and_fixes.spl:342` → `:401`; two flat dispatch lists, no name-keyed
+   table) plus a live behavioural run. This does not contradict the
+   "compiler .spl edits are live under `bin/simple test`" note — different path.
+
+4. **The defect shape here is a live text reimplementation shadowing an unwired
+   semantic checker**, not an absent checker. Confirmed three times:
+   `required_comment` (semantic `35.semantics/lint/required_comment.spl:86`
+   unwired, text twin `lint_checks.spl:501,:545` live with a weaker `<10`-chars
+   predicate), `stub_impl` (AST-STUB003 filtered at `entry_and_fixes.spl:124-126`,
+   text STUB003 live at `lint_checks.spl:495-499`), and match exhaustiveness
+   (MEXH001-006 registered at `lint_checks.spl:53-66`, nothing emits them).
+   **Wiring the semantic checker without deleting its twin doubles the
+   diagnostics.** Every wiring task must name the twin that dies.
+
+**Reachability:** `bin/simple` is the Rust seed and stage-3 self-host is blocked,
+so `src/compiler/**` work outside `90.tools/lint` lands dormant. The plan carries
+a per-WP Reach column (🟢 merge / 🟡 needs lint redeploy / 🔴 blocked) instead of
+one global disclaimer, and WP-3.5 owns the redeploy that makes 🟡 observable.
+
+**External standards citations (ECSS, NASA, JPL, JSF, CERT, SPARK, Ravenscar,
+F´, capDL, CompCert, TACLeBench, ARCHIE) are recorded "as-cited, unverified"** —
+network fetch is blocked in this environment. Re-verify against controlled
+documents before any of them becomes certification evidence.

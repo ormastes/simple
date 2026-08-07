@@ -117,8 +117,33 @@ Semantics: the profile selects which diagnostics are live during execution (lint
 applied pre-run, fail-closed per profile) and which runtime checks are enabled (bounds
 trap severity, MIR-interpreter trap mode, sanitizer hooks as they land). A package's
 `simple.sdn` `[lints] profile=` sets its default; the CLI flag overrides per run.
-Verified 2026-07-28: NO profile plumbing exists today in run/test paths — lint only.
-Status: NOT IMPLEMENTED — Batch 3 lane.
+~~Verified 2026-07-28: NO profile plumbing exists today in run/test paths — lint only.
+Status: NOT IMPLEMENTED — Batch 3 lane.~~
+
+**Corrected 2026-08-07.** Partial plumbing DOES exist and this paragraph was stale:
+`run` sets `SIMPLE_SAFETY_PROFILE` around the call
+(`src/app/io/_CliCommands/handler_commands.spl:177`) and the test runner sets it for
+the subprocess (`src/lib/nogc_sync_mut/test_runner/test_runner_config.spl:188`).
+
+What is still NOT implemented is the part that makes it trustworthy:
+
+- **No authoritative in-process state.** `SIMPLE_SAFETY_PROFILE` is a process-global
+  env var. The driver re-reads it per call (`80.driver/driver_safety_severity.spl:62-63`),
+  while the interpreter **latches it once** at `eval_init`
+  (`10.frontend/core/interpreter/eval_decls.spl:297`) and cannot observe a later change.
+  `ProjectContext.active_profile` (`80.driver/project.spl:56`) is never set —
+  `set_active_profile` (`:133`) has zero callers.
+- **Project-level pinning does not work at all.** `load_from_sdn` (`project.spl:81-90`)
+  parses and then returns defaults. All three TOML-ish `[lints] profile =` scanners
+  (`90.tools/lint/_LintMain/config_and_model.spl:335-352`, `handler_commands.spl:114-131`,
+  `test_runner_config.spl:48-71`) always return `""`, because no `simple.sdn` in the
+  repo carries a `lints` key and there is no repo-root manifest. The documented native
+  convention is indent/colon (`doc/06_spec/system/compiler/modules/tooling/formatting_lints.md:345,:438`),
+  which nothing reads.
+
+Status: PARTIAL — env-var propagation only; typed policy resolution and SDN pinning
+tracked as WP-3/WP-4 in
+`doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`.
 
 **Two orthogonal axes (user decision 2026-07-28):** engine and profile compose freely.
 

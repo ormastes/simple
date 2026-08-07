@@ -167,6 +167,22 @@ ring-3 gate; lands as tested-but-dormant code.
 | **WP-4** | Implement real SDN → `ProjectContext` mapping for the canonical `lints:`/`profile:` form; **delete** all three dead TOML scanners; wire `set_active_profile` | `80.driver/project.spl:81-90,:133`; `config_and_model.spl:335-352`; `handler_commands.spl:114-131`; `test_runner_config.spl:48-71` | Sonnet | 🟡 | A repo-root `simple.sdn` with `lints:\n  profile: critical` actually pins the profile — proved by a spec that fails when the key is removed. No TOML scanner remains |
 | **WP-5** | Correct the stale normative text | `doc/02_requirements/language/mission_critical_profile.md:120-121`; add REQ-MC-013…022 | Haiku | 🟢 | REQ-MC-012 status reflects premise 5/5b; each new REQ names its enforcement phase (compile / integration / release) |
 
+### WP-3.5 — discharge the 🟡 tier's reachability debt (blocks all of Wave 2)
+
+Every 🟡 acceptance criterion below is **unobservable without this WP.** Per
+premise #0.2, `bin/simple lint` runs a binary older than its source, so "REQC001
+now fires from the semantic checker" cannot be checked by running lint against
+an edited tree. The Reach column names that constraint; nothing else discharges
+it.
+
+| Task | Model | Accept |
+|---|---|---|
+| Own the lint-binary redeploy: a documented, repeatable build+deploy of `bin/release/<triple>/simple` from current `90.tools/lint` source, plus a **staleness probe** any later WP can run first | Sonnet | The probe fails on today's binary (which has `MEXH001` but not `MEXH006`, `lint_checks.spl:65`) and passes after redeploy. Note the `.mcp.json` launch-path skew and the `cp .new` + `mv` dance for "Text file busy" (`.claude/rules/code-style.md`) |
+
+Every 🟡 WP's acceptance is amended to read: *run the WP-3.5 staleness probe
+first; a WP that cannot prove it ran against fresh binary reports its result as
+unverified, not as pass.*
+
 ### Wave 2 — close the semantic gaps (parallel; each states which twin dies)
 
 | WP | Task | Files | Model | Reach | Accept |
@@ -205,8 +221,9 @@ ring-3 gate; lands as tested-but-dormant code.
 ## Merge order
 
 WP-0 → WP-1/WP-2 (parallel) → **WP-3 + WP-4 + WP-5** (the profile actually
-working is the gate for every enforcement WP) → Wave 2 in parallel → **WP-11
-before any other Wave-3 WP** → WP-12…15 → Wave 4.
+working is the gate for every enforcement WP) → **WP-3.5** (without it no 🟡
+result is observable) → Wave 2 in parallel → **WP-11 before any other Wave-3
+WP** → WP-12…15 → Wave 4.
 
 **WP-22 can jump the queue** — it is 🟢, small, and closes a live fail-open.
 
@@ -230,13 +247,26 @@ before any other Wave-3 WP** → WP-12…15 → Wave 4.
 
 ---
 
-## Filed separately from this plan
+## Defects surfaced by this audit — where each is tracked
 
-- `bin/simple inspect` (any unknown subcommand) exits **rc=0** — fail-open in
-  the CLI dispatch fall-through (`src/app/cli/dispatch/table.spl`).
-- `70.backend/linker/smf_writer.spl:273-276` returns `Ok([])` — a placeholder
-  that can silently produce an empty `.smf` image.
+Newly filed (2026-08-07):
+
+- `doc/08_tracking/bug/noalloc_family_manifest_prefix_match_exempts_its_own_allocators_2026-08-07.md`
+  — premise 7b, the circular hole. Blocks WP-12.
+- `doc/08_tracking/bug/cli_unknown_subcommand_exits_zero_fail_open_2026-08-07.md`
+  — `bin/simple <unknown>` exits **rc=0**. Paired with WP-22.
+
+Already tracked elsewhere — pointers, not new records:
+
+- `70.backend/linker/smf_writer.spl:273-276` returns `Ok([])` (empty `.smf`
+  image) → `doc/08_tracking/bug/smf_reader_bridge_silent_nil.md`, named by the
+  `pass_todo` itself.
 - `exec_cap_check` (`cap_exec_gate.spl:24`) never denies; every production call
-  site passes the `caller = 0` sentinel (`:30-31`).
+  site passes the `caller = 0` sentinel (`:30-31`) →
+  `doc/08_tracking/bug/execve_spec_blocked_by_dead_ipc_cap_gate_and_missing_rt_copy_user_byte_2026-08-06.md`.
+
+Carried inside a WP rather than filed standalone (fix and regression live
+together):
+
 - `stub_impl.spl:205` recommends `pass_todo`, which self-triggers STUB003 at
-  `:171`.
+  `:171` → WP-8.
