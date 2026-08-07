@@ -19,6 +19,7 @@ use gc_async_mut.gpu_sffi.{
     cuda_ctx_create
 }
 use gc_async_mut.gpu_types.{GpuError, GpuPtr, GpuModule, GpuLaunchConfig}
+use std.common.binary_io.{f32_to_bits}
 
 # ============================================================================
 # Top-Level API Functions
@@ -83,6 +84,19 @@ fn gpu_i32_fill_pattern(value: i64) -> i64:
     device.
     """
     value & 0xFFFFFFFF
+
+fn gpu_f32_fill_pattern(value: f32) -> i64:
+    """The 32-bit word an f32 fill of `value` must write.
+
+    This is the IEEE-754 single-precision bit pattern, NOT a numeric conversion:
+    filling with 3.14f must write 0x4048F5C3 into each element. That pattern is
+    not byte-uniform, which is exactly why no cuMemsetD8 call can express an f32
+    fill at any value -- it needs cuMemsetD32_v2 plus this bitcast.
+
+    Split out from the memset wrapper so the conversion is directly testable
+    against the IEEE-754 oracle without a device.
+    """
+    f32_to_bits(value) as i64
 
 fn gpu_memset_d32(gpu_ptr: GpuPtr, pattern: i64, count: i64) -> Result<(), GpuError>:
     """Fill device memory with a 32-bit pattern (CUDA cuMemsetD32_v2).
@@ -230,8 +244,13 @@ fn gpu_alloc_f64(count: i64) -> Result<GpuPtr, GpuError>:
 # ============================================================================
 
 fn gpu_memset_f32(ptr: GpuPtr, value: f32, count: i64) -> Result<(), GpuError>:
-    """Memset f32 device memory."""
-    gpu_memset(ptr, 0, count * 4)
+    """Fill `count` f32 elements with `value`.
+
+    The old body was `gpu_memset(ptr, 0, count * 4)`: it never read `value` at
+    all, filled the buffer with zeros, and still returned Ok(()). Routed through
+    the 32-bit primitive with the IEEE-754 bit pattern of `value`.
+    """
+    gpu_memset_d32(ptr, gpu_f32_fill_pattern(value), count)
 
 fn gpu_memset_i32(ptr: GpuPtr, value: i64, count: i64) -> Result<(), GpuError>:
     """Fill `count` i32 elements with `value`.
@@ -579,7 +598,7 @@ fn gpu_global_size_z() -> i64:
 
 export gpu_status
 export gpu_init, gpu_alloc, gpu_free, gpu_upload, gpu_download, gpu_memset, gpu_launch, gpu_sync
-export gpu_memset_d32, gpu_i32_fill_pattern
+export gpu_memset_d32, gpu_i32_fill_pattern, gpu_f32_fill_pattern
 export gpu_device_name, gpu_device_compute_capability, gpu_device_total_memory
 export gpu_set_device, gpu_device_count
 export gpu_upload_f32, gpu_download_f32, gpu_upload_i32, gpu_upload_i64, gpu_upload_f64
