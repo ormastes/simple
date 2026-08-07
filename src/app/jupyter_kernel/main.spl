@@ -7,15 +7,13 @@
 extern fn input() -> text
 extern fn stdout_write(s: text)
 extern fn stdout_flush()
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_getpid() -> i64
 extern fn rt_cli_get_args() -> [text]
 
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
-use app.io.mod.{process_run}
+use std.notebook.types.{CellResult}
+use std.notebook.session_manager.{KernelSessionManager}
+use std.notebook.local_exec.{LocalExecFactory}
 
 # ============================================================================
 # JSON Helpers (inlined to avoid cross-module issues)
@@ -112,64 +110,27 @@ fn extract_field(json: text, key: text) -> text:
         return parts.join("")
 
 # ============================================================================
-# Session state (module-level, all in this file)
-# Uses text accumulation instead of arrays to avoid .len()/.push() path issues
+# Session state — owned by KernelSessionManager (K1) over a LocalExec (K2)
+# lane executor. main.spl is now a thin JSON-lines front-end: it registers
+# one implicit "default" kernel session on the `interpreter` lane at startup
+# and routes every execute_request through the manager, which owns the
+# accumulation/rollback/delta logic (moved to
+# src/lib/nogc_sync_mut/notebook/local_exec.spl — behavior is bit-identical
+# to the pre-K2 module-level implementation this replaces).
 # ============================================================================
 
-var SESSION_CODE_ALL: text = ""
-var SESSION_CODE_PREV: text = ""
-var SESSION_TEMP_PATH: text = ""
-var SESSION_PREV_OUTPUT_LEN: i64 = 0
+const DEFAULT_SESSION_ID: text = "default"
 
-fn find_simple_runtime() -> text:
-    if rt_file_exists("bin/simple"):
-        return "bin/simple"
-    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
-        return "bin/release/aarch64-apple-darwin-macho/simple"
-    if rt_file_exists("bin/release/macos-arm64/simple"):
-        return "bin/release/macos-arm64/simple"
-    if rt_file_exists("bin/release/darwin-aarch64/simple"):
-        return "bin/release/darwin-aarch64/simple"
-    if rt_file_exists("bin/release/macos-x86_64/simple"):
-        return "bin/release/macos-x86_64/simple"
-    if rt_file_exists("bin/release/linux-x86_64/simple"):
-        return "bin/release/linux-x86_64/simple"
-    "bin/simple"
+var SESSION_MANAGER: KernelSessionManager = KernelSessionManager.create(LocalExecFactory())
 
 fn session_init():
-    val pid = rt_getpid()
-    SESSION_TEMP_PATH = "/tmp/simple_jupyter_{pid}.spl"
+    SESSION_MANAGER.create_session(DEFAULT_SESSION_ID, "interpreter")
 
 fn session_execute(code: text, exec_count: i64) -> (text, text, bool):
-    # Save previous state for rollback on error
-    SESSION_CODE_PREV = SESSION_CODE_ALL
-    SESSION_CODE_ALL = SESSION_CODE_ALL + code + "\n"
-
-    rt_file_write_text(SESSION_TEMP_PATH, SESSION_CODE_ALL)
-
-    val runtime = find_simple_runtime()
-    if runtime == "":
-        SESSION_CODE_ALL = SESSION_CODE_PREV
-        return ("", "Simple runtime not found", false)
-
-    # Use bash to redirect stdin from /dev/null — prevents subprocess
-    # from inheriting the kernel's stdin (which has JSON-lines data)
-    val (out, err, exit_code) = process_run("bash", ["-c", runtime + " run " + SESSION_TEMP_PATH + " </dev/null 2>&1"])
-
-    if exit_code != 0:
-        # Rollback failed cell
-        SESSION_CODE_ALL = SESSION_CODE_PREV
-        return (out, err, false)
-
-    # Only return NEW output (delta from previous execution)
-    var new_output = out
-    if SESSION_PREV_OUTPUT_LEN > 0 and out.len() > SESSION_PREV_OUTPUT_LEN:
-        new_output = out.substring(SESSION_PREV_OUTPUT_LEN)
-    elif SESSION_PREV_OUTPUT_LEN > 0 and out.len() <= SESSION_PREV_OUTPUT_LEN:
-        new_output = ""
-    SESSION_PREV_OUTPUT_LEN = out.len()
-
-    return (new_output, "", true)
+    val result: CellResult = SESSION_MANAGER.execute_cell(DEFAULT_SESSION_ID, code, "cell_{exec_count}", "")
+    if result.is_ok():
+        return (result.stdout_delta, "", true)
+    ("", result.error, false)
 
 fn session_is_complete(code: text) -> text:
     val trimmed = code.trim()
