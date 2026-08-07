@@ -2180,6 +2180,20 @@ fn host_background_crop_surface(surface: BackgroundSurface, rect: SharedWmRect, 
         row = row + 1
     out
 
+# Observability counter for HostWmHandle.pump_host_events: this file only ever
+# constructs Headless handles (init_headless_host_wm), and no backend reached
+# from here exposes a host event source, so the pump legitimately has zero
+# events to translate. Counting each no-op tick keeps that honest and
+# observable instead of a silent always-0 return (repo pattern: counted
+# rejection, same as vulkan_compositor_backend.reject / simd_batch_hits).
+var _host_wm_event_pump_noop_ticks: i64 = 0
+
+fn _host_wm_note_event_pump_noop():
+    _host_wm_event_pump_noop_ticks = _host_wm_event_pump_noop_ticks + 1
+
+fn host_wm_event_pump_noop_ticks() -> i64:
+    _host_wm_event_pump_noop_ticks
+
 class HostWmLoopState:
     running: bool
 
@@ -2191,8 +2205,13 @@ class HostWmHandle:
     backend: HostBackendKind
 
     fn pump_host_events() -> i64:
+        """Returns the number of host events pumped. Headless handles (the only
+        kind this file constructs) have no host event source, so this is always
+        0 — each live-handle tick is recorded in host_wm_event_pump_noop_ticks()
+        so the no-op is observable rather than silent."""
         if self.event_loop_id == 0:
             return 0
+        _host_wm_note_event_pump_noop()
         0
 
     me run_once():
