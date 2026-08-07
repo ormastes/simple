@@ -32,13 +32,32 @@ fn layer_dag_err(msg: text) -> LayerDagVerdict:
 
 class LayerDagRegistry:
     """Registry of declared layers (in declaration order) and their `uses` edges."""
+    # NOTE (stage3_sigsegv_layer_dag_registry_edges_field_collision
+    # 2026-08-07): this field is deliberately named `use_edges`, not `edges`.
+    # Two other unrelated types (`ImportGraph.edges` in
+    # src/compiler/00.common/dependency/graph.spl and
+    # `GraphDiagram.edges` in src/compiler/15.blocks/blocks/value.spl) also
+    # declare a field literally named `edges`, at different field-ordinals.
+    # The Rust seed's native-build struct/class field-offset resolution
+    # collided across these three types when building stage2 from
+    # `origin/main`: `LayerDagRegistry.edges` (ordinal 2) was assigned the
+    # byte offset of a same-named field at a DIFFERENT ordinal in one of the
+    # other two types, so runtime reads of `layer_registry.edges` inside
+    # stage2's own compiled code (flat_ast_to_module) dereferenced a
+    # tag/garbage value instead of a real array pointer -> SIGSEGV at the
+    # very start of Stage 3's parse phase, 100% reproducible, single-
+    # threaded, first file (src/app/cli/bootstrap_main.spl). Renaming this
+    # field to a name unique across the whole build graph avoids the
+    # collision; ImportGraph/GraphDiagram are left untouched (out of scope,
+    # working today). See doc/08_tracking/bug/
+    # stage3_sigsegv_layer_dag_registry_edges_field_collision_2026-08-07.md.
     names: [text]
     index: {text: i64}
-    edges: [LayerEdge]
+    use_edges: [LayerEdge]
 
 impl LayerDagRegistry:
     static fn new() -> LayerDagRegistry:
-        LayerDagRegistry(names: [], index: {}, edges: [])
+        LayerDagRegistry(names: [], index: {}, use_edges: [])
 
     me declare(name: text):
         """Register `layer NAME`. Re-declaring an existing name is a no-op (idempotent)."""
@@ -50,7 +69,7 @@ impl LayerDagRegistry:
 
     me uses(from_name: text, to_name: text):
         """Register a `uses` edge parsed from `layer FROM uses ..., TO, ...`."""
-        self.edges.push(LayerEdge(from_name: from_name, to_name: to_name))
+        self.use_edges.push(LayerEdge(from_name: from_name, to_name: to_name))
 
     fn has_layer(name: text) -> bool:
         self.index.has(name)
@@ -63,7 +82,7 @@ impl LayerDagRegistry:
 
     fn edges_from(name: text) -> [text]:
         var result: [text] = []
-        for e in self.edges:
+        for e in self.use_edges:
             if e.from_name == name:
                 result.push(e.to_name)
         result
@@ -75,7 +94,7 @@ impl LayerDagRegistry:
 fn check_declared_upward(reg: LayerDagRegistry) -> LayerDagVerdict:
     """Reject any `uses` edge pointing at an unknown layer or one declared
     at or after the layer that names it."""
-    for e in reg.edges:
+    for e in reg.use_edges:
         if not reg.has_layer(e.to_name):
             return layer_dag_err("layer '" + e.from_name + "' uses undeclared layer '"
                 + e.to_name + "'")
