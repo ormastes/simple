@@ -23,6 +23,7 @@ import { Signal } from "@lumino/signaling";
 jest.mock("@jupyterlab/codemirror", () => ({ IEditorLanguageRegistry: Symbol("IEditorLanguageRegistry") }));
 jest.mock("@jupyterlab/notebook", () => ({ INotebookTracker: Symbol("INotebookTracker") }));
 jest.mock("@jupyterlab/statusbar", () => ({ IStatusBar: Symbol("IStatusBar") }));
+jest.mock("@jupyterlab/apputils", () => ({ ICommandPalette: Symbol("ICommandPalette") }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 import plugins from "../src/index";
@@ -37,16 +38,34 @@ function findPlugin(id: string) {
   return found;
 }
 
-describe("Simple JupyterLab extension plugins (X2)", () => {
-  it("exports exactly the three expected plugins, all autoStart", () => {
+describe("Simple JupyterLab extension plugins (X2/X3/X4)", () => {
+  it("exports exactly the five expected plugins, all autoStart", () => {
     expect(plugins.map((p) => p.id).sort()).toEqual([
+      "@simple-lang/jupyterlab-simple:export-sdoctest",
       "@simple-lang/jupyterlab-simple:kernel-mapping",
+      "@simple-lang/jupyterlab-simple:lane-picker",
       "@simple-lang/jupyterlab-simple:language",
       "@simple-lang/jupyterlab-simple:mode-status",
     ]);
     for (const p of plugins) {
       expect(p.autoStart).toBe(true);
     }
+  });
+
+  it("lane-picker plugin attaches a widgetAdded listener on activation (X3)", () => {
+    const plugin = findPlugin("@simple-lang/jupyterlab-simple:lane-picker");
+    const widgetAdded = new Signal<any, any>({});
+    const notebooks: any = { widgetAdded, currentWidget: null };
+
+    expect(() => (plugin.activate as any)({}, notebooks)).not.toThrow();
+    // Wiring is exercised end-to-end in tests/lane.test.ts against a fake
+    // panel; here we only assert plugin activation doesn't throw when a
+    // panel-shaped object without a toolbar/sessionContext is emitted.
+    const fakePanel = {
+      toolbar: { insertItem: jest.fn() },
+      sessionContext: { session: undefined, kernelChanged: new Signal<any, void>({}) },
+    };
+    expect(() => widgetAdded.emit(fakePanel)).not.toThrow();
   });
 
   it("language plugin registers the Simple CM6 language on activation", () => {

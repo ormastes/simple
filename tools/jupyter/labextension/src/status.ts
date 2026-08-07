@@ -1,13 +1,10 @@
 // Status-bar "execution mode / lane" indicator (X2).
 //
 // Shows the current notebook's execution mode (local CPU/JIT vs a remote
-// lane such as GPU/JTAG/board). Lane-switching magics land in K3 and the
-// lane picker comm lands in X3 (see
-// doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md); until
-// then every Simple notebook runs in the "local" lane by definition, so this
-// widget is a real, registered status-bar item with a fixed placeholder
-// value rather than a stub -- X3 replaces `DEFAULT_MODE` with a live value
-// sourced from the lane comm, it does not need to register the widget itself.
+// lane such as GPU/JTAG/board). `DEFAULT_MODE` remains the widget's initial
+// value (matches the kernel's own default before any comm reply arrives);
+// X3 (./lane.ts) feeds it live updates sourced from the `simple_lane` comm
+// once a notebook connects, rather than registering its own widget.
 import { Widget } from "@lumino/widgets";
 
 export const DEFAULT_MODE = "local";
