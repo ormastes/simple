@@ -253,6 +253,33 @@ decision rule already stated in this doc's §3.
 proven bit-exact (pre-existing). Self-hosted pure-Simple **LLVM backend**
 registration gap: **left OPEN, not touched** — see residual below.
 
+## Residual RESOLVED (2026-08-07, follow-up session): self-hosted MIR/LLVM registration landed
+
+The two mechanical, pattern-matched additions this section calls for below
+are now landed, mirroring `a399483d`'s registration of `fill_span_u32`/
+`copy_span_u32`:
+
+- `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`
+  (`bootstrap_resolved_call_return_type`, ~line 1203): added
+  `rt_engine2d_simd_blend_span_u32` and `rt_engine2d_simd_blend_const_span_u32`
+  to the `Array(U32)` return-type OR-chain, alongside `rt_engine2d_simd_fill_span_u32`
+  / `rt_engine2d_simd_copy_span_u32`.
+- `src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl`
+  (~line 178-179, immediately after the `copy_span_u32` declare): added
+  `declare ptr @rt_engine2d_simd_blend_span_u32(ptr, i64, ptr, i64, i64)` and
+  `declare ptr @rt_engine2d_simd_blend_const_span_u32(ptr, i64, i64, i64)`,
+  matching the Rust signatures `(dst, dst_offset, src, src_offset, count)` and
+  `(dst, offset, count, const_color)` in `engine2d_simd_ops.rs`.
+
+This landed via the interpreter path only (this session had no working
+self-hosted/Stage-3 build either, same blocker as noted below) — verified by
+`test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl` staying **45/45
+passed, 0 failed** after the change (regression check; this spec does not
+exercise the native LLVM backend directly). The **unblock condition below
+still applies** for verifying the LLVM-backend declare lines against a real
+self-hosted build once Stage 3 is fixed — that verification gap is not closed
+by this session, only the source registration itself.
+
 ## Residual: self-hosted LLVM backend registration (not fixed here, blocked on Stage 3)
 
 `blend_row_u32`'s C-ABI signature is registered in the self-hosted pure-Simple
