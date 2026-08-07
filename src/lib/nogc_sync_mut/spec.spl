@@ -17,6 +17,10 @@
 # NOTE: No static fn, no try/catch/throw - runs on bootstrap runtime.
 
 use std.nogc_sync_mut.src.testing.mock.prevention.{ForbiddenCallGuard, check_guards}
+use std.spec.skip_governance.{
+    skip_ref, validate_skip_it, validate_bare_pending,
+    validate_free_text_skip, validate_skip_ref_record
+}
 
 # ================================================================
 # Global Test State
@@ -200,8 +204,29 @@ fn _target_arch() -> text:
     if mode.contains("x86"): return "x86"
     "host"
 
+# Assurance profile the skip governor validates against. WP-3's canonical
+# resolver serializes an already-resolved policy across the process boundary
+# via SIMPLE_SAFETY_PROFILE (`compiler.common.assurance.policy.policy_env_value`)
+# — this reads it back, same as `driver_safety_severity.spl`'s subprocess path.
+fn _active_assurance_profile() -> text:
+    rt_env_get("SIMPLE_SAFETY_PROFILE") ?? ""
+
+# Reject means a REAL diagnostic: count as a failed example (not a warning
+# that gets silently ignored), same accounting `_execute_it` uses on assertion
+# failure. Used by skip_it/skip/skip_via_ref, which stand alone (like
+# `it(name, block)`) with no enclosing `_execute_it` to fold into.
+fn _reject_skip(name: text, message: text):
+    test_failed = test_failed + 1
+    print "    it {name} ... FAILED (skip rejected under critical: {message})"
+    test_errors.push("{current_suite} > {name}: {message}")
+    _write_test_result_evidence(test_passed, test_failed)
+
 pub fn skip_it(name: text, block: fn()):
     if not _run_test("skipped"):
+        return
+    val validation = validate_skip_it(_active_assurance_profile())
+    if not validation.ok:
+        _reject_skip(name, validation.message)
         return
     # Skip in interpreter mode, run in compiled/smf/native modes
     if _is_interpreter_mode():
@@ -211,6 +236,22 @@ pub fn skip_it(name: text, block: fn()):
         _execute_it(name, block)
 
 pub fn pending(name: text):
+    val validation = validate_bare_pending(_active_assurance_profile())
+    if not validation.ok:
+        # pending() runs INSIDE an enclosing it() block (`it "x": pending(...)`),
+        # so push into the block-local error list instead of bumping
+        # test_failed directly — the surrounding _execute_it's existing
+        # pass/fail accounting then handles this exactly like a real
+        # assertion failure, with no double count. NOTE (WP-9, filed
+        # doc/08_tracking/bug/): under the Rust seed's interpreter, `pending`
+        # is intercepted by a hardcoded BDD dispatch shortcut
+        # (interpreter_call/bdd.rs) BEFORE this function body ever runs, so
+        # this rejection path is unreachable via `bin/simple test` on the
+        # seed; it is live for the self-hosted binary and for any direct
+        # caller (`bin/simple run`, or calling `pending()` outside the
+        # intercepted dispatch).
+        current_test_errors.push("pending rejected under critical: {validation.message}")
+        return
     test_pending = test_pending + 1
     print "    it {name} ... pending"
 
@@ -218,8 +259,29 @@ pub fn pending(name: text):
 pub fn skip(name: text, reason: text):
     if not _run_test("skipped"):
         return
+    val validation = validate_free_text_skip(reason, _active_assurance_profile())
+    if not validation.ok:
+        _reject_skip(name, validation.message)
+        return
     test_skipped = test_skipped + 1
     print "    it {name} ... skipped ({reason})"
+
+# skip_ref(id) — resolve a real SDN-tracked record
+# (doc/08_tracking/skip/<id>.sdn: category/reason/owner/requirement/
+# alternative_evidence/venue/expiry/issue) and validate it. Under `critical`
+# an unregistered id, an ownerless record, a weak/expired reason, or a
+# missing category/issue is REJECTED — see skip_governance.spl.
+# @tag(name=file_name, id=skip_id)
+pub fn skip_via_ref(name: text, id: text, block: fn()):
+    if not _run_test("skipped"):
+        return
+    val record = skip_ref(id)
+    val validation = validate_skip_ref_record(record, _active_assurance_profile())
+    if not validation.ok:
+        _reject_skip(name, validation.message)
+        return
+    test_skipped = test_skipped + 1
+    print "    it {name} ... skipped ({record.reason})"
 
 # ================================================================
 # pending_on / pending_skip (inline-only due to runtime limitation)
@@ -249,6 +311,13 @@ pub fn before_context(block: fn()):
     block()
 
 pub fn skip_context(reason: text):
+    val validation = validate_free_text_skip(reason, _active_assurance_profile())
+    if not validation.ok:
+        test_failed = test_failed + 1
+        print "  context skipped: FAILED (skip rejected under critical: {validation.message})"
+        test_errors.push("{current_suite}: {validation.message}")
+        _write_test_result_evidence(test_passed, test_failed)
+        return
     test_skipped = test_skipped + 1
     print "  context skipped: {reason}"
 

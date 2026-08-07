@@ -3,11 +3,43 @@
 # NOTE: No global var state due to runtime module var limitation
 
 use std.spec.condition.{SkipCondition, create_skip_condition}
+use std.spec.skip_governance.{validate_free_text_skip}
 
 # NOTE: These extern declarations reference runtime built-in test functions
 # The actual test execution (it, describe) is handled by the runtime
 extern fn rt_test_it(name: text, block: fn())
 extern fn rt_test_skip(name: text, reason: text)
+extern fn rt_env_get(key: text) -> text
+
+# Assurance profile these decorators validate reasons against (WP-9). Same
+# subprocess-boundary read as spec.spl's `_active_assurance_profile` and
+# `driver_safety_severity.spl`'s `safety_pass_severity`.
+fn _active_assurance_profile() -> text:
+    rt_env_get("SIMPLE_SAFETY_PROFILE") ?? ""
+
+# Shared skip-vs-reject path for the `skip`/`skip_if` decorators (WP-9).
+# Extracted to a flat helper so each decorator's closure body stays a single
+# call, not nested if/else — kept in one place per: "removed entirely, not
+# reused or wrapped" applies to the fabricated placeholder, not to this
+# dispatch logic itself.
+fn _skip_or_reject(name: text, reason: text, block: fn()):
+    val validation = validate_free_text_skip(reason, _active_assurance_profile())
+    if not validation.ok:
+        # critical: reject the skip. Do NOT fabricate a placeholder reason
+        # (the removed defect: "Condition matched" / "Condition not met") —
+        # force the test to actually run so a missing/weak reason cannot
+        # hide a real gap under critical.
+        print "    it {name} ... REJECTED (skip has no valid reason under critical: {validation.message})"
+        rt_test_it(name, block)
+        return
+    # Skip: count and print. A genuinely empty reason is reported truthfully,
+    # never as a fabricated placeholder.
+    val reason_msg = if reason != "":
+        reason
+    else:
+        "(no reason given)"
+    print "    it {name} ... skipped ({reason_msg})"
+    # NOTE: Cannot track count due to runtime limitation
 
 # ================================================================
 # CORE DECORATORS
@@ -72,14 +104,7 @@ fn skip(
     # Return decorator function (val binding avoids HIR "Unknown variable: decorator")
     val decorator = fn(name: text, block: fn()):
         if condition.matches():
-            # Skip: count and print
-            val reason_msg = if reason != "":
-                reason
-            else:
-                "Condition matched"
-
-            print "    it {name} ... skipped ({reason_msg})"
-            # NOTE: Cannot track count due to runtime limitation
+            _skip_or_reject(name, reason, block)
         else:
             # Run test normally
             rt_test_it(name, block)
@@ -190,7 +215,11 @@ fn only_on(
             # Run test
             rt_test_it(name, block)
         else:
-            # Skip with auto-generated reason
+            # Skip with auto-generated reason. Not the removed placeholder
+            # defect: `only_on` structurally has no reason input to fabricate
+            # away — this string is the genuine, complete explanation (the
+            # condition filter did not match), not a stand-in for a missing
+            # caller-supplied value.
             print "    it {name} ... skipped (Not on specified platform/runtime)"
             # NOTE: Cannot track count due to runtime limitation
 
@@ -217,13 +246,7 @@ fn skip_if(condition: fn() -> bool, reason: text) -> fn(text, fn()):
     # val binding avoids HIR "Unknown variable: decorator"
     val decorator = fn(name: text, block: fn()):
         if condition():
-            val reason_msg = if reason != "":
-                reason
-            else:
-                "Condition not met"
-
-            print "    it {name} ... skipped ({reason_msg})"
-            # NOTE: Cannot track count due to runtime limitation
+            _skip_or_reject(name, reason, block)
         else:
             rt_test_it(name, block)
 
