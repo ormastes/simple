@@ -3153,6 +3153,17 @@ int64_t rt_text_eq_fast(int64_t left, int64_t right) {
  * unlike rt_string_eq/rt_native_eq above, which require BOTH sides already
  * tagged and so silently return 0 (never equal) for a raw literal operand. */
 int64_t rt_text_eq_any(int64_t left, int64_t right) {
+    /* Flat-Option nil sentinel awareness (RT_NIL == 3). A `Dict<_,text>.get(k)`
+     * MISS hands back the flat nil sentinel preserved around the decode
+     * (dict_get_preserve_flat_nil, 50.mir), and `x == nil` on that str-typed
+     * result lowers straight here as rt_text_eq_any(x, 3): NilLit materializes
+     * as the raw word 3. The rt_interp_cstr calls below decode the sentinel to
+     * NULL, so the `!a || !b` guard used to answer NOT-EQUAL unconditionally --
+     * a text-dict miss could never compare equal to nil (bug
+     * native_dict_get_miss_returns_zero_not_nil_2026-07-28, residual text row;
+     * selfcheck: src/runtime/test/rt_text_eq_any_nil_sentinel_selfcheck.c).
+     * nil == nil is EQUAL; nil vs any real string is NOT. */
+    if (left == rt_core_nil() || right == rt_core_nil()) return left == right ? 1 : 0;
     const char* a = rt_interp_cstr(left);
     const char* b = rt_interp_cstr(right);
     if (!a || !b) return 0;
