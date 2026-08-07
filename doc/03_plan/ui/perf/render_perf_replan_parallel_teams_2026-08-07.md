@@ -401,7 +401,14 @@ or re-scope. Never sweep another session's uncommitted work into your commit.
 - Acceptance: 11 specs, all examples, 0 cannot-execute, with binary provenance.
   A GREEN that includes a vacuous all-zero pass is a failed unit.
 - Depends on: **all of Wave 1 and Wave 2**. Collision set: **{}** but must run
-  last; contends with `SERIAL-BOOTSTRAP` if T16 is in flight.
+  last. **T16 must have completed (or been explicitly excluded) before Wave 3
+  opens** — never run Wave 3 with a `SERIAL-BOOTSTRAP` unit in flight.
+- **Degrade-explicitly rule (do not let this stall):** T16 is gated on a
+  bootstrap window that may not be available, and T19→T20 transitively depend on
+  it. If T16 remains blocked, **run T19 and T20 with T16 explicitly excluded**
+  and have the suite verdict state, in words, that the blend-span kernels were
+  not exercised and the C symbol remains unverified. A queued-and-stalled Wave 3
+  is a worse outcome than a Wave 3 that names its own gap.
 
 **T20 — U4 cutover sweep**
 - Goal: the flag-guarded cutover at one dispatch site + the sweep confirming
@@ -418,8 +425,8 @@ or re-scope. Never sweep another session's uncommitted work into your commit.
 | Wave | Units | Safe to run fully in parallel? |
 |---|---|---|
 | 1 | T1 T2 T3 T4 T5 T6 T7 T8 T9 T10 T11 | Yes **except**: {T1,T2} serialise; {T3,T4} serialise if the readback signature changes; {T8,T10} serialise (T8 after T10); {T9,T18} — T18 is Wave 3 anyway. Honour the `[E!]` protocol on `style_block.spl`. Max concurrency ≈ 8 |
-| 2 | T12 T13 T14 T15 T16 T17 | {T13,T14} serialise; T15 after T14; **T16 runs ALONE** (SERIAL-BOOTSTRAP). Max concurrency ≈ 4 when T16 is not running |
-| 3 | T18 T19 T20 | T18 ∥ nothing else needed; T19 then T20, strictly ordered |
+| 2 | T12 T13 T14 T15 T16 T17 | {T13,T14} serialise; T15 after T14; **T16 runs ALONE** (SERIAL-BOOTSTRAP). Max concurrency ≈ 4 when T16 is not running. **T16 must finish or be formally excluded before Wave 3 opens** |
+| 3 | T18 T19 T20 | T18 ∥ nothing else needed; T19 then T20, strictly ordered. If T16 was excluded, T19/T20 still run — see T19's degrade-explicitly rule |
 
 ---
 
