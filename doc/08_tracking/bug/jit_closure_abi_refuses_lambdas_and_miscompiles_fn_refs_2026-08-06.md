@@ -1,6 +1,11 @@
 # JIT closure ABI: lambdas refuse the whole module, and named-fn refs SILENTLY MISCOMPILE
 
 - **Filed:** 2026-08-06
+- **Re-verified:** 2026-08-07 — both defects still live, unchanged behavior.
+  See "Root cause, precise (2026-08-07)" below for the exact miscompile
+  mechanism, and `test/01_unit/language/jit_lambda_and_fn_ref_value_spec.spl`
+  for an interpreter-lane regression lock (`Results: 3 total, 3 passed, 0
+  failed`).
 - **Status:** Open
 - **Severity:** High — defect 2 is a silent wrong answer with no diagnostic
 - **Component:** Rust seed JIT — `src/compiler_rust/compiler/src/codegen/jit.rs`
@@ -81,6 +86,51 @@ carries no `HeapHeader`.
 There is no pure-Simple counterpart: `grep -rln 'closure ABI' src/compiler/`
 returns nothing.
 
+## Root cause, precise (2026-08-07)
+
+Traced defect 2 past the guard hole to the exact miscompile:
+
+1. **`emit_global_load`** (`src/compiler_rust/compiler/src/codegen/cranelift_emitter.rs`,
+   ~line 109, the "static method reference" fallback branch used when a plain
+   identifier resolves to a function rather than a global variable) does:
+   ```rust
+   let func_ref = self.ctx.module.declare_func_in_func(func_id, self.builder.func);
+   let addr = self.builder.ins().func_addr(types::I64, func_ref);
+   self.ctx.vreg_values.insert(dest, addr);
+   ```
+   i.e. `val g = add_one` puts the bare code ADDRESS of `add_one` into `g`'s
+   vreg — not a pointer to any heap object.
+
+2. **`compile_indirect_call`** (`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:306`)
+   is the only lowering for calling a value through a vreg, and it
+   unconditionally assumes that vreg is a pointer to a closure struct:
+   ```rust
+   let closure_ptr = get_vreg_or_default(ctx, builder, &callee);
+   let fn_ptr = builder.ins().load(types::I64, MemFlags::new(), closure_ptr, 0);
+   ...
+   let mut call_args = vec![closure_ptr];   // implicit closure-self arg
+   for arg in args { call_args.push(...); }
+   indirect_call_with_result(ctx, builder, sig_ref, fn_ptr, &call_args, dest);
+   ```
+
+3. For `g(5)`, `closure_ptr` is actually `add_one`'s raw code address (from
+   step 1). `builder.ins().load(..., closure_ptr, 0)` therefore reads the
+   first 8 bytes of `add_one`'s own machine code and calls THAT as `fn_ptr` —
+   with `(closure_ptr, 5)` as arguments instead of `(5)`. There is no tag or
+   runtime check anywhere on this path that distinguishes "vreg holds a bare
+   function pointer" from "vreg holds a pointer to a closure object with the
+   fn ptr at offset 0". Both the miscalled target and the corrupted argument
+   list feed the ASLR-shaped garbage result.
+
+This means the fix cannot be "add a check in `compile_indirect_call`" alone —
+`emit_global_load`'s fallback branch must also stop emitting a bare
+`func_addr` for callable-value use, or `compile_indirect_call` needs a
+distinct calling convention for values it can prove are not closures (whole-
+program provenance tracking through the vreg, which cranelift MIR lowering
+does not currently carry). Confirms the existing "Fix direction" section
+below is the right shape (repair the ABI, or close the guard's hole by
+refusing on *any* callable-value use of a bare function).
+
 ## Blast radius
 
 Counted over `src/lib` + `src/os`, with string literals and comments stripped
@@ -135,6 +185,10 @@ none:
 
 ## Related
 
+- `test/01_unit/language/jit_lambda_and_fn_ref_value_spec.spl` — interpreter-lane
+  regression lock (3/3 green) plus a restated root cause in prose. Does NOT
+  exercise the JIT lane — `bin/simple test` is interpreter-only (see
+  `.claude/rules/testing.md`).
 - `doc/09_report/render_pipeline_profile_2026-08-06.md` — the profiling lane that
   found the blocker chain.
 - `src/lib/nogc_sync_mut/diag.spl:385` and both `fs/path.spl` twins carry

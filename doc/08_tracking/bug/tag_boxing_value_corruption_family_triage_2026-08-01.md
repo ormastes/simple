@@ -29,7 +29,7 @@ a reading.
 | 1 | `list.get(i)` returns `value << 3` | correct | correct | correct | DOES NOT REPRODUCE — fixed upstream since 2026-07-28 |
 | 2 | `??` on a raw i64 whose value is 3 | correct | **WRONG** | unsupported | OPEN — JIT only |
 | 3 | `.find()` result breaks `text[:idx]` | error | **WRONG** | error | **FIXED** — was never tag-boxing |
-| 4 | `to_text` on an erased `Any` bool | correct | **WRONG** | correct | OPEN — JIT only |
+| 4 | `to_text` on an erased `Any` bool | correct | correct | not re-run | **FIXED (interpreter+JIT) — verified 2026-08-07**, see update below |
 
 The four do not share a cause. #3 was a lexer/parser collision in a different
 subsystem entirely. #1 no longer reproduces on any lane. #2 and #4 are both
@@ -170,7 +170,33 @@ them symbol-keyed indexing, so the fix carried no ambiguity cost. The
 `.substring()` rewrites previously landed as workarounds remain correct and do
 not need reverting.
 
-## 4 — `to_text` on an erased `Any` bool — OPEN, JIT ONLY
+## 4 — `to_text` on an erased `Any` bool — FIXED, verified 2026-08-07
+
+**Update 2026-08-07:** re-ran the repro below (both the combined 4-case
+version and an isolated 2-line-output version containing only the
+`Any`-parameter case, to rule out the "one unsupported op demotes the whole
+program to the interpreter" trap) against today's deployed `bin/simple`
+(`bin/release/x86_64-unknown-linux-gnu/simple`, self-identifies at startup as
+"a bootstrap seed only", mtime 2026-08-07 04:52). Confirmed real JIT
+engagement via `RUST_LOG=cranelift=debug` — the isolated probe alone produced
+68 lines of Cranelift IR ending in the call/return for `show()`. Ran a second
+time under `SIMPLE_EXECUTION_MODE=interpret`. Both re-run lanes now render
+`erased_true=true` / `erased_false=false` correctly; JIT no longer prints
+`nil`/`0` for a bool passed through an `Any`-typed function parameter.
+**Native was not re-run** — this update only covers interpreter and JIT, per
+the two lanes asked for; native's "correct" in the table above is carried
+over unverified from the original report. No specific fixing commit was
+identified by searching recent `src/compiler_rust/` history (checked
+`81c58562fac`, the tuple-printer fix from item spirit above — it touches
+`io_print.rs` tuple formatting only, not bool/Any call-argument passing, so it
+is not the fix). Locked in for the interpreter lane (the only lane
+`bin/simple test` can reach) with
+`test/01_unit/language/any_erased_bool_to_text_spec.spl` — that spec does
+**not** cover the JIT lane where the defect actually lived; JIT status must be
+re-verified manually via `bin/simple run` + `RUST_LOG=cranelift=debug` per this
+update, not by the test suite.
+
+### Original report (OPEN, JIT ONLY) — superseded by the update above
 
 ```simple
 fn show(v: Any) -> text:
