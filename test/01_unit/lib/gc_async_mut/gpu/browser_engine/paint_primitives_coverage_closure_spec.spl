@@ -1,0 +1,199 @@
+# Coverage closure for simple_web_html_layout_renderer_paint_primitives.spl.
+#
+# Baseline (SIMPLE_COVERAGE=1 on the existing
+# simple_web_html_layout_renderer_coverage_spec.spl, artifact-measured via
+# SIMPLE_COVERAGE_OUTPUT): 57% (512/891 lines). Whole-function gaps were
+# identified by cross-referencing the artifact's (file, line) rows against
+# `^fn ` boundaries: many small pure helpers (gradient dithering/mixing,
+# `_radial_center_pct`, `clamp_corner_radius`'s sibling branches,
+# `compute_widget_paint_flags`'s need_text branch, `is_text_flow_fixture`,
+# `reverse_text_for_paint`, `apply_text_transform_for_paint`'s
+# uppercase/lowercase/capitalize/passthrough arms, `fb_put`/`fb_clear`/`fb_px`,
+# `fb_text_underline`, `fb_rounded_rect_row_span_opacity_clip`, and
+# `browser_layout_framebuffer_filled_serial`) were 0% covered despite being
+# plain module-level `fn`s reachable directly, without driving a full HTML
+# render. Two large functions (`fb_generated_widget_chrome_text`,
+# `fb_text_flow_chrome_overlay`) are NOT targeted here: their raw line spans
+# (62 and 168) are dominated by literal-array continuation rows that the
+# coverage collector does not instrument at all (confirmed by cross-checking
+# `fb_soft_box_shadow`'s covered-line set, where every executable line is
+# hit and 0 rows appear for its comment block) -- driving them would add real
+# behavioral coverage but only ~8-12 measured lines each, not their raw span.
+#
+# Every expected value below was derived either by hand from the source
+# (dither thresholds, clamp branches, capitalize/reverse text, radial-center
+# keyword parsing) or read off a throwaway `bin/simple test` probe of the
+# same call (mix_channel/mix_color's integer-rounding math, the rounded-rect
+# per-pixel corner test, `_radial_center_pct`'s comma-sensitivity), never
+# guessed. No assertion-free "smoke" calls.
+#
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl
+use std.spec.{describe, it, assert_true, assert_false, assert_equal}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
+    fb_put, fb_clear, fb_px, reverse_text_for_paint, apply_text_transform_for_paint,
+    is_text_flow_fixture, fb_text_underline, gradient_dither_threshold,
+    mix_channel_gradient_centered, mix_color_vertical_centered, background_gradient_pixel_opacity,
+    compute_widget_paint_flags, clamp_corner_radius, fb_rounded_rect_row_span_opacity_clip,
+    browser_layout_framebuffer_filled_serial, _radial_center_pct, ClipRect
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{HNode, mk_node}
+
+describe "paint_primitives.spl coverage closure":
+
+    it "fb_put clips out-of-bounds writes and fb_clear/fb_px write real pixels":
+        var fb: [u32] = [0u32; 20]
+        fb_put(fb, 5, 4, 2, 1, 0xAAu32)
+        assert_equal(fb[7], 0xAAu32)
+        # x = -1 is out of bounds: the whole buffer must stay untouched.
+        var fb2: [u32] = [0u32; 20]
+        fb_put(fb2, 5, 4, -1, 1, 0xAAu32)
+        assert_equal(fb2[0], 0u32)
+        var fb3: [u32] = [1u32; 6]
+        fb_clear(fb3, 9u32)
+        assert_equal(fb3[0], 9u32)
+        assert_equal(fb3[5], 9u32)
+        var fb4: [u32] = [0u32; 20]
+        val fb4_out = fb_px(fb4, 5, 4, 3, 2, 0x77u32)
+        assert_equal(fb4_out[13], 0x77u32)
+
+    it "reverse_text_for_paint reverses non-empty text and leaves empty text empty":
+        assert_equal(reverse_text_for_paint("abc"), "cba")
+        assert_equal(reverse_text_for_paint(""), "")
+
+    it "apply_text_transform_for_paint covers uppercase, lowercase, capitalize, and passthrough":
+        assert_equal(apply_text_transform_for_paint("AbC", "uppercase"), "ABC")
+        assert_equal(apply_text_transform_for_paint("AbC", "lowercase"), "abc")
+        # capitalize upper-cases only the first letter of each space-separated
+        # word; interior letters are left as-is (real behavior, not Title Case).
+        assert_equal(apply_text_transform_for_paint("hello world", "capitalize"), "Hello World")
+        # Unrecognized transform value falls through unchanged.
+        assert_equal(apply_text_transform_for_paint("HeLLo", "none"), "HeLLo")
+
+    it "is_text_flow_fixture requires the exact 96x64 size AND both marker texts":
+        var n1 = mk_node("#text", -1)
+        n1.text_trimmed = "GUI"
+        var n2 = mk_node("#text", -1)
+        n2.text_trimmed = "taskbar command"
+        assert_true(is_text_flow_fixture([n1, n2], 96, 64))
+        assert_false(is_text_flow_fixture([n1, n2], 10, 10))
+        assert_false(is_text_flow_fixture([n1], 96, 64))
+
+    it "fb_text_underline paints solid, double, and dashed/gapped styles and skips zero-width":
+        # solid: a single line_h=1 row at y=5, columns 1..6 (fbw=10 -> row offset 50).
+        var fb5: [u32] = [0u32; 100]
+        val fb5_out = fb_text_underline(fb5, 10, 10, 1, 5, 6, 1, "solid", 0xFFu32)
+        assert_equal(fb5_out[51], 0xFFu32)
+        assert_equal(fb5_out[56], 0xFFu32)
+        # w<=0 must be a true no-op.
+        var fb5b: [u32] = [0u32; 100]
+        val fb5b_out = fb_text_underline(fb5b, 10, 10, 0, 0, 0, 1, "solid", 0xFFu32)
+        assert_equal(fb5b_out[0], 0u32)
+        # double: two parallel rows, y=5 and y=5+line_h+1=7 (row offset 51 and 71).
+        var fb5c: [u32] = [0u32; 100]
+        val fb5c_out = fb_text_underline(fb5c, 10, 10, 1, 5, 4, 1, "double", 0xFFu32)
+        assert_equal(fb5c_out[51], 0xFFu32)
+        assert_equal(fb5c_out[71], 0xFFu32)
+        # dashed: dash_w=3, gap_w=1 over w=6 at x=0,y=5 -> painted cols 0-2 and
+        # 4-5, col 3 is the gap and must stay clear.
+        var fb5d: [u32] = [0u32; 100]
+        val fb5d_out = fb_text_underline(fb5d, 10, 10, 0, 5, 6, 1, "dashed", 0xFFu32)
+        assert_equal(fb5d_out[50], 0xFFu32)
+        assert_equal(fb5d_out[52], 0xFFu32)
+        assert_equal(fb5d_out[53], 0u32)
+
+    it "gradient_dither_threshold covers every (px%4, py%4) cell of the 4x4 tile":
+        assert_equal(gradient_dither_threshold(0, 0), 7)
+        assert_equal(gradient_dither_threshold(1, 0), 10)
+        assert_equal(gradient_dither_threshold(2, 0), 4)
+        assert_equal(gradient_dither_threshold(3, 0), 7)
+        assert_equal(gradient_dither_threshold(0, 1), 12)
+        assert_equal(gradient_dither_threshold(1, 1), 2)
+        assert_equal(gradient_dither_threshold(2, 1), 14)
+        assert_equal(gradient_dither_threshold(3, 1), 2)
+        # my==2, mx==0 has a further px%8==4 sub-branch.
+        assert_equal(gradient_dither_threshold(0, 2), 7)
+        assert_equal(gradient_dither_threshold(4, 2), 3)
+        assert_equal(gradient_dither_threshold(1, 2), 11)
+        assert_equal(gradient_dither_threshold(2, 2), 7)
+        assert_equal(gradient_dither_threshold(3, 2), 9)
+        assert_equal(gradient_dither_threshold(0, 3), 15)
+        assert_equal(gradient_dither_threshold(1, 3), 2)
+        assert_equal(gradient_dither_threshold(2, 3), 12)
+        assert_equal(gradient_dither_threshold(3, 3), 5)
+
+    it "mix_channel_gradient_centered and mix_color_vertical_centered do dithered integer rounding":
+        # span<=0 is a passthrough of `a`.
+        assert_equal(mix_channel_gradient_centered(0, 1, 0, 0, 0, 0), 0)
+        # px=0,py=0 -> dither threshold 7: rem*16=16 > 7*2=14, rounds UP.
+        assert_equal(mix_channel_gradient_centered(0, 1, 0, 1, 0, 0), 1)
+        # px=1,py=0 -> dither threshold 10: rem*16=16 > 10*2=20 is false, rounds DOWN.
+        assert_equal(mix_channel_gradient_centered(0, 1, 0, 1, 1, 0), 0)
+        # span<=0 passthrough on the composed ARGB color too.
+        assert_equal(mix_color_vertical_centered(0xFF112233u32, 0xFF445566u32, 0, 0, 5, 5), 0xFF112233u32)
+        # Per-channel: alpha/red/green unchanged (both sides 0 or equal),
+        # blue channel rounds down per the px=1,py=0 case above (127, not 128).
+        assert_equal(mix_color_vertical_centered(0xFF000000u32, 0xFF0000FFu32, 0, 1, 1, 0), 0xFF00007Fu32)
+
+    it "background_gradient_pixel_opacity scales element opacity by the color's alpha channel":
+        assert_equal(background_gradient_pixel_opacity(0xFF000000u32, 100), 100)
+        assert_equal(background_gradient_pixel_opacity(0x80000000u32, 50), 25)
+
+    it "clamp_corner_radius clamps to zero, caps at the shorter side, and passes through in range":
+        assert_equal(clamp_corner_radius(-3, 10, 10), 0)
+        assert_equal(clamp_corner_radius(100, 10, 20), 5)
+        assert_equal(clamp_corner_radius(3, 10, 20), 3)
+
+    it "_radial_center_pct parses at-keyword and percentage positions, and defaults with no 'at '":
+        val top_left = _radial_center_pct("circle at top left")
+        assert_equal(top_left[0], 0)
+        assert_equal(top_left[1], 0)
+        val bottom_right = _radial_center_pct("circle at bottom right")
+        assert_equal(bottom_right[0], 100)
+        assert_equal(bottom_right[1], 100)
+        val pct = _radial_center_pct("circle at 30% 40%")
+        assert_equal(pct[0], 30)
+        assert_equal(pct[1], 40)
+        # No "at " at all -> the true early-return default branch.
+        val no_at = _radial_center_pct("circle")
+        assert_equal(no_at[0], 50)
+        assert_equal(no_at[1], 50)
+        # "center center": the first "center" sets x_set, the second (x_set
+        # already true) sets y_set -- exercises both halves of that branch.
+        val center_center = _radial_center_pct("circle at center center")
+        assert_equal(center_center[0], 50)
+        assert_equal(center_center[1], 50)
+
+    it "compute_widget_paint_flags's need_text path stops at the first non-empty widget-descendant text":
+        var widget_ancestor = mk_node("div", -1)
+        widget_ancestor.has_widget_class = true
+        var child_text = mk_node("#text", 0)
+        child_text.text_trimmed = "hi"
+        val flags = compute_widget_paint_flags([widget_ancestor, child_text], false, true)
+        assert_false(flags.has_widget_panel)
+        assert_true(flags.has_nonempty_widget_text)
+        # not need_text: the widget_mode-seeded, panel-class-scanning branch
+        # (already covered by the existing coverage_spec) is re-exercised here
+        # with widget_mode=true to pin has_widget_panel starting true.
+        val flags2 = compute_widget_paint_flags([widget_ancestor, child_text], true, false)
+        assert_true(flags2.has_widget_panel)
+        assert_false(flags2.has_nonempty_widget_text)
+
+    it "fb_rounded_rect_row_span_opacity_clip: all-zero radii delegates to a plain rect fill, positive radii clip corners per-pixel":
+        val clip = ClipRect(x0: 0, y0: 0, x1: 20, y1: 20)
+        # radii all 0 -> early-return delegation to fb_rect_opacity_clip.
+        var fbA: [u32] = [0u32; 400]
+        val fbA_out = fb_rounded_rect_row_span_opacity_clip(fbA, 20, 20, 2, 2, 10, 10, 0, 0, 0, 0, 5, 2, 8, 0xFFu32, 100, clip)
+        assert_equal(fbA_out[102], 0xFFu32)
+        # radii 4 on all corners, row py=2 is inside the top-left/top-right
+        # corner bands: column 2 (idx 42) falls outside both corner circles
+        # (clipped away), column 7 (idx 47) falls inside the top-right circle.
+        var fbB: [u32] = [0u32; 400]
+        val fbB_out = fb_rounded_rect_row_span_opacity_clip(fbB, 20, 20, 2, 2, 10, 10, 4, 4, 4, 4, 2, 2, 8, 0xFFu32, 100, clip)
+        assert_equal(fbB_out[42], 0u32)
+        assert_equal(fbB_out[47], 0xFFu32)
+
+    it "browser_layout_framebuffer_filled_serial fills every cell with the base color, single-worker path":
+        val bs = browser_layout_framebuffer_filled_serial(7u32, 3, 2)
+        assert_equal(bs.len(), 6)
+        assert_equal(bs[0], 7u32)
+        assert_equal(bs[5], 7u32)

@@ -767,3 +767,161 @@ uncovered path was found unreachable or defective).
 Artifacts: `/tmp/layoutcov/baseline.sdn` (layout_spec.spl solo),
 `/tmp/layoutcov/closure.sdn` (new spec solo), rollup dump cross-checked by
 `browser_engine/layout.spl, <line>, <hit_count>` row count.
+
+## `paint_primitives.spl` (U4.5) closure — 2026-08-07 (session 3)
+
+Follow-up to the U4.4/U4.5 "NOT MET, honest gate report" and the subsequent
+`fb_outline_clip` closure example above. Target:
+`simple_web_html_layout_renderer_paint_primitives.spl`, line target >=85%.
+Binary: `readlink -f bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`
+(Rust seed, per repo policy for `test`).
+
+### Baseline (re-measured fresh, artifact-backed)
+
+`SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=/tmp/paintcov/baseline.sdn bin/simple
+test test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_coverage_spec.spl
+--coverage --no-cache`:
+
+```
+Results: 39 total, 38 passed, 1 failed
+coverage: src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl 57% (512/891 lines)
+```
+
+The tree has moved since this doc's earlier 35% (319/907) entry -- other
+sessions' closure work (the `fb_outline_clip` example above, plus unrelated
+denominator shrinkage from 907->891 measured lines) raised the real baseline
+to 57%, matching the number this unit was scoped against. The 1 pre-existing
+failure (`expected 0 to equal 6`) is unrelated to `paint_primitives.spl`, not
+investigated (out of this unit's scope), and not touched. Because a run with
+a failing example can abort a path early, 512/891 (and the 521 distinct-line
+count computed independently from the artifact bytes, see below) is a floor,
+not a ceiling.
+
+### `paint_rect` known-defect check -- not applicable here
+
+The brief for this unit cited a known `paint_rect` negative-x row-bleed
+defect (`doc/08_tracking/bug/paint_rect_negative_x_row_bleed_2026-08-07.md`).
+Verified: that bug is in a **different module**,
+`src/lib/common/ui/render_opt/paint_chunk_rasterizer.spl:136-143`.
+`paint_primitives.spl` has no `paint_rect` function at all; its equivalent,
+`fb_rect` (lines 48-70), clips `x0`/`x1` **and** `y0`/`y1` correctly before
+filling -- checked directly against the source. No defect pinned or filed
+for this file; the brief's reference does not apply to it.
+
+### Per-function gap analysis
+
+Cross-referencing the baseline artifact's `(file, line, hit_count)` rows
+against `^fn ` boundaries in the source found ~20 whole-function or
+whole-branch gaps, mostly plain module-level `fn`s reachable without driving
+a full HTML render: `fb_put`, `fb_clear`, `fb_px`,
+`browser_layout_framebuffer_filled_serial`, `reverse_text_for_paint`,
+`apply_text_transform_for_paint` (uppercase/lowercase/capitalize/passthrough
+arms), `is_text_flow_fixture`, `fb_text_underline`, `gradient_dither_threshold`,
+`mix_channel_gradient_centered`, `mix_color_vertical_centered`,
+`background_gradient_pixel_opacity`, `clamp_corner_radius`'s two edge
+branches, `_radial_center_pct`, `compute_widget_paint_flags`'s `need_text`
+branch, and `fb_rounded_rect_row_span_opacity_clip`.
+
+Two large-span functions were identified and deliberately **not** targeted:
+`fb_generated_widget_chrome_text` (62-line span) and
+`fb_text_flow_chrome_overlay` (168-line span). Both are almost entirely
+literal-array data tables (`xs`/`ys`/`colors` point lists, and a
+pixel-correction offset/color table gated on an exact 96x64 fixture size).
+Cross-checking a fully-hit function with a multi-line body
+(`fb_soft_box_shadow`, 437-520 span 84, 56 hit lines) showed every executable
+line is a covered row and 0 rows appear for its comment block -- confirming
+the coverage collector does not instrument literal-array continuation rows
+at all. The 891 measured-line denominator vs. 1327 raw lines (~436 excluded)
+is consistent with the bulk of that gap sitting in these two functions'
+~390 combined array rows. Driving them would add real behavioral coverage but
+only an estimated ~8-12 measured lines each, not their raw span -- a poor
+return relative to the mid-size logic functions above, so they were skipped
+in favor of those.
+
+### New spec and real per-function assertions
+
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/paint_primitives_coverage_closure_spec.spl`
+(13 `it` blocks, `assert_true`/`assert_false`/`assert_equal` throughout, no
+assertion-free calls) directly imports the plain functions above (no full
+HTML render) and asserts on real oracle values -- hand-derived from reading
+the source (e.g. all 17 `(px%4, py%4)` cells of `gradient_dither_threshold`,
+`clamp_corner_radius`'s three branches, `reverse_text_for_paint`/
+`apply_text_transform_for_paint`'s exact string outputs, `_radial_center_pct`'s
+keyword/percentage parsing) or read off a throwaway `bin/simple test` probe
+of the same call for the harder integer-rounding math
+(`mix_channel_gradient_centered`/`mix_color_vertical_centered`'s dithered
+rounding, `fb_rounded_rect_row_span_opacity_clip`'s per-pixel corner test).
+One probe result corrected an initial hand-guess: `_radial_center_pct`'s
+token split is comma-sensitive (`"bottom right,"` with a trailing comma
+matches neither the `right` nor a `%` branch and silently keeps the x-default)
+-- the spec pins the clean, comma-free real behavior and the probe finding is
+recorded here rather than silently discarded.
+
+Run: `SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=/tmp/paintcov/newspec.sdn
+bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/paint_primitives_coverage_closure_spec.spl
+--coverage --no-cache`:
+
+```
+Results: 13 total, 13 passed, 0 failed
+coverage: src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl 27% (243/891 lines)
+```
+
+(27% solo is expected and not a regression signal -- the new spec exercises
+only the ~20 targeted gap functions, not the full render pipeline the
+baseline spec drives.)
+
+### Combined (union) measurement
+
+`bin/simple spl-coverage rollup --file baseline.sdn --file newspec.sdn --out
+combined.sdn` completed (exit 0) after ~185s -- much slower than either
+standalone `test --coverage` run (each under 100s including module load),
+recorded here as a rollup-CLI performance observation, not investigated
+further. Its `summary:` block reports `total_lines: 8476, covered_lines:
+8476` (and `total_functions: 672, covered_functions: 672`) identically equal
+-- this is **not** a real 100% denominator; the SDN artifact format only ever
+stores rows for lines that were actually hit, so `rollup`'s summary counts
+rows-that-exist against rows-that-exist and is tautologically 100% by
+construction. It does not emit a per-file percentage. The rollup's raw
+per-line dump is the usable output: distinct `(file, line)` rows were
+extracted for `paint_primitives.spl` and compared against an independent
+union computed directly from the two source artifacts (`comm -3` shows zero
+lines differing between the two computations -- byte-identical):
+
+- Baseline distinct lines: **521** of 891 (58.5%) -- note this differs
+  slightly from the collector's own `57% (512/891)` stdout figure for the
+  same run; both are reported rather than one silently discarded.
+- New-spec-alone distinct lines: 244 of 891 (27.4%).
+- **Union: 701 of 891 (78.7%).**
+
+**Line delta (distinct artifact rows): 521/891 (58.5%) -> 701/891 (78.7%).**
+The collector's own stdout for the same baseline run printed `57% (512/891)`
+-- a 9-line discrepancy between the collector's own hit count and the
+distinct-row count of the artifact it wrote; noted here, not reconciled.
+Either basis shows a real gain of ~180-189 measured lines. This is a genuine
+improvement but falls **short of the U4.5 >=85% target** (needs 758/891; 57
+lines short on the union basis).
+
+### Remaining gap to 85%
+
+57 more measured lines are needed to reach the 85% target (758/891). The
+arithmetic says this is reachable from two functions alone:
+`fb_style_background_opacity_clip` (64 uncovered of its 82-line span) and
+`fb_style_rounded_rect_opacity_clip` (11 uncovered) sum to 75 uncovered
+lines -- more than the 57-line shortfall. Both require constructing a
+`Style` value (`simple_web_html_layout_renderer_style.spl:7`), which this
+unit did not attempt (not investigated whether `Style` has a default/`empty()`
+constructor usable from a direct-import spec, the same question that would
+determine whether `paint_box_shadow`'s and
+`fb_background_radial_stack_clip`'s remaining per-pixel-loop gaps are also
+reachable this way). This is a scoping gap, not a structural blocker: the
+gap is closable, just not attempted in this unit's budget. Per this plan's
+own honesty rule, this is reported as a real, measured, sub-target result
+rather than padded to the line with assertion-free calls on the two
+literal-table functions identified above.
+
+### Provenance / disk
+
+`df -h /`: 238G free before, 238G free after (no cargo/bootstrap run).
+Artifacts: `/tmp/paintcov/baseline.sdn` (1,363,556 bytes, full coverage_spec
+run), `/tmp/paintcov/newspec.sdn` (new closure spec run alone). New spec sha
+(`git hash-object`): `7b98f8c2573061855d231079084dffc0539b9994`.
