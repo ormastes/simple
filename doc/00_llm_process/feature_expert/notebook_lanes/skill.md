@@ -116,8 +116,23 @@ Implementation in progress, parallel-agent execution against
   (`rt_process_spawn_piped` unwired in the interpreter's dispatch table,
   `doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md`).
 
+- **H2** — `src/lib/nogc_sync_mut/notebook/lane_locks.spl`: `LaneLockRegistry`
+  (acquire/release/release_all_for_session/holder/is_held), generic string key
+  shared by K4's remote lanes and a future GPU-lane consumer (GPU plan A3
+  follow-up). Contention returns `"blocked: lane held by session <id>"` (matches
+  `LaneStatus`'s wording); stale-lock takeover checks pid liveness via
+  `rt_process_exists`. Verify: `lane_locks_spec.spl` 10/10 (contention, idempotent
+  re-acquire, cross-key independence, shutdown release incl. cross-session refusal,
+  stale-takeover with a real dead pid). **Design lesson** (not a new bug — the
+  documented run-vs-test engine divergence): a `struct`-based registry mutated via
+  free `fn`s passed under `bin/simple run` (JIT) but silently failed to persist
+  mutations under the interpreter (`bin/simple test`'s engine) because the
+  interpreter copies struct arguments at the call boundary — rewritten as a
+  `class` with `me` methods (same shape as `KernelSessionManager`), which mutates
+  correctly under both engines.
+
 Not yet started or still landing: K5-K6 (GPU-dependent), P2-P3, X3-X4, L3-L4
-(in flight), H1-H3 (H2 in flight), E1-E2.
+(in flight), H1, H3, E1-E2.
 
 ## Feature Links
 
