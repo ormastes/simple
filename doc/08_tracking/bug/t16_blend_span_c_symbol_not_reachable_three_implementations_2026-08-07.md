@@ -160,3 +160,133 @@ change (`CARGO_FEATURE_RUNTIME_SYMBOL_TABLE`) not scoped to T16.
 - `test/01_unit/lib/nogc_sync_mut/gpu/engine2d/simd_isa_provider_spec.spl:306-393`
 - `doc/03_plan/ui/perf/engine2d_simd_blend_span_kernel_design_plan_2026-08-07.md` §4 (design gap: never specified `engine2d_simd_ops.rs`)
 - `doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md` T16 (this unit)
+
+## RESOLVED (native-ABI symbol; 2026-08-07, follow-up session)
+
+Added `rt_engine2d_simd_blend_span_u32` and `rt_engine2d_simd_blend_const_span_u32`
+to `src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs`, mirroring
+`blend_row_u32`'s `blend_pixel` per-element loop, span-bounded like
+`fill_span_u32`/`copy_span_u32`. Semantics were pinned to the
+**already-proven-bit-exact interpreter bridge**
+(`interpreter_extern/simd.rs:1557-1614`), not the C file or the sibling
+`fill_span_u32`/`copy_span_u32` `.max(0)` clamp convention — the bridge
+**rejects** a negative `dst_offset`/`src_offset`/`offset` (returns the
+destination array unchanged) rather than clamping it to 0. An initial draft
+used `.max(0)` by analogy to `fill_span_u32` and was corrected before landing;
+a dedicated unit test (`hosted_blend_span_rejects_negative_offsets_instead_of_clamping`)
+pins the reject behaviour so a future edit can't silently regress it back to
+clamp semantics.
+
+**Verified (incremental release build from a warm `target/` — no `cargo
+clean`, no full bootstrap):**
+```
+$ nm src/compiler_rust/target/release/simple | grep "T rt_engine2d_simd_blend"
+... T rt_engine2d_simd_blend_const_span_u32
+... T rt_engine2d_simd_blend_row_u32
+... T rt_engine2d_simd_blend_span_u32
+
+$ nm -A src/compiler_rust/target/release/libsimple_runtime.a \
+    | grep -E 'rt_engine2d_simd_blend_(span|const_span)_u32' | grep -v ' U '
+libsimple_runtime.a:simple_runtime.simple_runtime.<hash>-cgu.14.rcgu.o:0000000000000000 T rt_engine2d_simd_blend_const_span_u32
+libsimple_runtime.a:simple_runtime.simple_runtime.<hash>-cgu.14.rcgu.o:0000000000000000 T rt_engine2d_simd_blend_span_u32
+```
+Both resolve as `T`, exactly one definition each, from a Rust `.rcgu.o`
+codegen unit (not the still-dead C translation unit) — the archive-member
+qualification the original report used to diagnose the gap now shows it
+closed the same way.
+
+`cargo test --release -p simple-runtime engine2d_simd_ops`: **10/10 passed**
+(the 6 pre-existing + 2 new hosted-ABI tests + the new negative-offset-reject
+test + the existing hosted-span-clamp test). A full `cargo test --release -p
+simple-runtime` run shows 8 pre-existing failures unrelated to this module
+(`executor::tests::test_isolated_thread_spawn_with_args_and_join*`,
+`loader::package::format::tests::test_manifest_section_rejects_partial_runtime_variants_trailer`,
+`loader::settlement::native::tests::test_native_lib_manager`,
+`value::collections::tests::test_dict_invalid_value`,
+`value::collections::tests::test_low_heap_tagged_values_do_not_crash_collection_runtime`,
+`value::collections::tests::test_string_char_at_out_of_bounds`,
+`value::heap::attr_tests::owner_attribution_orders_by_live_bytes_and_frees_settle`)
+— none touch `engine2d_simd_ops` or any module this change modified; this
+session's diff is 92 purely-additive lines in exactly one file, confirmed via
+`git status --porcelain -- src/compiler_rust/runtime` before building.
+
+**Spec run — honest scope, not upgraded to "native-path proven":** re-running
+`simd_isa_provider_spec.spl`'s `blend_span`/`blend_const_span` `describe`
+blocks does **not** newly verify the native path and their titles still say
+"C kernel unverified" **intentionally** — `bin/simple test`/`simple test`
+routes every extern call through the Rust **interpreter bridge**
+(`interpreter_extern/simd.rs`) in both interpreter and JIT modes regardless of
+whether a native symbol exists, exactly as this bug doc's §3 already
+documented. Worse, the test runner's child-binary resolution
+(`test_runner_single.spl::find_simple_binary`) defaults to `/proc/self/exe`
+of the *invoking* binary, which in this shared tree is the stale deployed
+`bin/release/x86_64-unknown-linux-gnu/simple` seed unless
+`SIMPLE_BINARY=<fresh-binary-path>` is set explicitly — a first spec attempt
+without it printed `child binary: .../bin/release/x86_64-unknown-linux-gnu/simple`
+(then hit `Process timed out` during the outer harness's own module-load
+phase) and thus would have proven nothing about this change either way. A
+second attempt with `SIMPLE_BINARY` pinned confirmed
+`child binary: /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple`
+and, after a ~353s module-load/compile phase (interpreted-mode module lint
+tax, not a hang), produced a real verdict:
+```
+=========================================
+Test Summary
+=========================================
+Files: 1
+Passed: 24
+Failed: 0
+Results: 24 total, 24 passed, 0 failed
+Duration: 352566ms
+
+PASS test/01_unit/lib/nogc_sync_mut/gpu/engine2d/simd_isa_provider_spec.spl
+```
+All 24 examples pass, including every `blend_span`/`blend_const_span` `it` —
+this is a regression check confirming the freshly-built binary's interpreter
+bridge (unmodified by this session) still agrees with the oracle, run against
+the same binary that now also carries the new native-ABI symbols. It is not,
+and is not being represented as, new evidence for the native/C path — that
+evidence remains `nm` (above) and the cargo unit tests (above), per the
+decision rule already stated in this doc's §3.
+
+**Native ABI symbol gap: CLOSED.** Interpreter-bridge path: unchanged, still
+proven bit-exact (pre-existing). Self-hosted pure-Simple **LLVM backend**
+registration gap: **left OPEN, not touched** — see residual below.
+
+## Residual: self-hosted LLVM backend registration (not fixed here, blocked on Stage 3)
+
+`blend_row_u32`'s C-ABI signature is registered in the self-hosted pure-Simple
+LLVM codegen backend at two sites; `fill_span_u32`/`copy_span_u32` are also
+registered there (their span-family precedent, not `blend_row_u32`'s). The two
+new span functions are **not** registered at either site:
+
+- `src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl:181`
+  — needs `declare ptr @rt_engine2d_simd_blend_span_u32(ptr, i64, ptr, i64, i64)`
+  and `declare ptr @rt_engine2d_simd_blend_const_span_u32(ptr, i64, i64, i64)`
+  immediately after the existing `copy_span_u32` declare line, matching its
+  C-ABI shape.
+- `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:1203` — both
+  names need adding to the `Array(U32)` return-type OR-chain (the same list
+  `rt_engine2d_simd_fill_span_u32`/`rt_engine2d_simd_copy_span_u32` are already
+  in). Without this, a call falls through to the generic i64 default — the
+  exact failure class already documented at
+  `asm_constraints_helpers.spl:161-173` for `rt_array_repeat` (bug #149:
+  "defined with type 'i64' but expected 'ptr'").
+- Precedent note: the span family (`fill_span`/`copy_span`) takes `declare` +
+  return-type-registry entries but **not** a `defined_func_names` entry — that
+  third registration is row-family-only (`fill_row`/`fill_rows`/`copy_row`/
+  `blend_row`). The two new functions should follow the span-family pattern,
+  not the row-family one.
+
+**Why not fixed in the same session:** `.claude/rules/bootstrap.md`'s KNOWN
+BLOCKER — Stage 3 self-host (`unresolved type: ByteOrder` in
+`cache_validator.spl`, then an `Effect` facade collision) — means there is
+currently no way to build and verify a change to `src/compiler`'s own LLVM
+backend; landing an edit there unverified violates this session's own
+"if the build or verification fails, land nothing" instruction, and this file
+is part of the compiler that any bootstrap would need to recompile itself
+with. **Unblock condition:** fix the Stage 3 defect (tracked separately at
+`doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md`),
+then land the two mechanical, pattern-matched additions above and verify with
+a real self-hosted build + a native-LLVM-backend call site exercising
+`rt_engine2d_simd_blend_span_u32`/`_blend_const_span_u32`.

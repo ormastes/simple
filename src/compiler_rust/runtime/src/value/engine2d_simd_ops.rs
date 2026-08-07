@@ -182,6 +182,78 @@ pub extern "C" fn rt_engine2d_simd_blend_row_u32(dst: RuntimeValue, src: Runtime
     pixel_array(&values)
 }
 
+/// Rust-hosted ABI for an in-place-style source-over `[u32]` span blend.
+///
+/// Span-bounded like `fill_span_u32`/`copy_span_u32`, not whole-array like
+/// `blend_row_u32`. Semantics are pinned to the already-proven-bit-exact
+/// interpreter bridge (`rt_engine2d_simd_blend_span_u32` in
+/// `interpreter_extern/simd.rs`), which itself matches the C kernel in
+/// `src/runtime/runtime_simd_dispatch.c` (`engine2d_blend_pixel`, exact
+/// integer floor formula, straight-alpha src-over): a negative offset is
+/// **rejected** (destination returned unchanged), not clamped to 0 — unlike
+/// `fill_span_u32`/`copy_span_u32`'s `.max(0)` convention.
+#[no_mangle]
+pub extern "C" fn rt_engine2d_simd_blend_span_u32(
+    dst: RuntimeValue,
+    dst_offset: i64,
+    src: RuntimeValue,
+    src_offset: i64,
+    count: i64,
+) -> RuntimeValue {
+    let mut dst_values = pixel_vec(dst);
+    let src_values = pixel_vec(src);
+    if dst_offset < 0 || src_offset < 0 || count <= 0 {
+        return pixel_array(&dst_values);
+    }
+    let dst_start = dst_offset as usize;
+    let src_start = src_offset as usize;
+    if dst_start >= dst_values.len() || src_start >= src_values.len() {
+        return pixel_array(&dst_values);
+    }
+    let available = count as usize;
+    let blended = available
+        .min(dst_values.len() - dst_start)
+        .min(src_values.len() - src_start);
+    for i in 0..blended {
+        let s = src_values[src_start + i];
+        let d = dst_values[dst_start + i];
+        dst_values[dst_start + i] = blend_pixel(s, d);
+    }
+    pixel_array(&dst_values)
+}
+
+/// Rust-hosted ABI for an in-place-style constant-color `[u32]` span blend.
+///
+/// Blends a single constant colour over `dst[offset..offset+count)` in
+/// place, straight-alpha src-over — no source array. Semantics pinned to the
+/// proven-bit-exact interpreter bridge
+/// (`rt_engine2d_simd_blend_const_span_u32` in
+/// `interpreter_extern/simd.rs`), including its `sa == 0` short circuit (a
+/// fully-transparent constant leaves the destination untouched) and its
+/// **reject** (not clamp) of a negative offset.
+#[no_mangle]
+pub extern "C" fn rt_engine2d_simd_blend_const_span_u32(
+    dst: RuntimeValue,
+    offset: i64,
+    count: i64,
+    const_color: i64,
+) -> RuntimeValue {
+    let mut dst_values = pixel_vec(dst);
+    let color = const_color as u32;
+    if offset < 0 || count <= 0 || (color >> 24) == 0 {
+        return pixel_array(&dst_values);
+    }
+    let start = offset as usize;
+    if start >= dst_values.len() {
+        return pixel_array(&dst_values);
+    }
+    let end = start.saturating_add(count as usize).min(dst_values.len());
+    for d in &mut dst_values[start..end] {
+        *d = blend_pixel(color, *d);
+    }
+    pixel_array(&dst_values)
+}
+
 // ---------------------------------------------------------------------------
 // fill_row — write a solid color across `count` contiguous pixels.
 // ---------------------------------------------------------------------------
@@ -389,6 +461,54 @@ mod tests {
             let blended = rt_engine2d_simd_blend_row_u32(pixel_array(&dst_values), pixel_array(&src_values));
             assert_eq!(pixel_vec(blended), src_values, "count={count}");
         }
+    }
+
+    #[test]
+    fn hosted_blend_span_clamps_and_preserves_untouched_pixels() {
+        let dst = pixel_array(&[0x0000_0000, 0x0000_0000, 0x0000_0000, 0xffAA_BBCC]);
+        let src = pixel_array(&[0x80ff_ffff, 0x80ff_ffff]);
+        let blended = rt_engine2d_simd_blend_span_u32(dst, 1, src, 0, 9);
+        let out = pixel_vec(blended);
+        assert_eq!(out[0], 0x0000_0000, "untouched before offset");
+        assert_eq!(out[1], blend_pixel(0x80ff_ffff, 0x0000_0000));
+        assert_eq!(out[2], blend_pixel(0x80ff_ffff, 0x0000_0000));
+        assert_eq!(out[3], 0xffAA_BBCC, "untouched past clamped span");
+    }
+
+    #[test]
+    fn hosted_blend_const_span_matches_blend_pixel_and_skips_zero_alpha() {
+        let dst = pixel_array(&[0x0011_2233, 0x0011_2233, 0x0011_2233]);
+        let blended = rt_engine2d_simd_blend_const_span_u32(dst, 1, 1, 0x80ff_ffff_u32 as i64);
+        let out = pixel_vec(blended);
+        assert_eq!(out[0], 0x0011_2233);
+        assert_eq!(out[1], blend_pixel(0x80ff_ffff, 0x0011_2233));
+        assert_eq!(out[2], 0x0011_2233);
+
+        let unchanged = pixel_array(&[0x0011_2233]);
+        let still = rt_engine2d_simd_blend_const_span_u32(unchanged, 0, 1, 0x0000_0000);
+        assert_eq!(pixel_vec(still), vec![0x0011_2233], "sa==0 is a no-op");
+    }
+
+    /// Negative offsets are REJECTED (dst returned unchanged), not clamped
+    /// to 0 — pinned to the interpreter bridge's `>= 0` guard in
+    /// `interpreter_extern/simd.rs::rt_engine2d_simd_blend_span_u32` /
+    /// `_blend_const_span_u32`, which diverges from `fill_span_u32`'s
+    /// `.max(0)` clamp convention.
+    #[test]
+    fn hosted_blend_span_rejects_negative_offsets_instead_of_clamping() {
+        let dst = pixel_array(&[0x0011_2233, 0x0011_2233]);
+        let src = pixel_array(&[0x80ff_ffff, 0x80ff_ffff]);
+        let unchanged = rt_engine2d_simd_blend_span_u32(dst, -1, src, 0, 2);
+        assert_eq!(pixel_vec(unchanged), vec![0x0011_2233, 0x0011_2233]);
+
+        let dst2 = pixel_array(&[0x0011_2233, 0x0011_2233]);
+        let src2 = pixel_array(&[0x80ff_ffff, 0x80ff_ffff]);
+        let unchanged2 = rt_engine2d_simd_blend_span_u32(dst2, 0, src2, -1, 2);
+        assert_eq!(pixel_vec(unchanged2), vec![0x0011_2233, 0x0011_2233]);
+
+        let dst3 = pixel_array(&[0x0011_2233, 0x0011_2233]);
+        let unchanged3 = rt_engine2d_simd_blend_const_span_u32(dst3, -1, 2, 0x80ff_ffff_u32 as i64);
+        assert_eq!(pixel_vec(unchanged3), vec![0x0011_2233, 0x0011_2233]);
     }
 
     #[test]
