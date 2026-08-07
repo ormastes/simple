@@ -1,0 +1,100 @@
+# Pins the interpreter-engine contract for `impl Trait for <primitive>`
+# dispatch, and leaves ONE row deliberately RED to document a real,
+# currently-unfixed defect rather than hide it.
+#
+# Background: doc/08_tracking/bug/primitive_receiver_trait_impl_dispatch_2026-08-07.md
+# Manual cross-engine repro (same fixtures, exercised via `bin/simple run` /
+# `native-build` since `bin/simple test` only reaches the interpreter):
+#   test/fixtures/repro/compiler/primitive_trait_impl_dispatch_repro.spl
+#   test/fixtures/repro/compiler/primitive_trait_impl_dispatch_native_min.spl
+#
+# `bin/simple test` hard-defaults to the tree-walk interpreter (no JIT
+# variant), so this spec can only exercise the INTERPRET column of the bug
+# doc's dispatch matrix. The other two engines are covered by running the
+# repro fixtures directly:
+#   SIMPLE_EXECUTION_MODE=interpret bin/simple run <repro>   # matches this spec
+#   bin/simple run <repro>                                    # JIT: hard runtime
+#                                                              # error on every
+#                                                              # primitive receiver
+#                                                              # (fails CLOSED)
+#   bin/simple native-build <native_min> -o /tmp/x             # MIR lowering
+#                                                              # error: unresolved
+#                                                              # method call (fails
+#                                                              # CLOSED)
+#
+# Interpret-engine matrix measured 2026-08-07 (still current):
+#   struct(control) correct | text correct | i64 correct | bool correct |
+#   f32 correct | f64 correct | i32 WRONG -- collapses onto the i64 impl.
+#
+# Per testing.md: a spec correctly asserting behavior the implementation does
+# not yet have must stay RED, not be weakened to match the bug. The i32 case
+# below asserts the CORRECT value (1003) and is expected to fail until
+# resolve.spl / resolve_strategies.spl / trait_impl_lowering.spl are fixed to
+# key primitive impl registration by type kind instead of by bare method name.
+
+trait MarkerProbe:
+    fn marker_probe() -> i64
+
+impl MarkerProbe for text:
+    fn marker_probe() -> i64:
+        1001
+
+impl MarkerProbe for i64:
+    fn marker_probe() -> i64:
+        1002
+
+impl MarkerProbe for i32:
+    fn marker_probe() -> i64:
+        1003
+
+impl MarkerProbe for bool:
+    fn marker_probe() -> i64:
+        1004
+
+impl MarkerProbe for f32:
+    fn marker_probe() -> i64:
+        1006
+
+impl MarkerProbe for f64:
+    fn marker_probe() -> i64:
+        1007
+
+struct ControlPoint:
+    x: i64
+
+impl MarkerProbe for ControlPoint:
+    fn marker_probe() -> i64:
+        self.x + 5000
+
+describe "impl Trait for <primitive> dispatches to the matching impl (interpret engine)":
+    """
+    As a Simple developer writing `impl SomeTrait for i64` (or text, bool,
+    f32, f64, or a struct), I want calling the trait method on a receiver of
+    that exact type to invoke that impl's body, not some other impl's body
+    and not silently nothing, regardless of which primitive type I chose.
+    """
+
+    it "dispatches correctly on a struct receiver (control)":
+        assert_equal(ControlPoint(x: 1).marker_probe(), 5001)
+
+    it "dispatches correctly on a text receiver":
+        assert_equal("x".marker_probe(), 1001)
+
+    it "dispatches correctly on an i64 receiver":
+        assert_equal((7 as i64).marker_probe(), 1002)
+
+    it "dispatches correctly on a bool receiver":
+        assert_equal(true.marker_probe(), 1004)
+
+    it "dispatches correctly on an f32 receiver":
+        assert_equal((1.5 as f32).marker_probe(), 1006)
+
+    it "dispatches correctly on an f64 receiver":
+        assert_equal((1.5 as f64).marker_probe(), 1007)
+
+    it "dispatches correctly on an i32 receiver [KNOWN BUG: collapses to the i64 impl, see bug doc]":
+        # EXPECTED (RED until fixed): should reach the i32 impl and return 1003.
+        # MEASURED today: returns 1002 -- the i64 impl's value -- because
+        # primitive impls register under a bare, unqualified method name
+        # (trait_impl_lowering.spl:242-244), so i32/i64 collide on one key.
+        assert_equal((7 as i32).marker_probe(), 1003)

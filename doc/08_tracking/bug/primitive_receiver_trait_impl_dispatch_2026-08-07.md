@@ -1,7 +1,13 @@
 # Trait `impl` blocks on PRIMITIVE Self types are honoured only by the interpreter
 
-- **Status:** OPEN (diagnosed, root cause located, not fixed)
+- **Status:** OPEN (diagnosed, root cause located, not fixed) — re-verified
+  2026-08-07 (same day, follow-up probe), matrix unchanged
 - **Date:** 2026-08-07
+- **Spec (RED by design, locks in the interpret column):**
+  `test/01_unit/language/primitive_receiver_trait_impl_dispatch_spec.spl` —
+  `bin/simple test` on this file: `Results: 7 total, 6 passed, 1 failed`, the
+  one failure being the i32-collapses-to-i64-impl row (asserts the correct
+  1003, measures 1002). Do not weaken that assertion; it documents this bug.
 - **Severity:** high — one variant fails **open** (silently wrong), one **SIGSEGVs**
 - **Repro (committed):**
   - `test/fixtures/repro/compiler/primitive_trait_impl_dispatch_repro.spl` (interpret + JIT)
