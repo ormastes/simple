@@ -35,6 +35,8 @@ ref count"; only the requirement text needed to say so.
 
 ## The defect
 
+**Update (same day): the sound part of this is now FIXED — see "Landed fix" below.**
+
 Swept over all 245 owned-code `.spl` files containing an acquire-verb `rt_*`
 call: **208 findings across 78 files.** The overwhelming majority are false
 positives, because the check matches on the acquire **verb alone**
@@ -135,3 +137,39 @@ pre-narrowed candidate list. Full 245-file sweep completes this way.
 exactly on the one file `bin/simple lint` did reach —
 `sffi_minimal.spl` lines 178, 181, 253 — which is what makes the 208 credible.
 Note `UnwrappedResourceFinding`'s line field is `line_num`, not `line`.
+
+## Landed fix: return-type gate (208 -> 160)
+
+`_ufr_is_nonhandle_return_type` + `_ufr_nonhandle_externs` now parse the
+`extern fn NAME(...) -> TYPE` declarations in the file being checked and
+suppress an acquire-verb call whose declared return type **cannot** be an
+opaque handle. Sweep: **208 -> 160 findings, 78 -> 51 files.**
+
+Deliberately narrow, and fail-closed in three ways:
+
+- Only `bool` and concrete array types (`[u8]`, `[i64]`, ...) qualify.
+- **`Any` is NOT treated as a non-handle** — `rt_mutex_new` and
+  `rt_rwlock_new` both return `Any`, so excluding it would fail open on real
+  resources. A spec pins this (`still flags when the return type is Any`).
+- An extern with no declaration in the file keeps being flagged: no type
+  information is not a licence to go quiet. Also spec-pinned.
+
+Every one of the 48 removed findings was verified to be one of 8 provably
+non-handle externs — `rt_dir_create` (19) and `rt_file_copy` (11), both
+`-> bool`; `rt_bytes_alloc` and the four `rt_*_array_alloc` (arrays);
+`rt_atomic_bool_load` — plus 9 handle-vars bound from those same calls.
+**No `rt_file_open`, `rt_image_load`, socket or CUDA finding was affected**,
+and the lint-cross-validated true positives at `sffi_minimal.spl:178,181,253`
+all survive. Sabotage-verified: stubbing the predicate to `false` restores
+exactly 208, reverting gives 160 again. Spec 22/22 (5 new).
+
+## What is still open after that fix
+
+160 findings remain, still dominated by `rt_string_new` / `rt_array_new`
+(both `-> i64` with a genuine `_free`). Separating those from a real handle
+acquire needs the declared handle type from `@sffi(handle: ...)` /
+`resource R` — and **there are currently ZERO `resource` declarations in
+`src/`** (only 6 files mention `@sffi` at all), so that registry is empty and
+a check keyed on it today would be vacuous. That is the blocker for the rest,
+and it is the same blocker as the wider migration: the seed cannot parse
+`resource` syntax in production source. The v2 `deny` promotion stays blocked.

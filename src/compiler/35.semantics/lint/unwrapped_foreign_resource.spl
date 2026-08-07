@@ -18,10 +18,24 @@
 # (commit 82fd43ad4df) is the requirement; landed here as commit TBD (see
 # that file's status note, updated in the same commit as this file).
 #
-# STATUS: landed but DORMANT — the deployed `bin/simple lint` binary predates
-# this source file (see doc/03_plan/language/assurance's WP-3.5 redeploy
-# note); this check only fires today via the unit spec's direct import
-# (interpreter path) or after the next lint-binary redeploy.
+# STATUS: LIVE (corrected 2026-08-07 — this note previously said DORMANT
+# pending the WP-3.5 lint redeploy, which is no longer true). Verified by
+# positive capability probe: a bare acquire returned from a fn produces
+# warning[W-MC-RES-001] under `bin/simple lint --profile=critical`, and is
+# correctly silent under `--profile=moderate`.
+#
+# KNOWN OVER-FIRING — do NOT promote to deny on this implementation. A
+# 245-file sweep yields 208 findings, dominated by value constructors that
+# name no resource. The return-type gate below removes the subset that is
+# soundly provable (39), but the residue (e.g. rt_string_new/rt_array_new,
+# both i64 with a real _free) needs the declared handle type that
+# `@sffi(handle:)`/`resource R` carry — and there are currently ZERO
+# `resource` declarations in src/, so that path is not yet usable. See
+# doc/08_tracking/bug/w_mc_res_001_overfires_verb_only_heuristic_2026-08-07.md
+#
+# Note a refcounted wrapper already satisfies this rule exactly like an
+# affine owning one: the accept predicate takes any TypeName(...) constructor
+# and never inspects which ownership discipline the wrapper implements.
 #
 # What warns (v1):
 #   - `return rt_x_open(args)` / `return (rt_x_open(a), rt_x_open(b))`
@@ -135,19 +149,63 @@ fn _ufr_split_top_level(inner: text) -> [text]:
 # Per-Function Escape Detection
 # ============================================================================
 
+# Return types that CANNOT be an opaque handle, so an acquire-verb call
+# returning one of them is a value constructor, not a resource acquire.
+#
+# Deliberately narrow, and fail-closed: only `bool` and concrete array types
+# qualify. `Any` is NOT listed — it is genuinely used as a handle type here
+# (`rt_mutex_new`/`rt_rwlock_new` both return `Any`), so excluding it would
+# fail OPEN on real resources. Neither is `i64`, the Opaque Handle Pattern's
+# usual handle representation. An extern this pass cannot find a declaration
+# for keeps being flagged: no type information means no license to silence.
+fn _ufr_is_nonhandle_return_type(ret: text) -> bool:
+    val t = ret.trim()
+    t == "bool" or t.starts_with("[")
+
+# Collects `extern fn NAME(...) -> TYPE` declarations in THIS source whose
+# return type cannot be a handle. Text-level and same-file only, matching the
+# rest of this checker's ceiling.
+fn _ufr_nonhandle_externs(code_lines: [CodeLine]) -> Dict<text, bool>:
+    var out: Dict<text, bool> = {}
+    for cl in code_lines:
+        val t = cl.trimmed
+        if not t.starts_with("extern fn "):
+            continue
+        val arrow = t.find("->")
+        if arrow < 0:
+            continue
+        val ret = t.substring(arrow + 2, t.len()).trim()
+        if not _ufr_is_nonhandle_return_type(ret):
+            continue
+        val after_kw = t.substring(10, t.len())
+        val paren = after_kw.find("(")
+        if paren < 0:
+            continue
+        out[after_kw.substring(0, paren).trim()] = true
+    out
+
+# True when `name` is an acquire-verb extern AND nothing in this file proves
+# its return type cannot be a handle.
+fn _ufr_is_handle_acquire(name: text, nonhandle: Dict<text, bool>) -> bool:
+    if nonhandle.contains_key(name):
+        return false
+    _ufr_is_acquire_name(name)
+
 # True when `expr` (trimmed) is EITHER a direct acquire call OR one of
 # `handle_vars` used bare — the two "unwrapped handle value" shapes.
-fn _ufr_is_bare_handle_value(expr: text, handle_vars: Dict<text, bool>) -> bool:
+fn _ufr_is_bare_handle_value(expr: text, handle_vars: Dict<text, bool>,
+                             nonhandle: Dict<text, bool>) -> bool:
     val t = expr.trim()
     if handle_vars.contains_key(t):
         return true
-    _ufr_is_acquire_name(_ufr_call_name(t))
+    _ufr_is_handle_acquire(_ufr_call_name(t), nonhandle)
 
 # True when `expr` is a bare handle value, OR a tuple/list literal whose top
 # level contains at least one element that is a bare handle value.
-fn _ufr_expr_escapes(expr: text, handle_vars: Dict<text, bool>) -> bool:
+fn _ufr_expr_escapes(expr: text, handle_vars: Dict<text, bool>,
+                     nonhandle: Dict<text, bool>) -> bool:
     val t = expr.trim()
-    if _ufr_is_bare_handle_value(t, handle_vars):
+    if _ufr_is_bare_handle_value(t, handle_vars, nonhandle):
         return true
     val is_tuple = t.starts_with("(") and t.ends_with(")")
     val is_list = t.starts_with("[") and t.ends_with("]")
@@ -155,13 +213,13 @@ fn _ufr_expr_escapes(expr: text, handle_vars: Dict<text, bool>) -> bool:
         return false
     val inner = t.substring(1, t.len() - 1)
     for part in _ufr_split_top_level(inner):
-        if _ufr_is_bare_handle_value(part, handle_vars):
+        if _ufr_is_bare_handle_value(part, handle_vars, nonhandle):
             return true
     false
 
 # `val`/`var NAME = <init>` — returns NAME when init is a direct acquire
 # call (single-assignment tracking), else "".
-fn _ufr_new_handle_binding(trimmed: text) -> text:
+fn _ufr_new_handle_binding(trimmed: text, nonhandle: Dict<text, bool>) -> text:
     var rest = ""
     if trimmed.starts_with("val "):
         rest = trimmed.substring(4, trimmed.len())
@@ -177,7 +235,7 @@ fn _ufr_new_handle_binding(trimmed: text) -> text:
     if lhs.contains(":") or lhs.contains(",") or lhs.contains(" "):
         return ""
     val rhs = rest.substring(eq + 1, rest.len()).trim()
-    if _ufr_is_acquire_name(_ufr_call_name(rhs)):
+    if _ufr_is_handle_acquire(_ufr_call_name(rhs), nonhandle):
         return lhs
     ""
 
@@ -210,6 +268,9 @@ pub fn check_unwrapped_foreign_resource(source: text, file_path: text) -> [Unwra
         return findings
 
     val code_lines = iter_code_lines(source)
+    # Acquire-verb externs this file proves cannot return a handle — see
+    # _ufr_is_nonhandle_return_type for why the set is deliberately narrow.
+    val nonhandle = _ufr_nonhandle_externs(code_lines)
     val n = code_lines.len()
     var i = 0
     while i < n:
@@ -240,12 +301,12 @@ pub fn check_unwrapped_foreign_resource(source: text, file_path: text) -> [Unwra
                 if body_indent <= header_indent:
                     break
                 if not unsafe_boundary:
-                    val new_handle = _ufr_new_handle_binding(cl.trimmed)
+                    val new_handle = _ufr_new_handle_binding(cl.trimmed, nonhandle)
                     if new_handle != "":
                         handle_vars[new_handle] = true
                     if cl.trimmed.starts_with("return "):
                         val ret_expr = cl.trimmed.substring(7, cl.trimmed.len())
-                        if _ufr_expr_escapes(ret_expr, handle_vars):
+                        if _ufr_expr_escapes(ret_expr, handle_vars, nonhandle):
                             findings.push(UnwrappedResourceFinding(
                                 code: "W-MC-RES-001",
                                 message: "bare foreign-resource handle escapes via return without a wrapping constructor",
@@ -260,7 +321,7 @@ pub fn check_unwrapped_foreign_resource(source: text, file_path: text) -> [Unwra
                         val is_eq_eq = eq + 1 < cl.trimmed.len() and cl.trimmed.substring(eq + 1, eq + 2) == "="
                         if not is_eq_eq and lhs.starts_with("self.") and not lhs.contains("("):
                             val rhs = cl.trimmed.substring(eq + 1, cl.trimmed.len()).trim()
-                            if _ufr_is_bare_handle_value(rhs, handle_vars):
+                            if _ufr_is_bare_handle_value(rhs, handle_vars, nonhandle):
                                 findings.push(UnwrappedResourceFinding(
                                     code: "W-MC-RES-001",
                                     message: "bare foreign-resource handle assigned directly to a struct/class field outside a wrapping constructor",
@@ -278,7 +339,7 @@ pub fn check_unwrapped_foreign_resource(source: text, file_path: text) -> [Unwra
                 val is_plain_expr = not tt.starts_with("val ") and not tt.starts_with("var ") and
                     not tt.starts_with("return ") and not tt.starts_with("self.") and
                     not tt.starts_with("#") and not tt.ends_with(":") and not tt.contains(" = ")
-                if is_plain_expr and _ufr_expr_escapes(tt, handle_vars):
+                if is_plain_expr and _ufr_expr_escapes(tt, handle_vars, nonhandle):
                     findings.push(UnwrappedResourceFinding(
                         code: "W-MC-RES-001",
                         message: "bare foreign-resource handle escapes as the fn's tail expression without a wrapping constructor",

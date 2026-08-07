@@ -122,6 +122,39 @@ describe "W-MC-RES-001: unwrapped foreign resource":
             val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
             expect(findings.len()).to_equal(0)
 
+    context "return-type gate: an acquire verb is not enough, it must be a handle":
+
+        it "does not flag an acquire-verb extern that returns bool":
+            # rt_dir_create makes a directory and returns success; there is no
+            # handle to wrap. 19 real findings in src/ were this shape.
+            val source = "extern fn rt_dir_create(path: text, parents: bool) -> bool\n\nfn ensure(path: text) -> bool:\n    return rt_dir_create(path, true)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "does not flag an acquire-verb extern that returns an array":
+            val source = "extern fn rt_bytes_alloc(n: i64) -> [u8]\n\nfn buf(n: i64) -> [u8]:\n    return rt_bytes_alloc(n)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "still flags an acquire-verb extern that returns an i64 handle":
+            val source = "extern fn rt_file_open(path: text) -> i64\n\nfn open_raw(path: text) -> i64:\n    return rt_file_open(path)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+
+        it "still flags when the return type is Any — Any IS used as a handle":
+            # Regression guard: rt_mutex_new/rt_rwlock_new both return Any, so
+            # treating Any as a non-handle would fail OPEN on real resources.
+            val source = "extern fn rt_mutex_new() -> Any\n\nfn make() -> Any:\n    return rt_mutex_new()\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+
+        it "fails closed when the extern is declared in another file":
+            # No declaration here means no type information, which is not a
+            # licence to go quiet.
+            val source = "fn open_raw(path: text) -> i64:\n    return rt_file_open(path)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+
     context "profile plumbing (critical tier)":
 
         it "maps W-MC-RES-001 to the unwrapped_foreign_resource config name":
