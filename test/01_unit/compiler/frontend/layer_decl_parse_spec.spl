@@ -27,7 +27,7 @@
 # module_assembly.spl for the shape of such adapters).
 
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
-use compiler.frontend.core.parser.{parser_has_errors}
+use compiler.frontend.core.parser.{parser_has_errors, parser_get_errors}
 
 describe "layer declaration parsing":
     it "parses a bare 'layer NAME' declaration with no errors":
@@ -81,6 +81,39 @@ describe "layer declaration parsing":
 
         expect(parser_has_errors()).to_equal(false)
         expect(module.structs.contains("Binding")).to_equal(true)
+
+    it "wires layer/uses facts into LayerDagRegistry: accepts a valid multi-layer DAG with no diagnostic":
+        # Distinct from the vacuous "parses with no errors" checks above (which
+        # would also pass if the marker were still a no-op drop): this is the
+        # same source as "parses 'layer NAME uses A, B' with no errors" but the
+        # point of this test is that check_layer_dag() actually RAN over real
+        # parsed facts and found them acyclic/declared-downward -- proven by
+        # the companion cycle test below going red on the identical wiring.
+        val source = "layer draw\n\nlayer gui uses draw\n\nlayer web uses gui, draw\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "layer_dag_valid.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("main")).to_equal(true)
+
+    it "wires layer/uses facts into LayerDagRegistry: a 2-cycle produces a real compile diagnostic":
+        # End-to-end proof that module_assembly.spl's __layer_decl handling
+        # actually feeds a real LayerDagRegistry and calls check_layer_dag()
+        # -- distinct from layer_dag_checker_spec.spl, which only proves the
+        # standalone checker's own internal DFS/declared-upward logic against
+        # synthetic fixtures built directly in that spec, never through a real
+        # parse. If module_assembly.spl dropped the __layer_decl marker
+        # without wiring it (the old M0 behavior), this source would parse
+        # with parser_has_errors() == false, same as the acyclic case above.
+        val source = "layer a uses b\n\nlayer b uses a\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "layer_dag_cycle.spl")
+
+        expect(parser_has_errors()).to_equal(true)
+        val errors = parser_get_errors()
+        var found_layer_dag_error = false
+        for e in errors:
+            if e.contains("layer_dag"):
+                found_layer_dag_error = true
+        expect(found_layer_dag_error).to_equal(true)
 
     it "does not regress: ordinary struct/trait/module decls still parse alongside a layer decl":
         val source = "layer draw\n\nstruct Point:\n    x: i64\n    y: i64\n\ntrait Shape:\n    fn area() -> i64\n\nfn main() -> i64:\n    0\n"
