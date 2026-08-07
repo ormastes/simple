@@ -326,18 +326,36 @@ whichever lane added the `mod.rs` wiring). Unblocked the scratch build only
 with two local no-op stubs (`Ok(Value::Int(0))`, no dependency on missing
 runtime symbols); **not landed**, not part of this commit's tree.
 
-- **GREEN**: built `cargo build --release --bin simple` against the scratch
-  tree with the fix applied; ran
-  `test/01_unit/try_operator_error_propagation_spec.spl` under the resulting
-  binary's default JIT engine (`bin/simple run`, no `SIMPLE_EXECUTION_MODE`
-  override): `6 examples, 0 failures` /
-  `declared>=6 executed=6 passed=6 failed=0 dropped=0`.
-- **RED**: `git apply -R` of the same hunk in the same scratch tree
-  reproduces the original defect shape (bare `rt_enum_payload`, no
-  discriminant test, no branch) — matching the JIT probe transcript recorded
-  above (`after: [boom]` / `caller OK:[boom]`) and confirming the fix, not
-  some other scratch-tree difference, is what flips the spec from failing to
-  passing.
+- **GREEN, minimal probe** (the exact repro from "Root cause" above, run
+  directly, not through the spec DSL): `bin/simple run` on the fixed scratch
+  binary prints `bad  ERR:[boom]` with no "after" line — matches the
+  interpreter and the hand-written `match`, both engine-default and with
+  `SIMPLE_EXECUTION_MODE=interpret`/`jit` forced explicitly.
+- **RED, minimal probe**: `git apply -R` of the fix hunk in the same scratch
+  tree, rebuilt, reproduces the original defect shape exactly (bare
+  `rt_enum_payload`, no discriminant test, no branch) — `before` / `after:
+  [boom]` / `bad  OK:[boom]`, byte-identical to the transcript recorded in
+  "Root cause" above.
+- **The landed regression spec does NOT discriminate this defect.**
+  `test/01_unit/try_operator_error_propagation_spec.spl` run via `bin/simple
+  run <spec>` reports `6 examples, 0 failures` /
+  `executed=6 passed=6 failed=0 dropped=0` on **both** the RED and the GREEN
+  scratch binary, and under every `SIMPLE_EXECUTION_MODE` value tried
+  (unset/default, `interpret`, `jit`). The spec's own comments claim
+  "under the defect `try_err_text` returns `Ok(\"boom\")`", but that is not
+  what was observed here — the spec passes regardless of whether `lower_try`
+  is fixed. This is recorded here rather than silently assumed working: the
+  spec's non-vacuity claim is FALSE as currently written, most likely because
+  the `describe`/`it`/`expect` spec DSL executes example bodies through a
+  path that never goes through the buggy JIT `lower_try` lowering at all
+  (consistent with the standing note that the spec DSL runs largely on Rust
+  intrinsics rather than compiling and JIT-running the `.spl` source the way
+  `bin/simple run` on a plain script does). Root-causing *why* the spec is
+  insulated from the engine choice is out of scope for this fix; what is
+  confirmed is that the minimal, non-DSL probe above is the only thing in
+  this doc that actually discriminates RED from GREEN, and any future claim
+  that this spec file is a regression guard for the JIT path should be
+  treated as unverified until that gap is closed.
 
 Remaining follow-ups (not this fix's scope): redeploy the seed so the shared
 binary picks the fix up; then revert `http1.decode_chunked` to the `?` form
