@@ -1,0 +1,150 @@
+# Layer DAG checker (M0 of doc/03_plan/compiler/forwarding/
+# zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md).
+#
+# Registry of declared `layer NAME` / `layer NAME uses A, B` facts (design doc
+# doc/05_design/language/forwarding/layer_forwarding_and_layer_eq_types.md §2)
+# plus two independent validations:
+#   1. cycle detection over the `uses` graph (self-edge, 2-cycle, 3-cycle, ...)
+#   2. declared-upward rejection: a `uses` edge may only point at a layer
+#      declared *before* the layer that names it (lower layers are declared
+#      first: `draw`, then `gui uses draw`, then `web uses gui, draw`) — an
+#      edge to a not-yet-declared (or later-declared) layer is rejected even
+#      when it would not by itself close a cycle.
+#
+# Deliberately self-contained: consumes declared layer/uses facts constructed
+# directly (fixtures in the spec, or a future frontend adapter — parser
+# wiring is NOT part of this milestone, see the plan doc's M0 section and the
+# discrepancy note in its own "done check").
+
+struct LayerEdge:
+    from_name: text
+    to_name: text
+
+struct LayerDagVerdict:
+    ok: bool
+    diagnostic: text
+
+fn layer_dag_ok() -> LayerDagVerdict:
+    LayerDagVerdict(ok: true, diagnostic: "")
+
+fn layer_dag_err(msg: text) -> LayerDagVerdict:
+    LayerDagVerdict(ok: false, diagnostic: "error[layer_dag]: " + msg)
+
+class LayerDagRegistry:
+    """Registry of declared layers (in declaration order) and their `uses` edges."""
+    names: [text]
+    index: {text: i64}
+    edges: [LayerEdge]
+
+impl LayerDagRegistry:
+    static fn new() -> LayerDagRegistry:
+        LayerDagRegistry(names: [], index: {}, edges: [])
+
+    me declare(name: text):
+        """Register `layer NAME`. Re-declaring an existing name is a no-op (idempotent)."""
+        if self.index.has(name):
+            return
+        val idx = self.names.len()
+        self.names.push(name)
+        self.index[name] = idx
+
+    me uses(from_name: text, to_name: text):
+        """Register a `uses` edge parsed from `layer FROM uses ..., TO, ...`."""
+        self.edges.push(LayerEdge(from_name: from_name, to_name: to_name))
+
+    fn has_layer(name: text) -> bool:
+        self.index.has(name)
+
+    fn declared_index(name: text) -> i64:
+        """Declaration order index, or -1 if the name was never declared."""
+        if self.index.has(name):
+            return self.index[name]
+        0 - 1
+
+    fn edges_from(name: text) -> [text]:
+        var result: [text] = []
+        for e in self.edges:
+            if e.from_name == name:
+                result.push(e.to_name)
+        result
+
+# ============================================================================
+# Declared-upward check
+# ============================================================================
+
+fn check_declared_upward(reg: LayerDagRegistry) -> LayerDagVerdict:
+    """Reject any `uses` edge pointing at an unknown layer or one declared
+    at or after the layer that names it."""
+    for e in reg.edges:
+        if not reg.has_layer(e.to_name):
+            return layer_dag_err("layer '" + e.from_name + "' uses undeclared layer '"
+                + e.to_name + "'")
+        val from_idx = reg.declared_index(e.from_name)
+        val to_idx = reg.declared_index(e.to_name)
+        if to_idx >= from_idx:
+            return layer_dag_err("layer '" + e.from_name + "' uses '" + e.to_name
+                + "', which is declared-upward (must be declared before '"
+                + e.from_name + "')")
+    layer_dag_ok()
+
+# ============================================================================
+# Cycle detection (DFS, visited + on-stack sets)
+# ============================================================================
+
+fn check_layer_cycles(reg: LayerDagRegistry) -> LayerDagVerdict:
+    """Detect cycles in the `uses` graph via DFS with a recursion-stack set.
+
+    A self-edge (`layer x uses x`) is a 1-node cycle and is caught the same
+    way as any longer cycle.
+
+    NOTE on reachability through check_layer_dag(): for a single compilation
+    unit where every `layer` decl is registered via `declare()` in source
+    order, check_declared_upward() already rejects any edge with
+    to_idx >= from_idx — which is every edge that could ever close a cycle
+    (a cycle needs at least one edge pointing at an equal-or-later-declared
+    layer). So through the combined `check_layer_dag` entry point,
+    declared-upward subsumes acyclicity and this function never gets to run
+    on a genuinely cyclic graph. It is kept and spec'd/sabotage-tested as its
+    own order-independent function because M1 (module tagging across
+    compilation units) may need to validate a `uses` graph assembled from
+    facts gathered in a different order than declaration order, where
+    declared-upward's index assumption no longer holds and this check is the
+    one still doing real work.
+    """
+    var visited: {text: bool} = {}
+    var on_stack: {text: bool} = {}
+
+    for start in reg.names:
+        if not visited.has(start) or not visited[start]:
+            val verdict = layer_dag_dfs(reg, start, visited, on_stack)
+            if not verdict.ok:
+                return verdict
+    layer_dag_ok()
+
+fn layer_dag_dfs(reg: LayerDagRegistry, name: text, visited: {text: bool}, on_stack: {text: bool}) -> LayerDagVerdict:
+    visited[name] = true
+    on_stack[name] = true
+    for target in reg.edges_from(name):
+        if on_stack.has(target) and on_stack[target]:
+            return layer_dag_err("cycle detected: '" + name + "' -> '" + target
+                + "' closes a cycle in the layer 'uses' graph")
+        if not visited.has(target) or not visited[target]:
+            val verdict = layer_dag_dfs(reg, target, visited, on_stack)
+            if not verdict.ok:
+                return verdict
+    on_stack[name] = false
+    layer_dag_ok()
+
+# ============================================================================
+# Combined entry point
+# ============================================================================
+
+fn check_layer_dag(reg: LayerDagRegistry) -> LayerDagVerdict:
+    """Run both validations; first failure wins (declared-upward, then cycles)."""
+    val upward = check_declared_upward(reg)
+    if not upward.ok:
+        return upward
+    check_layer_cycles(reg)
+
+export LayerEdge, LayerDagVerdict, LayerDagRegistry, check_declared_upward,
+    check_layer_cycles, check_layer_dag

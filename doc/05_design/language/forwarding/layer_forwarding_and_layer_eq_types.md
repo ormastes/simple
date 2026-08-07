@@ -132,7 +132,16 @@ was performed (type check skipped → rejection specs went red) and reverted.
 1. **Parser wiring** — `@layer_eq`/`@layer_field` are not yet parsed;
    annotations must flow through `10.frontend` decl parsing into a HIR-side
    registry the checker consumes (model: `noalloc_checker.spl`'s registry).
-2. **`layer` declarations + DAG check** — new decl kind; cycle diagnostic.
+2. **`layer` declarations + DAG check** — DAG registry + cycle diagnostic +
+   declared-upward rejection landed as `src/compiler/35.semantics/
+   layer_dag_checker.spl` (M0, 2026-08-07), self-contained over synthetic
+   `LayerDagRegistry` facts. Parser wiring of the `layer NAME [uses A, B]`
+   keyword into `10.frontend` decl dispatch is still open — deferred as a
+   separate follow-up (checked this session: `10.frontend/core/tokens.spl`
+   has `TOK_KW_TRAIT`-style keyword tokens but the plan doc's file hint
+   (`_ParserDecls/enum_module_body.spl`) does not itself contain the literal
+   `"trait"`/`"struct"`/`"module"` strings, so the decl-dispatch site needs
+   its own investigation before adding `layer`).
 3. **Offset/size from real layout** — the checker consumes declared layouts;
    production wiring must feed it the compiler's actual layout computation, not
    fixture-declared numbers.

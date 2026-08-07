@@ -105,6 +105,23 @@ else.
   "zero runtime effect" isn't just asserted in prose — nothing downstream
   breaks when a codebase adds layer decls and does nothing else with them).
 
+  **2026-08-07 landing note:** the second half of this check ("compiles
+  through the full pipeline") is unsatisfiable as stated, per §0 above:
+  `bin/simple` is the Rust seed, which does not parse `src/compiler/`
+  (pure-Simple) source at all, and the `layer` keyword is not wired into
+  `src/compiler/10.frontend` decl dispatch (that wiring turned out to need
+  its own investigation of the decl-dispatch site — the plan's file hint
+  `_ParserDecls/enum_module_body.spl` does not itself contain the literal
+  `"trait"`/`"struct"`/`"module"` strings the hint assumed, so the actual
+  dispatch site is still unidentified). What landed instead: the standalone
+  `layer_dag_checker.spl` registry + cycle detection + declared-upward
+  rejection, spec-tested and sabotage-tested directly against synthetic
+  `LayerDagRegistry` fixtures under the seed binary (proves the checker's own
+  logic, not the language feature end-to-end). Parser wiring is deferred as a
+  named follow-up, not silently dropped — see
+  `doc/05_design/language/forwarding/layer_forwarding_and_layer_eq_types.md`
+  §6 item 2.
+
 ### M1 — `@layer(gui)` module tagging + same-layer/downward call rule
 
 **Scope:** parse `@layer(NAME)` on `module` decls; resolve a symbol's owning
