@@ -1172,8 +1172,16 @@ hash-object`): `1a59124e49dd1d636df89437319a0430dc677ce3`.
 ### Full enumeration of remaining below-target files (all units, for context)
 
 **U4.4/U4.5 (this unit's actual scope), >=90%/>=85% line targets:**
-- `simple_web_html_layout_renderer_layout.spl` — excluded, in-flight by a
-  concurrent session this session observed land at 96-98%.
+- `simple_web_html_layout_renderer_layout.spl` — excluded, in-flight;
+  last recorded 40% (658/1634) in the session-2 U4.4/U4.5 table, still
+  short of >=90%. **Correction:** an earlier draft of this enumeration
+  wrongly attributed the 96-98% figure from the "`browser_engine/layout.spl`
+  line-coverage closure" section to this file. That section is explicit
+  that its target, `src/lib/gc_async_mut/gpu/browser_engine/layout.spl`
+  (64 executable lines), is "not to be confused with the *renamed*
+  `simple_web_html_layout_renderer_layout.spl` from the U4.4 table above, a
+  different file with a similar name" — the 96-98% belongs to that
+  different, much smaller file, not to this one.
 - `simple_web_html_layout_renderer_core.spl` — excluded, in-flight;
   concurrent sessions landed it at 75% (1558/2075) as of this unit's
   landing, still short of >=90%.
