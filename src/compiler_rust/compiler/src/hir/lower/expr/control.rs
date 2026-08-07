@@ -2181,25 +2181,100 @@ impl Lowerer {
     /// Lower a try expression (expr?) to HIR
     ///
     /// The `?` operator unwraps a Result type:
-    /// - If Ok(value), returns the value
-    /// - If Err(error), propagates the error (early return)
+    /// - If Ok(value), evaluates to the payload
+    /// - If Err(error), propagates the error (early return of the whole
+    ///   Err-tagged value, unchanged)
     ///
-    /// For native compilation, we simplify this to just unwrapping the value.
-    /// The actual error propagation would require more complex control flow
-    /// (generating early returns), which we'll implement in a future phase.
+    /// History: this used to lower to a bare `rt_enum_payload(expr)` — no
+    /// discriminant test, no branch, no early return — so under the JIT an
+    /// `Err` was silently unwrapped as if it were `Ok` and execution fell
+    /// through with the ERROR payload bound as the success value. See
+    /// `doc/08_tracking/bug/try_operator_early_return_matches_neither_ok_nor_err_2026-08-07.md`.
     ///
-    /// For now, this extracts the enum payload directly, which keeps both
-    /// backends on the Result/Option family instead of suffix-resolving a
-    /// generic `.unwrap()` call to an unrelated builtin enum like Poll.
+    /// Shape emitted now (mirrors `compile_try_unwrap` in
+    /// `codegen/instr/result.rs` and the pure-Simple `lower_try_expr` in
+    /// `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`):
+    ///
+    /// ```text
+    /// LetIn tmp = <inner> in
+    ///   if rt_enum_check_discriminant(tmp, disc("Err")):
+    ///       return tmp            // early-return the Err as-is
+    ///   else:
+    ///       rt_enum_payload(tmp)  // Ok payload
+    /// ```
+    ///
+    /// The subject is bound to a `LetIn` temp so a side-effecting operand
+    /// (`f()?`) is evaluated exactly once; the discriminant test, the early
+    /// return, and the unwrap all read the temp. The discriminant constant
+    /// uses the same hashed-variant-name convention as enum `match` lowering
+    /// above (and as `create_enum_value` at construction) — the proven-correct
+    /// path, since a hand-written `case Err(e)` always matched.
     pub(super) fn lower_try(&mut self, inner: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
-        // Lower the inner expression
+        // Lower the inner expression once and bind it to a temp.
         let inner_hir = self.lower_expr(inner, ctx)?;
-        let payload_ty = self.result_like_payload_type(inner_hir.ty).unwrap_or(TypeId::ANY);
+        let subject_ty = inner_hir.ty;
+        let payload_ty = self.result_like_payload_type(subject_ty).unwrap_or(TypeId::ANY);
 
-        Ok(HirExpr {
+        let subject_idx = ctx.locals.len();
+        ctx.add_local("$try_subject".to_string(), subject_ty, Mutability::Immutable);
+        let subject_ref = HirExpr {
+            kind: HirExprKind::Local(subject_idx),
+            ty: subject_ty,
+        };
+
+        // Hashed "Err" discriminant — same convention as match lowering.
+        let err_disc: i64 = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            "Err".hash(&mut hasher);
+            (hasher.finish() & 0xFFFFFFFF) as i64
+        };
+
+        let is_err = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_enum_check_discriminant".to_string(),
+                args: vec![
+                    subject_ref.clone(),
+                    HirExpr {
+                        kind: HirExprKind::Integer(err_disc),
+                        ty: TypeId::I64,
+                    },
+                ],
+            },
+            ty: TypeId::BOOL,
+        };
+
+        // Early return of the whole Err-tagged value. A one-statement Block
+        // holding a real `HirStmt::Return` preserves the terminator in
+        // expression position — same device as the match-arm return fix above
+        // (`finalize_block_jump`'s Unreachable-only guard keeps the enclosing
+        // if-merge from clobbering it).
+        let early_return = HirExpr {
+            kind: HirExprKind::Block(vec![crate::hir::HirStmt::Return(Some(subject_ref.clone()))]),
+            ty: payload_ty,
+        };
+
+        let unwrap_ok = HirExpr {
             kind: HirExprKind::BuiltinCall {
                 name: "rt_enum_payload".to_string(),
-                args: vec![inner_hir],
+                args: vec![subject_ref],
+            },
+            ty: payload_ty,
+        };
+
+        Ok(HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx: subject_idx,
+                value: Box::new(inner_hir),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(is_err),
+                        then_branch: Box::new(early_return),
+                        else_branch: Some(Box::new(unwrap_ok)),
+                    },
+                    ty: payload_ty,
+                }),
             },
             ty: payload_ty,
         })

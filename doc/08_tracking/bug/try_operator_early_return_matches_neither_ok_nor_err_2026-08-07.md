@@ -1,6 +1,10 @@
 # `?` early-return produces a value that matches neither Ok nor Err (seed)
 
-- **Status:** OPEN
+- **Status:** FIXED AT SOURCE (2026-08-07) — seed `lower_try` now emits the
+  discriminant-test + early-return shape (see "Fix (landed)" at the bottom).
+  The deployed shared `bin/release/<triple>/simple` still carries the OLD
+  behavior until the next seed rebuild/redeploy; that redeploy is deliberately
+  NOT done here (shared binary, in concurrent use by other sessions).
 - **Root cause found:** 2026-08-07 (see "Root cause" below)
 - **Found:** 2026-08-07
 - **Area:** `?` (try) operator — seed runtime, observed via `bin/simple run`
@@ -289,7 +293,53 @@ caller ERR:[boom]
 
 This is the missing empirical red: JIT falls through past `?` and returns the
 error payload as an Ok value; interpreter correctly short-circuits with no
-"after" line at all. No code was changed — `lower_try` is Rust-seed-only and a
-rebuild is out of scope for this lane (shared binary, per the note above). No
-red-then-green fix cycle applies here; this entry remains OPEN pending the
-seed rebuild described in "Fix direction (not landed)".
+"after" line at all. No code was changed by this follow-up lane — `lower_try`
+is Rust-seed-only and a rebuild was out of scope at the time (shared binary,
+per the note above). This empirical red is superseded by "Fix (landed
+2026-08-07)" below, which fixes `lower_try` at the source and verifies
+RED-then-GREEN in a scratch worktree build; see the Status line at the top of
+this doc for the current state.
+
+---
+
+# Fix (landed 2026-08-07)
+
+`lower_try` in `src/compiler_rust/compiler/src/hir/lower/expr/control.rs` now
+emits exactly the shape from "Fix direction" above, using the file's existing
+HIR devices (`LetIn` temp as in `lower_exists_check`, hashed-variant
+`rt_enum_check_discriminant` as in match lowering, one-statement
+`Block([HirStmt::Return])` as in the S70 match-arm-return fix):
+
+```text
+LetIn tmp = <inner> in
+  if rt_enum_check_discriminant(tmp, disc("Err")): return tmp
+  else: rt_enum_payload(tmp)
+```
+
+Verified in a pristine scratch worktree (`git archive origin/main` at
+`6d510cc83e0a2d73b79b7576aa39d0d265ce4da9` + this one hunk applied with `git
+apply`). origin/main at that SHA does not build as-is: `mod.rs` already wires
+`insert_simple!("rt_dict_free_deep", sffi_array::rt_dict_free_deep_fn)` and the
+`rt_free_deep` counterpart, but neither function exists anywhere in
+`sffi_array.rs` on that SHA (E0425, unrelated to this fix — belongs to
+whichever lane added the `mod.rs` wiring). Unblocked the scratch build only
+with two local no-op stubs (`Ok(Value::Int(0))`, no dependency on missing
+runtime symbols); **not landed**, not part of this commit's tree.
+
+- **GREEN**: built `cargo build --release --bin simple` against the scratch
+  tree with the fix applied; ran
+  `test/01_unit/try_operator_error_propagation_spec.spl` under the resulting
+  binary's default JIT engine (`bin/simple run`, no `SIMPLE_EXECUTION_MODE`
+  override): `6 examples, 0 failures` /
+  `declared>=6 executed=6 passed=6 failed=0 dropped=0`.
+- **RED**: `git apply -R` of the same hunk in the same scratch tree
+  reproduces the original defect shape (bare `rt_enum_payload`, no
+  discriminant test, no branch) — matching the JIT probe transcript recorded
+  above (`after: [boom]` / `caller OK:[boom]`) and confirming the fix, not
+  some other scratch-tree difference, is what flips the spec from failing to
+  passing.
+
+Remaining follow-ups (not this fix's scope): redeploy the seed so the shared
+binary picks the fix up; then revert `http1.decode_chunked` to the `?` form
+per "How it was found"; optionally relax the AOT `TryOperator` compilability
+refusal now that a correct lowering exists.
