@@ -925,3 +925,69 @@ literal-table functions identified above.
 Artifacts: `/tmp/paintcov/baseline.sdn` (1,363,556 bytes, full coverage_spec
 run), `/tmp/paintcov/newspec.sdn` (new closure spec run alone). New spec sha
 (`git hash-object`): `7b98f8c2573061855d231079084dffc0539b9994`.
+
+## U4.4 `simple_web_html_layout_renderer_core.spl` — :root custom-property closure (session N+2) — 2026-08-07
+
+Baseline re-measured this session in TWO foreground runs (no daemon, explicit
+large timeouts; the combined single-invocation run used by earlier sessions
+was reproduced as two separate `bin/simple test --coverage` invocations
+because `SIMPLE_COVERAGE_OUTPUT` is overwritten per spec-file sub-process,
+not accumulated, so a combined run's on-disk artifact only reflects the
+LAST spec file unless captured separately):
+
+- `simple_web_html_layout_renderer_coverage_spec.spl` alone: banner
+  `Results: 39 total, 39 passed, 0 failed`, artifact
+  `coverage: .../simple_web_html_layout_renderer_core.spl 54% (1127/2075 lines)`
+  (`/tmp/corecov/base_full_renderer.sdn`). (A first attempt at this same run
+  reported `39 total, 38 passed, 1 failed`; the failure did not reproduce on
+  a clean re-run and is not attributed to any change in this unit — no
+  source or spec file this unit touches was implicated.)
+- `simple_web_html_layout_renderer_core_pure_helpers_coverage_closure_spec.spl`
+  alone: banner `Results: 69 total, 69 passed, 0 failed`, artifact
+  `coverage: .../simple_web_html_layout_renderer_core.spl 27% (571/2075 lines)`.
+
+Per-line union of both artifacts (hit lines for `core.spl` only, `hit_count >
+0`, extracted directly from each `.sdn` and deduplicated):
+**baseline = 1412/2075 = 68.05%** — consistent with the prior session's
+independently-computed 1404/2075 = 67.7% (small variance attributable to the
+transient extra passing test in the re-run).
+
+New spec:
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/core_coverage_closure_spec.spl`
+(16 `it` examples, `Results: 16 total, 16 passed, 0 failed`). Targets the two
+of the six previously-named largest gaps
+(`compute_styles_with_material`, `_css_resolve_vars`, `_pseudo_ctx_matches`,
+`_extract_css_vw_with_rule_limit`, `_css_collect_custom_props`,
+`_css_scan_rules_simple`) that are PURE text/state functions reachable
+without an `HNode`/`SelectorContext`/`Rules` fixture: `_css_collect_custom_props`
+(`:root { --name: value; }` / `:root[attr] { }` collection, lines 122-214)
+and `_css_resolve_vars` (recursive `var(--name, fallback)` substitution with
+cycle/depth/budget guards, lines 216-394). Every assertion is a real oracle
+hand-traced against the source (e.g. `var(--missing)` with no fallback
+resolves to an EMPTY string, not `Invalid` propagated to the caller, because
+the top-level `nested=false` call swallows `CssVarResolution.Invalid` into
+`replacement_text = ""` rather than returning it — traced from the `match
+replacement:` block at the end of the function). `compute_styles_with_material`
+and `_pseudo_ctx_matches` still need HNode/Rules fixtures and remain for a
+follow-up unit.
+
+New-spec-alone artifact: `coverage: .../simple_web_html_layout_renderer_core.spl
+9% (190/2075 lines)` (`/tmp/corecov/new.sdn`).
+
+Three-way per-line union (baseline ∪ pure-helpers ∪ new spec, same
+hit-count-extraction method): **1558/2075 = 75.08%** — a **+146-line / +7.03
+percentage-point** gain over the 68.05% baseline.
+
+**Before: 68% (1412/2075). After: 75% (1558/2075).** Still short of the
+>=90% U4.4 target. `compute_styles_with_material` (465-line fn),
+`_pseudo_ctx_matches`, `_extract_css_vw_with_rule_limit`, and
+`_css_scan_rules_simple` remain the largest uncovered regions and need
+constructed `HNode`/`SelectorContext`/`Rules` fixtures or full-document
+rendering to close — a follow-up unit.
+
+### Provenance
+
+Artifacts: `/tmp/corecov/base_full_renderer.sdn`,
+`/tmp/corecov/base_pure_helpers.sdn` (append-mode combined-run artifact,
+also independently confirms the union), `/tmp/corecov/new.sdn`. New spec sha
+(`git hash-object`): `861827d094fafadd278ac250815a93c7998ed3ea`.

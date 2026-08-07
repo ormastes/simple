@@ -1,0 +1,154 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 68%
+"""
+# HTML Layout Renderer Core — :root Custom-Property Closure (U4.4, part N+2)
+
+`simple_web_html_layout_renderer_core.spl` measured 68% (1404/2075 lines,
+union of two artifact-confirmed runs) per
+`doc/09_report/ui/testing/wm_gui_web_coverage_baseline_2026-08-07.md`
+("U4.4 `simple_web_html_layout_renderer_core.spl` — pure-helper closure
+(session N+1)"). That session named `compute_styles_with_material`,
+`_css_resolve_vars`, `_pseudo_ctx_matches`, `_extract_css_vw_with_rule_limit`,
+`_css_collect_custom_props`, and `_css_scan_rules_simple` as the largest
+remaining uncovered regions.
+
+This closure spec targets the two of those six that are PURE text/state
+functions reachable without an `HNode`/`SelectorContext`/`Rules` fixture:
+`_css_collect_custom_props` (collects `--name: value` pairs out of `:root { }`
+and `:root[attr] { }` blocks) and `_css_resolve_vars` (recursively substitutes
+`var(--name, fallback)` against the collected property table, with cycle/
+depth/budget guards). `compute_styles_with_material` and `_pseudo_ctx_matches`
+still need HNode/Rules fixtures and are left for a follow-up unit.
+
+Every assertion below is a real oracle: expected values independently traced
+by hand against the source algorithm in
+`simple_web_html_layout_renderer_core.spl` (lines 122-214 for
+`_css_collect_custom_props`, 216-394 for `_css_resolve_vars`), not copied from
+a first run of the code. No smoke tests (bare calls with no assertion).
+"""
+
+use std.spec.{describe, it, expect}
+use gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{
+    _css_collect_custom_props,
+    _css_resolve_vars,
+    CssVarResolutionState,
+    CssVarResolution
+}
+
+describe "core.spl: _css_collect_custom_props":
+    it "returns empty when the stylesheet has no :root block":
+        val out = _css_collect_custom_props("body { color: red; }", "")
+        assert_equal(out, "")
+
+    it "collects a single base :root custom property":
+        val out = _css_collect_custom_props(":root { --a: 1; }", "")
+        assert_equal(out, "--a:1\n")
+
+    it "collects multiple base :root custom properties in source order":
+        val out = _css_collect_custom_props(
+            ":root { --a: 1; --b: two; }", ""
+        )
+        assert_equal(out, "--a:1\n--b:two\n")
+
+    it "appends a matching :root[attr] variant after the base entries":
+        val css = ":root { --a: 1; } :root[data-theme=\"dark\"] { --a: 2; }"
+        val out = _css_collect_custom_props(css, "data-theme=\"dark\"")
+        assert_equal(out, "--a:1\n--a:2\n")
+
+    it "skips a :root[attr] variant whose attribute does not match":
+        val css = ":root { --a: 1; } :root[data-theme=\"dark\"] { --a: 2; }"
+        val out = _css_collect_custom_props(css, "data-theme=\"light\"")
+        assert_equal(out, "--a:1\n")
+
+    it "skips :root used as part of a larger compound selector":
+        val out = _css_collect_custom_props(":root.dark { --a: 1; }", "")
+        assert_equal(out, "")
+
+    it "ignores declarations that are not custom properties (no -- prefix)":
+        val out = _css_collect_custom_props(
+            ":root { color: red; --a: 1; }", ""
+        )
+        assert_equal(out, "--a:1\n")
+
+    it "trims whitespace around the property name and value":
+        val out = _css_collect_custom_props(
+            ":root {   --a  :   1px  ; }", ""
+        )
+        assert_equal(out, "--a:1px\n")
+
+describe "core.spl: _css_resolve_vars":
+    it "returns the input unchanged when it contains no var()":
+        val state = CssVarResolutionState.new("")
+        val result = _css_resolve_vars("solid red", state, 0, 0, false)
+        match result:
+            CssVarResolution.Resolved(value):
+                assert_equal(value, "solid red")
+            _:
+                assert_true(false)
+
+    it "reports DepthExceeded when resolution_depth exceeds the 32 cap":
+        val state = CssVarResolutionState.new("--a:red")
+        val result = _css_resolve_vars("var(--a)", state, 33, 0, false)
+        match result:
+            CssVarResolution.DepthExceeded:
+                assert_true(true)
+            _:
+                assert_true(false)
+
+    it "reports BudgetExceeded when the substitution budget is exhausted":
+        val state = CssVarResolutionState.new("--a:red")
+        state.remaining = 0
+        val result = _css_resolve_vars("var(--a)", state, 0, 0, false)
+        match result:
+            CssVarResolution.BudgetExceeded:
+                assert_true(true)
+            _:
+                assert_true(false)
+
+    it "substitutes a defined custom property with its value":
+        val state = CssVarResolutionState.new("--a:red")
+        val result = _css_resolve_vars("var(--a)", state, 0, 0, false)
+        match result:
+            CssVarResolution.Resolved(value):
+                assert_equal(value, "red")
+            _:
+                assert_true(false)
+
+    it "keeps surrounding text around a substituted var()":
+        val state = CssVarResolutionState.new("--a:red")
+        val result = _css_resolve_vars("solid var(--a) 1px", state, 0, 0, false)
+        match result:
+            CssVarResolution.Resolved(value):
+                assert_equal(value, "solid red 1px")
+            _:
+                assert_true(false)
+
+    it "falls back to the fallback text when the property is undefined":
+        val state = CssVarResolutionState.new("")
+        val result = _css_resolve_vars(
+            "var(--missing, blue)", state, 0, 0, false
+        )
+        match result:
+            CssVarResolution.Resolved(value):
+                assert_equal(value, "blue")
+            _:
+                assert_true(false)
+
+    it "resolves to empty text for an undefined property with no fallback":
+        val state = CssVarResolutionState.new("")
+        val result = _css_resolve_vars("var(--missing)", state, 0, 0, false)
+        match result:
+            CssVarResolution.Resolved(value):
+                assert_equal(value, "")
+            _:
+                assert_true(false)
+
+    it "resolves multiple var() occurrences in one declaration":
+        val state = CssVarResolutionState.new("--a:1px\n--b:solid")
+        val result = _css_resolve_vars(
+            "var(--a) var(--b)", state, 0, 0, false
+        )
+        match result:
+            CssVarResolution.Resolved(value):
+                assert_equal(value, "1px solid")
+            _:
+                assert_true(false)
