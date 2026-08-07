@@ -291,6 +291,29 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 - [`doc/07_guide/platform/simpleos/qemu_system_tests.md`](../../doc/07_guide/platform/simpleos/qemu_system_tests.md) — **System tests over QEMU**: per-arch live-boot SSpec specs (`test/03_system/os/qemu/`), `qemu_systest_contract.spl` descriptors, pass/missing-media/boot-fail classification (fail-closed, never `skip()`), and `scripts/check/qemu-storage-audit.shs`
 - [`doc/07_guide/platform/simpleos/simpleos_baremetal_board_support.md`](../../doc/07_guide/platform/simpleos/simpleos_baremetal_board_support.md) — SimpleOS board support and the Simple compiler install-image/filesystem contract
 
+## Container test runs
+
+**Never `COPY . /opt/simple` (or any whole-repo COPY) into a test-isolation
+image build.** In this shared dev tree `build/` is 184GB and `.git/` is 51GB
+(~235GB build context); a `.dockerignore` excluding them does NOT make the
+build fast — the builder still walks the full tree to filter, and other large
+dirs remain uncovered. `tools/docker/Dockerfile.test-isolation:12` hit this:
+10+ minutes at high CPU with no end in sight, killed.
+
+Use a deps-only image (no repo COPY) plus a runtime bind-mount instead — image
+build becomes seconds and repo-size-independent:
+
+```bash
+docker run --rm -v "$REPO_ROOT":/opt/simple:ro -w /opt/simple \
+  simple-test-isolation:local bin/simple test <target>
+```
+
+Writable paths (test db, `doc/08_tracking` outputs) get specific `rw` mounts or
+tmpfs, never a whole-tree rw mount. WM/GUI tests need no display server in
+container — `HostCompositor.new_headless` is fully in-process. Canonical
+harness (bind-mount design, cited by `.claude/rules/testing.md`):
+`scripts/local-container-test.shs`.
+
 ## Scenario Manual Quality
 
 SSpec scenarios are executable `.spl` tests. SPipe runs those tests and
