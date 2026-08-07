@@ -97,7 +97,7 @@ carry the described subject line. Only the M2 *scope* claim was wrong.
 | U0b hosted input | **DONE** | `hosted_input_sdl2_spec.spl` 28/28 |
 | U2 WM/web showcase | **NEEDS-INVESTIGATION** | `wm_web_standards_showcase_child_frame_timeout_2026-08-06.md` Open — `bin/simple run` under `examples/**` has an internal 10 s watchdog (`DEFAULT_EXAMPLES_TIMEOUT_SECS`); past it the real verdict is FAIL (child-frame-timeout), not a hang → **T17** |
 | U3 event allocation | **DONE (premise refuted)** | Path already allocation-free per event; `InputEventQueue.drain()` allocates but is dead code |
-| U4 cutover sweep | **NOT STARTED** | → **T20** |
+| U4 cutover sweep | **BLOCKED (no producer) — T20 verdict** | `t20_u4_cutover_sweep_2026-08-07.md` — the arena-V2/`SceneDeltaRef`/packed-producer path has zero callers anywhere under `src/app/**`; `showcase_core.spl:286-289` is the one real dispatch site and never references it. No `DrawIrV3Scene`-equivalent output exists on the new path to cut over TO → **T20 (investigation-only)** |
 | V0/V1 promotion suite | **DONE (Run 4 GREEN)** | 11 specs, 160/160, 0 cannot-execute. Needs periodic re-run → **T19** |
 | Test-harness fixes (daemon binary shadowing; `slow_it` floor) | **DONE** | `423c0c46b83` + the `simple_binary()` fallback-order fix; these retroactively explain most "timeout" findings in this campaign |
 | gui_showcase exit-code contract | **NEEDS-INVESTIGATION** | `gui_showcase_perf_source_revision_contract_exit_code_never_zero_2026-08-07.md`, status open (residual, pre-existing, family-wide) → **T18** |
@@ -418,13 +418,27 @@ or re-scope. Never sweep another session's uncommitted work into your commit.
   not exercised and the C symbol remains unverified. A queued-and-stalled Wave 3
   is a worse outcome than a Wave 3 that names its own gap.
 
-**T20 — U4 cutover sweep**
+**T20 — U4 cutover sweep** — **DONE, investigation-only (2026-08-07)**
 - Goal: the flag-guarded cutover at one dispatch site + the sweep confirming
   nothing else needs migrating.
 - Files: the single dispatch site **[E]** — identify it first, do not pre-commit.
 - Acceptance: an enumerated sweep list (what was checked, what needs nothing),
   not a prose "nothing else found".
 - Depends on: **T3, T4, T5, T19**. Collision set: **{}**.
+- **Verdict:** the premise does not hold. `showcase_core.spl:286-318`
+  (`showcase_scene` + `showcase_run` → `host.present_scene(scene)`) is the
+  one real dispatch site, and it is explicitly documented in-source as "the
+  single production path; no host sees a writer." The candidate new path
+  (`UiSceneColumnArenaV2` → T5's `SceneDeltaRef` → the three packed
+  producers) has **zero callers under `src/app/**`** — grepped and
+  enumerated, not assumed. There is no `DrawIrV3Scene`-equivalent output on
+  the new path to flag-cutover TO; flipping a flag would route real hosts to
+  a pipeline with no proven output, which is a regression, not a cutover.
+  Full sweep table: `doc/09_report/ui/perf/t20_u4_cutover_sweep_2026-08-07.md`.
+  No spec/sabotage — investigation-only per the plan's own rule. T19 was not
+  yet landed on `origin/main` at the time this unit ran (collision set `{}`,
+  and T19 only re-runs an already-GREEN suite per §1's V0/V1 row — no file
+  T20 touches depends on T19's output).
 
 ---
 
