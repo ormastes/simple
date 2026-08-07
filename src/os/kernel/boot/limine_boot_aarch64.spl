@@ -37,9 +37,22 @@
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr}
 use os.kernel.boot.ports.{BootOutputPort, BootMemoryRegion, FramebufferInfo, MemoryRegionKind}
 use os.kernel.boot.mmio.{mmio_read64, mmio_read32, mmio_write8, mmio_read8}
-use os.kernel.boot.cpu.{halt_loop}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.log.klog_api.{log_init_serial, log_raw, log_raw_println, LOG_INFO}
+
+# `os.kernel.boot.cpu.halt_loop` is x86_64-only (rt_cli/rt_hlt are x86 `cli`/
+# `hlt` instructions with no aarch64 meaning) — importing that module here
+# was pulling ~20 unrelated x86 port-I/O/MSR/GDT/IDT extern symbols into
+# this arch's link closure (all fabricated as return-0 stubs by
+# native-build's freestanding-stub fallback, discovered while bringing up
+# this boot lane 2026-08-07). Use a local, genuinely aarch64 halt instead:
+# WFE (Wait For Event) in a loop, backed by `rt_aarch64_wfe_spin()` in
+# examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c.
+extern fn rt_aarch64_wfe_spin()
+
+fn halt_loop():
+    """Halt forever (aarch64: WFE spin loop, no interrupt controller set up yet)."""
+    rt_aarch64_wfe_spin()
 
 # ============================================================================
 # Limine Request/Response Structures (arch-agnostic, verbatim from limine_boot.spl)
@@ -400,11 +413,39 @@ fn _build_boot_output() -> BootOutputPort:
 # Kernel Entry Point
 # ============================================================================
 
-extern fn memory_init(boot_info: BootOutputPort)
+# MILESTONE STUB (2026-08-07): the real cross-arch memory layer (Layer 1)
+# `memory_init` is unimplemented for the Limine boot-entry lane on BOTH
+# x86_64 (limine_boot.spl) and aarch64 as of this pass — the `extern fn`
+# declaration this replaces had no definition anywhere in the tree on
+# either arch, so kernel_main() could never have linked before now. This
+# stub exists only to let a REAL (non-probe) SimpleOS kernel reach a real
+# halt after real serial output, which is this pass's actual milestone
+# scope (a genuine klog_api line from the real kernel booted via Limine +
+# AAVMF pflash on QEMU aarch64 `virt` — see
+# doc/08_tracking/bug/aarch64_real_firmware_boot_gap_and_seed_defects_2026-07-14.md).
+# Porting the real memory layer to this boot lane is future work, tracked
+# in that same bug doc — do not mistake this stub for a completed memory
+# subsystem.
+fn memory_init(boot_info: BootOutputPort):
+    log_raw_println("[BOOT] memory_init: MILESTONE STUB — Layer 1 not yet ported to the Limine boot lane (aarch64)")
+    log_raw_println("[BOOT] SIMPLEOS-AARCH64-LIMINE-KERNEL-OK")
+    halt_loop()
 
-@entry
+# Named `limine_aarch64_boot_main` (not `kernel_main`) because native-build
+# mangles non-entry-file module symbols with their full module path
+# (`src__os__kernel__boot__limine_boot_aarch64__kernel_main`), which does not
+# match the bare `ENTRY(kernel_main)` linker-script directive
+# (examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld) — ld.lld
+# silently accepts an unresolved ENTRY() name (entry point defaults to 0)
+# rather than erroring, and --gc-sections then has no root to keep this
+# function from being discarded, producing a link that "succeeds" as an
+# empty ~1KB stub with no code at all (found 2026-08-07 bringing up this
+# lane: readelf showed Entry point address 0x0 and no .text section).
+# examples/09_embedded/simple_os/arch/aarch64/limine_entry.spl defines the
+# actual bare `fn kernel_main()` symbol the linker script needs and calls
+# this one.
 @noreturn
-fn kernel_main():
+fn limine_aarch64_boot_main():
     """Limine boot entry point (aarch64).
 
     Called by Limine bootloader (BOOTAA64.EFI) after loading the kernel into

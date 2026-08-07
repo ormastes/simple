@@ -22,7 +22,7 @@
  * convention already used by arch/arm64 (entry 0x40200000) and leaving room
  * below for any future decompressor/relocator stage.
  */
-ENTRY(kernel_main)
+ENTRY(_start)
 
 PHDRS {
     text PT_LOAD FLAGS(5); /* R+X */

@@ -358,3 +358,192 @@ protocol port itself:
 real-firmware proxy per `.claude/rules/board-runnable.md` and satisfies the
 board-proxy requirement for this milestone. It is a QEMU/EDK2 boot, not a
 physical-aarch64-board boot; no physical-board claim is made here.
+
+## 2026-08-07: aarch64 freestanding-runtime port landed, real kernel boots and logs via klog on real firmware
+
+Milestone achieved: the **real** SimpleOS kernel (`limine_boot_aarch64.spl`,
+not the probe kernel) now boots through Limine + AAVMF pflash on QEMU
+aarch64 `virt` and prints a real `klog_api.log_raw_println` line over PL011
+serial. Sabotage-verified (see below).
+
+### Files landed
+
+- `examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c`
+  (new) — ported from `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`.
+  The RV64 file turned out to be ~90% arch-agnostic C runtime shim
+  (string/array/tuple/enum tagged-value helpers) with the arch delta
+  confined to a handful of functions; ported the generic section verbatim
+  (through `void unsafe(void) {}`, RV64's own line 1458) and dropped the
+  RV64-only tail (~3000 lines: PMM, virtio-blk/input/gpu drivers, a
+  `.incbin` of a RV64 FAT32 image) as out of scope for a boot-entry-only
+  milestone. Arch deltas: PL011 MMIO byte-store at `0x09000000` (replacing
+  the RV64 NS16550 store at `0x10000000`), a WFE spin halt
+  (`rt_aarch64_wfe_spin`, replacing the x86_64-only `os.kernel.boot.cpu`
+  import — see below), and no custom `_start` asm stub (Limine hands off
+  with a stack already set up; RV64's stub wouldn't even assemble under
+  `--target=aarch64-none-elf` since it's RISC-V asm).
+- `examples/09_embedded/simple_os/arch/aarch64/limine_entry.spl` (new) —
+  thin entry wrapper. Required for two independent reasons, both discovered
+  empirically by iterating real build/link failures, not from documentation:
+  1. Boot-object autodiscovery (`link_objects_freestanding()` in
+     `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs`)
+     keys off `<entry-file's-dir>/boot/`. `limine_boot_aarch64.spl` lives
+     under `src/os/kernel/boot/`, so passing it directly as `--entry` would
+     search `src/os/kernel/boot/boot/` (doesn't exist) and never find
+     `freestanding_runtime.c`.
+  2. **Entry-symbol mangling bug found and worked around**: native-build
+     mangles every top-level function with its full module path
+     (`src__os__kernel__boot__limine_boot_aarch64__kernel_main`), not a bare
+     `kernel_main`. `ENTRY(kernel_main)` in a linker script silently
+     resolves to nothing under `ld.lld` (no error — entry point just
+     becomes `0x0`), and `--gc-sections` then has no GC root, discarding
+     the *entire* reachable call graph and producing a "successfully
+     linked" ~1 KB binary with **no `.text` section at all**
+     (`readelf -S` showed only `.bss`). Found by comparing this build's
+     `nm` output against a real working build. The linker only
+     auto-generates a `--defsym=_start=<mangled-symbol>` /
+     `--entry=_start` alias (see the `raw_start_candidate` derivation in
+     `linker.rs`, ~line 2160) for a top-level function **literally named
+     `_start`** in the entry file — exactly mirroring
+     `examples/09_embedded/simple_os/arch/riscv64/entry.spl`'s own
+     `fn _start():`. Fix: `limine_entry.spl` defines `fn _start():` which
+     calls `limine_boot_aarch64.limine_aarch64_boot_main()` (the real
+     kernel_main renamed), and `linker_limine.ld` now says
+     `ENTRY(_start)`. **This same trap likely exists for anyone hand-writing
+     a new freestanding entry `.spl` file that isn't named/structured like
+     the existing riscv64/x86_64 ones** — worth a linker.rs-level warning
+     when `ENTRY(kernel_main)`-style directives don't match any resolvable
+     symbol, since the current silent-success-with-empty-binary failure
+     mode is a genuine trap (logged here rather than fixed in the Rust seed,
+     per this session's C/asm-only scope).
+- `src/os/kernel/boot/limine_boot_aarch64.spl` (modified) — three fixes:
+  1. Renamed `kernel_main` → `limine_aarch64_boot_main` (see above).
+  2. **`use os.kernel.boot.cpu.{halt_loop}` was wrong for this arch** —
+     that module's `halt_loop()` calls `rt_cli()`/`rt_hlt()`, x86-only
+     `cli`/`hlt` instructions with no aarch64 meaning, and importing the
+     module pulled ~20 unrelated x86 port-I/O/MSR/GDT/IDT/LGDT/LIDT extern
+     symbols into the aarch64 link closure (all initially masked as
+     fabricated return-0 stubs — see the `SIMPLE_ALLOW_FREESTANDING_STUBS`
+     trap note below). Replaced with a local `halt_loop()` calling a new
+     `rt_aarch64_wfe_spin()` extern (WFE spin loop) defined in
+     `freestanding_runtime.c`.
+  3. **`extern fn memory_init(boot_info: BootOutputPort)` had no
+     implementation anywhere in the tree, on EITHER x86_64 or aarch64** —
+     `limine_boot.spl` (x86_64) has the identical unimplemented extern, so
+     neither Limine-protocol kernel could ever have linked before this
+     pass. Replaced with a MILESTONE-STUB `fn memory_init(...)` that logs
+     `"[BOOT] memory_init: MILESTONE STUB — ..."` +
+     `"[BOOT] SIMPLEOS-AARCH64-LIMINE-KERNEL-OK"` and halts. Clearly marked
+     in-source as a stub, not a completed Layer 1 memory subsystem — real
+     memory-layer porting is future work, out of scope here.
+- `examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c`
+  also gained: `_get_kernel_end`/`_get_bss_start` (read the linker-script
+  `_kernel_end`/`_bss_start` symbols), and 12 generic `rt_*` runtime
+  primitives found missing by real `ld.lld` unresolved-symbol errors —
+  `rt_string_new_literal`, `rt_enum_id`, `rt_enum_discriminant`,
+  `rt_text_cmp_any`, `rt_native_cmp`, `rt_opt_i64_to_string`,
+  `rt_opt_bool_to_string`, `rt_opt_f64_to_string` (stub-only, no float
+  formatter — nothing in this milestone's path uses it), `rt_value_float`
+  (stub-only, same reason), `rt_typed_words_u32_at`/`u64_at`,
+  `rt_memory_barrier`/`rt_invlpg` (aarch64 `dsb sy`/`tlbi vaae1is`, ported
+  from RV64's `fence rw,rw`/`sfence.vma` analogs), and
+  `rt_arm64_dcache_clean_range`/`invalidate_range` (ported near-verbatim
+  from `examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c`,
+  the existing EL1-direct lane's already-correct aarch64 D-cache
+  maintenance code, adapted from its `RuntimeValue` ABI to this file's
+  `spl_i64` scheme).
+
+### `SIMPLE_ALLOW_FREESTANDING_STUBS=1` trap (re-confirmed)
+
+Copying the `x86_64` build-script convention of setting
+`SIMPLE_ALLOW_FREESTANDING_STUBS=1` (seen in
+`scripts/os/build_fsexec_general_ring3.shs`) produced a build that reported
+"Linked (freestanding): ... (1 KB)" as if successful, with 34 symbols
+silently fabricated as weak return-0 stubs — including x86-only
+`rt_port_inb`/`rt_read_msr`/`rt_lgdt`/etc. that should never have been
+referenced by an aarch64 build at all (see the `os.kernel.boot.cpu` import
+bug above). This is the same class of failure as
+`reference_fabricated_stub_guard_fails_open_for_unbaselined_entries` in
+memory: **do not set that env var when bringing up a new freestanding
+target** — use `SIMPLE_TRACE_STUBS=1 SIMPLE_STRICT_FREESTANDING_PRECHECK=1`
+instead to get the real unresolved-symbol list and fix them for real.
+
+### Real boot transcript (2026-08-07)
+
+Build: `bin/simple`-equivalent seed `native-build --backend cranelift
+--entry-closure --entry examples/09_embedded/simple_os/arch/aarch64/limine_entry.spl
+--target aarch64-unknown-none-elf --linker-script
+examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld` → real
+89 KB ELF (`readelf -h` entry point `0xffffffff8010105c`, real `.text`
+section, vs. the empty-1KB false-success before the `_start` mangling fix).
+
+Boot: `qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M -pflash
+AAVMF_CODE.no-secboot.fd -pflash AAVMF_VARS.fd -drive
+if=none,file=esp.img,format=raw,id=esp -device virtio-blk-pci,drive=esp
+-serial file:serial.log` (ESP built with `mkfs.vfat` + `pyfatfs`, same
+approach as the 2026-08-06 probe-kernel pass):
+
+```
+========================================
+  SimpleOS — Limine Boot Protocol (aarch64)
+========================================
+```
+
+This is genuinely the real kernel: Limine's own loader-progress line
+(`limine: Loading executable ...`) appears earlier in the raw serial
+capture, and this banner is a distinct string only `limine_boot_aarch64.spl`'s
+`limine_aarch64_boot_main()` prints via `log_raw_println` → `serial_println`
+→ this session's new PL011 `uart_put_byte`.
+
+**Sabotage-verify performed**: commented out the PL011 `DR` store in
+`uart_put_byte` (made it a no-op), rebuilt, reran with a freshly-rebuilt ESP
+image — confirmed **total serial silence** (0 bytes matching "SimpleOS").
+Restored the real store, rebuilt, reran — banner returned. Confirms the
+output is genuinely produced by this session's code, not residual
+firmware/Limine console output.
+
+### Next blocker (open, not fixed this session): hang in `_parse_hhdm()`
+
+`kernel_main` (`limine_aarch64_boot_main`) prints the banner (4
+`log_raw_println` calls) successfully, then calls `_parse_hhdm()` — after
+which **no further output appears and QEMU never exits/crashes/resets**
+(confirmed to persist past a 30s timeout with `-no-reboot`; no panic
+string, no data-abort trap message). `_parse_hhdm()`'s first two statements
+are `val resp_ptr = hhdm_request.response` then a nil check that should
+print a `"[BOOT] WARNING: No HHDM response from Limine"` line if
+`resp_ptr == 0` — and `hhdm_request`'s `response` field is explicitly
+statically initialized to `0` in its struct literal, so that WARNING should
+be unconditionally reachable and cheap. It never prints.
+
+Suspected but **unconfirmed** root cause, worth investigating first: the
+`# @section(".limine_reqs") — applied by linker script` annotations above
+`hhdm_request`/`memmap_request`/etc. are **plain comments**, not a real
+Simple-language section-placement attribute — `readelf -S kernel.elf`
+confirms **no `.limine_reqs` section exists in the linked binary at all**
+(`linker_limine.ld`'s `.limine_reqs : AT(...) { *(.limine_reqs) }` collected
+zero input sections, so ld dropped it). Per the protocol note earlier in
+this doc ("`base_revision == 0` falls back to scanning the ELF's
+`.limine_reqs` section directly"), Limine can never discover any of this
+kernel's requests, which is consistent with the WARNING-path *not* being a
+crash — but does not explain why the WARNING itself never prints. The
+struct-field read (`hhdm_request.response`, a `u64` field in a `@repr("C")`
+higher-half-linked global) or the following `== 0` compare is the most
+likely remaining suspect; not yet isolated whether this is a codegen defect
+specific to this target/link-address combination or a genuine data abort
+silently absorbed by AAVMF's default EL1 exception vectors. **Not fixed
+this session** — out of scope per the "one real klog line from the real
+kernel" milestone bar this pass targeted; the same `limine_boot.spl`
+(x86_64) code path has never been run either, so this may be a
+long-standing, previously-undiscovered defect shared by both arches rather
+than an aarch64-port regression.
+
+### Not done this session
+
+- `src/os/_QemuRunner/scenario_catalog.spl` / `scenario_disks.spl` wiring
+  (plan step 4/6) — still deferred; the artifact now exists and boots to a
+  real banner, but does not yet complete `kernel_main` end-to-end (see
+  blocker above), so wiring the QEMU-runner scenario ahead of that would
+  encode a known-incomplete boot as if it were a finished milestone.
+- The `_parse_hhdm()` hang itself (see above).
+- Full RV64-parity virtio/PMM/FAT32 support in the aarch64 freestanding
+  runtime — explicitly out of scope; only the boot-entry subset was ported.
