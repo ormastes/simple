@@ -20,6 +20,7 @@ drop; methods borrow by default.
 |---|---|---|
 | WP-A | `1a6a7da02f6`, `7c60ee34bc0` | `resource` decl + `@sffi` decorator parse. **Soft keyword** — see below. Regression spec 18/18, sabotage-verified |
 | WP-C | `286aa95c6f7` | All seven `@sffi` keys (`prefix`, `handle`, `invalid`, `retain`, `release`, `sharing`, `thread_safe`) round-trip into `compiler.frontend.resource_registry`, per-resource, reset per parse. 8/8, sabotage-verified |
+| WP-D | `57da6077b69` | Fail-closed convention inference (`resource_families.spl`): classifies acquire/release/retain verbs from extern names, returns an explicit error (never a guess) on ambiguity. 16/17; the 1 failure is a real engine gap, filed not swept. Census coverage across the 85 families is unmeasured — Appendix A only samples, doesn't enumerate |
 
 ## Four things you will otherwise re-derive painfully
 
@@ -75,8 +76,5 @@ control block — is illegal there. Corroborating measurement: that tier declare
 ## Still open
 - MIR drop edges + consuming `close()` (WP-E); RC lowering (WP-B); borrow-check
   enforcement (WP-G); `sffi_gen` adapter generation (WP-H).
-- Fail-closed convention inference (WP-D) — must return "cannot infer, declare
-  explicitly" on ambiguity. A wrong guess produces a resource silently never
-  released, or released twice, across 85 families.
 - REQ-MC-023 / `W-MC-RES-001` is **specified, not implemented** — no checker
   exists yet.
