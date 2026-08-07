@@ -20,6 +20,7 @@ use compiler.mir.mir_instructions.{MirPlace}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.text_extern_abi.{text_arg_indices, boxed_text_arg_indices}
+use compiler.semantics.match_exhaustiveness.{build_match_coverage, match_coverage_requires_hard_error}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
@@ -1935,6 +1936,12 @@ impl MirLowering:
         var has_default = false
         var default_body = HirBlock(stmts: [], value: nil, span: scrutinee.span)
         var enum_name = ""
+        # WP-6: the enum's own symbol id, captured alongside `enum_name` so
+        # ResolvedMatchCoverage (compiler.hir.match_coverage) can be built
+        # from a stable id instead of the bare name. -1 means "not yet
+        # resolved" (mirrors the discriminant sentinel used throughout this
+        # function).
+        var enum_symbol_id: i64 = -1
         # Step (c): the runtime_name key for `enum_name`, used ONLY for
         # discriminant lookups. `enum_name` itself stays BARE because it also
         # keys `enum_payload_struct_names` ("{enum_name}::{variant}"), which the
@@ -1964,6 +1971,14 @@ impl MirLowering:
                             # rather than reporting a miss the old code would not
                             # have reported.
                             enum_key = ""
+                        # WP-6: capture the id alongside the name (separate
+                        # match statement -- the arm above already consumes
+                        # its `esym` binding as the match EXPRESSION result).
+                        match etype.kind:
+                            case Named(esym_id, _):
+                                enum_symbol_id = esym_id.id
+                            case _:
+                                ()
                     val lookup_key = if enum_key != "": enum_key else: enum_name
                     var d: i64 = -1
                     val enum_name_known = self.enum_has_variants(lookup_key)
@@ -2460,6 +2475,43 @@ impl MirLowering:
             # warn-only here. Do not attempt the resolver or this promotion
             # without it -- explicitly deferred future work, not part of the
             # severity-wiring landed alongside this TODO.
+
+            # WP-6 (aerospace hardening, 2026-08-07): critical-profile hard
+            # error via ResolvedMatchCoverage (compiler.hir.match_coverage),
+            # id-keyed by enum_symbol_id + per-variant discriminant -- NOT
+            # the bare-name comparison above, so it does not inherit that
+            # comparison's soundness gap. Scoped deliberately to
+            # `enum_symbol_id >= 0`: that is only set when an arm's pattern
+            # carried an explicit `EnumName.Variant` qualifier (Named(esym,_)
+            # on `etype`, captured above), i.e. exactly the case this
+            # function's own bare-name-collision reasoning does NOT apply to.
+            # The ambiguous bare-pattern path (`owner_count == 1` sole-owner
+            # resolution above) has no id available here and is left
+            # warn-only, same as every other profile -- promoting it would
+            # require a name->symbol-id reverse lookup this pass does not
+            # have, a separate follow-up, not part of this escalation.
+            if enum_symbol_id >= 0:
+                val lookup_key2 = if enum_key != "": enum_key else: enum_name
+                var all_ids: [i64] = []
+                var all_names: [text] = []
+                if self.enum_variant_index.has(enum_name):
+                    for known_v2 in self.enum_variant_index[enum_name]:
+                        val vid = self.enum_variant_discriminant(lookup_key2, known_v2)
+                        all_ids = all_ids.push(vid)
+                        all_names = all_names.push(known_v2)
+                var covered_ids: [i64] = []
+                for cd in enum_discs:
+                    if cd >= 0:
+                        covered_ids = covered_ids.push(cd)
+                val coverage = build_match_coverage(
+                    enum_symbol_id, enum_symbol_id, enum_name,
+                    all_ids, all_names, covered_ids, has_default,
+                )
+                if match_coverage_requires_hard_error(coverage, rt_env_get("SIMPLE_SAFETY_PROFILE") ?? ""):
+                    val missing_names = coverage.missing_variant_names()
+                    var cmsg = "critical-profile match coverage: non-exhaustive match on '" + enum_name
+                    cmsg = cmsg + "' (no default/wildcard arm). Missing: " + missing_names.join(", ") + "."
+                    self.error_fatal(cmsg, Some(scrutinee.span))
 
         if has_default:
             val dres = self.lower_block_expected(default_body, expected_type)
