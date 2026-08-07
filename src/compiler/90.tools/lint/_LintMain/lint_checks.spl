@@ -30,6 +30,7 @@ use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access}
 use compiler.semantics.lint.leading_operator.{check_leading_operator}
 use compiler.semantics.lint.const_ref_default.{check_const_ref_default}
 use compiler.semantics.lint.bare_primitive_internal.{check_bare_primitive_internal}
+use compiler.semantics.lint.unwrapped_foreign_resource.{check_unwrapped_foreign_resource}
 
 # File I/O wrapper
 
@@ -187,6 +188,12 @@ impl Linter:
         lints.push(Lint.new("W-MC-VAL-001", LintLevel.Allow, LintCategory.Correctness,
             "Internal binding typed only by a bare primitive (mission-critical: use domain types)"))
 
+        # Unwrapped foreign resource escape lint (W-MC-RES-001 /
+        # unwrapped_foreign_resource, REQ-MC-023). Allow by default — warn
+        # only under the critical profile (would flood non-MC FFI glue).
+        lints.push(Lint.new("W-MC-RES-001", LintLevel.Allow, LintCategory.Correctness,
+            "Bare foreign-resource handle escapes its acquire call site unwrapped (mission-critical: wrap in an owning type)"))
+
         # Try to load project-level lint config from simple.sdn
         # Search in common project root locations
         var config = LintConfig.new()
@@ -226,6 +233,7 @@ impl Linter:
         self.check_leading_operator_spl(path, content)
         self.check_const_ref_default_spl(path, content)
         self.check_bare_primitive_internal_spl(path, content)
+        self.check_unwrapped_foreign_resource_spl(path, content)
         self.check_wm_lane_boundary(file_config, path, content)
 
         # Run shared EasyFix rules and attach as lint results
@@ -373,6 +381,20 @@ impl Linter:
     # path.
     me check_bare_primitive_internal_spl(path: String, content: String):
         val findings = check_bare_primitive_internal(content, path)
+        for finding in findings:
+            val lint = Lint.new(finding.code, LintLevel.Allow, LintCategory.Correctness, finding.message)
+                .with_fix(finding.note)
+            self.results.push(LintResult.new(path, finding.line_num, 0, lint))
+
+    # W-MC-RES-001 (unwrapped_foreign_resource): REQ-MC-023 — a bare handle
+    # returned by an SFFI acquire-verb extern must not escape its call site
+    # unwrapped. Constructed at Allow level: the end-of-lint_source config
+    # filter suppresses them by default and promotes to Warn under the
+    # critical profile. Text-level, intraprocedural, single-assignment
+    # heuristic — see unwrapped_foreign_resource.spl for the ponytail note
+    # and typed-HIR data-flow upgrade path.
+    me check_unwrapped_foreign_resource_spl(path: String, content: String):
+        val findings = check_unwrapped_foreign_resource(content, path)
         for finding in findings:
             val lint = Lint.new(finding.code, LintLevel.Allow, LintCategory.Correctness, finding.message)
                 .with_fix(finding.note)

@@ -32,6 +32,10 @@ claims meet or exceed Rust's for a declared certified subset.
 - **Engine axis + default pairing (2026-07-28):** interpreter is the DEFAULT engine for run/test (dev loop); compiler/loader (native build) defaults to robust at WARN severity during migration. Interpreter/JIT→moderate; compiler/loader→robust-at-warn; `--profile` CLI flag or `simple.sdn [lints] profile=` override per-package. Bare `bin/simple run` = interpreter+moderate.
 - Const-by-default references in MC mode: WARN now (`W-MC-REF-001`, landed), deny at
   critical profile v2. `mut` params + `me` receivers are the mutation opt-ins.
+- No unwrapped foreign resource (REQ-MC-023): WARN now (`W-MC-RES-001`, landed but
+  DORMANT pending lint redeploy — WP-3.5), deny at critical profile v2. See
+  `doc/02_requirements/language/mission_critical_profile.md` § REQ-MC-023 and
+  `src/compiler/35.semantics/lint/unwrapped_foreign_resource.spl`.
 - Short borrowing range is a DESIGN DECISION, not a gap — never "fix" toward Rust.
 - Unsafe: keep `unsafe:` blocks; replace blanket-allow with capability-scoped
   `@unsafe(reason, capabilities:[...])` + manifest in critical profile.

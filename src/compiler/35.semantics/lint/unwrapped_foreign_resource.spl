@@ -1,0 +1,291 @@
+# Unwrapped Foreign Resource Lint (mission-critical profile)
+#
+# unwrapped_foreign_resource: firmware-style REQ-MC-023 rule — a raw opaque
+# handle returned by an SFFI acquire call (`rt_..._open`/`_create`/`_new`/
+# `_alloc`, verb catalog reused from resource_families.acquire_verbs — this
+# check restricts to the `rt_` prefix convention named in REQ-MC-023) must not
+# escape its acquire call site unwrapped.
+#
+# W-MC-RES-001: the direct result of an acquire-pattern extern call is used
+#               in a position that lets it escape the call site without first
+#               being passed to a wrapping constructor call:
+#                 (a) returned from a fn (explicit `return`, or the fn's tail
+#                     expression) — bare, or inside a tuple/list literal;
+#                 (b) assigned to a `self.<field>` (a mutation statement, as
+#                     opposed to a constructor's named-argument position).
+#
+# doc/02_requirements/language/mission_critical_profile.md § REQ-MC-023
+# (commit 82fd43ad4df) is the requirement; landed here as commit TBD (see
+# that file's status note, updated in the same commit as this file).
+#
+# STATUS: landed but DORMANT — the deployed `bin/simple lint` binary predates
+# this source file (see doc/03_plan/language/assurance's WP-3.5 redeploy
+# note); this check only fires today via the unit spec's direct import
+# (interpreter path) or after the next lint-binary redeploy.
+#
+# What warns (v1):
+#   - `return rt_x_open(args)` / `return (rt_x_open(a), rt_x_open(b))`
+#   - `val h = rt_x_open(args)` ... `return h` (single-assignment tracking)
+#   - a fn's bare tail expression is (or contains, top-level in a tuple/list)
+#     a tracked handle var or a direct acquire call
+#   - `self.handle = rt_x_open(args)` / `self.handle = h` (h tracked)
+#
+# What does NOT warn (documented ceiling — ponytail: text-level heuristic,
+# intraprocedural, single-assignment only; ok for a warn-level rule; upgrade
+# path = typed-HIR data-flow walk over the whole call graph, not just one
+# function body):
+#   - the acquire call's own binding statement in isolation (`val h =
+#     rt_x_open(path)` with h never returned/field-assigned in the SAME
+#     function) — REQ-MC-023's illustrative "handle threaded through app
+#     code" example additionally flags the acquire line itself and the
+#     unwrapped argument passed to `read_from(handle)`; v1 does not do
+#     cross-call argument tracking, only return/field escape, per the
+#     scoped-minimal v1 acceptance criteria
+#   - the acquire call passed as a constructor's named/positional argument,
+#     e.g. `Database(handle: rt_db_open(path))` — the outer call there is
+#     the constructor, not the acquire call, so it reads as WRAPPED
+#   - handles threaded through more than one hop of variable renaming
+#     (`val a = rt_x_open(p)` then `val b = a` then `return b`)
+#   - the `extern fn` declaration line itself
+#   - code inside an `@unsafe(reason: ..., capabilities: [ffi])` boundary —
+#     the immediately-preceding-line decorator on the enclosing fn header
+#   - generated SFFI adapter modules (path contains "sffi_gen")
+#   - vendored sources (src/compiler_rust/vendor, src/runtime/vendor)
+#
+# Levels: default "allow" in moderate/strict/robust (would flood non-MC FFI
+# glue); "warn" only under the critical profile; deny at profile v2 (user
+# decision 2026-08-07 — explicitly NOT implemented here).
+
+use compiler.semantics.resource_families.{acquire_verbs}
+use compiler.semantics.lint.lint_text.{iter_code_lines, CodeLine}
+
+# ============================================================================
+# Finding Struct
+# ============================================================================
+
+pub struct UnwrappedResourceFinding:
+    code: text
+    message: text
+    note: text
+    line_num: i64
+
+    fn fmt() -> text:
+        "[{self.code}] WARNING: {self.message} — {self.note}"
+
+# ============================================================================
+# Acquire-Call Name Matching
+# ============================================================================
+
+# True when `name` is `rt_<...>_<acquire-verb>`, reusing the shared verb
+# catalog from resource_families.spl rather than duplicating it.
+fn _ufr_is_acquire_name(name: text) -> bool:
+    if not name.starts_with("rt_"):
+        return false
+    for verb in acquire_verbs():
+        if name.ends_with("_" + verb):
+            return true
+    false
+
+# If `expr` (trimmed) is a bare call `NAME(...)`, return NAME; else "".
+fn _ufr_call_name(expr: text) -> text:
+    val t = expr.trim()
+    var i = 0
+    val n = t.len()
+    while i < n:
+        val ch = t.substring(i, i + 1)
+        val is_ident = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+                        (ch >= "0" and ch <= "9") or ch == "_"
+        if not is_ident:
+            break
+        i = i + 1
+    if i == 0 or i >= n:
+        return ""
+    if t.substring(i, i + 1) != "(":
+        return ""
+    if not t.ends_with(")"):
+        return ""
+    t.substring(0, i)
+
+# Split a comma-separated top-level argument/element list (contents already
+# stripped of the outer bracket pair) on commas that are not nested inside
+# `()`/`[]`/`{}`.
+fn _ufr_split_top_level(inner: text) -> [text]:
+    var parts: [text] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    val n = inner.len()
+    while i < n:
+        val ch = inner.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "{":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == "}":
+            if depth > 0:
+                depth = depth - 1
+        elif ch == "," and depth == 0:
+            parts.push(inner.substring(start, i).trim())
+            start = i + 1
+        i = i + 1
+    val last = inner.substring(start, n).trim()
+    if last != "":
+        parts.push(last)
+    parts
+
+# ============================================================================
+# Per-Function Escape Detection
+# ============================================================================
+
+# True when `expr` (trimmed) is EITHER a direct acquire call OR one of
+# `handle_vars` used bare — the two "unwrapped handle value" shapes.
+fn _ufr_is_bare_handle_value(expr: text, handle_vars: Dict<text, bool>) -> bool:
+    val t = expr.trim()
+    if handle_vars.contains_key(t):
+        return true
+    _ufr_is_acquire_name(_ufr_call_name(t))
+
+# True when `expr` is a bare handle value, OR a tuple/list literal whose top
+# level contains at least one element that is a bare handle value.
+fn _ufr_expr_escapes(expr: text, handle_vars: Dict<text, bool>) -> bool:
+    val t = expr.trim()
+    if _ufr_is_bare_handle_value(t, handle_vars):
+        return true
+    val is_tuple = t.starts_with("(") and t.ends_with(")")
+    val is_list = t.starts_with("[") and t.ends_with("]")
+    if not is_tuple and not is_list:
+        return false
+    val inner = t.substring(1, t.len() - 1)
+    for part in _ufr_split_top_level(inner):
+        if _ufr_is_bare_handle_value(part, handle_vars):
+            return true
+    false
+
+# `val`/`var NAME = <init>` — returns NAME when init is a direct acquire
+# call (single-assignment tracking), else "".
+fn _ufr_new_handle_binding(trimmed: text) -> text:
+    var rest = ""
+    if trimmed.starts_with("val "):
+        rest = trimmed.substring(4, trimmed.len())
+    elif trimmed.starts_with("var "):
+        rest = trimmed.substring(4, trimmed.len())
+    else:
+        return ""
+    val eq = rest.find("=")
+    if eq < 0:
+        return ""
+    val lhs = rest.substring(0, eq).trim()
+    # Bare identifier name only — no type annotation, no tuple pattern.
+    if lhs.contains(":") or lhs.contains(",") or lhs.contains(" "):
+        return ""
+    val rhs = rest.substring(eq + 1, rest.len()).trim()
+    if _ufr_is_acquire_name(_ufr_call_name(rhs)):
+        return lhs
+    ""
+
+# Function header detection: `fn NAME(`, `static fn NAME(`, `me NAME(`.
+fn _ufr_is_fn_header(trimmed: text) -> bool:
+    trimmed.starts_with("fn ") or trimmed.starts_with("static fn ") or
+        trimmed.starts_with("me ") or trimmed.starts_with("pub fn ") or
+        trimmed.starts_with("pub static fn ")
+
+fn _ufr_indent_of(raw: text) -> i64:
+    var i = 0
+    val n = raw.len()
+    while i < n and raw.substring(i, i + 1) == " ":
+        i = i + 1
+    i
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+pub fn check_unwrapped_foreign_resource(source: text, file_path: text) -> [UnwrappedResourceFinding]:
+    """Text-based, intraprocedural, single-assignment heuristic for
+    W-MC-RES-001 (unwrapped_foreign_resource, REQ-MC-023). See the file
+    docstring above for the exact ceiling of what this v1 check does and
+    does not catch."""
+    var findings: [UnwrappedResourceFinding] = []
+    if file_path.contains("src/compiler_rust/vendor") or file_path.contains("src/runtime/vendor"):
+        return findings
+    if file_path.contains("sffi_gen"):
+        return findings
+
+    val code_lines = iter_code_lines(source)
+    val n = code_lines.len()
+    var i = 0
+    while i < n:
+        val header = code_lines[i]
+        if _ufr_is_fn_header(header.trimmed) and not header.trimmed.starts_with("extern "):
+            # @unsafe(...) boundary: the decorator immediately precedes the
+            # header (skipping blank lines).
+            var unsafe_boundary = false
+            var pi = i - 1
+            while pi >= 0:
+                val prev_trimmed = code_lines[pi].trimmed
+                if prev_trimmed == "":
+                    pi = pi - 1
+                    continue
+                if prev_trimmed.starts_with("@unsafe("):
+                    unsafe_boundary = true
+                break
+            val header_indent = _ufr_indent_of(header.raw)
+            var handle_vars: Dict<text, bool> = {}
+            var last_body_idx = -1
+            var j = i + 1
+            while j < n:
+                val cl = code_lines[j]
+                if cl.trimmed == "":
+                    j = j + 1
+                    continue
+                val body_indent = _ufr_indent_of(cl.raw)
+                if body_indent <= header_indent:
+                    break
+                if not unsafe_boundary:
+                    val new_handle = _ufr_new_handle_binding(cl.trimmed)
+                    if new_handle != "":
+                        handle_vars[new_handle] = true
+                    if cl.trimmed.starts_with("return "):
+                        val ret_expr = cl.trimmed.substring(7, cl.trimmed.len())
+                        if _ufr_expr_escapes(ret_expr, handle_vars):
+                            findings.push(UnwrappedResourceFinding(
+                                code: "W-MC-RES-001",
+                                message: "bare foreign-resource handle escapes via return without a wrapping constructor",
+                                note: "wrap the acquire call's result in an owning `resource` type or a hand-written class before returning it",
+                                line_num: cl.line_num
+                            ))
+                    elif cl.trimmed.starts_with("self.") and cl.trimmed.contains("="):
+                        val eq = cl.trimmed.find("=")
+                        val lhs = cl.trimmed.substring(0, eq).trim()
+                        # Exclude `==` and field patterns that aren't a plain
+                        # `self.field = ...` mutation statement.
+                        val is_eq_eq = eq + 1 < cl.trimmed.len() and cl.trimmed.substring(eq + 1, eq + 2) == "="
+                        if not is_eq_eq and lhs.starts_with("self.") and not lhs.contains("("):
+                            val rhs = cl.trimmed.substring(eq + 1, cl.trimmed.len()).trim()
+                            if _ufr_is_bare_handle_value(rhs, handle_vars):
+                                findings.push(UnwrappedResourceFinding(
+                                    code: "W-MC-RES-001",
+                                    message: "bare foreign-resource handle assigned directly to a struct/class field outside a wrapping constructor",
+                                    note: "wrap the acquire call's result in an owning `resource` type or a hand-written class before storing it on self",
+                                    line_num: cl.line_num
+                                ))
+                    last_body_idx = j
+                j = j + 1
+            # Implicit tail expression: the last body line, only when it is
+            # neither a declaration/return/assignment/control line already
+            # handled above and does not open a nested block.
+            if not unsafe_boundary and last_body_idx >= 0:
+                val tail = code_lines[last_body_idx]
+                val tt = tail.trimmed
+                val is_plain_expr = not tt.starts_with("val ") and not tt.starts_with("var ") and
+                    not tt.starts_with("return ") and not tt.starts_with("self.") and
+                    not tt.starts_with("#") and not tt.ends_with(":") and not tt.contains(" = ")
+                if is_plain_expr and _ufr_expr_escapes(tt, handle_vars):
+                    findings.push(UnwrappedResourceFinding(
+                        code: "W-MC-RES-001",
+                        message: "bare foreign-resource handle escapes as the fn's tail expression without a wrapping constructor",
+                        note: "wrap the acquire call's result in an owning `resource` type or a hand-written class before returning it",
+                        line_num: tail.line_num
+                    ))
+            i = j
+            continue
+        i = i + 1
+    findings

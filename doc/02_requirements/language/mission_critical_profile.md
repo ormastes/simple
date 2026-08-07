@@ -256,23 +256,34 @@ user decision date pattern.
 severity-table mechanism as `W-MC-REF-001`/`W-MC-VAL-001`, driver
 `80.driver/driver_safety_severity.spl`, lint `90.tools/lint/_LintMain/config_and_model.spl`).
 
-**Status: SPECIFIED, NOT IMPLEMENTED.** No `W-MC-RES-001` checker exists in
-`src/compiler/90.tools/lint` or elsewhere as of this writing, and it has no
-entry in the lint registry (`lint_checks.spl`) the way `W-MC-VAL-001` does not
-either — REQ-MC-011 is itself only a rule-name reservation, not a landed
-checker; this rule is the same kind of reservation. It additionally depends on
-the `resource` declaration (Phase 1, not yet implemented — see
+**Status: IMPLEMENTED, DORMANT pending lint redeploy (WP-3.5).**
+`W-MC-RES-001` is a landed checker —
+`src/compiler/35.semantics/lint/unwrapped_foreign_resource.spl`
+(`check_unwrapped_foreign_resource`) — registered in
+`src/compiler/90.tools/lint/_LintMain/lint_checks.spl` and
+`config_and_model.spl` (allow in moderate/strict/robust, warn in critical,
+via the WP-3 canonical policy resolver's `profile_default_levels` — no new
+severity table). It is a text-level, intraprocedural, single-assignment
+heuristic (documented ceiling in the check's file docstring): it flags a
+bare acquire-verb-extern (`rt_..._open`/`_create`/`_new`/`_alloc`, verb
+catalog reused from `resource_families.acquire_verbs()`) result that escapes
+via `return`, an implicit tail expression, or a direct `self.field`
+assignment, without first passing through a wrapping constructor call in the
+SAME function; cross-call argument threading and multi-hop variable renaming
+are out of scope for v1. Unit-verified over source strings at
+`test/01_unit/compiler/lint/unwrapped_foreign_resource_spec.spl` (interpreter
+path — the deployed `bin/simple lint` binary predates this source and will
+not exercise it until the next lint-binary redeploy, same reachability gap
+REQ-MC-012 already documents for this whole family). It additionally depends
+on the `resource` declaration (Phase 1, not yet implemented — see
 `doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md`)
 for the primary wrapped-form example to be checkable as `resource`-typed
-rather than only as the hand-written-class fallback. Per REQ-MC-012's
-reachability caveat, even a landed checker enforces nothing through
-`bin/simple` until stage-3 self-host unblocks — `bin/simple` today is the
-Rust seed, which has no lint code for this family at all. The
+rather than only as the hand-written-class fallback. The
 `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`
 premises table (row 12b: "the enemy is reimplementation, not absence")
-applies here too — if a WARN-only text heuristic for this rule is ever added
-ahead of a real semantic checker, it must be named as the twin that dies when
-the semantic checker lands, not kept alongside it.
+applies here too — this WARN-only text heuristic is the checker itself (not
+a stand-in ahead of a future semantic checker); a later typed-HIR data-flow
+upgrade replaces it in place, it does not get kept alongside it.
 
 ## Non-goals / design decisions honored
 

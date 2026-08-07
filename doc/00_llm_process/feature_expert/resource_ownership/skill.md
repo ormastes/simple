@@ -21,6 +21,7 @@ drop; methods borrow by default.
 | WP-A | `1a6a7da02f6`, `7c60ee34bc0` | `resource` decl + `@sffi` decorator parse. **Soft keyword** — see below. Regression spec 18/18, sabotage-verified |
 | WP-C | `286aa95c6f7` | All seven `@sffi` keys (`prefix`, `handle`, `invalid`, `retain`, `release`, `sharing`, `thread_safe`) round-trip into `compiler.frontend.resource_registry`, per-resource, reset per parse. 8/8, sabotage-verified |
 | WP-D | `57da6077b69`, `45c0f068163` | Fail-closed convention inference (`resource_families.spl`): classifies acquire/release/retain verbs from extern names, returns an explicit error (never a guess) on ambiguity. Now 17/17 — the residual failure was `load` missing from the acquire-verb catalog (`rt_image_load` classified as method, family left acquire-less). Census coverage across the 85 families is unmeasured — Appendix A only samples, doesn't enumerate |
+| REQ-MC-023 | (2026-08-07, this change) | `W-MC-RES-001 unwrapped_foreign_resource` lint landed — `src/compiler/35.semantics/lint/unwrapped_foreign_resource.spl`, reuses `resource_families.acquire_verbs()`, wired through the WP-3 canonical policy resolver (allow moderate/strict/robust, warn critical). Text-level, intraprocedural, single-assignment heuristic (return/tail-expr/`self.field` escape only — no cross-call argument threading). 17/17, sabotage-verified. **DORMANT**: deployed `bin/simple lint` predates this source; unit-spec (`test/01_unit/compiler/lint/unwrapped_foreign_resource_spec.spl`) is the acceptance oracle until the next lint-binary redeploy (WP-3.5) |
 
 ## Four things you will otherwise re-derive painfully
 
@@ -76,5 +77,10 @@ control block — is illegal there. Corroborating measurement: that tier declare
 ## Still open
 - MIR drop edges + consuming `close()` (WP-E); RC lowering (WP-B); borrow-check
   enforcement (WP-G); `sffi_gen` adapter generation (WP-H).
-- REQ-MC-023 / `W-MC-RES-001` is **specified, not implemented** — no checker
-  exists yet.
+- REQ-MC-023 / `W-MC-RES-001` is **implemented but DORMANT**: the checker exists
+  (`src/compiler/35.semantics/lint/unwrapped_foreign_resource.spl`, wired in
+  `90.tools/lint/_LintMain/lint_checks.spl`, registered `warn` under `critical`
+  in `config_and_model.spl`), but the deployed `bin/simple lint` binary predates
+  it, so it fires for nobody until the lint redeploy (WP-3.5). The unit spec is
+  the only acceptance oracle today — 17/17, sabotage-verified (stubbing
+  `_ufr_is_acquire_name` → `17 total, 10 passed, 7 failed`).
