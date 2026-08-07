@@ -192,26 +192,218 @@ and plain `use std.hash` leaves `.hash()` unresolved on every receiver. Only
 uses the non-working `use std.hash.Hash` form; an unresolved `use` is only a
 warning, so that import is silently inert.
 
-## Unresolved axis (do not assert either way)
+## Unresolved axis — CLOSED 2026-08-07 (follow-up attempt)
 
 Whether the `i32`/`i8`/`i16` → `i64` collapse is "the `as` cast does not retype
-the value" or "dispatch discards the integer width" is not settled by this data.
-The bare-name registration at `trait_impl_lowering.spl:244` is the leading
-suspect but was not proven.
+the value" or "dispatch discards the integer width" is now settled: it is
+**dispatch keying, not cast retyping**. Probe (`SIMPLE_EXECUTION_MODE=interpret
+bin/simple run`, no `as` anywhere):
 
-## Suggested fix (not attempted — see why)
+```
+trait MarkerProbe: fn marker_probe() -> i64
+impl MarkerProbe for i64: fn marker_probe() -> i64: 1002
+impl MarkerProbe for i32: fn marker_probe() -> i64: 1003
 
-Defect B looks like a two-part change: key primitive impl registration on the
-primitive's type kind rather than a bare name, and let `try_trait_method` fall
+val v: i32 = 7
+v.marker_probe()             # -> 1002 (want 1003)
+
+fn take_i32(x: i32) -> i64: x.marker_probe()
+take_i32(9)                  # -> 1002 (want 1003)
+```
+
+Both a `val: i32` and an `i32` function parameter — no cast in sight — still
+collapse to the `i64` impl. This rules out "the `as` cast doesn't retype the
+value" entirely; whatever collides, it collides on the receiver's static type
+identity itself, not on cast handling.
+
+## `trait_impl_lowering.spl:242-244` attribution WITHDRAWN 2026-08-07
+
+That site is dead code for every case this bug doc measures, for two
+independent reasons:
+
+1. `if not methods.contains_key(default_fn.name):` at line 239 gates the
+   block — it only fires for trait **default** methods an impl does NOT
+   override. Every impl in the repro fixture and in `hash.spl` explicitly
+   defines its method, so this guard is always false for them.
+2. `trait MarkerProbe: fn marker_probe() -> i64` and `hash.spl:37 fn hash() ->
+   i64` are both **bodyless required methods** (no default body), so
+   `trait_hir.defaults` is empty for both traits and the
+   `for default_fn in trait_hir.defaults:` loop never iterates at all.
+
+So the bare-name registration at line 244 cannot be the mechanism behind the
+measured i32→i64 collapse for either the `MarkerProbe` repro or `std.hash`.
+The real collision site is somewhere in primitive-receiver method dispatch
+proper — plausibly still a bare/normalized-name keying collision, but not at
+this call site. Not re-diagnosed in this lane (see next section for why).
+
+## Verification loop is VACUOUS for this defect — attempt STOPPED 2026-08-07
+
+A follow-up lane attempted the registration-key fix (scoped tightly, per
+instruction) and got as far as re-diagnosis before hitting a hard blocker:
+
+**`bin/simple test <spec>` does not execute edited `src/compiler/**/*.spl`
+source for this spec, as of 2026-08-07.** Proven by liveness probe, not
+assumed: an unconditional `eprint("LIVENESS_PROBE_MARKER...")` inserted as the
+first statement of `lower_impl` in `trait_impl_lowering.spl` (guaranteed on
+the path for any file with `impl` blocks, which both the fixture and every
+provided spec have) produced **zero** occurrences of the marker across two
+independent runs of
+`bin/simple test test/01_unit/language/primitive_receiver_trait_impl_dispatch_spec.spl`,
+while `Results: 7 total, 6 passed, 1 failed` stayed byte-for-byte identical
+to the unedited baseline both times. The edit was reverted after each probe
+(`git diff --stat` on the file returns clean / marker count 0 post-revert).
+
+This directly **contradicts**
+`.claude/memory/reference_compiler_spl_edits_are_live_under_bin_simple_test.md`
+(dated 2026-08-06, one day prior), which claims `.spl` compiler edits are live
+under `bin/simple test` via the seed's interpreter loading source directly.
+Something changed between that observation and today, or the two lanes hit a
+different code path (that memory's proof point was
+`src/compiler/50.mir/mir_lowering_stmts.spl`, a MIR-lowering file, not this
+HIR-lowering file). The test log's own `child binary:
+/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple`
+line, combined with that binary's own `--version` banner ("this Rust-built
+Simple binary is a bootstrap seed only"), corroborates but does not by itself
+prove seed-only execution — per
+`.claude/memory/reference_positive_capability_probe_for_binary_identity.md`,
+banners can lie. The load-bearing fact is the marker probe, not the banner.
+
+**Consequence:** no edit to `src/compiler/**/*.spl` in this area can be
+verified against the one usable oracle
+(`primitive_receiver_trait_impl_dispatch_spec.spl`, interpreter lane) in this
+environment right now. Per this lane's own instructions, a change that cannot
+be verified is not to be shipped. No fix was attempted or landed. This is a
+harness-level blocker on top of the original one (bootstrap stage 3 blocked,
+no self-hosted binary) — both must be resolved before this defect is
+fixable-and-verifiable in one lane.
+
+**A/B control attempted, 2026-08-07 — INCONCLUSIVE, do not over-read.** A
+follow-up probe placed the same unconditional `eprint` at
+`src/compiler/50.mir/mir_lowering_stmts.spl:49` (`mir_hir_type_is_isolated`)
+— the exact site
+`.claude/memory/reference_compiler_spl_edits_are_live_under_bin_simple_test.md`
+cites as PROVEN live on 2026-08-06 — and ran it against
+`test/01_unit/compiler/borrow/iso_move_pipeline_spec.spl` (the same spec that
+memory used). That run produced no `Results:` line at all (`ERROR: test
+daemon timed out`). Critically, a **re-run of the unedited baseline for the
+*same* spec afterward also timed out with no `Results:` line**, and a
+subsequent re-run of `primitive_receiver_trait_impl_dispatch_spec.spl` itself
+(the spec used for the original, successful probes) — both unedited and with
+a third probe edit in `resolve.spl:89` (`get_type_symbol`) — likewise timed
+out, even after `test_daemon_stop`. So the test daemon/environment degraded
+mid-session (consistent with `.claude/memory/reference_...` notes on box load
+causing spec timeouts that are "not a RED"), and **none of these three later
+runs are usable evidence either way** — a timed-out run with no verdict
+cannot confirm or refute liveness. All three probe edits from this batch were
+reverted (`git diff --stat` per file, `grep -c LIVENESS_PROBE` = 0, on
+`mir_lowering_stmts.spl` and `resolve.spl` both, post-revert).
+
+**What still stands, scoped correctly:** the original vacuity finding is
+based on the *first* three runs in this lane (baseline, `self.error` probe,
+`eprint` probe — see above), which all completed cleanly within ~180s with
+byte-consistent `Results: 7 total, 6 passed, 1 failed` and zero marker
+occurrences, run *before* the environment degraded. That is real evidence
+that an edit to `trait_impl_lowering.spl:157` (`lower_impl`, first statement)
+was not observed while compiling
+`primitive_receiver_trait_impl_dispatch_spec.spl` at that time. It is **not**
+confirmed as a universal, harness-wide, or still-current fact — the broader
+claim ("no `.spl` edit is ever live") is withdrawn as unverified; a future
+lane should re-run the A/B control in a quiet environment before relying on
+it.
+
+## ROOT CAUSE LOCATED — 2026-08-07, and it is OUT OF SCOPE for this repo
+
+A parallel research pass (independent of the verification-loop finding above,
+launched before it landed) traced the actual i32→i64 collapse mechanism all
+the way to source, using `SIMPLE_EXECUTION_MODE=interpret` against the
+deployed `bin/simple` (confirmed Rust seed, per the `--version` banner and
+`git log` on `bin/release/x86_64-unknown-linux-gnu/simple`). The mechanism is
+entirely inside `src/compiler_rust/`, not in `src/compiler/**/*.spl` at all —
+which also explains why the doc's original citation of a `.spl`-side
+registration key was never going to be the fix, independent of the
+verification blocker above.
+
+**Registration is correct — impls do NOT collide.**
+`src/compiler_rust/compiler/src/interpreter_eval.rs:1064-1070` (module scope)
+and `src/compiler_rust/compiler/src/interpreter_call/block_execution.rs:909-912`
+(block/closure scope) register each `impl Trait for T` into
+`TRAIT_IMPLS: HashMap<(String, String), Vec<Arc<FunctionDef>>>` keyed
+`(trait_name, impl_type_name)` (`interpreter_state.rs:249`), where
+`impl_type_name` comes from `get_type_name` (`interpreter_types.rs:22-32`),
+which clones the parsed type name verbatim for `Type::Simple(name)`. So
+`impl MarkerProbe for i32` and `impl MarkerProbe for i64` land under the
+genuinely distinct keys `("MarkerProbe","i32")` and `("MarkerProbe","i64")`.
+
+**The lookup is where the collision happens.** Both
+`src/compiler_rust/compiler/src/interpreter_method/mod.rs:1430-1463` and a
+duplicated copy for chained calls at
+`src/compiler_rust/compiler/src/interpreter_helpers/method_dispatch.rs:747-762`
+fall back, when a type-specific handler doesn't recognize the method, to a
+**fixed candidate-name list keyed on the receiver's runtime `Value` variant**,
+not its declared/static type:
+
+```rust
+let type_names: &[&str] = match &recv_val {
+    Value::Str(_) => &["text", "str", "String"],
+    Value::Int(_) => &["i64", "i32", "int"],
+    ...
+};
+for type_alias in type_names {
+    for ((_trait_name, impl_type), methods) in trait_impls.iter() {
+        if impl_type == type_alias { /* return FIRST match */ }
+```
+
+`Value::Int` is the single runtime representation for **every** integer
+width in this interpreter — i8/i16/i32/i64 are indistinguishable at this
+point. So an i32 receiver (or i8/i16) walks the *same* candidate list
+`["i64","i32","int"]` as a genuine i64 receiver, `"i64"` is tried first, and
+since an `impl ... for i64` almost always exists it wins before `"i32"` is
+ever reached — reproducing the exact collapse this doc documents. u8/u16/u32/u64
+aren't in the candidate list at all, independently explaining why this doc's
+matrix reports those as unreachable ("method not found") rather than
+colliding with i64 — same mechanism, different outcome depending on whether
+the receiver's width happens to be in the hardcoded list.
+
+**This is squarely inside the disposable Rust seed
+(`src/compiler_rust/`).** The seed is sanctioned bootstrap infrastructure, not
+the deliverable, and lanes working this bug have been instructed not to edit
+it (a task-scope constraint, not a repo-wide prohibition — the seed itself is
+legitimate Rust code by design). Combined with the verification-loop
+finding above (edited `.spl` source is not observably live today), this
+defect currently has **no compliant, verifiable fix path** in this
+environment: the correct-looking `.spl`-side fix cannot be verified, and the
+only mechanism actually proven to cause the measured symptom lives in code
+this repo's own rules place off-limits.
+
+Filed, not fixed. Recommended next step for a future lane: (1) resolve why
+`.spl` compiler edits are not observably live under `bin/simple test` as of
+2026-08-07 (candidate separate bug — see A/B control above), which is a
+prerequisite for verifying *any* `.spl`-side compiler fix, not just this one;
+(2) once verifiable, decide whether the seed's ordered-fallback dispatch
+(`interpreter_method/mod.rs:1430-1463`,
+`interpreter_helpers/method_dispatch.rs:747-762`) needs a matching Rust-side
+fix regardless (since the deployed tool today runs the seed, not any
+self-hosted binary), which would need explicit user sign-off to touch the
+seed.
+
+## Suggested fix (still not attempted — compounded reasons)
+
+The original two-part suggestion (key primitive impl registration on the
+primitive's type kind rather than a bare name; let `try_trait_method` fall
 through to `try_trait_method_with_solver` instead of returning nil when the
-receiver type carries no symbol.
+receiver type carries no symbol) may still be directionally right, but its
+proposed landing site (`trait_impl_lowering.spl:242-244`) is now known wrong
+(see above) and the actual collision site was not re-located in this lane —
+the re-diagnosis effort was abandoned once the verification loop proved
+vacuous, to avoid spending budget locating a site for an unverifiable change.
 
-Deliberately NOT attempted in this lane: `try_trait_method` is on the hot path of
-every method resolution in the self-hosted compiler, and bootstrap stage 3 is
-blocked, so there is no self-hosted binary on which the change could be verified.
-The only available vehicle is `native-build` on toy probes, which cannot show a
-regression in the compiler's own bootstrap. A speculative edit there would be
-unverifiable by construction.
+Two blockers now stack: (1) `try_trait_method` is hot-path code in a compiler
+with no self-hosted binary (bootstrap stage 3 blocked), and (2) even the one
+available oracle (`bin/simple test` on the interpreter lane) does not execute
+edited `src/compiler/**/*.spl` source as of 2026-08-07. Until (2) is resolved
+(establish which binary/path `bin/simple test` actually runs specs through,
+and how to make a `.spl` source edit observable there again), any edit to this
+area is unverifiable by construction and should not be attempted.
 
 Defect A is a one-arm change in the disposable Rust seed (gate `"hash"` on the
 receiver's static type, or drop the arm so it fails closed like every other
