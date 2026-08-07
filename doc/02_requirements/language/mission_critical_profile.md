@@ -180,6 +180,63 @@ tracked as WP-3/WP-4 in
 Old spellings keep parsing with a deprecation warning; removal is an edition decision.
 All rule phase notes in this doc map onto the new names (`mission-critical` → `critical`).
 
+## REQ-MC-013 — Canonical assurance-policy resolution (phase: compile-time, typed state — IMPLEMENTED 2026-08-07)
+
+Profile resolution is unified: five callsites (lint parser, driver severity engine, `run`
+command, test runner, interpreter) all delegate to a single canonical resolver
+(`src/compiler/00.common/assurance/policy.spl:policy_for_name_and_cli_flag`) that
+applies precedence: CLI flag > `simple.sdn` project pinning > engine default (interpreter→`moderate`,
+jit→`moderate`, compiler/loader→`robust`-at-WARN). The resolver returns a typed
+`ResolvedAssurancePolicyV1` with `(name, severity_projection, is_deny_tier)` for all
+accepted spellings (profile names + deprecated aliases). Deprecated aliases (`mission-critical`,
+`mission_critical`, `mission_critical_internal`, `mission_critical_v1`) warn once per
+invocation; the canonical names are `moderate`, `strict`, `robust`, `critical`.
+
+`SIMPLE_SAFETY_PROFILE` env var is demoted to subprocess serialization only (driver re-reads
+it, test runner passes it to subprocess, interpreter no longer latches it at `eval_init`).
+Instead, the interpreter receives a typed policy via `eval_apply_assurance_profile`
+(`src/compiler/10.frontend/core/interpreter/eval_decls.spl:304-312`), removing the
+latch-once defect.
+
+**Enforcement phase:** compile-time; policy resolution is wired at all five sites and is
+fail-closed (unrecognized profile name is an error, not a fallback).
+
+**Status:** IMPLEMENTED. Landed `4817dd06f0f`; unit test `test/01_unit/compiler/assurance/policy_five_site_convergence_spec.spl`, 24/24.
+
+## REQ-MC-014 — Project-level assurance-profile pinning via SDN (phase: compile-time, typed state — IMPLEMENTED 2026-08-07)
+
+A `simple.sdn` manifest can pin a profile via `lints:` / `profile: <tier>`:
+
+```
+project:
+  name: my_package
+  source_root: src
+
+lints:
+  profile: critical
+```
+
+The canonical form is indent/colon, not TOML-ish `[section]` syntax. `ProjectContext.load_from_sdn`
+parses the manifest and calls `set_active_profile(profile_name)` at `src/compiler/80.driver/project.spl:81-90`,
+setting `active_profile` (`src/compiler/80.driver/project.spl:56`) to a typed `ResolvedAssurancePolicyV1`.
+The CLI `--profile` flag may **raise** the pinned tier but never **lower** it (fail-closed). Three
+dead TOML-ish scanners in `config_and_model.spl:335-352`, `handler_commands.spl:114-131`,
+`test_runner_config.spl:48-71` were deleted; no compatibility path kept.
+
+**Enforcement phase:** compile-time and integration; the driver validates the SDN syntax at load time
+and enforces the raise-only constraint at CLI resolution.
+
+**Status:** IMPLEMENTED. Landed `2c51766e401`; unit tests `test/01_unit/app/io/run_sdn_lints_profile_spec.spl`, `test/01_unit/compiler/lint/lint_profile_spec.spl`.
+
+## Reserved requirement IDs 015–022
+
+REQ-MC-015 through REQ-MC-022 are reserved for this profile but remain unallocated as of
+2026-08-07. The aerospace hardening plan (WP-5) surveyed current gaps and found two
+load-bearing issues already covered by REQ-MC-013 and REQ-MC-014 (policy resolution and
+project pinning). Future gaps in profile enforcement, policy precedence, or SDK/tooling
+integration will claim IDs from this range. No padding requirements were added;
+the list contains only verified, specified, landed work.
+
 ## REQ-MC-023 — No unwrapped foreign resource (phase: WARN in critical now, deny at v2 — user decision 2026-08-07)
 
 Firmware-style rule, same shape as REQ-MC-002/011: a raw opaque handle
