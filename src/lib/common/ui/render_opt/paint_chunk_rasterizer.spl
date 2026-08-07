@@ -133,13 +133,26 @@ fn paint_chunk_rasterizer_run(chunks: PaintChunks, rects: PaintChunkRects,
 
 # Flat-colour fill of one rect via the scalar-oracle store primitive
 # (`oracle_fill_const` — a STORE, not a blend, matching an opaque paint).
+# The fill span is clipped per row to `[0, buf.stride)` in x, the same way
+# `py` is already clipped to `[0, buf.height)` in y — see
+# `doc/08_tracking/bug/paint_rect_negative_x_row_bleed_2026-08-07.md`: without
+# this clip, a negative `x` makes `row_offset` land inside the tail of the
+# PRECEDING row's flat pixel storage, and the fill then bleeds forward across
+# the row boundary into that unrelated row instead of clipping to this one.
 fn paint_rect(buf: ChunkRasterBuffer, x: i64, y: i64, w: i64, h: i64, argb: i64):
     var row: i64 = 0
     while row < h:
         val py = y + row
         if py >= 0 and py < buf.height:
-            val row_offset = py * buf.stride + x
-            oracle_fill_const(buf.pixels, row_offset, w, argb)
+            var x0 = x
+            if x0 < 0:
+                x0 = 0
+            var x1 = x + w
+            if x1 > buf.stride:
+                x1 = buf.stride
+            if x1 > x0:
+                val row_offset = py * buf.stride + x0
+                oracle_fill_const(buf.pixels, row_offset, x1 - x0, argb)
         row = row + 1
 
 export PaintChunkRects, ChunkRasterBuffer, paint_chunk_rasterizer_run, paint_rect

@@ -98,27 +98,60 @@ describe "F4 paint_rect edge cases: zero-area, negative-origin, empty chunk list
             i = i + 1
         assert_false(any_nonzero)
 
-    it "REAL BEHAVIOR (not plan assumption): negative-origin x bleeds into the PRECEDING row instead of clipping":
-        # Probed directly (see doc/08_tracking/bug/paint_rect_negative_x_row_bleed_2026-08-07.md):
-        # `paint_rect` clips `py` (row) to [0, height) but never clips `x`/`row_offset`
-        # against the buffer stride, and `oracle_fill_const` performs no bounds check
-        # of its own. A rect whose x origin is negative therefore computes a
-        # `row_offset` that lands in the PREVIOUS row's tail, and the fill silently
-        # wraps forward across the row boundary into the target row's head -- real
-        # pixel corruption of a row this rect was never supposed to touch, not the
-        # "paints nothing" the plan assumed for negative-origin rects.
+    it "negative-origin x clips to the buffer instead of bleeding into the preceding row (FIXED: see doc/08_tracking/bug/paint_rect_negative_x_row_bleed_2026-08-07.md)":
+        # `paint_rect` now clips the fill span per row to [0, buf.stride) in x,
+        # the same way it already clipped `py` to [0, buf.height) in y. Before
+        # the fix, x=-3 made `row_offset` land in the PRECEDING row's tail and
+        # the fill bled forward across the row boundary; now it is clamped to
+        # the intersection of [x, x+w) with [0, stride), i.e. [0, 2).
         val buf = ChunkRasterBuffer.create(10, 10)
         paint_rect(buf, -3, 2, 5, 1, 0xFFFF0000)
-        # Row 1 (the row ABOVE the target row 2) gets its last 3 columns
-        # corrupted -- this rect was never supposed to touch row 1 at all.
-        assert_true(buf.get(7, 1) == 0xFFFF0000)
-        assert_true(buf.get(8, 1) == 0xFFFF0000)
-        assert_true(buf.get(9, 1) == 0xFFFF0000)
-        # Row 2 (the intended target row) only gets its first 2 columns painted,
-        # not clipped-to-nothing and not the full 5-wide rect either.
+        # Row 1 (the row ABOVE the target row 2) must stay completely
+        # untouched -- no bleed at all.
+        assert_true(buf.get(7, 1) == 0)
+        assert_true(buf.get(8, 1) == 0)
+        assert_true(buf.get(9, 1) == 0)
+        # Row 2 (the intended target row) is clipped to columns [0, 2):
+        # requested span [-3, 2) intersected with [0, 10) is [0, 2).
         assert_true(buf.get(0, 2) == 0xFFFF0000)
         assert_true(buf.get(1, 2) == 0xFFFF0000)
         assert_true(buf.get(2, 2) == 0)
+
+    it "negative-x rect fully left of the buffer paints nothing and touches no neighbouring row":
+        val buf = ChunkRasterBuffer.create(10, 10)
+        paint_rect(buf, -8, 3, 5, 1, 0xFFFF0000)
+        var i: i64 = 0
+        var any_nonzero = false
+        while i < 100:
+            if buf.pixels[i.to_i32()] != 0:
+                any_nonzero = true
+            i = i + 1
+        assert_false(any_nonzero)
+
+    it "x + w overflowing the right edge clips instead of writing into the next row":
+        val buf = ChunkRasterBuffer.create(10, 10)
+        paint_rect(buf, 7, 4, 5, 1, 0xFFFF0000)
+        # Requested span [7, 12) intersected with [0, 10) is [7, 10).
+        assert_true(buf.get(7, 4) == 0xFFFF0000)
+        assert_true(buf.get(8, 4) == 0xFFFF0000)
+        assert_true(buf.get(9, 4) == 0xFFFF0000)
+        # Row 5 (the row BELOW the target row 4) must stay untouched -- no
+        # bleed from the overflowing tail wrapping into the next row.
+        assert_true(buf.get(0, 5) == 0)
+        assert_true(buf.get(1, 5) == 0)
+        assert_true(buf.get(2, 5) == 0)
+
+    it "negative-y rect with partial row overlap paints only in-bounds rows, no wrap-around bleed":
+        val buf = ChunkRasterBuffer.create(10, 10)
+        paint_rect(buf, 2, -1, 3, 3, 0xFFFF0000)
+        # Requested rows y=-1,0,1; only rows 0 and 1 are in bounds.
+        assert_true(buf.get(2, 0) == 0xFFFF0000)
+        assert_true(buf.get(3, 0) == 0xFFFF0000)
+        assert_true(buf.get(4, 0) == 0xFFFF0000)
+        assert_true(buf.get(2, 1) == 0xFFFF0000)
+        # The last row of the buffer must not have been touched by the
+        # negative-y clip (no wrap-around from the skipped row=-1).
+        assert_true(buf.get(2, 9) == 0)
 
     it "paint_chunk_rasterizer_run with an empty chunk list rasters nothing and reports zero counts":
         val trees = make_scene()
