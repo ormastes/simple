@@ -465,6 +465,68 @@ B1-B6 CUDA, C2-C3 Vulkan, D1-D4 SVM-G, E1-E2 docs/CI) not started.
   now resolved: D1 (and D2) are present on `origin/main` as of this
   session's commit landing this section.
 
+## Status: D2 (host reference VM) -- landed 2026-08-07
+
+- `src/lib/common/svmg/ref_vm.spl` (`SvmgVm` class) + its unit spec
+  `test/01_unit/lib/svmg/ref_vm_spec.spl`, recovered the same way as D1
+  (byte-identical to `c2f18eec42e`; `diff <(git show c2f18eec42e:<path>)
+  <path>` empty both before and after the sabotage-probe round trip
+  below).
+- **RECORD-ring layout confirmed to match B3's checked-in
+  `svmg_cuda_kernel.ptx`, not A2's `gpu_mailbox.MailboxArena`**: both
+  `write_record`/`read_records` compute the ring base as
+  `record_ring_base_offset(log_cap)` = `LOG_DATA_OFFSET + log_cap` with
+  **no** head-counter word — same offset arithmetic the PTX kernel hardcodes
+  (`add.u32 %r28, %r26, 0x10028` where `%r26` is `log_cap`). This closes the
+  open question in
+  `doc/08_tracking/bug/svmg_a2_record_ring_head_counter_diverges_from_d2_ref_vm_2026-08-07.md`
+  in D2's favor (D2/B3 agree; A2's `MailboxArena` is the outlier, already
+  documented as such in that bug and in `cuda_vm_executor.spl`'s module
+  docstring) — not re-filing, just confirming the existing bug's framing
+  from the D2 side.
+- Verify: `bin/simple test test/01_unit/lib/svmg/ref_vm_spec.spl` ->
+  `Results: 19 total, 19 passed, 0 failed`. `bin/simple lint
+  src/lib/common/svmg/ref_vm.spl`: 0 `error[...]` diagnostics (only
+  pre-existing cross-module warnings from unrelated co-compiled files, not
+  introduced by this file).
+- **Sabotage probe:** flipped `OP_ADD`'s execution from `a + b` to `a - b`
+  in `SvmgVm.step` -> RED (`19 total, 17 passed, 2 failed`); reverted ->
+  GREEN (`19 total, 19 passed, 0 failed`), file byte-identical to the
+  recovered source again.
+- Landed via the same plumbing-commit pattern as D1, immediately after D1's
+  commit was verified an ancestor of `origin/main`.
+- **NOTE:** this D2 section was silently deleted from `origin/main` by an
+  unrelated concurrent commit (`fb8f796903f`, "WP-I — MIR interpreter
+  parity for resource Drop instruction" — a stale whole-WC snapshot that
+  reverted this section along with nothing else it touched; textbook
+  instance of the anti-pattern in `.claude/rules/vcs.md` §"Sync must never
+  clobber") and restored here as part of landing D3. If this section goes
+  missing again, restore from this task's D2 commit
+  (`ae316101d59756842a91ca22b029d40c3ccf01f5`) rather than re-authoring.
+
+## Status: D3 (conformance vector suite) -- landed 2026-08-07
+
+- `test/fixtures/svmg/conformance_vectors.spl` (`all_vectors()`, 61 spec
+  examples covering the opcode table, both trap kinds, budget exhaustion,
+  and PARFOR) + `test/02_integration/svmg/conformance/conformance_suite_spec.spl`,
+  recovered from the never-merged commit `a05020fed04` (child of D1/D2's
+  `c2f18eec42e`, same lineage) the same way as D1/D2 (byte-identical:
+  `diff <(git show a05020fed04:<path>) <path>` empty both before and after
+  the sabotage-probe round trip below).
+- Every vector is assembled with D1's `svmg_asm` and executed against D2's
+  `SvmgVm` — this table is what B3/C3 (CUDA/Vulkan device executors) are
+  meant to re-run against real hardware per the design doc's "two
+  implementations, one conformance suite" (§4.5); nothing here talks to a
+  GPU.
+- Verify: `bin/simple test test/02_integration/svmg/conformance/conformance_suite_spec.spl`
+  -> `Results: 61 total, 61 passed, 0 failed`. `bin/simple lint` on both
+  files: 0 `error[...]` diagnostics.
+- **Sabotage probe:** changed the `"add"` vector's expected record value
+  from `7` to `8` (a wrong-oracle edit, not a VM edit) -> RED (`61 total,
+  60 passed, 1 failed`); reverted -> GREEN (`61 total, 61 passed, 0
+  failed`), file byte-identical to the recovered source again.
+- Landed via the same plumbing-commit pattern as D1/D2.
+
 ## Affected Layers
 
 - [[test_runner]] — `doc/00_llm_process/layer_expert/test_runner/skill.md`
