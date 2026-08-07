@@ -34,6 +34,31 @@ bootstrap-blocking regressions.
 
 **Stage-4 Caveat:** Hours-long spins observed when stage-3 was built by pre-fix seed. Root: InterpCall handicap in Cranelift (symbol lowering delay). See [doc/08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md](../../../../doc/08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md).
 
+## WP-3.5 — lint-oracle staleness probe (2026-08-07)
+
+`bin/simple lint` runs `bin/release/x86_64-unknown-linux-gnu/simple`, which is
+proven to be a **Rust seed** build (prints the seed WARNING banner), not a
+self-hosted binary. It contains `MEXH001` (present in
+`src/compiler_rust/compiler/src/lint/types.rs`) but not `MEXH006` or
+`W-MC-RES-001` (pure-Simple-only diagnostics in `src/compiler/90.tools/lint`
+and `src/compiler/35.semantics/lint`) — those can never appear in a seed
+binary regardless of how it's rebuilt; they require a genuine Stage-3
+self-host.
+
+Staleness probe: `scripts/check/check-lint-binary-staleness.shs` (grep-only,
+no build; `--selftest` proves the PASS branch without a real redeploy).
+Process doc:
+[doc/07_guide/compiler/lint_binary_redeploy_process.md](../../../../doc/07_guide/compiler/lint_binary_redeploy_process.md).
+
+Redeploy itself (T3 full bootstrap, required because the changed source is
+under `src/compiler`) is **blocked**, not merely slow: a same-day full
+`--full-bootstrap --deploy` run reached Stage 3 and SIGSEGV'd during
+`phase=monomorphize` / MIR lowering (exit 139, ~394s wall, 10.7 GB peak RSS,
+no diagnostic). See
+[doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md](../../../../doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md).
+This blocks every Wave-2 WP's ability to observe its own lint-based fix
+through the deployed binary, not just WP-3.5.
+
 ## Redeploy #79 Status (2026-07-10)
 
 **Wall:** short-circuit `and`/`or` undef dominance (#135, not yet fixed).
