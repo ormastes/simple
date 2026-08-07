@@ -41,7 +41,12 @@ A third vacuity: a path filter of `compiler/` against a tree extracted as
   and `escape.spl`; both are now restored (`EscapeState.escapes()`,
   `can_stack_allocate()`, `merge_with()`, `to_text()` all present).
 - **(b) call site renamed after the VARIABLE, not the TYPE** — no new instances
-  found beyond the already-fixed `cast_rules.spl` / `api_surface_snapshot.spl`.
+  **confirmed** beyond the already-fixed `cast_rules.spl` /
+  `api_surface_snapshot.spl`. This is NOT a closure claim: the oracle finds
+  undefined free calls but does not classify *why* a name is wrong, and the 20
+  residual files below were not classified. Entries such as `universal`,
+  `two_phase`, `static_var`, `outlives`, `jit`, `aot` could each be shape (b)
+  rather than enum-variant syntax. Shape (b) remains OPEN.
 - **(c) NEW: constructor free-function never generated.** The refactor rewrote
   static-constructor call sites `ClassName.create(...)` into free functions
   `classname_create(...)` but never emitted them. **FIXED in `46c39fa9faf`.**
@@ -145,3 +150,38 @@ eyeballing before any edit. `_` and `for` entries are detector noise.
 `origin/main`. It does not cover: method-shaped calls (except the specific
 folded-receiver pattern), trait dispatch, macro-generated calls, or anything
 under `src/lib/**`. Do not read the unlisted 38 files as verified-clean.
+
+## `cycle_detector.spl` — discriminator results (highest-liveness open cluster)
+
+Attempted next; **not fixed**, because the discriminator "does the method exist
+on the receiver's type?" came back mixed. Receiver types read from the source,
+not inferred:
+
+| call | receiver type | verdict |
+|---|---|---|
+| `visited_get(visited, node, false)` x3 | `{text: bool}` | **cannot** restore to `.get(node, false)` |
+| `rec_stack_get(rec_stack, neighbor, false)` | `{text: bool}` | same |
+| `in_degree_get(in_degree, edge, 0)` | `{text: i64}` | same |
+| `queue_pop(queue)` | `[text]` | `queue.pop()` — `.pop()` used 36x in compiler, safe |
+| `metadata_add_circular_error/_warning` | `NoteSdnMetadata` | `me add_circular_error/_warning` DO exist (`note_sdn.spl:259,262`) — safe |
+| `cycle_path_clone`, `to_clone`, `new_to_clone` x5 | **text** | see below |
+
+**The blocking finding: the two-argument `dict.get(key, default)` idiom does not
+exist anywhere in `src/compiler/**` — 0 occurrences.** So the four `*_get(d, k,
+default)` sites cannot be restored by dropping the first argument; they need a
+`contains_key` guard plus a bracket read, which is multi-line restructuring
+rather than a substitution. That restructuring is also what `CLAUDE.md` requires
+for native codegen anyway. Semantically `visited_get(visited, node, false)` on a
+`{text: bool}` that only ever stores `true` is just `visited.contains_key(node)`
+— but that is a judgement call, not a mechanical restore, and this file is the
+highest-liveness cluster found (`monomorphize`, 24 importing files), so a wrong
+guess here is expensive.
+
+The `*_clone` sites are all on **`text`** receivers (`cycle_path` is
+`cycle.join("->")`; `to` / `new_to` come from iterating a `{text: [text]}`).
+Per this repo's own ruling text is a VALUE TYPE, so the original was probably a
+no-op clone and the correct restore may be to drop the call entirely rather than
+rewrite it to `.clone()`. Needs confirmation that `text.clone()` even exists
+before either choice is made.
+
+Net: this cluster is well-specified but needs per-site judgement, not `sed`.
