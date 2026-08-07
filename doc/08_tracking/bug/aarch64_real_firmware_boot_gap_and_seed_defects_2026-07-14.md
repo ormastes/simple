@@ -851,3 +851,102 @@ standing correctness improvement, not a closed bug. File:
   lint hang.
 - Real aarch64 verification is still blocked on the native-build regression
   noted above (separate, in-flight fix by another session).
+
+## `.limine_reqs` named-section Synchronous Exception: orphan-placement hypothesis REFUTED (static-only, 2026-08-07)
+
+Follow-up on the parked "named-section attempt and empirically-confirmed
+regression" note above: with `__attribute__((section(".limine_reqs")))` added
+to the five request globals in `freestanding_runtime.c`, Limine's own loader
+faulted (`Synchronous Exception at 0x000000004C66A2E0`, reproduced twice) while
+`linker_limine.ld` DOES already carry an explicit output-section rule for
+`.limine_reqs` (`.limine_reqs : AT(...) { *(.limine_reqs) } :data`, sitting
+between `.text` and `.rodata`, mapped into the `data` PHDR). The obvious
+hypothesis was that this rule mishandles the input section as an **orphan**
+(ld.lld places sections with no matching rule using its own orphan-placement
+heuristic, which can put them outside the intended `PT_LOAD`, break page
+alignment, or violate this script's own documented "mixed R/W permissions may
+not share a page" constraint) — worth checking since the crash was never
+isolated further at the time (no Limine source in-tree, network fetch
+unavailable).
+
+**This investigation is static-only — QEMU was not re-run.** The live tree
+currently ships the plain-`used`-global form (per the parked note); per task
+scope that working boot path was left untouched. Instead, reconstructed the
+placement question directly from the real `linker_limine.ld` in a scratch
+copy (`/tmp/.../scratchpad/limine_repro/`, not committed): a minimal
+freestanding C file defining the same five `limine_request_t` globals
+(identical magic IDs, `__attribute__((used, aligned(8)))`, plus a `_start`
+that reads all five `.response` fields so nothing gets DCE'd), built two ways
+with the system `clang`/`ld.lld` (`clang -target aarch64-unknown-none-elf
+-ffreestanding -c ...` then `ld.lld -T linker_limine.ld -o out.elf out.o`,
+no `--gc-sections`, matching the flags implied by the rest of this doc's
+native-build invocations): once with plain `used` (baseline, "good") and once
+with `section(".limine_reqs")` added (repro, "bad").
+
+**Result: the `.limine_reqs` rule is NOT an orphan, and placement is
+byte-for-byte structurally identical to the baseline.** `readelf -SW`/`-lW`
+diff between the two builds:
+
+```
+< [2] .data        PROGBITS ffffffff80101000 011000 0000f0 00 WA 0 0 8   (good)
+> [2] .limine_reqs PROGBITS ffffffff80101000 011000 0000f0 00 WA 0 0 8   (bad)
+...
+Segment 01: good=".data"  bad=".limine_reqs"   (both inside the same RW PT_LOAD)
+```
+
+Every field — `Address`, file `Offset`, `Size`, `Flg` (`WA`, i.e. `SHF_ALLOC |
+SHF_WRITE`, so it's real allocated loaded data, not stripped/orphaned-into-a
+non-alloc region), `Align` — is identical between the two builds; the section
+even lands at the exact same virtual/physical address the plain-global data
+would have occupied. The `PT_LOAD` program headers (`VirtAddr`, `PhysAddr`,
+`FileSiz`, `MemSiz`, `Flg`, `Align`) are byte-identical between builds too;
+only the section *name* differs (`.data` → `.limine_reqs`), plus a few bytes
+of `.shstrtab` string-table growth to hold the longer name and a
+correspondingly larger `e_shoff`. This exactly matches what the earlier
+readelf check in this doc already found for the real, full kernel build
+("genuinely populated the section... `0xf0` = 240 bytes... no `.limine_reqs`
+section at all [in the working build]") — i.e. **two independent readelf
+checks (the original full-kernel build, and this from-scratch minimal repro)
+both show correct, non-orphaned, in-segment, correctly-`AT()`-mapped
+placement for the named section.** The linker script's rule works exactly as
+written; it is not silently falling through to orphan handling, splitting a
+page across permissions, or landing outside a `PT_LOAD`.
+
+**Conclusion: the orphan-section-placement hypothesis is refuted by this
+evidence.** The `Synchronous Exception` Limine hits is not explained by
+anything visible in `readelf -lS` output — the ELF's segment/section layout
+is unremarkable. The remaining candidate explanations are outside what static
+linker-script/readelf analysis can settle without Limine's own loader source
+(still not available in this environment/offline network):
+- Limine's ELF loader may special-case a section literally named `.requests`
+  (bracketed by `LIMINE_REQUESTS_START_MARKER`/`_END_MARKER` symbols per
+  `PROTOCOL.md`'s reference kernel convention) differently from an
+  arbitrarily-named allocated section it doesn't recognize — `.limine_reqs`
+  matches neither the "no named section, scan everything" path (which is
+  what actually works, per this doc's `x86_64` comment: "Limine scans the
+  binary for the magic IDs at boot time") nor the reference `.requests`
+  fast-path name, so it may be hitting a bounded/fast-path scan keyed on a
+  name it half-recognizes and mis-sizes.
+- A one-off toolchain/environment difference between the two build attempts
+  (different `clang_static` fork state, different AAVMF firmware image
+  revision) that happens to correlate with, but isn't caused by, the section
+  attribute — not ruled out, since the original two "bad" runs were not
+  cross-checked against a simultaneous re-run of the "good" configuration on
+  the identical AAVMF/QEMU binaries.
+
+**Recommended correct recipe, IF this is revisited and re-tested on real
+hardware/QEMU:** the linker-script rule itself does not need to change for
+placement reasons — the diff above shows `AT(0x40100000 + (. -
+0xffffffff80100000)) { *(.limine_reqs) } :data` already produces a correct,
+non-orphaned in-segment section. The one real gap worth closing regardless of
+this fault: **add `KEEP()`** — `.limine_reqs : AT(...) { KEEP(*(.limine_reqs))
+} :data` — so a future `--gc-sections`-enabled build path can't silently drop
+the section (harmless today only because nothing in this checkout's
+native-build invocation passes `--gc-sections`). This is a documentation-only
+recommendation here, not applied to the live linker script, since the
+task scope for this pass was diagnosis, not changing the working boot path.
+
+**Not done:** re-running the actual QEMU/AAVMF boot (explicitly out of scope
+for this pass — the task was static analysis only); fetching Limine loader
+source to check its section-name handling (no network access in this
+environment).

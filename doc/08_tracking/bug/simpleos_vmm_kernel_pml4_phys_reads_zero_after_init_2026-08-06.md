@@ -115,6 +115,24 @@ reports **56 known, 0 new** — so the fix introduced no fabricated symbols. Any
 future fabrication in this entry now fails the build instead of shipping a
 no-op.
 
+## Interpreter-level regression spec added 2026-08-07
+
+`test/01_unit/os/kernel/memory/vmm_publish_kernel_pml4_spec.spl` exercises the
+`vmm_publish_kernel_pml4` / `vmm_kernel_pml4_phys` store-load pair directly
+(interpreter level, no QEMU needed): publish a known PML4 root, assert the
+accessor reads back the exact value; publish a second value and assert it is
+reflected (rules out a cached/stale read); and a dedicated
+"never reads back zero after a nonzero publish" assertion for the exact
+regression shape. `bin/simple test` on this file: `Results: 3 total, 3 passed,
+0 failed`.
+
+Sabotage check performed: commenting out `_vmm_pml4_phys = pml4_phys` in
+`vmm_core.spl:294` (leaving `_vmm_hhdm_offset` / `g_vmm_initialized` writes
+intact) reproduces the exact defect and turns all 3 examples red
+(`Results: 3 total, 0 passed, 3 failed`, `expected 0 to equal ...`). Restoring
+the line returns the file to a clean diff and 3/3 green — confirms the spec
+is load-bearing, not vacuous.
+
 ## Still open
 
 - **L5** host-side `getfile` retrieval returns an empty object. The serial ends

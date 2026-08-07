@@ -256,3 +256,40 @@ parallel sessions and must not be overwritten to prove a fix.
 
 Once the seed is fixed, revert `http1.decode_chunked` to the `?` form and re-run
 the probe; it must print `try bad : ERR:[boom]`.
+
+## Additional verification (2026-08-07, follow-up lane)
+
+Two source claims above were re-checked directly (not relayed secondhand):
+
+- `src/compiler_rust/compiler/src/hir/lower/expr/control.rs:2194` `lower_try` —
+  confirmed: body is exactly `rt_enum_payload(inner_hir)`, no discriminant test,
+  no branch, no early return.
+- `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:2501`
+  `lower_try_expr` — confirmed: creates `try_err`/`try_ok` blocks (line
+  2700-2701) and calls `terminate_return(res_local)` on the Err path (line
+  2713). The pure-Simple-lowering-is-correct claim holds.
+
+The doc previously had no probe run under the JIT to demonstrate the defect
+directly (the 6/6 green spec only exercises the interpreter, which `bin/simple
+test` defaults to and where `?` is already correct). Ran the doc's own
+text-payload repro under both engines directly, no rebuild:
+
+JIT (`bin/simple run`, default engine):
+```
+  before
+  after: [boom]
+caller OK:[boom]
+```
+
+Interpreter (`SIMPLE_EXECUTION_MODE=interpret bin/simple run`):
+```
+  before
+caller ERR:[boom]
+```
+
+This is the missing empirical red: JIT falls through past `?` and returns the
+error payload as an Ok value; interpreter correctly short-circuits with no
+"after" line at all. No code was changed — `lower_try` is Rust-seed-only and a
+rebuild is out of scope for this lane (shared binary, per the note above). No
+red-then-green fix cycle applies here; this entry remains OPEN pending the
+seed rebuild described in "Fix direction (not landed)".
