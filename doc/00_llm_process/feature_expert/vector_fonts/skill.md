@@ -134,6 +134,36 @@ Shares a signature with the general BoxInt `<<3` tag-shift family
 (2026-07-04 seed ANY-channel enum-handle mangling) — same "tagged value
 read at the wrong shift" shape, different call sites.
 
+## Cross-Instance Glyph-Raster Cache (T12, render-perf replan, 2026-08-07)
+
+- `FontRenderer.get_glyph` now has a module-level cross-instance pixel
+  cache (`_glyph_raster_keys`/`_glyph_raster_values`, ring-buffer capped at
+  `GLYPH_RASTER_CACHE_LIMIT`), in addition to the pre-existing per-instance
+  `self.cache`. Serves the `browser_default_for_family`-style production
+  shape where a fresh `FontRenderer` is built per text node.
+- History: a same-shaped cache was attempted 2026-08-06, blocked by
+  `doc/08_tracking/bug/glyph_raster_cache_text_array_index_corrupt_zero_hit_rate_2026-08-06.md`
+  ("`[text]`-array element read is corrupt under native/JIT"), and dropped
+  before ever being committed (`c1e232a9a1e` only landed shaped-run-cache
+  instrumentation — there is no glyph-raster diff to revert-restore). T11
+  (2026-08-07) re-investigated and found that framing FALSE for the general
+  case; the real, narrower, still-open interpreter-only defect is: a free
+  function whose entire body is only `_arr.push(v)` can silently lose the
+  write when called from an `it` block under `bin/simple test`. It does
+  NOT reproduce when the mutation is inline inside the function/method
+  that owns the array.
+- **Landing constraint**: the push and ring-buffer overwrite for this
+  cache live directly inside `get_glyph`'s own body — never delegated to a
+  separate free-function push helper — specifically to stay clear of that
+  boundary. If you refactor this into a helper function, re-run the
+  hit-rate spec (`test/01_unit/lib/common/text_layout/glyph_raster_cache_spec.spl`)
+  under `bin/simple test`, not just `bin/simple run` — the JIT lane does
+  not exercise the interpreter-only defect class at all.
+- Verified nonzero hit rate under both engines: `bin/simple run` (JIT, ad
+  hoc driver) and the interpreter test lane (spec above, 4/4 green,
+  sabotage-verified — forcing the lookup loop to `if false:` flips 3 of 4
+  cases red).
+
 ## Gotchas
 
 - A fix that works hosted (interpreter/JIT) says nothing about the

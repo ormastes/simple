@@ -68,7 +68,7 @@ carry the described subject line. Only the M2 *scope* claim was wrong.
 | W2 selector index | **DONE (mechanism) / uncommitted** | `style_block.spl:211,248,72,309`. **File is `M` in this shared tree from another session** — collision hazard, see §3 |
 | §7 DrawIR deltas | **DONE** | `0502c2b7873`; `src/lib/common/ui/render_opt/draw_ir_delta.spl` (103L) + spec, 5/5 incl. sabotage |
 | §7 shaped-run cache | **DONE** | `c1e232a9a1e`; `src/lib/nogc_sync_mut/text_layout/font_renderer.spl:145-159`, accessors :264/:267 |
-| §7 glyph-raster cache | **BLOCKED on a named bug** | Deliberately not landed (`font_renderer.spl:148-153`); `glyph_raster_cache_text_array_index_corrupt_zero_hit_rate_2026-08-06.md` — `[text]` array read-back corrupt under native/JIT, root-caused with a minimal repro → **T11** then **T12** |
+| §7 glyph-raster cache | **DONE** | `font_renderer.spl` — cross-instance cache in `get_glyph`, push inline in the method body per T11's boundary finding (not a revert of any prior diff — none existed to restore). Spec: `test/01_unit/lib/common/text_layout/glyph_raster_cache_spec.spl`, 4/4, sabotage-verified. Nonzero hit rate confirmed on both `bin/simple run` (JIT) and the interpreter test lane → **T12** |
 
 ### C0–C5 sub-lane (zero-cost layers) — see also the M-milestone doc
 

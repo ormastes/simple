@@ -158,6 +158,43 @@ var _resolved_font_metric_lock: Mutex? = nil
 # interpreter-lane correctness only, not JIT-lane safety.
 var _resolved_font_metric_hits: i64 = 0
 var _resolved_font_metric_misses: i64 = 0
+# Cross-instance glyph-raster (pixel) cache -- T12 (render-perf replan,
+# 2026-08-07). Landed after T11 corrected the root cause named in the block
+# comment above: "[text]-array element read is corrupt under native/JIT" was
+# disproven (plain array push/index-read is clean on both engines; see
+# text_array_index_readback_spec.spl). The actual open interpreter-lane
+# defect is narrower -- a free function whose ENTIRE body is only
+# `_arr.push(v)` can silently lose the write when called from an `it` block
+# under `bin/simple test` -- and does not reproduce for a mutation done
+# INLINE inside the function/method that owns the array (verified by a
+# positive-control probe: `me` method body doing `_arr = _arr.push(v)`
+# directly, called from an `it` block via a class instance, round-trips
+# correctly). This cache is deliberately implemented that way: the push and
+# ring-buffer overwrite live directly inside `FontRenderer.get_glyph`'s body
+# below, never delegated to a separate free-function push helper, to stay on
+# the proven-safe side of that boundary. Read-only accessors below are safe
+# regardless (no push involved).
+val GLYPH_RASTER_CACHE_LIMIT: i64 = 4096
+var _glyph_raster_keys: [text] = []
+var _glyph_raster_values: [CachedGlyph] = []
+var _glyph_raster_cursor: i64 = 0
+var _glyph_raster_hits: i64 = 0
+var _glyph_raster_misses: i64 = 0
+
+fn glyph_raster_cache_hits() -> i64:
+    _glyph_raster_hits
+
+fn glyph_raster_cache_misses() -> i64:
+    _glyph_raster_misses
+
+fn _glyph_raster_cache_reset_for_test():
+    """Test-only: clear entries AND counters so a spec gets a cold cache."""
+    _glyph_raster_keys = []
+    _glyph_raster_values = []
+    _glyph_raster_cursor = 0
+    _glyph_raster_hits = 0
+    _glyph_raster_misses = 0
+
 # Referenced by the shared mutex helpers below. Keep this declaration before
 # first use because SMF semantic compilation resolves module globals in order.
 var _registered_selected_fonts_only: bool = false
@@ -1218,6 +1255,32 @@ class FontRenderer:
             self.cache = cache
             return cached
 
+        # Cross-instance glyph-raster cache (T12, render-perf replan
+        # 2026-08-07) -- keyed by rasterizer identity + codepoint + size.
+        # Independent of the per-instance `cache` above, which only survives
+        # repeat calls on the SAME FontRenderer instance; this one also
+        # serves fresh instances (the browser_default_for_family production
+        # shape, where a new FontRenderer is built per text node). The push
+        # below happens INLINE in this method body (never delegated to a
+        # separate free-function push helper) -- see the comment on
+        # `_glyph_raster_keys` above for why that boundary matters.
+        val raster_identity = if active_rasterizer != nil: active_rasterizer.cache_identity() else: ""
+        val raster_key = "{raster_identity};cp={codepoint};fs={font_size}"
+        var raster_idx = 0
+        var raster_hit: CachedGlyph? = nil
+        while raster_idx < _glyph_raster_keys.len():
+            if _glyph_raster_keys[raster_idx] == raster_key:
+                raster_hit = _glyph_raster_values[raster_idx]
+            raster_idx = raster_idx + 1
+        if raster_hit != nil:
+            _glyph_raster_hits = _glyph_raster_hits + 1
+            cache.insert(raster_hit)
+            self.cache = cache
+            if raster_hit.width > 0 and raster_hit.height > 0:
+                self.glyph_phase_return_positive = true
+            return raster_hit
+        _glyph_raster_misses = _glyph_raster_misses + 1
+
         # Rasterize
         cache.record_rasterization()
         var glyph = CachedGlyph.empty(codepoint, font_size)
@@ -1350,6 +1413,15 @@ class FontRenderer:
             cache.insert(glyph)
         if glyph.width > 0 and glyph.height > 0:
             self.glyph_phase_return_positive = true
+            # Store into the cross-instance glyph-raster cache -- inline
+            # push/ring-overwrite, same method body that owns the globals.
+            if _glyph_raster_keys.len() < GLYPH_RASTER_CACHE_LIMIT:
+                _glyph_raster_keys = _glyph_raster_keys.push(raster_key)
+                _glyph_raster_values = _glyph_raster_values.push(glyph)
+            else:
+                _glyph_raster_keys[_glyph_raster_cursor] = raster_key
+                _glyph_raster_values[_glyph_raster_cursor] = glyph
+                _glyph_raster_cursor = (_glyph_raster_cursor + 1) % GLYPH_RASTER_CACHE_LIMIT
         self.cache = cache
         glyph
 
