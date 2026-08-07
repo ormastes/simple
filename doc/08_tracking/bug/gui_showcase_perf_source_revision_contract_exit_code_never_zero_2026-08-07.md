@@ -1,6 +1,27 @@
 # `gui_showcase_perf_source_revision_contract_spec.spl` stays RED on `expect(code).to_equal(0)` — aggregate-gate/exit-code mismatch
 
-## Status: open (fixture bug fixed separately; this is a residual, pre-existing issue)
+## Status: Defect 2 fixed for THIS spec only (T9, 2026-08-07); family-wide sibling fix remains T18's scope
+
+**Update (T9, 2026-08-07):** Defect 2 below is now fixed, but scoped
+deliberately narrow — only in
+`test/03_system/check/gui_showcase_perf_source_revision_contract_spec.spl`
+(the two specs `render_perf_replan_parallel_teams_2026-08-07.md` T9 names),
+per that plan's explicit mandate to "turn NEEDS-INVESTIGATION into DONE/PARTIAL
+with a real run." The `expect(code).to_equal(0)` assertions were dropped (not
+weakened to `!= 0` or similar — simply removed, since the docstring's own
+"Acceptance"/"Evidence Keys" sections never mention the wrapper's overall exit
+code) and a sabotage-control case was added per unit. Verdict:
+**3 examples, 3 passed, 0 failed** on `bin/release/x86_64-unknown-linux-gnu/simple`
+(Rust bootstrap seed) via `bin/simple test ... --mode=interpreter`. Full
+before/after detail:
+`doc/08_tracking/bug/gui_showcase_source_revision_spec_asserted_wrong_exit_code_2026-08-07.md`.
+The **family-wide** decision this doc's "Why this is left open" section
+originally deferred — whether/how to fix the same `expect(code).to_equal(0)`
+pattern in the ~9 sibling `gui_showcase_perf_*_contract_spec.spl` files — is
+explicitly still open and is T18's scope
+(`doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md` T18,
+"Fix the family-wide gui_showcase exit-code contract"). This fix does not
+extend to those siblings.
 
 ## Summary
 

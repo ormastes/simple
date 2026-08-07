@@ -194,3 +194,34 @@ none:
 - `src/lib/nogc_sync_mut/diag.spl:385` and both `fs/path.spl` twins carry
   `ponytail`-style comments explaining why the closure was written out by hand.
   **Do not "clean those up" back into `array_sort_by` / `.map(_)`.**
+
+## T7 (render-perf replan, 2026-08-07): unexecutable under current constraints
+
+`doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md` T7 scopes
+a "loud guard" for defect 2 at "wherever Defect 1's existing lambda guard
+lives" — that is `jit.rs:196 first_lambda_function_impl` in
+`src/compiler_rust/compiler/src/codegen/jit.rs`, per the Localization section
+above. Two independent facts make this unit unexecutable this session:
+
+1. **The guard site is Rust-seed-only, and deployed-binary rebuild/redeploy is
+   forbidden in this task's constraints.** This doc's own Localization section
+   already states the guard's file "is in `src/compiler_rust/**`, out of scope
+   by policy — not fixed here." A Rust edit that cannot be rebuilt into the
+   binary `bin/simple test`/`bin/simple run` actually execute has zero
+   observable effect.
+2. **The text-scanner fallback is pre-refuted by this same doc.** Detection
+   section Limit #1: "It cannot detect defect 2 at all. A named-fn ref is
+   indistinguishable from an ordinary call at the text level. Defect 2 must be
+   closed in the compiler." Extending
+   `scripts/check/check-jit-closure-blockers.shs` cannot substitute for the
+   Rust-side fix.
+
+`grep -rln 'closure ABI' src/compiler/` still returns nothing (reconfirmed
+2026-08-07), matching this doc's "no pure-Simple counterpart" finding.
+
+**Conclusion:** T7 is blocked pending either a policy exception for a
+Rust-seed edit plus a bootstrap rebuild, or the real ABI fix (this doc's "Fix
+direction" item 1), which removes both defects and makes a guard moot. No spec
+was written against `jit.rs` for this unit. This session pivoted to T9
+instead — see
+`doc/08_tracking/bug/gui_showcase_source_revision_spec_asserted_wrong_exit_code_2026-08-07.md`.

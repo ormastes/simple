@@ -86,7 +86,7 @@ carry the described subject line. Only the M2 *scope* claim was wrong.
 
 | Item | Status | Evidence |
 |---|---|---|
-| O0/O1 revisions + property trees | **NEEDS-INVESTIGATION** | Specs exist (`gui_showcase_perf_source_revision_contract_spec.spl` — fixture repaired by `bcf581e52702`; `gui_web_2d_source_revision_emitters_spec.spl`); no verified verdict → **T9** |
+| O0/O1 revisions + property trees | **DONE** (T9, 2026-08-07) | `gui_showcase_perf_source_revision_contract_spec.spl`: 3/3 (dropped an unsatisfiable `expect(code).to_equal(0)`, added sabotage control); `gui_web_2d_source_revision_emitters_spec.spl`: 3/3 (added sabotage control). Binary: `bin/release/x86_64-unknown-linux-gnu/simple` (seed), `--mode=interpreter`. Detail: `doc/08_tracking/bug/gui_showcase_source_revision_spec_asserted_wrong_exit_code_2026-08-07.md` |
 | O2 damage / occlusion | **DONE** | V-lane suite: `compositor_occlusion_rect_spec.spl` 21/21, `compositor_occlusion_spec.spl` 10/10 (130.6 s — needs a 300–600 s per-spec timeout, not 150 s) |
 | O3 rasterizer / resources | **PARTIAL** | `paint_chunk_rasterizer_spec.spl` (2 its), `widget_draw_ir_glyph_run_spec.spl` 4/4 |
 | P0/P1 SIMD bucket gate | **DONE (honest negative)** | `6c048f9af5ce`; `backend_software.spl:813,831-834` probes TINY/SMALL/MEDIUM/LARGE. Honest result: **SIMD lost at every bucket under the interpreter; all four stayed scalar.** `_kernel_probe_fill_bucket:66,87-90` |
