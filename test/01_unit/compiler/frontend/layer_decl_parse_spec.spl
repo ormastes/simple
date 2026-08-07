@@ -1,0 +1,92 @@
+# Layer declaration parsing (M0 of doc/03_plan/compiler/forwarding/
+# zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md).
+#
+# @cover src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl
+# @cover src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
+#
+# Exercises the self-hosted frontend directly via parse_and_build_module --
+# bin/simple currently resolves to the Rust seed, which does not read
+# src/compiler/10.frontend/ at all, so this in-process call into the flat
+# AST bridge is the only way to observe this parser code running at all
+# right now (see bootstrap_decl_count_slot_spec.spl and
+# flat_ast_speculative_diagnostics_spec.spl for the same pattern used
+# elsewhere in this directory).
+#
+# `layer` is intentionally a SOFT keyword (current_ident_is_layer_decl() in
+# enum_module_body.spl), not a new lexer token: the codebase already uses
+# `layer` as an ordinary field/param identifier (e.g.
+# src/compiler/85.mdsoc/construct_types/shared_binding.spl's
+# `static fn new(path: text, primary: text, layer: i64)`), so reserving it
+# globally would have broken those call sites. A `layer` decl is lowered to
+# an inert `__layer_decl(name, uses_csv)` marker call that module_assembly.spl
+# recognizes and drops (mirroring the existing `__domain_block` marker
+# trick) -- zero HIR/MIR/codegen output, per the plan's M0 "zero runtime
+# effect" scope. Wiring the parsed facts into layer_dag_checker.spl's
+# LayerDagRegistry is left to a future frontend adapter (that checker's own
+# doc comment already defers this, see #157-style trait rebuild note in
+# module_assembly.spl for the shape of such adapters).
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.core.parser.{parser_has_errors}
+
+describe "layer declaration parsing":
+    it "parses a bare 'layer NAME' declaration with no errors":
+        val source = "layer draw\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "layer_bare.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("main")).to_equal(true)
+
+    it "parses 'layer NAME uses A, B' with no errors":
+        val source = "layer draw\n\nlayer gui uses draw\n\nlayer web uses gui, draw\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "layer_uses.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("main")).to_equal(true)
+
+    it "is fully inert: no stray constant/decl is emitted for the marker":
+        val source = "layer draw\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "layer_inert.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        # The __layer_decl marker is dropped entirely by module_assembly.spl
+        # (mirrors __domain_block), so it must never surface as a top-level
+        # constant/binding under its synthetic "_expr_layer_*" name.
+        expect(module.constants.contains("_expr_layer_0")).to_equal(false)
+
+    it "sabotage: rejects a layer decl whose 'name' position holds a reserved keyword":
+        # "layer " is followed by whitespace + an identifier-start char ('i'),
+        # so current_ident_is_layer_decl() correctly enters the layer-decl
+        # parse path (same soft-keyword lookahead a legitimate `layer draw`
+        # takes) -- but the actual next token lexes as TOK_KW_IF, not
+        # TOK_IDENT, so parse_layer_decl's name check must reject it rather
+        # than silently accepting "if" as a layer name or crashing.
+        val source = "layer if\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "layer_bad_name.spl")
+
+        expect(parser_has_errors()).to_equal(true)
+
+    it "sabotage: rejects a malformed 'uses' list (trailing comma with no name)":
+        val source = "layer draw\n\nlayer gui uses draw,\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "layer_malformed_uses.spl")
+
+        expect(parser_has_errors()).to_equal(true)
+
+    it "does not regress: 'layer' still works as an ordinary field name":
+        # Regression guard for the soft-keyword design: `layer` must remain a
+        # valid plain identifier when it is NOT followed by whitespace + an
+        # identifier in decl-start position (e.g. as a typed struct field).
+        val source = "struct Binding:\n    layer: i64\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "layer_field_regression.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.structs.contains("Binding")).to_equal(true)
+
+    it "does not regress: ordinary struct/trait/module decls still parse alongside a layer decl":
+        val source = "layer draw\n\nstruct Point:\n    x: i64\n    y: i64\n\ntrait Shape:\n    fn area() -> i64\n\nfn main() -> i64:\n    0\n"
+        val module = parse_and_build_module(source, "layer_broader_regression.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.structs.contains("Point")).to_equal(true)
+        expect(module.traits.contains("Shape")).to_equal(true)
+        expect(module.functions.contains("main")).to_equal(true)

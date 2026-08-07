@@ -23,7 +23,7 @@ use compiler.core.ast.{decl_set_unroll_factor, decl_set_pipeline_ii, decl_set_me
 use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_derives}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_field_bits, decl_get_derives, decl_set_derives}
 use compiler.core.ast.{module_set_path, module_add_decl}
-use compiler.frontend.core.lexer.{lex_token_start_get}
+use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
@@ -38,6 +38,7 @@ use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_wa
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
 use compiler.core.tokens.{TOK_KW_AS, TOK_KW_CE, TOK_PIPE, TOK_ASSIGN, tok_kind_name}
+use compiler.core.tokens.{TOK_IDENT, TOK_COMMA}
 
 # Import from sibling split modules
 use compiler.frontend.core.parser_expr.{parse_expr, parse_int_text}
@@ -58,6 +59,71 @@ extern fn rt_env_get(key: text) -> text
 
 fn parser_module_trace_enabled() -> bool:
     (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+
+# Soft-keyword lookahead for `layer NAME` / `layer NAME uses A, B` (M0 of
+# doc/03_plan/compiler/forwarding/zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md).
+# "layer" is NOT a reserved word at the lexer level -- it collides with
+# legitimate identifiers already in this codebase (e.g. `layer: i64` /
+# `layer: LayerDef` struct fields and fn params in src/compiler/85.mdsoc/,
+# same reason the "cli" soft keyword at current_ident_is_cli_decl() is not a
+# lexer token). The module-body dispatcher only treats "layer" as the start
+# of a layer decl when it is immediately followed by whitespace then an
+# identifier-start character (the layer name). Any other shape (`layer:`,
+# `layer =`, `layer.foo`, `layer(`, `layer` alone at EOL) is left as a normal
+# identifier for the generic statement/expression parser.
+fn current_ident_is_layer_decl() -> bool:
+    var pos = lex_token_end_get()
+    val source_len = lex_source_len()
+    var saw_space = false
+    while pos < source_len:
+        val ch = lex_source_char_at(pos)
+        if ch == " " or ch == "\t":
+            saw_space = true
+            pos = pos + 1
+            continue
+        break
+    if not saw_space or pos >= source_len:
+        return false
+    is_ident_start_char(lex_source_char_at(pos))
+
+# Parses `layer NAME` and `layer NAME uses A, B, ...` (M0: no body, no
+# fields, no methods -- zero runtime effect). The declared facts are lowered
+# into a `__layer_decl(name, uses_csv)` marker call wrapped in an ordinary
+# val-binding decl, mirroring the `__domain_block` marker trick used by
+# parse_module_domain_block_decl above: module_assembly.spl recognizes the
+# marker by callee name and drops it entirely (di + 1; continue) instead of
+# emitting a real top-level const, so a `layer` decl is fully inert -- no
+# HIR/MIR/codegen output, matching the plan's "zero runtime effect" scope.
+# Wiring the recognized facts into layer_dag_checker.spl's LayerDagRegistry
+# is left for the frontend adapter that checker's own doc comment already
+# calls out as future work, not part of this milestone.
+fn parse_layer_decl(loop_index: i64) -> i64:
+    parser_advance()  # consume 'layer'
+    var layer_name = ""
+    if par_kind_get() != TOK_IDENT:
+        parser_error("expected layer name after 'layer'")
+    else:
+        layer_name = par_text_get()
+        parser_advance()
+    var uses_list: [text] = []
+    if par_kind_get() == TOK_IDENT and par_text_get() == "uses":
+        parser_advance()
+        while true:
+            if par_kind_get() != TOK_IDENT:
+                parser_error("expected layer name in 'uses' list")
+                break
+            uses_list.push(par_text_get())
+            parser_advance()
+            if par_kind_get() == TOK_COMMA:
+                parser_advance()
+                continue
+            break
+    val helper = expr_ident("__layer_decl", 0)
+    var args: [i64] = []
+    args.push(expr_string_lit(layer_name, 0))
+    args.push(expr_string_lit(uses_list.join(","), 0))
+    val marker = expr_call(helper, args, 0)
+    decl_val_binding("_expr_layer_" + int_to_str(loop_index), -1, marker, -1)
 
 fn parse_enum_decl() -> i64:
     parser_advance()
@@ -311,6 +377,8 @@ fn parse_module_decl_with_visibility(loop_index: i64, visibility: text) -> i64:
         return parse_export_decl()
     if par_kind_get() == 6 and par_text_get() == "mod":
         return parse_mod_decl_with_visibility(visibility)
+    if par_kind_get() == 6 and par_text_get() == "layer" and current_ident_is_layer_decl():
+        return finalize_decl_visibility(parse_layer_decl(loop_index), visibility)
     parser_error("expected declaration after visibility modifier")
     -1
 
@@ -535,6 +603,14 @@ fn parse_module_body():
             val d = parse_bitfield_decl()
             module_add_decl(d)
             parser_reset_pending_vhdl_decorators()
+        elif par_kind_get() == 6 and par_text_get() == "layer" and current_ident_is_layer_decl():
+            # layer NAME / layer NAME uses A, B ("layer" is a soft keyword,
+            # not reserved, so it never shadows identifiers like
+            # `layer: i64` fields/params; see current_ident_is_layer_decl()).
+            val layer_d = parse_layer_decl(i)
+            if layer_d >= 0:
+                module_add_decl(layer_d)
+                parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and par_text_get() == "cli" and current_ident_is_cli_decl():
             # cli Name: declarative arg parsing block ("cli" is a soft
             # keyword, not reserved, so it never shadows identifiers like
