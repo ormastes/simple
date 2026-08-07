@@ -1234,3 +1234,138 @@ in this report and may already be stale per the repeated pattern this
 report documents (containment.spl, paint_primitives.spl, and
 paint_layout.spl above all drifted from their last-recorded number by the
 time they were re-measured).
+
+## `paint_primitives.spl` (U4.5) closure, remainder round — 2026-08-07 (session 4)
+
+Closes the specific 57-line shortfall the previous session ("session 3",
+directly above) reported and left explicitly deferred: reaching the >=85%
+U4.5 line target (758/891) required constructing real `Style` values, which
+that session did not attempt and named as the reachable path via
+`fb_style_background_opacity_clip` (64 uncovered of 82) and
+`fb_style_rounded_rect_opacity_clip` (11 uncovered).
+
+`Style` has a full-field constructor, `renderer_default_style()`
+(`simple_web_html_layout_renderer_style.spl:311`), already used by
+`simple_web_html_layout_renderer_paint_layout_coverage_closure_spec.spl` in
+exactly the needed pattern: `var st = renderer_default_style()` then
+per-field mutation (`st.bg = 0xFF0000FFu32`, etc.). No blocker: `Style`
+construction from a direct-import spec is straightforward.
+
+### Extension, not a new file
+
+Per this task's instruction, the existing (already-landed)
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/paint_primitives_coverage_closure_spec.spl`
+was extended with a second `describe` block, `"paint_primitives.spl coverage
+closure: Style-driven remainder"` (13 new `it` blocks: 3 for
+`fb_style_rounded_rect_opacity_clip`, 10 for
+`fb_style_background_opacity_clip`), rather than creating a duplicate
+closure spec file. File grew from 13 to 26 `it` blocks total, all real
+`assert_true`/`assert_equal`/`assert_false` oracles, no assertion-free
+calls.
+
+Every expected pixel was hand-derived from the source, not guessed:
+- The solid-color path folds the fill color's own rgba alpha into
+  `opacity_pct` via `(opacity_pct * alpha + 127) / 255` before delegating to
+  `fb_style_rounded_rect_opacity_clip` -> `fb_rounded_rect_corners_opacity_clip`
+  -> `fb_rect_opacity_clip` (radii 0 delegates further to a plain rect fill
+  at opacity_pct>=100, or `blend_opacity`'s
+  `(src*pct + dst*(100-pct) + 50) / 100` per-channel rounding otherwise).
+- The gradient path was deliberately pinned with
+  `background_gradient_from == background_gradient_to` so that
+  `mix_channel_gradient_centered`'s dithering remainder is provably 0
+  (`weighted = a*denom` exactly when `a==b`, since `denom - b_weight +
+  b_weight == denom`), making the resulting pixel color a flat, known value
+  independent of the (separately, already-covered) dither table.
+- Corner-radius per-pixel clipping reused the exact numeric setup already
+  verified in the file's first `describe` block
+  (`fb_rounded_rect_row_span_opacity_clip`'s `fbB` case: radii 4 on all
+  corners, `fbw=20`, box at `(2,2,10,10)`, row `py=2` -> column 2 clipped
+  away, column 7 inside the top-right circle), routed this time through the
+  `Style`-driving wrapper instead of the raw corners function.
+
+New branches specifically targeted for `fb_style_background_opacity_clip`
+beyond the original solid/gradient/tile-vs-repeat/clip-box cases: the
+`bg_w<=0` early-return no-op (`w=0`), the `image_origin_w<=0` fallback
+(triggered via `border_l+border_r >= w` under the default, non-`border-box`,
+non-`content-box` `background_origin`), the `solid_bg_opacity<=0` early
+return (a fully-transparent `bg` color, alpha byte 0), and the combined
+"opaque solid layer painted, then a gradient tile paints on top of it"
+sequencing (`st.bg` and `background_gradient_from/to` both set
+simultaneously — the first 10 examples in this round deliberately zeroed one
+side of that pair to keep each oracle isolated; this one exercises both
+together, including the `st.bg != 0u32 and solid_bg_opacity > 0` guard body
+at `paint_primitives.spl:661` that would otherwise stay dead).
+
+Run: `SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=/tmp/paintcov2/newspec2.sdn
+bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/paint_primitives_coverage_closure_spec.spl
+--coverage --no-cache`:
+
+```
+Results: 26 total, 26 passed, 0 failed
+coverage: src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl 44% (393/891 lines)
+```
+
+(44% solo, up from the prior round's 27% solo -- expected, not a regression
+signal; this run still only drives the closure spec's own targeted
+functions, not the full render pipeline the baseline spec exercises.)
+
+### Union with the prior session's artifacts
+
+Reused the prior session's own artifacts rather than re-running the full
+baseline spec (unchanged code path, no reason to re-measure it): the prior
+session's `/tmp/paintcov/baseline.sdn` (full `..._coverage_spec.spl` run,
+521 distinct `(file, line)` rows for `paint_primitives.spl`, matching that
+session's own reported "Baseline distinct lines: 521 of 891 (58.5%)")
+combined via the same method that session documented and used (extract
+`(file, line)` rows for `paint_primitives.spl` from each `.sdn` artifact,
+union the distinct line-number sets) rather than the slow (~185s)
+`spl-coverage rollup` CLI:
+
+- Baseline distinct lines (prior session, reused unmodified): 521 of 891
+  (58.5%).
+- This round's new-spec-alone distinct lines: 394 of 891 (44.2%) --
+  consistent with (one higher than) the collector's own stdout figure of
+  393, the same small discrepancy class the prior session noted and did not
+  reconcile.
+- **Union: 758 of 891 (85.07%).**
+
+**Line delta (distinct artifact rows): 521/891 (58.5%) -> 758/891 (85.07%),
+a net gain of 237 measured lines this round.** This **MEETS the U4.5 >=85%
+line target** (758/891 needed; 758/891 achieved -- exactly on the line, not
+padded past it).
+
+### Iteration note: the collector does not instrument every line syntax
+
+The first attempt at this round's spec (9 new `it` blocks, no `bg_w<=0` /
+`image_origin_w<=0` / `solid_bg_opacity<=0` / combined-layer cases) measured
+751/891 (84.29%) solo-plus-union, 7 lines short of 758. Diffing the
+target functions' full line ranges against the achieved union set found not
+7 but 15 nominally-uncovered lines, which split into two different
+categories:
+- **Genuinely reachable but untested**: `fb_style_background_opacity_clip`
+  lines 643 (`return fb` inside the `bg_w<=0` branch), 645-648 (the
+  `image_origin_w<=0` fallback body), 657 (`return fb` inside the
+  `solid_bg_opacity<=0` branch), and 661 (the solid-then-gradient combined
+  fill) -- exactly 7 lines, exactly the shortfall. The 4 new examples above
+  target precisely these.
+- **Structurally uninstrumented by this collector, confirmed unreachable by
+  more testing**: the `fn` signature lines themselves (378, 613 -- also true
+  of every other function in this file, consistent with the rest of this
+  report's "impl-method... undercounted" observations extending to
+  plain top-level `fn`s too), bare tail-expression return lines with no
+  `return` keyword (379, 692 -- both single-expression function bodies), and
+  bare `elif`/`else:` guard lines (627, 686) whose branch **bodies** were
+  confirmed covered (623-626, 687-690) by the very tests that were supposed
+  to hit them, proving the guard line itself is simply never assigned a
+  coverage row by this tool regardless of whether the branch executes. None
+  of these 6 lines can be closed by writing more tests; they are a tooling
+  gap, not a testing gap, and are named here rather than silently
+  worked around or padded past with unrelated assertions.
+
+### New spec sha and reproduction
+
+New spec sha (`git hash-object`, whole extended file, both `describe`
+blocks): `8588c5ce51c82e7e3cd7e4ce18d2c4aec69c9974`. Baseline artifact reused
+unmodified from the prior session at `/tmp/paintcov/baseline.sdn` (not
+re-generated); this round's new-spec artifact at
+`/tmp/paintcov2/newspec2.sdn`.
