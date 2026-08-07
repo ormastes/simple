@@ -2032,6 +2032,48 @@ int64_t rt_value_int(int64_t value) {
 }
 
 int64_t rt_value_as_int(int64_t value) {
+    /* TEXT reaching an integer cast must be DECODED, not bit-shifted.
+     *
+     * This function backs the `ANY -> int` cast arm on the compiled lanes, and
+     * `char_at` has no static return type, so `s.char_at(i) as i64` falls
+     * through to ANY and lands here. A bare `value >> 3` is correct for a
+     * tagged int (TAG_INT == 0x0, so a boxed int is v << 3) but pure garbage
+     * for a TAG_HEAP value: it yields the string's raw allocation address >> 3,
+     * a different number on every run. Nothing can depend on the old answer.
+     *
+     * Same defect and same resolution as the Rust seed twin (22c983762d0);
+     * this is the copy the SELF-HOSTED binary links.
+     *
+     * The guard is deliberately rt_core_as_string(), which is REGISTRY-
+     * VALIDATED (rejects raw < 4096, requires TAG_HEAP, requires membership in
+     * the string registry and kind == RT_VALUE_HEAP_STRING) -- NOT a bare
+     * `(value & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP` test. That distinction
+     * is load-bearing: TAG_HEAP is 0x1, so every ODD value would test as "heap",
+     * and two pure-Simple call sites pass a RAW, UNTAGGED i64 here and depend on
+     * the bare shift -- `rt_value_as_int(load_symbol_slot >> 32)` and
+     * `rt_value_as_int(packed_return_local & 0xFFFFFFFF)`, both in
+     * src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl (:700, :1011).
+     * Pinned by P4 of src/runtime/test/rt_value_as_int_text_decode_selfcheck.c.
+     *
+     * Text of exactly one codepoint yields THAT CODE POINT, matching the
+     * tree-walk interpreter's contract ("only int, float, bool, and single-char
+     * strings can be cast to numeric types"). Longer text falls back to
+     * rt_string_to_int_lenient, the same parse the STRING-typed cast arm
+     * already uses, so `int(text)` is unchanged in shape. */
+    RtCoreString* s = rt_core_as_string(value);
+    if (s) {
+        if (s->len > 0) {
+            /* Width of the FIRST codepoint, from its lead byte. If that width
+             * spans the whole string, the text is exactly one codepoint. */
+            uint8_t b0 = (uint8_t)s->data[0];
+            uint64_t width = 1;
+            if (b0 >= 194 && b0 <= 223) width = 2;
+            else if (b0 >= 224 && b0 <= 239) width = 3;
+            else if (b0 >= 240 && b0 <= 244) width = 4;
+            if (width == s->len) return rt_string_char_code_at(value, 0);
+        }
+        return rt_string_to_int_lenient(value);
+    }
     return value >> 3;
 }
 
