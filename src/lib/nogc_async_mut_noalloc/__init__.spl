@@ -1,8 +1,23 @@
-# nogc_async_mut_noalloc — Baremetal Runtime (No Heap, No GC)
+# nogc_async_mut_noalloc — Baremetal Runtime (No OS Heap, No GC)
 #
-# Stack-only, allocation-free runtime for bare-metal embedded targets.
-# All data structures use fixed-size, stack-allocated storage.
-# No heap allocation, no garbage collector, no OS dependencies.
+# Stack-only by default: most data structures use fixed-size, stack-allocated
+# storage. No garbage collector, no OS dependencies, no libc malloc/mmap/brk
+# anywhere in this family — verified 2026-08-07 (WP-13):
+#   - `baremetal/allocator.spl` (Bump/FreeList/FixedBlock/MultiPool) and
+#     `mimalloc.spl` (`mimalloc_alloc`/`heap_init`) both take a caller-supplied
+#     `(base, size)` region and read/write it via `rt_mmio_*`/`rt_ptr_*`
+#     primitives; neither ever calls an OS allocator. Real memory they hand
+#     out always comes from that statically reserved or caller-provided
+#     arena — e.g. `BumpAllocator(base: 0x20000000, size: 64*1024)` in
+#     `test/03_system/feature/baremetal/allocator_spec.spl`.
+#   - `memory/refc_binary.spl`'s `SharedHeap` is pure bookkeeping, not a real
+#     allocator: `allocate()` returns a logical `BinaryRef{id, offset, len}`
+#     from counters, never a memory address, so it makes no OS or arena call
+#     either. Its own id/refcount tables are ordinary growable Simple lists,
+#     not static storage — treat it as an accounting simulator, not a heap.
+# Code that must stay allocation-free entirely should avoid the allocator-
+# class exports below and the `mimalloc`/`memory`/`baremetal.allocator`
+# submodules.
 #
 # Architecture modules:
 #   baremetal/arm/     — ARM Cortex-M (armv7m-none-eabi)
@@ -28,8 +43,13 @@
 #
 # Design constraints:
 #   - @no_gc: GC is forbidden in this family
-#   - alloc_allowed: false (enforced by BaremetalConfig)
-#   - No heap allocation — all storage is stack or static
+#   - No OS heap: nothing in this family calls libc malloc/mmap/brk or any
+#     other OS allocator (enforced by BaremetalConfig)
+#   - Default storage is stack or static; the allocator-class exports
+#     (Bump/FreeList/FixedBlock/MultiPool, mimalloc_*, heap_init) hand out
+#     real memory only from a statically reserved or caller-provided
+#     `(base, size)` arena, and `SharedHeap` allocates nothing at all (pure
+#     accounting) — see the header note above
 #   - No OS — cooperative scheduling only
 #   - SFFI limited to MMIO, interrupts, semihosting syscalls
 
