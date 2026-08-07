@@ -1,0 +1,72 @@
+# @cover src/lib/common/ui/ui_scene_delta_v2.spl 80%
+# @cover src/lib/common/ui/ui_scene_ports_v3.spl 80%
+# @tag: unit, ui, draw_ir_v3, unified_packed_ui_scene, render_perf, f3, t5
+
+use std.spec
+use common.ui.ui_scene_delta_v2.{
+    SceneDeltaRef,
+    SceneDeltaCursor,
+    SCENE_DELTA_V2_OK,
+    SCENE_DELTA_V2_STALE_GENERATION,
+    scene_delta_ref_make
+}
+use common.ui.ui_scene_ports_v3.ui_scene_v3_build_delta
+use nogc_sync_mut.ui.ui_scene_column_arena_v2.UiSceneColumnArenaV2
+use nogc_sync_mut.ui.draw_ir_v3_direct_writer_v2.{
+    ui_scene_v2_write_row,
+    ui_scene_v2_commit
+}
+
+# two tables: table 0 stride 4 cap 8 rows, table 1 stride 2 cap 4 rows
+fn make_arena() -> UiSceneColumnArenaV2:
+    UiSceneColumnArenaV2.create([4, 2], [8, 4])
+
+describe "SceneDeltaRef (F3 completion, T5)":
+    it "round-trips dirty ranges through the v3 port":
+        val a = make_arena()
+        val p = a.lease_partition(1, 0, 2)
+        assert_true(ui_scene_v2_write_row(a, p, 0, [10, 11, 12, 13]) == 0)
+        assert_true(ui_scene_v2_write_row(a, p, 1, [20, 21, 22, 23]) == 0)
+        val delta = ui_scene_v3_build_delta(a)
+        # table 0 dirty -> bit 0 set, table 1 untouched -> bit 1 clear
+        assert_true((delta.changed_table_mask & 1u32) == 1u32)
+        assert_true((delta.changed_table_mask & 2u32) == 0u32)
+        assert_true(delta.dirty_range_start == 0u32)
+        assert_true(delta.dirty_range_count == 2u32)
+        # damage mirrors dirty until occlusion narrows it (documented in
+        # ui_scene_ports_v3.spl)
+        assert_true(delta.damage_start == delta.dirty_range_start)
+        assert_true(delta.damage_count == delta.dirty_range_count)
+        assert_true(delta.scene_generation == a.back_generation)
+
+    it "reflects a second producer's dirty rows in the same generation":
+        val a = make_arena()
+        val p0 = a.lease_partition(1, 0, 2)
+        assert_true(ui_scene_v2_write_row(a, p0, 0, [1, 2, 3, 4]) == 0)
+        val p1 = a.lease_partition(2, 1, 2)
+        assert_true(ui_scene_v2_write_row(a, p1, 0, [5, 6]) == 0)
+        val delta = ui_scene_v3_build_delta(a)
+        assert_true((delta.changed_table_mask & 1u32) == 1u32)
+        assert_true((delta.changed_table_mask & 2u32) == 2u32)
+
+    it "accepts a delta that strictly advances the cursor's generation":
+        val cursor = SceneDeltaCursor.create()
+        val d1 = scene_delta_ref_make(1u32, 1u32, 0u32, 1u32, 0u32, 1u32)
+        assert_true(cursor.accept(d1) == SCENE_DELTA_V2_OK)
+        assert_true(cursor.last_seen_generation == 1u32)
+        val d2 = scene_delta_ref_make(3u32, 1u32, 1u32, 1u32, 1u32, 1u32)
+        assert_true(cursor.accept(d2) == SCENE_DELTA_V2_OK)
+        assert_true(cursor.last_seen_generation == 3u32)
+
+    it "refuses a stale (non-advancing) generation without mutating the cursor":
+        val cursor = SceneDeltaCursor.create()
+        val d1 = scene_delta_ref_make(5u32, 1u32, 0u32, 1u32, 0u32, 1u32)
+        assert_true(cursor.accept(d1) == SCENE_DELTA_V2_OK)
+        # same generation replayed
+        val stale_same = scene_delta_ref_make(5u32, 1u32, 0u32, 1u32, 0u32, 1u32)
+        assert_true(cursor.accept(stale_same) == SCENE_DELTA_V2_STALE_GENERATION)
+        assert_true(cursor.last_seen_generation == 5u32)
+        # older generation replayed
+        val stale_older = scene_delta_ref_make(2u32, 1u32, 0u32, 1u32, 0u32, 1u32)
+        assert_true(cursor.accept(stale_older) == SCENE_DELTA_V2_STALE_GENERATION)
+        assert_true(cursor.last_seen_generation == 5u32)
