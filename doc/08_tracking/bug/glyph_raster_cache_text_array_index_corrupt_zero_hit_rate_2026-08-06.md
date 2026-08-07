@@ -155,6 +155,66 @@ Only hit/miss observability counters
 `_resolved_font_metric_cache_reset_for_test()`) were added to the shaped-run
 cache; its underlying storage/lookup logic was not changed.
 
+## T11 re-investigation (2026-08-07) — corrected root cause
+
+The "`[text]`-array element read is corrupt under native/JIT" framing in the
+title/summary above is **wrong**. Minimal, sabotage-comparable repro at
+`test/01_unit/language/text_array_index_readback_spec.spl`, run via
+`bin/simple test test/01_unit/language/text_array_index_readback_spec.spl`
+(binary: `bin/release/x86_64-unknown-linux-gnu/simple`, the deployed
+pure-Simple self-hosted binary, confirmed by the `child binary:` line the
+runner prints):
+
+```
+Results: 3 total, 1 passed, 2 failed
+```
+
+- **"direct inline push+index-read agrees (positive control)"** — PASSES.
+  `_direct_keys.push("hello")` then `_direct_keys[0]` called directly inside
+  the `it` block round-trips correctly. This rules out a general `[text]`
+  array-index-read defect: plain module-level `[text]` array push/read-back
+  is fine on the interpreter (`bin/simple test`) when done inline.
+- **"push via a free function is visible to the caller (`[text]`)"** —
+  FAILS: `_keys.len()` reads back `0` after `_store_text("hello")`, where
+  `_store_text` is a free function whose entire body is
+  `_indirect_keys.push(k)`. The push is silently lost across the
+  free-function call boundary.
+- **"... (`[i64]`, not text-specific)"** — FAILS identically with a plain
+  `[i64]` array and integer values, ruling out anything text-specific. The
+  defect is: **a free function that `.push()`es onto a module-level array
+  does not write back to the caller's view of that array, on the
+  interpreter lane (`bin/simple test`)**.
+
+Also ruled out during this investigation: file position / example count.
+The same free-function-push construct was independently reproduced as (a)
+the sole `it` in a single-example file, (b) the first of two `it` blocks,
+and (c) the second of two `it` blocks — all three fail identically, so this
+is not a test-runner single-example special case.
+
+Separately, non-spec plain `.spl` scripts run directly through
+`bin/simple run` (Cranelift JIT, the default engine) show NO corruption for
+either declaration order (module array declared before vs. after the file's
+`use` block) or free-function-indirected push, for both `[text]` and
+class-method-nested-push shapes — so the JIT lane is unaffected; this is an
+**interpreter-only** (`bin/simple test` lane) defect.
+
+This is very plausibly the actual root cause the original glyph-raster-cache
+investigation was chasing (`_glyph_raster_cache_lookup`'s scan loop reads
+`_glyph_raster_keys[index]`, but the store happens via `_cache_store`-shaped
+free functions/methods) — but it manifests as a write-back loss through the
+free-function call, not a corrupt index-read as originally described. It
+also resembles the already-documented "`mut` class params through nested
+free fns can LOSE write-back" family, but for **module-level globals**
+mutated via free functions, not `mut` parameters — worth checking whether
+they share a fix site.
+
+**Status: root-caused to a specific, minimal, sabotage-comparable repro;
+NOT fixed in this session** (no bounded fix location identified — needs a
+codegen/interpreter investigation into how free-function calls resolve
+module-level array globals, likely a stale/cloned reference rather than the
+live module slot). The spec above is intentionally left RED per this
+repo's testing rules; do not weaken it.
+
 ## Fix direction (not attempted this session)
 
 Either: (a) root-cause the native-codegen `[text]` array-element-read
