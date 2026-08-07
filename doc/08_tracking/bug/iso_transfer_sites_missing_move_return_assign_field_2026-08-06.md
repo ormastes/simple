@@ -1,8 +1,20 @@
 # iso ownership-transfer sites still missing MIR `Move` (WP-M audit)
 
-**Status:** open (3 of 4 investigated transfer sites still emit no Move; 1
-closed in this lane)
+**Status:** open (2 of 4 investigated transfer sites still emit no Move; 1
+closed by this lane, 1 closed 2026-08-07 by WP-F0)
 **Lane:** WP-M (2026-08-06)
+
+**Update 2026-08-07 (WP-F0, commit `3f79f98cc9d97bf902db5da7d32e215e297b4ebf`):**
+Item #4's mutual-exclusivity blocker is fixed. `function_lowering.spl`'s
+second `match param.type_.kind:` (the one that sets `struct_value_syms`) now
+has an `Isolated(Named(...))` arm, so an iso-wrapped struct param DOES reach
+`struct_value_syms` registration — the precondition this doc's item #4
+documented as permanently unreachable now holds. The downstream
+`mir_lowering_stmts.spl` TODO fix (route iso-typed struct place-reads through
+`emit_move` instead of `maybe_copy_struct_value`) has been implemented and is
+spec-covered (`iso_move_pipeline_spec.spl`, extended with a struct-typed iso
+binding case, 4/4, sabotage-verified: `4 total, 3 passed, 1 failed` →
+reverted `4/4`, independently re-verified). Items #1-3 below are still open.
 
 ## Background
 
