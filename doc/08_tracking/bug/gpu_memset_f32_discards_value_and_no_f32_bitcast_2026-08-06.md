@@ -1,6 +1,6 @@
 # gpu_memset_f32 discards its `value` argument and returns Ok(()) — blocked on a missing f32→u32 bitcast
 
-- **Status:** OPEN (diagnosed, not fixed)
+- **Status:** OPEN (wiring only) — CORRECTED 2026-08-07: the "missing f32 bitcast" blocker below was DISPROVEN, see the correction section
 - **Date:** 2026-08-06
 - **Severity:** high — silently-wrong success
 - **Sites:** `src/lib/gc_async_mut/gpu_ops.spl`, `src/lib/gc_async_mut/gpu_api.spl`
@@ -35,58 +35,70 @@ primitive **and** the f32 bit pattern of `value`.
 
 The fill path is no longer the blocker: `gpu_memset_d32` /
 `cuda_memset_d32` / `rt_cuda_memset_d32` (`cuMemsetD32_v2`) now exist. What is
-still missing is the value→bits conversion.
+was believed missing was the value→bits conversion — see the CORRECTION below:
+that conversion already existed.
 
-## The actual blocker: no working f32→u32 bitcast in the language
 
-Both candidate routes are dead. Probed on `bin/simple` (Rust seed) this date:
+## CORRECTION 2026-08-07 — the "no f32 bitcast exists" blocker was WRONG
 
-| probe | result |
-|-------|--------|
-| `extern fn f32_to_bits(value: f32) -> u32` then call it | `semantic: unknown extern function: f32_to_bits` |
-| `val v: f32 = 3.14` then `v.to_bits()` | `method 'to_bits' not found on type 'f64'` |
+The section that used to stand here claimed `f32_to_bits` / `f32_from_bits` have
+no implementation anywhere and that a NEW runtime extern had to be registered in
+four seed sites. **That is false, and was false when written.**
 
-Two independent findings fall out of this:
+`src/lib/common/binary_io.spl` already implements `f32_to_bits`, `f64_to_bits`,
+`f32_from_bits` and `f64_from_bits` in pure Simple, layered on `spl_f64_to_bits`
+(the one natively linked float primitive). No new extern is needed. Commit
+`8554402f091` superseded this doc by routing `hash.spl` at
+`use std.common.binary_io.{f32_to_bits, f64_to_bits}`.
 
-1. **`f32_to_bits` is declared but has no runtime implementation.** It is
-   `extern`-declared and called in production code that therefore cannot work:
-   - `src/lib/nogc_sync_mut/src/hash.spl:15,251`
-   - `src/lib/nogc_sync_mut/game_net/wire.spl:33,87` (also `f32_from_bits`)
-   - `src/lib/nogc_sync_mut/engine/render/gpu_mesh3d.spl:9,104`
-   No `f32_to_bits` / `f32_from_bits` entry exists in the seed's extern table
-   (`src/compiler_rust/compiler/src/interpreter_extern/`) nor as an exported
-   `rt_*` symbol in the runtime crate. The only hits in the Rust tree are inside
-   `vendor/compiler_builtins`, which is not linked as a Simple extern.
-2. **Simple's `f32` presents as `f64` at runtime** in this engine — the second
-   probe's error names the receiver type as `f64` for a value declared `f32`.
-   Any bitcast hook must therefore state its rounding contract explicitly
-   (round-to-nearest f64→f32 before taking the bits), because the hook will
-   receive an f64, not an f32.
+### Why the original probe read as a dead end
 
-## Suggested fix (decided question, not yet implemented)
+The probe in the table above declared `extern fn f32_to_bits(...)` and called it.
+That declares a NEW unbacked extern and shadows the real pure-Simple function; an
+unbacked extern resolves to nil. The probe therefore measured its own extern
+declaration, not the library. `f32_to_bits` was never missing — it was never
+imported. The correct form is `use std.common.binary_io.{f32_to_bits}`.
 
-Implement `f32_to_bits` / `f32_from_bits` for real — as a general float
-primitive, NOT parked in the CUDA module — registering in all four seed sites
-that an extern needs (`interpreter_extern/mod.rs`, the backing `_fn`,
-`codegen/runtime_sffi.rs`, `interpreter_eval.rs`) plus the runtime `rt_*` export.
-That unblocks the three files above as well as this bug. Then:
+### Verification (2026-08-07, `bin/simple run`, INTERPRET and JIT, both agree)
+
+| input | measured | IEEE-754 oracle | |
+|-------|----------|-----------------|---|
+| `1.0f32`   | 1065353216 | `0x3F800000` | PASS |
+| `3.14f32`  | 1078523331 | `0x4048F5C3` | PASS |
+| `-0.0f32`  | 2147483648 | `0x80000000` | PASS (sign bit survives) |
+| `1e-40f32` | 71362      | `0x000116C2` | PASS (subnormal) |
+
+Round-trip `f32_from_bits(0x3F800000)` returns `1.0`.
+
+**Also corrected:** the subnormal constant quoted for `1e-40f32` in
+`src/lib/nogc_sync_mut/src/hash.spl`'s header comment (and repeated in downstream
+notes) was `0x00011692`. The true value is `0x000116C2` = 71362, confirmed
+against `struct.pack('<f', 1e-40)`. The library was right; the quoted oracle was
+wrong. Never fix an implementation to match an unverified constant.
+
+### What is genuinely still open for `gpu_memset_f32`
+
+Only the wiring, and it is now a small change with no blocker in front of it:
 
 ```
-fn gpu_f32_fill_pattern(value: f32) -> i64:
-    f32_to_bits(value).to_i64()
+use std.common.binary_io.{f32_to_bits}
 
 fn gpu_memset_f32(ptr: GpuPtr, value: f32, count: i64) -> Result<(), GpuError>:
-    gpu_memset_d32(ptr, gpu_f32_fill_pattern(value), count)
+    gpu_memset_d32(ptr, f32_to_bits(value).to_i64(), count)
 ```
 
-with a host-side spec asserting the IEEE-754 oracle (3.14f → 0x4048F5C3 =
-1078523331; 1.0f → 0x3F800000; -0.0f → 0x80000000) and the rounding contract.
+Finding 2 of the removed section survives and still matters: **Simple's `f32`
+presents as `f64` at runtime in this engine** (`v.to_bits()` on an `f32`-declared
+value reports the receiver as `f64`). `binary_io.f32_to_bits` already handles
+this — it takes the f64, rounds to nearest f32, and extracts those bits — which
+is why the table above passes. Any *new* bitcast hook would have to state the
+same rounding contract; there is no reason to add one.
 
-Deliberately NOT done here: adding a one-off `rt_f32_fill_bits` inside
-`cuda_runtime.rs` just to close this call site. That would park a general
-float-bitcast primitive in the CUDA module, and its f64→f32 marshalling could
-not be verified — bootstrap stage 3 is blocked, so no self-hosted binary can be
-redeployed to exercise the native SFFI path.
+### Status
+
+- Original blocker claim ("no f32→u32 bitcast in the language"): **DISPROVEN**.
+- `gpu_memset_f32` discarding `value`: **still OPEN**, now unblocked.
+- Doc retained rather than deleted so the false blocker is not rediscovered.
 
 ## What was NOT verified
 
