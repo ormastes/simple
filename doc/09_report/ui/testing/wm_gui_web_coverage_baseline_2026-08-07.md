@@ -621,3 +621,86 @@ re-confirmed green (`15 total, 15 passed, 0 failed`), worktree removed.
 `df -h /`: 238G free before this unit, 238G free after (one dip to 236G
 mid-unit during worktree creation, recovered after `git worktree remove`;
 no cargo/bootstrap run).
+
+## U4.4 `simple_web_html_layout_renderer_core.spl` — pure-helper closure (session N+1) — 2026-08-07
+
+Baseline re-measured this session (throwaway single-`@cover` copy of
+`simple_web_html_layout_renderer_coverage_spec.spl`, all `it` marked
+`slow_it` per the verified timeout workaround): banner
+`Results: 29 total, 29 passed, 0 failed`, artifact
+`coverage: .../simple_web_html_layout_renderer_core.spl 53% (1114/2075 lines)`
+(`/tmp/u44core/base.sdn`, 1114 matching rows counted directly). Denominator
+2075 measured lines vs 3098 raw lines, consistent with prior units.
+
+Coverage-artifact-driven per-function gap analysis (Python union of `fn`
+line ranges against the hit-line set) surfaced `compute_styles_with_material`
+(465-line fn, only 169 hit) as the single largest gap, followed by
+`_css_resolve_vars`, `_pseudo_ctx_matches`, `_extract_css_vw_with_rule_limit`,
+and a long tail of small/medium pure selector-specificity, merge-sort, and
+text/array helper functions that were reachable only indirectly through
+full-document rendering. This unit targeted the pure tail (no DOM-tree
+fixture required, only text/i32-array/`Style` inputs) since it's the
+highest-density closure per line of spec code; `compute_styles_with_material`
+and the CSS-var/pseudo-context functions (which need constructed `HNode`/
+`SelectorContext`/`Rules` fixtures) are left for a follow-up unit.
+
+New spec:
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_pure_helpers_coverage_closure_spec.spl`
+(69 `it` examples, all real oracles independently traced against the CSS
+specificity algorithm and the merge/sort/dedupe logic in the source — no
+assertion-free calls). Functions closed: `_css_root_prefix_is_preamble`,
+`_is_interaction_state_pseudo`, `_nth_child_matches`, `_part_specificity`,
+`_group_specificity`, `_sort_candidates_by_specificity`,
+`_sort_positive_z_indices`, `_sort_style_order_indices`,
+`merge_two_sorted_rule_lists_unique`, `merge_sorted_rule_lists_unique_count`,
+`rule_lists_from_counts`, `selector_bucket_value_from_base`,
+`text_seen_before`, `i32_list_prefix`, `text_key_index_count`,
+`dict_key_index_count`, `attr_selector_matches`, `base_selector_matches`,
+`class_words_has`, `class_has_all`, `unquote_css_attr_value`.
+`Results: 69 total, 69 passed, 0 failed`.
+
+Two initial assertions were WRONG hand-calculations, corrected before
+landing (not weakened, corrected to match real traced behavior):
+`_nth_child_matches("-n+3", 4)` — the source's `rem % a` check for negative
+`a` never rejects a positive `rem` (any integer is divisible by -1), so
+`pos=3` and above all match, not just `pos<=3` as naive CSS `:nth-child`
+semantics would suggest; retargeted the negative-boundary case to `pos=2`
+(`rem<0`, correctly false) instead of the wrongly-assumed `pos=4`.
+`attr_selector_matches("disabled", "disabled")` (presence-only form) —
+`attr_value` requires a literal `name=` in the attrs string, and even
+`disabled=""` returns an empty string (`.len() > 0` is false), so the
+presence-only oracle needed a non-empty value (`disabled="disabled"`).
+
+Because `SIMPLE_COVERAGE_OUTPUT` overwrites rather than accumulates, the
+new spec was re-run alone with `--coverage`
+(`coverage: .../simple_web_html_layout_renderer_core.spl 27% (571/2075 lines)`,
+artifact `/tmp/u44core/new.sdn`) and the **union** of the baseline and new
+hit-line sets computed directly (Python, both artifacts read line-by-line):
+baseline 1114 lines, new-spec-alone 571 lines, union **1404/2075 = 67.7%**.
+
+**Before: 53% (1114/2075). After: 68% (1404/2075, union of two
+artifact-confirmed runs).** Still short of the >=90% U4.4 target —
+`compute_styles_with_material`, `_css_resolve_vars`, `_pseudo_ctx_matches`,
+`_extract_css_vw_with_rule_limit`, `_css_collect_custom_props`, and
+`_css_scan_rules_simple` remain the largest uncovered regions (a combined
+~600+ uncovered lines) and need HNode/SelectorContext/Rules fixtures or
+full-document rendering to close — a follow-up unit.
+
+### Sabotage
+
+In-tree method (worktree not used this session): `sha256sum` recorded
+before sabotage (`36227a04...`), confirmed identical to `git diff
+origin/main -- <path>` being empty. Sabotaged `_part_specificity`'s
+multi-class compound-selector branch (`base_specificity = class_count * 10
++ attribute_specificity` -> `+ attribute_specificity + 999`) in the live
+worktree. Target spec re-run: `Results: 69 total, 65 passed, 4 failed` —
+exactly the class-specificity-dependent examples went red (`scores a single
+class selector`, `scores a multi-class compound selector`, `returns the
+max-option specificity for :is()`, `sums per-part specificity...` in
+`_group_specificity`'s test, which calls through `_part_specificity`).
+Restored; `sha256sum` matched the pre-sabotage value exactly, and `git diff
+origin/main -- <path>` was empty again afterward.
+
+### Disk
+
+`df -h /`: 238G free before, 238G free after (no cargo/bootstrap run).
