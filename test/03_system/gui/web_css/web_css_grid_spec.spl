@@ -1,0 +1,277 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl
+# @req REQ-WEB-CSS-003
+# @gui: headless
+"""
+# Web CSS Grid Layout System Test
+
+**Plan:** doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md (unit U3.3)
+
+## Purpose and Audience
+
+A reader wants to know whether the headless web/HTML-CSS renderer computes
+CSS Grid layout correctly: fixed pixel track sizing, `grid-column` spans
+across tracks, gap separating tracks on both axes, and — as documented
+known gaps — `fr` tracks, `grid-template-areas`, and `grid-auto-flow:
+column`.
+
+## Scope and Preconditions
+
+Runs entirely in-process, headless, no display server:
+`simple_web_layout_render_html_draw_ir(html, width, height)` produces a
+`common.ui.draw_ir.DrawIrComposition`. Every assertion reads computed box
+geometry straight off `DrawIrCommand` (`x`/`y`/`width`/`height` = border box)
+— never a "didn't crash" check. Every geometry assertion first confirms the
+element's Draw IR command was actually emitted (`_draw_ir_index_by_id >= 0`);
+the id lookup helper fails open to `commands[0]` on a miss, so skipping this
+check would let a missing command masquerade as `x == 0` and pass vacuously.
+
+## Primary Workflow
+
+Render small fixed HTML/CSS fixtures at a fixed viewport, look up the command
+for a named element by `component_id`, and assert exact computed pixel
+geometry.
+
+## Known Renderer Gaps (verified by direct probe against the real renderer,
+not assumed from the CSS spec)
+
+`normalized_grid_track_list` (`simple_web_html_layout_renderer_declarations.spl:828-836`)
+requires every track-list token to end with the literal `"px"` suffix — a
+token like `1fr` fails that check, the whole track list normalizes to `""`,
+`grid_template_columns` never gets set, and `layout.spl:1463`'s
+`grid_columns.len() > 0` guard then skips the Grid code path entirely, so a
+`display:grid` container with only `fr` tracks silently falls back to
+plain block flow (probed: both children land at `x=0`, full container
+width, `y=0`). `fr` tracks are unimplemented, not merely surprising — see
+`doc/08_tracking/bug/browser_engine_grid_fr_track_unit_unsupported_2026-08-07.md`.
+
+`grid-template-areas` and `grid-auto-flow` have zero occurrences anywhere in
+`simple_web_html_layout_renderer_*.spl` (`grep` confirmed) — unimplemented,
+per plan §Grid row gaps; filed at
+`doc/08_tracking/bug/browser_engine_grid_template_areas_missing_2026-08.md`.
+
+## Evidence and Provenance
+
+DrawIR-tree oracle per plan §3.6; source:
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl`.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir}
+use common.ui.draw_ir.{DrawIrCommand}
+
+fn _draw_ir_command_by_id(
+    commands: [DrawIrCommand], component_id: text
+) -> DrawIrCommand:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].component_id == component_id:
+            return commands[idx]
+        idx = idx + 1
+    commands[0]
+
+fn _draw_ir_index_by_id(
+    commands: [DrawIrCommand], component_id: text
+) -> i64:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].component_id == component_id:
+            return idx
+        idx = idx + 1
+    -1
+
+describe "Web CSS grid layout":
+    """
+    Readers of this manual section can trust that the headless HTML/CSS
+    renderer's Draw IR carries correct computed Grid geometry for fixed
+    pixel tracks, `grid-column` spans, and gap on both axes — and can see,
+    documented rather than silently passing, exactly where `fr` tracks,
+    `grid-template-areas`, and `grid-auto-flow:column` remain unimplemented.
+    """
+
+    # @manual_section "Grid layout geometry"
+
+    it "fixed pixel tracks position cells exactly":
+        step("Render a grid container with two fixed pixel column tracks")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff;}" +
+            "#grid{display:grid;grid-template-columns:20px 30px;" +
+            "width:60px;height:10px;background-color:#e5e7eb;}" +
+            "#a{background-color:#ef4444;}" +
+            "#b{background-color:#22c55e;}" +
+            "</style></head><body><div id='grid'>" +
+            "<div id='a'></div><div id='b'></div>" +
+            "</div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val commands = composition.batches[0].commands
+
+        step("Assert both cells' Draw IR commands were actually emitted")
+        assert_true(_draw_ir_index_by_id(commands, "grid") >= 0)
+        assert_true(_draw_ir_index_by_id(commands, "a") >= 0)
+        assert_true(_draw_ir_index_by_id(commands, "b") >= 0)
+
+        val grid = _draw_ir_command_by_id(commands, "grid")
+        val a = _draw_ir_command_by_id(commands, "a")
+        val b = _draw_ir_command_by_id(commands, "b")
+
+        step("Assert cell a occupies the first 20px track and cell b the next 30px track")
+        expect(a.x).to_equal(grid.x)
+        expect(a.width).to_equal(20)
+        expect(b.x).to_equal(a.x + 20)
+        expect(b.width).to_equal(30)
+
+    it "grid-template-columns: fr tracks are unimplemented (RED-by-design)":
+        step("Render a grid container with two fr column tracks over a 60px container")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff;}" +
+            "#grid{display:grid;grid-template-columns:1fr 2fr;" +
+            "width:60px;height:10px;background-color:#e5e7eb;}" +
+            "#a{background-color:#ef4444;height:10px;}" +
+            "#b{background-color:#22c55e;height:10px;}" +
+            "</style></head><body><div id='grid'>" +
+            "<div id='a'></div><div id='b'></div>" +
+            "</div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val commands = composition.batches[0].commands
+
+        step("Assert both cells' Draw IR commands were actually emitted")
+        assert_true(_draw_ir_index_by_id(commands, "a") >= 0)
+        assert_true(_draw_ir_index_by_id(commands, "b") >= 0)
+
+        val a = _draw_ir_command_by_id(commands, "a")
+        val b = _draw_ir_command_by_id(commands, "b")
+
+        step("Assert the 60px remaining space splits 1:2 (20px/40px) per CSS Grid " +
+             "fr-unit semantics — expected RED: `normalized_grid_track_list` " +
+             "(simple_web_html_layout_renderer_declarations.spl:835) rejects any " +
+             "track token that doesn't end with the literal \"px\" suffix, so " +
+             "`1fr 2fr` normalizes to \"\", the Grid path never activates, and " +
+             "layout falls back to plain block flow instead. See " +
+             "doc/08_tracking/bug/browser_engine_grid_fr_track_unit_unsupported_2026-08-07.md")
+        expect(a.width).to_equal(20)
+        expect(b.x).to_equal(20)
+        expect(b.width).to_equal(40)
+
+    it "grid-column spans move a cell across tracks":
+        step("Render a 3-column grid where the first cell spans two tracks")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff;}" +
+            "#grid{display:grid;grid-template-columns:10px 10px 10px;" +
+            "width:30px;height:10px;background-color:#e5e7eb;}" +
+            "#a{background-color:#ef4444;grid-column:1 / span 2;}" +
+            "#b{background-color:#22c55e;}" +
+            "</style></head><body><div id='grid'>" +
+            "<div id='a'></div><div id='b'></div>" +
+            "</div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val commands = composition.batches[0].commands
+
+        step("Assert both cells' Draw IR commands were actually emitted")
+        assert_true(_draw_ir_index_by_id(commands, "grid") >= 0)
+        assert_true(_draw_ir_index_by_id(commands, "a") >= 0)
+        assert_true(_draw_ir_index_by_id(commands, "b") >= 0)
+
+        val grid = _draw_ir_command_by_id(commands, "grid")
+        val a = _draw_ir_command_by_id(commands, "a")
+        val b = _draw_ir_command_by_id(commands, "b")
+
+        step("Assert the spanning cell covers tracks 1-2 (20px) and the auto-placed " +
+             "cell lands in track 3")
+        expect(a.x).to_equal(grid.x)
+        expect(a.width).to_equal(20)
+        expect(b.x).to_equal(a.x + 20)
+        expect(b.width).to_equal(10)
+
+    it "gap separates tracks in both axes":
+        step("Render a 3x2 grid with column-gap and row-gap, forcing a wrap to a second row")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff;}" +
+            "#grid{display:grid;grid-template-columns:10px 10px 10px;" +
+            "grid-template-rows:10px 10px;column-gap:2px;row-gap:3px;" +
+            "width:40px;height:30px;background-color:#e5e7eb;}" +
+            "#a{background-color:#ef4444;grid-column:1 / span 2;}" +
+            "#b{background-color:#22c55e;}" +
+            "#c{background-color:#3b82f6;}" +
+            "</style></head><body><div id='grid'>" +
+            "<div id='a'></div><div id='b'></div><div id='c'></div>" +
+            "</div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val commands = composition.batches[0].commands
+
+        step("Assert all three cells' Draw IR commands were actually emitted")
+        assert_true(_draw_ir_index_by_id(commands, "a") >= 0)
+        assert_true(_draw_ir_index_by_id(commands, "b") >= 0)
+        assert_true(_draw_ir_index_by_id(commands, "c") >= 0)
+
+        val a = _draw_ir_command_by_id(commands, "a")
+        val b = _draw_ir_command_by_id(commands, "b")
+        val c = _draw_ir_command_by_id(commands, "c")
+
+        step("Assert column-gap widens the spanning cell and offsets the next column, " +
+             "and row-gap offsets the auto-placed second-row cell")
+        expect(a.width).to_equal(22)
+        expect(b.x).to_equal(24)
+        expect(c.y).to_equal(13)
+        expect(c.x).to_equal(0)
+
+    it "grid-template-areas places named cells (RED-by-design)":
+        step("Render a grid using a named-area template")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff;}" +
+            "#grid{display:grid;grid-template-columns:20px 20px;" +
+            "grid-template-areas:\"left right\";" +
+            "width:40px;height:10px;background-color:#e5e7eb;}" +
+            "#a{background-color:#ef4444;grid-area:right;}" +
+            "</style></head><body><div id='grid'>" +
+            "<div id='a'></div>" +
+            "</div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val commands = composition.batches[0].commands
+
+        step("Assert the named-area cell was placed in the 'right' column (x=20) — " +
+             "expected RED: grid-template-areas has zero occurrences anywhere in " +
+             "simple_web_html_layout_renderer_*.spl (unimplemented). See " +
+             "doc/08_tracking/bug/browser_engine_grid_template_areas_missing_2026-08.md")
+        assert_true(_draw_ir_index_by_id(commands, "a") >= 0)
+        val a = _draw_ir_command_by_id(commands, "a")
+        expect(a.x).to_equal(20)
+
+    it "grid-auto-flow: column fills column-first (RED-by-design)":
+        step("Render a 2x2 grid with grid-auto-flow:column and three auto-placed cells")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff;}" +
+            "#grid{display:grid;grid-template-columns:10px 10px;" +
+            "grid-template-rows:10px 10px;grid-auto-flow:column;" +
+            "width:20px;height:20px;background-color:#e5e7eb;}" +
+            "#a{background-color:#ef4444;}" +
+            "#b{background-color:#22c55e;}" +
+            "#c{background-color:#3b82f6;}" +
+            "</style></head><body><div id='grid'>" +
+            "<div id='a'></div><div id='b'></div><div id='c'></div>" +
+            "</div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val commands = composition.batches[0].commands
+
+        step("Assert the third auto-placed cell fills column-first into column 2, row 1 " +
+             "(x=10,y=0) rather than row-first into row 2, column 1 (x=0,y=10) — " +
+             "expected RED: grid-auto-flow has zero occurrences anywhere in " +
+             "simple_web_html_layout_renderer_*.spl (auto-placement is row-major only, " +
+             "unimplemented). See " +
+             "doc/08_tracking/bug/browser_engine_grid_template_areas_missing_2026-08.md")
+        assert_true(_draw_ir_index_by_id(commands, "c") >= 0)
+        val c = _draw_ir_command_by_id(commands, "c")
+        expect(c.x).to_equal(10)
+        expect(c.y).to_equal(0)

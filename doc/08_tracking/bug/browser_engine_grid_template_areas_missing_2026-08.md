@@ -1,0 +1,55 @@
+# `grid-template-areas` and `grid-auto-flow` are entirely unimplemented in the browser engine
+
+- **Filed:** 2026-08-07
+- **Severity:** P2 — no crash; named-area placement and column-first
+  auto-placement simply do not happen. Cells fall back to the default
+  row-major auto-placement algorithm regardless of these declarations.
+- **Affects:** any CSS using `grid-template-areas` + `grid-area`, or
+  `grid-auto-flow: column` (or `dense` variants).
+- **Found by:** `test/03_system/gui/web_css/web_css_grid_spec.spl` — examples
+  `"grid-template-areas places named cells (RED-by-design)"` and
+  `"grid-auto-flow: column fills column-first (RED-by-design)"` (see that
+  spec's file:line), part of unit U3.3 of
+  `doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md`.
+
+## Root cause
+
+`grep -rn "grid-template-areas\|grid_template_areas\|grid-auto-flow\|grid_auto_flow"
+src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_*.spl`
+returns **zero matches**. Neither property is parsed by the CSS declaration
+layer nor consulted by the Grid placement code in
+`simple_web_html_layout_renderer_layout.spl` (the auto-placement loop around
+line 1462 onward always walks candidate cells in row-major order —
+`candidate_row = candidate / grid_column_count`, `candidate_column =
+candidate % grid_column_count` — with no branch for a column-first mode).
+
+Concretely:
+- `grid-template-areas: "left right"` plus `grid-area: right` on a child is
+  silently ignored; the child is placed by the default auto-placement
+  algorithm instead of by name, landing in the first available track
+  (probed: `x=0`, not the named `right` track's `x=20`).
+- `grid-auto-flow: column` is silently ignored; a third auto-placed cell in
+  a 2x2 grid lands row-first in row 2 column 1 (`x=0,y=10`) instead of
+  column-first in column 2 row 1 (`x=10,y=0`).
+
+## Unblock condition
+
+1. Parse `grid-template-areas` (a sequence of quoted row strings) into a
+   named-area-to-track-range map, and `grid-auto-flow` into a flow-mode enum
+   (`row` | `column`, with an optional `dense` modifier).
+2. In the placement loop, resolve `grid-area`/`grid-row`/`grid-column`
+   named-area references against that map before falling through to
+   numeric/auto placement.
+3. Make the auto-placement candidate-cell walk branch on flow mode: row-major
+   (existing) vs column-major (iterate `candidate_column` before
+   `candidate_row`).
+
+Once landed, flip both RED-by-design examples in
+`test/03_system/gui/web_css/web_css_grid_spec.spl` to assert the real
+named-area / column-first geometry and drop the `(RED-by-design)`
+qualifier from their names.
+
+## Status
+
+OPEN — unimplemented, not merely surprising per CSS spec. Left RED per
+testing-rules RED protocol; do not weaken the assertions.
