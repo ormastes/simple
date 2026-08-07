@@ -40,6 +40,9 @@ use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_
 use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_unit, expr_block, expr_lambda}
 use compiler.core.ast.{expr_unsafe_block}
+use compiler.core.ast.{expr_method_call}
+use compiler.core.ast.{EXPR_CAST, expr_get_int}
+use compiler.core.types.{named_type_name, TYPE_NAMED_BASE}
 use compiler.frontend.desugar.placeholder_lambda.{set_placeholder_transform_suppressed}
 use compiler.frontend.core.lexer.{lex_token_end_get, lex_source_char_at}
 use compiler.frontend.core.lexer.{lex_pop_indent, lex_enable_forced_indentation, lex_disable_forced_indentation}
@@ -628,6 +631,81 @@ fn parse_statement() -> i64:
                 parser_advance()
                 val _assert_msg = parse_expr()
             return stmt_expr_stmt(assert_cond, 0)
+
+        # WP-K (resource ownership, doc/03_plan/language/resource/
+        # resource_parallel_agent_plan_2026-08-06.md): `with ACQUIRE as NAME:
+        # BODY` scoped form. `with` is a SOFT keyword recognized ONLY here, at
+        # statement-start position -- the pre-existing class-header mixin form
+        # (`class X with Read, Write:`, fn_struct_decls.spl's
+        # parse_struct_or_trait_decl) is parsed by a completely different
+        # function, reached only while parsing a class/struct/trait
+        # declaration's header, never through parse_statement. The two forms
+        # therefore never compete for the same token-stream position -- this
+        # is the same positional-disambiguation technique WP-A used for
+        # `resource` (soft keyword, no new reserved token). If what follows
+        # `with` does not match `EXPR as NAME:`, backtrack and fall through
+        # to ordinary identifier-expression parsing so `with` stays usable as
+        # a plain identifier everywhere else.
+        if ident_text == "with":
+            val (with_snap_nums, with_snap_txts) = lex_snapshot_save()
+            val (with_tok_nums, with_tok_text) = parser_tok_save()
+            parser_advance()  # consume 'with'
+            # `as` is ALSO the cast operator (parser_expr.spl's parse_unary /
+            # parse_binary_from), applied WITHIN ordinary expression parsing
+            # at unary precedence -- tighter than any binary operator. A
+            # plain parse_expr() call therefore already consumes `ACQUIRE as
+            # NAME` itself as an `expr_cast(ACQUIRE, NAME-as-a-Type)` node
+            # (NAME read as a bare named TYPE, not an identifier) before this
+            # branch ever gets a chance to see an unconsumed TOK_KW_AS. Do
+            # NOT look for a leftover `as` token after calling parse_expr()
+            # -- there isn't one. Unwrap the cast shape instead: gated on the
+            # very next token being ':' (so a genuine cast STATEMENT, `x as
+            # SomeType` with no with-block colon following, is untouched and
+            # keeps its pre-existing meaning/error behavior unchanged).
+            val with_parsed = parse_expr()
+            var with_ok = false
+            var with_acquire = with_parsed
+            var with_name = ""
+            if expr_get_tag(with_parsed) == EXPR_CAST and par_kind_get() == TOK_COLON:
+                val with_cast_type_id = expr_get_int(with_parsed) - TYPE_NAMED_BASE
+                val with_cast_name = if with_cast_type_id >= 0: named_type_name(with_cast_type_id) else: ""
+                if with_cast_name != "":
+                    with_ok = true
+                    with_acquire = expr_get_left(with_parsed)
+                    with_name = with_cast_name
+            if with_ok:
+                parser_advance()  # consume ':'
+                # Desugar to: val NAME = ACQUIRE ; BODY ; NAME.close()
+                # wrapped in one nested block. `val NAME = ACQUIRE` (ACQUIRE
+                # may itself end in `?`, e.g. `R.open(...)?`) reuses the
+                # `val`-decl resource-local registration
+                # (mir_lowering_stmts.spl) as-is: if ACQUIRE's own `?`
+                # short-circuits, the val-decl never completes, so NAME is
+                # never registered as a resource-owned local and there is
+                # nothing to close -- exit (e). Once registered, WP-E's
+                # existing function-scoped drop machinery
+                # (emit_pending_resource_drops) covers every early exit
+                # (explicit `return`, a `?` inside BODY) with zero new MIR
+                # code; the explicit `NAME.close()` appended below covers the
+                # one exit WP-E does NOT already cover as a byproduct: BODY's
+                # own normal fall-through. `.close()` lowers to a consuming
+                # Drop (method_calls_literals.spl) and marks NAME consumed,
+                # so the function-end sweep does not double-drop it on that
+                # path.
+                val with_val_decl = stmt_val_decl(with_name, 0, with_acquire, 0)
+                var with_stmts: [i64] = []
+                with_stmts.push(with_val_decl)
+                val with_body = parse_block()
+                for with_body_stmt in with_body:
+                    with_stmts.push(with_body_stmt)
+                var with_close_args: [i64] = []
+                val with_close_call = expr_method_call(expr_ident(with_name, 0), "close", with_close_args, 0)
+                with_stmts.push(stmt_expr_stmt(with_close_call, 0))
+                val with_block_expr = expr_block(with_stmts, -1, 0)
+                return stmt_expr_stmt(with_block_expr, 0)
+            # Not `with EXPR as NAME:` -- backtrack, `with` is a plain ident.
+            lex_snapshot_restore(with_snap_nums, with_snap_txts)
+            parser_tok_restore(with_tok_nums, with_tok_text)
 
     # `me NAME(...) [-> T]: body` in statement position (a class's methods
     # written at fn-body indent, e.g. semantics/resolve.spl) — same desugar
