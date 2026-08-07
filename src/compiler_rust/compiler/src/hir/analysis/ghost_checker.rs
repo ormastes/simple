@@ -144,6 +144,7 @@ impl<'a> GhostChecker<'a> {
                 condition,
                 then_block,
                 else_block,
+                ..
             } => {
                 self.check_ghost_expr(condition, func_name);
                 for stmt in then_block {
@@ -315,6 +316,7 @@ impl<'a> GhostChecker<'a> {
                 condition,
                 then_block,
                 else_block,
+                ..
             } => {
                 self.check_non_ghost_expr(condition, func_name, in_contract);
                 for stmt in then_block {

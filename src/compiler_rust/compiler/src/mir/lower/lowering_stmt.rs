@@ -1067,11 +1067,16 @@ impl<'a> MirLowerer<'a> {
                 condition,
                 then_block,
                 else_block,
+                span,
             } => {
+                let saved_decision_span = self.current_decision_span;
+                self.current_decision_span = *span;
                 let cond_reg = self.lower_expr(condition)?;
+                self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for coverage (before branch)
-                self.emit_decision_probe(cond_reg, 0, 0)?;
+                let (line, column) = span.unwrap_or((0, 0));
+                self.emit_decision_probe(cond_reg, line, column)?;
 
                 // Save last_expr_value before branches (for proper value merging)
                 let saved_last_expr = self.last_expr_value;
@@ -1196,7 +1201,7 @@ impl<'a> MirLowerer<'a> {
                 Ok(())
             }
 
-            HirStmt::While { condition, body, .. } => {
+            HirStmt::While { condition, body, span, .. } => {
                 let bound_proof = self
                     .loop_len_bound_proof(condition)
                     .filter(|proof| !Self::body_may_mutate_or_escape_array(body, proof.array_local_index));
@@ -1285,11 +1290,14 @@ impl<'a> MirLowerer<'a> {
 
                 // Check condition
                 self.set_current_block(cond_id)?;
+                let saved_decision_span = self.current_decision_span;
+                self.current_decision_span = *span;
                 let cond_reg = self.lower_expr(condition)?;
+                self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for while condition coverage
-                // Line/column require span tracking in HIR expressions
-                self.emit_decision_probe(cond_reg, 0, 0)?;
+                let (line, column) = span.unwrap_or((0, 0));
+                self.emit_decision_probe(cond_reg, line, column)?;
 
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
@@ -1435,12 +1443,16 @@ impl<'a> MirLowerer<'a> {
                 Ok(())
             }
 
-            HirStmt::Assert { condition, message } => {
+            HirStmt::Assert { condition, message, span } => {
                 // Lower the assertion condition
+                let saved_decision_span = self.current_decision_span;
+                self.current_decision_span = *span;
                 let cond_reg = self.lower_expr(condition)?;
+                self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for assert condition coverage (#674)
-                self.emit_decision_probe(cond_reg, 0, 0)?;
+                let (line, column) = span.unwrap_or((0, 0));
+                self.emit_decision_probe(cond_reg, line, column)?;
 
                 // Get function name for error message (best effort)
                 let func_name = self
@@ -1873,13 +1885,17 @@ impl<'a> MirLowerer<'a> {
                 Ok(())
             }
 
-            HirStmt::Assume { condition, message } => {
+            HirStmt::Assume { condition, message, span } => {
                 // Assume is a verification statement similar to assert
                 // At runtime, we treat it as an assertion
+                let saved_decision_span = self.current_decision_span;
+                self.current_decision_span = *span;
                 let cond_reg = self.lower_expr(condition)?;
+                self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for assume condition coverage (#674)
-                self.emit_decision_probe(cond_reg, 0, 0)?;
+                let (line, column) = span.unwrap_or((0, 0));
+                self.emit_decision_probe(cond_reg, line, column)?;
 
                 let func_name = self
                     .try_contract_ctx()

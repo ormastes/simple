@@ -318,6 +318,12 @@ pub struct MirLowerer<'a> {
     pub(super) current_file: Option<String>,
     /// Last expression value for implicit returns (non-void functions)
     pub(super) last_expr_value: Option<super::super::instructions::VReg>,
+    /// (line, column) of the decision currently being lowered — set around
+    /// `lower_expr(condition)` for `if`/`while`/`assert`/`assume` so nested
+    /// `and`/`or` sub-condition probes (emitted deep inside `lower_binary_expr`,
+    /// which has no direct access to the enclosing `HirStmt`) can still report
+    /// a real source location instead of `0, 0`.
+    pub(super) current_decision_span: Option<(u32, u32)>,
     /// VRegs known to hold tagged RuntimeValues (from runtime function calls, BoxInt, etc.)
     /// Used to avoid double-tagging when enum payloads flow into typed variables.
     pub(super) tagged_vregs: std::collections::HashSet<super::super::instructions::VReg>,
@@ -367,6 +373,7 @@ impl<'a> MirLowerer<'a> {
             path_counter: 0,
             current_file: None,
             last_expr_value: None,
+            current_decision_span: None,
             tagged_vregs: std::collections::HashSet::new(),
             tagged_locals: std::collections::HashSet::new(),
             len_local_sources: HashMap::new(),
@@ -416,6 +423,7 @@ impl<'a> MirLowerer<'a> {
             path_counter: 0,
             current_file: None,
             last_expr_value: None,
+            current_decision_span: None,
         }
     }
 
@@ -592,6 +600,7 @@ impl<'a> MirLowerer<'a> {
                 condition,
                 then_block,
                 else_block,
+                ..
             } => {
                 Self::expr_may_escape_array(condition, array_local_index)
                     || Self::body_may_mutate_or_escape_array(then_block, array_local_index)
@@ -808,6 +817,7 @@ impl<'a> MirLowerer<'a> {
                 condition,
                 then_block,
                 else_block,
+                ..
             } => {
                 !Self::expr_mentions_array(condition, array_local_index)
                     && Self::body_uses_array_only_for_ignored_appends(then_block, array_local_index, push_count)

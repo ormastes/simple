@@ -767,6 +767,7 @@ impl CompilerPipeline {
                     body,
                     simd_requested,
                     invariants,
+                    span,
                 } => {
                     let mut body_len_aliases = len_aliases.clone();
                     self.rewrite_hir_simd_stmts(types, body, &mut body_len_aliases);
@@ -775,6 +776,7 @@ impl CompilerPipeline {
                         body: body.clone(),
                         simd_requested: *simd_requested,
                         invariants: invariants.clone(),
+                        span: *span,
                     };
                     if let Some(candidate) =
                         self.classify_hir_u64_contains_while_loop(types, condition, body, len_aliases)
@@ -984,6 +986,9 @@ impl CompilerPipeline {
                 condition,
                 then_block: vec![lowered],
                 else_block: Some(vec![fallback]),
+                // Optimizer-synthesized guard (SIMD/u64-contains loop fusion);
+                // no single source line to attribute it to.
+                span: None,
             }
         } else {
             lowered
@@ -1140,6 +1145,7 @@ impl CompilerPipeline {
             condition: probe,
             then_block,
             else_block: None,
+            ..
         } = &body[0]
         else {
             return None;
@@ -1173,12 +1179,16 @@ impl CompilerPipeline {
                 ty: TypeId::BOOL,
             }))],
             else_block: None,
+            // Optimizer-synthesized (u64-contains loop fusion); no single
+            // source line to attribute it to.
+            span: None,
         };
         if let Some(condition) = candidate.guard {
             HirStmt::If {
                 condition,
                 then_block: vec![lowered],
                 else_block: Some(vec![fallback]),
+                span: None,
             }
         } else {
             lowered

@@ -155,6 +155,7 @@ fn collect_old_expressions_from_stmt(stmt: &HirStmt, results: &mut Vec<HirExpr>)
             condition,
             then_block,
             else_block,
+            ..
         } => {
             collect_old_expressions(condition, results);
             for stmt in then_block {

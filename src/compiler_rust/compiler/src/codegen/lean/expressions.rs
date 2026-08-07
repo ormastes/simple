@@ -558,6 +558,7 @@ impl<'a> ExprTranslator<'a> {
                     condition,
                     then_block,
                     else_block,
+                    ..
                 } => {
                     let lean_cond = self.translate(condition)?;
                     let lean_then = self.translate_stmts(then_block, locals)?;
@@ -578,7 +579,7 @@ impl<'a> ExprTranslator<'a> {
                         result = Some(if_expr);
                     }
                 }
-                HirStmt::Assert { condition, message } => {
+                HirStmt::Assert { condition, message, .. } => {
                     let lean_cond = self.translate(condition)?;
                     let assert_expr = LeanExpr::Assert {
                         condition: Box::new(lean_cond),
@@ -595,7 +596,7 @@ impl<'a> ExprTranslator<'a> {
                         result = Some(assert_expr);
                     }
                 }
-                HirStmt::Assume { condition, message } => {
+                HirStmt::Assume { condition, message, .. } => {
                     let lean_cond = self.translate(condition)?;
                     let assume_expr = LeanExpr::Assume {
                         condition: Box::new(lean_cond),
@@ -634,6 +635,7 @@ impl<'a> ExprTranslator<'a> {
                     body,
                     simd_requested: _simd_requested,
                     invariants,
+                    ..
                 } => {
                     let lean_cond = self.translate(condition)?;
                     let lean_body = self.translate_stmts(body, locals)?;

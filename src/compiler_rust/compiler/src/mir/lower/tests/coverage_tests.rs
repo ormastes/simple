@@ -33,6 +33,22 @@ fn test(x: i64) -> i64:
     });
 
     assert!(has_decision_probe, "If statement should have decision probe");
+
+    // The MIR-path decision probe must carry the `if`'s real source location,
+    // not the `line: 0, column: 0` placeholder emitted before HirStmt::If
+    // gained a `span` field threaded from the AST (see HirStmt::If::span doc
+    // comment). `source` opens with a newline, so `if x > 0:` is line 3.
+    let probe_line = func.blocks.iter().find_map(|b| {
+        b.instructions.iter().find_map(|inst| match inst {
+            MirInst::DecisionProbe { line, .. } => Some(*line),
+            _ => None,
+        })
+    });
+    assert_eq!(
+        probe_line,
+        Some(3),
+        "decision probe should carry the if statement's real source line, not 0"
+    );
 }
 
 #[test]

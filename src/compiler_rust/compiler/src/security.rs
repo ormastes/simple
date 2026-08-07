@@ -1266,6 +1266,7 @@ fn collect_hir_stmt_symbols(stmt: &HirStmt, symbols: &mut BTreeSet<String>) {
             condition,
             then_block,
             else_block,
+            ..
         } => {
             collect_hir_expr_symbols(condition, symbols);
             for stmt in then_block {

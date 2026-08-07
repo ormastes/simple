@@ -50,6 +50,7 @@ impl Lowerer {
                 condition,
                 then_block,
                 else_block,
+                ..
             } => {
                 self.check_expr_for_async_calls(condition, caller_name, function_suspension)?;
                 for s in then_block {

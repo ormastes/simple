@@ -20,6 +20,13 @@ pub enum HirStmt {
         condition: HirExpr,
         then_block: Vec<HirStmt>,
         else_block: Option<Vec<HirStmt>>,
+        /// Source (line, column) of the `if`/`elif` keyword, for decision-coverage
+        /// probes emitted during MIR lowering (#674 follow-up: MIR-path probes
+        /// previously always carried `line: 0, column: 0` because HIR had no
+        /// span to thread through). `None` for synthesized/desugared ifs that
+        /// have no single source location (e.g. `elif val` chains, SIMD-loop
+        /// rewrites) — those still probe, just without a precise location.
+        span: Option<(u32, u32)>,
     },
     While {
         condition: HirExpr,
@@ -28,6 +35,8 @@ pub enum HirStmt {
         simd_requested: bool,
         /// Loop invariants for verification
         invariants: Vec<HirContractClause>,
+        /// Source (line, column) of the `while` keyword; see `If::span`.
+        span: Option<(u32, u32)>,
     },
     /// For loop (lowered from ForStmt)
     /// Note: for loops can have invariants for verification
@@ -61,6 +70,8 @@ pub enum HirStmt {
     Assert {
         condition: HirExpr,
         message: Option<String>,
+        /// Source (line, column) of the `assert` keyword; see `HirStmt::If::span`.
+        span: Option<(u32, u32)>,
     },
     /// Assume statement for verification assumptions
     /// assume condition, "message"
@@ -69,6 +80,8 @@ pub enum HirStmt {
     Assume {
         condition: HirExpr,
         message: Option<String>,
+        /// Source (line, column) of the `assume` keyword; see `HirStmt::If::span`.
+        span: Option<(u32, u32)>,
     },
     /// Admit statement for skipping proofs (tracked)
     /// admit condition, "reason"

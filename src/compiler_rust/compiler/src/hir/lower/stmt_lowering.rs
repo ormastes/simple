@@ -135,6 +135,9 @@ impl Lowerer {
                         condition,
                         then_block,
                         else_block,
+                        // `elif val` branches carry no span of their own in the AST
+                        // (see the enclosing `if_stmt.span` uses below).
+                        span: None,
                     },
                 ]);
             } else {
@@ -144,6 +147,7 @@ impl Lowerer {
                     condition,
                     then_block,
                     else_block,
+                    span: None,
                 }]);
             }
         }
@@ -490,6 +494,7 @@ impl Lowerer {
                         condition,
                         then_block,
                         else_block,
+                        span: Some((if_stmt.span.line as u32, if_stmt.span.column as u32)),
                     });
                     Ok(result)
                 } else {
@@ -513,6 +518,7 @@ impl Lowerer {
                         condition,
                         then_block,
                         else_block,
+                        span: Some((if_stmt.span.line as u32, if_stmt.span.column as u32)),
                     }])
                 }
             }
@@ -605,6 +611,7 @@ impl Lowerer {
                                 condition,
                                 then_block,
                                 else_block: Some(vec![HirStmt::Break]),
+                                span: Some((while_stmt.span.line as u32, while_stmt.span.column as u32)),
                             },
                         ],
                         simd_requested: while_stmt.simd_requested,
@@ -619,6 +626,7 @@ impl Lowerer {
                     body,
                     simd_requested: while_stmt.simd_requested,
                     invariants,
+                    span: Some((while_stmt.span.line as u32, while_stmt.span.column as u32)),
                 }])
             }
 
@@ -755,6 +763,7 @@ impl Lowerer {
                 Ok(vec![HirStmt::Assert {
                     condition,
                     message: assert_stmt.message.clone(),
+                    span: Some((assert_stmt.span.line as u32, assert_stmt.span.column as u32)),
                 }])
             }
 
@@ -763,6 +772,7 @@ impl Lowerer {
                 Ok(vec![HirStmt::Assume {
                     condition,
                     message: assume_stmt.message.clone(),
+                    span: Some((assume_stmt.span.line as u32, assume_stmt.span.column as u32)),
                 }])
             }
 
@@ -870,6 +880,7 @@ impl Lowerer {
                             condition: cond_hir,
                             then_block: vec![HirStmt::Return(Some(result_hir))],
                             else_block: None,
+                            span: Some((guard_stmt.span.line as u32, guard_stmt.span.column as u32)),
                         }])
                     }
                     None => {
@@ -1961,6 +1972,7 @@ impl Lowerer {
             condition: final_condition,
             then_block,
             else_block: if else_block.is_empty() { None } else { Some(else_block) },
+            span: Some((arm.span.line as u32, arm.span.column as u32)),
         };
 
         Ok(vec![if_stmt])

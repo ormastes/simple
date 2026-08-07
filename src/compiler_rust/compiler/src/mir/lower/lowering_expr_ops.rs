@@ -14,14 +14,20 @@ impl<'a> MirLowerer<'a> {
         if self.coverage_enabled && matches!(op, BinOp::And | BinOp::Or) {
             // Create a decision ID for this compound expression
             let decision_id = self.next_decision_id();
+            // `current_decision_span` is set by the enclosing if/while/assert/assume
+            // arm in lowering_stmt.rs around its `lower_expr(condition)` call — this
+            // function has no direct access to that HirStmt, only its condition
+            // subexpression, so the span is threaded ambiently rather than through
+            // HirExpr (which has no span field; see HirStmt::If::span doc comment).
+            let (line, column) = self.current_decision_span.unwrap_or((0, 0));
 
             // Lower left operand and emit condition probe
             let left_reg = self.lower_expr(left)?;
-            self.emit_condition_probe(decision_id, left_reg, 0, 0)?;
+            self.emit_condition_probe(decision_id, left_reg, line, column)?;
 
             // Lower right operand and emit condition probe
             let right_reg = self.lower_expr(right)?;
-            self.emit_condition_probe(decision_id, right_reg, 0, 0)?;
+            self.emit_condition_probe(decision_id, right_reg, line, column)?;
 
             // Compute the final result
             let dest = self.with_func(|func, current_block| {
@@ -37,7 +43,7 @@ impl<'a> MirLowerer<'a> {
             })?;
 
             // Emit decision probe for the overall result
-            self.emit_decision_probe(dest, 0, 0)?;
+            self.emit_decision_probe(dest, line, column)?;
 
             Ok(dest)
         } else if matches!(op, BinOp::And | BinOp::Or) {
