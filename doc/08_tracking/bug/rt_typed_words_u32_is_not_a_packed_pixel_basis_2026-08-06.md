@@ -132,3 +132,51 @@ possible on typed words.
   `core_array_ops.spl` by grep). A wrapper may need adding.
 - No benchmark was run. The lane's benchmark step was conditional on the basis
   verifying, and it did not.
+
+## Reverified 2026-08-07 — still live, not stale
+
+Re-checked independently a day later against a claim that this might already
+be fixed. It is not; the premise still holds exactly as filed.
+
+- **Source unchanged.** `git log` on `runtime_native.c`, `core_array_ops.spl`,
+  and `packed_span.spl` since this file's commit shows no touches to the
+  cited lines. Direct re-read confirms both citations verbatim:
+  `runtime_native.c:5197` still reads `elem_size = (flags &
+  RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) : sizeof(int64_t)`, and
+  `core_array_ops.spl:382` (`rt_typed_words_u32_at`) still hardcodes `idx *
+  8`.
+- **MIR lowering has no special-cased 4-byte path.** Grepped
+  `src/compiler/50.mir` and `src/compiler/70.backend` for `u32` combined with
+  array-construction logic: the only `u32`-specific lowering is a Vulkan
+  SPIR-V local-type coercion (`vulkan_u32_local` in
+  `mir_lowering_stmts.spl`), unrelated to `[u32]` array-literal storage.
+  `[u32]` literals lower through the same generic tagged-array push as every
+  other element type — there is no alternate 4-byte-packed construction path
+  to have silently become the default.
+- **New empirical corroboration (peak-RSS delta).** Built a 5,000,000-element
+  `[u32]` array via `bin/simple run` (bootstrap seed, JIT-attempting default
+  path) and measured `/usr/bin/time -v` "Maximum resident set size" against a
+  100-element control: 143,108 KB vs. 28,160 KB baseline, a delta of
+  ~114,948 KB, i.e. ~23 bytes/element. A true 4-byte-packed buffer would add
+  only ~19,073 KB (4 bytes × 5,000,000) — the measured delta is ~6x that
+  floor. `SIMPLE_EXECUTION_MODE=interpret` on the same script showed an even
+  larger delta (594,156 KB peak — interpreter boxing/temporary overhead, not
+  a clean stride measurement, but directionally consistent: nowhere near
+  4-byte-packed). This is corroborating, not the primary evidence — the
+  binary/decisive check remains the unchanged source citations above.
+- **Direct byte-stride probing from ordinary `.spl` code is not currently
+  possible.** Attempted to redeclare `extern fn array_items` /
+  `extern fn spl_load_u8` in a standalone probe script and call them from
+  `main()`, under both the default `bin/simple run` path and
+  `SIMPLE_EXECUTION_MODE=interpret`. Both reported the externs as
+  unavailable to user code (`array_items`: "declared but backed by no
+  implementation, call returned nil"; `spl_load_u8`: "unknown extern
+  function"). These are runtime-internal intrinsics resolved only within the
+  runtime's own compilation unit, not exposed via the interpreter's SFFI
+  dispatch table for arbitrary scripts — a tooling gap, not evidence about
+  `[u32]`'s layout. Regression spec added at
+  `test/01_unit/lib/common/memory/u32_array_layout_spec.spl` documents this
+  gap alongside the verified layout guarantee and asserts the functional
+  (value round-trip) contract that IS testable today.
+
+**Verdict: LIVE.** No part of the original finding has been superseded.
