@@ -100,6 +100,46 @@ impl MirLowering:
             case nil:
                 false
 
+    me mir_hir_type_is_shared_resource(t: HirType?) -> bool:
+        """WP-G (resource ownership invariant 7, doc/04_architecture/language/
+        resource/resource_declaration_architecture_2026-08-06.md §8: "`*R`
+        does not grant exclusive (`mut`) methods"). True when a HIR type is
+        the use-site shared-RC sigil `*R` on a declared resource.
+
+        `*R` (WP-B's `TypeKind.Pointer` AST node) lowers at HIR lowering
+        (`20.hir/hir_lowering/types.spl`, `d_pointer` branch) to a plain
+        `HirTypeKind.Ptr(inner, mutable)` -- there is deliberately no
+        dedicated HirTypeKind for "shared resource" (same side-table
+        rationale as `mir_hir_type_is_resource` above: avoids a new
+        HirTypeKind variant touched across five layers). This mirrors that
+        helper one step further: `Ptr(Named(sym))` where `sym` resolves to a
+        declared resource IS the shared-RC sigil; a `Ptr` to anything else
+        is an ordinary raw pointer and out of scope here.
+
+        NOTE: `@R` (atomic) and `-R` (weak) are NOT reachable this way --
+        `hir_lowering/types.spl`'s `lower_type` erases both to
+        `HirTypeKind.Infer` (its `else` branch explicitly names "Atomic" as
+        one of the erased kinds), so invariant 7 as implemented here only
+        covers the `*R` shared case the architecture doc's own wording names
+        ("`*R` does not grant..."), not `@R`/`-R`."""
+        match t:
+            case Some(ht):
+                match ht.kind:
+                    case HirTypeKind.Ptr(inner, _):
+                        match inner.kind:
+                            case HirTypeKind.Named(sym, _):
+                                val found = self.symbols.get_symbol_raw(sym.id)
+                                if found.?:
+                                    resource_is_declared(found.name)
+                                else:
+                                    false
+                            case _:
+                                false
+                    case _:
+                        false
+            case nil:
+                false
+
     me emit_pending_resource_drops(returned_local: LocalId?):
         """WP-E: emit a Drop (MirInstKind.Drop, mir_instruction_kinds.spl)
         for every resource-owned local registered in `self.

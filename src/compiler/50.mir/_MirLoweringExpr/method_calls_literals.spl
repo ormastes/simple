@@ -925,6 +925,26 @@ impl MirLowering:
                 val close_unit_local = b_close_unit.emit_const_int(0)
                 self.builder = b_close_unit
                 return close_unit_local
+        # WP-G (resource ownership invariant 7, doc/04_architecture/language/
+        # resource/resource_declaration_architecture_2026-08-06.md §8: "`*R`
+        # does not grant exclusive (`mut`) methods"). A `*R`-sigiled receiver
+        # (mir_hir_type_is_shared_resource, mir_lowering_stmts.spl) calling a
+        # method whose own declaration is marked mutating (HirSymbol.
+        # is_mutable, resolved through the InstanceMethod's method_id) is a
+        # hard compile error -- shared RC ownership never implies exclusive
+        # access. `.close()` is checked separately above (consuming, not
+        # mutating) and never reaches this point. Only `InstanceMethod`
+        # carries a resolvable per-declaration mutability bit here; trait/
+        # free-function/static/unresolved resolutions are out of scope for
+        # this check (same scoping the close-consume check above uses).
+        if self.mir_hir_type_is_shared_resource(Some(receiver.type_)):
+            match resolution:
+                case InstanceMethod(_, shared_mut_method_id):
+                    val shared_mut_sym = self.symbols.get_symbol_raw(shared_mut_method_id.id)
+                    if shared_mut_sym != nil and shared_mut_sym.is_mutable:
+                        self.error_fatal("mut method '" + method + "' called through a shared ('*R') resource receiver -- '*R' does not grant exclusive/mut methods (design doc section 8, invariant 7)", receiver.span)
+                case _:
+                    ()
         val resolution_disc = rt_enum_discriminant(resolution)
         val resolution_is_unresolved = resolution_disc == rt_enum_discriminant(MethodResolution.Unresolved)
         val resolution_is_free_function = resolution_disc == rt_enum_discriminant(MethodResolution.FreeFunction(SymbolId(id: -1)))
