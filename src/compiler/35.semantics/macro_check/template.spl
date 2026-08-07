@@ -201,7 +201,7 @@ class TemplateValidator:
 
             i = i + 1
 
-        self.errors_is_empty(errors)
+        self.errors.is_empty()
 
     me declare_param(name: text, kind: FragmentKind, pos: i64):
         """Declare a parameter in the matcher."""
@@ -221,20 +221,22 @@ class TemplateValidator:
 
     me use_param(name: text, kind: FragmentKind, pos: i64):
         """Use a parameter in the transcriber."""
-        match self.params_get(params, name):
-            case nil:
-                self.errors = self.errors.push(TemplateError.at(
-                    "Undefined parameter '${name}'",
-                    pos
-                ))
-            case param:
-                # Check repetition depth matches
-                if param.repetition_depth > 0:
-                    if self.current_rep_depth < param.repetition_depth:
-                        self.errors = self.errors.push(TemplateError.at(
-                            "Parameter '${name}' must be used inside repetition",
-                            pos
-                        ))
+        # Native Dict pitfall: .get() on struct-valued dicts is corrupt —
+        # use contains_key + index read instead.
+        if not self.params.contains_key(name):
+            self.errors = self.errors.push(TemplateError.at(
+                "Undefined parameter '${name}'",
+                pos
+            ))
+        else:
+            val param = self.params[name]
+            # Check repetition depth matches
+            if param.repetition_depth > 0:
+                if self.current_rep_depth < param.repetition_depth:
+                    self.errors = self.errors.push(TemplateError.at(
+                        "Parameter '${name}' must be used inside repetition",
+                        pos
+                    ))
 
     fn get_errors() -> [TemplateError]:
         """Get validation errors."""
@@ -242,7 +244,7 @@ class TemplateValidator:
 
     fn has_errors() -> bool:
         """Check if validation produced errors."""
-        not self.errors_is_empty(errors)
+        not self.errors.is_empty()
 
 # ============================================================================
 # Template Type Checker
@@ -265,7 +267,7 @@ class TemplateTypeChecker:
     me check_rule(matcher: [TemplateToken], transcriber: [TemplateToken]) -> bool:
         """Type check a macro rule (matcher => transcriber)."""
         # First validate matcher
-        if not self.validator_validate_matcher(validator, matcher):
+        if not self.validator.validate_matcher(matcher):
             return false
 
         # Build type environment from matcher
@@ -275,7 +277,7 @@ class TemplateTypeChecker:
             self.type_env[name] = param.kind_to_text(kind)
 
         # Then validate transcriber
-        if not self.validator_validate_transcriber(validator, transcriber):
+        if not self.validator.validate_transcriber(transcriber):
             return false
 
         true
@@ -311,7 +313,7 @@ class TemplateTypeChecker:
 
     fn get_errors() -> [TemplateError]:
         """Get all type checking errors."""
-        self.validator_get_errors(validator)
+        self.validator.get_errors()
 
 # ============================================================================
 # Exports

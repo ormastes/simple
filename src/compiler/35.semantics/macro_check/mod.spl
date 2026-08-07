@@ -61,7 +61,7 @@ class MacroDef:
 
     me add_rule(rule: MacroRule):
         """Add a rule to this macro."""
-        self.rules = self.rules_push(rules, rule)
+        self.rules = self.rules.push(rule)
 
     me set_unhygienic():
         """Mark this macro as unhygienic (advanced use)."""
@@ -175,21 +175,22 @@ class MacroChecker:
 
         Matches arguments against rules and infers expansion type.
         """
-        # Look up macro
-        match self.macros_get(macros, call.name):
-            case nil:
-                return MacroCheckResult.UndefinedMacro(call.name)
+        # Look up macro.
+        # Native Dict pitfall: .get() on struct-valued dicts is corrupt —
+        # use contains_key + index read instead.
+        if not self.macros.contains_key(call.name):
+            return MacroCheckResult.UndefinedMacro(call.name)
 
-            case def:
-                # Try to match rules
-                for rule in def.rules:
-                    match self.try_match_rule(rule, call.args, def.is_hygienic):
-                        case expansion_type:
-                            return MacroCheckResult.Ok(expansion_type)
-                        case nil:
-                            pass  # Try next rule
+        val macro_def = self.macros[call.name]
+        # Try to match rules
+        for rule in macro_def.rules:
+            match self.try_match_rule(rule, call.args, macro_def.is_hygienic):
+                case expansion_type:
+                    return MacroCheckResult.Ok(expansion_type)
+                case nil:
+                    pass  # Try next rule
 
-                MacroCheckResult.NoMatchingRule(call.name, call.args)
+        MacroCheckResult.NoMatchingRule(call.name, call.args)
 
     me try_match_rule(rule: MacroRule, args: [MacroArg], is_hygienic: bool) -> text:
         """Try to match arguments against a rule.
@@ -200,7 +201,9 @@ class MacroChecker:
         val validator = TemplateValidator.create()
         validator.validate_matcher(rule.matcher)
 
-        val expected_params = validator.params_len(params)
+        # Native Dict pitfall: .len() on a dict always returns -1 — use
+        # keys().len() instead.
+        val expected_params = validator.params.keys().len()
         if args_len(args) != expected_params:
             return nil
 
@@ -236,7 +239,7 @@ class MacroChecker:
 
     fn get_macro(name: text) -> has_MacroDef:
         """Get a macro definition."""
-        self.macros_get(macros, name)
+        if self.macros.contains_key(name): self.macros[name] else: nil
 
     fn list_macros() -> [text]:
         """List all registered macros."""

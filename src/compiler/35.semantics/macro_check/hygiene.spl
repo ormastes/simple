@@ -63,7 +63,7 @@ fn markedident_from_name(name: text) -> MarkedIdent:
 
 fn markedident_add_mark(self: MarkedIdent, mark: SyntaxMark) -> MarkedIdent:
         """Add a mark during expansion."""
-        MarkedIdent(name: self.name, marks: self.marks_push(marks, mark))
+        MarkedIdent(name: self.name, marks: self.marks.push(mark))
 
 
 fn markedident_remove_mark(self: MarkedIdent, mark: SyntaxMark) -> MarkedIdent:
@@ -188,15 +188,17 @@ class HygieneContext:
 
     me exit_scope():
         """Exit current scope."""
-        match self.scopes_get(scopes, self.current_scope):
-            case scope:
-                match scope.parent:
-                    case parent_id:
-                        self.current_scope = parent_id
-                    case nil:
-                        self.errors = self.errors.push("Cannot exit root scope")
-            case nil:
-                self.errors = self.errors.push("Invalid current scope")
+        # Native Dict pitfall: .get() on struct-valued dicts is corrupt —
+        # use contains_key + index read instead.
+        if self.scopes.contains_key(self.current_scope):
+            val scope = self.scopes[self.current_scope]
+            match scope.parent:
+                case parent_id:
+                    self.current_scope = parent_id
+                case nil:
+                    self.errors = self.errors.push("Cannot exit root scope")
+        else:
+            self.errors = self.errors.push("Invalid current scope")
 
     me enter_expansion() -> SyntaxMark:
         """Enter a macro expansion, creating a new mark."""
@@ -215,12 +217,12 @@ class HygieneContext:
 
     me bind_name(name: text, ident: MarkedIdent):
         """Bind a name in current scope."""
-        match self.scopes_get(scopes, self.current_scope):
-            case scope:
-                scope_bind(scope, name, ident)
-                self.scopes[self.current_scope] = scope
-            case nil:
-                self.errors = self.errors.push("Invalid current scope for binding")
+        if self.scopes.contains_key(self.current_scope):
+            val scope = self.scopes[self.current_scope]
+            scope_bind(scope, name, ident)
+            self.scopes[self.current_scope] = scope
+        else:
+            self.errors = self.errors.push("Invalid current scope for binding")
 
     fn resolve(ident: MarkedIdent) -> has_MarkedIdent:
         """Resolve an identifier through scope chain.
@@ -230,25 +232,24 @@ class HygieneContext:
         var scope_id = self.current_scope
 
         while true:
-            match self.scopes_get(scopes, scope_id):
-                case scope:
-                    # Check for binding in this scope
-                    match scope_lookup(scope, ident.name):
-                        case bound:
-                            # Check marks match for hygiene
-                            if self.marks_compatible(ident, bound, scope):
-                                return bound
-                        case nil:
-                            pass
-
-                    # Move to parent scope
-                    match scope.parent:
-                        case parent_id:
-                            scope_id = parent_id
-                        case nil:
-                            return nil  # Not found in any scope
+            if not self.scopes.contains_key(scope_id):
+                return nil  # Invalid scope chain
+            val scope = self.scopes[scope_id]
+            # Check for binding in this scope
+            match scope_lookup(scope, ident.name):
+                case bound:
+                    # Check marks match for hygiene
+                    if self.marks_compatible(ident, bound, scope):
+                        return bound
                 case nil:
-                    return nil  # Invalid scope chain
+                    pass
+
+            # Move to parent scope
+            match scope.parent:
+                case parent_id:
+                    scope_id = parent_id
+                case nil:
+                    return nil  # Not found in any scope
 
     fn marks_compatible(use_ident: MarkedIdent, def_ident: MarkedIdent, scope: HygieneScope) -> bool:
         """Check if marks are compatible for resolution.
@@ -258,10 +259,10 @@ class HygieneContext:
         2. The definition has no marks and use has expansion marks (escape)
         """
         # Same marks = hygienic reference
-        if use_ident.marks_len(marks) == def_ident.marks_len(marks):
+        if use_ident.marks.len() == def_ident.marks.len():
             var i = 0
             var all_match = true
-            while i < use_ident.marks_len(marks):
+            while i < use_ident.marks.len():
                 if use_ident.marks[i].id != def_ident.marks[i].id:
                     all_match = false
                     break
@@ -270,7 +271,7 @@ class HygieneContext:
                 return true
 
         # Definition in outer scope with no marks = intentional capture
-        if def_ident.marks_is_empty(marks):
+        if def_ident.marks.is_empty():
             return true
 
         false
@@ -283,23 +284,22 @@ class HygieneContext:
         var scope_id = self.current_scope
 
         while true:
-            match self.scopes_get(scopes, scope_id):
-                case scope:
-                    match scope_lookup(scope, name):
-                        case existing:
-                            # Check if same expansion scope
-                            if scope.has_expansion_mark:
-                                return "Macro binding '{name}' shadows existing binding"
-                        case nil:
-                            pass
-
-                    match scope.parent:
-                        case parent_id:
-                            scope_id = parent_id
-                        case nil:
-                            return nil  # No shadowing
+            if not self.scopes.contains_key(scope_id):
+                return nil
+            val scope = self.scopes[scope_id]
+            match scope_lookup(scope, name):
+                case existing:
+                    # Check if same expansion scope
+                    if scope.has_expansion_mark:
+                        return "Macro binding '{name}' shadows existing binding"
                 case nil:
-                    return nil
+                    pass
+
+            match scope.parent:
+                case parent_id:
+                    scope_id = parent_id
+                case nil:
+                    return nil  # No shadowing
 
 # ============================================================================
 # Hygiene Transformer
