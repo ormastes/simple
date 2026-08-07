@@ -175,6 +175,12 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     # (one registry per parsed module), same lifetime as `functions`/`structs`
     # above.
     var layer_registry = LayerDagRegistry.new()
+    # M1 wiring (same plan doc): `@layer(NAME)` module tag captured by the
+    # `__module_layer_tag` marker below. Empty text means "untagged" -- the
+    # M1 milestone scope is parsing + recording + validating the tag exists;
+    # the same-layer/downward call-direction check that CONSUMES this fact is
+    # a separate, not-yet-landed effort (call-edge tracking).
+    var module_tagged_layer = ""
     val span = make_span()
 
     var di = 0
@@ -544,6 +550,25 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                                             pass
                                     di = di + 1
                                     continue
+                                elif helper_name == "__module_layer_tag" and args.len() >= 1:
+                                    # M1 `@layer(NAME)` module tag (doc/03_plan/
+                                    # compiler/forwarding/
+                                    # zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md).
+                                    # Record the tagged name; the "must refer
+                                    # to a layer declared somewhere in this
+                                    # module" check runs once after the whole
+                                    # decl loop below, once layer_registry has
+                                    # seen every `layer NAME` decl regardless
+                                    # of its source position relative to this
+                                    # tag. Marker dropped either way (zero
+                                    # HIR/MIR/codegen output).
+                                    match args[0].value.kind:
+                                        case ExprKind.StringLit(tag_name, _):
+                                            module_tagged_layer = tag_name
+                                        case _:
+                                            pass
+                                    di = di + 1
+                                    continue
                             case _:
                                 pass
                     case _:
@@ -674,6 +699,16 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     if not layer_dag_verdict.ok:
         parser_error(layer_dag_verdict.diagnostic)
 
+    # M1: `@layer(NAME)` module tag must refer to a layer actually declared
+    # (via M0's `layer NAME` decl) somewhere in scope. Checked after the DAG
+    # validation above and after layer_registry has seen every `layer` decl
+    # in this module, so declaration order relative to the `@layer(...)` tag
+    # does not matter. The same-layer/downward CALL check that consumes this
+    # fact is out of scope for M1 (separate call-edge-tracking effort).
+    if module_tagged_layer != "" and not layer_registry.has_layer(module_tagged_layer):
+        parser_error("error[layer_dag]: module tagged with unknown layer '"
+            + module_tagged_layer + "'")
+
     # Synthetic main: wrap bare top-level statements so script-style sources
     # (`-c` snippets, single files without `fn main`) actually execute instead
     # of the interpreter backend returning Unit (no `main` found).
@@ -733,7 +768,8 @@ fn flat_ast_to_module(path: text) -> ParserModule:
         aop_advices: aop_advices,
         di_bindings: di_bindings,
         arch_rules: arch_rules,
-        mock_decls: []
+        mock_decls: [],
+        tagged_layer: module_tagged_layer
     )
     if flat_bridge_trace_enabled():
         print "[flat-bridge] built frontend module path={path}"

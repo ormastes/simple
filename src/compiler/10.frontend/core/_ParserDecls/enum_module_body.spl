@@ -647,6 +647,15 @@ fn parse_module_body():
             var gpu_target_arg = ""
             var gpu_target_arg_name = ""
             var gpu_backends_arg = ""
+            # M1 (doc/03_plan/compiler/forwarding/
+            # zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md):
+            # `@layer(NAME)` module tag. Reuses this same generic decorator
+            # dispatch (not the disjoint tree-based AttributeParser in
+            # parser_extensions.spl, whose only caller is the LSP/outline
+            # path and which never sees the flat-arena token stream this
+            # function reads via par_kind_get()/par_text_get()) -- a single
+            # ident arg, same shape as @derive's trait-name collection above.
+            var layer_tag_names: [text] = []
             if par_kind_get() == 140:
                 parser_advance()
                 while true:
@@ -654,7 +663,13 @@ fn parse_module_body():
                     val dec_end2: bool = par_kind_get() == 190
                     if dec_end1 or dec_end2:
                         break
-                    if decorator_name == "derive":
+                    if decorator_name == "layer":
+                        if par_kind_get() == 6:
+                            layer_tag_names.push(par_text_get())
+                            parser_advance()
+                        else:
+                            parser_advance()
+                    elif decorator_name == "derive":
                         if par_kind_get() == 6:
                             derive_traits.push(par_text_get())
                             parser_advance()
@@ -737,6 +752,28 @@ fn parse_module_body():
                 pass_dn
             elif decorator_name == "flatten_struct_output":
                 PENDING_FLATTEN_STRUCT_OUTPUT = 1
+            elif decorator_name == "layer":
+                # `@layer(NAME)` module tag (M1). Unlike @gpu/@derive/etc,
+                # this attribute does not decorate the *next* declaration --
+                # it tags the whole module -- so it is lowered to its own
+                # inert marker decl right here (mirrors parse_layer_decl's
+                # `__layer_decl` marker trick) instead of setting a PENDING_*
+                # flag consumed by the following decl. module_assembly.spl
+                # recognizes `__module_layer_tag(name)` by callee name, feeds
+                # it into the per-module tagged_layer fact, validates it
+                # against the same LayerDagRegistry the `layer NAME` decls
+                # populate, and drops the marker (zero HIR/MIR/codegen
+                # output, same as `__layer_decl`).
+                if layer_tag_names.len() > 0:
+                    val tag_helper = expr_ident("__module_layer_tag", 0)
+                    var tag_args: [i64] = []
+                    tag_args.push(expr_string_lit(layer_tag_names[0], 0))
+                    val tag_marker = expr_call(tag_helper, tag_args, 0)
+                    val tag_decl = decl_val_binding("_expr_layer_tag_" + int_to_str(i), -1, tag_marker, -1)
+                    module_add_decl(tag_decl)
+                else:
+                    parser_error("expected layer name in '@layer(NAME)'")
+                parser_reset_pending_vhdl_decorators()
             elif decorator_name == "unsafe":
                 # Args already collected into PENDING_UNSAFE_* above; the next
                 # parsed decl records itself via parser_record_unsafe_annotation.
