@@ -156,7 +156,7 @@ ring-3 gate; lands as tested-but-dormant code.
 | WP | Task | Files | Model | Reach | Accept |
 |---|---|---|---|---|---|
 | **WP-0** | Freeze the four schemas above; create `src/compiler/00.common/assurance/flight_rules.spl` with `FlightRuleV1` + the initial `FLT-*` registry | new `00.common/assurance/**` | Sonnet | 🟢 (data + docgen) | Registry compiles; docgen emits the standards crosswalk + severity table from it; **no** hand-maintained severity table remains outside it |
-| **WP-1** | Standards crosswalk `doc/02_requirements/language/flight_core_v1.md`: every `FLT-*` rule ↦ source, rationale, phase, analyzer, waiver policy, `critical`/`aero-a`/`space-a` level | doc only | Haiku | 🟢 | Every rule row has all seven fields; citations carry the "as-cited, unverified" marker |
+| **WP-1** | Standards crosswalk `doc/04_architecture/language/assurance/standards_crosswalk_2026-08-07.md`: every `FLT-*` rule ↦ source, rationale, phase, analyzer, waiver policy, `critical`/`aero-a`/`space-a` level | doc only | Haiku | 🟢 | Every rule row has all seven fields; citations carry the "as-cited, unverified" marker; dormant/intrinsic/enforcement-gap status explicit |
 | **WP-2** | Baseline census: current violations per `FLT-*`, read-only, reproducible | new scanner under `90.tools/verify/` + `doc/09_report/` | Sonnet | 🟢 | Zero source-behaviour changes; two runs give identical counts; report states its own coverage fraction (do **not** repeat the audit-script mistake of premise 7 — state what it cannot see) |
 
 ### Wave 1 — make the profile real (the biggest single win; depends on WP-0)

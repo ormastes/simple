@@ -48,7 +48,7 @@ These citations come from the originating proposal and are recorded verbatim as 
 rationale. They were **not** re-verified against the published standards in this session
 (network fetch is blocked in this environment, and a wrong revision date does not change
 the plan the way a wrong repo fact does). Anyone converting these into certification
-evidence must re-verify against the controlled documents first.
+evidence must re-verify against the controlled documents first. See also [`doc/04_architecture/language/assurance/standards_crosswalk_2026-08-07.md`](../../../04_architecture/language/assurance/standards_crosswalk_2026-08-07.md) for the mapping of Simple's `FLT-*` rules to these external standards (WP-1).
 
 | Source | Cited claim | Why it matters here |
 |---|---|---|
