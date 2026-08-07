@@ -4868,7 +4868,17 @@ pub(crate) fn exec_if_core(
         // comment in this file -- an `.?` condition's presence was already
         // decided inside `.?`'s own evaluation and must not be re-decided
         // from the payload's truthiness (the "0 is falsy" landmine).
-        if is_condition_present(&if_stmt.condition, &cond_val) {
+        let decision_result = is_condition_present(&if_stmt.condition, &cond_val);
+        // COVERAGE: `exec_if_core` is the implicit-return/value-position twin
+        // of `exec_if` (dispatched by `exec_block_fn` whenever this `if` is
+        // the LAST statement of its enclosing block — extremely common for
+        // short fn bodies, e.g. `fn f(x): if cond: a else: b`). It never
+        // recorded a decision at all, so any branch expressed in that shape
+        // reported zero coverage regardless of how it was exercised. Mirrors
+        // `exec_if`'s recording exactly (see also block_execution.rs's two
+        // `Node::If` sites, which had the same gap for a different reason).
+        record_decision_coverage_sffi(&current_coverage_file(), if_stmt.span.line, if_stmt.span.column, decision_result);
+        if decision_result {
             let (flow, last_val) = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
             return match flow {
                 Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
@@ -4877,7 +4887,7 @@ pub(crate) fn exec_if_core(
         }
     }
 
-    for (pattern, cond, block) in if_stmt.elif_branches.iter() {
+    for (elif_idx, (pattern, cond, block)) in if_stmt.elif_branches.iter().enumerate() {
         if let Some(pattern) = pattern {
             let value = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
             match optional_let_binding(pattern, &value) {
@@ -4911,7 +4921,14 @@ pub(crate) fn exec_if_core(
             } else {
                 elif_val
             };
-            if is_condition_present(cond, &elif_val) {
+            let elif_decision = is_condition_present(cond, &elif_val);
+            record_decision_coverage_sffi(
+                &current_coverage_file(),
+                if_stmt.span.line + elif_idx,
+                if_stmt.span.column,
+                elif_decision,
+            );
+            if elif_decision {
                 let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
                 return match flow {
                     Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),

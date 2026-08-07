@@ -5,10 +5,10 @@ use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_w
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    evaluate_expr, exec_assignment, exec_augmented_assignment, exec_with, get_type_name, pattern_matches,
-    BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS,
-    MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER,
-    CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS, USER_MACROS,
+    current_coverage_file, evaluate_expr, exec_assignment, exec_augmented_assignment, exec_with, get_type_name,
+    pattern_matches, record_decision_coverage_sffi, BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME,
+    EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS,
+    MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER, CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS, USER_MACROS,
 };
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
@@ -495,7 +495,20 @@ pub(super) fn exec_block_closure_into(
                     )?;
                     // `is_condition_present` (not plain `.truthy()`): see its
                     // doc comment in `interpreter_control.rs`.
-                    is_condition_present(&if_stmt.condition, &cond_val)
+                    let decision_result = is_condition_present(&if_stmt.condition, &cond_val);
+                    // COVERAGE: mirror `interpreter_control::exec_if`. This is a
+                    // SEPARATE `Node::If` execution path — function-body / BDD
+                    // block closures run through `exec_block_closure_mut`, not
+                    // `exec_if` — so branch decisions inside a function body
+                    // previously recorded NOTHING. See
+                    // doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md.
+                    record_decision_coverage_sffi(
+                        &current_coverage_file(),
+                        if_stmt.span.line,
+                        if_stmt.span.column,
+                        decision_result,
+                    );
+                    decision_result
                 } {
                     last_value = exec_block_closure_mut(
                         &if_stmt.then_block.statements,
@@ -508,7 +521,7 @@ pub(super) fn exec_block_closure_into(
                     handled = true;
                 }
                 if !handled {
-                    for (pattern, cond, block) in &if_stmt.elif_branches {
+                    for (elif_idx, (pattern, cond, block)) in if_stmt.elif_branches.iter().enumerate() {
                         if let Some(pattern) = pattern {
                             let value = evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?;
                             match optional_let_binding(pattern, &value) {
@@ -548,7 +561,17 @@ pub(super) fn exec_block_closure_into(
                         } else if {
                             let elif_val =
                                 evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?;
-                            is_condition_present(cond, &elif_val)
+                            let elif_decision = is_condition_present(cond, &elif_val);
+                            // COVERAGE: mirror `interpreter_control::exec_if`'s elif
+                            // handling (offset the line by `elif_idx` so each elif
+                            // gets a distinct decision id, same scheme as there).
+                            record_decision_coverage_sffi(
+                                &current_coverage_file(),
+                                if_stmt.span.line + elif_idx,
+                                if_stmt.span.column,
+                                elif_decision,
+                            );
+                            elif_decision
                         } {
                             last_value = exec_block_closure_mut(
                                 &block.statements,
@@ -1245,7 +1268,17 @@ fn exec_block_closure_mut_inner(
                         evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
                     // `is_condition_present` (not plain `.truthy()`): see its
                     // doc comment in `interpreter_control.rs`.
-                    is_condition_present(&if_stmt.condition, &cond_val)
+                    let decision_result = is_condition_present(&if_stmt.condition, &cond_val);
+                    // COVERAGE: mirror `interpreter_control::exec_if`. This is the
+                    // `exec_block_closure_into` twin of the `exec_block_closure_mut`
+                    // `Node::If` handling above — same previously-missing wiring.
+                    record_decision_coverage_sffi(
+                        &current_coverage_file(),
+                        if_stmt.span.line,
+                        if_stmt.span.column,
+                        decision_result,
+                    );
+                    decision_result
                 } {
                     last_value = exec_block_closure_mut(
                         &if_stmt.then_block.statements,
@@ -1258,7 +1291,7 @@ fn exec_block_closure_mut_inner(
                     handled = true;
                 }
                 if !handled {
-                    for (pattern, cond, block) in &if_stmt.elif_branches {
+                    for (elif_idx, (pattern, cond, block)) in if_stmt.elif_branches.iter().enumerate() {
                         if let Some(pattern) = pattern {
                             let value = evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?;
                             match optional_let_binding(pattern, &value) {
@@ -1297,7 +1330,14 @@ fn exec_block_closure_mut_inner(
                             }
                         } else if {
                             let elif_val = evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?;
-                            is_condition_present(cond, &elif_val)
+                            let elif_decision = is_condition_present(cond, &elif_val);
+                            record_decision_coverage_sffi(
+                                &current_coverage_file(),
+                                if_stmt.span.line + elif_idx,
+                                if_stmt.span.column,
+                                elif_decision,
+                            );
+                            elif_decision
                         } {
                             last_value = exec_block_closure_mut(
                                 &block.statements,

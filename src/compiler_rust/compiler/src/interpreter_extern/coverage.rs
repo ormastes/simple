@@ -609,12 +609,73 @@ pub fn rt_coverage_enable_timed_fn(_args: &[Value]) -> Result<Value, CompileErro
     Ok(Value::Nil)
 }
 
-/// Decision probe for MC/DC coverage (stub in interpreter)
-pub fn rt_coverage_decision_probe_fn(_args: &[Value]) -> Result<Value, CompileError> {
+/// Helper to extract a bool argument. Native codegen passes the SFFI `result`
+/// slot as an i8 (see `runtime_sffi.rs`'s `[I32, I8, I64, I32, I32]` spec for
+/// `rt_coverage_decision_probe`), but interpreter-level calls may hand this
+/// intrinsic a genuine `Value::Bool`. Accept either so both call shapes work.
+fn get_bool_arg(args: &[Value], idx: usize) -> bool {
+    match args.get(idx) {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Int(i)) => *i != 0,
+        Some(Value::UInt { value, .. }) => *value != 0,
+        _ => false,
+    }
+}
+
+/// Helper to extract a u32 argument.
+fn get_u32_arg(args: &[Value], idx: usize) -> u32 {
+    match args.get(idx) {
+        Some(Value::Int(i)) => *i as u32,
+        Some(Value::UInt { value, .. }) => *value as u32,
+        _ => 0,
+    }
+}
+
+/// Decision probe for MC/DC coverage.
+///
+/// Was a no-op stub (`Ok(Value::Nil)` regardless of args), so every decision
+/// probe fired by interpreted/JIT'd code through this SFFI dispatch path was
+/// silently discarded — the runtime's own `CoverageData` store
+/// (`simple_runtime::coverage`) already has a working, non-vacuous
+/// (true_count, false_count) recorder and SDN emitter (merged into the final
+/// report by `crate::coverage::dump_runtime_coverage_sdn`); this intrinsic
+/// just never forwarded into it. Mirrors
+/// `interpreter::coverage_helpers::record_decision_coverage_sffi`, which
+/// reaches the same real function directly (not through this dispatch table)
+/// from the AST-walking interpreter's if/while/match handling.
+///
+/// Args match the `[I32, I8, I64, I32, I32]` `runtime_sffi.rs` spec:
+/// `(decision_id, result, file, line, column)`.
+pub fn rt_coverage_decision_probe_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let decision_id = get_u32_arg(args, 0);
+    let result = get_bool_arg(args, 1);
+    let file = get_str_arg(args, 2);
+    let line = get_u32_arg(args, 3);
+    let column = get_u32_arg(args, 4);
+
+    let file_cstr = std::ffi::CString::new(file).unwrap_or_else(|_| std::ffi::CString::new("<error>").unwrap());
+    unsafe {
+        simple_runtime::rt_coverage_decision_probe(decision_id, result, file_cstr.as_ptr(), line, column);
+    }
     Ok(Value::Nil)
 }
 
-/// Condition probe for MC/DC coverage (stub in interpreter)
-pub fn rt_coverage_condition_probe_fn(_args: &[Value]) -> Result<Value, CompileError> {
+/// Condition probe for MC/DC coverage. See `rt_coverage_decision_probe_fn` —
+/// same bug (silent stub), same fix (forward to the real runtime store).
+///
+/// Args match the `[I32, I32, I8, I64, I32, I32]` `runtime_sffi.rs` spec:
+/// `(decision_id, condition_id, result, file, line, column)`.
+pub fn rt_coverage_condition_probe_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let decision_id = get_u32_arg(args, 0);
+    let condition_id = get_u32_arg(args, 1);
+    let result = get_bool_arg(args, 2);
+    let file = get_str_arg(args, 3);
+    let line = get_u32_arg(args, 4);
+    let column = get_u32_arg(args, 5);
+
+    let file_cstr = std::ffi::CString::new(file).unwrap_or_else(|_| std::ffi::CString::new("<error>").unwrap());
+    unsafe {
+        simple_runtime::rt_coverage_condition_probe(decision_id, condition_id, result, file_cstr.as_ptr(), line, column);
+    }
     Ok(Value::Nil)
 }
