@@ -163,3 +163,34 @@ describe "test runner single example failure contract":
         expect(code).to_equal(1)
         expect(output).to_contain("Failed: 1")
         expect(output).to_contain("FAIL " + root + "/child_orphan_spec.spl")
+
+    it "writes the coverage artifact to SIMPLE_COVERAGE_OUTPUT when coverage is enabled":
+        step("Run the wrapper with SIMPLE_COVERAGE_OUTPUT set on a passing spec")
+        # U1.3 prerequisite 4: the single-runner's own line-coverage
+        # instrumentation (SDN parsed from the child's stdout) must be
+        # persisted to the path named by SIMPLE_COVERAGE_OUTPUT, not just
+        # summarized into a stdout banner.
+        val root = "build/test-runner-single-coverage-export"
+        val artifact = root + "/coverage_out.sdn"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            "printf 'use std.spec.*\\n\\ndescribe \"cov probe\":\\n    it \"passes\":\\n        expect(1).to_equal(1)\\n' > " + root + "/child_cov_spec.spl && " +
+            "SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=" + artifact + " " +
+            "bin/simple run src/app/test_runner_new/test_runner_single.spl " + root + "/child_cov_spec.spl --coverage"
+        val (stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
+        val output = stdout + stderr
+
+        expect(code).to_equal(0)
+        expect(output).to_contain("Failed: 0")
+        val exists_command = "test -s " + artifact + " && cat " + artifact
+        val (art_stdout, _art_stderr, art_code) = process_run("/bin/sh", ["-c", exists_command])
+
+        expect(art_code).to_equal(0)
+        expect(art_stdout).to_contain("Coverage Report")
+        # NOTE: the hit-line entries are tagged "<entry>" rather than the
+        # real source path/line here — that is the SEPARATE, still-open
+        # Rust-side prerequisite (real source spans in
+        # interpreter_control.rs), not part of this export-path fix. This
+        # spec only asserts that SOMETHING real (non-empty, well-formed SDN)
+        # reaches disk at SIMPLE_COVERAGE_OUTPUT, matching what the stdout
+        # banner already reported.
+        expect(art_stdout).to_contain("lines |file, line, hit_count|")
