@@ -7,9 +7,57 @@
   built branch-coverage and line-coverage closure units on top of tooling that
   does not currently work end-to-end. No product functionality is broken by
   this; it blocks trustworthy coverage MEASUREMENT, both branch and line.
-- **Status:** open. Structural root causes pinned by source read (file:line
-  below); no fix attempted here (doc-only investigation). Five concrete
-  prerequisites are listed at the end as the unblock condition.
+- **Status:** open, PARTIALLY RESOLVED. Structural root causes pinned by
+  source read (file:line below). Prerequisite 4 (export) landed in commit
+  `ae97a34cd365` ("fix(test-runner): export coverage SDN to
+  SIMPLE_COVERAGE_OUTPUT (U1.3 prereq 4)") — `check-render2d-coverage.shs`
+  row `prereq4_artifact_export` now reads MET; see the "Correction" section
+  below. Prerequisites 1 (partially), 2, 3, 5 remain unmet. Overall gate
+  verdict is still FAIL.
+
+## Correction 2026-08-07 (later pass, after `ae97a34cd365`)
+
+Two claims in this doc, as originally written, no longer hold and are
+corrected here rather than rewritten in place (repo convention: append, don't
+silently rewrite a bug doc's history):
+
+1. **Prerequisite 4 (export) is now MET, not "still unmet exactly as
+   documented."** `test_runner_single.spl` now writes `cov_sdn` to
+   `SIMPLE_COVERAGE_OUTPUT` (guarded on the env var and non-empty data) —
+   verified independently in this pass: an artifact 15,688-45,747 bytes
+   across several runs, `# Coverage Report` header, real `(file, line,
+   hit_count)` rows keyed on genuine `src/...` paths, matching the stdout
+   `coverage: <path> NN%` banner exactly. `check-render2d-coverage.shs`
+   confirms this mechanically (`prereq4_artifact_export -- artifact written
+   and non-empty`).
+2. **Prerequisite 1's framing ("the interpreter hardcodes file as
+   `<source>`, line/col 0,0") is too broad as a description of LINE
+   coverage.** That hardcoding is real but applies to the raw
+   *decision/branch*-probe call sites (`interpreter_control.rs:279` etc.,
+   feeding `rt_coverage_decision_probe`/branch coverage — still genuinely
+   `<source>`/`0,0`, prerequisite 1 stays UNMET for branch coverage). LINE
+   coverage uses a separate, already-working mechanism
+   (`CURRENT_EXEC_MODULE`, documented at `test_runner_single.spl:345-386`):
+   an **imported module's** statements inside functions are attributed to
+   their own real file and line today, not to `<source>` or `<entry>`. Only
+   an imported module's *top-level* statements (bounded, <=2 lines/module)
+   still get mis-filed under `<entry>`; that residual is separately tracked
+   and does not affect production modules exercised primarily through their
+   functions (as `src/os/compositor/**`,
+   `src/lib/gc_async_mut/gpu/browser_engine/**`, and `src/lib/common/ui/**`
+   are, from a spec's perspective). U1.2's baseline
+   (`doc/09_report/ui/testing/wm_gui_web_coverage_baseline_2026-08-07.md`)
+   demonstrates this empirically: 16 real `coverage: <path> NN%` lines
+   across all three module families, cross-checked against artifact bytes,
+   plus a sabotage run (misspelled target) that correctly produced no line.
+   **This correction is scoped to LINE coverage only** — branch coverage's
+   `<source>`/`0,0` hardcoding is unaffected and prerequisite 1 stays UNMET
+   for that axis, which is why the gate's overall verdict is still FAIL.
+
+Everything else in this doc (prerequisites 2, 3, 5; the branch-coverage
+scope; the "why ~100% branch/line coverage is not currently a meaningful
+target" framing for BRANCH coverage specifically) is unchanged and still
+accurate.
 
 ## Scope: this is BOTH a branch-coverage gap AND a line-coverage-export gap
 
@@ -143,11 +191,13 @@ background assumptions:
 3. **Implement the `spl-coverage` subcommand in the deployed binary** —
    `src/app/spl_coverage/main.spl` exists as source but is not reachable from
    `bin/simple`; needs real dispatch-table wiring, not just a source file.
-4. **Wire coverage export into the spipe/.spl runner path** — `runner.rs:434`
-   → `save_coverage_data` is the working call chain today, but the actual
-   `bin/simple test <spec>` invocation an agent runs does not go through it
-   (repro 2 above); either route the spipe/.spl runner through that chain or
-   build an equivalent export call on the path it does use.
+4. **MET (2026-08-07, commit `ae97a34cd365`).** ~~Wire coverage export into
+   the spipe/.spl runner path~~ — `test_runner_single.spl` now writes
+   `cov_sdn` to `SIMPLE_COVERAGE_OUTPUT` directly on the spipe/.spl runner
+   path (not via `runner.rs:434`/`save_coverage_data`, which remains a
+   separate, still-unused chain for this path). Gate-confirmed
+   (`prereq4_artifact_export` MET); see "Correction 2026-08-07" above and
+   `doc/09_report/ui/testing/wm_gui_web_coverage_baseline_2026-08-07.md`.
 5. **Build a rollup computing taken/not-taken per site** — even once spans
    and export both work, nothing today aggregates raw decision events into a
    per-file or per-module hit/total table; this is new code, not a
@@ -187,6 +237,14 @@ Both hold:
   is still unmet exactly as documented, and this doc's characterization of
   prerequisite 4 stands.
 
+  **STALE as of the later pass documented in "Correction 2026-08-07" above:**
+  commit `ae97a34cd365` landed the missing write to `SIMPLE_COVERAGE_OUTPUT`
+  after this note was written. Prerequisite 4 is now MET (gate-confirmed).
+  `build/coverage/coverage.sdn` staying untouched is expected and not a
+  counter-signal — that path is the *unrelated* Rust-seed `--native`
+  collector output (branch-shaped schema, prerequisite 2/5 territory), not
+  the `SIMPLE_COVERAGE_OUTPUT` path this note and prerequisite 4 are about.
+
 Per the plan's own reframing, B1 cannot build all five prerequisites in one
 unit (prerequisite 1 alone requires editing ~10 pinned Rust seed call sites
 across `interpreter_control.rs`, `lowering_stmt.rs`, `lowering_expr_ops.rs`
@@ -219,12 +277,3 @@ primitive before building on a derived signal**
 (`feedback_measure_the_primitive_before_building_on_a_derived_signal.md`).
 Both plans cited a CLI/pipeline as working evidence without running it; a
 five-minute empirical repro (the two commands above) disproved both claims.
-
-## Patch prep landed (2026-08-07)
-
-A doc-only patch-preparation pass pinned exact file:line diffs, verification
-steps, and ordering for all five prerequisites (with two corrections to this
-doc's original claims: the interpreter file path and the scope of prerequisite
-2's production-path gap). See
-`doc/03_plan/ui/testing/u1_3_coverage_primitive_patch_prep_2026-08-07.md` —
-apply in an isolated bootstrap session, not this shared working tree.
