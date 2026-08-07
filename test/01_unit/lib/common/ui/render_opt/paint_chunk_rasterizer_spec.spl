@@ -74,6 +74,70 @@ fn count_changed_bands(before: [u32], after: [u32]) -> i64:
         band = band + 1
     changed
 
+describe "F4 paint_rect edge cases: zero-area, negative-origin, empty chunk list":
+    it "zero-area rects (w=0 or h=0) paint nothing":
+        val buf = ChunkRasterBuffer.create(10, 10)
+        paint_rect(buf, 2, 2, 0, 3, 0xFFFF0000)
+        paint_rect(buf, 2, 2, 3, 0, 0xFFFF0000)
+        var i: i64 = 0
+        var any_nonzero = false
+        while i < 100:
+            if buf.pixels[i.to_i32()] != 0:
+                any_nonzero = true
+            i = i + 1
+        assert_false(any_nonzero)
+
+    it "fully out-of-bounds negative-y rect paints nothing (row clip works)":
+        val buf = ChunkRasterBuffer.create(10, 10)
+        paint_rect(buf, 2, -5, 3, 2, 0xFFFF0000)
+        var i: i64 = 0
+        var any_nonzero = false
+        while i < 100:
+            if buf.pixels[i.to_i32()] != 0:
+                any_nonzero = true
+            i = i + 1
+        assert_false(any_nonzero)
+
+    it "REAL BEHAVIOR (not plan assumption): negative-origin x bleeds into the PRECEDING row instead of clipping":
+        # Probed directly (see doc/08_tracking/bug/paint_rect_negative_x_row_bleed_2026-08-07.md):
+        # `paint_rect` clips `py` (row) to [0, height) but never clips `x`/`row_offset`
+        # against the buffer stride, and `oracle_fill_const` performs no bounds check
+        # of its own. A rect whose x origin is negative therefore computes a
+        # `row_offset` that lands in the PREVIOUS row's tail, and the fill silently
+        # wraps forward across the row boundary into the target row's head -- real
+        # pixel corruption of a row this rect was never supposed to touch, not the
+        # "paints nothing" the plan assumed for negative-origin rects.
+        val buf = ChunkRasterBuffer.create(10, 10)
+        paint_rect(buf, -3, 2, 5, 1, 0xFFFF0000)
+        # Row 1 (the row ABOVE the target row 2) gets its last 3 columns
+        # corrupted -- this rect was never supposed to touch row 1 at all.
+        assert_true(buf.get(7, 1) == 0xFFFF0000)
+        assert_true(buf.get(8, 1) == 0xFFFF0000)
+        assert_true(buf.get(9, 1) == 0xFFFF0000)
+        # Row 2 (the intended target row) only gets its first 2 columns painted,
+        # not clipped-to-nothing and not the full 5-wide rect either.
+        assert_true(buf.get(0, 2) == 0xFFFF0000)
+        assert_true(buf.get(1, 2) == 0xFFFF0000)
+        assert_true(buf.get(2, 2) == 0)
+
+    it "paint_chunk_rasterizer_run with an empty chunk list rasters nothing and reports zero counts":
+        val trees = make_scene()
+        val chunks = PaintChunks.create()
+        val rects = make_rects()
+        val revs = RenderRevisions.create(4)
+        val buf = ChunkRasterBuffer.create(40, 10)
+        val stats = paint_chunk_rasterizer_run(chunks, rects, trees, revs, buf,
+                                                1, 1, 1, 1, 1)
+        assert_true(stats.rastered_count == 0)
+        assert_true(stats.skipped_count == 0)
+        var i: i64 = 0
+        var any_nonzero = false
+        while i < 400:
+            if buf.pixels[i.to_i32()] != 0:
+                any_nonzero = true
+            i = i + 1
+        assert_false(any_nonzero)
+
 describe "O3 paint-chunk rasterizer: dirty chunks paint, skipped chunks stay untouched":
     it "frame 1 paints the 3 existing chunks; frame 2's newly-added 4th chunk is the ONLY one that paints":
         val trees = make_scene()
