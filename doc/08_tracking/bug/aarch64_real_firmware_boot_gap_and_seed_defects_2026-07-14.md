@@ -950,3 +950,99 @@ task scope for this pass was diagnosis, not changing the working boot path.
 for this pass — the task was static analysis only); fetching Limine loader
 source to check its section-name handling (no network access in this
 environment).
+
+## Candidate 1 vs candidate 2 for the struct-global field-misread: NEITHER, as literally scoped (static read, 2026-08-07)
+
+Follow-up task: determine whether surviving candidate 1 (uniform `field * 8`
+stride) or candidate 2 (unconditional `band(addr, -8)` tag-strip) — both in
+`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl`'s `GetField`
+case, lines 592-601 — explains the real aarch64 disassembly captured earlier
+in this doc (`_parse_hhdm`, "Actual defect" paragraph, lines 566-571):
+
+```
+ldr x11, =0xffffffff80105008   ; &hhdm_request
+ldr x11, [x11]                 ; loads id[0] (magic), not .response
+and x12, x11, #0xfffffffffffffff8   ; mask low 3 bits
+cbnz x12, ...
+```
+
+Read the current `GetField` lowering directly (`cranelift_codegen_adapter.spl:592-601`):
+
+```
+case GetField(dest, base, field):
+    val tagged_addr = cl_translate_operand(ctx, cl_module, base, value_map, slot_map, func)
+    val addr = cranelift_band(ctx, tagged_addr, cranelift_iconst(ctx, CL_TYPE_I64, -8))
+    val offset = field * 8
+    val field_addr = cranelift_iadd(ctx, addr, cranelift_iconst(ctx, CL_TYPE_I64, offset))
+    val result = load_uniform_i64(ctx, dest.id, field_addr, func)
+```
+
+**Instruction-order mismatch rules out both candidates as literal explanations
+of this trace.** `GetField`'s own IR order is AND-the-address, then ADD the
+offset, then LOAD through the result — i.e. the mask always happens *before*
+any load, on the pointer, never on a loaded value. The captured aarch64 trace
+does the opposite: `ldr x11,[x11]` happens *first* (a bare, unmasked
+dereference of the base pointer, offset 0), and `and x12, x11, #-8` happens
+*second*, operating on `x11` — the just-**loaded value** — not on any address,
+producing a *third* register (`x12`) that then feeds `cbnz`. Masking a loaded
+value and branching on it is not what `GetField` emits; `GetField` never
+masks anything after a load, and never branches at all. So:
+
+- **Candidate 2 (unconditional tag-strip) does not match**: the mask in the
+  trace is applied to `id[0]`'s *loaded value*, not to the *base address*
+  being dereferenced. `GetField`'s `band(addr, -8)` (line 594) is address-side
+  and would appear, if present, as an instruction *before* the `ldr`, not
+  after it. Confirmed by grep: `cranelift_band` occurs in only three places in
+  this file (594, 605, generic BinOp-`&` at 1078) — none is a "mask a
+  just-loaded value, then branch" pattern. That pattern is not emitted by any
+  code currently in `cranelift_codegen_adapter.spl`; it either comes from a
+  different lowering site not yet located, or from Cranelift's own aarch64
+  instruction selection synthesizing a compare-with-tag-bits sequence from
+  MIR/IR this file emits for something other than a plain `GetField` (e.g. an
+  `== 0` compare on a value whose inferred type is nilable/boxed, since this
+  compiler's boxed-value representation ORs in a low tag bit — see
+  `Aggregate::Struct`, lines 623-633 — and a nil-check on such a value would
+  plausibly mask-and-compare like this). This was not chased further; it is
+  the concrete next lead, not a settled conclusion.
+- **Candidate 1 (uniform 8-byte stride) is moot for this specific trace,
+  not confirmed or refuted in general**: the load in the trace reads offset 0
+  (`id[0]`, the magic constant) instead of `.response`'s real offset. Per
+  `GetField`'s own formula `offset = field * 8`, reading offset 0 means
+  `field` resolved to **0** — the exact "silently defaulted to field index 0"
+  fallback (`resolve_field_index`, `function_lowering.spl:1070`) that the
+  prior session in this doc tested and refuted **on the x86_64 JIT path**
+  (`bin/simple run`, `SIMPLE_MIR_FIELD_TRACE=1`, no `[field-idx-fallback0]`
+  trace, all fields correct). That refutation was never run against the
+  actual native-build/AOT `--target aarch64-unknown-none-elf` pipeline that
+  produced this real kernel disassembly — it is not established that the two
+  pipelines share the same field-index resolution outcome for this global.
+  Whether the field-width/stride mismatch (candidate 1) matters at all is
+  moot until `field` resolves to the *correct* non-zero index; right now the
+  evidence points at index resolution being wrong (index 0 instead of the
+  real `.response` index), not at the stride formula being wrong for a
+  correctly-resolved index.
+
+**Conclusion: neither candidate 1 nor candidate 2, as literally scoped in
+`GetField`/`SetField`'s address-masking and stride code, explains the
+captured trace — the trace's shape (load-then-mask-the-value-then-branch,
+reading field index 0) does not match what that code emits (mask-the-address-
+then-add-then-load).** The strongest concrete lead the trace itself supports
+is a recurrence of the **field-index-resolves-to-0** failure mode, but this
+time exercised through the native-build/AOT pipeline rather than the
+`bin/simple run` JIT pipeline the prior test used — those are two different
+execution paths through this compiler (see
+`reference_entry_flag_delegates_to_rust_runtime.md` /
+`reference_entry_flag_stage3_selfhost_regression.md` in project memory for a
+precedent of `--entry`/native-build diverging from the JIT/interpreter path)
+and were not shown to share field-index-resolution behavior. Confirming this
+requires either (a) a `SIMPLE_MIR_FIELD_TRACE=1` run through the actual
+native-build pipeline targeting `aarch64-unknown-none-elf` (not just
+`bin/simple run` on x86_64), or (b) locating the actual MIR/codegen site that
+emits "mask a loaded value, branch on it" (not found in
+`cranelift_codegen_adapter.spl` by exhaustive grep for `cranelift_band` in
+this session) to explain the trace's true shape. Neither was done this
+session — this is a static-code-reading-only pass, no execution, per the
+task's explicit scope (no bootstrap rebuild, no fix attempted). **Status:
+still unconfirmed**, with the field-index-resolution-on-native-build path now
+the concrete next lead instead of the two stride/tag-mask candidates, which
+this pass demonstrates do not match the evidence at the instruction level.

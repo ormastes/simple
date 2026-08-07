@@ -1,0 +1,54 @@
+#!/bin/sh
+# Regression gate for AOT (`native-build`) tuple stringification.
+#
+# WHY THIS EXISTS: `bin/simple test` hard-defaults to the tree-walk interpreter
+# and has no AOT mode, so a spec can only ever prove the interpreter lane. The
+# tuple-to-text defect was "fixed" twice (JIT printer 81c58562fac, then the AOT
+# MIR path) and re-reported both times because no harness reached the AOT lane.
+# Only a script that actually drives `native-build` can fence this.
+# Bug: doc/08_tracking/bug/native_pushed_tuple_into_empty_literal_list_unboxed_2026-08-02.md
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+WORK_DIR="${WORK_DIR:-/tmp/check-native-tuple-to-text.$$}"
+FIXTURE="test/fixtures/native_tuple_to_text/main.spl"
+
+test -x "$SIMPLE_BINARY"
+mkdir -p "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+binary="$WORK_DIR/tuple-to-text"
+log="$WORK_DIR/tuple-to-text.log"
+
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+    "$SIMPLE_BINARY" native-build \
+    --source test/fixtures --entry-closure --entry "$FIXTURE" \
+    --cache-dir "$WORK_DIR/cache" --output "$binary" >"$log" 2>&1
+
+out="$(timeout 30 "$binary" 2>>"$log")"
+
+flat="$(printf '%s\n' "$out" | sed -n 's/^tuple: //p')"
+mixed="$(printf '%s\n' "$out" | sed -n 's/^mixed: //p')"
+
+if [ "$flat" != "(1, 2, 3)" ]; then
+    echo "FAIL — all-i64 tuple interpolation regressed under native-build"
+    echo "  expected: (1, 2, 3)"
+    echo "  actual:   $flat"
+    exit 1
+fi
+
+# Mixed-type tuples are a KNOWN-OPEN gap (unreliable HIR field_types
+# annotations), tracked in the bug doc above. Reported, not gated -- so that a
+# FIX shows up here as loudly as a regression does.
+if [ "$mixed" = "(1, abc, true)" ]; then
+    echo "NOTE — mixed-type tuple rendering now CORRECT; close the open gap in"
+    echo "       doc/08_tracking/bug/native_pushed_tuple_into_empty_literal_list_unboxed_2026-08-02.md"
+    echo "       and promote this to a hard assertion."
+else
+    echo "KNOWN-OPEN — mixed-type tuple still wrong: $mixed (expected (1, abc, true))"
+fi
+
+echo "PASS — native-build tuple-to-text: all-i64 tuple renders correctly"

@@ -242,3 +242,71 @@ Consequence for the fix order: the `: list` retype campaign remains the only
 member with a demonstrated live reproduction, which strengthens recommended
 next step 4 above (lint/error on `: list` parameters) relative to the
 general runtime-tag-dispatched decode.
+
+## 2026-08-07 re-verification — STILL LIVE, unchanged signature
+
+Cross-referenced (not re-investigated) during a prior native rebind/spill
+re-verification pass; re-checked empirically as its own item this pass since
+this repo moves fast enough that "known defects" often turn out fixed.
+
+**Binary checked**: deployed `bin/simple` → `bin/release/x86_64-unknown-linux-gnu/simple`
+(prints the "this Rust-built Simple binary is a bootstrap seed only" banner —
+confirmed to be the Rust seed, i.e. exactly the binary this bug's root cause
+lives in). No pure-Simple self-hosted `simple` binary is currently deployed
+under `bin/release/linux-x86_64/` (only the two MCP server binaries are
+there), so the seed is also the only `bin/simple` available to test against
+right now.
+
+**Probe** (`/tmp/.../scratchpad/list_reverify_probe.spl`, colon-body syntax,
+minimal pair matching the original repro almost verbatim):
+
+```
+fn get_via_list_param(l: list, i: i64) -> i64:
+    return l[i] & 0xFF
+
+fn get_via_typed_param(l: [i64], i: i64) -> i64:
+    return l[i] & 0xFF
+
+fn main():
+    var buf: [i64] = [5, 7, 9]
+    print(get_via_typed_param(buf, 0)); print(get_via_typed_param(buf, 1))
+    print(get_via_list_param(buf, 0));  print(get_via_list_param(buf, 1))
+```
+
+Result, default engine (Cranelift JIT, the seed's normal path) vs
+`SIMPLE_EXECUTION_MODE=interpret`:
+
+| call | default | interpret | expected |
+|---|---|---|---|
+| `get_via_typed_param(buf, 0/1)` | `5, 7` | `5, 7` | `5, 7` |
+| `get_via_list_param(buf, 0/1)` | **`40, 56`** | `5, 7` | `5, 7` |
+
+Exact match to the documented `<<3` corruption signature (`5→40`, `7→56`)
+and to the 2026-08-01 re-measurement's `param_untyped` row. The typed
+control and the interpreter both remain correct, confirming this is
+specifically the untyped-`: list`-parameter / default-JIT-engine
+combination, unchanged from both prior checks.
+
+**Also attempted**: `bin/simple native-build` on the same probe, to check
+the native-codegen engine's behavior independently. It hung and was killed
+after the 2-minute tool timeout with no output — consistent with this
+session's memory note that `native-build` execution can abort without a
+verdict line; not pursued further as it is orthogonal to confirming the
+already-reproduced JIT/interpreter divergence, and this bug's root cause
+(`lower_index_expr`'s `needs_int_unbox` decision in
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_struct.rs`) is
+upstream of and shared by both the JIT and native lowering paths.
+
+**Verdict: STILL LIVE.** No fix attempted this pass — per the bug doc's own
+2026-07-30 analysis (see "INFERRED: why a safe general fix is NOT contained
+this pass" above), a general fix requires either a cross-cutting runtime-
+tag-dispatched decode at every `ANY`-typed consumption site, or call-site
+monomorphization of `list`-typed parameters; neither is a small, safe,
+contained `.spl`-only change, and the defect's precise mechanism lives in
+the Rust seed's MIR lowering (`lowering_expr_struct.rs`), which per this
+session's task scope is off-limits without a prior-session decision
+explicitly permitting a Rust-seed fix (none is recorded for this bug). The
+recommended mitigation remains unchanged: retype `: list` parameters to
+concrete element types (`[i64]`, `[u8]`, etc.) at call sites, as already
+done for kafka `serialization.spl`, and/or land the lint/error on `: list`
+parameters proposed in "Recommended next steps" item 4.

@@ -502,3 +502,60 @@ fault" for the reported bug).
 changes; no bootstrap rebuild performed or required (native-build
 interprets these `.spl` sources live under `SIMPLE_BOOTSTRAP=1`, confirmed
 by re-running the repro immediately after each edit).
+
+## 2026-08-07: why this defect kept coming back, and the prevention that was missing
+
+This bug was reported, fixed, and re-reported as still-broken **three times**
+(JIT value printer `81c58562fac`; the MIR type-preservation + compile-time
+Tuple-to-text pair earlier today; and again in the follow-up pass). That is not
+three separate defects — it is one defect with **no harness able to observe it**.
+
+### Root cause of the recurrence: the only spec covering it is structurally blind
+
+`test/01_unit/language/tuple_to_text_native_repro_spec.spl` asserts tuple
+interpolation renders `(1, 2, 3)`. It passes. It has always passed. It passed
+on every single day the AOT lane was emitting a raw pointer.
+
+`bin/simple test` hard-defaults to the tree-walk interpreter and
+`TestExecutionMode` has no AOT/native variant (see `.claude/rules/testing.md`
+§ "`run` and `test` are DIFFERENT ENGINES"). So **no spec can ever reach the
+`native-build` lane**. Each fix was verified by hand against `native-build`,
+landed, and then had nothing standing behind it; the next person to touch tuple
+lowering got a green suite and shipped the regression. The spec's own header
+comment even documented "the AOT lane still reproduces this" while reporting
+PASS — a green result sitting directly beneath a written statement that the
+thing under test was broken.
+
+This is the general shape, not a tuple-specific accident: **any AOT-lane defect
+is invisible to the spec corpus.** The repo's answer for that class is a
+`scripts/check/check-*.shs` gate that drives the real `native-build` binary —
+which is why ~20 such scripts already exist (`check-native-*.shs`).
+
+### Prevention landed
+
+- `test/fixtures/native_tuple_to_text/main.spl` — flat and mixed-type tuple
+  interpolation.
+- `scripts/check/check-native-tuple-to-text.shs` — builds that fixture through
+  `native-build` and asserts the rendered output. Hard-fails (exit 1) if the
+  all-i64 case regresses. Sabotage-verified: mutating the fixture to `(9, 9, 9)`
+  produced `FAIL — all-i64 tuple interpolation regressed under native-build`,
+  exit 1, so the assertion is load-bearing rather than vacuous.
+- The spec header now states it cannot see the AOT lane and names the `.shs`
+  gate as the real fence, so the next reader does not mistake its green for
+  coverage.
+
+### Current AOT status, measured 2026-08-07
+
+```
+$ sh scripts/check/check-native-tuple-to-text.shs
+KNOWN-OPEN — mixed-type tuple still wrong: (1, 107362607422760, 1) (expected (1, abc, true))
+PASS — native-build tuple-to-text: all-i64 tuple renders correctly
+```
+
+The mixed-type value **changes between runs** (`96657993682216` on one run,
+`107362607422760` on the next) — that is ASLR moving a heap address, confirming
+the middle field is still a leaked raw pointer rather than a decoded `text`.
+Consistent with the "unreliable HIR `field_types` annotations" gap recorded
+above. The gate REPORTS this rather than asserting it, deliberately: it is a
+known-open gap, and phrasing it as a NOTE-on-fix means the day someone fixes
+mixed-type rendering the gate says so out loud instead of staying silent.
