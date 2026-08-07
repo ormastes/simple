@@ -26,6 +26,7 @@ The shared UI contract has two layers:
 | Native TUI | Direct terminal rendering | `app.ui.tui` | S1 target | Must expose the same semantic tree, command vocabulary, focus state, and captures through adapter helpers; it is not required to speak HTTP. |
 | Web Backend | HTTP + WebSocket | `app.ui.web` | S4 | Full HTML rendering, browser client, and `/api/test` endpoints. |
 | TUI-Web Proxy | HTTP + WebSocket | `app.ui.tui_web` | S4 | TUI rendered as HTML over network. |
+| Simple Lab | HTTP + WebSocket | `app.simple_lab` | S4 | Notebook UI; `/api/test` mounted alongside the app-specific `/api/lab` routes (task L4). |
 | Electron | IPC stdin/stdout + WebView bridge | `app.ui.electron` | S2 target | Host IPC is adapter-private; render, snapshot, patch, input, capability, and host-window envelopes come from the shared API. |
 | Tauri | IPC stdin/stdout + WebView bridge | `app.ui.tauri` | S2 target | Host IPC is adapter-private; render, snapshot, patch, input, capability, and host-window envelopes come from the shared API. |
 | Pure Simple GUI | Engine2D/Web renderer bridge | `app.ui.web`, `std.gpu.browser_engine` | S3 target | GUI state must flow through semantic UI, then shared web render artifacts, then Engine2D-backed pixels when requested. |
@@ -51,6 +52,7 @@ capture evidence. Web and TUI-Web remain the only S4 surfaces today.
 |---------|-----------|--------|-------|
 | Web Backend | HTTP + WebSocket | `app.ui.web` | Full HTML rendering, browser client |
 | TUI-Web Proxy | HTTP + WebSocket | `app.ui.tui_web` | TUI rendered as HTML over network |
+| Simple Lab | HTTP + WebSocket | `app.simple_lab` | Notebook UI, `/api/test` alongside `/api/lab` |
 
 ### Adapter Boundary
 
@@ -364,28 +366,28 @@ Surface-specific deviations from this contract MUST be documented here:
 
 ## 9. Support Matrix
 
-| Capability | Web Backend | TUI-Web Proxy |
-|------------|-------------|---------------|
-| `/api/test/ready` | yes | yes |
-| `/api/test/element` | yes | yes |
-| `/api/test/elements` | yes | yes |
-| `/api/test/state` | yes | yes |
-| `/api/test/screenshot` | yes | yes |
-| `/api/test/click` | yes | yes |
-| `/api/test/type` | yes | yes |
-| `/api/test/drag` | yes | yes |
-| `/api/test/submit` | yes | yes |
-| `/api/test/event` | yes | yes |
-| Protocol version header | yes | yes |
-| Structured error model | yes | yes |
-| Stable element IDs | yes | yes |
-| Read-after-write consistency | yes | yes |
-| ElementInfo.enabled | yes | yes |
-| ElementInfo.selected | yes | yes |
-| ElementInfo.text | yes | yes |
-| UIStateInfo.element_count | yes | yes |
-| UIStateInfo.protocol_version | yes | yes |
-| Protocol v2 Draw IR extension | optional | optional |
+| Capability | Web Backend | TUI-Web Proxy | Simple Lab |
+|------------|-------------|---------------|------------|
+| `/api/test/ready` | yes | yes | yes |
+| `/api/test/element` | yes | yes | yes |
+| `/api/test/elements` | yes | yes | yes |
+| `/api/test/state` | yes | yes | yes |
+| `/api/test/screenshot` | yes | yes | yes |
+| `/api/test/click` | yes | yes | yes |
+| `/api/test/type` | yes | yes | yes (widget-level only; does not launder into `SimpleLabApp` cell source — see `src/app/simple_lab/lab_server.spl`) |
+| `/api/test/drag` | yes | yes | yes |
+| `/api/test/submit` | yes | yes | yes |
+| `/api/test/event` | yes | yes | yes |
+| Protocol version header | yes | yes | yes |
+| Structured error model | yes | yes | yes |
+| Stable element IDs | yes | yes | yes |
+| Read-after-write consistency | yes | yes | yes (Action/InputChange only) |
+| ElementInfo.enabled | yes | yes | yes |
+| ElementInfo.selected | yes | yes | yes |
+| ElementInfo.text | yes | yes | yes |
+| UIStateInfo.element_count | yes | yes | yes |
+| UIStateInfo.protocol_version | yes | yes | yes |
+| Protocol v2 Draw IR extension | optional | optional | no |
 
 ## 10. Versioning
 

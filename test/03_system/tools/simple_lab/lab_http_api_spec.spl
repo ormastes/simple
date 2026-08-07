@@ -38,6 +38,13 @@ extern fn rt_text_to_bytes(s: text) -> [u8]
 
 val SERVER_ENTRYPOINT = "src/app/simple_lab/lab_server.spl"
 
+# H1 (Stream H) requires a bearer token on every /api/lab/* call (design
+# §8.2 "Auth"); pin one here so this L3 spec keeps exercising the real
+# HTTP/WS wire under the post-H1 contract instead of getting 401 on
+# everything. See test/03_system/tools/simple_lab/lab_hardening_spec.spl
+# for the auth/origin/bounds contract itself.
+val TEST_TOKEN = "l3-http-api-test-token"
+
 # ============================================================================
 # Subprocess driver — spawns lab_server.spl as a real OS process on an
 # ephemeral loopback port, mirroring test/helpers/browser_h1_loopback_driver.spl.
@@ -108,6 +115,7 @@ fn start_lab_server(max_requests: i64) -> LabServerProc:
         "SIMPLE_LAB_HTTP_PORTFILE={portfile}",
         "SIMPLE_LAB_HTTP_ACCEPT_TIMEOUT_MS=20000",
         "SIMPLE_LAB_NOTEBOOK_ROOT={notebook_root}",
+        "SIMPLE_LAB_TOKEN={TEST_TOKEN}",
         "{root}/bin/simple",
         "run",
         "{root}/{SERVER_ENTRYPOINT}"
@@ -162,7 +170,7 @@ fn http_request(addr: text, method: text, path: text, body: text) -> HttpProbe:
     var stream = stream_res.unwrap()
 
     val clen = body.len()
-    var req = "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {clen}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}"
+    var req = "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {clen}\r\nContent-Type: application/json\r\nAuthorization: Bearer {TEST_TOKEN}\r\nConnection: close\r\n\r\n{body}"
     val w = stream.write_text(req)
     if w.is_err():
         val _ = stream.close()
@@ -225,7 +233,8 @@ fn ws_connect_and_drain(addr: text, path: text, max_frames: i64) -> [text]:
     # Fixed RFC6455 test-vector key (rfc6455 §1.3) — the server only needs a
     # syntactically valid base64 key to compute Sec-WebSocket-Accept.
     val key = "dGhlIHNhbXBsZSBub25jZQ=="
-    val req = "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    val full_path = "{path}?token={TEST_TOKEN}"
+    val req = "GET {full_path} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
     val w = stream.write_text(req)
     if w.is_err():
         val _ = stream.close()
