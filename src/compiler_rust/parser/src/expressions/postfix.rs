@@ -962,7 +962,7 @@ impl<'a> Parser<'a> {
                 ));
             }
             params.push(LambdaParam { name, ty: None });
-            self.parse_remaining_lambda_params(&mut params)?;
+            self.parse_remaining_lambda_params(&mut params, false)?;
         } else {
             // Empty params with just \: means capture all
             capture_all = true;
@@ -990,8 +990,17 @@ impl<'a> Parser<'a> {
                     param_span,
                 ));
             }
-            params.push(LambdaParam { name, ty: None });
-            self.parse_remaining_lambda_params(&mut params)?;
+            let ty = if self.check(&TokenKind::Colon) {
+                self.advance();
+                // Use parse_single_type, not parse_type: parse_type continues
+                // through `|` to build a union type, which would swallow the
+                // pipe-lambda's own closing `|`.
+                Some(self.parse_single_type()?)
+            } else {
+                None
+            };
+            params.push(LambdaParam { name, ty });
+            self.parse_remaining_lambda_params(&mut params, true)?;
         }
         Ok(params)
     }

@@ -7,7 +7,12 @@ use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
 
 impl<'a> Parser<'a> {
-    pub(super) fn parse_remaining_lambda_params(&mut self, params: &mut Vec<LambdaParam>) -> Result<(), ParseError> {
+    /// `allow_types`: whether an optional `: Type` may follow each parameter
+    /// name. Only true for the pipe-lambda form (`|x, y: i64|`); the
+    /// backslash-lambda form (`\x, y: body`) uses a bare trailing `:` to end
+    /// the parameter list and start the body, so a per-param `: Type` there
+    /// would be ambiguous with that terminator and must stay disabled.
+    pub(super) fn parse_remaining_lambda_params(&mut self, params: &mut Vec<LambdaParam>, allow_types: bool) -> Result<(), ParseError> {
         while self.check(&TokenKind::Comma) {
             self.advance();
             // Support wildcard parameter: \x, _: or |x, _|
@@ -24,7 +29,16 @@ impl<'a> Parser<'a> {
                     param_span,
                 ));
             }
-            params.push(LambdaParam { name, ty: None });
+            let ty = if allow_types && self.check(&TokenKind::Colon) {
+                self.advance();
+                // Use parse_single_type, not parse_type: parse_type continues
+                // through `|` to build a union type, which would swallow the
+                // pipe-lambda's own closing `|`.
+                Some(self.parse_single_type()?)
+            } else {
+                None
+            };
+            params.push(LambdaParam { name, ty });
         }
         Ok(())
     }
