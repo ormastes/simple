@@ -503,3 +503,95 @@ result proves correctness on that path specifically; it does not by itself
 prove the pure-Simple/self-hosted execution path is equally green. That was
 out of scope for this verification task, which targeted a genuine, current
 re-run of the existing suite as-is.
+
+## T8 — "zero production call sites for SIMD kernels" audit (2026-08-07)
+
+Per `doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md` §1,
+the P row lists this as **NEEDS-INVESTIGATION**: "The V0/V1 'zero production
+call sites' finding was never confirmed closed." This section closes it with
+an enumerated, anchored grep trail.
+
+**VERDICT: REFUTED. There are real, non-test production call sites, at two
+independent layers.**
+
+### Layer 1 — the kernel-table / span-batch dispatcher (P0/P1, `fill_const` only)
+
+```
+$ grep -n "kernel_table_register\|self.kernel_table\b" \
+    src/lib/gc_async_mut/gpu/engine2d/backend_software.spl
+```
+`ensure_kernel_table()` (:956) probes and registers into `self.kernel_table`
+(:1060); the only real dispatcher of that table,
+`simd_span_batch_execute(batch, self.buf, ..., self.kernel_table, ...)`, is
+called from `sw_fill_raw_span` (:1073) — **not** from a probe or a spec. This
+is consistent with §0/§1's own honest finding (P0/P1 DONE, honest negative):
+at every measured bucket the SIMD path measured slower, so
+`kernel_table_register` never actually seals a faster slot — the dispatcher
+is wired and reachable, but currently always resolves to the scalar branch
+inside `simd_span_batch_execute` itself. Call site is real; the *promotion*
+is honestly zero, which is a different claim than "zero call sites."
+
+### Layer 2 — the direct native span kernels (P2, fill/copy/blend)
+
+```
+$ grep -rn "engine2d_simd_blend_row_u32\|rt_engine2d_simd_fill_span_u32\|rt_engine2d_simd_copy_span_u32" \
+    src/ --include=*.spl | grep -v _spec.spl
+```
+Three bulk-drawing primitives in `backend_software.spl` gate on
+`self.native_simd_spans and native_pixel_rows_enabled()` and call these
+kernels directly, independent of the kernel table:
+- `sw_fill_raw_span` (:1063) → `rt_engine2d_simd_fill_span_u32` (:1080)
+- `sw_copy_raw_span` (:1084) → `rt_engine2d_simd_copy_span_u32` (:1090)
+- `sw_blend_const_raw_span` (:1098) → `engine2d_simd_blend_row_u32` (:1111)
+
+These three are themselves called from real drawing operations, not test
+scaffolding:
+- `sw_fill_raw_span` ← framebuffer clear (:357), rect fill (:422, :601),
+  `fill_rect`-style wrapper (:1343)
+- `sw_copy_raw_span` ← image blit row loop (:650)
+- `sw_blend_const_raw_span` ← blend wrapper (:1359)
+
+`native_simd_spans` is `false` by default (`SoftwareBackend.create()`, :292)
+and only becomes `true` via `SoftwareBackend.create_cpu_simd()` (:301-302),
+reached through `CpuBackend.create_simd()` (`backend_cpu.spl:17`). That
+constructor is called from `engine.spl:667` when `Engine2D.create(...,
+requested_backend: "cpu_simd")`, **and** the `"cpu_simd"` backend name is
+requested from real (non-test) application code, not just specs:
+`src/app/office/md_wysiwyg_ppm.spl:57`, `md_wysiwyg_gui.spl:61,63`,
+`src/lib/common/ui/wm_app_process_contract.spl:364`,
+`src/app/wm_compare/production_gui_web_renderer_parity.spl:249,395,401`, and
+the compositor's `src/os/compositor/engine2d_wm_frame_executor.spl:62`.
+(`src/app/test/*.spl` and `backend_measurement_*.spl` also request it, but
+were excluded from this count — they are test/measurement harnesses, not
+production call sites, and are not needed to establish reachability.)
+
+### Answer to the audit question
+
+**Not an empty list.** Enumerated non-test call sites (anchored):
+
+| Kernel entry point | File:line | Caller chain reaches |
+|---|---|---|
+| `simd_span_batch_execute` | `backend_software.spl:1073` | `sw_fill_raw_span` ← clear/fill/rect draws |
+| `rt_engine2d_simd_fill_span_u32` | `backend_software.spl:1080` | same, fallback branch |
+| `rt_engine2d_simd_copy_span_u32` | `backend_software.spl:1090` | `sw_copy_raw_span` ← image blit |
+| `engine2d_simd_blend_row_u32` | `backend_software.spl:1111`, `:845` | `sw_blend_const_raw_span` ← blend draws |
+| backend selection reaching the above | `engine.spl:667`, `backend_cpu.spl:17` | `md_wysiwyg_ppm.spl`, `md_wysiwyg_gui.spl`, `wm_app_process_contract.spl:364`, `production_gui_web_renderer_parity.spl`, `engine2d_wm_frame_executor.spl:62` |
+
+What remains open, stated explicitly rather than silently folded into
+"REFUTED": (1) the *default* auto-detected backend at `engine.spl`'s top of
+the selection chain is `"software"` (native_simd_spans stays `false`) — SIMD
+is reached only when a caller explicitly requests `"cpu_simd"`, which the
+five files above do, but this is not the engine's default. (2) Whether
+`"cpu_simd"` is exercised in any *default* end-user run path (vs. only
+explicit CLI/API opt-in) was not traced further here — out of scope for this
+audit, which was scoped to "does a production call site exist," not "is it
+the default." (3) T10 (extending the bucket gate beyond `fill_const`) had not
+landed at the time of this audit — if it lands later, this Layer 1 section
+should be re-read for `KERNEL_OP_SRC_OVER_CONST`/`_IMAGE`/`MASK_SRC_OVER`,
+which per §1 register call sites in `ensure_kernel_table` but were not
+independently re-probed here beyond confirming the registration code exists
+at :1012-1056.
+
+**Binary/method provenance:** this is a static reachability audit (grep +
+manual call-chain trace over `.spl` source), not a runtime execution proof —
+consistent with the unit's read-only/deliverable-is-a-doc scope in the plan.
