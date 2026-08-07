@@ -7,6 +7,7 @@
 
 use compiler.backend.linker.smf_header.{SmfHeader}
 use compiler.backend.linker.smf_enums.{Platform, Arch}
+use compiler.common.assurance.policy_names.{normalize_profile_name}
 
 # ============================================================================
 # Constants
@@ -279,6 +280,18 @@ impl SmfWriter:
         )
         self.sections = self.sections.push(section)
         self.sections.len() - 1
+
+    me add_assurance_note_section(note: AssuranceObjectNoteV1) -> i64:
+        """Add the per-object assurance note (WP-20 remainder, v1/placeholder
+        schema -- see AssuranceObjectNoteV1's doc comment) as a `.note`
+        section, real payload bytes via AssuranceObjectNoteV1.to_bytes().
+        Mirrors add_launch_metadata_section's shape; reuses the existing
+        SectionType.Note attachment point rather than adding a new wire type."""
+        val bytes = note.to_bytes()
+        var payload: [i64] = []
+        for b in bytes:
+            payload.push(b as i64)
+        self.add_note_section(".assurance_note", payload)
 
     fn section_count() -> i64:
         self.sections.len()
@@ -624,3 +637,109 @@ fn smf_build_symbol_entry_bytes(symbol: SmfWriterSymbol, name_offset: i64) -> [u
     for b in u64_to_bytes_u8(0):
         buf.push(b)
     buf
+
+# ============================================================================
+# AssuranceObjectNoteV1 (WP-20 remainder) -- v1 / PLACEHOLDER, NOT FINAL.
+# ============================================================================
+#
+# This is a deliberately minimal first-cut per-object assurance note attached
+# via the existing `SectionType.Note` attachment point (see
+# `add_assurance_note_section` above). There is no prior design doc for this
+# schema anywhere under `doc/04_architecture/` or `doc/05_design/` -- grepped,
+# zero hits -- so there is no hidden ground truth being discovered here. This
+# schema is a proposal, scoped to what THIS session's landed work already
+# produces:
+#
+#   - artifact_sha256_hex: content-hash identity of the built artifact,
+#     reusing WP-19's `manifest_sha256_hex` concept
+#     (src/os/kernel/loader/artifact_manifest.spl) rather than inventing a new
+#     identity scheme. This module does not import that kernel-layer file
+#     (layering: 70.backend must not depend on os/kernel); callers compute the
+#     hex digest the same way (SHA-256, two hex chars per byte, MSB nibble
+#     first) and pass it in as plain text.
+#   - assurance_profile: the canonical profile name text as produced by WP-3's
+#     `compiler.common.assurance.policy_names.normalize_profile_name`
+#     (critical/moderate/strict/robust) -- not a new string enum.
+#   - build_timestamp_unix: when the artifact was produced, unix seconds.
+#     `AssuranceStampV1` (stamp.spl, WP-0, frozen) carries no wall-clock time
+#     field, so this is new, not a duplicate.
+#   - obligations_checked/obligations_complied/obligations_violated: a
+#     COMPACT summary of this session's flight-rule census output (WP-16,
+#     `90.tools/verify/flight_rule_census_scan.spl`'s `CensusReport`) -- three
+#     counts, not the full per-site report re-embedded. This module does not
+#     import the census scanner (layering: 70.backend must not depend on
+#     90.tools); callers sum `RuleCensus.comply` / `.violate` over rules whose
+#     `classification == "checked"` and pass the three totals in.
+#
+# This note is NOT `AssuranceStampV1`: the stamp is a build-determinism
+# identity (policy/rule-set/compiler/source hashes + diagnostic counts) meant
+# to gate whether two objects may be linked together; this note is a smaller,
+# attached-to-one-object record of artifact identity + profile + when it was
+# built + how many flight-rule obligations were checked. Future work may
+# revise this schema once real certification requirements are defined -- it
+# is explicitly not a complete or final assurance-note design.
+struct AssuranceObjectNoteV1:
+    artifact_sha256_hex: text
+    assurance_profile: text
+    build_timestamp_unix: i64
+    obligations_checked: i64
+    obligations_complied: i64
+    obligations_violated: i64
+
+impl AssuranceObjectNoteV1:
+    static fn create(artifact_sha256_hex: text, assurance_profile: text,
+            build_timestamp_unix: i64, obligations_checked: i64,
+            obligations_complied: i64, obligations_violated: i64) -> AssuranceObjectNoteV1:
+        AssuranceObjectNoteV1(
+            artifact_sha256_hex: artifact_sha256_hex,
+            assurance_profile: normalize_profile_name(assurance_profile),
+            build_timestamp_unix: build_timestamp_unix,
+            obligations_checked: obligations_checked,
+            obligations_complied: obligations_complied,
+            obligations_violated: obligations_violated
+        )
+
+    """Real byte serialization, v1 wire layout (all integers little-endian,
+    via the same u32_to_bytes_u8/u64_to_bytes_u8 helpers WP-20's SmfWriter.write()
+    uses):
+
+        offset 0            magic "AON1"                 4 bytes
+        offset 4            version (u32) = 1             4 bytes
+        offset 8            hash_len (u32)                4 bytes
+        offset 12           artifact_sha256_hex bytes     hash_len bytes
+        offset 12+hash_len  profile_len (u32)              4 bytes
+        offset 16+hash_len  assurance_profile bytes        profile_len bytes
+        offset 16+hash_len+profile_len   build_timestamp_unix (u64)   8 bytes
+        + 8                 obligations_checked (u64)      8 bytes
+        + 8                 obligations_complied (u64)     8 bytes
+        + 8                 obligations_violated (u64)     8 bytes
+
+    Total length = 16 + hash_len + profile_len + 32.
+    """
+    fn to_bytes() -> [u8]:
+        var out: [u8] = []
+        out.push(65)   # 'A'
+        out.push(79)   # 'O'
+        out.push(78)   # 'N'
+        out.push(49)   # '1'
+        for b in u32_to_bytes_u8(1):
+            out.push(b)
+        val hash_bytes = self.artifact_sha256_hex.bytes()
+        for b in u32_to_bytes_u8(hash_bytes.len()):
+            out.push(b)
+        for b in hash_bytes:
+            out.push(b)
+        val profile_bytes = self.assurance_profile.bytes()
+        for b in u32_to_bytes_u8(profile_bytes.len()):
+            out.push(b)
+        for b in profile_bytes:
+            out.push(b)
+        for b in u64_to_bytes_u8(self.build_timestamp_unix):
+            out.push(b)
+        for b in u64_to_bytes_u8(self.obligations_checked):
+            out.push(b)
+        for b in u64_to_bytes_u8(self.obligations_complied):
+            out.push(b)
+        for b in u64_to_bytes_u8(self.obligations_violated):
+            out.push(b)
+        out
