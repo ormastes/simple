@@ -1,11 +1,76 @@
 # Bug: `iso`/`mut` capability-prefixed types are not parsed by the real frontend (`parse_full_frontend`) at all
 
 - **Date:** 2026-07-29
-- **Status:** open
+- **Status:** RESOLVED (parser gap) — re-verified 2026-08-07, see "Re-verification" below.
+  `mut T` capability-prefix parsing is also handled now; HIR-side consumption of the
+  `mut`/exclusive side-table was not re-audited in this pass (out of scope: this bug is
+  titled around the *parser* gap, which is closed).
 - **Severity:** medium (blocks real-source verification of the capability
   system end-to-end; also hides behind a false-green spec)
 - **Found by:** lane ISO1 `iso-real`, while writing a real-source-through-the-
   pipeline spec for iso use-after-move
+
+## Re-verification (2026-08-07)
+
+Re-checked empirically against current `src/compiler/**` (not by re-reading this
+doc or old memory). The parser gap described below **no longer exists**:
+
+- `src/compiler/10.frontend/core/parser.spl:565-571` — `parser_parse_type_impl`
+  (the function that underlies `parser_parse_type()` /
+  `parser_parse_type_with_union()`, called 9x across the frontend) now has an
+  explicit branch: `if kind == 6 and par_text_get() == "iso":` that registers
+  the inner type via `isolated_type_register(...)` and returns a
+  `TYPE_ISOLATED_BASE`-tagged id, dated "LANE ISO2 (2026-07-29)" in the
+  surrounding comment — landed same day as this bug, after the original filing.
+  A parallel `mut T` branch exists at lines 540-549 (`exclusive_type_register`).
+- Call-graph trace confirms this is the REAL path, not a side parser:
+  `fn take(a: iso i64) -> i64: a` (regular `fn` decl) parses its param type via
+  `parser_decls_fn.spl:138 parser_parse_type_with_union()` →
+  `parser.spl:950 parser_parse_type_with_union()` → `parser.spl:461
+  parser_parse_type()` → `parser.spl:477 parser_parse_type_impl()` — i.e. the
+  exact function/line sequence the original repro (`fn take(a: iso i64) -> i64`
+  → `expected ), got Ident 'i64'`) went through.
+  `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl:402-410` rebuilds
+  the real `TypeKind.Isolated(inner)` from the flat tag
+  (`TYPE_ISOLATED_BASE + id`), so construction sites are no longer "zero" as
+  originally reported — they now include `parser_types_expr.spl:178,181`
+  (discriminant probes) and `convert_nodes.spl:410,451` (Isolated/Atomic
+  rebuild).
+- `emit_move` (`src/compiler/50.mir/mir_data.spl:353`) went from the
+  documented single call site to **8 call sites** across
+  `mir_lowering_stmts.spl` (5) and `_MirLoweringExpr/switch_operators_calls.spl`
+  (1, for call-argument moves) plus 2 more in `mir_lowering_stmts.spl` for
+  field/dict/array moves — the "starved of facts" gap from the original
+  finding #2 is substantially closed.
+- The struct-binding TODO (original finding #3, `mir_lowering_stmts.spl:664-672`,
+  "iso-typed struct bindings emit copy not move") is also addressed: current
+  `mir_lowering_stmts.spl:786-793` has a `struct_is_place_iso` branch that calls
+  `emit_move` instead of `maybe_copy_struct_value` for exactly that case, with a
+  "WP-E parity: an iso struct is exactly the shape of a resource handle" comment.
+- `function_lowering.spl:209,270,770` show `HirTypeKind.Isolated` is consumed at
+  the parameter-lowering level too, not just the let-binding level documented
+  originally.
+- Smoke-tested via `bin/simple check` on `fn take(a: iso i64) -> i64: a; fn
+  main(): println(take(5))` — parses and typechecks clean (no "expected )"
+  error). **Caveat:** the currently-deployed `bin/simple` (and
+  `bootstrap/stage3/x86_64-unknown-linux-gnu/simple`, identical BuildID) is the
+  Rust seed, not the pure-Simple self-hosted binary — this is the SAME
+  measurement trap this bug doc already flagged (seed's native parser
+  understands `iso` regardless of `src/compiler/10.frontend/**` state), so this
+  smoke test does **not** independently confirm the fix. The fix claim above
+  rests on the source/call-graph trace, not on the binary run. No bootstrap
+  rebuild was performed (out of scope for this task) to produce a pure-Simple
+  binary for a binary-level re-confirmation — that remains a follow-up if
+  independent binary-level proof is wanted.
+
+Net: the specific defect this bug reports (parser cannot parse `iso T` /
+`mut T` in parameter position) is fixed in current source. What was NOT
+re-verified in this pass: (a) whether `capability_system_spec.spl` and
+`iso_move_pipeline_spec.spl` have been updated to drive real source text
+through `parse_full_frontend` per the "Suggested next step" below (still
+open as a follow-up), and (b) end-to-end use-after-move diagnostics on real
+`iso` source through a genuine pure-Simple-compiled binary (blocked by the
+seed-vs-self-hosted binary gap above, not by this bug).
 
 ## The actual defect
 
