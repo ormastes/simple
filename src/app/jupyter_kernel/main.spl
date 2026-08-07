@@ -16,6 +16,7 @@ use std.notebook.session_manager.{KernelSessionManager}
 use std.notebook.local_exec.{LocalExecFactory}
 use std.notebook.lsp_bridge.{LspBridge}
 use app.simple_lab.export_sdoctest.{export_notebook_file}
+use std.notebook.magics.{MagicsState, MagicsResult, dispatch_magics}
 
 # ============================================================================
 # JSON Helpers (inlined to avoid cross-module issues)
@@ -155,10 +156,24 @@ fn cursor_pos_to_line_col(code: text, cursor_pos: i64) -> (i64, i64):
         i = i + 1
     (line, col)
 
+# Per-session magics state (%budget/%timeout/%onfault) — currently a single
+# implicit session, matching SESSION_MANAGER/LSP_BRIDGE's own scope.
+var MAGICS_STATE: MagicsState = MagicsState.create()
+
 fn session_execute(code: text, exec_count: i64) -> (text, text, bool):
-    val result: CellResult = SESSION_MANAGER.execute_cell(DEFAULT_SESSION_ID, code, "cell_{exec_count}", "")
+    val magics: MagicsResult = dispatch_magics(SESSION_MANAGER, DEFAULT_SESSION_ID, MAGICS_STATE, code)
+    if magics.error != "":
+        return ("", magics.error, false)
+    if magics.code.trim() == "":
+        # Magics-only cell (e.g. bare %reset, %lanes, %mode): nothing left
+        # to execute — the magic's own confirmation/table IS the output.
+        return (magics.message, "", true)
+    val result: CellResult = SESSION_MANAGER.execute_cell(DEFAULT_SESSION_ID, magics.code, "cell_{exec_count}", magics.cell_mode_override)
     if result.is_ok():
-        return (result.stdout_delta, "", true)
+        var output = result.stdout_delta
+        if magics.message != "":
+            output = magics.message + "\n" + output
+        return (output, "", true)
     ("", result.error, false)
 
 fn session_is_complete(code: text) -> text:
