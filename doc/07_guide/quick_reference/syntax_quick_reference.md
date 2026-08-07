@@ -100,14 +100,17 @@ fn main():
 Do not rely on `iso`/`mut` to catch a bug for you yet.
 
 **Foreign resources:** a raw handle from an `extern fn`/SFFI acquire call
-(bare `i64` etc.) should be wrapped in an owning type (a `resource R`
-declaration once implemented, or a hand-written class today) rather than
-threaded through app code unwrapped — `REQ-MC-023` in
+(bare `i64` etc.) should be wrapped in an owning type (a hand-written class
+today) rather than threaded through app code unwrapped — `REQ-MC-023` in
 `doc/02_requirements/language/mission_critical_profile.md` specifies this as
 `critical`-profile-only, warn now / deny at profile v2. Like `iso`/`mut`
 above, no checker (`W-MC-RES-001`) exists yet — this is a spec, not an
-enforced rule. See `doc/07_guide/platform/ffi/sffi.md` § Opaque Handle
-Pattern for the wrapping shape.
+enforced rule. `resource R` declaration syntax and its HIR metadata parse and
+round-trip today (`doc/00_llm_process/feature_expert/resource_ownership/skill.md`),
+but no production `.spl` source can use it yet — `bin/simple` is still the Rust
+seed, which reparses a source file's own syntax and doesn't know this grammar.
+See `doc/07_guide/platform/ffi/sffi.md` § Opaque Handle Pattern for the
+wrapping shape to use today.
 
 ---
 

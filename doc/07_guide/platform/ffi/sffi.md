@@ -159,23 +159,34 @@ class Database:
         spl_db_close(self.handle)
 ```
 
-> **Proposal, not implemented:** a `resource R` declaration is designed (not
-> built) to replace this raw-`i64`-handle-plus-manual-`_free` pattern with
-> origin-neutral ownership (`R` unique/move-only + auto-release, `*R` shared
-> RC, `@R` atomic RC, `-R` weak) for both native and foreign resources, so
-> callers wouldn't need to see `Foreign<T>`/`SffiHandle<T>` at all. There is no
-> code behind this today — keep writing the opaque-handle pattern above. See
-> `doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md`
-> and `doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md`.
+> **Partially implemented, not yet reachable from source:** a `resource R`
+> declaration is designed to replace this raw-`i64`-handle-plus-manual-`_free`
+> pattern with origin-neutral ownership (`R` unique/move-only + auto-release,
+> `*R` shared RC, `@R` atomic RC, `-R` weak) for both native and foreign
+> resources, so callers wouldn't need to see `Foreign<T>`/`SffiHandle<T>` at
+> all. As of 2026-08-07: parsing (`resource`/`@sffi` as soft keywords) and HIR
+> metadata round-tripping (all seven `@sffi` keys into a per-resource registry)
+> are landed and test-verified, plus a fail-closed naming-convention inference
+> engine for the 85 foreign-resource families. **None of this reaches
+> production `.spl` source yet** — `bin/simple` is still the Rust seed, whose
+> parser reads a spec/source file's own syntax directly, so no `.spl` file
+> outside the compiler's own test harness can use `resource` syntax until
+> stage-3 self-host lands. Keep writing the opaque-handle pattern above. See
+> `doc/00_llm_process/feature_expert/resource_ownership/skill.md` for the
+> landed-work table, and `doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md`
+> / `doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md`
+> for the design.
 >
-> **Related rule, also not implemented:** `REQ-MC-023` in
+> **Related rule, spec landed, checker not implemented:** `REQ-MC-023` in
 > `doc/02_requirements/language/mission_critical_profile.md` specifies that,
 > in the `critical` profile, a bare handle returned by `rt_file_open` above
 > must not escape the acquire call site unwrapped (warn now, deny at profile
 > v2) — the `class Database` wrapper shown here is the compliant shape. No
 > `W-MC-RES-001` checker exists yet, and `bin/simple` (the Rust seed) has no
 > lint code for this family regardless — see the requirement's own
-> "SPECIFIED, NOT IMPLEMENTED" note before assuming this fires anywhere.
+> "SPECIFIED, NOT IMPLEMENTED" note before assuming this fires anywhere. A
+> canonical policy resolver (WP-3) now exists for wiring a checker's severity
+> once one is written, but the checker itself is still greenfield.
 
 ### Feature Detection Pattern
 
