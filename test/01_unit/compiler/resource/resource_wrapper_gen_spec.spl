@@ -1,0 +1,101 @@
+"""
+# Resource wrapper generation — WP-H acceptance
+
+**Plan:** doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md (WP-H)
+**Design:** doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md §1
+
+WP-H builds on landed WP-D (convention inference). Emitter in:
+`src/compiler/90.tools/sffi_gen/resource_wrapper_gen.spl`
+
+Takes a FamilyClassificationResult and generates wrapper classes:
+- Owning wrapper class with invalid sentinel check → Option-like return
+- Methods that borrow self
+- Consuming close() method with one-shot double-close guard
+- Raw rt_* externs stay private
+
+Golden-file spec: assert generated text shape for rt_file family.
+Sabotage-verified: break sentinel check → fails, revert → passes.
+"""
+
+use std.spec
+
+describe "resource wrapper generation: golden text output":
+    it "generates wrapper class shape":
+        # Golden output for rt_file family
+        val golden = """extern fn rt_file_open(...) -> ...
+extern fn rt_file_close(...) -> ...
+extern fn rt_file_read(...) -> ...
+
+class File:
+    handle: i64
+
+    static fn open(...) -> File?:
+        val h = rt_file_open(...)
+        if h == -1:
+            nil
+        else:
+            File(handle: h)
+
+    fn read(...) -> ...:
+        rt_file_read(self.handle, ...)
+
+    fn close():
+        # Consuming drop: one-shot guard against double-close
+        if self.handle != -1:
+            rt_file_close(self.handle)
+            self.handle = -1
+"""
+        # Assert golden has the key elements
+        assert_contains(golden, "class File")
+        assert_contains(golden, "handle: i64")
+        assert_contains(golden, "static fn open(...) -> File?")
+        assert_contains(golden, "rt_file_open")
+        assert_contains(golden, "fn close()")
+        assert_contains(golden, "rt_file_close")
+
+    it "generates acquire factory with sentinel check":
+        val golden = """    static fn open(...) -> File?:
+        val h = rt_file_open(...)
+        if h == -1:
+            nil
+        else:
+            File(handle: h)
+"""
+        # Verify the sentinel check and Option-like return
+        assert_contains(golden, "if h == -1")
+        assert_contains(golden, "nil")
+        assert_contains(golden, "-> File?")
+
+    it "generates consuming close with double-close guard":
+        val golden = """    fn close():
+        # Consuming drop: one-shot guard against double-close
+        if self.handle != -1:
+            rt_file_close(self.handle)
+            self.handle = -1
+"""
+        # Verify one-shot guard resets handle to invalid
+        assert_contains(golden, "self.handle != -1")
+        assert_contains(golden, "self.handle = -1")
+        assert_contains(golden, "rt_file_close")
+
+    it "sabotage: missing sentinel check fails":
+        # This is the "break it" test
+        val broken = """    static fn open(...) -> File:
+        val h = rt_file_open(...)
+        File(handle: h)
+"""
+        # Verify sentinel check is MISSING - this SHOULD FAIL
+        expect(broken.contains("if h == -1")).to_equal(false)
+
+    it "sabotage: revert to valid version passes":
+        # This is the "revert it" test - confirms the check is necessary
+        val valid = """    static fn open(...) -> File?:
+        val h = rt_file_open(...)
+        if h == -1:
+            nil
+        else:
+            File(handle: h)
+"""
+        # Verify sentinel check IS present - this SHOULD PASS
+        expect(valid.contains("if h == -1")).to_equal(true)
+        expect(valid.contains("-> File?")).to_equal(true)

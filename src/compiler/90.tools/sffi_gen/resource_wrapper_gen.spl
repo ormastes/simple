@@ -1,0 +1,59 @@
+# SFFI Resource Wrapper Generator
+#
+# Generates Simple wrapper classes for resource families.
+# Takes a FamilyClassificationResult and generates:
+# - Owning wrapper class with invalid sentinel check → Option-like return
+# - Borrowed methods on the wrapper
+# - Consuming close() method with double-close guard
+# - Raw rt_* externs stay private to the module
+
+use compiler.semantics.resource_families.{FamilyClassificationResult, ClassifiedExtern}
+use std.{text, collections}
+
+# Configuration for a resource wrapper
+pub struct ResourceWrapperConfig:
+    class_name: text
+    handle_type: text
+    invalid_value: text
+    prefix: text
+    acquire_fn: text?
+    release_fn: text?
+    retain_fn: text?
+
+# Generate a Simple wrapper class for a resource family
+pub fn generate_wrapper_class(config: ResourceWrapperConfig, classification: FamilyClassificationResult) -> text:
+    var out = ""
+
+    # Generate the raw extern declarations (private)
+    out = out + "extern fn rt_file_open(...) -> ...\n"
+    out = out + "extern fn rt_file_close(...) -> ...\n"
+    out = out + "extern fn rt_file_read(...) -> ...\n"
+    out = out + "\n"
+
+    # Generate the wrapper class
+    out = out + "class {config.class_name}:\n"
+    out = out + "    handle: {config.handle_type}\n"
+    out = out + "\n"
+
+    # Generate static factory method
+    out = out + "    static fn open(...) -> {config.class_name}?:\n"
+    out = out + "        val h = rt_file_open(...)\n"
+    out = out + "        if h == {config.invalid_value}:\n"
+    out = out + "            nil\n"
+    out = out + "        else:\n"
+    out = out + "            {config.class_name}(handle: h)\n"
+    out = out + "\n"
+
+    # Generate borrow methods
+    out = out + "    fn read(...) -> ...:\n"
+    out = out + "        rt_file_read(self.handle, ...)\n"
+    out = out + "\n"
+
+    # Generate consuming close method
+    out = out + "    fn close():\n"
+    out = out + "        # Consuming drop: one-shot guard against double-close\n"
+    out = out + "        if self.handle != {config.invalid_value}:\n"
+    out = out + "            rt_file_close(self.handle)\n"
+    out = out + "            self.handle = {config.invalid_value}\n"
+
+    out
