@@ -194,7 +194,9 @@ Simple is real, and it should be described honestly.
 - **Test snapshot (2026-02-14):** 4,067 / 4,067 passing in 17.4 seconds. That's evidence of suite breadth and speed — *not* a language-vs-language runtime benchmark.
 - **Source footprint (2026-04-23):** ~2.27M non-comment lines across Simple, Rust, C, and assembly, with ~1.78M in Simple itself.
 
-Safe to advertise as implemented: Sspec, SDoctest, coverage, traceability, generated spec docs, the system-test mock policy, the self-hosted compiler/interpreter/loader, MDSOC manifests, parser-friendly macros, Tree-sitter tooling, SDN-backed databases, primitive-public-API linting, borrow-checking infrastructure, watch/auto-build, and C/C++ bidirectional SFFI for the supported ABI subset.
+Safe to advertise as implemented: Sspec, SDoctest, coverage, traceability, generated spec docs, the system-test mock policy, the self-hosted compiler/interpreter/loader, MDSOC manifests, parser-friendly macros, Tree-sitter tooling, SDN-backed databases, primitive-public-API linting, watch/auto-build, and C/C++ bidirectional SFFI for the supported ABI subset.
+
+One item needs a sharper qualifier than "implemented": **borrow-checking infrastructure** exists in the self-hosted compiler — `iso`/`mut` parse in type and parameter position, MIR emits `Move` at variable-binding, call-argument, reassignment, field-store, array-store, and dict-store sites, and the NLL checker flags use-after-move across those sites. None of it is reachable through the binary a developer actually runs: `bin/simple` is still the Rust bootstrap seed, which has no borrow-check code at all, and stage-3 self-host (the path that would make the self-hosted compiler the shipped one) is currently blocked. A program moving an `iso i64` and reading it again compiles and runs clean today, with no diagnostic.
 
 One boundary matters for accuracy: Rust is still present as the bootstrap seed and host implementation substrate. The pure-Simple compiler, loader, libraries, and generated docs are the direction of travel and the thing the bootstrap verifies, but "pure Simple" should not be read as "no Rust source exists in the repo" today.
 

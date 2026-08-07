@@ -336,6 +336,23 @@ impl plan: [`doc/03_plan/sspec_modernization_plan.md`](../../doc/03_plan/sspec_m
 authoritative feature set today:
 [`doc/02_requirements/feature/sspec_scenario_manual.md`](../../doc/02_requirements/feature/sspec_scenario_manual.md).
 
+## Declare the entry layer
+
+A compiler-layer spec (parser, HIR, MIR, borrow-check, codegen, …) sometimes
+must hand-build its input at a mid-pipeline layer — e.g. constructing HIR
+directly — when a front-end gap makes real source text unusable; that is
+legitimate, but state *why* in the spec header (cite the blocking bug) and say
+which layer the spec actually reached. A pipeline of mid-layer specs can each
+pass while the layers don't connect. Where feasible, pair mid-layer specs with
+at least one end-to-end spec that drives real source text through the whole
+chain (source → parse → HIR → MIR → the layer under test); the e2e spec is
+what proves the wiring, not just each stage in isolation. Worked example:
+`test/01_unit/compiler/borrow/iso_move_pipeline_spec.spl` (mid-layer, header
+explains the front-end gap it works around) paired with
+`test/01_unit/compiler/borrow/iso_use_after_move_e2e_spec.spl` (end-to-end via
+`parse_full_frontend`) — the e2e spec caught a real defect every mid-layer spec
+missed.
+
 ## Test API Imports
 
 Use `std.spec.*` as the canonical SSpec test-library import in new executable
@@ -1263,7 +1280,15 @@ arm missed. When that happens:
 2. **Escalate to a broader arm** rather than concluding. Sabotage *all 33*
    increments, not 3. Sabotage *all 227* constants, not the one marker you
    picked. A narrow arm's silence is a statement about your sample.
-3. Sabotage the **implementation**, not the shim in front of it.
+3. Sabotage the **implementation**, not the shim in front of it, and not the
+   spec's own input. Swapping a spec's fixture input and watching it fail only
+   proves input-sensitivity — it does not prove the spec would catch a
+   regression in the mechanism under test.
+4. **Report all three numbers** — pre-sabotage green, sabotaged red, and
+   reverted-green — not just the final green. When two concurrent fixes might
+   both explain a closed case, disable one fix alone and confirm the case
+   re-breaks; a green suite with both fixes present cannot tell you which one
+   is load-bearing.
 
 ### Census discipline
 

@@ -22,12 +22,26 @@ This agent CREATES the initial state file. All subsequent agents read and append
      root-cause situation. Permit Rust/runtime work only when evidence proves
      the pure layer delegates correctly and the defect lives below it; require
      that rationale in the bug record.
-   - If the request changes workflow, tooling, evidence wrappers, verification
-     contracts, or SPipe behavior, include an AC that final verification checks
-     matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
-     `.agents/skills/`, `.claude/skills/`, `.claude/agents/spipe/`, and
-     `.gemini/commands/` docs are updated and generated SSpec docs read as
-     operator manuals.
+   - ALWAYS include a knowledge-update AC, whatever the task type. This is not
+     conditional on the task being workflow-related: ordinary feature and bug
+     work changes what future readers and agents need to know, and that is
+     exactly the case where the step gets skipped. The AC must name which of
+     these are affected, or mark each `N/A` with a reason:
+     - `doc/` research/architecture/design/plan for the area touched
+     - `doc/07_guide/` developer guide — and it must NOT advertise a capability
+       that is unreachable through the binary users actually run; name the
+       blocker instead
+     - `doc/00_llm_process/feature_expert/<feature>/skill.md` and
+       `doc/00_llm_process/layer_expert/<layer>/skill.md` — REQUIRED by
+       `.claude/rules/vcs.md` ("commit the wiki update in the same change as
+       the work it describes"); create the entry if none covers the area
+     - `doc/08_tracking/bug/` records for every gap found and not fixed, with
+       file:line and the unblock condition
+   - If the request ALSO changes workflow, tooling, evidence wrappers,
+     verification contracts, or SPipe behavior, extend that AC to cover
+     `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
+     `.claude/agents/spipe/`, `.claude/commands/`, and `.gemini/commands/`,
+     and require that generated SSpec docs read as operator manuals.
    - If the request needs compiler/bootstrap diagnostics, specify whether
      default-off, `--diagnostics=test`, or `--diagnostics=debug` evidence is
      required. Keep AOP tracing as a separately justified scoped opt-in.
@@ -63,8 +77,14 @@ This agent CREATES the initial state file. All subsequent agents read and append
 - Bug ACs include ownership, pre-fix reproduction, pure-Simple-first boundary
   proof, exact regression coverage, and a similar/adjacent regression (or a
   documented reason none exists)
-- Workflow/tooling/evidence/verification-contract requests include a concrete
-  final-doc verification AC or explicitly mark it `N/A`
+- EVERY task — not just workflow/tooling ones — includes a knowledge-update AC
+  naming the affected `doc/`, `doc/07_guide/`, `doc/00_llm_process/`
+  (feature_expert + layer_expert skill.md), and `doc/08_tracking/bug/` entries,
+  or marking each `N/A` with a concrete reason. An absent LLM-wiki line is an
+  incomplete state file: `.claude/rules/vcs.md` requires the wiki refresh to
+  ship in the same change as the work.
+- Workflow/tooling/evidence/verification-contract requests additionally cover
+  `doc/06_spec` and the skills/commands dirs, or explicitly mark them `N/A`
 
 ## Boil a Small Lake
 

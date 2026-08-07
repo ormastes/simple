@@ -159,6 +159,15 @@ class Database:
         spl_db_close(self.handle)
 ```
 
+> **Proposal, not implemented:** a `resource R` declaration is designed (not
+> built) to replace this raw-`i64`-handle-plus-manual-`_free` pattern with
+> origin-neutral ownership (`R` unique/move-only + auto-release, `*R` shared
+> RC, `@R` atomic RC, `-R` weak) for both native and foreign resources, so
+> callers wouldn't need to see `Foreign<T>`/`SffiHandle<T>` at all. There is no
+> code behind this today — keep writing the opaque-handle pattern above. See
+> `doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md`
+> and `doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md`.
+
 ### Feature Detection Pattern
 
 Check if an external library is available before using it:

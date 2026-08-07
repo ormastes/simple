@@ -43,6 +43,7 @@ claims meet or exceed Rust's for a declared certified subset.
 
 - 35.semantics (lint: primitive table, semantic_api checker, const_ref, safety_checker)
 - 50.mir + 55.borrow (SF1 borrow-feed) — see [mir_lowering](../../layer_expert/mir_lowering/skill.md)
+  and [borrow_check](../../layer_expert/borrow_check/skill.md)
 - 95.interp (SF3 OOB trap)
 - 70.backend (CUDA layout, Lean backend) — see [backend](../../layer_expert/backend/skill.md)
 - stdlib concurrent/ + engine/resource/ (SF4 guards, SF5 generation handles)

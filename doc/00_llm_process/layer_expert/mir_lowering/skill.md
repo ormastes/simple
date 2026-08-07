@@ -154,4 +154,61 @@ crash (see `layer_expert/bootstrap/skill.md`) preventing a clean rebuild. Do
 not cite this as confirmed-working without re-running once that blocker
 clears.
 
+### Iso ownership: `emit_move` had exactly one caller before `6a53442f` (2026-08-06)
+
+`MirBuilder.emit_move` (`src/compiler/50.mir/mir_data.spl:353`) previously had
+exactly ONE call site in the whole compiler — the variable-to-variable
+let-binding at `mir_lowering_stmts.spl:743`. Every other ownership transfer of
+an `Isolated`-typed value (call argument, reassignment, field store, array/dict
+element store) emitted a plain Copy, so the borrow checker (see
+[layer_expert/borrow_check/skill.md](../borrow_check/skill.md)) never saw a
+Move fact for them. Five more sites were added:
+
+- Call argument — `_MirLoweringExpr/switch_operators_calls.spl`, `lower_call`,
+  a `case HirTypeKind.Isolated(_):` arm.
+- Reassignment `b = a` — `mir_lowering_stmts.spl`, `lower_assign_var` plain
+  (non-compound) branch.
+- Field store `o.f = a` — `Field` arm of the same assign path.
+- `arr[i] = a` and `d[k] = a` — `Index` arm.
+
+**Non-obvious trap:** element stores (`arr[i] = a`, `d[k] = a`) are NOT a
+Store-instruction family — they lower to runtime CALLS (`rt_array_set` /
+`rt_dict_set`) carrying bare operands. An earlier audit grepped
+`MirInstKind.Store|emit_store|SetField|StoreField|StoreIndex` and found
+nothing there, wrongly concluding the site didn't exist. Since there's no
+instruction to hang a Move on, a synthetic `emit_move` into a fresh local is
+inserted ahead of the call instead.
+
+All five sites keep the original let-binding guard's two conditions: move
+only on a PLACE read of an existing binding (`val b = a`), never on a fresh
+construction (`val p = Point(x:1)`); and only in the plain, non-compound
+assignment case. Predicate: `mir_hir_type_is_isolated` at
+`mir_lowering_stmts.spl:48`.
+
+Still open (lowering side, tracked in
+`doc/08_tracking/bug/iso_transfer_sites_missing_move_return_assign_field_2026-08-06.md`):
+no Move is emitted ahead of `Ret`, and `list.push(x)` has the identical gap at
+`_MirLoweringExpr/method_calls_literals.spl:874`.
+
+**Also unblockable, don't re-walk it:** the iso **struct**-field binding TODO
+at `mir_lowering_stmts.spl:664-672` is UNREACHABLE, not merely unimplemented —
+`find_local_hir_type(x) == Isolated` and `struct_value_syms.get(x) != nil` can
+never co-occur, because `_MirLowering/function_lowering.spl:206` (records
+`Isolated`) and `:239` (sets `struct_value_syms`) match mutually-exclusive
+variants of the same `param.type_.kind`. Unblock condition: `:239` must
+unwrap `Isolated` before its `Named` check. An agent implemented the TODO,
+measured identical spec results before/after, and correctly REVERTED rather
+than ship dead code.
+
+Emission (this layer) and detection (`55.borrow`) are independent — neither
+substitutes for the other, proven by isolation (disabling one alone re-breaks
+only its own test case). See
+[feature_expert/iso_ownership/skill.md](../../feature_expert/iso_ownership/skill.md)
+for the end-to-end picture and specs.
+
+**Working practice:** compiler `.spl` edits under `src/compiler/**` are LIVE
+under `bin/simple test` — the test runner's interpreter loads source
+directly, so no bootstrap rebuild is needed to iterate on this layer. That
+says nothing about the compiled/JIT path or `bin/simple run` (seed).
+
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

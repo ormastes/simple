@@ -11,6 +11,7 @@ A concise reference for the canonical public Simple syntax. Legacy or parser-com
 ## Table of Contents
 
 - [Variables](#variables)
+- [Ownership Capabilities (`iso`/`mut`)](#ownership-capabilities-isomut)
 - [Short Grammar](#short-grammar)
 - [Type & Function Aliases](#type--function-aliases)
 - [Strings](#strings)
@@ -71,6 +72,32 @@ var items = []
 val name: text = "Alice"
 var count: i64 = 0
 ```
+
+---
+
+## Ownership Capabilities (`iso`/`mut`)
+
+```simple
+val x: iso i64 = 5   # isolated / move-only capability
+val y: mut i64 = 5   # mutable-borrow capability
+```
+
+`iso T` and `mut T` parse in type and parameter position, and the
+self-hosted compiler's MIR/NLL passes can already move an `iso` binding and
+flag a use-after-move. **This is not available through `bin/simple` today.**
+`bin/simple` is the Rust bootstrap seed, which has no borrow-check code, and
+stage-3 self-host (the step that would make the self-hosted compiler the
+shipped one) is currently blocked. In practice, the following compiles and
+runs today with no diagnostic, printing `5` twice:
+
+```simple
+fn main():
+    val x: iso i64 = 5
+    val y: iso i64 = x
+    print x   # no error today — treat iso/mut as not yet enforced
+```
+
+Do not rely on `iso`/`mut` to catch a bug for you yet.
 
 ---
 
