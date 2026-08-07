@@ -167,6 +167,51 @@ background assumptions:
   U1.2/U1.3/Wave-4 updated to make U1.3 an explicit "build the primitive"
   blocking unit, referencing this bug doc.
 
+## Unit B1 execution note (2026-08-07, second pass)
+
+Re-verified both repros empirically before doing any work (binary provenance:
+`readlink -f bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`).
+Both hold:
+
+- `bin/simple spl-coverage status` -> `error: file not found: spl-coverage`
+  (prerequisite 3 still unmet).
+- `SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=/tmp/cov.sdn bin/simple test
+  test/01_unit/lib/common/gpu/engine2d/scalar_oracle_spec.spl --coverage
+  --no-cache` prints `38 total, 38 passed, 0 failed` and then two per-file
+  **line**-coverage banners (`coverage: src/lib/common/gpu/engine2d/scalar_oracle.spl
+  89% (95/106 lines)`, likewise for `kernel_registry.spl`) with real file
+  identity — so line-percent-with-real-path on stdout does work today, more
+  than repro 2's original text implied. But no artifact is ever written at
+  `SIMPLE_COVERAGE_OUTPUT`, and `build/coverage/coverage.sdn` stays untouched
+  (still the stale 2026-08-02 zero-decision file) — prerequisite 4 (export)
+  is still unmet exactly as documented, and this doc's characterization of
+  prerequisite 4 stands.
+
+Per the plan's own reframing, B1 cannot build all five prerequisites in one
+unit (prerequisite 1 alone requires editing ~10 pinned Rust seed call sites
+across `interpreter_control.rs`, `lowering_stmt.rs`, `lowering_expr_ops.rs`
+to stop hardcoding `"<source>"` / `line=0,column=0`; prerequisites 2 and 5 are
+comparable-sized MIR/export work). Rather than wire prerequisite 3 alone
+(which would make a CLI subcommand answer with fabricated/zero data and look
+more "done" than the current honest `file not found` error — the exact
+fail-open shape this doc warns against), this pass built a fail-closed gate:
+`scripts/check/check-render2d-coverage.shs`. It probes prerequisites 3 and 4
+directly against the live binary and records 1/2/5 as unmet pending a future
+mechanical probe (grepping the pinned Rust sites), never silently skipping
+them. Verdict format matches `check-tree-size-push.shs`
+(`PASS —`/`FAIL —`/`ERROR —`, last stdout line, exit 0/1/2). Sabotage-verified
+in a scratch `git worktree`: a fake `bin/simple` that fabricates prerequisites
+3+4 (prints `status: ok`, writes a dummy artifact) flips exactly those two
+rows to MET while 1/2/5 stay UNMET and the overall verdict stays FAIL — the
+gate does not fabricate a PASS. Current real-repo run: **FAIL — 5
+prerequisite(s) checked, 5 unmet.**
+
+**Unit B1 status: NOT done.** None of the five prerequisites landed this
+pass; C1-C3 remain blocked. What did land: a re-verified, current repro of
+both empirical claims above (with the line-coverage-banner correction noted),
+plus the fail-closed prerequisite gate other units/agents can run instead of
+re-deriving "is coverage measurement trustworthy yet" from prose each time.
+
 ## Standing-rule note
 
 This is a direct instance of the repo's own standing rule: **measure the

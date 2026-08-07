@@ -1,0 +1,119 @@
+#!/bin/sh
+# Fail-closed prerequisite gate for the render_2d Vulkan coverage plan's Wave-3
+# units (C1-C3). Per
+# doc/03_plan/ui/testing/render_2d_vulkan_functional_coverage_plan_2026-08-07.md
+# Unit B1 and doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md,
+# no branch-coverage percentage may be reported for this stack until FIVE
+# prerequisites land:
+#
+#   1. Real (non-"<source>", non-0/0) file/line identity at decision probe
+#      call sites (interpreter_control.rs, lowering_stmt.rs, lowering_expr_ops.rs).
+#   2. Production MIR lowering calls lower_to_mir_with_coverage, not just
+#      Rust unit tests.
+#   3. `bin/simple spl-coverage <subcommand>` is dispatchable (not
+#      "file not found: spl-coverage").
+#   4. SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<path> bin/simple test <spec>
+#      writes a real, non-empty artifact at <path> (or an equivalent
+#      spipe/.spl-runner-reachable export).
+#   5. A rollup exists computing taken/not-taken per site into a per-file or
+#      per-module hit/total table.
+#
+# This script probes 3 and 4 directly (the two prerequisites this repo's own
+# CLI surface can answer without reading Rust source). It does NOT probe 1, 2,
+# 5 automatically — those require reading Rust seed source for hardcoded
+# "<source>"/0,0 identity and are recorded as UNVERIFIED-BY-THIS-SCRIPT below;
+# it treats them as still-failing per the bug doc until this script is
+# extended to check them mechanically (e.g. grep the pinned Rust file:line
+# sites for the literal "<source>" string disappearing). A script that can
+# only ever print PASS once real per-module branch-coverage percentages exist
+# is the entire point: it must never go green while the underlying artifact
+# is fabricated or absent.
+#
+# Verdict is always the LAST line of stdout:
+#   PASS — <n> prerequisite(s) checked, all met (branch-coverage % may be reported)
+#   FAIL — <n> prerequisite(s) checked, <m> unmet (do not report a percentage)
+#   ERROR — nothing was checked
+#
+# Exit codes: 0 PASS, 1 FAIL, 2 ERROR.
+
+SELF="check-render2d-coverage"
+
+err() {
+    echo "$SELF: ERROR — $*" >&2
+    echo "$SELF: ERROR — nothing was checked"
+    exit 2
+}
+
+# Fail-closed on cwd: must run from a real repo root, not an archive worktree.
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || err "not inside a git working tree"
+cd "$toplevel" || err "cannot cd to repo toplevel $toplevel"
+[ -e "$toplevel/.git" ] || err "no .git at repo toplevel — refusing to check an archive worktree"
+
+BIN="$toplevel/bin/simple"
+[ -x "$BIN" ] || err "bin/simple not found or not executable at $BIN"
+
+checked=0
+unmet=0
+report=""
+
+add_result() {
+    # $1 = name, $2 = 0 (met) or 1 (unmet), $3 = detail
+    checked=$((checked + 1))
+    if [ "$2" -ne 0 ]; then
+        unmet=$((unmet + 1))
+    fi
+    report="$report
+  [$([ "$2" -eq 0 ] && echo MET || echo UNMET)] $1 -- $3"
+}
+
+# --- Prerequisite 3: spl-coverage subcommand dispatchable ---------------
+p3_out=$("$BIN" spl-coverage status 2>&1)
+p3_rc=$?
+if echo "$p3_out" | grep -q "file not found: spl-coverage"; then
+    add_result "prereq3_spl_coverage_dispatchable" 1 "bin/simple spl-coverage status -> 'file not found: spl-coverage'"
+elif [ "$p3_rc" -eq 0 ]; then
+    add_result "prereq3_spl_coverage_dispatchable" 0 "bin/simple spl-coverage status exited 0"
+else
+    add_result "prereq3_spl_coverage_dispatchable" 1 "bin/simple spl-coverage status exited $p3_rc, output: $(echo "$p3_out" | head -1)"
+fi
+
+# --- Prerequisite 4: artifact export on the spipe/.spl runner path ------
+# Use a real branching spec from this plan's own module set so a false PASS
+# can't hide behind an empty/degenerate spec.
+PROBE_SPEC="test/01_unit/lib/common/gpu/engine2d/scalar_oracle_spec.spl"
+if [ ! -f "$PROBE_SPEC" ]; then
+    add_result "prereq4_artifact_export" 1 "probe spec missing: $PROBE_SPEC (cannot probe export)"
+else
+    ARTIFACT="$(mktemp -u /tmp/check-render2d-coverage-artifact.XXXXXX.sdn)"
+    rm -f "$ARTIFACT"
+    SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT="$ARTIFACT" \
+        "$BIN" test "$PROBE_SPEC" --coverage --no-cache >/tmp/check-render2d-coverage-testout.$$ 2>&1
+    if [ -s "$ARTIFACT" ]; then
+        add_result "prereq4_artifact_export" 0 "artifact written and non-empty at $ARTIFACT"
+    else
+        add_result "prereq4_artifact_export" 1 "SIMPLE_COVERAGE_OUTPUT artifact not written (checked $ARTIFACT); stdout only has line-% banners, no export"
+    fi
+    rm -f "$ARTIFACT" /tmp/check-render2d-coverage-testout.$$
+fi
+
+# --- Prerequisites 1, 2, 5: not mechanically probed here -----------------
+# Recorded as UNMET pending a future extension of this script (grep the
+# pinned Rust file:line sites; see header). Never silently skipped — an
+# unprobed prerequisite counts against PASS, it does not count as met.
+add_result "prereq1_real_source_spans_UNVERIFIED_BY_SCRIPT" 1 "not mechanically probed; per bug doc, interpreter_control.rs hardcodes '<source>' and lowering_stmt.rs/lowering_expr_ops.rs hardcode line=0,column=0 -- treated as unmet until re-verified"
+add_result "prereq2_production_mir_coverage_lowering_UNVERIFIED_BY_SCRIPT" 1 "not mechanically probed; per bug doc, production path calls lower_to_mir not lower_to_mir_with_coverage -- treated as unmet until re-verified"
+add_result "prereq5_perfile_rollup_UNVERIFIED_BY_SCRIPT" 1 "not mechanically probed; per bug doc, no code aggregates decision events into a per-file/per-module hit/total table -- treated as unmet until re-verified"
+
+echo "$SELF: prerequisite detail:$report"
+
+if [ "$checked" -eq 0 ]; then
+    err "no prerequisites were checked"
+fi
+
+if [ "$unmet" -eq 0 ]; then
+    echo "$SELF: PASS — $checked prerequisite(s) checked, all met (branch-coverage % may be reported)"
+    exit 0
+else
+    echo "$SELF: FAIL — $checked prerequisite(s) checked, $unmet unmet (do not report a branch-coverage percentage; see doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md)"
+    exit 1
+fi
