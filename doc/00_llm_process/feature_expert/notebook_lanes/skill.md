@@ -52,6 +52,17 @@ Implementation in progress, parallel-agent execution against
   real failure with blank `err` read as success. Verify: `test/03_system/tools/
   jupyter/` 22/22 (bit-identical to pre-K2 baseline), `jupyter_kernel_log_modes_spec`
   5/5, `test/01_unit/lib/notebook/` 18/18 (K1 regression).
+- **K3** — `src/lib/nogc_sync_mut/notebook/magics.spl`: parses/strips `%mode`, `%%mode`,
+  `%lanes`, `%reset`, `%budget`, `%timeout`, `%onfault` from leading cell lines only
+  (a `%` later in code, e.g. `10 % 3`, is untouched); unknown magics error with the
+  full supported list. Does not duplicate `%mode`/`%%mode` resolution — that stays in
+  `session_manager.spl`; `dispatch_magics()` is the integration seam that calls
+  `KernelSessionManager.set_default_mode`/`reset_session`/`default_mode_of` and returns
+  the stripped code + any per-cell mode override for the caller to pass to
+  `execute_cell`. `%budget`/`%timeout`/`%onfault` land in a `MagicsState` that's
+  currently inert until GPU lanes (K5/K6) consume it via `SessionOpts`. Verify:
+  `magics_spec.spl` 23/23 (incl. `%%mode` cell isolation, unknown-magic text,
+  malformed-argument cases), `kernel_session_manager_spec.spl` 18/18 regression.
 - **L1** — `ipynb.spl`/`snb_sdn.spl` doc model + `src/app/simple_lab/export_sdoctest.spl`
   exporter. `.snb.sdn` is a dict-shaped SDN doc, not `Table` (SDN tables can't nest).
   Verify: ipynb round-trip 9/9, snb_sdn round-trip (incl. required
