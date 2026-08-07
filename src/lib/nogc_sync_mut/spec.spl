@@ -16,6 +16,8 @@
 #
 # NOTE: No static fn, no try/catch/throw - runs on bootstrap runtime.
 
+use std.nogc_sync_mut.src.testing.mock.prevention.{ForbiddenCallGuard, check_guards}
+
 # ================================================================
 # Global Test State
 # ================================================================
@@ -517,6 +519,53 @@ pub fn before_each(hook: fn()):
 
 pub fn after_each(hook: fn()):
     after_hooks.push(hook)
+
+# ================================================================
+# Prevention mocks
+# ================================================================
+#
+# IMPORTANT ordering contract: call prevent()/prevent_at_most()/prevent_file()
+# AFTER the code under test has run, not at the top of the `it` body. The
+# interpreter copies a class instance (like a MockFunction) by value on every
+# form of storage (array push, class-field construction, closure capture) —
+# only continued access through the ORIGINAL variable observes later
+# mutations. An "arm early, auto-check at the end of _execute_it" design was
+# attempted and found to silently report zero calls (always green) for any
+# guard armed before the forbidden call happened — a fail-open DSL. See
+# doc/08_tracking/bug/prevention_mock_deferred_arming_impossible_2026-08-07.md
+# for the repro. These three functions therefore check IMMEDIATELY, against
+# mockfn's current state, and record a failure right where they are called
+# (same mechanism as a failed `expect`: std.nogc_sync_mut.spec.fail_assertion).
+#
+# IMPORT NOTE: `use std.spec.*` does NOT reliably expose every pub fn in this
+# module (a pre-existing, unrelated limitation — even the long-standing
+# get_test_count() is unreachable through it; see the same bug doc). Import
+# these three explicitly and fully-qualified instead:
+#   use std.nogc_sync_mut.spec.{prevent, prevent_at_most, prevent_file}
+
+pub fn prevent(mockfn, reason: text):
+    """Prevention mock: fails THIS example right now if mockfn has been
+    called. Call AFTER the code under test has run — see the ordering
+    contract above."""
+    for msg in check_guards([ForbiddenCallGuard.new(mockfn, reason)]):
+        fail_assertion(msg)
+
+pub fn prevent_at_most(mockfn, n: i32, reason: text):
+    """Budget variant of prevent(): fails if mockfn has been called more
+    than n times. Call AFTER the code under test has run."""
+    for msg in check_guards([ForbiddenCallGuard.at_most(mockfn, n, reason)]):
+        fail_assertion(msg)
+
+pub fn prevent_file(mockfn, reason: text):
+    """NOTE: true file scope (checked automatically after every example in
+    the spec file) is NOT achievable — module-level spec state does not
+    persist from one `it` example to the next under this runner (verified;
+    see the bug doc above). prevent_file() therefore behaves exactly like
+    prevent(): an immediate check of mockfn's current state in the example
+    it is called from. Call it explicitly in every example (or from
+    before_each/after_each with a mock built fresh each time) to approximate
+    file-wide coverage."""
+    prevent(mockfn, reason)
 
 # ================================================================
 # Expectations
