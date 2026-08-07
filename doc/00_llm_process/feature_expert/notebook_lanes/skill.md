@@ -24,8 +24,21 @@ Implementation in progress, parallel-agent execution against
   only ships a hand-written TextMate grammar). Generator `scripts/gen_cm6_grammar.mjs`
   is SHA-gated against the `.scm` sources; Jest suite 4/4 green.
 
-In flight: **K1** (`KernelSessionManager` + `NotebookExecutor` trait) and **L1** (ipynb/
-snb.sdn doc model + SDoctest exporter), both under `src/lib/nogc_sync_mut/notebook/`.
+- **K1** — `KernelSessionManager` + `NotebookExecutor` trait
+  (`src/lib/nogc_sync_mut/notebook/{session_manager,executor,types}.spl`). GPU-A1's
+  composite-grammar extractors were already landed, so `validate_mode_spec` calls the
+  real `test_executor_composite_parse.spl` helpers directly (no stub needed). Verify:
+  `bin/simple test test/01_unit/lib/notebook/` — 18/18. Found and filed a real fixer
+  bug: `bin/simple fix` on `spipe_missing_docstrings` corrupts a bare `describe "..."`
+  string literal.
+- **L1** — `ipynb.spl`/`snb_sdn.spl` doc model + `src/app/simple_lab/export_sdoctest.spl`
+  exporter. `.snb.sdn` is a dict-shaped SDN doc, not `Table` (SDN tables can't nest).
+  Verify: ipynb round-trip 9/9, snb_sdn round-trip (incl. required
+  `.ipynb`→`.snb.sdn`→`.ipynb` byte-stable case) 4/4, exporter 8/9 — the one RED example
+  hits a pre-existing, unrelated `--sdoctest` subcommand defect
+  (`unknown extern function: rt_string_ends_with`), filed separately rather than
+  weakened.
+
 Not yet started: K2-K6, P1-P3, X2-X4, L2-L4, H1-H3, E2.
 
 ## Feature Links
@@ -48,11 +61,12 @@ Not yet started: K2-K6, P1-P3, X2-X4, L2-L4, H1-H3, E2.
   `Router` router.spl:25); UI contract `src/lib/common/ui/semantic_contract.spl`;
   contract spec `test/system/ui/shared_ui_contract_spec.spl`.
 - LSP backend: `src/app/lsp/main.spl`; editor grammar donor: `src/app/vscode_extension/`.
-- New lib (in progress): `src/lib/nogc_sync_mut/notebook/` (session_manager, executor
-  trait, magics, lane_locks, ipynb/snb_sdn — K1/L1 landing these).
-- Landed: `tools/jupyter/kernel_wrapper.py` (Python ZMQ transport, P0);
+- Landed: `src/lib/nogc_sync_mut/notebook/{session_manager,executor,types,ipynb,
+  snb_sdn}.spl` (K1/L1); `src/app/simple_lab/export_sdoctest.spl` (L1);
+  `tools/jupyter/kernel_wrapper.py` (Python ZMQ transport, P0);
   `tools/jupyter/labextension/` (CM6 grammar, X1) with generator
-  `scripts/gen_cm6_grammar.mjs`.
+  `scripts/gen_cm6_grammar.mjs`. Still to add: `magics.spl`, `remote_exec.spl`,
+  `lane_locks.spl` (K3/K4/H2).
 
 ## Known Constraints
 
