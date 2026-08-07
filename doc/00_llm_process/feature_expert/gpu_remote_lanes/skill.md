@@ -11,12 +11,15 @@ constraints, and the pipeline artifacts to update as work progresses.
 **Landed on `origin/main`:** A1 (grammar), A2 (GMB-1 mailbox library), A3
 (runner routing to `GpuLaneExecutor`), B0 (CUDA interpreter adapter), B1
 (CUDA lane session), B2 (CUDA JIT lane executor), B3 (SVM-G CUDA device
-kernel + executor, verified out-of-tree), C1 (Vulkan lane session shell), C2
-(Vulkan JIT lane executor), D1 (SVM-G ISA spec + assembler), D2 (host
-reference VM), D3 (conformance vector suite), D4 (test-body lowering to
-SVM-G). This is now the great majority of the plan's Streams A-D.
+kernel + executor, verified out-of-tree), B4 (CUDA resident/interactive
+session protocol logic -- command ring, watchdog gate, interactive servicer
+all real and unit-tested; live single-kernel resident dispatch blocked on
+missing SFFI, filed), C1 (Vulkan lane session shell), C2 (Vulkan JIT lane
+executor), D1 (SVM-G ISA spec + assembler), D2 (host reference VM), D3
+(conformance vector suite), D4 (test-body lowering to SVM-G). This is now the
+great majority of the plan's Streams A-D.
 
-**Not yet landed:** B4-B6 (further CUDA lane work), C3 (SVM-G Vulkan device
+**Not yet landed:** B5-B6 (further CUDA lane work), C3 (SVM-G Vulkan device
 executor — the Vulkan-side counterpart to B3), E2 (`doc/08_tracking/lane_matrix.md`
 does not exist yet). E1 (this doc-linking task) is in progress here.
 
@@ -607,6 +610,80 @@ rewritten").
   --oneline -- <path>` first -- it is often faster and more faithful to
   recover a verified-working past version than to rewrite from the design
   doc.
+
+## Status: B4 (CUDA resident/interactive session) -- landed 2026-08-07 (host-independent protocol logic fully green; live single-kernel resident dispatch blocked by 3 missing SFFI bindings, filed)
+
+- New `src/lib/gc_async_mut/gpu_lane/cuda_resident_session.spl`: three
+  pieces per design §5.3 --
+  - `CommandRing` -- pure host-side 8-slot `(sgp_offset, doorbell)` ring
+    (`RING_SLOTS=8`, 8 bytes/slot), `next_free_slot`/`write_command`/
+    `write_shutdown` (SHUTDOWN sentinel `0x7E`)/`service_next` (device-side
+    ack simulation), ring-full backpressure (`-1`, never silently
+    overwrites a pending slot).
+  - `resident_refusal_gate(watchdog_attr, force_env_value) -> text` --
+    pure decision function: refuses on `WATCHDOG_ENABLED` (1) AND on
+    `WATCHDOG_UNKNOWN` (-1, fail-safe -- an unreadable attribute is never
+    treated as "assume safe"), proceeds on `WATCHDOG_DISABLED` (0) or when
+    `CUDA_RESIDENT_FORCE=1`. `unknown_watchdog_attr()` is the default
+    provider and always returns `WATCHDOG_UNKNOWN` on this build (see gap
+    below).
+  - `InteractiveServicer` -- drives A2's `service_trigger` against a
+    `MailboxArena` for live PUTC/EXIT/RESULT servicing; `poll_once`/
+    `service_until_exit` (bounded-budget loop, mirrors the watchdog
+    backstop). Real protocol logic, unit-tested by simulating the device
+    side with `arena.fire_command(...)` between polls.
+  - `ResidentSession` -- keeps ONE `CudaVmExecutor` (== one
+    `CudaLaneSession` + one loaded module) open across multiple
+    `run_program` calls, gated by `resident_refusal_gate` in `start()`.
+- **Known gap (filed, not routed around)**: design §5.3's full shape needs
+  (a) `cuMemHostAlloc(MAPPED|PORTABLE)` + `cuMemHostGetDevicePointer` (no
+  binding in `src/lib/nogc_sync_mut/cuda/sffi.spl` -- grep-confirmed), (b)
+  a real device-attribute query for `CU_DEVICE_ATTRIBUTE_KERNEL_EXEC_
+  TIMEOUT` (also no binding), and (c) a checked-in resident, ring-polling
+  PTX kernel (only B3's per-launch `svmg_interpret` exists). None of the
+  three exist today; adding them needs a Rust-runtime extern + bootstrap
+  rebuild, out of scope here per "no bootstrap unless essential". So
+  `ResidentSession.run_program` falls back to B3's per-launch dispatch
+  internally (one open session, N sequential launches -- correct PUTC
+  ORDER across programs, but PUTC delivery WITHIN one program's execution
+  is buffered, not live/interleaved mid-kernel), and the watchdog gate
+  always sees `WATCHDOG_UNKNOWN` on live hardware today, so it refuses
+  every real start unless forced. Filed:
+  `doc/08_tracking/bug/cuda_resident_session_missing_mapped_memory_and_watchdog_sffi_2026-08-07.md`.
+- New `test/03_system/gpu_lane/cuda_resident_session_spec.spl` (18
+  examples): 6 refusal-gate cases (enabled/unknown/disabled/forced x2/gap
+  documentation), 7 command-ring cases (including a sabotage-probe
+  example asserting the `is_free` guard is load-bearing), 4 interactive
+  servicer cases (single PUTC, 3-byte live ORDER preservation `"ABC"`,
+  EXIT latching + early-stop, RESULT recording), and 1 end-to-end ">=3
+  programs through ONE resident session" case that takes the
+  refuse/skip branch on hosts without a real watchdog-attribute query
+  (this dev host included) and asserts that refusal explicitly rather
+  than papering over it.
+- Verify: `bin/simple test test/03_system/gpu_lane/cuda_resident_session_spec.spl`
+  -> `Results: 18 total, 18 passed, 0 failed`. All 17 host-independent
+  examples exercise real logic; the 18th confirms `start()` returns
+  `refuse:cuda-resident-watchdog-attr-unavailable` on this host (no CUDA
+  device either, so both refusal-branch and no-device-branch assertions
+  in that example are dormant-but-correct).
+- **Sabotage probe:** inverted `resident_refusal_gate`'s
+  `WATCHDOG_ENABLED` check to `WATCHDOG_DISABLED` -> RED (`6 examples, 2
+  failures` in the refusal-gate describe block; `18 total, 16 passed, 2
+  failed` overall); reverted -> GREEN (`18 total, 18 passed, 0 failed`).
+- **Real finding while writing the spec**: `MailboxArena`'s `bytes: [u8]`
+  field is an array (value type, per
+  `feedback_arrays_value_types.md`) -- constructing
+  `InteractiveServicer.create(arena)` copies the arena into
+  `servicer.arena`, so a caller must drive the device-side simulation
+  through `servicer.arena.fire_command(...)`, not a separately-held outer
+  `arena` handle (an earlier draft firing on the outer handle left
+  `servicer.arena` permanently untriggered -- 4 failures, all fixed by
+  routing the simulation through `servicer.arena`).
+- Lint: `bin/simple lint src/lib/gc_async_mut/gpu_lane/cuda_resident_session.spl
+  test/03_system/gpu_lane/cuda_resident_session_spec.spl` -> 0 errors (5
+  warnings, all pre-existing-style advisories shared with sibling A2/B3
+  files: `MODINIT001` non-literal module constants, one
+  `unnamed_duplicate_typed_args` hint).
 
 ## Affected Layers
 
