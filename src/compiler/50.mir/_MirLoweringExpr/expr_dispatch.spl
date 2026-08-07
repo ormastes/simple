@@ -1609,6 +1609,7 @@ impl MirLowering:
             self.emit_bounds_check_for_index(base.type_, base_local, index_local)
         elif self.current_gpu_kernel_target == "vulkan":
             index_local = self.vulkan_u32_local(index_local)
+        var is_tuple_base = false
         if has_base_mir_type:
             match base_mir_type.kind:
                 case MirTypeKind.Array(element_type, _):
@@ -1623,6 +1624,29 @@ impl MirLowering:
                 case MirTypeKind.Dict(_, value_type):
                     result_type = value_type
                     result_type_from_base = true
+                case MirTypeKind.Tuple(_):
+                    # Bug (native_pushed_tuple_into_empty_literal_list_
+                    # unboxed_2026-08-02, gap (a) follow-up): `t.0`/`t.1`
+                    # desugars to Index(base, IntLit(i)) at HIR-lowering time
+                    # (20.hir/hir_lowering/expressions.spl,
+                    # is_tuple_positional_field). Deliberately does NOT set
+                    # result_type here from the tuple's own MIR field_types:
+                    # those are derived from each element's raw HIR
+                    # `.type_` annotation in lower_tuple_lit
+                    # (_MirLoweringExpr/literals.spl), which gap (b) above
+                    # already proved unreliable for non-i64/mixed-type
+                    # tuples (`(1, "x")` renders its text field as a raw
+                    # pointer). HIR lowering's own
+                    # `field_tuple_element_type` (20.hir/hir_lowering/
+                    # expressions.spl, keyed off `local_tuple_types`) is the
+                    # MORE reliable source for a plain tuple-local field
+                    # read and already flows into `index_result_hir_type`
+                    # below via `has_index_result_hir_type` -- this arm only
+                    # needs to flag "tuple base" so the SIMPLE_BOOTSTRAP
+                    # forced-text default two blocks down defers to that
+                    # HIR-sourced type instead of clobbering it, closing
+                    # gap (a) without inheriting gap (b)'s unreliability.
+                    is_tuple_base = true
                 case _: ()
         if not result_type_from_base and self.find_local_hir_type(base_local.id) != nil:
             val base_hir_type = self.find_local_hir_type(base_local.id) ?? HirType(kind: HirTypeKind.Error, span: base.span)
@@ -1631,7 +1655,7 @@ impl MirLowering:
                     result_type = self.lower_type(element_type)
                     result_type_from_base = true
                 case _: ()
-        if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not result_type_from_base:
+        if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not result_type_from_base and not is_tuple_base:
             result_type = self.bootstrap_text_type()
         elif not result_type_from_base and has_index_result_hir_type:
             result_type = self.lower_type(index_result_hir_type)
@@ -1657,7 +1681,25 @@ impl MirLowering:
             if result_disc == rt_enum_discriminant(MirTypeKind.I64) or (noted_is_array and not result_is_array):
                 result_type = noted_elem_type
         val runtime_array = self.local_is_runtime_array(base_local)
-        if runtime_array or (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        # Bug (native_pushed_tuple_into_empty_literal_list_unboxed_2026-08-02,
+        # gap (a) follow-up, part 2): a tuple's physical storage is a raw
+        # rt_alloc(field_count*8) block with NO rt_array header
+        # (translate_aggregate's `case Tuple` in
+        # 70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl -- "IDENTICAL
+        # physical layout to Struct", explicitly not an rt_array). Routing a
+        # tuple base through rt_array_get here -- which the plain
+        # `SIMPLE_BOOTSTRAP=1` gate below did unconditionally, regardless of
+        # `runtime_array` -- reads the tuple's raw field words as if they
+        # were an SplArray header/length/elements-pointer, an out-of-bounds
+        # or misinterpreted read (observed: `t.0`/`t.1` printed empty
+        # instead of the field value). A tuple base must always take the
+        # plain GEP+load else-branch below, which is the SAME single-index
+        # native-int-word read `lower_tuple_field_raw`
+        # (coerce_tuple_to_raw_str's helper, above in this file) and
+        # `translate_get_field` already use for tuple/struct field reads.
+        # (`is_tuple_base` was already computed above from the same
+        # base_mir_type match -- no need to re-scan self.builder.locals.)
+        if (runtime_array or (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1") and not is_tuple_base:
             val getter = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_array_get"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.ptr(result_type, false), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))

@@ -559,3 +559,274 @@ Consistent with the "unreliable HIR `field_types` annotations" gap recorded
 above. The gate REPORTS this rather than asserting it, deliberately: it is a
 known-open gap, and phrasing it as a NOTE-on-fix means the day someone fixes
 mixed-type rendering the gate says so out loud instead of staying silent.
+
+## 2026-08-07 follow-up 2: gap (a) fixed — `t.0`/`t.1` field-index access under `SIMPLE_BOOTSTRAP=1 native-build`
+
+Scoped follow-up to gap (a) from the previous section only. Gap (b) (nested /
+mixed-type tuple rendering) is untouched and still open.
+
+### Reproduction (before fix)
+
+```simple
+fn main():
+    val t = (7, 9)
+    print("first: {t.0}\n")
+    print("second: {t.1}\n")
+```
+
+Built with `SIMPLE_BOOTSTRAP=1 bin/simple native-build repro.spl -o repro.bin`
+(deployed pure-Simple `bin/release/x86_64-unknown-linux-gnu/simple`, no
+bootstrap rebuild — these `.spl` sources interpret live under
+`SIMPLE_BOOTSTRAP=1 native-build`). Before this fix:
+
+```
+first: 
+second: 
+```
+
+Both fields print empty (exit 0, no crash). This reproduces the gap exactly as
+described in the previous section.
+
+### Root cause (two stacked defects in `lower_index_expr`, `expr_dispatch.spl`)
+
+`t.0` does **not** lower through `HirExprKind.Field` or `TupleIndex` — HIR
+lowering (`20.hir/hir_lowering/expressions.spl:606-620`,
+`is_tuple_positional_field`/`parse_tuple_field_index`) desugars any
+digit-named field access on a tuple into `HirExprKind.Index(base,
+IntLit(i))`, explicitly to route through the already-proven tuple-destructure
+Index path rather than the struct-field path (`resolve_field_index` has no
+notion of tuple positional layout). So the actual defect site is
+`lower_index_expr`, exactly where the previous section's root-cause note
+pointed, not a Field/TupleIndex arm.
+
+**Defect 1 — result type forced to text.** The base's MIR local type is
+`MirTypeKind.Tuple(field_types)` (set by `lower_tuple_lit` /
+`local_is_tuple`, landed in the first 2026-08-07 follow-up above), but the
+`match base_mir_type.kind` block that derives `result_type_from_base`
+(`expr_dispatch.spl` ~1612-1626) only had arms for
+`Array`/`Slice`/`Ptr`/`Ref`/`Dict` — no `Tuple` arm. With
+`result_type_from_base` staying `false`, this line fired unconditionally:
+
+```
+if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not result_type_from_base:
+    result_type = self.bootstrap_text_type()   # unconditionally Opaque("str")
+elif not result_type_from_base and has_index_result_hir_type:
+    result_type = self.lower_type(index_result_hir_type)   # dead: elif never reached
+```
+
+`index_result_hir_type` was actually correct here (HIR lowering's
+`field_tuple_element_type`, keyed off `local_tuple_types`, resolves `t.0`'s
+real element type reliably for a plain `val t = (a, b)` local — this is a
+different, more reliable source than the tuple-*literal* `field_types`
+unreliability documented in gap (b)) — but the `if/elif` structure meant the
+`SIMPLE_BOOTSTRAP=1` branch always won first and the correct type was never
+consulted.
+
+**Defect 2 — wrong runtime accessor.** Independent of the result type, the
+read itself routed through `rt_array_get`:
+
+```
+if runtime_array or (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+    ...call rt_array_get(base_local, index_local)...
+```
+
+This fires whenever `SIMPLE_BOOTSTRAP=1`, **regardless of `runtime_array`**.
+But a tuple's physical layout (`translate_aggregate`'s `case Tuple` in
+`70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl:119-162`, added in
+the sibling `native_class_array_field_mutation_segfault` fix family) is an
+`rt_alloc(field_count * word_bytes)` block of raw native-int words —
+explicitly documented there as "IDENTICAL physical layout to Struct" with NO
+`rt_array_new` header, deliberately not routed through the generic aggregate
+path for that reason. `rt_array_get` expects an `SplArray*` header
+(length/capacity/elements-pointer fields) — calling it on a raw tuple block
+reads memory that isn't a valid array header at all. That garbage read, then
+decoded as `Opaque("str")` (Defect 1), is what produced the empty prints
+rather than a crash or garbage number — the two defects compounded into one
+"quietly wrong" symptom.
+
+### Fix (`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`)
+
+Two small, additive, Tuple-gated changes to `lower_index_expr`.
+
+**First attempt (revised — see below).** The first version of this fix read
+`result_type` straight off the tuple's own MIR `field_types` table (set by
+`lower_tuple_lit` from each element's raw HIR `.type_`). A review pass
+pointed out this is the SAME source gap (b) above already proved unreliable
+for non-i64/mixed-type tuples, and that using it here would silently inherit
+that unreliability instead of using the more reliable HIR-lowering source
+(`field_tuple_element_type`, keyed off `local_tuple_types`) that already
+flows into `index_result_hir_type`/`has_index_result_hir_type` a few lines
+below. Verifying with a `val m = (1, "x")` / `{m.1}` probe confirmed this
+concern was real for the naive version. The fix below only flags "this base
+is a tuple" and lets the existing `elif has_index_result_hir_type` branch —
+already fed by the more reliable source — supply the actual type, instead of
+sourcing a type from the Tuple arm itself:
+
+1. Added a `MirTypeKind.Tuple(_)` arm to the `base_mir_type.kind` match
+   (alongside Array/Slice/Ptr/Ref/Dict) that sets a new `is_tuple_base` flag
+   (computed once here, reused by the runtime-accessor fix below — no
+   change to `result_type`/`result_type_from_base`):
+
+   ```
+   var is_tuple_base = false
+   ...
+       case MirTypeKind.Tuple(_):
+           is_tuple_base = true
+   ```
+
+2. Changed the `SIMPLE_BOOTSTRAP=1` forced-text default to also exclude a
+   tuple base, so the `elif has_index_result_hir_type` branch (the reliable
+   HIR-sourced type) is consulted instead, closing Defect 1:
+
+   ```
+   if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not result_type_from_base and not is_tuple_base:
+       result_type = self.bootstrap_text_type()
+   elif not result_type_from_base and has_index_result_hir_type:
+       result_type = self.lower_type(index_result_hir_type)
+   ```
+
+3. Reused the same `is_tuple_base` flag to gate the `rt_array_get` call,
+   forcing a tuple base to always take the pre-existing plain GEP+load
+   `else` branch — the exact same single-index native-int-word read
+   `lower_tuple_field_raw` (`coerce_tuple_to_raw_str`'s helper, same file)
+   and `translate_get_field` already use for tuple/struct field reads,
+   closing Defect 2:
+
+   ```
+   if (runtime_array or (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1") and not is_tuple_base:
+   ```
+
+All three changes are gated strictly on a `Tuple`-typed base, so
+Array/Slice/Ptr/Ref/Dict indexing (the paths this `SIMPLE_BOOTSTRAP=1` gate
+exists for) take an identical path to before, and `is_tuple_base` is
+computed once (inside the pre-existing `match base_mir_type.kind` loop over
+`self.builder.locals`) rather than re-scanning locals a second time.
+
+### Verification (`SIMPLE_BOOTSTRAP=1 native-build`, freshly built, same repro)
+
+| | Before | After |
+|---|---|---|
+| `first: {t.0}` | `first: ` (empty) | `first: 7` — **correct** |
+| `second: {t.1}` | `second: ` (empty) | `second: 9` — **correct** |
+
+### Regression checks (same lane, no bootstrap rebuild)
+
+```simple
+fn main():
+    val t = (7, 9)
+    print("tuple: {t}\n")                       # whole-tuple interpolation (prior fix)
+    val t2: (i64, i64) = (3, 5)
+    print("annotated: {t2.0} {t2.1}\n")          # explicitly-annotated tuple type
+    var a = [10, 20, 30]
+    print("arr1: {a[1]}\n")                      # plain runtime-array index, unaffected path
+    val nested = (1, (2, 3))
+    print("nested: {nested}\n")                  # gap (b), still open, unaffected by this fix
+```
+
+Output:
+
+```
+tuple: (7, 9)
+annotated: 3 5
+arr1: 20
+nested: (1, 88853888)
+```
+
+- `{t}` (whole-tuple interpolation, the original bug's fix) — still correct,
+  unaffected.
+- `{t2.0} {t2.1}` (the annotated-type isolation repro the previous section
+  used to isolate this gap from the type-preservation fix) — now correct;
+  previously this also printed empty (confirmed in the earlier section: "the
+  identical repro/build command ... no longer reproduces on the current
+  tree").
+- `a[1]` (plain runtime-array indexing, the path the `SIMPLE_BOOTSTRAP=1 or
+  runtime_array` gate exists for) — still correct (`20`), proving the `and
+  not is_tuple_base` guard did not regress the array path.
+- `nested` — unchanged, still shows gap (b) (an ASLR-moving raw pointer for
+  the inner tuple field, e.g. `(1, 88853888)`/`(1, 1005178240)` across
+  runs) exactly as documented above; this fix does not touch
+  `coerce_tuple_to_raw_str`/`lower_tuple_lit`'s `field_types` derivation, so
+  gap (b) is explicitly out of scope here and remains open.
+- Dict indexing (`d[k]`) is structurally unreachable by this diff: it
+  returns early via `local_is_runtime_dict`/`lower_dict_runtime_get`
+  (`expr_dispatch.spl` ~1553-1559), before either edited line is reached —
+  not re-verified by a fresh run, but provably unaffected by inspection.
+
+### Wider verification (destructure, arithmetic, mixed-type discriminator)
+
+A review pass raised two further questions before accepting the fix as
+correct: (1) `val (a, b) = t` tuple destructure desugars through the exact
+same `Index(base, IntLit(i))` shape (`lower_tuple_destructure`,
+`20.hir/hir_lowering/statements.spl`) — does the `and not is_tuple_base`
+reroute affect it too, and is that reroute actually correct given the HIR
+comment's claim that destructure was "proven-working ... via the same
+rt_array_get path" (which directly conflicts with
+`aggregate_intrinsics.spl`'s "raw rt_alloc block, no header" description of
+the SAME tuple)? (2) does a non-interpolation read (bypassing
+`coerce_concat_operand` entirely) behave the same as the `{...}`
+interpolation reads verified above?
+
+```simple
+fn main():
+    val t = (7, 9)
+    val (a, b) = t
+    print("destr: {a} {b}\n")
+    val (c, d) = (11, 13)
+    print("destr-lit: {c} {d}\n")
+    print("arith: {t.0 + t.1}\n")
+    val m = (1, "x")
+    print("mixed0: {m.0}\n")
+    print("mixed1: {m.1}\n")
+```
+
+Output (post-fix, `SIMPLE_BOOTSTRAP=1 native-build`):
+
+```
+destr: 7 9
+destr-lit: 11 13
+arith: 16
+mixed0: 1
+mixed1: 2100296
+```
+
+- `destr`/`destr-lit` (tuple destructure, both from a named local and a bare
+  literal) — correct. The HIR comment's "proven-working ... via rt_array_get"
+  claim is stale relative to the raw-`rt_alloc` layout `aggregate_intrinsics.spl`
+  now documents for `AggregateKind.Tuple` — this fix's reroute to the plain
+  GEP+load path is what makes destructure (and `.0`/`.1`) correct under
+  `SIMPLE_BOOTSTRAP=1`, not a regression of a working path.
+- `arith` (`t.0 + t.1`, a non-interpolation read that never reaches
+  `coerce_concat_operand`) — correct (`16`), confirming the fix holds outside
+  the string-interpolation lane the rest of this doc focuses on.
+- `mixed0` (`m.0`, the `i64` field of a mixed `(i64, str)` tuple) — correct.
+- `mixed1` (`m.1`, the `str` field) — **still wrong** (`2100296`, a raw
+  handle/pointer bit pattern, not `"x"`). This is gap (b)'s family, not a
+  regression: pre-fix, EVERY field read on EVERY tuple (homogeneous or mixed)
+  printed empty (Defect 1 forced text unconditionally), so `m.1` was already
+  broken before this change, just differently broken (empty vs. garbage
+  pointer). Switching the type source from the tuple's own MIR `field_types`
+  to the "more reliable" HIR-lowering source (`field_tuple_element_type`)
+  did NOT fix `m.1` either — confirmed by testing both versions of the fix
+  head-to-head — so the unreliability is not specific to which type source
+  is consulted; the deeper issue is downstream, in how a `str`-typed
+  `result_type` is read via the plain `emit_gep`/`emit_load` pair this fix
+  routes tuples through (unlike `translate_get_field`, that pair has no
+  int-word-vs-pointer-vs-float storage/logical-type reconciliation — see
+  `aggregate_intrinsics.spl:176-236`'s `dest_ty` dispatch for the shape that
+  reconciliation would need to take). Left open as a newly-scoped, narrower
+  extension of gap (b) — mixed-type tuple field READS (not just renders) are
+  broken under `SIMPLE_BOOTSTRAP=1`; homogeneous-`i64`-tuple field reads (the
+  bug's actual title/repro shape) are fixed.
+
+**Files changed:** `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`
+(new `MirTypeKind.Tuple` arm computing `is_tuple_base` in `lower_index_expr`'s
+base-type match, `is_tuple_base` added to the forced-text-default and
+`rt_array_get` gate conditions). No Rust seed changes; no bootstrap rebuild
+performed or required.
+
+Gap (b) (nested/mixed-type tuple rendering via `coerce_tuple_to_raw_str`,
+and now also confirmed for mixed-type tuple field READS via `.0`/`.1`, not
+just whole-tuple interpolation) remains open, unchanged, and out of scope
+for this pass — see the previous section for its root cause and proposed
+follow-up (`lower_tuple_lit` preferring `local_mir_type_of` over `elem.type_`
+per field).
