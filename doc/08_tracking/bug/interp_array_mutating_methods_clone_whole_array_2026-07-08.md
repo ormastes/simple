@@ -232,3 +232,48 @@ must switch from `Arc::make_mut` to `Arc::get_mut` (falling through to the clone
 
 See `doc/03_plan/compiler/perf/interp_array_mutating_method_fast_path_plan.md` for the two-track
 fix (durable seed fast path vs. immediate per-site refactor) and verification protocol.
+
+## Addendum 2026-08-07 — JIT path measured, confirmed amortized O(1)/op (not this bug's scope, verified anyway)
+
+The "Compiled/JIT/native-build execution is unaffected" line above was an assertion, not a
+measurement. Verified empirically today because a separate task suspected the claim might be
+stale.
+
+**Root check (`src/compiler_rust/runtime/src/value/collections.rs`):** `RuntimeArray` (the
+JIT/native array representation, `:317-325`) already carries `len: u64` and `capacity: u64` as
+separate fields. `bin/simple run` compiles through **Cranelift**, and its `.push()` codegen
+(`src/compiler_rust/compiler/src/codegen/instr/calls.rs:3431`, `"push" => Some("rt_push")`) calls
+`rt_push` (`collections.rs:2885`), which for an array receiver delegates straight to
+`rt_array_push` (`:1045`) — i.e. the exact symbol the measurement below exercises. The LLVM backend
+(`codegen/llvm/functions/calls.rs:1947,2116`, `"push" => Some("rt_array_push")`) maps `.push()`
+directly to `rt_array_push` instead of going through `rt_push`; both backends land on the same
+function. `rt_array_push` forwards to `rt_array_push_grow` (`:1306`), which grows via
+`new_cap = (old_cap * 2).max(4)` + `std::alloc::realloc` only when `len >= capacity` — a standard
+amortized-doubling fast path, not a per-push clone. This is a different, already-correct code path
+from `collections.rs:97-102`'s `arr.to_vec()` (that one is the interpreter's generic per-type
+method handler; per the Track A fix above it's reached only outside the `patterns.rs` lvalue
+fast-path case — not independently re-verified today, out of scope for this JIT-focused check).
+
+**Measured (`bin/simple run <file>.spl`, Cranelift JIT, `arr.push(i)` in a `while` loop building
+`[i64]` from empty):**
+
+| N | wall time | N→2N ratio |
+|---|---|---|
+| 2,000,000 | 0.100s | — |
+| 4,000,000 | 0.195s | **1.95×** |
+
+Single runs (not averaged over repeats); the 2×-vs-4× margin below is wide enough that run-to-run
+noise doesn't change the verdict. Wall time includes a fixed process-startup floor (~0.022–0.028s,
+measured separately at N=50k/100k); startup-subtracted the ratio is ~0.078s → ~0.173s ≈ **2.2×**,
+still linear, not the ~4× a quadratic always-clone would produce. Confirms the JIT path was never
+affected by this bug — verdict is **stale premise** for JIT specifically; the interpreter finding
+above (already fixed 2026-07-07) stands unchanged.
+
+**No automated gate added.** `bin/simple test` hard-defaults to the tree-walk interpreter (see
+`.claude/rules/testing.md` — "`run` and `test` are DIFFERENT ENGINES"), so a `_spec.spl` timing
+assertion would measure the interpreter, not the JIT path this addendum verifies. The repo's actual
+perf-gate vehicle for JIT-reachable code is `scripts/check/*.shs` (e.g. `check-render-perf-v-lane-
+suite.shs`), which shells out to `bin/simple run` directly — that vehicle was not used here; adding
+a `check-array-push-amortized.shs` gate is a reasonable follow-up but out of scope for this
+verification pass. Repro kept as scratch-only (`push_perf_2m.spl`/`push_perf_4m.spl`, not
+committed); rerun via `bin/simple run` to reverify.
