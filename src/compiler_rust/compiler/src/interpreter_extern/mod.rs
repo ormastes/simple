@@ -554,6 +554,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_array_extend_i64", sffi_array::rt_array_extend_i64_fn);
     insert_simple!("rt_array_free", sffi_array::rt_array_free_fn);
     insert_simple!("rt_array_free_deep", sffi_array::rt_array_free_deep_fn);
+    insert_simple!("rt_dict_free_deep", sffi_array::rt_dict_free_deep_fn);
+    insert_simple!("rt_free_deep", sffi_array::rt_free_deep_fn);
     insert_simple!("rt_array_get", sffi_array::rt_array_get_fn);
     insert_simple!("rt_array_get_text", sffi_array::rt_array_get_fn);
     insert_simple!("rt_array_len", sffi_array::rt_array_len_fn);
@@ -1705,6 +1707,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_engine2d_simd_fill_rows_u32", simd::rt_engine2d_simd_fill_rows_u32);
     insert_simple!("rt_engine2d_simd_fill_span_u32", simd::rt_engine2d_simd_fill_span_u32);
     insert_simple!("rt_engine2d_simd_copy_span_u32", simd::rt_engine2d_simd_copy_span_u32);
+    insert_simple!("rt_engine2d_simd_blend_span_u32", simd::rt_engine2d_simd_blend_span_u32);
+    insert_simple!("rt_engine2d_simd_blend_const_span_u32", simd::rt_engine2d_simd_blend_const_span_u32);
     insert_simple!("rt_engine2d_simd_copy_row_u32", simd::rt_engine2d_simd_copy_row_u32);
     insert_simple!("rt_engine2d_simd_blend_row_u32", simd::rt_engine2d_simd_blend_row_u32);
     insert_simple!("rt_simd_aes_round_last_u8x16", simd::rt_simd_aes_round_last_u8x16);

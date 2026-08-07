@@ -1621,6 +1621,47 @@ SplArray* rt_engine2d_simd_copy_span_u32(SplArray* dst, int64_t dst_off,
     return dst;
 }
 
+/* Blend src[src_off..src_off+n) over dst[dst_off..dst_off+n) in place,
+ * straight-alpha src-over (oracle_src_over). No malloc — matches
+ * fill_span/copy_span's in-place convention, not blend_row's
+ * malloc-two-scratch-buffers convention. */
+SplArray* rt_engine2d_simd_blend_span_u32(SplArray* dst, int64_t dst_off,
+                                          SplArray* src, int64_t src_off,
+                                          int64_t count) {
+    int64_t d_off = 0, n = 0;
+    if (!engine2d_span_bounds(dst, dst_off, count, &d_off, &n)) return dst;
+    int64_t s_off = 0, sn = 0;
+    if (!engine2d_span_bounds(src, src_off, n, &s_off, &sn)) return dst;
+    if (sn < n) n = sn;
+    int64_t* dst_data = (int64_t*)(uintptr_t)rt_array_data_ptr(dst);
+    const int64_t* src_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(src);
+    if (!dst_data || !src_data) return dst;
+    for (int64_t i = 0; i < n; i++) {
+        uint32_t s = engine2d_unbox_pixel(src_data[s_off + i]);
+        uint32_t d = engine2d_unbox_pixel(dst_data[d_off + i]);
+        dst_data[d_off + i] = engine2d_box_pixel((uint32_t)engine2d_blend_pixel((int64_t)s, (int64_t)d));
+    }
+    return dst;
+}
+
+/* Blend one constant colour over dst[offset..offset+count) in place,
+ * straight-alpha src-over (oracle_src_over_const). No src array, no malloc. */
+SplArray* rt_engine2d_simd_blend_const_span_u32(SplArray* dst, int64_t offset,
+                                                int64_t count, int64_t const_color) {
+    int64_t off = 0, n = 0;
+    if (!engine2d_span_bounds(dst, offset, count, &off, &n)) return dst;
+    int64_t* dst_data = (int64_t*)(uintptr_t)rt_array_data_ptr(dst);
+    if (!dst_data) return dst;
+    uint32_t s = (uint32_t)(uint64_t)const_color;
+    uint32_t sa = (s >> 24) & 0xFFu;
+    if (sa == 0u) return dst;
+    for (int64_t i = 0; i < n; i++) {
+        uint32_t d = engine2d_unbox_pixel(dst_data[off + i]);
+        dst_data[off + i] = engine2d_box_pixel((uint32_t)engine2d_blend_pixel((int64_t)s, (int64_t)d));
+    }
+    return dst;
+}
+
 /* Scalar fallback stubs — no-op placeholders until pure Simple or
    hardware-accelerated implementations are wired in. */
 

@@ -32,6 +32,8 @@ actual numbers this run produced.
 use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{
     engine2d_simd_fill_row_u32,
     engine2d_simd_blend_row_u32,
+    engine2d_simd_blend_span_u32,
+    engine2d_simd_blend_const_span_u32,
 }
 use common.gpu.engine2d.scalar_oracle.{
     oracle_modulate_alpha,
@@ -157,6 +159,46 @@ fn simd_isa_mask_src_over(mut dst: [u32], dst_offset: i64, colour: i64,
     while j < count:
         dst[(dst_offset + j).to_i32()] = blended[j.to_i32()]
         j = j + 1
+
+# --- blend_span / blend_const_span (in-place, no malloc) ---------------------
+#
+# Alternative to simd_isa_src_over_image/simd_isa_src_over_const above: those
+# two gather dst/src into fresh row buffers and call the malloc-per-call
+# blend-ROW kernel; these call the in-place blend-SPAN kernel directly
+# (rt_engine2d_simd_blend_span_u32 / rt_engine2d_simd_blend_const_span_u32,
+# src/runtime/runtime_simd_dispatch.c) with zero heap allocation and no
+# gather/scatter copy loop. See
+# doc/03_plan/ui/perf/engine2d_simd_blend_span_kernel_design_plan_2026-08-07.md.
+# Not wired into simd_span_batch_execute below or KERNEL_PROVIDER_SIMD_ISA
+# registration — the honest-gate timing pass in simd_isa_provider_spec.spl
+# decides whether either earns a slot; see that spec for the actual verdict.
+
+fn simd_isa_blend_span(mut dst: [u32], dst_offset: i64, src: [u32],
+                       src_offset: i64, count: i64):
+    """src_over_image via the in-place blend-span kernel (no malloc, no
+    gather/scatter row buffers), matching oracle_src_over_image."""
+    if count <= 0:
+        return
+    val blended = engine2d_simd_blend_span_u32(dst, dst_offset, src, src_offset, count)
+    if blended.len() != dst.len():
+        return
+    var i: i64 = 0
+    while i < count:
+        dst[(dst_offset + i).to_i32()] = blended[(dst_offset + i).to_i32()]
+        i = i + 1
+
+fn simd_isa_blend_const_span(mut dst: [u32], offset: i64, count: i64, colour: i64):
+    """src_over_const via the in-place blend-const-span kernel (no malloc, no
+    row buffers), matching oracle_src_over_const (sa==0 no-op included)."""
+    if count <= 0:
+        return
+    val blended = engine2d_simd_blend_const_span_u32(dst, offset, count, colour)
+    if blended.len() != dst.len():
+        return
+    var i: i64 = 0
+    while i < count:
+        dst[(offset + i).to_i32()] = blended[(offset + i).to_i32()]
+        i = i + 1
 
 # --- real per-op dispatcher --------------------------------------------------
 #

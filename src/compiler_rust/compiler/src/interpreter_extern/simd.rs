@@ -1527,6 +1527,92 @@ pub fn rt_engine2d_simd_copy_span_u32(args: &[Value]) -> Result<Value, CompileEr
     Ok(pack_u32_array(dst))
 }
 
+/// Src-over blend of a single packed straight-alpha pixel (0xAARRGGBB),
+/// bit-exact with `oracle_src_over` (truncating integer division). Shared by
+/// the in-place span bridges below and `rt_engine2d_simd_blend_row_u32`.
+#[inline]
+fn engine2d_blend_pixel_u32(s: u32, d: u32) -> u32 {
+    let sa = (s >> 24) & 0xFF;
+    if sa == 255 {
+        return s;
+    }
+    if sa == 0 {
+        return d;
+    }
+    let da = (d >> 24) & 0xFF;
+    let inv = 255 - sa;
+    let dst_weight = da * inv / 255;
+    let out_alpha = sa + dst_weight;
+    let r = (((s >> 16) & 0xFF) * sa + ((d >> 16) & 0xFF) * dst_weight) / out_alpha;
+    let g = (((s >> 8) & 0xFF) * sa + ((d >> 8) & 0xFF) * dst_weight) / out_alpha;
+    let b = ((s & 0xFF) * sa + (d & 0xFF) * dst_weight) / out_alpha;
+    (out_alpha << 24) | (r << 16) | (g << 8) | b
+}
+
+/// Interpreter bridge for the native in-place blend-span ABI. Blends
+/// src[src_off..src_off+n) over dst[dst_off..dst_off+n) with straight-alpha
+/// src-over, matching `rt_engine2d_simd_blend_span_u32`'s C kernel and
+/// `oracle_src_over_image`. Interpreter arrays are immutable Arc values, so
+/// return the updated destination array.
+pub fn rt_engine2d_simd_blend_span_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 5 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_simd_blend_span_u32 expects 5 arguments (dst, dst_offset, src, src_offset, count)".to_string(),
+        ));
+    }
+    let mut dst = unpack_u32_array("rt_engine2d_simd_blend_span_u32(dst)", &args[0])?;
+    let dst_offset_raw = require_u64_value("rt_engine2d_simd_blend_span_u32(dst_offset)", &args[1])? as i64;
+    let src = unpack_u32_array("rt_engine2d_simd_blend_span_u32(src)", &args[2])?;
+    let src_offset_raw = require_u64_value("rt_engine2d_simd_blend_span_u32(src_offset)", &args[3])? as i64;
+    let requested_raw = require_u64_value("rt_engine2d_simd_blend_span_u32(count)", &args[4])? as i64;
+    if dst_offset_raw >= 0 && src_offset_raw >= 0 && requested_raw > 0 {
+        let dst_offset = dst_offset_raw as usize;
+        let src_offset = src_offset_raw as usize;
+        let requested = requested_raw as usize;
+        if dst_offset >= dst.len() || src_offset >= src.len() {
+            return Ok(pack_u32_array(dst));
+        }
+        let count = requested.min(dst.len() - dst_offset).min(src.len() - src_offset);
+        for i in 0..count {
+            let d = dst[dst_offset + i];
+            let s = src[src_offset + i];
+            dst[dst_offset + i] = engine2d_blend_pixel_u32(s, d);
+        }
+    }
+    Ok(pack_u32_array(dst))
+}
+
+/// Interpreter bridge for the native in-place blend-const-span ABI. Blends
+/// one constant colour over dst[offset..offset+count) with straight-alpha
+/// src-over, matching `rt_engine2d_simd_blend_const_span_u32`'s C kernel and
+/// `oracle_src_over_const`. Interpreter arrays are immutable Arc values, so
+/// return the updated destination array.
+pub fn rt_engine2d_simd_blend_const_span_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_simd_blend_const_span_u32 expects 4 arguments (dst, offset, count, const_color)".to_string(),
+        ));
+    }
+    let mut dst = unpack_u32_array("rt_engine2d_simd_blend_const_span_u32(dst)", &args[0])?;
+    let offset_raw = require_u64_value("rt_engine2d_simd_blend_const_span_u32(offset)", &args[1])? as i64;
+    let requested_raw = require_u64_value("rt_engine2d_simd_blend_const_span_u32(count)", &args[2])? as i64;
+    let s = require_u32_value("rt_engine2d_simd_blend_const_span_u32(const_color)", &args[3])?;
+    let sa = (s >> 24) & 0xFF;
+    if offset_raw >= 0 && requested_raw > 0 && sa != 0 {
+        let offset = offset_raw as usize;
+        let requested = requested_raw as usize;
+        if offset >= dst.len() {
+            return Ok(pack_u32_array(dst));
+        }
+        let count = requested.min(dst.len() - offset);
+        for i in 0..count {
+            let d = dst[offset + i];
+            dst[offset + i] = engine2d_blend_pixel_u32(s, d);
+        }
+    }
+    Ok(pack_u32_array(dst))
+}
+
 /// rt_engine2d_simd_copy_row_u32(src: [u32]) -> [u32]
 pub fn rt_engine2d_simd_copy_row_u32(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {

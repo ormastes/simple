@@ -40,6 +40,8 @@ use std.nogc_sync_mut.gpu.engine2d.simd_isa_provider.{
     simd_isa_src_over_const,
     simd_isa_src_over_image,
     simd_isa_mask_src_over,
+    simd_isa_blend_span,
+    simd_isa_blend_const_span,
 }
 use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
 
@@ -300,3 +302,145 @@ describe "SIMD ISA provider — honest timing for src_over_image / mask_src_over
                                             KERNEL_SPAN_CONTIGUOUS,
                                             KERNEL_BUCKET_LARGE) == KERNEL_PROVIDER_SCALAR)
         print("mask_src_over timing us: scalar=" + scalar_us.to_text() + " simd=" + simd_us.to_text() + " registered=" + ok.to_text())
+
+# blend_span / blend_const_span: the in-place, no-malloc kernels from
+# doc/03_plan/ui/perf/engine2d_simd_blend_span_kernel_design_plan_2026-08-07.md
+# (rt_engine2d_simd_blend_span_u32 / rt_engine2d_simd_blend_const_span_u32,
+# src/runtime/runtime_simd_dispatch.c), wrapped by
+# simd_isa_blend_span/simd_isa_blend_const_span (simd_isa_provider.spl).
+#
+# HONESTY NOTE (established this session via sabotage-testing both sides):
+# `bin/simple test` / `simple run` route ALL extern calls to
+# rt_engine2d_simd_blend_span_u32/_const_span_u32 through the Rust
+# interpreter_extern bridge (src/compiler_rust/compiler/src/interpreter_extern/simd.rs)
+# in BOTH interpreter and jit execution modes — sabotaging the C kernel body
+# in runtime_simd_dispatch.c was invisible to this spec, while sabotaging the
+# Rust bridge was caught in both modes. So this describe block proves the
+# RUST BRIDGE is bit-exact against the oracle; it does NOT independently prove
+# the compiled C kernel is reachable/correct as a linked native symbol in this
+# build (a standalone C-harness link attempt against the freshly rebuilt
+# bootstrap runtime static libraries could not locate the new symbols in any
+# .a this session inspected — a build-packaging question left open, matching
+# the design plan's own caution that the full seed rebuild needs its own
+# isolated session). The C source is written to the same math, byte for byte,
+# as this bridge and as the proven-correct scalar fallback it's templated on.
+describe "SIMD ISA provider — blend_span vs canonical hashes (Rust bridge, C kernel unverified this session)":
+    it "blend_span agrees with the oracle pixel-for-pixel at a 64 span":
+        var oracle_dst = filled_random(64, 4001)
+        var native_dst = filled_random(64, 4001)
+        var src = filled_random(64, 4002)
+        oracle_src_over_image(oracle_dst, 0, src, 0, 64)
+        simd_isa_blend_span(native_dst, 0, src, 0, 64)
+        assert_true(oracle_hash_span(oracle_dst, 0, 64) == oracle_hash_span(native_dst, 0, 64))
+
+    it "blend_span agrees with the oracle pixel-for-pixel at a 4096 span":
+        var oracle_dst = filled_random(4096, 4003)
+        var native_dst = filled_random(4096, 4003)
+        var src = filled_random(4096, 4004)
+        oracle_src_over_image(oracle_dst, 0, src, 0, 4096)
+        simd_isa_blend_span(native_dst, 0, src, 0, 4096)
+        assert_true(oracle_hash_span(oracle_dst, 0, 4096) == oracle_hash_span(native_dst, 0, 4096))
+
+    it "blend_span treats a fully-opaque (sa==255) src as a verbatim copy, matching the oracle":
+        var oracle_dst = filled_random(64, 4005)
+        var native_dst = filled_random(64, 4005)
+        var src: [u32] = [0xFF224466; 64]
+        oracle_src_over_image(oracle_dst, 0, src, 0, 64)
+        simd_isa_blend_span(native_dst, 0, src, 0, 64)
+        assert_true(oracle_hash_span(oracle_dst, 0, 64) == oracle_hash_span(native_dst, 0, 64))
+        assert_true(native_dst[0] == 0xFF224466)
+
+    it "blend_span treats a fully-transparent (sa==0) src as a no-op, matching the oracle":
+        var oracle_dst = filled_random(64, 4006)
+        var native_dst = filled_random(64, 4006)
+        var src: [u32] = [0x00224466; 64]
+        oracle_src_over_image(oracle_dst, 0, src, 0, 64)
+        simd_isa_blend_span(native_dst, 0, src, 0, 64)
+        assert_true(oracle_hash_span(oracle_dst, 0, 64) == oracle_hash_span(native_dst, 0, 64))
+
+    it "blend_span leaves dst untouched at a zero-length span":
+        var native_dst = filled_random(16, 4007)
+        val before = oracle_hash_span(native_dst, 0, 16)
+        simd_isa_blend_span(native_dst, 0, filled_random(16, 4008), 0, 0)
+        assert_true(oracle_hash_span(native_dst, 0, 16) == before)
+
+describe "SIMD ISA provider — blend_const_span vs canonical hashes (Rust bridge, C kernel unverified this session)":
+    it "blend_const_span agrees with the oracle pixel-for-pixel at a 64 span":
+        var oracle_dst = filled_random(64, 5001)
+        var native_dst = filled_random(64, 5001)
+        oracle_src_over_const(oracle_dst, 0, 64, 0x60112233)
+        simd_isa_blend_const_span(native_dst, 0, 64, 0x60112233)
+        assert_true(oracle_hash_span(oracle_dst, 0, 64) == oracle_hash_span(native_dst, 0, 64))
+
+    it "blend_const_span agrees with the oracle pixel-for-pixel at a 4096 span":
+        var oracle_dst = filled_random(4096, 5002)
+        var native_dst = filled_random(4096, 5002)
+        oracle_src_over_const(oracle_dst, 0, 4096, 0x50aabbcc)
+        simd_isa_blend_const_span(native_dst, 0, 4096, 0x50aabbcc)
+        assert_true(oracle_hash_span(oracle_dst, 0, 4096) == oracle_hash_span(native_dst, 0, 4096))
+
+    it "blend_const_span treats sa==0 as a no-op, matching the oracle":
+        var oracle_dst = filled_random(64, 5003)
+        var native_dst = filled_random(64, 5003)
+        oracle_src_over_const(oracle_dst, 0, 64, 0x00FFFFFF)
+        simd_isa_blend_const_span(native_dst, 0, 64, 0x00FFFFFF)
+        assert_true(oracle_hash_span(oracle_dst, 0, 64) == oracle_hash_span(native_dst, 0, 64))
+
+    it "blend_const_span leaves dst untouched at a zero-length span":
+        var native_dst = filled_random(16, 5004)
+        val before = oracle_hash_span(native_dst, 0, 16)
+        simd_isa_blend_const_span(native_dst, 0, 0, 0x80112233)
+        assert_true(oracle_hash_span(native_dst, 0, 16) == before)
+
+describe "SIMD ISA provider — honest timing for blend_span / blend_const_span (Rust-bridge engine)":
+    it "measures blend_span: scalar vs native at 4096 pixels x 200 iters":
+        val n: i64 = 4096
+        val iters: i64 = 200
+        var buf = filled_random(4096, 6001)
+        var src = filled_random(4096, 6002)
+
+        val t0 = time_now_unix_micros()
+        var it0: i64 = 0
+        while it0 < iters:
+            oracle_src_over_image(buf, 0, src, 0, n)
+            it0 = it0 + 1
+        val t1 = time_now_unix_micros()
+        val scalar_us = t1 - t0
+
+        var it1: i64 = 0
+        while it1 < iters:
+            simd_isa_blend_span(buf, 0, src, 0, n)
+            it1 = it1 + 1
+        val t2 = time_now_unix_micros()
+        val native_us = t2 - t1
+
+        # Correctness gate stays independent of which is faster.
+        val faster = native_us < scalar_us
+        print("blend_span timing us: scalar=" + scalar_us.to_text() + " native=" + native_us.to_text() + " faster=" + faster.to_text())
+        # Not registered into kernel_registry — see the describe-block honesty
+        # note above: this timing is the Rust-bridge extern-call overhead,
+        # not a measurement of real SIMD lane throughput, so it is reported
+        # but not used to justify a KERNEL_PROVIDER_SIMD_ISA slot.
+
+    it "measures blend_const_span: scalar vs native at 4096 pixels x 200 iters":
+        val n: i64 = 4096
+        val iters: i64 = 200
+        var buf = filled_random(4096, 6003)
+
+        val t0 = time_now_unix_micros()
+        var it0: i64 = 0
+        while it0 < iters:
+            oracle_src_over_const(buf, 0, n, 0x40203040)
+            it0 = it0 + 1
+        val t1 = time_now_unix_micros()
+        val scalar_us = t1 - t0
+
+        var it1: i64 = 0
+        while it1 < iters:
+            simd_isa_blend_const_span(buf, 0, n, 0x40203040)
+            it1 = it1 + 1
+        val t2 = time_now_unix_micros()
+        val native_us = t2 - t1
+
+        val faster = native_us < scalar_us
+        print("blend_const_span timing us: scalar=" + scalar_us.to_text() + " native=" + native_us.to_text() + " faster=" + faster.to_text())
