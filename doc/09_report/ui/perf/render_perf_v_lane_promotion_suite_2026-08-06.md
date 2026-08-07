@@ -595,3 +595,59 @@ at :1012-1056.
 **Binary/method provenance:** this is a static reachability audit (grep +
 manual call-chain trace over `.spl` source), not a runtime execution proof —
 consistent with the unit's read-only/deliverable-is-a-doc scope in the plan.
+
+## Run 5 — T19 regression-gate re-run (2026-08-07)
+
+T19 (`doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md`)
+re-runs this suite as a regression gate after Waves 1-2, and narrows the
+`compositor_occlusion_spec.spl` per-spec timeout floor from the prior
+session's 1200s to T19's mandated 300-600s band (plan: "not 150s, not 7200s").
+`scripts/check/check-render-perf-v-lane-suite.shs:64` was changed to floor at
+600s (the top of that band).
+
+**Binary provenance:** `readlink -f bin/simple` →
+`bin/release/x86_64-unknown-linux-gnu/simple` (self-hosted binary, per repo
+default-tooling policy).
+
+Verbatim per-spec output:
+
+```
+PASS: test/01_unit/lib/common/gpu/engine2d/scalar_oracle_spec.spl (44/44 passed)
+PASS: test/01_unit/lib/common/ui/render_opt/render_opt_invalidation_spec.spl (18/18 passed)
+PASS: test/01_unit/compiler/semantics/layer_eq_checker_spec.spl (19/19 passed)
+PASS: test/01_unit/compiler/semantics/effect_verifier_spec.spl (16/16 passed)
+PASS: test/01_unit/lib/common/memory/packed_span_spec.spl (10/10 passed)
+PASS: test/01_unit/lib/common/ui/widget_draw_ir_glyph_run_spec.spl (4/4 passed)
+PASS: test/01_unit/os/compositor/hosted_input_sdl2_spec.spl (28/28 passed)
+CANNOT_EXECUTE: test/01_unit/os/compositor/compositor_occlusion_spec.spl (exit=255, no verdict line — timeout or crash)
+  reason: process timed out after 600s
+PASS: test/01_unit/os/compositor/compositor_occlusion_rect_spec.spl (21/21 passed)
+PASS: test/01_unit/compiler/class_reference_semantics_spec.spl (6/6 passed)
+PASS: test/01_unit/os/render_pixel_bridge_spec.spl (2/2 passed)
+
+=== V-LANE AGGREGATE ===
+specs covered:    11
+cannot execute:   1
+total examples:   168
+total passed:     168
+total failed:     0
+VERDICT: RED
+```
+
+**Verdict: RED** — 10/11 specs green (168/168 examples, 0 failed), 1
+cannot-execute. This is **not a code regression**: `uptime` at the time of the
+run showed `load average: 39.60, 29.07, 22.51` — roughly 3x the 14.0 load
+average that previously required 1200s of headroom over this spec's ~130-140s
+clean baseline (see Run 3 above). At T19's mandated 600s ceiling, today's
+shared-WC contention (5 concurrent agent sessions independently running
+`bin/simple test`/`bin/simple run`) is enough to exceed the floor even though
+the underlying algorithmic cost is unchanged and bounded.
+
+This tension — the plan's 300-600s band is correct for a lightly-loaded
+environment but this repo's actual shared-WC development load regularly
+exceeds it — is recorded, not silently patched by widening the timeout back
+past the plan's ceiling. Filed as
+`doc/08_tracking/bug/v_lane_suite_occlusion_spec_times_out_under_shared_wc_contention_2026-08-07.md`
+with re-run and permanent-fix unblock conditions. T16 (blend-span C-symbol
+verification) was not part of this suite's 11 specs and required no explicit
+exclusion here.

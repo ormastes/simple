@@ -98,7 +98,7 @@ carry the described subject line. Only the M2 *scope* claim was wrong.
 | U2 WM/web showcase | **NEEDS-INVESTIGATION** | `wm_web_standards_showcase_child_frame_timeout_2026-08-06.md` Open — `bin/simple run` under `examples/**` has an internal 10 s watchdog (`DEFAULT_EXAMPLES_TIMEOUT_SECS`); past it the real verdict is FAIL (child-frame-timeout), not a hang → **T17** |
 | U3 event allocation | **DONE (premise refuted)** | Path already allocation-free per event; `InputEventQueue.drain()` allocates but is dead code |
 | U4 cutover sweep | **BLOCKED (no producer) — T20 verdict** | `t20_u4_cutover_sweep_2026-08-07.md` — the arena-V2/`SceneDeltaRef`/packed-producer path has zero callers anywhere under `src/app/**`; `showcase_core.spl:286-289` is the one real dispatch site and never references it. No `DrawIrV3Scene`-equivalent output exists on the new path to cut over TO → **T20 (investigation-only)** |
-| V0/V1 promotion suite | **DONE (Run 4 GREEN)** | 11 specs, 160/160, 0 cannot-execute. Needs periodic re-run → **T19** |
+| V0/V1 promotion suite | **T19 RE-RUN: RED (contention, not regression)** | 10/11 specs GREEN, 168/168 examples, 1 `CANNOT_EXECUTE` (occlusion spec timed out at 600s under load avg 39.6) → bug doc filed |
 | Test-harness fixes (daemon binary shadowing; `slow_it` floor) | **DONE** | `423c0c46b83` + the `simple_binary()` fallback-order fix; these retroactively explain most "timeout" findings in this campaign |
 | gui_showcase exit-code contract | **NEEDS-INVESTIGATION** | `gui_showcase_perf_source_revision_contract_exit_code_never_zero_2026-08-07.md`, status open (residual, pre-existing, family-wide) → **T18** |
 
@@ -401,9 +401,22 @@ or re-scope. Never sweep another session's uncommitted work into your commit.
 - Depends on: **T9** (T9 establishes the family's real verdicts first).
   Collision set: **{T9}**.
 
-**T19 — Re-run the V-lane promotion suite as a regression gate**
+**T19 — Re-run the V-lane promotion suite as a regression gate** — **DONE, RED-by-design (2026-08-07)**
 - Goal: re-establish GREEN after Waves 1–2 and set the per-spec timeout for
   `compositor_occlusion_spec.spl` to 300–600 s (not 150 s, not 7200 s).
+- **Verdict:** timeout narrowed from 1200s to 600s (top of the mandated band)
+  in `scripts/check/check-render-perf-v-lane-suite.shs:64`. Re-run: 10/11
+  specs GREEN (168/168 examples, 0 failed), 1 `CANNOT_EXECUTE`
+  (`compositor_occlusion_spec.spl`, timed out at 600s) → **VERDICT: RED**.
+  Root cause is real shared-WC contention, not a code regression: `uptime`
+  showed load average 39.60 (5 concurrent agent sessions), ~3x the 14.0 load
+  that previously required 1200s of headroom over this spec's ~130-140s clean
+  baseline. Not silently widened back past the plan's 600s ceiling — filed as
+  `doc/08_tracking/bug/v_lane_suite_occlusion_spec_times_out_under_shared_wc_contention_2026-08-07.md`
+  with re-run (low-load) and permanent-fix unblock conditions. T16's
+  blend-span kernels are not among this suite's 11 specs, so no explicit
+  exclusion was needed for T16. Full Run 5 detail:
+  `doc/09_report/ui/perf/render_perf_v_lane_promotion_suite_2026-08-06.md`.
 - Files: the aggregate suite runner **[E]**;
   `doc/09_report/ui/perf/render_perf_v_lane_promotion_suite_2026-08-06.md` **[E]**.
 - Acceptance: 11 specs, all examples, 0 cannot-execute, with binary provenance.
