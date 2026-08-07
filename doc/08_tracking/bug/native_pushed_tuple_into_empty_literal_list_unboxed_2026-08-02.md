@@ -830,3 +830,114 @@ just whole-tuple interpolation) remains open, unchanged, and out of scope
 for this pass — see the previous section for its root cause and proposed
 follow-up (`lower_tuple_lit` preferring `local_mir_type_of` over `elem.type_`
 per field).
+
+## 2026-08-07 update — whole-tuple interpolation rendering FIXED (gap (b), the `coerce_tuple_to_raw_str` half)
+
+Oracle: `sh scripts/check/check-native-tuple-to-text.shs`
+(`test/fixtures/native_tuple_to_text/main.spl`, `val m = (1, "abc", true)` ->
+`"mixed: {m}"`). Before this update:
+
+```
+KNOWN-OPEN — mixed-type tuple still wrong: (1, 107362607422760, 1) (expected (1, abc, true))
+PASS — native-build tuple-to-text: all-i64 tuple renders correctly
+```
+
+The middle number changed between runs (96657993682216 on one run,
+107362607422760 on the next) — an ASLR-varying heap/text address, i.e. a raw
+pointer being rendered as a decimal integer instead of decoded to characters.
+The `true` printed as `1` for the same reason: both the `str` and `bool`
+fields were going down the plain-`i64` numeric render branch.
+
+**Root-caused, not re-assumed:** traced `coerce_tuple_to_raw_str`'s
+`field_types` argument back to its source, `lower_tuple_lit`
+(`_MirLoweringExpr/literals.spl` and its duplicate in
+`_MirLoweringExpr/method_calls_literals.spl`). Per element, the old code
+computed the MIR field type from `elem.type_` (the tuple element's HIR-level
+type annotation), defaulting to `MirType.i64()` whenever `elem.type_` was
+nil:
+
+```
+var elem_ty = MirType.i64()
+val maybe_elem_type = elem.type_
+if val elem_type = maybe_elem_type:
+    if elem_type != nil:
+        elem_ty = self.lower_type(elem_type)
+types = types.push(elem_ty)
+```
+
+Confirmed by tracing the actual lowering of each literal kind that
+`elem.type_` is unreliable here but the JUST-LOWERED element local's own
+MIR-registered type is not: `StringLit` lowering (`expr_dispatch.spl`
+`case StringLit`) registers its dest local as `MirType(kind: Opaque("str"))`
+via `new_temp`; `BoolLit` lowering goes through `emit_const_bool`, which
+registers `MirType.bool()`. Both are recoverable via
+`self.local_mir_type_of(local)` (`mir_lowering_stmts.spl`) right after
+`self.lower_expr(elem)` — the same MIR-registered-type idiom already used
+elsewhere in this file (`local_is_tuple`, `local_is_str`) specifically
+because HIR-level type annotations (`elem.type_`, `let_type`) are unreliably
+nil on the flat-HIR path. `lower_tuple_lit` was the one caller in this family
+still reading the unreliable HIR-level source instead. With `field_types[1]`
+silently defaulting to `I64`, `coerce_tuple_to_raw_str`'s per-field
+`lower_tuple_field_raw` + `bootstrap_coerce_to_raw_str` recursion loaded the
+string field's raw pointer bits as a plain `i64` and rendered them through
+`rt_raw_i64_to_string` (the ASLR-varying decimal), and rendered the bool
+field's `1`/`0` bit pattern the same way instead of going through
+`rt_raw_bool_to_string` — this fully explains both symptoms and confirms the
+original "unreliable HIR field_types annotations" attribution in the previous
+section, this time for the whole-tuple-render path specifically (not just
+asserted, empirically traced).
+
+**Fix:** in both `lower_tuple_lit` definitions, prefer
+`self.local_mir_type_of(local)` (the lowered element's own MIR-registered
+type) over `elem.type_`, falling back to the old `elem.type_` path only if
+`local_mir_type_of` returns nil:
+
+```
+var elem_ty = MirType.i64()
+if val local_ty = self.local_mir_type_of(local):
+    elem_ty = local_ty
+else:
+    val maybe_elem_type = elem.type_
+    if val elem_type = maybe_elem_type:
+        if elem_type != nil:
+            elem_ty = self.lower_type(elem_type)
+types = types.push(elem_ty)
+```
+
+Gate after the fix:
+
+```
+NOTE — mixed-type tuple rendering now CORRECT; close the open gap in ...
+PASS — native-build tuple-to-text: all-i64 tuple renders correctly
+```
+
+`scripts/check/check-native-tuple-to-text.shs`'s mixed-type check was then
+promoted from the reported `NOTE`/soft branch to a hard `FAIL`/`exit 1`
+assertion, matching the all-i64 check's rigor. Sabotage-verified: mutating
+the fixture's string literal (`"abc"` -> `"xyz"`) reproduces a `FAIL —
+mixed-type tuple rendering regressed under native-build` with the mismatched
+actual value, confirming the promoted assertion is load-bearing, not
+vacuous. Fixture restored; gate re-run clean:
+
+```
+PASS — native-build tuple-to-text: mixed-type tuple renders correctly
+PASS — native-build tuple-to-text: all-i64 tuple renders correctly
+```
+
+**Files changed:**
+`src/compiler/50.mir/_MirLoweringExpr/literals.spl` (`lower_tuple_lit`),
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` (duplicate
+`lower_tuple_lit`), `scripts/check/check-native-tuple-to-text.shs` (promoted
+mixed-type check to a hard assertion). No Rust seed changes; no bootstrap
+rebuild performed or required (interpreter-path compiler edits are live
+under `native-build` per this repo's established pattern).
+
+**Still open, unchanged, out of scope:** mixed-type tuple field READS via
+`.0`/`.1` (the `m.1` -> `2100296`-style symptom from the section above,
+routed through `translate_gep`/`emit_load` in `lower_index_expr`, not
+`coerce_tuple_to_raw_str`). That is a different code path from the one fixed
+here and was NOT touched by this change — it needs the
+`aggregate_intrinsics.spl` `dest_ty`-style storage/logical-type
+reconciliation described above, not a `field_types`-source swap (the
+previous section already ruled that fix out for the `.0`/`.1` path
+specifically, head-to-head).
