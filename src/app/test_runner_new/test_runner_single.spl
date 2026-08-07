@@ -27,6 +27,7 @@ use app.io.process_ops.{process_run_bounded}
 use app.io.mod.{env_get}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use std.string_core.{char_code}
+use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage_sdn}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -816,13 +817,25 @@ fn main() -> i64:
         val cov_output_path = env_get("SIMPLE_COVERAGE_OUTPUT") ?? ""
         if cov_output_path != "" and cov_sdn != "":
             # Multi-spec invocations: each spec's child inherits the SAME
-            # SIMPLE_COVERAGE_OUTPUT path from the parent, so writing here is
-            # an OVERWRITE (last spec wins), not a merge/append. Deliberate
-            # choice for this prerequisite: appending would silently
-            # concatenate unrelated SDN records with no delimiter/rollup
-            # logic (that's prerequisite 5, still open, Rust-side). A single
-            # spec run (the gate script's probe) is unaffected either way.
-            val _ = rt_file_write_text(cov_output_path, cov_sdn)
+            # SIMPLE_COVERAGE_OUTPUT path from the parent. Prerequisite 5
+            # (std.common.coverage_sdn) now provides a real per-key union, so
+            # a second (third, ...) spec writing to the same path ACCUMULATES
+            # instead of overwriting (previously: last spec wins, silently
+            # dropping every earlier spec's coverage). If the path already
+            # holds a well-formed prior artifact, merge this spec's SDN into
+            # it before writing; otherwise (first spec, or a stale/garbage
+            # file at that path) write this spec's SDN alone — never block a
+            # test run on a malformed pre-existing artifact.
+            val new_cov = parse_coverage_sdn(cov_sdn)
+            val to_write = if rt_file_exists(cov_output_path):
+                val existing_raw = rt_file_read_text(cov_output_path)
+                if existing_raw.trim().starts_with("# Coverage Report"):
+                    render_coverage_sdn(merge_coverage(parse_coverage_sdn(existing_raw), new_cov))
+                else:
+                    cov_sdn
+            else:
+                cov_sdn
+            val _ = rt_file_write_text(cov_output_path, to_write)
     if child_stdout != "":
         print child_stdout
     if stderr != "":

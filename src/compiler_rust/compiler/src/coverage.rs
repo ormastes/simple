@@ -359,7 +359,7 @@ fn write_coverage_file(path: &Path, content: &str) -> Result<(), String> {
     std::fs::write(path, content).map_err(|e| format!("failed to write {}: {}", path.display(), e))
 }
 
-fn dump_runtime_coverage_sdn() -> String {
+pub(crate) fn dump_runtime_coverage_sdn() -> String {
     unsafe {
         let ptr = simple_runtime::rt_coverage_dump_sdn();
         if ptr.is_null() {

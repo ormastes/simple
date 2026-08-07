@@ -89,6 +89,53 @@ SIMPLE_COVERAGE=1 bin/simple test <path> --no-cache --no-cover-check --timeout 1
   its method-only coverage cannot attribute; that is the current residual,
   not a bug in the caller's spec.
 
+## U1.3 Prerequisite 5: rollup (2026-08-07)
+
+- **New module:** `src/lib/common/coverage_sdn.spl` — parses SDN `lines` /
+  `functions` / `sffi_calls` / `decisions` sections, merges by key (real
+  set-union: shared `(file, line)` sums, disjoint keys stay separate), and
+  re-renders with a freshly-computed `summary:` (never trusts a stored one).
+  Spec + sabotage: `test/01_unit/common/coverage_sdn_spec.spl` (6 examples;
+  sabotaging the merge to overwrite-instead-of-sum flips 2 to RED with
+  `expected 5, got 2`).
+- **`spl-coverage rollup --file A --file B [--out path]`**
+  (`src/app/spl_coverage/main.spl`) unions N persisted `.sdn` artifacts. Fails
+  CLOSED (distinct message, exit 1) on: zero `--file`, any missing/unreadable/
+  empty/malformed input — never silently drops a bad file and prints a
+  partial union.
+- **Overwrite bug fixed:** `test_runner_single.spl`'s
+  `SIMPLE_COVERAGE_OUTPUT` write previously OVERWROTE on every spec in a
+  multi-spec run (last spec wins, silently dropping every earlier spec's
+  coverage — the file's own comment called this out as blocked on
+  prerequisite 5). Now: if the path already holds a well-formed prior
+  artifact, merge the new spec's SDN into it before writing.
+- **Rust fix, narrowly scoped:** the interpreter's own SFFI shim for
+  `rt_coverage_dump_sdn` (`interpreter_extern/coverage.rs`) previously
+  returned ONLY the compiler-level line/function tracker
+  (`crate::coverage::get_global_coverage()`), silently dropping the separate
+  runtime decision/condition/path global
+  (`runtime/src/coverage.rs::COVERAGE_DATA`) even when decisions WERE being
+  recorded into it by the interpreter's own `record_decision_coverage_sffi`
+  in the same process. Fixed to merge both, mirroring the existing
+  `save_global_coverage()` export-path merge. In-process A/B proof: a
+  top-level `if` recorded a real decision before the fix and after, but only
+  after the fix did `coverage_dump_sdn()` (called from Simple) surface a
+  `decisions` section for it.
+- **Real, deeper, NOT fixed here — separate gap, needs its own fix:**
+  `record_decision_coverage_sffi` is called only from
+  `interpreter_control.rs`'s `exec_if` / `exec_while` / `exec_match_core`
+  (used for TOP-LEVEL module statements via
+  `interpreter/node_exec.rs::exec_node`). Branches INSIDE a called function's
+  body or a BDD `it` block execute through
+  `interpreter_call/block_execution.rs`'s own separate `Node::If` handling
+  (lines ~434, ~1201), which never calls `record_decision_coverage_sffi` at
+  all. Measured: a top-level `if` under `SIMPLE_COVERAGE=1
+  SIMPLE_EXECUTION_MODE=interpret` records a real decision; the same `if`
+  moved inside a `fn` body records none. This means decision/branch rows
+  reaching `spl-coverage dump` today are real only for top-level control
+  flow, not for the common case (branches inside functions/specs) — file as
+  a follow-up bug before trusting a per-file branch-coverage percentage.
+
 ## Update Rule
 
 When the project process creates or changes research, requirements,

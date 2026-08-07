@@ -547,16 +547,39 @@ pub fn rt_coverage_clear(_args: &[Value]) -> Result<Value, CompileError> {
 }
 
 /// Get coverage data as SDN format string
+///
+/// Merges two independent coverage stores, mirroring
+/// `crate::coverage::save_global_coverage`'s merge for the CLI/file export
+/// path: the compiler-level line/function/sffi-call tracker
+/// (`crate::coverage::get_global_coverage`) AND the runtime decision/
+/// condition/path tracker reached via the real linked `rt_coverage_dump_sdn`
+/// symbol (`crate::coverage::dump_runtime_coverage_sdn`). Before this fix,
+/// this SFFI intrinsic returned ONLY the former, so Simple code calling
+/// `coverage_dump_sdn()` (e.g. `spl-coverage dump`, or the test runner's
+/// coverage epilogue) never saw decision/branch data even when decisions
+/// were being recorded into the runtime global by
+/// `record_decision_coverage_sffi` in the same process.
 pub fn rt_coverage_dump_sdn(_args: &[Value]) -> Result<Value, CompileError> {
+    let mut sdn = String::new();
     if let Some(cov) = crate::coverage::get_global_coverage() {
         if let Ok(guard) = cov.lock() {
-            // Generate SDN format coverage data
-            let sdn = guard.to_sdn();
-            return Ok(Value::text(sdn));
+            sdn.push_str(&guard.to_sdn());
         }
     }
-    // Return empty string if no coverage data
-    Ok(Value::text(String::new()))
+
+    let runtime_sdn = crate::coverage::dump_runtime_coverage_sdn();
+    if !runtime_sdn.trim().is_empty() {
+        if !sdn.is_empty() && !sdn.ends_with('\n') {
+            sdn.push('\n');
+        }
+        sdn.push_str("\n# Runtime decision/condition coverage\n");
+        sdn.push_str(&runtime_sdn);
+    }
+
+    if sdn.trim().is_empty() {
+        return Ok(Value::text(String::new()));
+    }
+    Ok(Value::text(sdn))
 }
 
 /// Free SDN string (no-op in interpreter - GC handles memory)
