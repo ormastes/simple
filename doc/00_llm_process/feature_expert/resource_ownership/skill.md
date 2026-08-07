@@ -20,7 +20,7 @@ drop; methods borrow by default.
 |---|---|---|
 | WP-A | `1a6a7da02f6`, `7c60ee34bc0` | `resource` decl + `@sffi` decorator parse. **Soft keyword** — see below. Regression spec 18/18, sabotage-verified |
 | WP-C | `286aa95c6f7` | All seven `@sffi` keys (`prefix`, `handle`, `invalid`, `retain`, `release`, `sharing`, `thread_safe`) round-trip into `compiler.frontend.resource_registry`, per-resource, reset per parse. 8/8, sabotage-verified |
-| WP-D | `57da6077b69` | Fail-closed convention inference (`resource_families.spl`): classifies acquire/release/retain verbs from extern names, returns an explicit error (never a guess) on ambiguity. 16/17; the 1 failure is a real engine gap, filed not swept. Census coverage across the 85 families is unmeasured — Appendix A only samples, doesn't enumerate |
+| WP-D | `57da6077b69`, `45c0f068163` | Fail-closed convention inference (`resource_families.spl`): classifies acquire/release/retain verbs from extern names, returns an explicit error (never a guess) on ambiguity. Now 17/17 — the residual failure was `load` missing from the acquire-verb catalog (`rt_image_load` classified as method, family left acquire-less). Census coverage across the 85 families is unmeasured — Appendix A only samples, doesn't enumerate |
 
 ## Four things you will otherwise re-derive painfully
 
