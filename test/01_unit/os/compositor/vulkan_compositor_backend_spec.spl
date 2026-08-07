@@ -103,6 +103,114 @@ describe "honesty gate: no method silently succeeds":
         if present.device_node_present:
             assert_contains(present.unavailable_reason(), "vulkan_venus_session_not_implemented")
 
+describe "every trait method is exercised (full conformance closure)":
+    """V1 closure: the original spec exercised only a subset of drawing ops
+    per-call; this extends to EVERY `CompositorBackend` method, individually,
+    with a rejection-count delta assertion per op, plus the non-drawing
+    methods (`width`/`height`, `as_glass_capable`, `report_damage`) that must
+    NOT record a rejection."""
+
+    it "every drawing op is rejected exactly once per call (count delta per op)":
+        val backend = VulkanCompositorBackend.create_with_render_node(10, 10, "/nonexistent/render-node-for-spec")
+
+        val before_clear = backend.rejected_op_count()
+        backend.clear(0)
+        assert_equal(backend.rejected_op_count(), before_clear + 1)
+
+        val before_fill = backend.rejected_op_count()
+        backend.fill_rect(0, 0, 1, 1, 0)
+        assert_equal(backend.rejected_op_count(), before_fill + 1)
+
+        val before_text = backend.rejected_op_count()
+        backend.draw_text(0, 0, "x", 0, 0)
+        assert_equal(backend.rejected_op_count(), before_text + 1)
+
+        val before_char = backend.rejected_op_count()
+        backend.draw_char_8x16(0, 0, 65, 0, 0)
+        assert_equal(backend.rejected_op_count(), before_char + 1)
+
+        val before_pixel = backend.rejected_op_count()
+        backend.put_pixel(0, 0, 0)
+        assert_equal(backend.rejected_op_count(), before_pixel + 1)
+
+        val before_blit = backend.rejected_op_count()
+        backend.blit_pixels(0, 0, 1, 1, [0])
+        assert_equal(backend.rejected_op_count(), before_blit + 1)
+
+        val before_present = backend.rejected_op_count()
+        backend.present()
+        assert_equal(backend.rejected_op_count(), before_present + 1)
+
+        val before_present_rect = backend.rejected_op_count()
+        backend.present_rect(0, 0, 1, 1)
+        assert_equal(backend.rejected_op_count(), before_present_rect + 1)
+
+    it "last_rejection names the most recent op in call order":
+        val backend = VulkanCompositorBackend.create_with_render_node(10, 10, "/nonexistent/render-node-for-spec")
+        backend.clear(0)
+        assert_contains(backend.last_rejection(), "not_implemented:clear")
+        backend.put_pixel(0, 0, 0)
+        assert_contains(backend.last_rejection(), "not_implemented:put_pixel")
+        backend.present_rect(0, 0, 1, 1)
+        assert_contains(backend.last_rejection(), "not_implemented:present_rect")
+
+    it "width/height report constructed dimensions without rejection":
+        val backend = VulkanCompositorBackend.create_with_render_node(77, 55, "/nonexistent/render-node-for-spec")
+        val before = backend.rejected_op_count()
+        assert_equal(backend.width(), 77)
+        assert_equal(backend.height(), 55)
+        assert_equal(backend.rejected_op_count(), before)
+
+    it "as_glass_capable is nil and does not count as a rejection":
+        val backend = VulkanCompositorBackend.create_with_render_node(10, 10, "/nonexistent/render-node-for-spec")
+        val before = backend.rejected_op_count()
+        assert_nil(backend.as_glass_capable())
+        assert_equal(backend.rejected_op_count(), before)
+
+    it "report_damage is a no-op and does not count as a rejection":
+        val backend = VulkanCompositorBackend.create_with_render_node(10, 10, "/nonexistent/render-node-for-spec")
+        val before = backend.rejected_op_count()
+        backend.report_damage(0, 0, 1, 1)
+        assert_equal(backend.rejected_op_count(), before)
+
+describe "unavailable_reason names the honest gap for both branches":
+    """The reason string must distinguish the node-absent branch (names the
+    missing DRM node, `qemu_only` scope) from the node-present branch (names
+    the unimplemented venus session AND the open board gap) -- never a
+    generic message that hides which branch produced it."""
+
+    it "unavailable_reason names the qemu-only scope when the render node is absent":
+        val backend = VulkanCompositorBackend.create_with_render_node(10, 10, "/nonexistent/render-node-for-spec")
+        assert_contains(backend.unavailable_reason(), "no_drm_render_node")
+        assert_contains(backend.unavailable_reason(), "qemu_only")
+
+    it "unavailable_reason names the unimplemented venus session and open board gap when the render node is present":
+        step("Use a plain, always-present file to reach the node-present branch honestly (container-portable)")
+        val backend = VulkanCompositorBackend.create_with_render_node(10, 10, "/etc/hostname")
+        assert_true(backend.device_node_present)
+        assert_contains(backend.unavailable_reason(), "vulkan_venus_session_not_implemented")
+        assert_contains(backend.unavailable_reason(), "qemu_only")
+        assert_contains(backend.unavailable_reason(), "board_gap_open")
+
+describe "detect_virtio_gpu_device is a plain filesystem existence probe (KNOWN LIMITATION, tracked)":
+    """The implementation's own docstring is explicit that this is NOT a
+    device-type check: any path that exists on disk reports true, including
+    a plain non-device file. This spec pins that DOCUMENTED, REAL behavior --
+    it does not invent a stricter expectation the code does not implement.
+    But this is a genuine fail-open risk, not a non-issue: because
+    `device_node_present` (and therefore `unavailable_reason()`'s branch
+    selection) is derived directly from this probe, pointing it at an
+    arbitrary existing non-device file makes the backend report
+    `vulkan_venus_session_not_implemented` (node-present branch) instead of
+    the truthful `no_drm_render_node` -- a misrouted honesty-gate reason.
+    Tracked, not silently accepted: see
+    doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md."""
+
+    it "reports false for a missing path and true for an existing plain file (documented limitation, tracked as a bug)":
+        assert_false(detect_virtio_gpu_device("/nonexistent/render-node-for-spec"))
+        step("A plain, non-device file still exists on disk, so the probe honestly reports true per its own docstring -- a filesystem check, not a device-type check. See the bug doc for the fail-open consequence.")
+        assert_true(detect_virtio_gpu_device("/etc/hostname"))
+
 describe "sabotage test: the honesty gate itself is verified":
     """If `is_available()` were mutated to return `true` (the exact failure
     mode this lane must avoid: a backend that LOOKS wired but isn't), the
