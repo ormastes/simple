@@ -227,6 +227,47 @@ above went from "whole-tree parse-state defect, unreproducible in isolation" to 
 warning banner). Use it, not `bin/simple`, when asking "what is the correct
 behaviour?" during bootstrap work.
 
+## 2026-08-06 Stage 3 blocker family — several fixed, one still OPEN
+
+A dense sequence of Stage-3 self-host blockers were root-caused and fixed this
+session (chronological, each superseding the previous hypothesis where noted):
+
+- Non-termination (not a crash): `find_reexport_source` needed memoization
+  (`548f2d3b1f6`, writeup `80eeb22ee7f`).
+- Stack overflow: removed a `SymbolTable` scope guard that recursed unboundedly
+  (`030ff43e330`) — **this fix is what re-opened the ud2 crash below**, see
+  that entry for the current unresolved state.
+- Dead `Effect`/`EffectSet` re-exports broke Stage 3 self-host (`35c8086a06b`).
+- Missing `ByteOrder` import + an `Effect` facade collision (`9bb8727cbc3`) —
+  **this is the currently-cited KNOWN BLOCKER for `bin/simple` provenance**
+  (`t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md`).
+  Do not re-open or contradict this status; it is genuine and still tracked.
+- SIGSEGV: an untyped local made a vtable-bearing class read fields at the
+  wrong offset — this was a field-offset RELRO write bug, not a MIR-lowering
+  crash as first suspected (`9078535133c` → fixed `92d059e5ce7`).
+- LLVM triple corruption: a one-slot field-offset shift, not an "empty arch"
+  as first suspected (`dc8186a0e71`; the seed-mechanism hypothesis in an
+  earlier doc was explicitly retracted, `057a15f09c7`).
+- C runtime objects were dropped from the Stage 3 link line; put back
+  (`52be0cdbc23`, corrected record `e1c7e10fafe`).
+- `try_lower_bitfield_construct` SIGSEGV from a stale scope-chain lookup —
+  guarded (`1ea6599e8fb`, in `switch_operators_calls.spl`).
+- Generic native-build SIGSEGV confirmed to be seed-vs-selfhosted-scoped, not
+  uname/target-detection-specific (`1d17d3cc657`).
+
+**Still OPEN as of this session's last check:** `SymbolTable.lookup` ud2
+nil-receiver crash. First diagnosed `789639d54f7`, then **the root cause was
+corrected** — it's a binary-provenance mismatch (comparing a disassembled
+binary that was NOT built from this repo's WC), not a codegen bug
+(`e099de44b8f`). After correcting the WC to match `origin/main`, the
+underlying scope-tracking bug is confirmed real and still open: fixing it with
+an `rt_dict_contains` guard causes a *worse* failure (stack overflow, the same
+bug `030ff43e330` fixed by removing a guard) — so neither "guard" nor
+"no guard" is currently correct. Full detail and next-step options:
+`doc/08_tracking/bug/stage3_symboltable_lookup_ud2_field_access_nil_receiver_2026-08-06.md`.
+**Do not assume this is fixed** — check that doc's status before building on
+top of Stage 3 self-host claims.
+
 ## Downstream feature experts depending on this layer (2026-08-06)
 
 - [feature_expert/simpleos_toolchain_selfhost](../../feature_expert/simpleos_toolchain_selfhost/skill.md)

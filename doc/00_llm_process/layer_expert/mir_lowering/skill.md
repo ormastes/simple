@@ -142,4 +142,16 @@ same `ctx.module.isa().triple().architecture` check — grep `I64X2\|I8X16\|
 I32X4\|vany_true\|vall_true` in that file before adding a target. Full
 writeup: `doc/08_tracking/bug/riscv64_kernel_codegen_blocker_2026-07-20.md`.
 
+### `Array.first()`/`.last()` MIR lowering never engaged (2026-08-06)
+
+Real MIR lowering for `Array.first()`/`.last()` under native codegen was added
+(`c49bb5606de`), but a later execution-verify pass found it still did not
+engage at runtime — the lowering was missing the `Some(...)` wrap the caller
+expected, so the fast path silently fell through (`21875c735e1` diagnosis →
+`1692ceb0b9a` fix). **Execution-unverified as of this session** — the fix
+landed but a re-test was blocked by the separate `SymbolTable.lookup` nil-scope
+crash (see `layer_expert/bootstrap/skill.md`) preventing a clean rebuild. Do
+not cite this as confirmed-working without re-running once that blocker
+clears.
+
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

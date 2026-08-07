@@ -342,7 +342,8 @@ All in `doc/08_tracking/bug/`, all dated `2026-08-06`:
 | `simpleos_image_builder_provenance_asymmetry` | FIXED | trap 7 |
 | `simpleos_llvm_toolchain_guide_claimed_prebuilt_artifacts` | FIXED (D4) | trap 8 |
 | `fs_exec_ring3_fork_unreachable_spawnwait` | impl landed, **in-guest proof not obtained** | fact 6, trap 5 |
-| `b1_witness_guest_clang_heap_exhausts_on_real_tu` | PARTIALLY RESOLVED — SIGABRT root-caused (`operator new(0)` returned NULL: guest `malloc(0)` legally returns NULL but `_Znwm`/`_Znam` in `simpleos_cxxabi.c` didn't special-case size 0, violating C++'s never-null-for-size-0 `operator new` guarantee) and fixed; `-cc1` now compiles the real TU to completion in-guest. Byte-identical win condition still NOT met — post-fix `.text` diverges from the host reference (`.rodata`/`.data`/`.bss` identical) — open follow-up | new trap below |
+| `b1_witness_guest_clang_heap_exhausts_on_real_tu` | RESOLVED — SIGABRT root-caused (`operator new(0)` returned NULL: guest `malloc(0)` legally returns NULL but `_Znwm`/`_Znam` in `simpleos_cxxabi.c` didn't special-case size 0, violating C++'s never-null-for-size-0 `operator new` guarantee, `13abfa0ca2f`) and fixed; `-cc1` now compiles the real TU to completion in-guest. The post-fix `.text` divergence from the host reference was **root-caused as a wrong-compiler reference, not a guest bug** (`5e80b53c5d1`): the host-repro control used stock Ubuntu clang-20.1.8, not this project's LLVM fork (20.0.0git @ `59612206386553df`) that the guest actually runs. The entire `.text` diff is one functionally-equivalent instruction-selection choice (`tzcnt` vs `bsf`+`cmovne` for `countTrailingZeros`); every other differing byte is the same downstream +3-byte address shift. Both codegens are correct. | new trap below |
+| `simpleos_userspace_crt0_missing_module_init_call_empty_init_array` | FIXED (x86_64 `3525e837a0e`, aarch64 `1e9311483f7`) | new entry below |
 
 **New trap:** after editing any `src/os/libc/*.c` file, the B1/B-lane
 harnesses (`SKIP_KERNEL=0`, `SKIP_STAGE=1`) rebuild the **kernel** and
@@ -358,6 +359,48 @@ rerun — a null result from a stale binary reads identically to a real one.
 Plus the standing gate defects **D1** (`deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`),
 **D2** (#99 seed-cranelift enum miscompile), **D3** (freestanding landmine family),
 **D4** (the guide drift above).
+
+## 2026-08-06 crt0 / linker / aarch64 real-firmware boot
+
+- **crt0 module-init call was missing on both arches** — every module-level
+  heap-backed global was previously silently uninitialized because
+  `__simple_call_module_inits` was never invoked from userspace crt0. Fixed
+  for x86_64 (`3525e837a0e`) and, separately, aarch64 (`1e9311483f7`, verified
+  `75b7e20962c`). This directly caused an empty `.init_array` behind AC-6's
+  `rc=70` failure, pinned in `b8360aea0e6` before the fix landed. Any future
+  "reads as zero"/"nil where a static should be initialized" symptom on
+  SimpleOS userspace should check crt0's module-init call is actually wired
+  before assuming a MIR/codegen bug.
+- **`operator new(0)` NULL bug** — see B1 bug-record row above
+  (`13abfa0ca2f`); same `simpleos_cxxabi.c` file family as crt0.
+- **ELF64→ELF32 silent linker downgrade** (`7c9609333fd`): `linker.rs`
+  unconditionally objcopy'd every x86_64 freestanding kernel to ELF32/EM_386
+  via crt0.s presence — correct for the legacy QEMU `-kernel` multiboot1 path,
+  wrong for OVMF+GRUB-EFI+multiboot1 (AC-6), which needs ELF64. Gated behind
+  `SIMPLE_FREESTANDING_ELF32_MULTIBOOT_WRAP=1` (default off) instead of
+  unconditional. Same commit also fixed `check-simpleos-x86-kernel-elf.shs`
+  unconditionally rejecting legitimate weak `spl_handle_*` syscall-stub
+  fallbacks (~40 symbols, correct for an SSH-only entry closure).
+- **aarch64 now boots through real firmware, mirroring x86_64's Limine
+  pattern** — the aarch64 EFI-stub gap tracked since 2026-07-14 is closed.
+  Provisioned real vendored Limine `BOOTAA64.EFI`/`BOOTX64.EFI` (v10.8.5,
+  `vendor/limine/`, via `scripts/os/provision_limine_efi.shs`) and ported the
+  Limine boot protocol to aarch64 (`c922fdef5d7`). Validated: both binaries
+  boot for real under OVMF/AAVMF pflash with a minimal hand-written ELF probe
+  kernel (not a PE/COFF stub) to serial output. Scoping doc for the prior gap:
+  `028a2ae89ce`. **Next step for this feature, not yet done:** wire the full
+  SimpleOS aarch64 kernel (not just the probe) through this same boot path —
+  check for fresher commits before assuming this is complete.
+
+## isa-debug-exit board-runnable sweep (2026-08-06)
+
+A multi-commit sweep removed `isa-debug-exit` (a QEMU-only device with no real
+hardware; see `.claude/rules/board-runnable.md`) from ~29 scripts across
+`scripts/os/` and `scripts/check/`: `d022f71664e`, `a538b424f56`,
+`76c95142d68`, `e9359cfd1ac` (fix commits) plus `cb92e6c0a5e` (closes a
+`-kernel` board-runnable finding as a false alarm, adds dev-harness banners).
+If a new QEMU launch script or probe is added, grep it for `isa-debug-exit`
+before landing — this was previously a recurring, silent violation.
 
 ## Verification Requirements
 

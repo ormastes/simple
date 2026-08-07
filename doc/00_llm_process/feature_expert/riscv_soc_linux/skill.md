@@ -181,3 +181,34 @@ BRAM lane remains a CPU-local recovery/boot check, not host NVMe transport.
 - Payload addresses `0x8002AB5C/6C/8C` in `rv32_exec_core.vhd` are UNREACHABLE
   dead code (`SCRATCH_BASE_WORD=16384` vs `word_index()` max 16383).
 - Full ledger: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md`.
+
+## 2026-08-06 riscv64 kernel-closure campaign
+
+- **SIMD overgeneration, not an ISLE gap** (`8053e05f683`): `vany_true.i64x2`
+  was thought to be a missing ISLE lowering rule for riscv64. It was actually
+  the Rust seed's hand-inlined SIMD fast path in
+  `src/compiler_rust/compiler/src/codegen/instr/calls.rs` emitting Cranelift
+  I64X2 ops unconditionally even on riscv64 (no `V` extension → no vector type
+  exists to lower). Fixed by gating to x86_64/aarch64 with a scalar fallback
+  elsewhere. Full pattern (grep for future hand-inlined SIMD intrinsics):
+  `doc/00_llm_process/layer_expert/mir_lowering/skill.md` § SIMD gating.
+- **`boot.spl` mangled symbol name fix** (`91644b426eb`): a hardcoded
+  `boot_main` mangled symbol name was wrong; corrected.
+- **`freestanding_runtime.c` volatile/barrier family** (`6890950285b`):
+  `rt_volatile_read/write_u16/u32/u64`, `rt_load_barrier`, `rt_store_barrier`,
+  `unsafe_addr_of` added. A later lane found two bugs in this same landing
+  (`f9f85cdc443`): (1) a doc comment accidentally embedded `*/` mid-sentence,
+  closing the C block comment early and cascading into ~200+ undefined-symbol
+  link errors including `rt_alloc` (which was already correctly implemented);
+  (2) `rt_alloc`'s bump-allocator heap limit (`g_freestanding_heap_limit =
+  0x90000000`) was 128 MiB past QEMU virt's actual RAM end (`0x88000000` =
+  base `0x80000000` + 128 MiB), silently approving allocations into
+  non-existent memory instead of failing closed. Both fixed; the riscv64
+  kernel closure now compiles and links past this file, progressing to a
+  narrower ~20-symbol set (`rt_dict_new`, `rt_string_to_lower`,
+  `rt_enum_discriminant`, `rt_find`, etc.) tracked as the pre-existing,
+  separate dict/string/enum design gap in
+  `doc/08_tracking/bug/riscv64_kernel_codegen_blocker_2026-07-20.md`.
+- Also this session: `idt.spl _halt()` target-gated so the riscv64 kernel
+  closure clears the C-asm stage (`1874c7a8bd8`); `runtime_legacy_core` added
+  to the riscv64 sysroot C runtime build (`d0ff4e834b3`).

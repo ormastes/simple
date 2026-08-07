@@ -159,6 +159,39 @@ has the right *shape*.
   freestanding landmines: module-global array initializers never run,
   `rt_string_join` faults, `text_index_of` nil).
 
+## 2026-08-06 landings
+
+- **FAT32 `rename_at` + fd-table wiring** (`f92f60da224`, `cf12235211a`):
+  `Fat32Filesystem.rename_at` is a real primitive (not a stub); path-based FS
+  syscalls now go through `fat32_fd_table.spl` for read/write. Also this
+  session: FAT32 delete left LFN slots live, re-adopting deleted long names
+  (`d4692cb181d`); 8.3 short-name generation aborted on non-ASCII filenames
+  (`c5c77454cce`). New mount-accessor persistence wall documented (not yet
+  fixed) — see `doc/08_tracking/bug/` FAT32 mount-accessor docs, and
+  `52ede2e5a72` (confirms Wall 2 is a pre-existing seed-only Optional-bind COW
+  defect, not new).
+- **Scheduler/IpcManager state-loss fix** (`7e36d9a577a`): process syscalls
+  were reading/mutating *copies* of `Scheduler`/`IpcManager` state (value-copy
+  semantics on a struct silently drops writes across the call boundary) — fixed
+  by threading a `ProcessSyscallState` wrapper through every process syscall
+  path. `execve_spec.spl` went to 8/8 as a result. This is an instance of the
+  general "structs are value types" trap — any future kernel syscall handler
+  that takes a scheduler/IPC struct by value instead of through this wrapper
+  will silently lose state the same way.
+- **ENOEXEC symbol-collision fix** (`6972b397244`): `byte_utils.spl`'s
+  `read_u16/32/64_le` collided across modules at link time (ELF64 reader vs
+  something else), producing ENOEXEC. Renamed to `lb_read_*_le`. Any new
+  cross-module free function with a generic name (`read_*`, `write_*`) should
+  be checked for this class of collision before landing.
+- **C-ABI syscall shim spec coverage** (`399546e466c`): first real spec for
+  `syscall_shim_process.spl`/`syscall_shim_file.spl` — calls the `@export("C")`
+  entry points directly and verifies `g_shim_scheduler = st.scheduler`
+  state-threading is genuinely wired (spawn_binary, waitpid), not just
+  compile-checked. In writing it, a new interpreter bug was found and filed:
+  `doc/08_tracking/bug/shim_init_keepalive_function_ptr_cast_breaks_interpreter_2026-08-06.md`
+  (function-pointer-to-`u64` cast unsupported in the tree-walk interpreter) —
+  check that doc for current status before assuming it's fixed.
+
 ## Verification Commands
 
 ```sh
