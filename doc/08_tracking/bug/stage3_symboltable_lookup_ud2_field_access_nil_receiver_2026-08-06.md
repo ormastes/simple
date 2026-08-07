@@ -1,7 +1,9 @@
 # Stage-3 native-build crash: `SymbolTable.lookup` traps "field access on nil receiver" (ud2), distinct from the offset-0x118 / NULL-deref SIGSEGVs
 
-Status: OPEN — real bug, but the original "codegen drops the guard" root-cause
-theory below is WRONG (disproven by binary provenance, see 2026-08-06 update).
+Status: FIX LANDED (interpreter-verified only, native-build unverifiable in
+this checkout — see 2026-08-07 update). The original "codegen drops the
+guard" root-cause theory below is WRONG (disproven by binary provenance, see
+2026-08-06 update).
 Date: 2026-08-06
 Owner: unassigned
 
@@ -296,3 +298,136 @@ Not done in this session (blocked by the native-build harness issue in this
 checkout): confirming whether `scope_id.id` is genuinely absent from
 `self.scopes` at the ud2 crash site (the task's suggested `eprintln`
 diagnostic), and testing a `.keys()`-based membership check in isolation.
+
+## Update (2026-08-07): third guard strategy landed — Dict-free scope-id range check, plus a narrowed root-cause candidate
+
+### Root-cause narrowing (read-only, no live testing needed)
+
+Grepped every `push_scope`/`pop_scope` call site in `src/compiler/`
+(`self.symbols.push_scope`/`.pop_scope`, plus a few unrelated
+`env.push_scope`/`narrowing.push_scope` families that are different types).
+**All** `SymbolTable.push_scope`/`pop_scope` calls live under
+`src/compiler/20.hir/hir_lowering/**` (HIR lowering: `statements.spl`,
+`_Items/declaration_lowering.spl`, `expressions.spl`,
+`_Items/trait_impl_lowering.spl`). **Zero** hits anywhere under
+`src/compiler/50.mir/**`, which is the phase in the crash backtrace
+(`bootstrap_lower_flat_hir_module_to_mir` -> `lower_enum_construct_named` ->
+`self.symbols.lookup`).
+
+The `SymbolTable` used by `lower_enum_construct_named` (`self.symbols` inside
+`MirLowering`) is built fresh per module by `bootstrap_flat_symbol_table`
+(`src/compiler/50.mir/_MirLowering/bootstrap_globals.spl:302-307`):
+
+```
+fn bootstrap_flat_symbol_table(module_index: i64) -> SymbolTable:
+    var table = SymbolTable.new()
+    val flat_symbols = bootstrap_hir_module_symbols_at(module_index)
+    for symbol in flat_symbols:
+        table.symbols[symbol.id.id] = symbol
+    table
+```
+
+This populates the flat id->symbol `Dict<i64, HirSymbol>` directly, bypassing
+`define()` entirely, and never calls `push_scope()`. So structurally, for
+this specific `SymbolTable` instance, `current_scope` should be
+`ScopeId(id: 0)` for its entire lifetime and `self.scopes` should hold
+exactly `{0: <root Scope>}` (`next_scope_id == 1`) — there should be no way
+for `scope_id.id` to ever be out of range in this code path. That the crash
+happens anyway during this exact call chain means one of:
+
+- `self.current_scope` (a struct-typed field, `ScopeId`, on a `class`
+  instance) reads back corrupted/stale under native codegen — consistent
+  with this repo's broader catalog of native-codegen struct-field/value
+  corruption (`.claude/memory` "Engine divergence" section: JIT/native
+  miscompiles chained methods, module globals, spilled locals, etc.), or
+- some other MIR-lowering path aliases/replaces `self.symbols` with a
+  different `SymbolTable` instance that legitimately did call `push_scope`
+  elsewhere (not found by this grep, so not confirmed), or
+- `scope_id.id` is not actually corrupted but the disassembly's `ud2` branch
+  is reached via a completely different code path than assumed (unconfirmed
+  without a working native-build harness in this checkout — see prior
+  update).
+
+None of these were confirmed live (native-build is still broken in this
+checkout, see below). But the finding is useful independent of which one is
+true: **whatever the true cause, a Dict-free, exact scope-id validity check
+closes the crash without reintroducing either previously-tried failure
+mode**, described next.
+
+### The fix: `next_scope_id` range check instead of `rt_dict_contains`
+
+`self.scopes` is append-only: `push_scope` (`hir_types.spl:525-539`) is the
+**only** writer, and it always does `self.scopes[raw_id] = Scope(...)`
+*before* `self.next_scope_id = raw_id + 1`. Nothing anywhere in
+`hir_types.spl` (or, per the grep above, anywhere else) ever removes a key
+from `self.scopes`. Therefore, for the entire lifetime of any `SymbolTable`:
+
+```
+scope_id.id in self.scopes  <=>  0 <= scope_id.id < self.next_scope_id
+```
+
+is an **exact** identity, not an approximation. The right-hand side is a
+plain scalar `i64` comparison against a scalar `i64` class field
+(`next_scope_id`) — it never touches `self.scopes` (the buggy struct-valued
+`Dict<i64, Scope>`) or calls `rt_dict_contains`/`.contains_key()` at all, so
+it cannot exhibit the documented false-negative membership bug that made
+guard attempt #2 (`1ea6599e8fb`) disable the HIR bootstrap-global
+recursion breakers and stack-overflow Stage 3 (`030ff43e330`'s finding). It
+also can't reproduce failure mode #1 (no guard, ud2 trap on a genuinely
+out-of-range id), since the bracket read is now unreachable whenever
+`scope_id.id` is out of range.
+
+Landed in both `SymbolTable.lookup()` and `SymbolTable.lookup_or_invalid()`
+(`src/compiler/20.hir/hir_types.spl`, right before each function's
+`val scope = self.scopes[scope_id.id]` bracket read):
+
+```
+if scope_id.id < 0 or scope_id.id >= self.next_scope_id:
+    break
+val scope = self.scopes[scope_id.id]
+```
+
+Both existing "DO NOT re-add `rt_dict_contains(...)`" comments are kept
+verbatim (that specific guard is still known-bad) with an added note
+pointing at this range-check replacement.
+
+### Verification performed (interpreter only — native-build unusable in this checkout)
+
+`bin/simple` in this worktree is still the Rust-seed binary
+(`readlink -f bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+prints the seed warning banner), same finding as the prior update. Per
+`.claude/rules/testing.md`, `bin/simple test` hard-defaults to the tree-walk
+interpreter regardless, so it exercises the new source-level logic (not
+native codegen, and not proof the *original* ud2 crash — which is
+native-only — is gone) but does verify the guard doesn't break existing
+scope-chain resolution behavior.
+
+New spec:
+`test/01_unit/compiler/hir/symbol_table_lookup_scope_guard_spec.spl` — 5
+examples: (1) `lookup()` finds a name defined in the valid root scope; (2)
+`lookup()` walks a pushed child scope up to the root and `pop_scope()`
+correctly hides the child-only name again afterward (guards against a
+"break too eagerly" regression); (3) `lookup()` does not crash and returns
+`nil` when `current_scope` is force-set (`symbols.current_scope =
+ScopeId(id: 999)`, simulating the corrupted/never-pushed scope id from the
+filed bug) past `next_scope_id`; (4) `lookup_or_invalid()` returns
+`SymbolId(id: -1)` (`is_valid() == false`) under the same condition; (5) a
+negative `scope_id.id` also breaks cleanly. Run via
+`bin/simple test test/01_unit/compiler/hir/symbol_table_lookup_scope_guard_spec.spl`:
+`Results: 5 total, 5 passed, 0 failed`.
+
+**What's still NOT verified**: whether this actually eliminates the
+*original* native-codegen ud2 crash from the 2026-08-06 backtrace (that
+requires a working stage2/stage3 native-build in a clean checkout, which
+this worktree does not have — see the "binary provenance mismatch" update
+above). Also not confirmed: which of the three root-cause candidates listed
+above is the real one. The range-check fix is correct and safe regardless of
+which candidate is true (it's a strict superset guard: it fires only when
+the existing bracket read would otherwise be unsafe), so it does not need
+that answer to be safely landed — but a future lane with a working
+native-build harness should still (a) confirm the ud2 crash is gone on a
+full stage3 self-compile, and (b) if time permits, add a one-shot
+`eprintln` at the new guard's `break` branch to see whether it is ever
+actually hit during a real self-compile (if it's never hit, the true crash
+cause was probably candidate 3 above — a different code path — and this fix,
+while still correct, would not be why the crash stopped).

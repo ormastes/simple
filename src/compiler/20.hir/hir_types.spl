@@ -391,6 +391,24 @@ impl SymbolTable:
             # the stack and SIGSEGVed Stage 3 with zero diagnostic output.
             # See doc/08_tracking/bug/
             # stage3_native_build_segv_generic_codegen_link_path_2026-08-06.md.
+            #
+            # Instead: `self.scopes` is append-only and `next_scope_id` is
+            # its exact cardinality counter -- `push_scope` is the ONLY
+            # writer, always inserting `self.scopes[raw_id]` before
+            # advancing `next_scope_id = raw_id + 1`, and nothing anywhere
+            # in this file ever removes a key from `self.scopes`. So
+            # `scope_id.id in self.scopes` is EXACTLY
+            # `0 <= scope_id.id < self.next_scope_id` -- a plain scalar i64
+            # comparison, not a Dict operation, so it cannot exhibit the
+            # `rt_dict_contains` false-negative bug (that bug is specific to
+            # Dict membership calls on this struct-valued dict; a bare `<`
+            # on two `i64` fields is untouched by it). This also guards
+            # against the ud2 "field access on nil receiver" trap from an
+            # out-of-range `scope_id` reaching the bracket read below (see
+            # doc/08_tracking/bug/
+            # stage3_symboltable_lookup_ud2_field_access_nil_receiver_2026-08-06.md).
+            if scope_id.id < 0 or scope_id.id >= self.next_scope_id:
+                break
             val scope = self.scopes[scope_id.id]
             # Dict.get can falsely report nil for a present tagged integer on
             # the self-hosted native path. The runtime-owner predicate plus a
@@ -415,7 +433,11 @@ impl SymbolTable:
             # See lookup()'s matching comment: do NOT re-add an
             # `rt_dict_contains(self.scopes, scope_id.id)` guard here -- it
             # under-reports membership on this struct-valued dict and breaks
-            # the Stage 3 self-host via unbounded HIR recursion.
+            # the Stage 3 self-host via unbounded HIR recursion. Use the same
+            # Dict-free `next_scope_id` range check instead (exact substitute
+            # for membership -- see lookup()'s full comment).
+            if scope_id.id < 0 or scope_id.id >= self.next_scope_id:
+                break
             val scope = self.scopes[scope_id.id]
             if rt_dict_contains(scope.symbols, name):
                 val found: i64 = scope.symbols[name]
