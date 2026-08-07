@@ -328,6 +328,80 @@ B1-B6 CUDA, C2-C3 Vulkan, D1-D4 SVM-G, E1-E2 docs/CI) not started.
   authoritative lane status today is
   `doc/06_spec/03_system/hardware/remote_baremetal_lane_status_spec.md`.
 
+### C2 — landed (vulkan_jit lane executor)
+
+- New `src/lib/gc_async_mut/gpu_lane/vulkan_jit_lane_executor.spl`:
+  `VulkanJitLaneExecutor` (structurally follows the A3 `GpuLaneExecutor`
+  shape -- `prepare`/`run_program`/`teardown` -- no explicit
+  `impl X for Y:` block, matching B2's landed `CudaJitLaneExecutor`
+  style), plus the SPIR-V emission pieces design §6.1 requires:
+  - `build_hello_kernel_spirv()` -- a vector-add-equivalent hello kernel
+    (single invocation, `local_size 1 1 1`) built with the EXISTING
+    `compiler.backend.vulkan.spirv_builder.SpirvBuilder` (reused, not
+    forked). Reads two u32 operands from the arena DATA region, adds
+    them, and writes the sum as a GMB-1 RECORD (`seq=0, pass=1,
+    value=a+b`) plus the exit sentinel `0xCAFE0000`, reusing A2's
+    `gpu_mailbox.spl` offset constants directly (no duplicated magic
+    numbers).
+  - `assemble_spirv_text`/`spirv_bin_path_for` -- shells out to
+    `spirv-as` (mandatory: without it there is no way to turn assembly
+    into the binary module the session consumes, so its absence is a
+    real `Err`, not a skip).
+  - `validate_spirv_binary` -- shells out to `spirv-val` **only when the
+    tool is present on the host** (host-aware optional, per task step 3
+    and design §6.2's "validated by spirv-val in CI" -- absence of the
+    tool itself is never a failure).
+  - `emit_step_budget_decrement_check` -- design §6.3's mandated
+    "no unbounded loops": injects `OpLoad` (budget word) ->
+    `OpISub` 1 -> `OpStore` (write back) -> `OpIEqual` (against zero) at
+    the current builder position. This is the one hardware-free
+    testable piece; `build_while_true_budget_loop_spirv` wires it into a
+    real structured `while true` loop (loop header -> decrement/check ->
+    `OpBranchConditional` to either an exit block that writes the GMB-1
+    timeout sentinel `0xDEAD0000` and returns, or back to the header) as
+    the standalone kernel shape the unit spec below asserts against.
+  - **Emitter primitive gotcha found while landing this:** `SpirvBuilder`'s
+    high-level `emit_type_*`/`emit_decorate_*` helpers always
+    self-allocate a fresh SPIR-V ID at call time, but SPIR-V's logical
+    module layout (Core Spec §2.4) requires the Annotations section
+    (`OpDecorate`) to *precede* the Types/variables/constants section
+    that declares the IDs a `DescriptorSet`/`Binding`/`ArrayStride`
+    decoration targets. Worked around by reserving those specific IDs
+    via `alloc_id()` up front and writing their `OpDecorate`/`OpType*`/
+    `OpVariable` text directly via `emit()` -- still "the existing
+    emitter" (its ID/text-emission primitives), not a parallel one.
+- Verify: `test/03_system/gpu_lane/vulkan_jit_hello_spec.spl` (2 examples)
+  and `test/01_unit/compiler/backend/vulkan_jit_step_budget_loop_lowering_spec.spl`
+  (4 examples) both `Results: N total, N passed, 0 failed` on this host,
+  which has a **real Vulkan device** (NVIDIA, driver 580.126.16.0) --
+  the hello spec exercises the live dispatch path, not a skip: a direct
+  probe script confirmed `probe=""` (not `skip:`), `prepare=OK`,
+  `record_count=1`, `record0_value=42`, `record0_pass=true` for
+  operands a=7/b=35. `spirv-as`/`spirv-val`/`vulkaninfo` are all present
+  on this host, so the host-aware-optional `spirv-val` path was also
+  exercised for real, not skipped.
+- **Sabotage probe** (step-budget decrement, the most novel
+  unit-testable piece): flipped `emit_isub` to `emit_iadd` in
+  `emit_step_budget_decrement_check` -> RED (`4 total, 2 passed, 2
+  failed`, the two examples asserting the `OpISub`-in-sequence and the
+  end-to-end budget-decrement-present checks both failed as expected);
+  reverted -> GREEN (`4 total, 4 passed, 0 failed`).
+- **Shared-WC clobber hit while landing this** (see
+  `reference_shared_wc_environment_traps_2026-07-30.md` in memory): both
+  new spec files and the new source file were silently wiped from disk
+  by a concurrent session's working-copy operation partway through this
+  task (confirmed via `ls`/`git status` showing them absent with no
+  corresponding delete in this session's own history); B2's already-landed
+  `src/lib/gc_async_mut/gpu_lane/cuda_jit_lane_executor.spl` was also
+  found missing from disk at the same time despite having been read
+  successfully minutes earlier in this same session. Recovered by
+  re-writing this task's own files from in-context content and
+  re-verifying with `ls` immediately before every subsequent test run;
+  did not attempt to restore B2's file (out of scope for this task, and
+  another session presumably owns its lifecycle).
+- No new bugs filed for C2 itself -- the emitter/session/mailbox
+  integration worked as designed on this host's real Vulkan device.
+
 ## Affected Layers
 
 - [[test_runner]] — `doc/00_llm_process/layer_expert/test_runner/skill.md`

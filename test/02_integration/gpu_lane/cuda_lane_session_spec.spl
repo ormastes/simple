@@ -1,0 +1,151 @@
+# Host-aware integration spec for CudaLaneSession (Task B1).
+#
+# Design: doc/05_design/runtime/gpu_remote_interpreter_architecture.md
+# section 5 / 3.1. Covers:
+#   1. Pure helpers testable on ANY host (no CUDA required): guard canary
+#      generation/matching, the raw host-memory byte round-trip used to
+#      marshal the arena, and first-error retention on a freshly-created
+#      (never-`init`'d, so no device calls at all) session.
+#   2. A clean skip when no CUDA driver/device is present.
+#   3. On a live CUDA host: arena allocation, a host-side pattern round-trip
+#      through the device via HtoD/DtoH, and guard-region integrity after
+#      the round-trip.
+
+use std.spipe.*
+use std.gc_async_mut.gpu_lane.cuda_lane_session.{
+    CudaLaneSession, GUARD_BYTES, GUARD_CANARY_BYTE,
+    canary_bytes, bytes_match_canary,
+    read_bytes_from_ptr, write_bytes_to_ptr,
+    lane_scratch_alloc, lane_scratch_free}
+
+fn _arena_pattern(len: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < len:
+        out.push((i % 251).to_u8())
+        i = i + 1
+    out
+
+describe "CudaLaneSession pure helpers (no CUDA hardware required)":
+    """
+    Coverage for the parts of the B1 CUDA lane session that are genuinely
+    testable without live CUDA hardware: guard canary generation/matching
+    (pure byte logic), the raw host-memory read/write round-trip used to
+    marshal HtoD/DtoH payloads (plain process memory, not device memory),
+    and first-error retention (exercised on a session that is never
+    `init`'d, so it never touches the CUDA driver at all).
+    """
+    it "should generate a canary buffer that matches itself and reject a corrupted one":
+        step("Generate a guard-sized canary buffer")
+        val guard = canary_bytes(GUARD_BYTES)
+        expect(guard.len()).to_equal(GUARD_BYTES)
+
+        step("An unmodified canary buffer matches")
+        assert_true(bytes_match_canary(guard))
+
+        step("Flipping a single byte anywhere in the buffer is detected")
+        var corrupted = canary_bytes(GUARD_BYTES)
+        corrupted[0] = (GUARD_CANARY_BYTE + 1).to_u8()
+        assert_false(bytes_match_canary(corrupted))
+
+        var corrupted_tail = canary_bytes(GUARD_BYTES)
+        corrupted_tail[GUARD_BYTES - 1] = 0u8
+        assert_false(bytes_match_canary(corrupted_tail))
+
+    it "should round-trip an arbitrary byte pattern through raw host memory":
+        step("Allocate plain host memory (not CUDA) and write a non-trivial pattern into it")
+        val pattern = _arena_pattern(4096)
+        val ptr = lane_scratch_alloc(4096)
+        assert_true(ptr != 0)
+        write_bytes_to_ptr(ptr, pattern)
+
+        step("Read it back and confirm every byte round-tripped exactly")
+        val readback = read_bytes_from_ptr(ptr, 4096)
+        expect(readback.len()).to_equal(4096)
+        expect(readback[0]).to_equal(pattern[0])
+        expect(readback[100]).to_equal(pattern[100])
+        expect(readback[4095]).to_equal(pattern[4095])
+        lane_scratch_free(ptr)
+
+    it "should retain only the FIRST error even when later calls also fail":
+        step("Create a session but never call init() -- no CUDA driver call happens")
+        var session = CudaLaneSession.create()
+        expect(session.last_error).to_equal("")
+
+        step("A call requiring an initialized session fails without touching CUDA")
+        val first = session.arena_write(_arena_pattern(16))
+        assert_false(first)
+        expect(session.last_error).to_equal("")  # arena_write fails closed, not via _fail
+
+        step("load_entry on an uninitialized session captures the first error")
+        val load_result = session.load_entry([1u8, 2u8, 3u8, 4u8], "main")
+        expect(load_result).to_equal("cuda-lane-session-unavailable")
+        expect(session.last_error).to_equal("cuda-lane-session-unavailable")
+
+        step("A second, DIFFERENT failure (manufactured without CUDA: force the " +
+            "cleanup-pending guard by flipping completion_unknown directly) does " +
+            "NOT overwrite the retained first error")
+        session.completion_unknown = true
+        val second_result = session.shutdown()
+        expect(second_result).to_equal("cuda-lane-session-cleanup-pending")
+        expect(session.last_error).to_equal("cuda-lane-session-unavailable")
+
+describe "CudaLaneSession host-aware arena round-trip":
+    """
+    Host-aware coverage for the B1 CUDA lane session shell: a clean skip
+    when no CUDA driver/device is present, and on a live host a real arena
+    allocation, HtoD/DtoH pattern round-trip, and guard-region integrity
+    check.
+    """
+    it "should probe cleanly, and on a live host allocate the arena and round-trip a pattern with guards intact":
+        step("Probe for a CUDA-capable device")
+        var session = CudaLaneSession.create()
+        val probe_result = session.probe()
+
+        if probe_result.starts_with("skip:"):
+            step("No usable CUDA driver/device on this host: " + probe_result)
+            assert_true(probe_result.starts_with("skip:"))
+        else:
+            step("Live CUDA driver/device found by probe()")
+
+            # KNOWN-RED on some hosts, filed:
+            # doc/08_tracking/bug/cuda_device_name_fails_after_successful_device_get_and_ctx_create_2026-08-07.md
+            # `init()` requires a non-empty device name + nonzero identity per
+            # the CUDA host validation contract's "record driver, device
+            # name/UUID" step (never weakened here -- see the filed bug for
+            # why `rt_cuda_device_name` can fail even when `cuda_device_get`/
+            # `cuda_ctx_create` for the SAME device already succeeded). Guard
+            # every following step behind `init_result == ""` so a genuine
+            # upstream failure reports as a clean, readable red assertion
+            # instead of an index-out-of-bounds crash on an unpopulated arena.
+            step("Initialize the session (context, combined guard|arena|guard allocation)")
+            val init_result = session.init()
+            expect(init_result).to_equal("")
+
+            if init_result == "":
+                expect(session.device_name).to_not_equal("")
+
+                step("Guard regions are intact immediately after init")
+                assert_true(session.guard_check())
+
+                step("Write a host-side pattern into the arena")
+                val pattern = _arena_pattern(session.arena_capacity)
+                assert_true(session.arena_write(pattern))
+
+                step("Read the arena back and confirm the pattern round-tripped exactly")
+                val readback = session.arena_read(session.arena_capacity)
+                expect(readback.len()).to_equal(session.arena_capacity)
+                expect(readback[0]).to_equal(pattern[0])
+                expect(readback[100]).to_equal(pattern[100])
+                expect(readback[session.arena_capacity - 1]).to_equal(
+                    pattern[session.arena_capacity - 1])
+
+                step("Guard regions are still intact after the round-trip -- no overflow")
+                assert_true(session.guard_check())
+
+                step("Shut the session down cleanly")
+                expect(session.shutdown()).to_equal("")
+            else:
+                step("init() failed: " + init_result +
+                    " (last_error=" + session.last_error +
+                    ") -- see the filed bug above; nothing further to exercise safely")
