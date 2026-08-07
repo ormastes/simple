@@ -685,6 +685,96 @@ rewritten").
   files: `MODINIT001` non-literal module constants, one
   `unnamed_duplicate_typed_args` hint).
 
+## Status: C3 (SVM-G Vulkan device executor) -- landed 2026-08-07 (verified on real hardware; one documented host/device divergence)
+
+- New `src/lib/gc_async_mut/gpu_lane/svmg_vulkan_kernel.spvasm`: hand-written
+  SPIR-V assembly (no `.glsl`/`.comp` source -- no `glslangValidator`/
+  `glslc`/`dxc` on this host, verified, and the byte-addressable arena this
+  interpreter needs has no natural GLSL expression anyway) implementing
+  **all 50** SVM-G opcodes as a flat fetch-decode-execute loop (single
+  dispatch 1x1x1, single invocation -- `PARFOR` degenerates the same way
+  `ref_vm.spl` and `svmg_cuda_kernel.ptx` both document, matching the CUDA
+  sibling rather than doing real workgroup+barrier fan-out). Compiled with
+  `spirv-as --target-env vulkan1.0`, validated clean with `spirv-val`.
+  Checked-in artifacts: `svmg_vulkan_kernel.spv` + `.spv.sha256`. Regen
+  script: `scripts/build/regen_svmg_vulkan_kernel.shs`.
+  - Byte-addressing against the SSBO (declared as a `uint32` runtime array,
+    `BufferBlock`/`Uniform`, set 0 binding 0) is done via shift/mask
+    read-modify-write helper functions (`read_u8`/`write_u8`), with
+    `read_u32`/`read_u16`/`write_u32` **fully inlined** (not routed through
+    nested `OpFunctionCall`s to the byte helpers) -- see the fix note in
+    the file itself and the corruption/root-cause writeup below.
+  - "Registers" (`pc`/`sp`/`csp`/`steps`/`seq`/`reccount`/etc.) and the
+    256-slot operand stack + 32-slot call stack are `Private`-storage-class
+    module-scope `OpVariable`s (single invocation only, so no
+    cross-invocation hazard) -- avoids threading ~10 loop-carried values
+    through SPIR-V `OpPhi` by hand.
+  - Control flow: `OpSwitch` on the opcode byte, `OpSelectionMerge`d to a
+    dedicated `%switch_merge` block (NOT directly to the loop's own
+    `%loop_continue` -- validator rejects a nested selection header whose
+    declared merge is the *enclosing loop's continue target*, "merge block
+    not contained in the loop construct"; fixed by adding one pass-through
+    block). Every nested nested-selection merge (DIV/REM-by-zero,
+    LOAD32/STORE32/LOAD8/STORE8 bounds, CALL-stack-overflow) uses the
+    idiom `OpSelectionMerge %ok_block None; OpBranchConditional %cond
+    %trap_block %ok_block` (merge target = the false-branch block itself)
+    rather than a separate always-unreachable merge label, since the true
+    branch always ends in `OpReturn` (a legal structured early exit).
+- New `src/lib/gc_async_mut/gpu_lane/vulkan_vm_executor.spl`
+  (`VulkanVmExecutor`): mirrors B3's `cuda_vm_executor.spl` almost exactly
+  (same `build_svmg_arena`/`read_records`/`_decode_sentinel` shapes,
+  reimplemented locally rather than shared, same tier-ownership reasoning)
+  but dispatches through C1's `VulkanLaneSession.dispatch_once` instead of
+  a CUDA launch. Buffered mailbox only (design §6.3) -- no interactive
+  PUTC servicing loop.
+- New `test/03_system/gpu_lane/vulkan_vm_executor_conformance_spec.spl`
+  (2 examples): runs every D3 conformance vector (`all_vectors()`, 59
+  vectors via `v.push`, `all_vectors().len() == 59` on this checkout) minus
+  one documented exclusion (see below) through the real device, plus a
+  dedicated call-stack-overflow ("recursion depth") check.
+- **Verification performed**: this host has 2 real GPUs and a live Vulkan
+  1.3/1.4 ICD (`vulkaninfo --summary` succeeds; `spirv-as`/`spirv-val` on
+  PATH). **58/58 non-excluded D3 conformance vectors pass** on the real
+  device (`Vulkan device conformance: 58/58 vectors passed`).
+  `spirv-val --target-env vulkan1.0`: clean. Recursion-depth check (33
+  back-to-back `CALL`s chaining into each other, `CALL_STACK_SIZE=32`):
+  the 33rd `CALL` observes `csp==32` and produces a genuine **TRAP record**
+  (sentinel `0xCAFE007F`, `record{passed:0,value:3}`) rather than a device
+  hang/loss -- confirmed on real hardware, not simulated.
+- **Real bug found and root-caused, not routed around**: an early draft
+  routed `write_u32`'s 4 byte-writes through `OpFunctionCall`s to a shared
+  `write_u8` function. On this NVIDIA Vulkan driver, `mem_store_load_byte`
+  (the one D3 vector exercising `STORE8`) came back with a corrupted
+  `SYS_RESULT` `pass` field (`13107201` instead of `1`) -- traced with two
+  independent rewrites (call-based, then fully-inlined-with-`Volatile`)
+  producing the byte-identical wrong result both times, which ruled out
+  the nested-call/driver-caching theory. The ACTUAL root cause, found by
+  hand-tracing the arena byte layout: this is **not a shader bug at all**
+  -- it is a genuine, pre-existing divergence between `ref_vm.spl` (which
+  keeps `code`/`arena` as two *separate* host arrays, so `STORE8` can never
+  perturb instruction fetch) and both device kernels (CUDA and this one),
+  which have only one buffer and fetch opcodes via `arena[code_off+pc]`
+  directly, matching the SGP wire format's literal single-buffer meaning.
+  `mem_store_load_byte`'s `STORE8` target (absolute offset 50) happens to
+  land inside that exact program's own code footprint, making it
+  genuinely (if accidentally) self-modifying on a real single-buffer
+  device. Filed:
+  `doc/08_tracking/bug/svmg_device_arena_code_coresidency_diverges_from_ref_vm_2026-08-07.md`
+  -- also flags that **B3's CUDA kernel has the identical exposure and has
+  never actually been run against the D3 table on real hardware** (no
+  `cuda_vm_executor` conformance spec exists in-tree; B3's own status
+  section above used a standalone C harness against 3 hand-picked vectors,
+  none of which happened to trigger this).
+- **Sabotage probe**: flipped `case_add`'s `OpIAdd` to `OpISub` in the
+  `.spvasm` -> RED (`add` vector: `assert_equal failed: expected 7, got
+  -1`); reverted (byte-identical `.spv`/`.sha256` to the pre-sabotage
+  build, confirmed via the regen script's SHA-256 output) -> GREEN again.
+- Lint: `bin/simple lint src/lib/gc_async_mut/gpu_lane/vulkan_vm_executor.spl
+  test/03_system/gpu_lane/vulkan_vm_executor_conformance_spec.spl` -> 0
+  errors (2 pre-existing-style warnings, same class as B3's
+  `cuda_vm_executor.spl`: `unnamed_duplicate_typed_args`,
+  `non_exhaustive_match`).
+
 ## Affected Layers
 
 - [[test_runner]] — `doc/00_llm_process/layer_expert/test_runner/skill.md`
