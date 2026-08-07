@@ -845,3 +845,140 @@ hello-world is rc=139, reproducible on demand.
 - `si_addr` here is `(tagged_value & ~7) + 8`. Two runs disagreeing on it
   (`0x98` vs `0x118`) is *not* evidence of two bugs.
 - `SIMPLE_BOOTSTRAP=1` masks this SIGSEGV as a clean rc=1 diagnostic.
+
+---
+
+## 2026-08-07 — NEGATIVE RESULT: the `resolve_field_index` reorder is NOT verifiable at stage 2, and the "~3-minute stage-2-only recipe" cannot validate ANY `src/compiler` fix
+
+The previous section proposed a one-line reorder in
+`MirLowering.resolve_field_index`, deliberately did not land it, and left a
+"~3 minutes of compute" stage-2-only verification recipe for the next lane. That
+recipe has now been executed. **It cannot work, for a structural reason, and the
+reorder is therefore still unverified and still NOT landed.**
+
+### What was run
+
+A hardlink copy of `simple-s3bisect` (the tree `FIX8` was built from) at
+`/home/ormastes/dev/simple-fieldidx-lane`. Before editing, `resolve_field_index`
+was confirmed **byte-identical** between that tree and `origin/main`, making
+`FIX8` a true A/B control with the reorder as the only source delta. The reorder
+applied was exactly the proposed one: the name-keyed tier
+(`struct_field_order[type_symbol.name]`, `Dict<text, [text]>`) moved **above**
+the id-keyed tier (`field_map[sym_id]`, `Dict<i64, [text]>`).
+
+Three stage-2 builds via `build_stage2.sh` (copied, with `R`/`O` repointed;
+`SEED` and `--runtime-path` unchanged). All `STAGE2_EXIT=0`.
+
+### Result — the A/B, and the negative controls that explain it
+
+| build | `nll.errors` read in `BorrowChecker.check_function` | hello-world |
+|-------|-----------------------------------------------------|-------------|
+| `FIX8/stage2-simple` (control, pre-reorder) | `5ae450: 49 8b 7f 58  mov 0x58(%r15),%rdi` | **rc=139** |
+| `FIELDIDX1/stage2-simple` (post-reorder)    | `5ae4d0: 49 8b 7f 58  mov 0x58(%r15),%rdi` | **rc=139** |
+
+Both hello-world runs were **without** `SIMPLE_BOOTSTRAP=1`, so the SIGSEGV is
+unmasked (that env var turns this crash into a misleading clean `rc=1`).
+
+The edit *was* compiled in — this is not a stale-binary artifact. The symbol
+moved `0x5ae400` → `0x5ae480` (+0x80) and the build reported 727 compiled /
+0 cached / 0 failed.
+
+### Why: `stage2-simple` is emitted by the RUST SEED, so no `src/compiler` change can alter its machine code
+
+This is the finding that matters, and it invalidates the recipe.
+
+`build_stage2.sh` sets **`SIMPLE_NATIVE_BUILD_RUST=1`** and drives
+`$RT/simple`. That binary is the **Rust seed** — 415 `rustc`/`cargo`/
+`rust_begin_unwind` markers, and `nm` finds **no `resolve_field_index` symbol in
+it at all**. Two positive/negative controls confirm the pure-Simple field
+resolver never executes on this path:
+
+- **PROBE1** — an instrumented build carrying three `[fieldprobe]` `print`
+  statements inside `resolve_field_index`, gated on `SIMPLE_MIR_FIELD_TRACE=1`.
+  Positive control: `strings` finds those 3 strings in
+  `PROBE1/stage2-simple` and **0** in `FIELDIDX1/stage2-simple`, proving the
+  edited file was read and compiled. Running that binary on hello-world with
+  `SIMPLE_MIR_FIELD_TRACE=1` printed **0** `[fieldprobe]` lines (and still
+  `rc=139`).
+- **PROBE2** — the same build with `SIMPLE_MIR_FIELD_TRACE=1` set *during the
+  build itself*, to catch the resolver while the compiler's own
+  `borrow_check/mod.spl:77 val errors = nll.errors` is being lowered. The build
+  log contains **0** `[fieldprobe]` lines.
+
+So the `mov 0x58(%r15),%rdi` baked into every `stage2-simple` was emitted by the
+**seed's** codegen. `stage2` is built by the seed; a change to
+`src/compiler/50.mir/**` cannot move a single byte of it. Step 3 of the previous
+section's recipe ("objdump the new `stage2-simple` and confirm the read is
+`0x20`") is therefore unable to respond to the fix under test, in either
+direction — and the RED/GREEN criterion it defines (hello-world `rc=0` on a
+seed-built stage 2) is **unattainable by any `src/compiler` change**.
+
+**Correction to commit `61197205501`.** That commit read `0x58` out of the
+stripped stage 3, found the window byte-for-byte identical to the seed-built
+stage 2, and concluded this "proves the 0x58 field index comes from pure-Simple
+codegen". The identity does not license that inference: the stage-2 side of the
+comparison is seed-emitted. What the identity actually shows is that *both*
+codegens land on the same wrong index.
+
+### The pure-Simple compiler does independently reproduce it
+
+Confirmed here, so the `src/compiler` lead is not dead:
+`bootstrap/stage3/x86_64-unknown-linux-gnu/simple` — emitted by stage 2's
+pure-Simple codegen — carries `517950: 49 8b 7f 58  mov 0x58(%r15),%rdi`
+immediately before the faulting `517966: mov 0x8(%rax),%r14`.
+
+That means the reorder still *might* be right. It simply cannot be tested below
+a full **stage-3** build (~1 h, ~40 GB RSS), which the machine gate did not
+permit during this lane. **Nothing is claimed green and no code was landed.**
+
+### Verification budget — measured, and much cheaper than assumed for stage 2
+
+Sampled `/proc/<pid>/status` `VmRSS` every second for a whole run:
+
+- **stage-2-only build: peak 908 MB, 167.7 s** (107.3 s compile + 60.4 s link).
+  Not 12 GB, not 32 GB. It runs safely alongside two 18–33 GB foreign builds.
+- The "no other `native-build` AND >= 85 GB available" gate was written for a
+  **full Stage-3** build (~1 h, ~40 GB — the workload earlyoom SIGTERMed twice
+  at 00:59 on 2026-08-07). Applying it to a sub-1 GB job idles a lane for an
+  hour for nothing. Gate on headroom relative to the measured peak
+  (available >= 2x peak + 10 GB, floor 25 GB) and reserve the
+  zero-concurrent-builds condition for the 40 GB class of job.
+
+### What the next lane should do
+
+1. **Do not re-run the stage-2-only recipe on a `src/compiler` change.** It is
+   structurally blind. Either build stage 3, or find a path where the
+   pure-Simple compiler is the one emitting the code under test.
+2. If a stage-3 build is affordable, the fix to test is already written and A/B
+   -ready (name-keyed tier above id-keyed tier in `resolve_field_index`); the
+   `[fieldprobe]` instrumentation used here is the way to see which tier fires
+   and why, and its `strings` presence/absence is a working positive control.
+3. Note that `struct_field_order` **is** populated for classes on the bootstrap
+   flat path (`50.mir/_MirLowering/bootstrap_globals.spl:589-591`,
+   `sfo[class_def.name] = field_names`), and `NLLChecker`, `MirLowering`,
+   `BorrowChecker` and `LifetimeInference` each have exactly one `class`
+   declaration in `src/{compiler,lib,app}` — so if the name tier still misses,
+   the reason is `self.symbols.get_symbol_raw(found_type_sym.id)` returning nil
+   on the flat table, not an ambiguous name. `HirTypeKind.Named(symbol, args)`
+   carries **no** name (`20.hir/hir_types.spl:783`), so there is no way to reach
+   the name tier without a working symbol lookup — which is the next thing to
+   verify.
+4. The backend is **not** a second suspect: `translate_get_field`
+   (`70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl:190`) emits
+   `getelementptr ... i32 {field}` straight from the MIR index, and the native
+   isel does `val offset = field * 8`
+   (`70.backend/backend/native/isel_x86_64.spl:391`). There is no name- or
+   id-keyed layout table in `70.backend`. The index is decided solely in MIR.
+
+### Standing lessons
+
+- **Check which compiler emitted the bytes you are reading before attributing
+  them.** A stage-2 binary is seed-emitted; only stage 3 and later are
+  pure-Simple-emitted. A verification recipe that objdumps the wrong stage
+  returns a confident, reproducible, meaningless answer.
+- A clean A/B that shows *no change* is a result about the harness at least as
+  often as about the fix. The +0x80 symbol shift proved the source was read,
+  which is what made "the recipe is blind" the only surviving explanation.
+- Put positive-control markers in **string literals**, not comments — a comment
+  marker does not reach `.rodata` and silently fails the control (that happened
+  here on the first attempt).
