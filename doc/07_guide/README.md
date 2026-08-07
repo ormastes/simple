@@ -41,6 +41,7 @@ User-facing guides for the Simple programming language. For specifications see `
 |-------|-------------|
 | [tooling/repl.md](tooling/repl.md) | Interactive REPL -- commands, multi-line, state |
 | [tooling/jupyter.md](tooling/jupyter.md) | Jupyter kernel -- notebooks, installation, testing |
+| [app/tools/simple_lab.md](app/tools/simple_lab.md) | Simple Lab -- notebook UI widget layer + HTTP/WS API |
 | [tooling/lsp_dap.md](tooling/lsp_dap.md) | LSP + DAP setup (VSCode, Neovim) |
 | [tooling/mcp.md](tooling/mcp.md) | MCP server setup and usage |
 | [tooling/lint.md](tooling/lint.md) | Linter configuration and usage |
