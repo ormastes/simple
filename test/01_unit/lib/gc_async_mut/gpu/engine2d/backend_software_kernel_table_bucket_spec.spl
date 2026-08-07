@@ -36,13 +36,19 @@
 # numbers below are INTERPRETER-engine numbers (see simd_isa_provider_spec.spl).
 
 use std.spec
-use common.gpu.engine2d.scalar_oracle.{oracle_fill_const, oracle_hash_span}
+use common.gpu.engine2d.scalar_oracle.{
+    oracle_fill_const, oracle_hash_span,
+    oracle_src_over_const, oracle_src_over_image, oracle_mask_src_over,
+}
 use common.gpu.engine2d.kernel_registry.{
     kernel_table_new,
     kernel_table_register,
     kernel_table_lookup,
     kernel_size_bucket,
     KERNEL_OP_FILL_CONST,
+    KERNEL_OP_SRC_OVER_CONST,
+    KERNEL_OP_SRC_OVER_IMAGE,
+    KERNEL_OP_MASK_SRC_OVER,
     KERNEL_PROVIDER_SCALAR,
     KERNEL_FORMAT_ARGB8888_STRAIGHT,
     KERNEL_ALIGN_UNKNOWN,
@@ -52,9 +58,16 @@ use common.gpu.engine2d.kernel_registry.{
     KERNEL_BUCKET_MEDIUM,
     KERNEL_BUCKET_LARGE,
 }
-use std.nogc_sync_mut.gpu.engine2d.simd_isa_provider.{simd_isa_fill_const}
+use std.nogc_sync_mut.gpu.engine2d.simd_isa_provider.{
+    simd_isa_fill_const, simd_isa_src_over_const, simd_isa_src_over_image, simd_isa_mask_src_over,
+}
 use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
-use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.backend_software.{
+    SoftwareBackend,
+    _kernel_probe_src_over_const_bucket,
+    _kernel_probe_src_over_image_bucket,
+    _kernel_probe_mask_src_over_bucket,
+}
 
 val SIMD_PROVIDER_ID: i64 = 9
 
@@ -208,3 +221,239 @@ describe "real hit-count evidence — small-surface Engine2D.clear() exercises t
               backend.kernel_table_ready.to_text() +
               " simd_batch_hits=" + backend.simd_batch_hits.to_text() +
               " (0 is a legitimate honest outcome if SIMD did not beat scalar at 10px on this machine)")
+
+# ============================================================================
+# T10 — the honest gate extended beyond fill_const: src_over_const,
+# src_over_image, mask_src_over each get a per-bucket bit-exact + timing
+# probe of their own (backend_software.spl _kernel_probe_*_bucket), against
+# the same scalar oracles simd_span_batch_execute falls back to.
+# ============================================================================
+
+describe "SIMD-ISA src_over_const bit-exactness at representative bucket spans":
+    it "agrees with oracle_src_over_const pixel-for-pixel at an 8px TINY span":
+        var oracle_buf: [u32] = [0; 8]
+        var simd_buf: [u32] = [0; 8]
+        oracle_fill_const(oracle_buf, 0, 8, 0xFF404040)
+        oracle_fill_const(simd_buf, 0, 8, 0xFF404040)
+        oracle_src_over_const(oracle_buf, 0, 8, 0x80102030)
+        simd_isa_src_over_const(simd_buf, 0, 8, 0x80102030)
+        assert_true(oracle_hash_span(oracle_buf, 0, 8) == oracle_hash_span(simd_buf, 0, 8))
+
+    it "agrees with oracle_src_over_const pixel-for-pixel at a 300px LARGE span":
+        var oracle_buf: [u32] = [0; 300]
+        var simd_buf: [u32] = [0; 300]
+        oracle_fill_const(oracle_buf, 0, 300, 0xFF204060)
+        oracle_fill_const(simd_buf, 0, 300, 0xFF204060)
+        oracle_src_over_const(oracle_buf, 0, 300, 0xC0FF8040)
+        simd_isa_src_over_const(simd_buf, 0, 300, 0xC0FF8040)
+        assert_true(oracle_hash_span(oracle_buf, 0, 300) == oracle_hash_span(simd_buf, 0, 300))
+
+describe "SIMD-ISA src_over_image bit-exactness at representative bucket spans":
+    it "agrees with oracle_src_over_image pixel-for-pixel at an 8px TINY span":
+        var src: [u32] = [0; 8]
+        oracle_fill_const(src, 0, 8, 0x9033AA55)
+        var oracle_buf: [u32] = [0; 8]
+        var simd_buf: [u32] = [0; 8]
+        oracle_fill_const(oracle_buf, 0, 8, 0xFF404040)
+        oracle_fill_const(simd_buf, 0, 8, 0xFF404040)
+        oracle_src_over_image(oracle_buf, 0, src, 0, 8)
+        simd_isa_src_over_image(simd_buf, 0, src, 0, 8)
+        assert_true(oracle_hash_span(oracle_buf, 0, 8) == oracle_hash_span(simd_buf, 0, 8))
+
+    it "agrees with oracle_src_over_image pixel-for-pixel at a 300px LARGE span":
+        var src: [u32] = [0; 300]
+        oracle_fill_const(src, 0, 300, 0x66CC2288)
+        var oracle_buf: [u32] = [0; 300]
+        var simd_buf: [u32] = [0; 300]
+        oracle_fill_const(oracle_buf, 0, 300, 0xFF103050)
+        oracle_fill_const(simd_buf, 0, 300, 0xFF103050)
+        oracle_src_over_image(oracle_buf, 0, src, 0, 300)
+        simd_isa_src_over_image(simd_buf, 0, src, 0, 300)
+        assert_true(oracle_hash_span(oracle_buf, 0, 300) == oracle_hash_span(simd_buf, 0, 300))
+
+describe "SIMD-ISA mask_src_over bit-exactness at representative bucket spans":
+    it "agrees with oracle_mask_src_over pixel-for-pixel at an 8px TINY span with mixed coverage":
+        var mask: [u32] = [0; 8]
+        var m: i64 = 0
+        while m < 8:
+            mask[m.to_i32()] = ((m * 37) % 256) as u32
+            m = m + 1
+        var oracle_buf: [u32] = [0; 8]
+        var simd_buf: [u32] = [0; 8]
+        oracle_fill_const(oracle_buf, 0, 8, 0xFF404040)
+        oracle_fill_const(simd_buf, 0, 8, 0xFF404040)
+        oracle_mask_src_over(oracle_buf, 0, 0xC0104080, mask, 0, 8)
+        simd_isa_mask_src_over(simd_buf, 0, 0xC0104080, mask, 0, 8)
+        assert_true(oracle_hash_span(oracle_buf, 0, 8) == oracle_hash_span(simd_buf, 0, 8))
+
+    it "agrees with oracle_mask_src_over pixel-for-pixel at a 300px LARGE span including 0 and 255 coverage":
+        var mask: [u32] = [0; 300]
+        var m: i64 = 0
+        while m < 300:
+            mask[m.to_i32()] = ((m * 37) % 256) as u32
+            m = m + 1
+        var oracle_buf: [u32] = [0; 300]
+        var simd_buf: [u32] = [0; 300]
+        oracle_fill_const(oracle_buf, 0, 300, 0xFF404040)
+        oracle_fill_const(simd_buf, 0, 300, 0xFF404040)
+        oracle_mask_src_over(oracle_buf, 0, 0xC0104080, mask, 0, 300)
+        simd_isa_mask_src_over(simd_buf, 0, 0xC0104080, mask, 0, 300)
+        assert_true(oracle_hash_span(oracle_buf, 0, 300) == oracle_hash_span(simd_buf, 0, 300))
+
+describe "honest-gate invariant per new op — registered IFF measured exact AND faster (production probes)":
+    # NOTE: each probe returns a verdict bitmask (bit0=faster, bit1=exact) and
+    # the CALLER registers — a mut table threaded through the probe loses the
+    # register write-back (see STRUCTURE NOTE in backend_software.spl). This
+    # is exactly how ensure_kernel_table consumes the probes in production.
+    slow_it "src_over_const TINY+LARGE: registration outcome matches the probe's own verdict":
+        var t = kernel_table_new()
+        val tiny_v = _kernel_probe_src_over_const_bucket(8, 200)
+        val large_v = _kernel_probe_src_over_const_bucket(4096, 4)
+        val tiny_ok = kernel_table_register(t, KERNEL_OP_SRC_OVER_CONST,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY, SIMD_PROVIDER_ID,
+            (tiny_v & 2) != 0, (tiny_v & 1) != 0)
+        val large_ok = kernel_table_register(t, KERNEL_OP_SRC_OVER_CONST,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE, SIMD_PROVIDER_ID,
+            (large_v & 2) != 0, (large_v & 1) != 0)
+        assert_true(tiny_ok == (tiny_v == 3))
+        assert_true(large_ok == (large_v == 3))
+        val tiny_simd = kernel_table_lookup(t, KERNEL_OP_SRC_OVER_CONST,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY) == SIMD_PROVIDER_ID
+        val large_simd = kernel_table_lookup(t, KERNEL_OP_SRC_OVER_CONST,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE) == SIMD_PROVIDER_ID
+        assert_true(tiny_simd == tiny_ok)
+        assert_true(large_simd == large_ok)
+        # Probe bit-exactness must hold — a non-exact SIMD blend is a defect,
+        # not a legitimate scalar verdict.
+        assert_true((tiny_v & 2) != 0)
+        assert_true((large_v & 2) != 0)
+        print("src_over_const gate: TINY verdict=" + tiny_v.to_text() +
+              " registered=" + tiny_simd.to_text() +
+              " | LARGE verdict=" + large_v.to_text() +
+              " registered=" + large_simd.to_text() + " (verdict: 1=faster, 2=exact, 3=both)")
+
+    slow_it "src_over_image TINY+LARGE: registration outcome matches the probe's own verdict":
+        var t = kernel_table_new()
+        val tiny_v = _kernel_probe_src_over_image_bucket(8, 200)
+        val large_v = _kernel_probe_src_over_image_bucket(4096, 4)
+        val tiny_ok = kernel_table_register(t, KERNEL_OP_SRC_OVER_IMAGE,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY, SIMD_PROVIDER_ID,
+            (tiny_v & 2) != 0, (tiny_v & 1) != 0)
+        val large_ok = kernel_table_register(t, KERNEL_OP_SRC_OVER_IMAGE,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE, SIMD_PROVIDER_ID,
+            (large_v & 2) != 0, (large_v & 1) != 0)
+        assert_true(tiny_ok == (tiny_v == 3))
+        assert_true(large_ok == (large_v == 3))
+        val tiny_simd = kernel_table_lookup(t, KERNEL_OP_SRC_OVER_IMAGE,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY) == SIMD_PROVIDER_ID
+        val large_simd = kernel_table_lookup(t, KERNEL_OP_SRC_OVER_IMAGE,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE) == SIMD_PROVIDER_ID
+        assert_true(tiny_simd == tiny_ok)
+        assert_true(large_simd == large_ok)
+        assert_true((tiny_v & 2) != 0)
+        assert_true((large_v & 2) != 0)
+        print("src_over_image gate: TINY verdict=" + tiny_v.to_text() +
+              " registered=" + tiny_simd.to_text() +
+              " | LARGE verdict=" + large_v.to_text() +
+              " registered=" + large_simd.to_text() + " (verdict: 1=faster, 2=exact, 3=both)")
+
+    slow_it "mask_src_over TINY+LARGE: registration outcome matches the probe's own verdict":
+        var t = kernel_table_new()
+        val tiny_v = _kernel_probe_mask_src_over_bucket(8, 200)
+        val large_v = _kernel_probe_mask_src_over_bucket(4096, 4)
+        val tiny_ok = kernel_table_register(t, KERNEL_OP_MASK_SRC_OVER,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY, SIMD_PROVIDER_ID,
+            (tiny_v & 2) != 0, (tiny_v & 1) != 0)
+        val large_ok = kernel_table_register(t, KERNEL_OP_MASK_SRC_OVER,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE, SIMD_PROVIDER_ID,
+            (large_v & 2) != 0, (large_v & 1) != 0)
+        assert_true(tiny_ok == (tiny_v == 3))
+        assert_true(large_ok == (large_v == 3))
+        val tiny_simd = kernel_table_lookup(t, KERNEL_OP_MASK_SRC_OVER,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY) == SIMD_PROVIDER_ID
+        val large_simd = kernel_table_lookup(t, KERNEL_OP_MASK_SRC_OVER,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE) == SIMD_PROVIDER_ID
+        assert_true(tiny_simd == tiny_ok)
+        assert_true(large_simd == large_ok)
+        assert_true((tiny_v & 2) != 0)
+        assert_true((large_v & 2) != 0)
+        print("mask_src_over gate: TINY verdict=" + tiny_v.to_text() +
+              " registered=" + tiny_simd.to_text() +
+              " | LARGE verdict=" + large_v.to_text() +
+              " registered=" + large_simd.to_text() + " (verdict: 1=faster, 2=exact, 3=both)")
+
+describe "gate refusal per new op — a losing (or non-exact) measurement stays scalar":
+    it "keeps every new op's TINY slot on scalar when faster=false, and refuses bit_exact=false outright":
+        var t = kernel_table_new()
+        assert_true(not kernel_table_register(t, KERNEL_OP_SRC_OVER_CONST,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY, SIMD_PROVIDER_ID, true, false))
+        assert_true(not kernel_table_register(t, KERNEL_OP_SRC_OVER_IMAGE,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY, SIMD_PROVIDER_ID, true, false))
+        assert_true(not kernel_table_register(t, KERNEL_OP_MASK_SRC_OVER,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY, SIMD_PROVIDER_ID, false, true))
+        assert_true(kernel_table_lookup(t, KERNEL_OP_SRC_OVER_CONST,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY) == KERNEL_PROVIDER_SCALAR)
+        assert_true(kernel_table_lookup(t, KERNEL_OP_SRC_OVER_IMAGE,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY) == KERNEL_PROVIDER_SCALAR)
+        assert_true(kernel_table_lookup(t, KERNEL_OP_MASK_SRC_OVER,
+            KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+            KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY) == KERNEL_PROVIDER_SCALAR)
+
+describe "total table-build cost + owned-table persistence — 4 ops x 4 buckets probed at ensure_kernel_table time":
+    slow_it "builds the full 16-slot-probed table via a first fill, persists it observably, and reports total wall time + the per-slot provider map":
+        # Persistence guard for the defect shape found while building T10:
+        # registrations applied through self.kernel_table -> free fn (or a
+        # mut table threaded through a probe) are silently dropped, so
+        # ensure_kernel_table builds a LOCAL table and field-assigns it.
+        # sealed==true on the backend's own table proves the assignment
+        # persisted — an unsealed table here means the build was lost.
+        var backend = SoftwareBackend.create_cpu_simd()
+        assert_true(backend.init(10, 4))
+        val t0 = time_now_unix_micros()
+        backend.clear(0xFF001122u32)
+        val build_us = time_now_unix_micros() - t0
+        assert_true(backend.kernel_table_ready == true)
+        assert_true(backend.kernel_table.sealed == true)
+        assert_true(backend.buf[0] == 0xFF001122u32)
+        # Per-op x per-bucket provider map — machine-dependent honest verdicts,
+        # printed (not asserted) as the T10 measurement-coverage evidence.
+        var report = "kernel table providers (KERNEL_PROVIDER_SIMD_ISA=1, KERNEL_PROVIDER_SCALAR=0):"
+        val ops: [i64] = [KERNEL_OP_FILL_CONST, KERNEL_OP_SRC_OVER_CONST,
+                          KERNEL_OP_SRC_OVER_IMAGE, KERNEL_OP_MASK_SRC_OVER]
+        val op_names: [text] = ["fill_const", "src_over_const", "src_over_image", "mask_src_over"]
+        val buckets: [i64] = [KERNEL_BUCKET_TINY, KERNEL_BUCKET_SMALL,
+                              KERNEL_BUCKET_MEDIUM, KERNEL_BUCKET_LARGE]
+        var oi = 0
+        while oi < 4:
+            report = report + " " + op_names[oi] + "=["
+            var bi = 0
+            while bi < 4:
+                val prov = kernel_table_lookup(backend.kernel_table, ops[oi],
+                    KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN,
+                    KERNEL_SPAN_CONTIGUOUS, buckets[bi])
+                report = report + prov.to_text()
+                if bi < 3:
+                    report = report + ","
+                bi = bi + 1
+            report = report + "]"
+            oi = oi + 1
+        print(report)
+        print("full 4-op x 4-bucket kernel table build (first clear, interpreter): " +
+              build_us.to_text() + " us total")

@@ -24,12 +24,19 @@ use common.gpu.engine2d.kernel_registry.{
     CpuKernelTable, SpanOpBatch,
     kernel_table_new, kernel_table_register, kernel_table_seal,
     span_batch_new, span_batch_push,
-    KERNEL_OP_FILL_CONST, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+    KERNEL_OP_FILL_CONST, KERNEL_OP_SRC_OVER_CONST, KERNEL_OP_SRC_OVER_IMAGE, KERNEL_OP_MASK_SRC_OVER,
+    KERNEL_FORMAT_ARGB8888_STRAIGHT,
     KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS,
     KERNEL_BUCKET_TINY, KERNEL_BUCKET_SMALL, KERNEL_BUCKET_MEDIUM, KERNEL_BUCKET_LARGE,
     KERNEL_PROVIDER_SIMD_ISA,
 }
-use std.nogc_sync_mut.gpu.engine2d.simd_isa_provider.{simd_span_batch_execute, simd_isa_fill_const}
+use std.nogc_sync_mut.gpu.engine2d.simd_isa_provider.{
+    simd_span_batch_execute, simd_isa_fill_const,
+    simd_isa_src_over_const, simd_isa_src_over_image, simd_isa_mask_src_over,
+}
+use common.gpu.engine2d.scalar_oracle.{
+    oracle_fill_const, oracle_src_over_const, oracle_src_over_image, oracle_mask_src_over,
+}
 use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
@@ -58,16 +65,28 @@ val TILE_SIZE: i32 = 64     # Tile width/height in pixels (fits in L1 cache)
 #
 # Same pattern as the KERNEL_BUCKET_LARGE probe that used to be the only one
 # ensure_kernel_table ran: measure scalar vs SIMD-ISA at a span length
-# representative of the bucket, then register only if the SIMD path actually
-# measured faster. TINY/SMALL/MEDIUM spans pay SIMD setup/call overhead that
-# LARGE spans amortize away, so this is expected to (and is allowed to) stay
-# on scalar for the small buckets — the gate must not be forced either way.
+# representative of the bucket; the caller registers only if the SIMD path
+# actually measured faster (and bit-exact). TINY/SMALL/MEDIUM spans pay SIMD
+# setup/call overhead that LARGE spans amortize away, so this is expected to
+# (and is allowed to) stay on scalar for the small buckets — the gate must
+# not be forced either way.
+#
+# STRUCTURE NOTE (why the probes measure but do NOT register): a `mut`
+# CpuKernelTable passed caller -> probe -> kernel_table_register loses the
+# register's write-back at the intermediate hop under the interpreter — a
+# direct one-hop kernel_table_register(t, ...) persists, the same call routed
+# through a probe taking `mut table` does not (verified 2026-08-07; sibling
+# of doc/08_tracking/bug/self_pass_to_free_fn_mutation_loss_2026-05-29.md).
+# So each probe returns an exact/faster verdict bitmask and the table OWNER
+# performs the registration one hop from itself.
 
-fn _kernel_probe_fill_bucket(mut table: CpuKernelTable, bucket: i64, n: i64, iters: i64) -> bool:
-    """Measure scalar vs SIMD-ISA fill_const at `n` pixels x `iters` reps,
-    register KERNEL_PROVIDER_SIMD_ISA into `bucket` only if SIMD measured
-    faster, and return the measured faster flag so callers can log/observe
-    the real numbers."""
+val KERNEL_PROBE_FASTER: i64 = 1   # bit 0: SIMD measured faster than scalar
+val KERNEL_PROBE_EXACT: i64 = 2    # bit 1: SIMD output bit-exact vs the oracle
+
+fn _kernel_probe_fill_bucket(n: i64, iters: i64) -> i64:
+    """Measure scalar vs SIMD-ISA fill_const at `n` pixels x `iters` reps and
+    return the KERNEL_PROBE_* verdict bitmask. fill_const is a verbatim store,
+    bit-exact by construction, so KERNEL_PROBE_EXACT is always set."""
     var probe: [u32] = [0; n.to_i32()]
     val t0 = time_now_unix_micros()
     var i0: i64 = 0
@@ -84,11 +103,135 @@ fn _kernel_probe_fill_bucket(mut table: CpuKernelTable, bucket: i64, n: i64, ite
         simd_isa_fill_const(probe, 0, n, 0xFF102030)
         i2 = i2 + 1
     val simd_us = time_now_unix_micros() - t2
-    val faster = simd_us < scalar_us
-    kernel_table_register(table, KERNEL_OP_FILL_CONST, KERNEL_FORMAT_ARGB8888_STRAIGHT,
-                          KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, bucket,
-                          KERNEL_PROVIDER_SIMD_ISA, true, faster)
-    faster
+    var verdict: i64 = KERNEL_PROBE_EXACT
+    if simd_us < scalar_us:
+        verdict = verdict + KERNEL_PROBE_FASTER
+    verdict
+
+# The three blend ops below mirror _kernel_probe_fill_bucket exactly, with one
+# addition: unlike fill_const (a verbatim store, bit-exact by construction),
+# these READ dst (and src/mask), so each probe first runs one oracle-vs-SIMD
+# pass over identical buffers and compares pixel-for-pixel — the measured
+# exact flag joins faster in the returned verdict, and the caller's
+# kernel_table_register refuses the slot unless BOTH hold. Timing measures
+# the same functions simd_span_batch_execute dispatches to, against the same
+# scalar oracles it falls back to.
+
+fn _kernel_probe_src_over_const_bucket(n: i64, iters: i64) -> i64:
+    """Measure oracle_src_over_const vs simd_isa_src_over_const at `n` pixels
+    x `iters` reps, with a bit-exact pre-pass on identical buffers. Returns
+    the KERNEL_PROBE_* verdict bitmask."""
+    val colour: i64 = 0x80102030
+    var oracle_buf: [u32] = [0; n.to_i32()]
+    var simd_buf: [u32] = [0; n.to_i32()]
+    oracle_fill_const(oracle_buf, 0, n, 0xFF404040)
+    oracle_fill_const(simd_buf, 0, n, 0xFF404040)
+    oracle_src_over_const(oracle_buf, 0, n, colour)
+    simd_isa_src_over_const(simd_buf, 0, n, colour)
+    var exact = true
+    var k: i64 = 0
+    while k < n:
+        if oracle_buf[k.to_i32()] != simd_buf[k.to_i32()]:
+            exact = false
+        k = k + 1
+    val t0 = time_now_unix_micros()
+    var i0: i64 = 0
+    while i0 < iters:
+        oracle_src_over_const(oracle_buf, 0, n, colour)
+        i0 = i0 + 1
+    val scalar_us = time_now_unix_micros() - t0
+    val t1 = time_now_unix_micros()
+    var i1: i64 = 0
+    while i1 < iters:
+        simd_isa_src_over_const(simd_buf, 0, n, colour)
+        i1 = i1 + 1
+    val simd_us = time_now_unix_micros() - t1
+    var verdict: i64 = 0
+    if exact:
+        verdict = verdict + KERNEL_PROBE_EXACT
+    if simd_us < scalar_us:
+        verdict = verdict + KERNEL_PROBE_FASTER
+    verdict
+
+fn _kernel_probe_src_over_image_bucket(n: i64, iters: i64) -> i64:
+    """Measure oracle_src_over_image vs simd_isa_src_over_image at `n` pixels
+    x `iters` reps (same honest gate shape as the fill probe, plus the
+    bit-exact pre-pass). Returns the KERNEL_PROBE_* verdict bitmask."""
+    var src: [u32] = [0; n.to_i32()]
+    oracle_fill_const(src, 0, n, 0x9033AA55)
+    var oracle_buf: [u32] = [0; n.to_i32()]
+    var simd_buf: [u32] = [0; n.to_i32()]
+    oracle_fill_const(oracle_buf, 0, n, 0xFF404040)
+    oracle_fill_const(simd_buf, 0, n, 0xFF404040)
+    oracle_src_over_image(oracle_buf, 0, src, 0, n)
+    simd_isa_src_over_image(simd_buf, 0, src, 0, n)
+    var exact = true
+    var k: i64 = 0
+    while k < n:
+        if oracle_buf[k.to_i32()] != simd_buf[k.to_i32()]:
+            exact = false
+        k = k + 1
+    val t0 = time_now_unix_micros()
+    var i0: i64 = 0
+    while i0 < iters:
+        oracle_src_over_image(oracle_buf, 0, src, 0, n)
+        i0 = i0 + 1
+    val scalar_us = time_now_unix_micros() - t0
+    val t1 = time_now_unix_micros()
+    var i1: i64 = 0
+    while i1 < iters:
+        simd_isa_src_over_image(simd_buf, 0, src, 0, n)
+        i1 = i1 + 1
+    val simd_us = time_now_unix_micros() - t1
+    var verdict: i64 = 0
+    if exact:
+        verdict = verdict + KERNEL_PROBE_EXACT
+    if simd_us < scalar_us:
+        verdict = verdict + KERNEL_PROBE_FASTER
+    verdict
+
+fn _kernel_probe_mask_src_over_bucket(n: i64, iters: i64) -> i64:
+    """Measure oracle_mask_src_over vs simd_isa_mask_src_over at `n` pixels
+    x `iters` reps (same honest gate shape as the fill probe, plus the
+    bit-exact pre-pass). Returns the KERNEL_PROBE_* verdict bitmask."""
+    val colour: i64 = 0xC0104080
+    var mask: [u32] = [0; n.to_i32()]
+    var m: i64 = 0
+    while m < n:
+        # Mixed coverage including 0 and 255 so the probe exercises the
+        # oracle's `m > 0` skip and full-coverage paths, not one flat value.
+        mask[m.to_i32()] = ((m * 37) % 256) as u32
+        m = m + 1
+    var oracle_buf: [u32] = [0; n.to_i32()]
+    var simd_buf: [u32] = [0; n.to_i32()]
+    oracle_fill_const(oracle_buf, 0, n, 0xFF404040)
+    oracle_fill_const(simd_buf, 0, n, 0xFF404040)
+    oracle_mask_src_over(oracle_buf, 0, colour, mask, 0, n)
+    simd_isa_mask_src_over(simd_buf, 0, colour, mask, 0, n)
+    var exact = true
+    var k: i64 = 0
+    while k < n:
+        if oracle_buf[k.to_i32()] != simd_buf[k.to_i32()]:
+            exact = false
+        k = k + 1
+    val t0 = time_now_unix_micros()
+    var i0: i64 = 0
+    while i0 < iters:
+        oracle_mask_src_over(oracle_buf, 0, colour, mask, 0, n)
+        i0 = i0 + 1
+    val scalar_us = time_now_unix_micros() - t0
+    val t1 = time_now_unix_micros()
+    var i1: i64 = 0
+    while i1 < iters:
+        simd_isa_mask_src_over(simd_buf, 0, colour, mask, 0, n)
+        i1 = i1 + 1
+    val simd_us = time_now_unix_micros() - t1
+    var verdict: i64 = 0
+    if exact:
+        verdict = verdict + KERNEL_PROBE_EXACT
+    if simd_us < scalar_us:
+        verdict = verdict + KERNEL_PROBE_FASTER
+    verdict
 
 # ============================================================================
 # Software Backend
@@ -812,27 +955,109 @@ impl SoftwareBackend:
 
     me ensure_kernel_table():
         """Build the CpuKernelTable once, per-session, with an honest timing
-        gate applied to EVERY size bucket (TINY/SMALL/MEDIUM/LARGE), not just
-        LARGE: fill_const only earns the KERNEL_PROVIDER_SIMD_ISA slot in a
-        bucket if a real measurement (same pattern as
-        simd_isa_provider_spec.spl) shows it both bit-exact (the SIMD-ISA
-        kernel always matches the scalar oracle by construction) and faster
-        than the scalar path, at a span length representative of that
-        bucket, on this machine. If it is not faster in a bucket, that
-        bucket's slot honestly stays scalar and simd_span_batch_execute's
-        own fallback keeps output identical — small spans are expected to
-        lose to SIMD's fixed call/setup overhead, and the gate must not
-        force registration to pretend otherwise."""
+        gate applied to EVERY size bucket (TINY/SMALL/MEDIUM/LARGE) and to
+        EVERY op simd_span_batch_execute can dispatch to SIMD-ISA —
+        fill_const, src_over_const, src_over_image, and mask_src_over — not
+        just fill_const: each op only earns the KERNEL_PROVIDER_SIMD_ISA
+        slot in a bucket if a real measurement (same pattern as
+        simd_isa_provider_spec.spl) shows it both bit-exact against its
+        scalar oracle and faster than that oracle, at a span length
+        representative of that bucket, on this machine. If it is not faster
+        in a bucket, that bucket's slot honestly stays scalar and
+        simd_span_batch_execute's own fallback keeps output identical —
+        small spans are expected to lose to SIMD's fixed call/setup
+        overhead, and the gate must not force registration to pretend
+        otherwise. All-scalar is a legitimate (and under the interpreter,
+        the expected) outcome; the deliverable of this table is complete
+        MEASUREMENT coverage, not SIMD wins."""
         if self.kernel_table_ready:
             return
-        # (bucket, representative span length, iterations). Small spans get
+        # (representative span length, iterations) per bucket. Small spans get
         # more iterations so the wall-clock measurement window is large
-        # enough to be above timer-resolution noise.
-        _kernel_probe_fill_bucket(self.kernel_table, KERNEL_BUCKET_TINY, 8, 4000)
-        _kernel_probe_fill_bucket(self.kernel_table, KERNEL_BUCKET_SMALL, 32, 2000)
-        _kernel_probe_fill_bucket(self.kernel_table, KERNEL_BUCKET_MEDIUM, 128, 500)
-        _kernel_probe_fill_bucket(self.kernel_table, KERNEL_BUCKET_LARGE, 4096, 64)
-        kernel_table_seal(self.kernel_table)
+        # enough to be above timer-resolution noise. Probes MEASURE only and
+        # return a verdict bitmask; registration happens HERE, on a LOCAL
+        # table that is assigned to self.kernel_table once sealed. Both
+        # indirections are deliberate: a mut table threaded through a probe
+        # loses kernel_table_register's write-back, and so does registering
+        # into self.kernel_table directly (self.field passed to a free fn —
+        # doc/08_tracking/bug/self_pass_to_free_fn_mutation_loss_2026-05-29.md).
+        # A local var -> free fn register is the one shape that persists;
+        # the sealed local is then stored with a plain field assignment.
+        # The bucket-spec's "owned-table registration persists" example
+        # guards this exact shape.
+        var table = kernel_table_new()
+        var v: i64 = 0
+        v = _kernel_probe_fill_bucket(8, 4000)
+        kernel_table_register(table, KERNEL_OP_FILL_CONST, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_fill_bucket(32, 2000)
+        kernel_table_register(table, KERNEL_OP_FILL_CONST, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_SMALL,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_fill_bucket(128, 500)
+        kernel_table_register(table, KERNEL_OP_FILL_CONST, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_MEDIUM,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_fill_bucket(4096, 64)
+        kernel_table_register(table, KERNEL_OP_FILL_CONST, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        # Blend ops cost many times a fill per pixel under the interpreter
+        # (gather + blend + scatter), so their probe iteration counts are
+        # scaled down hard to keep total table-build time in the same order
+        # as the fill probes while still measuring well above timer
+        # resolution (each timing window stays in the multi-ms range).
+        v = _kernel_probe_src_over_const_bucket(8, 75)
+        kernel_table_register(table, KERNEL_OP_SRC_OVER_CONST, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_src_over_const_bucket(32, 40)
+        kernel_table_register(table, KERNEL_OP_SRC_OVER_CONST, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_SMALL,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_src_over_const_bucket(128, 10)
+        kernel_table_register(table, KERNEL_OP_SRC_OVER_CONST, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_MEDIUM,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_src_over_const_bucket(1024, 2)
+        kernel_table_register(table, KERNEL_OP_SRC_OVER_CONST, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_src_over_image_bucket(8, 75)
+        kernel_table_register(table, KERNEL_OP_SRC_OVER_IMAGE, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_src_over_image_bucket(32, 40)
+        kernel_table_register(table, KERNEL_OP_SRC_OVER_IMAGE, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_SMALL,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_src_over_image_bucket(128, 10)
+        kernel_table_register(table, KERNEL_OP_SRC_OVER_IMAGE, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_MEDIUM,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_src_over_image_bucket(1024, 2)
+        kernel_table_register(table, KERNEL_OP_SRC_OVER_IMAGE, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_mask_src_over_bucket(8, 75)
+        kernel_table_register(table, KERNEL_OP_MASK_SRC_OVER, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_mask_src_over_bucket(32, 40)
+        kernel_table_register(table, KERNEL_OP_MASK_SRC_OVER, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_SMALL,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_mask_src_over_bucket(128, 10)
+        kernel_table_register(table, KERNEL_OP_MASK_SRC_OVER, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_MEDIUM,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_mask_src_over_bucket(1024, 2)
+        kernel_table_register(table, KERNEL_OP_MASK_SRC_OVER, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        kernel_table_seal(table)
+        self.kernel_table = table
         self.kernel_table_ready = true
 
     me sw_fill_raw_span(offset: i32, count: i32, color: u32):
