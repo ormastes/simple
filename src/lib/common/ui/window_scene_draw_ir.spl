@@ -188,9 +188,20 @@ extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
 # both interpreter and native runtimes.
 extern fn rt_memcpy(dst: i64, src: i64, n: i64) -> i64
 extern fn rt_memset(dst: i64, value: i64, n: i64) -> i64
+# Bulk one-call readback: builds the whole [u32] runtime-side from the raw
+# buffer (little-endian u32 per pixel). Replaces the per-pixel
+# rt_ptr_read_i64 loop that cost width*height FFI crossings per frame
+# (230,400 at 480x480 — see doc/09_report/ws_f4_presentation_readback_audit_2026-08-06.md).
+# The returned array is a fresh copy, so it carries NO live-alias hazard.
+extern fn rt_u32s_from_raw(data_ptr: i64, count: i64) -> [u32]
 
 var _shared_wm_px_addr: i64 = 0
 var _shared_wm_px_count: i64 = 0
+# Counter-backed FFI accounting for the readback path (T3 acceptance: the
+# bulk path must cost 1 extern crossing per frame, not one per pixel).
+var _shared_wm_readback_ffi_calls: i64 = 0
+
+fn shared_wm_readback_ffi_calls() -> i64: _shared_wm_readback_ffi_calls
 var _shared_wm_px_width: i64 = 0
 var _shared_wm_px_height: i64 = 0
 
@@ -522,6 +533,21 @@ fn shared_wm_top_content_frame_index(frames: [WmContentFrame], scene_revision: i
 fn shared_wm_pixel_buffer_pixels(backend: SharedWmPixelBufferBackend) -> [u32]:
     # Rebuild from the authoritative raw buffer (see the scalar-owner note at
     # the top of this file). Host presentation paths keep their [u32] view.
+    #
+    # T3: ONE extern crossing for the whole frame. rt_u32s_from_raw reads
+    # `count` little-endian u32s starting at the buffer base — byte-identical
+    # to the old per-pixel `rt_ptr_read_i64(addr, i*4) & 0xFFFFFFFF` loop
+    # (which cost `count` FFI calls per frame; kept below as the spec oracle).
+    val count = _shared_wm_px_count
+    if _shared_wm_px_addr == 0 or count <= 0:
+        return []
+    _shared_wm_readback_ffi_calls = _shared_wm_readback_ffi_calls + 1
+    rt_u32s_from_raw(_shared_wm_px_addr, count)
+
+fn shared_wm_pixel_buffer_pixels_per_pixel_oracle() -> [u32]:
+    """Reference readback: the pre-T3 per-pixel FFI loop, kept ONLY as the
+    bit-exactness oracle for window_scene_readback_spec.spl. Costs one
+    rt_ptr_read_i64 crossing per pixel — never call on a warm frame."""
     val count = _shared_wm_px_count
     if _shared_wm_px_addr == 0 or count <= 0:
         return []
@@ -531,6 +557,7 @@ fn shared_wm_pixel_buffer_pixels(backend: SharedWmPixelBufferBackend) -> [u32]:
         # Little-endian: the low 32 bits of the 8-byte load at offset i*4 are
         # pixel i. The allocation carries 4 bytes of tail padding so this is
         # in bounds for the last pixel (rt_ptr_read_i32 is not exported).
+        _shared_wm_readback_ffi_calls = _shared_wm_readback_ffi_calls + 1
         out[i] = (rt_ptr_read_i64(_shared_wm_px_addr, i * 4) & 0xFFFFFFFF) as u32
         i = i + 1
     out
@@ -581,6 +608,8 @@ impl CompositorBackend for SharedWmPixelBufferBackend:
     me present_rect(x: i32, y: i32, width: i32, height: i32):
         self.present_count = self.present_count + 1
     fn as_glass_capable() -> CompositorGlassCapable?: nil
+    me report_damage(x: i32, y: i32, w: i32, h: i32):
+        pass_dn
 
 # Nested content-frame recursion cap (Lane C, "rendering inside rendering").
 # Depth 1 is a direct child of a top-level window frame, depth 2 a
