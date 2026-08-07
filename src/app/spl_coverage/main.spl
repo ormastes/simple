@@ -8,6 +8,7 @@ use std.log.{error}
 
 # Coverage imports from SFFI module
 use std.sffi.coverage.{coverage_dump_sdn, coverage_enabled, coverage_clear}
+use std.fs.{file_exists, read_to_string}
 
 fn print_help():
     print "Usage: simple spl-coverage [command]"
@@ -19,6 +20,12 @@ fn print_help():
     print "  status    Show coverage status and summary"
     print ""
     print "  clear     Clear coverage data"
+    print ""
+    print "Options:"
+    print "  --file <path>   Read a persisted SDN coverage artifact from a prior"
+    print "                  run (e.g. produced by SIMPLE_COVERAGE_OUTPUT) instead"
+    print "                  of this process's live in-memory coverage state."
+    print "                  Supported by: dump, status"
     print ""
     print "Note: Set SIMPLE_COVERAGE=1 before running tests to enable coverage tracking"
     print ""
@@ -56,7 +63,45 @@ fn get_arg(args: [text], flag: text, default_val: text) -> text:
         i = i + 1
     default_val
 
+# Result of loading a persisted SDN coverage artifact from disk: exactly one
+# of `sdn`/`error` is meaningful, distinguished by `ok`. Kept as a struct
+# (rather than text? / bool) so the three failure modes — missing file,
+# unreadable file, malformed/empty content — each get a distinct, explicit
+# message instead of collapsing into a silent empty dump that reads as
+# "zero coverage".
+struct CoverageFileLoad:
+    ok: bool
+    sdn: text
+    error: text
+
+fn _load_coverage_file(path: text) -> CoverageFileLoad:
+    if not file_exists(path):
+        return CoverageFileLoad(ok: false, sdn: "", error: "coverage file not found: {path}")
+
+    val sdn = match read_to_string(path):
+        case Some(content):
+            content
+        case None:
+            return CoverageFileLoad(ok: false, sdn: "", error: "could not read coverage file (unreadable): {path}")
+
+    if sdn.trim() == "":
+        return CoverageFileLoad(ok: false, sdn: "", error: "coverage file is empty: {path}")
+
+    if not sdn.starts_with("# Coverage Report"):
+        return CoverageFileLoad(ok: false, sdn: "", error: "coverage file is malformed (missing '# Coverage Report' header): {path}")
+
+    CoverageFileLoad(ok: true, sdn: sdn, error: "")
+
 fn cmd_dump(args: [text]) -> i64:
+    val file_path = get_arg(args, "--file", "")
+    if file_path != "":
+        val loaded = _load_coverage_file(file_path)
+        if not loaded.ok:
+            print "Error: {loaded.error}"
+            return 1
+        print loaded.sdn
+        return 0
+
     if not coverage_enabled():
         print "Error: Coverage not enabled. Set SIMPLE_COVERAGE=1 environment variable."
         return 1
@@ -65,7 +110,19 @@ fn cmd_dump(args: [text]) -> i64:
     print coverage_sdn
     return 0
 
-fn cmd_status() -> i64:
+fn cmd_status(args: [text]) -> i64:
+    val file_path = get_arg(args, "--file", "")
+    if file_path != "":
+        val loaded = _load_coverage_file(file_path)
+        if not loaded.ok:
+            print "Error: {loaded.error}"
+            return 1
+        print "✓ Loaded persisted coverage data from: {file_path}"
+        print ""
+        print "Coverage data:"
+        print loaded.sdn
+        return 0
+
     if coverage_enabled():
         print "✓ Coverage tracking is ENABLED (SIMPLE_COVERAGE=1)"
 
@@ -123,6 +180,14 @@ fn main() -> i64:
                 val progress_line = render_progress(log_opts.progress, 1, 1, "spl-coverage")
                 if progress_line != "":
                     print progress_line
+            val status_file_path = get_arg(filtered_args, "--file", "")
+            if as_json and status_file_path != "":
+                val loaded = _load_coverage_file(status_file_path)
+                val status = if loaded.ok: "ok" else: "error"
+                print "{\"command\":\"spl-coverage status\",\"status\":\"{status}\",\"file\":\"{status_file_path}\"}"
+                if loaded.ok:
+                    return 0
+                return 1
             if as_json:
                 val enabled = if coverage_enabled(): "true" else: "false"
                 val status = if coverage_enabled(): "ok" else: "error"
@@ -130,7 +195,7 @@ fn main() -> i64:
                 if coverage_enabled():
                     return 0
                 return 1
-            return cmd_status()
+            return cmd_status(filtered_args)
         case "clear":
             if log_opts.progress != "summary" and not as_json:
                 val progress_line = render_progress(log_opts.progress, 1, 1, "spl-coverage")
