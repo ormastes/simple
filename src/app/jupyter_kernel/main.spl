@@ -15,6 +15,7 @@ use std.notebook.types.{CellResult}
 use std.notebook.session_manager.{KernelSessionManager}
 use std.notebook.local_exec.{LocalExecFactory}
 use std.notebook.lsp_bridge.{LspBridge}
+use app.simple_lab.export_sdoctest.{export_notebook_file}
 
 # ============================================================================
 # JSON Helpers (inlined to avoid cross-module issues)
@@ -386,6 +387,28 @@ fn lane_status_content() -> text:
         jp("lanes", json_string_array(["interpreter"]))
     )
 
+# ============================================================================
+# comm `simple_export` (X4, design §7.3/§7.4): receives an
+# {"action":"export_sdoctest","in_path":...,"out_path":...} request (sent as
+# the comm_open payload by tools/jupyter/labextension/src/export.ts's
+# "Export notebook as SDoctest" command) and runs the shared L1 exporter
+# (src/app/simple_lab/export_sdoctest.spl `export_notebook_file`) against it,
+# replying with {"status":"ok","out_path":...} or
+# {"status":"error","error":...} over the same comm.
+# ============================================================================
+
+const SIMPLE_EXPORT_COMM_TARGET: text = "simple_export"
+
+fn handle_export_request(comm_id: text, data: text):
+    val in_path = extract_field(data, "in_path")
+    val out_path = extract_field(data, "out_path")
+    val result = export_notebook_file(in_path, out_path)
+    match result:
+        case Ok(_):
+            send_comm_msg(comm_id, jo2(jp("status", js("ok")), jp("out_path", js(out_path))))
+        case Err(msg):
+            send_comm_msg(comm_id, jo2(jp("status", js("error")), jp("error", js(msg))))
+
 fn send_comm_msg(comm_id: text, data: text):
     val content = jo2(
         jp("comm_id", js(comm_id)),
@@ -395,14 +418,18 @@ fn send_comm_msg(comm_id: text, data: text):
 
 fn handle_comm_open(raw_msg: text):
     val target = extract_field(raw_msg, "target_name")
-    if target != SIMPLE_LANE_COMM_TARGET:
-        return
     val comm_id = extract_field(raw_msg, "comm_id")
-    send_comm_msg(comm_id, lane_status_content())
+    if target == SIMPLE_LANE_COMM_TARGET:
+        send_comm_msg(comm_id, lane_status_content())
+    elif target == SIMPLE_EXPORT_COMM_TARGET:
+        handle_export_request(comm_id, extract_object_field(raw_msg, "data"))
 
 fn handle_comm_msg(raw_msg: text):
     val comm_id = extract_field(raw_msg, "comm_id")
     val data = extract_object_field(raw_msg, "data")
+    if extract_field(data, "action") == "export_sdoctest":
+        handle_export_request(comm_id, data)
+        return
     val new_mode = extract_field(data, "set_mode")
     if new_mode.trim() != "":
         SESSION_MANAGER.set_default_mode(DEFAULT_SESSION_ID, new_mode.trim())
