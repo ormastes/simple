@@ -41,6 +41,19 @@ use app.devhub.adapter_bitbucket.{
     _bb_combine_values_json
 }
 use std.common.json.{json_parse, json_object, json_string, json_boolean}
+use std.nogc_sync_mut.src.testing.mock.builder.{MockFunction}
+use std.nogc_sync_mut.spec.{prevent}
+
+# Prevention-mock adoption (U5, sspec_prevention_mock_plan_2026-08-07.md):
+# `real_http_send` stands in for this adapter's HTTP transport seam.
+# bb_list_repos/bb_repo_view/bb_list_prs have no fetcher-injection point (no
+# seam parameter, unlike _bb_collect_pages below), so `prevent()` here does
+# NOT intercept a real network call — it documents the invariant and would
+# catch a future accidental wiring bug that routes a real send through this
+# mock. See doc/07_guide/infra/testing/prevention_mocks.md "What it cannot
+# see", and the ordering contract at src/lib/nogc_sync_mut/spec.spl:527
+# (prevent() must run AFTER the code under test, which the auth-guard
+# examples below already satisfy).
 
 
 # ============================================================================
@@ -471,24 +484,30 @@ fn _mk_unconfigured_client() -> BbClient:
 
 describe "bb_list_repos / bb_repo_view / bb_list_prs auth guard":
     it "bb_list_repos fails closed with no token configured":
+        val guard_mock = MockFunction.new("real_http_send")
         val (ok, repos, msg, capped) = bb_list_repos(_mk_unconfigured_client(), "acme", 30)
         expect(ok).to_equal(false)
         expect(repos.len()).to_equal(0)
         expect(msg).to_contain("blocked-auth")
         expect(capped).to_equal(false)
+        prevent(guard_mock, "unit specs must not hit the network")
 
     it "bb_repo_view fails closed with no token configured":
+        val guard_mock = MockFunction.new("real_http_send")
         val (ok, repo, msg) = bb_repo_view(_mk_unconfigured_client(), "acme", "widgets")
         expect(ok).to_equal(false)
         expect(repo.slug).to_equal("")
         expect(msg).to_contain("blocked-auth")
+        prevent(guard_mock, "unit specs must not hit the network")
 
     it "bb_list_prs fails closed with no token configured":
+        val guard_mock = MockFunction.new("real_http_send")
         val (ok, prs, msg, capped) = bb_list_prs(_mk_unconfigured_client(), "acme", "widgets", "OPEN", 30)
         expect(ok).to_equal(false)
         expect(prs.len()).to_equal(0)
         expect(msg).to_contain("blocked-auth")
         expect(capped).to_equal(false)
+        prevent(guard_mock, "unit specs must not hit the network")
 
 
 # ============================================================================
