@@ -164,6 +164,10 @@ is set, so it cannot silently delete a session's artifacts.
 - [browser_engine layer](../browser_engine/skill.md) — the render-budget
   silent-truncation hazard is the sibling trap to `@exec_limit`; a
   long-running renderer spec usually needs BOTH.
+- [prevention_mocks](../../feature_expert/prevention_mocks/skill.md) — its
+  directory-wide scope is blocked specifically by this layer's lack of a
+  per-directory config/fixture hook (`find_config_file`,
+  `test_runner/test_config.spl:297-302`, cwd-relative parent-walk only).
 
 ## Update Rule
 
