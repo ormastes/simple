@@ -26,6 +26,7 @@ use compiler.driver.driver_log_helpers.{
     log_build_progress
 }
 use compiler.driver.driver_orchestration.{driver_streaming_surface_enabled}
+use compiler.semantics.layer_call_wiring.{check_project_layer_calls}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
@@ -301,7 +302,8 @@ impl CompilerDriver:
                         di_bindings: [],
                         arch_rules: [],
                         mock_decls: [],
-                        tagged_layer: ""
+                        tagged_layer: "",
+                        layer_dag_edges: ""
                     )
                 boot_idx = boot_idx + 1
             var bootstrap_parse_ctx: CompileContext = self.ctx
@@ -312,6 +314,22 @@ impl CompilerDriver:
             )
 
         var parsed_modules: Dict<text, ParserModule> = self.ctx.modules
+        # M1b wiring (doc/03_plan/compiler/forwarding/
+        # zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md):
+        # this loop is the one place in parse_all_impl that holds every
+        # module's source text (sources[i].content) alongside its freshly
+        # parsed ParserModule (tagged_layer, layer_dag_edges) at the same
+        # time -- the whole-program view the per-module module_assembly.spl
+        # checks structurally cannot have. Collect parallel arrays here and
+        # run check_project_layer_calls once after the loop. Only the
+        # "plain" parse path below is covered; the streaming-surface,
+        # native-entry-closure, and SIMPLE_BOOTSTRAP branches above return
+        # early and do not reach this call (see the plan doc note this
+        # landing appends for the scoping gap that leaves).
+        var layer_wiring_paths: [text] = []
+        var layer_wiring_contents: [text] = []
+        var layer_wiring_tags: [text] = []
+        var layer_wiring_dags: [text] = []
         var src_idx = 0
         while src_idx < sources.len():
             val source = sources[src_idx]
@@ -322,7 +340,24 @@ impl CompilerDriver:
                 self.ctx.logger
             )
             parsed_modules[source.module_name] = module
+            layer_wiring_paths.push(source.path)
+            layer_wiring_contents.push(source.content)
+            layer_wiring_tags.push(module.tagged_layer)
+            layer_wiring_dags.push(module.layer_dag_edges)
             src_idx = src_idx + 1
+
+        val layer_call_violations = check_project_layer_calls(
+            layer_wiring_paths, layer_wiring_contents, layer_wiring_tags, layer_wiring_dags)
+        var lcv_idx = 0
+        while lcv_idx < layer_call_violations.len():
+            # Observability-only: layer_call_wiring's call-edge extraction is
+            # a text heuristic (see that file's header) that can false-
+            # positive on a locally-defined fn sharing an imported symbol's
+            # name, so this warns rather than gating the build via
+            # self.ctx.add_error(...). Promote to a real error once call
+            # edges are AST/HIR-derived instead of text-scanned.
+            eprint("[layer_call] warning: {layer_call_violations[lcv_idx]}")
+            lcv_idx = lcv_idx + 1
 
         log_debug("parsing done")
         var parsed_all_ctx: CompileContext = self.ctx

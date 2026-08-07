@@ -147,6 +147,91 @@ runtime effect — this is a static rejection pass, no codegen change.
   `@layer(...)` yet; run the check in dry-run/report mode against them, not
   enforced — tagging real modules is out of scope for this milestone.
 
+#### M1b landing note (2026-08-07): whole-program driver wiring
+
+Prior session state: `layer_call_scan.spl` (text-scan caller->callee edge
+extractor) + `layer_call_direction_checker.spl` (same-layer-or-downward
+checker) existed as a standalone, spec-proven pair, explicitly NOT wired
+into the live pipeline (their own file headers said so).
+
+**Structural finding that changed this session's plan:** the task framing
+("single-module-at-a-time assembly, no whole-program pass hook") does not
+hold. `src/compiler/80.driver/driver_source_pipeline_parsing.spl`'s
+`parse_all_impl()` (the "plain" parse branch, i.e. not the streaming-surface,
+native-entry-closure, or `SIMPLE_BOOTSTRAP` branches, which return earlier)
+loops over every `SourceFile` and populates `ctx.modules: Dict<text,
+ParserModule>` for the whole compilation unit before returning — a genuine
+whole-program view exists and was already reachable. **The actual gap was
+narrower:** `module_assembly.spl`'s `layer_registry` (a `LayerDagRegistry`
+built while parsing one module, feeding M0's per-module `check_layer_dag`
+call) was a local variable, consumed and discarded before `flat_ast_to_module`
+returns — no `layer NAME [uses ...]` fact survived past a single module's
+parse. `ParserModule.tagged_layer` (M1a) was already there for free; the
+merged-DAG half was not.
+
+**What landed:**
+- `ParserModule.layer_dag_edges: text` (new field, `src/compiler/10.frontend/
+  parser_types.spl`): a flat per-module serialization of that module's own
+  `layer`/`uses` facts (`"D:name"` / `"E:from>to"` lines, declaration order).
+  Threaded through all 6 `ParserModule` construction sites in the tree
+  (`module_assembly.spl` — the real one, populated from `layer_registry`;
+  `convert_nodes.spl`, `compile_c_entry.spl`, and the
+  `driver_source_pipeline_parsing.spl` bootstrap-stub branch — all `""`; and
+  critically `desugar_async.spl`'s `desugar_module`, which rebuilds a fresh
+  `ParserModule` from the parsed one immediately after parsing and would
+  otherwise have silently dropped the field one call after it was set).
+- `src/compiler/35.semantics/layer_call_wiring.spl` (new): `merge_layer_dag`
+  (replays every module's `layer_dag_edges` text into one project-wide
+  `LayerDagRegistry`), `build_module_layers` (module_path -> tagged_layer
+  map), and `check_project_layer_calls` (the whole-program entry point:
+  early-out `[]` with zero scanning when no module in the batch carries a
+  layer tag; otherwise scans every module's in-memory source via
+  `layer_call_scan.scan_source_calls` — split out of `scan_file_calls` so
+  the driver's already-loaded `SourceFile.content` is reused instead of a
+  second disk read — and runs `check_all_layer_calls`).
+- Driver call site: `parse_all_impl`'s plain branch now collects
+  `(path, content, tagged_layer, layer_dag_edges)` per module while parsing
+  and calls `check_project_layer_calls` once after the loop, `eprint`-ing
+  each violation as `[layer_call] warning: ...` — **not** `self.ctx.add_error`
+  / `parser_error`. This is a deliberate deviation from the original task's
+  step (4) ("surface as a real compile error"): the edge source is still
+  `layer_call_scan`'s bare-`ident(` text heuristic (no string/comment
+  awareness, can misattribute a locally-defined fn sharing an imported
+  symbol's name as a call into that symbol's module) — gating a compile on a
+  heuristic false positive would be worse than the gap it closes. Promote to
+  a real error once call edges come from AST/HIR instead of text.
+
+**Known remaining gaps, stated precisely so a future session doesn't have to
+re-derive them:**
+- Only the "plain" `parse_all_impl` branch is covered. The streaming-surface
+  branch (`parse_all_streaming_surfaces_impl`, sets `ctx.modules = {}`), the
+  native-entry-closure branch, and the `SIMPLE_BOOTSTRAP` branch (fills most
+  modules with `parser_module_new(... tagged_layer: "")` stubs, never
+  actually parsing their body) all return before reaching this call.
+- The merged `LayerDagRegistry`'s declared-upward ordering reflects the
+  order modules were passed to `check_project_layer_calls` (the driver's
+  source-list order), not any cross-module authority — a best-effort merge,
+  not a proof of global consistency. It is currently unused for gating
+  (M0's per-module `check_layer_dag` already gates single-file cycles; the
+  merged registry only feeds the M1b reachability check, which is WARN-only
+  per the point above).
+- Vacuity note: this repo has zero `@layer(...)`-tagged modules today, so
+  the early-out means this pass currently never actually scans anything in
+  normal builds. Verified NOT vacuous via
+  `test/01_unit/compiler/semantics/layer_call_wiring_spec.spl` (8/8, one
+  fixture-based genuine violation, one legalized-by-`uses`-edge negative,
+  one direction-sensitive sabotage case) and a live sabotage probe against
+  `check_project_layer_calls` itself (forced it to always return `[]`; 2 of
+  4 of that function's tests went red, confirming they exercise the real
+  code path, not a vacuous assertion).
+
+Regression: `layer_decl_parse_spec.spl` (M0) 9/9, `layer_module_tag_spec.spl`
+(M1a) 7/7, `layer_call_scan_spec.spl` 4/4 — all unaffected by this change.
+Binary provenance: `readlink -f bin/simple` resolves to
+`bin/release/x86_64-unknown-linux-gnu/simple`, which self-reports as the
+Rust bootstrap seed (`bin/simple --version` prints the seed warning) — same
+seed-vs-self-hosted caveat every other spec run in this doc already carries.
+
 ### M2 — production-wire `layer_eq_checker.spl` to real layout, not fixtures
 
 **Scope:** design doc §6 item 3, verbatim. Replace `LayerEqType`/

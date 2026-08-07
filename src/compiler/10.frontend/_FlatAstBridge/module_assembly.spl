@@ -699,6 +699,19 @@ fn flat_ast_to_module(path: text) -> ParserModule:
     if not layer_dag_verdict.ok:
         parser_error(layer_dag_verdict.diagnostic)
 
+    # M1b wiring: serialize this module's own declared layers/edges (flat
+    # "D:name" / "E:from>to" lines, declaration order) into
+    # ParserModule.layer_dag_edges so a whole-program driver pass can merge
+    # every module's facts into one project-wide LayerDagRegistry after all
+    # modules are parsed. layer_registry itself is local to this call and
+    # would otherwise be discarded once check_layer_dag() above returns.
+    var layer_dag_edges_lines: [text] = []
+    for layer_name in layer_registry.names:
+        layer_dag_edges_lines.push("D:" + layer_name)
+    for layer_edge in layer_registry.edges:
+        layer_dag_edges_lines.push("E:" + layer_edge.from_name + ">" + layer_edge.to_name)
+    val layer_dag_edges_text = layer_dag_edges_lines.join("\n")
+
     # M1: `@layer(NAME)` module tag must refer to a layer actually declared
     # (via M0's `layer NAME` decl) somewhere in scope. Checked after the DAG
     # validation above and after layer_registry has seen every `layer` decl
@@ -769,7 +782,8 @@ fn flat_ast_to_module(path: text) -> ParserModule:
         di_bindings: di_bindings,
         arch_rules: arch_rules,
         mock_decls: [],
-        tagged_layer: module_tagged_layer
+        tagged_layer: module_tagged_layer,
+        layer_dag_edges: layer_dag_edges_text
     )
     if flat_bridge_trace_enabled():
         print "[flat-bridge] built frontend module path={path}"
