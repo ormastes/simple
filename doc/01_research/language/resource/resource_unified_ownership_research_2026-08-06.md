@@ -6,6 +6,13 @@
 - Architecture: `doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md`
 - Design: `doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md`
 - Plan: `doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md`
+- **Downstream (2026-08-07):** `doc/01_research/language/assurance/aerospace_grade_hardening_research_2026-08-07.md`
+  — the aerospace/`space-a` hardening line. Its allocation-class analysis
+  (`none` / `init_only` / `bounded_pool` / `unbounded` / `unknown`) and its
+  steady-state sealing model build directly on the ownership/move work here;
+  its `resource` lifecycle (`construct → initialize → seal → start → step →
+  recover → shutdown`) is the consuming-drop story generalized to a whole
+  program. Both share the same gate: no self-hosted binary reaches users.
 
 ## Verified state as of 2026-08-07 (second round, folded into 2026-08-06 findings below)
 
