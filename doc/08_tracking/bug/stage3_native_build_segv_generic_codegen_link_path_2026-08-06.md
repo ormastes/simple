@@ -480,7 +480,7 @@ open finding, not folded into this doc's `0x118` mechanism — see
 `mir_lowering_codegen_error_first_call_zero_core_dump_2026-08-06.md`'s
 2026-08-06 "later" update for the exact repro and stderr capture.
 
-## 2026-08-07 — symbolized backtrace, and the "enum misclassification" diagnosis is FALSIFIED
+## 2026-08-07 — symbolized backtrace; the "enum misclassification" diagnosis is FALSIFIED; this family is STILL OPEN
 
 A lane was handed a "30-second reproduction": an 8-line program
 (`enum Shape: Circle(i64)/Square(i64)` + `val s = Shape.Circle(7)`) that
@@ -511,7 +511,10 @@ fails at parse time and never reaches lowering. There is no green baseline on
 this harness, so no crash observed on it can be attributed to any language
 construct in the input. The enum program is not special.
 
-**Symbolized backtrace (gdb, hello-world `print "hi"`):**
+**Symbolized backtrace (gdb, hello-world `print "hi"`).** This run carried
+**no** `ulimit -v`, unlike the probe table above, and SIGSEGV'd on the same
+`pF` program — so the memory cap used for the probes is exonerated as a
+confound:
 
 ```
 Program received signal SIGSEGV
@@ -530,7 +533,7 @@ Program received signal SIGSEGV
 Not LLVM codegen, not the link path, not enum lowering: `SymbolTable.lookup`
 walking a scope chain from `try_lower_bitfield_construct`.
 
-**It is a stale binary. The fix already landed.**
+**The binary is stale — but that does NOT close this family.**
 
 - `stage2-admitted/simple` mtime: **2026-08-06 06:33:43 UTC**
 - `1ea6599e8fb` *"fix(compiler): stop try_lower_bitfield_construct SIGSEGV,
@@ -539,7 +542,25 @@ walking a scope chain from `try_lower_bitfield_construct`.
   guard that had stack-overflowed Stage 3, keeping the correct
   `next_scope_id` range check.
 
-The binary predates its own fix by 7h19m. The fix's code comment at
+The binary predates its own fix by 7h19m. That explains why *this*
+backtrace lands in `try_lower_bitfield_construct` specifically — that call
+site was repaired after this binary was built. **It does not explain
+hello-world crashing at all.** This same doc records five stage3 binaries
+rebuilt 20:20-21:07 on 2026-08-06 — i.e. *after* both `1ea6599e8fb` (13:52)
+and `030ff43e330` (15:27) — all SIGSEGVing on `fn main(): print("hello")`
+with `si_addr=0x118`. So `1ea6599e8fb` narrowed or moved the fault; it did
+not close it. This addendum does not close it either. (The commit message of
+the change that first added this section said "the fix is already on main";
+that phrasing is superseded by this paragraph.)
+
+`0x118` is consistent with a field read at offset 0x118 off a null `Scope`,
+i.e. plausibly the same `SymbolTable` mechanism at a *different*
+`lookup()` call site still reachable from `lower_call`. Flagged as the next
+lane's entry point — **not proven**; the post-fix binaries on disk are
+stripped, so a symbolized backtrace for them still needs an unstripped
+rebuild.
+
+The fix's code comment at
 `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:971-985`
 describes this exact fault: on the bootstrap flat symbol table
 (`bootstrap_flat_symbol_table`, `bootstrap_globals.spl`) `self.scopes` is `{}`
@@ -548,25 +569,47 @@ returns a null `Scope` under native codegen — the next field read
 (`scope.symbols`) SIGSEGVs. The fix is to use the symbol already resolved onto
 the HIR node instead of re-resolving by name via `self.symbols.lookup()`.
 
-**Same root cause explains the enum symptom.** The
+**The enum fallthrough is a SEPARATE, still-open question — an earlier
+draft of this section wrongly folded it into the crash above.** `lookup()`
+walks `self.scopes`; `get_symbol_raw(id)` reads `self.symbols`. These are
+different dicts, and reading the constructor body settles it:
+`bootstrap_flat_symbol_table` (`bootstrap_globals.spl:302-307`) calls
+`SymbolTable.new()` — which **does** create the id-0 root scope
+(`hir_types.spl:229`, `table.scopes[0] = Scope(...)`; a grep for `scopes:`
+shows only `scopes: {}` at :218 and misleads) — and then populates
+`table.symbols[symbol.id.id]`. It leaves `scopes[0].symbols` and
+`exact_symbols` empty. So on that table `get_symbol_raw(id)` **works**, and
+`lookup(name)` returns nil rather than crashing. Consequences:
+
+1. The `switch_operators_calls.spl:978-983` comment's premise ("`self.scopes`
+   is `{}`") does not hold at origin/main. The guard is still right for other
+   reasons, but the stated mechanism should be re-derived.
+2. `recv_enum_name == ""` is therefore **not** explained by an unpopulated
+   `symbols` dict. The remaining candidate is that `receiver.kind` matches
+   neither `Var` nor `NamedVar` at that point. Unverified.
+
+Hypothesis, with its disconfirming constraint, for whoever picks this up: the
 `enum_variant_index` reclassification at
 `50.mir/_MirLoweringExpr/method_calls_literals.spl:1046-1069` derives
 `recv_enum_name` from `self.symbols.get_symbol_raw(rsym.id)`. On the same
 unpopulated flat symbol table that returns nil, so `recv_enum_name` stays `""`
-and the block falls through to the unresolved-method path — which is exactly
-what the traces show (`[mir-method-call] enum-owner` printed, no return).
+and the block would fall through to the unresolved-method path. This is
+consistent with the traces (`[mir-method-call] enum-owner` printed, no return).
 Corroborating: `Option.Some(7)` fell through identically even though
 `"Option"` is registered unconditionally (`module_lowering.spl:895`,
-`bootstrap_globals.spl:544/655`), so the index is not the problem — the symbol
-lookup is. The "misclassification" is a downstream symptom of the same broken
-symbol table, in the same stale binary.
+`bootstrap_globals.spl:544/655`), so the index is not the problem. **What is
+the problem was not established.** Confirm or kill it by dumping
+`rt_enum_discriminant(receiver.kind)` at `method_calls_literals.spl:1046` —
+which requires a rebuild, see the CTL control below.
 
 **Two numbers cited as evidence are not garbage.** `disc=1851930204` and
 `local=103079215111` (`0x1800000007`) are byte-identical across every probe,
-including `Circle` and `Some`. They are stable name-hash / sentinel values of
-the kind the code deliberately computes (`rt_enum_discriminant(...)`, cf. the
-`[hir-field-type]` traces), not corrupted per-site data. Do not root-cause
-from them.
+including `Circle` and `Some`. Being byte-identical across unrelated inputs is
+exactly as much as was proved: they are stable, hence not per-site
+corruption. (`disc` is consistent with the name-hash discriminants the code
+deliberately computes via `rt_enum_discriminant`, cf. the `[hir-field-type]`
+traces; `0x1800000007` reads more like a packed LocalId than a sentinel —
+neither reading is verified.) Do not root-cause from them.
 
 **This harness cannot validate a compiler source fix.** Control: an `XYZZY`
 marker was added to the const-0 warning string at
