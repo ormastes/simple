@@ -1,0 +1,60 @@
+#!/bin/sh
+# Install the Simple Jupyter kernelspec.
+#
+# Copies kernel.json (with the real kernel_wrapper.py path substituted for
+# the "<path>" placeholder) plus kernel_wrapper.py into a staging directory,
+# then registers it with `jupyter kernelspec install`. See
+# doc/07_guide/app/tools/jupyter.md for the documented contract this script
+# implements.
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)/..
+REPO_ROOT=$(CDPATH= cd -- "$REPO_ROOT" && pwd)
+
+fail() {
+    echo "[FAIL] $*" >&2
+    exit 1
+}
+
+command -v jupyter >/dev/null 2>&1 || fail "jupyter is required (pip install notebook jupyter_client pyzmq)"
+command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+python3 -c "import zmq" >/dev/null 2>&1 || fail "pyzmq is required (pip install pyzmq)"
+
+USER_FLAG="--user"
+if [ "${SIMPLE_JUPYTER_SYSTEM_INSTALL:-0}" = "1" ]; then
+    USER_FLAG=""
+fi
+
+STAGE=$(mktemp -d "${TMPDIR:-/tmp}/simple-jupyter-kernelspec.XXXXXX")
+trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
+
+WRAPPER_PATH="$SCRIPT_DIR/kernel_wrapper.py"
+[ -f "$WRAPPER_PATH" ] || fail "missing $WRAPPER_PATH"
+
+cp "$WRAPPER_PATH" "$STAGE/kernel_wrapper.py"
+chmod 755 "$STAGE/kernel_wrapper.py"
+
+# `jupyter kernelspec install` copies the staging directory's contents
+# (kernel.json + kernel_wrapper.py) verbatim into its data-dir destination
+# and then discards the staging directory -- so kernel.json's argv must
+# already point at wherever kernel_wrapper.py will *land*, not at $STAGE.
+# `jupyter --data-dir` plus the --user/--sys-prefix choice below determines
+# that destination the same way `jupyter kernelspec install` computes it.
+if [ -n "$USER_FLAG" ]; then
+    DEST_BASE=$(jupyter --data-dir)
+else
+    DEST_BASE=$(python3 -c "import sys; print(sys.prefix)")/share/jupyter
+fi
+DEST_DIR="$DEST_BASE/kernels/simple"
+WRAPPER_DEST="$DEST_DIR/kernel_wrapper.py"
+
+# Substitute the "<path>" placeholder in kernel.json's argv with the real,
+# absolute path the wrapper script will be installed at.
+sed "s#<path>/kernel_wrapper.py#$WRAPPER_DEST#" "$SCRIPT_DIR/kernel.json" > "$STAGE/kernel.json"
+
+# shellcheck disable=SC2086
+jupyter kernelspec install "$STAGE" --name simple $USER_FLAG
+
+echo "[OK] Simple kernelspec installed. Verify with: jupyter kernelspec list"

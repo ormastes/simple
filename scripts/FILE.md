@@ -24,4 +24,5 @@ Build, audit, bootstrap, and utility scripts.
 | `smoke` | Protocol smoke test scripts |
 | `check-workspace-root-guard.shs` | Workspace root guard |
 | `check-simpleos-native-surface.shs` | SimpleOS native-surface policy gate |
+| `gen_cm6_grammar.mjs` | Generates the JupyterLab labextension's CodeMirror 6 grammar from the Tree-sitter highlight queries (`tools/jupyter/labextension/src/generated/`) |
 | `FILE.md` | This manifest |

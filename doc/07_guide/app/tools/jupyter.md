@@ -2,6 +2,15 @@
 
 Run Simple language code in Jupyter notebooks, JupyterLab, and Jupyter console.
 
+**Status (2026-08-07):** `tools/jupyter/` (P0) is implemented and verified — live
+`jupyter_client` round trip + `bin/simple test
+test/03_system/tools/jupyter/jupyter_kernel_install_system_spec.spl` (7/7). Spec paths
+below are `test/03_system/tools/jupyter/`, not `test/03_system/jupyter/`. The JupyterLab
+CodeMirror 6 grammar (X1) is implemented at `tools/jupyter/labextension/`, generated from
+the compiler's Tree-sitter queries — see § Source Files. Lane-aware execution (local/
+remote/CUDA/Vulkan), magics, and the Simple Lab web UI are still in progress; see
+`doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md`.
+
 ---
 
 ## Quick Start
@@ -158,11 +167,11 @@ Failed cells are rolled back — accumulated state is preserved.
 
 ```bash
 # Full server E2E (starts real Jupyter server, HTTP + ZMQ)
-python3 test/03_system/jupyter/helpers/run_server_check.py
+python3 test/03_system/tools/jupyter/helpers/run_server_check.py
 
 # Execute notebook via nbconvert
-python3 test/03_system/jupyter/helpers/run_notebook_server_test.py \
-    --notebook test/03_system/jupyter/fixtures/hello.ipynb --skip-server
+python3 test/03_system/tools/jupyter/helpers/run_notebook_server_test.py \
+    --notebook test/03_system/tools/jupyter/fixtures/hello.ipynb --skip-server
 ```
 
 ### Run E2E Tests in Docker
@@ -176,12 +185,12 @@ sh scripts/test/jupyter-docker-test.shs
 
 ```bash
 # All Jupyter specs
-bin/simple test test/03_system/jupyter/
+bin/simple test test/03_system/tools/jupyter/
 
 # Individual specs
-bin/simple test test/03_system/jupyter/jupyter_notebook_server_system_spec.spl
-bin/simple test test/03_system/jupyter/jupyter_kernel_install_system_spec.spl
-bin/simple test test/03_system/jupyter/jupyter_execution_system_spec.spl
+bin/simple test test/03_system/tools/jupyter/jupyter_notebook_server_system_spec.spl
+bin/simple test test/03_system/tools/jupyter/jupyter_kernel_install_system_spec.spl
+bin/simple test test/03_system/tools/jupyter/jupyter_execution_system_spec.spl
 ```
 
 ### Test Coverage
@@ -209,6 +218,7 @@ bin/simple test test/03_system/jupyter/jupyter_execution_system_spec.spl
 | `tools/jupyter/install.shs` | 69 | Installation script |
 | `tools/docker/Dockerfile.jupyter-test` | 84 | Docker E2E image |
 | `scripts/test/jupyter-docker-test.shs` | 72 | Docker test runner |
+| `tools/jupyter/labextension/` | — | JupyterLab extension: CodeMirror 6 grammar generated from the compiler's Tree-sitter queries (`scripts/gen_cm6_grammar.mjs`, SHA-gated against `src/compiler/10.frontend/parser/treesitter/queries/*.scm`) |
 
 ---
 
