@@ -91,7 +91,7 @@ carry the described subject line. Only the M2 *scope* claim was wrong.
 | O3 rasterizer / resources | **PARTIAL** | `paint_chunk_rasterizer_spec.spl` (2 its), `widget_draw_ir_glyph_run_spec.spl` 4/4 |
 | P0/P1 SIMD bucket gate | **DONE (honest negative)** | `6c048f9af5ce`; `backend_software.spl:813,831-834` probes TINY/SMALL/MEDIUM/LARGE. Honest result: **SIMD lost at every bucket under the interpreter; all four stayed scalar.** `_kernel_probe_fill_bucket:66,87-90` |
 | P1 gate coverage beyond `fill_const` | **NOT STARTED** | Only `fill_const` is probed → **T10** |
-| P2 blend-span kernels | **PARTIAL — unlinked** | `5f19c774648`, source only, 8 files/+329. C symbol never independently proven linked/callable; shared binary deliberately not rebuilt → **T16** (SERIAL-BOOTSTRAP) |
+| P2 blend-span kernels | **T16 RE-RUN (2026-08-07): premise refuted — root cause is NOT the bootstrap block** | `5f19c774648`, source only, 8 files/+329. `nm` on the deployed (still-seed) binary and on `libsimple_runtime.a` proves the two new C symbols are absent from the native ABI, while all 5 siblings are present. Root cause found: the working siblings are provided by a **second, independent Rust reimplementation** in `engine2d_simd_ops.rs` (`simple_runtime` crate), not by `runtime_simd_dispatch.c` (dead code for this link config, selective-archive-extraction). `engine2d_simd_ops.rs` never got the two new blend-span functions added — a plain Rust-crate fix, not a Stage-3/bootstrap issue. See `t16_blend_span_c_symbol_not_reachable_three_implementations_2026-08-07.md` |
 | P — production call sites for registered SIMD kernels | **NEEDS-INVESTIGATION** | The V0/V1 "zero production call sites" finding was never confirmed closed → **T8** |
 | G0–G4 Vulkan | **BLOCKED (board)** | virtio-gpu-gl / Venus is a QEMU-only device on this host; no physical-board path. Filed per `.claude/rules/board-runnable.md` (`simpleos_vulkan_board_gap_venus_is_qemu_only_2026-08-06.md`) |
 | U0b hosted input | **DONE** | `hosted_input_sdl2_spec.spl` 28/28 |
@@ -114,7 +114,7 @@ and is itself achievable):
 
 | Unit | Named prerequisite | What unblocks it |
 |---|---|---|
-| **T16** blend-kernel C-symbol verification | An isolated full-bootstrap + redeploy window; `bin/simple build bootstrap` has an open Stage-3 blocker (`.claude/rules/bootstrap.md`, `project_stage3_selfhost_blocked_2026-07-31`) | Either the Stage-3 blocker is fixed, or a single-purpose session takes the exclusive bootstrap window and accepts the risk. Tagged **SERIAL-BOOTSTRAP** |
+| **T16** blend-kernel C-symbol verification | **REVISED 2026-08-07:** not actually gated on the bootstrap window — see `t16_blend_span_c_symbol_not_reachable_three_implementations_2026-08-07.md`. Needs `rt_engine2d_simd_blend_span_u32`/`_blend_const_span_u32` added to `src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs` (plain Rust-crate change) | A normal seed rebuild once `engine2d_simd_ops.rs` gets the two missing functions, then re-run this unit's `nm` checks. The Stage-3 self-host blocker is orthogonal and does not need to be fixed first |
 | **T12** land the glyph-raster cache | **T11** — fix the `[text]`-array read-back corruption under native/JIT | T11 landing with a passing repro |
 | **T15** wire `HirForwardDecl` into a pass | Nothing external — but must not start before T14, or it wires against fixture-layout facts | T14 landing |
 | Any claim of a *pure-Simple AOT* perf number | Same Stage-3 bootstrap blocker | Same as T16. Until then, every number is seed-JIT/interpreter-bound and must say so |
@@ -359,21 +359,52 @@ or re-scope. Never sweep another session's uncommitted work into your commit.
 - Depends on: **T14** (layer views must be proven against real layout before
   forwarding leans on them). Collision set: **{}**.
 
-**T16 — Verify the blend-span C symbols are linked and bit-exact** — `SERIAL-BOOTSTRAP`
+**T16 — Verify the blend-span C symbols are linked and bit-exact** — **RE-RUN DONE, RED (2026-08-07), premise refuted**
 - Goal: `5f19c774648` landed source only. Prove the C symbol is linked, callable,
   and bit-exact against the scalar oracle.
 - Files: `src/runtime/runtime_simd_dispatch.c` **[E]**, `src/runtime/runtime.h` **[E]**,
   `src/compiler_rust/runtime/build.rs` **[E]**, `simd_isa_provider.spl` /
   `simd_native_rows.spl` **[E]**.
+- **Verdict:** run against the 2026-08-07 22:39 redeployed artifact
+  (`bin/release/x86_64-unknown-linux-gnu/simple`, md5
+  `70476ca038e184fecba4f910b0db9b18`). The redeploy is **still the Rust seed**
+  (`bin/simple --version` prints the seed WARNING banner) — the task premise
+  that this redeploy was a self-hosted build unblocking T16 does not hold, but
+  T16's own acceptance bar (`nm` on the real artifact) is answerable
+  regardless of seed-vs-self-hosted, and the answer is **NO**: `nm` shows
+  `rt_engine2d_simd_blend_span_u32`/`_blend_const_span_u32` absent from both
+  the deployed binary and `libsimple_runtime.a`, while all 5 sibling kernels
+  are present as `T`. Root-caused (not inferred): the 5 working siblings are
+  provided by a **second, independent Rust implementation** in
+  `src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs` (the
+  `simple_runtime` crate, linked into the native ABI) — `runtime_simd_dispatch.c`
+  is dead code for this link configuration (selective `-lstatic=runtime_sffi_c`
+  extraction, nothing in the Rust crate graph references the C names). A
+  standalone `gcc -c` of the C file confirms both new C symbols compile fine
+  and would export as `T` if the archive member were ever pulled in — the gap
+  is that `engine2d_simd_ops.rs` never received the two new functions, so
+  there is no native-ABI provider at all, C or Rust. Full evidence (nm
+  transcripts, archive-member-qualified `nm -A`, grep of all three
+  implementation sites): `doc/08_tracking/bug/t16_blend_span_c_symbol_not_reachable_three_implementations_2026-08-07.md`.
 - Spec: the verification suite planned in
   `doc/03_plan/ui/perf/engine2d_simd_blend_span_kernel_design_plan_2026-08-07.md` §5
   (bit-exact hashes, `sa==0` / `sa==255` / zero-length guards, two `describe`
-  blocks) — currently **planned, not run**.
+  blocks) — **already implemented and run by a prior session** against the
+  Rust interpreter bridge only (`simd_isa_provider_spec.spl:327-393`); that
+  spec's own honesty note already documents it cannot reach the native/C path.
+  Not re-run this session (no new coverage would result — the gap is a
+  missing native-ABI function, not an unrun spec).
 - Acceptance: the symbol resolves at link time (prove it — `nm`, not inference);
   every kernel is bit-exact vs scalar; a non-bit-exact kernel is **not
   registered**. State the binary provenance of the redeployed artifact.
-- Depends on: an isolated full-bootstrap window (§2 category b).
-  **Collision set: GLOBAL** — no other unit may build or redeploy concurrently.
+  **NOT MET** for the native-ABI symbol (absent, not merely non-bit-exact);
+  MET for the interpreter-bridge path (previously proven bit-exact, symbol
+  presence re-confirmed in this binary).
+- Depends on: ~~an isolated full-bootstrap window~~ **REVISED:** a plain Rust
+  crate change to `engine2d_simd_ops.rs` + normal seed rebuild. The Stage-3
+  self-host blocker (§2 category b, still open) is orthogonal to this fix.
+  **Collision set: GLOBAL** — no other unit may build or redeploy concurrently
+  (unchanged — a seed rebuild still needs exclusivity).
 
 **T17 — Unblock the WM/web showcase child-frame timeout**
 - Goal: the internal 10 s `DEFAULT_EXAMPLES_TIMEOUT_SECS` watchdog kills the
