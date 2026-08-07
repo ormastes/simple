@@ -96,7 +96,28 @@ Implementation in progress, parallel-agent execution against
   Worked around with a `!= nil` check instead of `match`; see
   `doc/08_tracking/bug/match_on_optional_enum_variant_falls_to_wildcard_2026-08-07.md`.
 
-Not yet started: K2-K6, P1-P3, X2-X4, L3-L4, H1-H3, E2.
+- **P1** — `src/lib/nogc_sync_mut/notebook/lsp_bridge.spl`: session-long Simple LSP
+  subprocess bridge (real `rt_process_spawn_piped`-backed `StdioProcessTransport`
+  from `std.editor.services.lsp_transport`, not the still-stub `LspClient` in that
+  module). Real discovery: this repo's LSP completion/hover handlers shell out to
+  `simple query completions/hover <path-from-uri> <line> <col>` against a REAL FILE
+  ON DISK — `didChange` is a no-op there, no in-memory buffer — so the bridge
+  rewrites a real temp file per call. Found + fixed a second bug:
+  `query_sanitize.spl` allowlists only two `/tmp` prefixes for that CLI path;
+  any other path silently returns empty with no error. `main.spl` wires
+  `complete_request`/`inspect_request` (via the bridge), `interrupt_request`
+  (idle-kernel/no-active-executor is a no-op success, not an error), and comm
+  `simple_lane` (`comm_open` replies with mode + lane list;
+  `comm_msg`'s `set_mode` calls `set_default_mode`). `display_data` for math
+  blocks is deferred. Verify: `jupyter_execution_system_spec.spl` 7/7 (extended
+  with interrupt/comm scenarios), `jupyter_kernel_log_modes_spec.spl` 5/5 and
+  `jupyter_kernel_install_system_spec.spl` 7/7 regression-checked. `lsp_bridge_spec.spl`
+  2/2, both SKIP-clean on a pre-existing, already-filed gap
+  (`rt_process_spawn_piped` unwired in the interpreter's dispatch table,
+  `doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md`).
+
+Not yet started or still landing: K5-K6 (GPU-dependent), P2-P3, X3-X4, L3-L4
+(in flight), H1-H3 (H2 in flight), E1-E2.
 
 ## Feature Links
 
