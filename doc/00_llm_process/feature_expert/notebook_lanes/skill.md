@@ -8,8 +8,15 @@ the Simple Lab web notebook surface.
 
 ## Status (2026-08-07)
 
-Implementation in progress, parallel-agent execution against
-`doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md`. Landed:
+Plan complete: 23 of 24 tasks landed via parallel-agent execution against
+`doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md` (P0-P3,
+X1-X4, K1-K4, L1-L4, H1-H3, E1-E2, plus a critical dead-code magics-wiring fix
+and a critical server-crashing `TcpStream.read_bytes` fix found along the
+way). **K5/K6 remain genuinely blocked**, not a gap in this plan's own
+execution: the separate GPU plan's D1 task (`src/lib/common/svmg/ref_vm.spl`,
+the SVM-G interpreter core) does not exist yet, and B3/B4/C3 (which K5/K6
+need) depend on it. E2's CI workflow ships a documented, honest placeholder
+for the K5/K6 GPU-fixture jobs rather than inventing coverage. Landed:
 
 - **P0** — `tools/jupyter/` (Python ZMQ transport wrapper, kernelspec, installer)
   recreated and verified: live `jupyter_client` round trip + `bin/simple test
@@ -217,10 +224,18 @@ spec 7/7 after the fix. One remaining fuzz-lite gap, root-caused and refiled:
 instead of erroring (`doc/08_tracking/bug/lab_http_parser_oversized_header_line_silently_truncated_not_rejected_2026-08-07.md`) —
 not a crash, left RED rather than weakened.
 
-Not yet started or still landing: K5-K6 (blocked on the GPU plan's D1 —
+- **E2** — `.github/workflows/notebook-lanes-tests.yml`: 6 jobs (unit specs
+  cross-platform, subprocess-spawning system specs Linux+macOS, Docker E2E,
+  labextension Jest/tsc fallback, GPU-fixture placeholder, board-fixture
+  manual dispatch). No live GitHub Actions run was triggerable from this
+  sandbox — verified instead by running every wired `bin/simple test <spec>`
+  locally and confirming the workflow encodes their real pass/fail state,
+  including the two known RED items (L1's `--sdoctest` gap, H3's
+  oversized-header gap) rather than hiding them.
+
+Only remaining gap: **K5-K6**, blocked on the GPU plan's D1 —
 `src/lib/common/svmg/ref_vm.spl` doesn't exist yet, so B3/B4/C3 can't land
-either), H3 (in flight, deps: H1+L4 both landed), E2 (deps: P3 done, L4 done,
-H3 pending).
+either. Not a gap in this plan's own execution.
 
 ## Feature Links
 
