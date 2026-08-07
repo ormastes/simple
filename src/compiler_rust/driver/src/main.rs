@@ -307,6 +307,7 @@ fn command_is_pure_simple_tool(name: &str) -> bool {
             | "brief"
             | "dashboard"
             | "coverage"
+            | "spl-coverage"
             | "depgraph"
             | "lsp"
             | "dap"
@@ -932,6 +933,17 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "",
         needs_rust_flags: &[],
     },
+    // Simple-source branch/decision coverage CLI (app-only)
+    CommandEntry {
+        name: "spl-coverage",
+        app_path: "src/app/spl_coverage/main.spl",
+        rust_handler: Handler::Custom(|_| {
+            eprintln!("error: spl-coverage app not found (install Simple or run from project root)");
+            1
+        }),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
     // Dependency graph (app-only)
     CommandEntry {
         name: "depgraph",
@@ -1279,6 +1291,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/app/query/main.spl"
         && app_relative_path != "src/app/info/main.spl"
         && app_relative_path != "src/app/spec_coverage/main.spl"
+        && app_relative_path != "src/app/spl_coverage/main.spl"
         && app_relative_path != "src/app/replay/main.spl"
         && app_relative_path != "src/app/gen_lean/main.spl"
         && app_relative_path != "src/app/feature_gen/main.spl"
@@ -1407,6 +1420,7 @@ fn app_receives_user_args_only(app_relative_path: &str) -> bool {
             | "src/app/query/main.spl"
             | "src/app/info/main.spl"
             | "src/app/spec_coverage/main.spl"
+            | "src/app/spl_coverage/main.spl"
             | "src/app/replay/main.spl"
             | "src/app/gen_lean/main.spl"
             | "src/app/feature_gen/main.spl"

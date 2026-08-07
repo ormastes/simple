@@ -1697,7 +1697,8 @@ impl CompilerPipeline {
 
         // Lower HIR to MIR with contract mode, DI config, and coverage (#674)
         let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
-        let mut mir_module = mir::lower_to_mir_full(&hir_module, self.contract_mode, di_config, self.coverage_enabled)
+        let coverage_enabled = self.coverage_enabled || crate::coverage::is_coverage_enabled();
+        let mut mir_module = mir::lower_to_mir_full(&hir_module, self.contract_mode, di_config, coverage_enabled)
             .map_err(|e| crate::error::factory::mir_lowering_failed(&e))?;
 
         // Ghost erasure pass: remove ghost variables before codegen
