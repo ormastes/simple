@@ -1,0 +1,121 @@
+# Tests for the nbformat v4 subset reader/writer (src/lib/nogc_sync_mut/notebook/ipynb.spl)
+
+use std.nogc_sync_mut.notebook.ipynb.{NbNotebook, NbCell, NbOutput, ipynb_parse, ipynb_serialize}
+
+fn make_hello_notebook() -> NbNotebook:
+    val markdown_cell = NbCell(
+        cell_type: "markdown",
+        metadata_json: "{}",
+        source: "# Hello, Simple Lab",
+        has_execution_count: false,
+        execution_count: -1,
+        outputs: []
+    )
+    val stream_output = NbOutput(
+        output_type: "stream",
+        stream_name: "stdout",
+        text: "Hello, Simple Lab!\n",
+        metadata_json: "{}",
+        ename: "",
+        evalue: "",
+        traceback: ""
+    )
+    val code_cell = NbCell(
+        cell_type: "code",
+        metadata_json: "{}",
+        source: "print(\"Hello, Simple Lab!\")",
+        has_execution_count: true,
+        execution_count: 1,
+        outputs: [stream_output]
+    )
+    NbNotebook(nbformat_minor: 5, metadata_json: "{}", cells: [markdown_cell, code_cell])
+
+describe "ipynb_parse / ipynb_serialize":
+    it "round-trips a serialized notebook back to an equal notebook":
+        val nb = make_hello_notebook()
+        val text1 = ipynb_serialize(nb)
+        val parsed = ipynb_parse(text1)
+        match parsed:
+            case Ok(nb2):
+                val text2 = ipynb_serialize(nb2)
+                expect(text2).to_equal(text1)
+            case Err(msg):
+                fail("expected parse to succeed, got error: {msg}")
+
+    it "serializes nbformat 4 with the expected structural markers":
+        val nb = make_hello_notebook()
+        val text = ipynb_serialize(nb)
+        expect(text).to_contain("\"nbformat\": 4")
+        expect(text).to_contain("\"cell_type\": \"code\"")
+        expect(text).to_contain("\"cell_type\": \"markdown\"")
+        expect(text).to_contain("\"output_type\": \"stream\"")
+
+    it "preserves markdown source through the round trip":
+        val nb = make_hello_notebook()
+        val text1 = ipynb_serialize(nb)
+        val parsed = ipynb_parse(text1)
+        match parsed:
+            case Ok(nb2):
+                expect(nb2.cells[0].cell_type).to_equal("markdown")
+                expect(nb2.cells[0].source).to_equal("# Hello, Simple Lab")
+            case Err(msg):
+                fail("expected parse to succeed, got error: {msg}")
+
+    it "preserves code cell outputs through the round trip":
+        val nb = make_hello_notebook()
+        val text1 = ipynb_serialize(nb)
+        val parsed = ipynb_parse(text1)
+        match parsed:
+            case Ok(nb2):
+                val code_cell = nb2.cells[1]
+                expect(code_cell.cell_type).to_equal("code")
+                expect(code_cell.execution_count).to_equal(1)
+                expect(code_cell.outputs.len()).to_equal(1)
+                expect(code_cell.outputs[0].output_type).to_equal("stream")
+                expect(code_cell.outputs[0].text).to_equal("Hello, Simple Lab!\n")
+            case Err(msg):
+                fail("expected parse to succeed, got error: {msg}")
+
+    it "fails fast on an unsupported nbformat version":
+        val bad = "{\"nbformat\": 3, \"nbformat_minor\": 0, \"metadata\": {}, \"cells\": []}"
+        val parsed = ipynb_parse(bad)
+        match parsed:
+            case Ok(_):
+                fail("expected an Err for nbformat 3")
+            case Err(msg):
+                expect(msg).to_contain("nbformat")
+
+    it "fails fast on an unsupported cell_type":
+        val bad = "{\"nbformat\": 4, \"nbformat_minor\": 5, \"metadata\": {}, \"cells\": [{\"cell_type\": \"raw\", \"metadata\": {}, \"source\": []}]}"
+        val parsed = ipynb_parse(bad)
+        match parsed:
+            case Ok(_):
+                fail("expected an Err for cell_type 'raw'")
+            case Err(msg):
+                expect(msg).to_contain("cell_type")
+
+    it "fails fast on an unsupported output_type":
+        val bad = "{\"nbformat\": 4, \"nbformat_minor\": 5, \"metadata\": {}, \"cells\": [{\"cell_type\": \"code\", \"metadata\": {}, \"source\": [], \"execution_count\": null, \"outputs\": [{\"output_type\": \"execute_result\", \"data\": {}}]}]}"
+        val parsed = ipynb_parse(bad)
+        match parsed:
+            case Ok(_):
+                fail("expected an Err for output_type 'execute_result'")
+            case Err(msg):
+                expect(msg).to_contain("output_type")
+
+    it "fails fast on an unsupported display_data mimetype":
+        val bad = "{\"nbformat\": 4, \"nbformat_minor\": 5, \"metadata\": {}, \"cells\": [{\"cell_type\": \"code\", \"metadata\": {}, \"source\": [], \"execution_count\": null, \"outputs\": [{\"output_type\": \"display_data\", \"data\": {\"image/png\": \"abc\"}, \"metadata\": {}}]}]}"
+        val parsed = ipynb_parse(bad)
+        match parsed:
+            case Ok(_):
+                fail("expected an Err for a non-text/plain display_data mimetype")
+            case Err(msg):
+                expect(msg).to_contain("mimetype")
+
+    it "fails fast on malformed JSON":
+        val parsed = ipynb_parse("{not json")
+        match parsed:
+            case Ok(_):
+                fail("expected an Err for malformed JSON")
+            case Err(msg):
+                expect(msg).to_contain("JSON")
