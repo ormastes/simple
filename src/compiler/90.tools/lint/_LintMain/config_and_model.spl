@@ -253,7 +253,7 @@ fn _strict_robust_levels(levels: Dict<String, String>) -> Dict<String, String>:
 
 # --- Engine-default axis (REQ-MC-012 priority tier 3) -----------------------
 # Profile resolution priority (highest first): explicit --profile= CLI flag
-# > simple.sdn [lints] profile= > engine default. The first two tiers are
+# > simple.sdn lints.profile > engine default. The first two tiers are
 # wired at the CLI/sdn-loader call sites (see resolve_lint_config below and
 # entry_and_fixes.spl); this is the third tier's pure resolution logic,
 # parameterized on which engine is asking. Actual --engine=interpreter|jit|
@@ -310,7 +310,7 @@ fn parse_lint_level(level_str: String) -> Option<LintLevel>:
     nil
 
 # Lint configuration — overrides for lint levels.
-# Loaded from simple.sdn [lints] section and/or file-level attributes.
+# Loaded from the simple.sdn `lints:` section and/or file-level attributes.
 class LintConfig:
     levels: Dict<String, String>
     # Selected strictness tier; nil = unset (legacy build_default_levels behavior).
@@ -322,7 +322,7 @@ impl LintConfig:
     static fn new() -> LintConfig:
         LintConfig(levels: {}, profile: nil, error: "")
 
-    # Load config from an SDN file.  Parses the [lints] section.
+    # Load config from an SDN file.  Parses the canonical `lints:` section.
     static fn from_sdn_file(path: String) -> LintConfig:
         if not file_exists(path):
             return LintConfig.new()
@@ -332,6 +332,26 @@ impl LintConfig:
         LintConfig.from_sdn_string(content)
 
     # Parse config from an SDN string.
+    #
+    # Accepts the CANONICAL SDN indent/colon form only:
+    #
+    #     lints:
+    #       profile: critical
+    #       stub_impl: deny
+    #
+    # (documented at doc/06_spec/system/compiler/modules/tooling/formatting_lints.md
+    # :345,:438). The former TOML-ish `[lints]` / `name = "level"` shape was
+    # removed in WP-4 of the aerospace hardening plan: premise 4 of that plan
+    # established that NO simple.sdn in the tree ever carried a `lints` key in
+    # either shape, so there is no legacy form to stay compatible with.
+    #
+    # Hand-rolled rather than routed through std.common.sdn.parser or
+    # ProjectContext.load_from_sdn: executing extra module init inside
+    # lint-main's graph is the documented trigger of
+    # doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md.
+    # The typed loader (compiler.driver.project.ProjectContext.load_from_sdn)
+    # does use the real parser and is the canonical mapping; collapsing this
+    # copy into it is WP-3's job, not WP-4's.
     static fn from_sdn_string(content: String) -> LintConfig:
         var config = LintConfig.new()
         var in_lints_section = false
@@ -344,28 +364,25 @@ impl LintConfig:
             if trimmed == "" or trimmed.starts_with("#"):
                 continue
 
-            # Check for [lints] section header
-            if trimmed == "[lints]":
-                in_lints_section = true
+            val indented = line.starts_with(" ") or line.starts_with("\t")
+
+            # `lints:` with no inline value opens the section.
+            if not indented:
+                in_lints_section = trimmed == "lints:"
                 continue
 
-            # Any other section header exits [lints]
-            if trimmed.starts_with("[") and trimmed.ends_with("]"):
-                in_lints_section = false
-                continue
-
-            # Parse lint = "level" entries inside [lints]
-            if in_lints_section and trimmed.contains("="):
-                val parts = trimmed.split("=")
-                if parts.len() >= 2:
-                    val lint_name = parts[0].trim()
-                    var level_str = parts[1].trim()
+            # Parse `name: level` entries nested under `lints:`
+            if in_lints_section and trimmed.contains(":"):
+                val sep = trimmed.index_of(":") ?? -1
+                if sep > 0:
+                    val lint_name = trimmed.substring(0, sep).trim()
+                    var level_str = trimmed.substring(sep + 1).trim()
                     # Strip surrounding quotes
                     level_str = level_str.replace("\"", "")
                     level_str = level_str.replace("'", "")
                     level_str = level_str.trim()
 
-                    # profile=<tier> selects the strictness tier (not a lint name).
+                    # profile: <tier> selects the strictness tier (not a lint name).
                     # Handle it BEFORE the all_lint_names() gate or it is dropped.
                     if lint_name == "profile":
                         if parse_lint_profile(level_str).?:
@@ -378,6 +395,11 @@ impl LintConfig:
                             config.levels[lint_name] = level_str
                         else:
                             config.set_error_once("invalid level for {lint_name}: {level_str}")
+                    elif lint_name == "default_level":
+                        # Section-wide default (formatting_lints.md:438). LintConfig
+                        # has no default-level field yet; recognised so it is not
+                        # reported as an unknown lint, but not yet honoured.
+                        ()
                     elif lint_name == "unknown_annotation":
                         # Meta-lint: sets both unknown_decorator and unknown_attribute
                         if parse_lint_level(level_str).?:

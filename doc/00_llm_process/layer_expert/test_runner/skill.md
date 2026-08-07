@@ -180,3 +180,30 @@ update this skill with the new links and handoff notes before committing.
 - Record feature experts that depend on this layer.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
+
+## Profile pinning from `simple.sdn` (WP-4, 2026-08-07)
+
+`resolve_effective_profile` (`src/lib/nogc_sync_mut/test_runner/test_runner_config.spl`)
+reads the **canonical SDN indent/colon** form only:
+
+```
+lints:
+  profile: critical
+```
+
+The TOML-ish `[lints]` / `profile = "x"` shape it used to scan for was deleted:
+no manifest in the tree ever carried it, so the scanner always returned `""` and
+project-level profile pinning did not work at all (aerospace hardening plan
+premise 4, `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`).
+
+- Path-taking `read_sdn_lints_profile(path)` is exported so specs can drive it
+  from a fixture instead of depending on cwd. Fixtures:
+  `test/fixtures/project_sdn_profile/{with_profile,without_profile,legacy_toml}/simple.sdn`.
+- The canonical **typed** loader is
+  `compiler.driver.project.ProjectContext.load_from_sdn`, which maps
+  `project.name`/`source_root`, `features`, `lints.profile` (→ `set_active_profile`)
+  and the remaining `lints.*` keys into `lint_overrides` via
+  `std.common.sdn.parser`. `src/lib` must NOT import it (upward dependency), and
+  executing extra module init in a session that later drives frontend parsing
+  triggers `doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md`
+  — hence the deliberate small duplicate here. Unifying the three readers is WP-3.

@@ -155,15 +155,38 @@ describe "lint strictness profiles (reliable-mode P0)":
         cfg.set_profile(LintProfile.Robust)
         expect(level_name(cfg.get_level("unsafe_pattern"))).to_equal("deny")
 
-    it "sdn [lints] profile= selects a tier (AC-2)":
-        step("from_sdn_string parses profile= before the lint-name gate")
-        val cfg = LintConfig.from_sdn_string("[lints]\nprofile = \"robust\"\n")
+    it "sdn lints.profile selects a tier (AC-2)":
+        step("from_sdn_string parses profile: before the lint-name gate")
+        val cfg = LintConfig.from_sdn_string("lints:\n  profile: robust\n")
         expect(level_name(cfg.get_level("unsafe_pattern"))).to_equal("deny")
 
-    it "sdn [lints] profile= also accepts the deprecated old spelling (profile-rename)":
+    it "sdn lints.profile also accepts the deprecated old spelling (profile-rename)":
         step("from_sdn_string honors 'reliable' as an alias for 'robust'")
-        val cfg = LintConfig.from_sdn_string("[lints]\nprofile = \"reliable\"\n")
+        val cfg = LintConfig.from_sdn_string("lints:\n  profile: reliable\n")
         expect(level_name(cfg.get_level("unsafe_pattern"))).to_equal("deny")
+
+    it "leaves the tier unselected when the manifest carries no profile key":
+        # Differential half of AC-2: without this, the two examples above pass
+        # even on a scanner that never matches anything, because an unselected
+        # profile also leaves unsafe_pattern at its default. Assert the two
+        # cases DIFFER rather than only asserting the with-key case.
+        step("a lints: section with no profile: entry selects nothing")
+        val cfg = LintConfig.from_sdn_string("lints:\n  stub_impl: deny\n")
+        val unpinned_name = if cfg.profile.?: "selected" else: "none"
+        expect(unpinned_name).to_equal("none")
+        step("and the with-key case does select one")
+        val pinned = LintConfig.from_sdn_string("lints:\n  profile: robust\n")
+        val pinned_name = if pinned.profile.?: "selected" else: "none"
+        expect(pinned_name).to_equal("selected")
+
+    it "no longer accepts the removed TOML-ish [lints] shape":
+        # WP-4: the `[lints]` / `name = "level"` shape was deleted. It was never
+        # present in any manifest in the tree (aerospace hardening plan premise
+        # 4), so this is a format removal, not a softened assertion.
+        step("the old shape selects no profile")
+        val cfg = LintConfig.from_sdn_string("[lints]\nprofile = \"robust\"\n")
+        val legacy_name = if cfg.profile.?: "selected" else: "none"
+        expect(legacy_name).to_equal("none")
 
     it "@lint_profile() file attribute selects a tier (AC-2)":
         step("apply_file_attributes honors @lint_profile, distinct from @profile(critical)")

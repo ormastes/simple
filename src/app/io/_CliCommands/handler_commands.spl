@@ -108,10 +108,30 @@ fn _run_normalize_profile_name(raw: text) -> text:
 fn _run_valid_profile_names_help() -> text:
     "moderate, strict, robust, critical (deprecated aliases: lib, reliable, mission-critical)"
 
-# Minimal, self-contained simple.sdn [lints] profile= reader -- mirrors the
-# section format LintConfig.from_sdn_string parses, without importing it
-# (same interpreter-contamination hazard as above).
-fn _run_read_sdn_lints_profile(sdn_path: text) -> text:
+# Minimal, self-contained reader for the CANONICAL simple.sdn form
+#
+#     lints:
+#       profile: critical
+#
+# (doc/06_spec/system/compiler/modules/tooling/formatting_lints.md:345,:438).
+# The former TOML-ish `[lints]` / `profile = "x"` shape was removed in WP-4 of
+# the aerospace hardening plan — premise 4 established no manifest in the tree
+# ever used it, so there is no legacy form to keep.
+#
+# Still hand-rolled rather than calling
+# compiler.driver.project.ProjectContext.load_from_sdn (which is the canonical
+# typed mapping and does use std.common.sdn.parser): src/app/io must not pull
+# the compiler driver graph into the `run` path, and executing extra module
+# init in the session that later drives frontend parsing is the documented
+# trigger of the dict-to-int corruption cited above. Collapsing this copy into
+# the typed loader is WP-3's job.
+#
+# Public (and path-taking) so test/01_unit/app/io/run_sdn_lints_profile_spec.spl
+# can drive it from a fixture: _run_resolve_profile hardcodes the cwd-relative
+# "simple.sdn", which is not testable, and `bin/simple run` cannot exercise this
+# file at all today because the deployed binary is the Rust seed (aerospace
+# hardening plan premise #0.2).
+pub fn run_read_sdn_lints_profile(sdn_path: text) -> text:
     if not rt_file_exists(sdn_path):
         return ""
     val content = rt_file_read_text(sdn_path)
@@ -122,16 +142,14 @@ fn _run_read_sdn_lints_profile(sdn_path: text) -> text:
         val trimmed = line.trim()
         if trimmed == "" or trimmed.starts_with("#"):
             continue
-        if trimmed == "[lints]":
-            in_lints = true
+        val indented = line.starts_with(" ") or line.starts_with("\t")
+        if not indented:
+            in_lints = trimmed == "lints:"
             continue
-        if trimmed.starts_with("[") and trimmed.ends_with("]"):
-            in_lints = false
-            continue
-        if in_lints and trimmed.starts_with("profile") and trimmed.contains("="):
-            val parts = trimmed.split("=")
-            if parts.len() >= 2:
-                var val_str = parts[1].trim()
+        if in_lints and trimmed.starts_with("profile") and trimmed.contains(":"):
+            val sep = trimmed.index_of(":") ?? -1
+            if sep > 0 and trimmed.substring(0, sep).trim() == "profile":
+                var val_str = trimmed.substring(sep + 1).trim()
                 val_str = val_str.replace("\"", "")
                 val_str = val_str.replace("'", "")
                 val_str = val_str.trim()
@@ -139,13 +157,13 @@ fn _run_read_sdn_lints_profile(sdn_path: text) -> text:
     ""
 
 # Resolution order (highest first): explicit --profile= CLI flag (already
-# normalized by the caller) > simple.sdn [lints] profile= in the cwd >
+# normalized by the caller) > simple.sdn lints.profile in the cwd >
 # engine default (unset -- driver_safety_severity.safety_pass_severity()
 # treats an unset SIMPLE_SAFETY_PROFILE as Advisory, i.e. today's behavior).
 fn _run_resolve_profile(cli_value: text) -> text:
     if cli_value != "":
         return cli_value
-    _run_read_sdn_lints_profile("simple.sdn")
+    run_read_sdn_lints_profile("simple.sdn")
 
 fn cli_handle_run(args: [text], gc_log: bool, gc_off: bool) -> i64:
     if args.len() > 0:

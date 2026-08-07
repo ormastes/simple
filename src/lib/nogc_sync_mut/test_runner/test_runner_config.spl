@@ -34,18 +34,31 @@ fn get_cli_args() -> [text]:
 # =========================================================================
 
 # =========================================================================
-# REQ-MC-012 profile-aware execution: resolve simple.sdn [lints] profile=
+# REQ-MC-012 profile-aware execution: resolve simple.sdn lints.profile
 # =========================================================================
 #
-# Minimal, self-contained [lints] section scan (mirrors the format read by
-# LintConfig.from_sdn_string in
-# src/compiler/90.tools/lint/_LintMain/config_and_model.spl) rather than
-# importing that module: importing is harmless on its own, but *executing*
-# any of its module-level init (parse_lint_profile included) in the same
-# interpreter session that also drives `run`/`test`'s frontend parsing
-# deterministically corrupts the later frontend call — see
+# Minimal, self-contained reader for the CANONICAL simple.sdn form
+#
+#     lints:
+#       profile: critical
+#
+# (doc/06_spec/system/compiler/modules/tooling/formatting_lints.md:345,:438).
+# The former TOML-ish `[lints]` / `profile = "x"` shape was removed in WP-4 of
+# the aerospace hardening plan — premise 4 established that no manifest in the
+# tree ever carried it, so there is no legacy form to preserve.
+#
+# Still hand-rolled rather than calling
+# compiler.driver.project.ProjectContext.load_from_sdn (the canonical typed
+# mapping, which does use std.common.sdn.parser): src/lib must not depend
+# upward on the compiler driver, and *executing* extra module init in the
+# session that also drives `run`/`test`'s frontend parsing deterministically
+# corrupts the later frontend call — see
 # doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md.
-fn _read_sdn_lints_profile(sdn_path: text) -> text:
+# Collapsing this copy into the typed loader is WP-3's job, not WP-4's.
+#
+# Takes an explicit path so it is testable; resolve_effective_profile supplies
+# the cwd-relative default.
+pub fn read_sdn_lints_profile(sdn_path: text) -> text:
     val content = file_read(sdn_path) ?? ""
     if content == "":
         return ""
@@ -54,16 +67,14 @@ fn _read_sdn_lints_profile(sdn_path: text) -> text:
         val trimmed = line.trim()
         if trimmed == "" or trimmed.starts_with("#"):
             continue
-        if trimmed == "[lints]":
-            in_lints = true
+        val indented = line.starts_with(" ") or line.starts_with("\t")
+        if not indented:
+            in_lints = trimmed == "lints:"
             continue
-        if trimmed.starts_with("[") and trimmed.ends_with("]"):
-            in_lints = false
-            continue
-        if in_lints and trimmed.starts_with("profile") and trimmed.contains("="):
-            val parts = trimmed.split("=")
-            if parts.len() >= 2:
-                var val_str = parts[1].trim()
+        if in_lints and trimmed.starts_with("profile") and trimmed.contains(":"):
+            val sep = trimmed.index_of(":") ?? -1
+            if sep > 0 and trimmed.substring(0, sep).trim() == "profile":
+                var val_str = trimmed.substring(sep + 1).trim()
                 val_str = val_str.replace("\"", "")
                 val_str = val_str.replace("'", "")
                 val_str = val_str.trim()
@@ -72,13 +83,13 @@ fn _read_sdn_lints_profile(sdn_path: text) -> text:
 
 # Resolution order (REQ-MC-012, highest first): explicit --profile= CLI flag
 # (already normalized onto options.profile by parse_test_args) > simple.sdn
-# [lints] profile= in the current working directory > engine default (unset
+# lints.profile in the current working directory > engine default (unset
 # here -- driver_safety_severity.safety_pass_severity() already treats an
 # unset SIMPLE_SAFETY_PROFILE as Advisory, i.e. today's behavior).
 fn resolve_effective_profile(options: TestOptions) -> text:
     if options.profile != "":
         return options.profile
-    _read_sdn_lints_profile("simple.sdn")
+    read_sdn_lints_profile("simple.sdn")
 
 # =========================================================================
 # Editions plumbing -- decision-free manifest slice (lane ED1). See scoping
@@ -181,7 +192,7 @@ fn propagate_env_vars(options: TestOptions):
     # REQ-MC-012: export the resolved profile to the one consumer that
     # already exists -- driver_safety_severity's safety-pass severity gate
     # (src/compiler/80.driver/driver_safety_severity.spl reads this exact
-    # env var). Left unset when no CLI flag and no simple.sdn [lints]
+    # env var). Left unset when no CLI flag and no simple.sdn lints.
     # profile= are present, preserving prior (Advisory) behavior.
     val resolved_profile = resolve_effective_profile(options)
     if resolved_profile != "":
