@@ -14,6 +14,7 @@ use std.log.{error}
 use std.notebook.types.{CellResult}
 use std.notebook.session_manager.{KernelSessionManager}
 use std.notebook.local_exec.{LocalExecFactory}
+use std.notebook.lsp_bridge.{LspBridge}
 
 # ============================================================================
 # JSON Helpers (inlined to avoid cross-module issues)
@@ -123,8 +124,35 @@ const DEFAULT_SESSION_ID: text = "default"
 
 var SESSION_MANAGER: KernelSessionManager = KernelSessionManager.create(LocalExecFactory())
 
+# Lazily started on the first complete_request/inspect_request (design §5.1) —
+# most notebook sessions never trigger completion, so paying the LSP
+# subprocess's startup cost for every kernel is wasteful.
+var LSP_BRIDGE: LspBridge? = nil
+
 fn session_init():
     SESSION_MANAGER.create_session(DEFAULT_SESSION_ID, "interpreter")
+
+fn get_or_start_lsp_bridge() -> LspBridge:
+    if val bridge = LSP_BRIDGE:
+        return bridge
+    val bridge = LspBridge.start()
+    LSP_BRIDGE = bridge
+    bridge
+
+fn cursor_pos_to_line_col(code: text, cursor_pos: i64) -> (i64, i64):
+    """Jupyter's complete_request/inspect_request give a flat character
+    offset into `code`; the LSP wants 0-indexed (line, col)."""
+    var line = 0
+    var col = 0
+    var i = 0
+    while i < cursor_pos and i < code.len():
+        if code.char_at(i) == "\n":
+            line = line + 1
+            col = 0
+        else:
+            col = col + 1
+        i = i + 1
+    (line, col)
 
 fn session_execute(code: text, exec_count: i64) -> (text, text, bool):
     val result: CellResult = SESSION_MANAGER.execute_cell(DEFAULT_SESSION_ID, code, "cell_{exec_count}", "")
@@ -242,6 +270,144 @@ fn handle_comm_info(msg_id: text):
     )
     send_message("shell", "comm_info_reply", msg_id, content)
 
+# ============================================================================
+# complete_request / inspect_request (design §5.1: forwarded to the Simple
+# LSP over a session-long subprocess; positions mapped from cell text).
+# ============================================================================
+
+fn json_string_array(items: [text]) -> text:
+    var parts: [text] = []
+    for item in items:
+        parts.push(js(item))
+    SB_L() + parts.join(",") + SB_R()
+
+fn handle_complete(msg_id: text, raw_msg: text):
+    val code = extract_field(raw_msg, "code")
+    val cursor_pos = extract_field(raw_msg, "cursor_pos").trim().to_i64() ?? 0
+    val (line, col) = cursor_pos_to_line_col(code, cursor_pos)
+    val bridge = get_or_start_lsp_bridge()
+    val matches = bridge.complete(code, line, col)
+    val content = jo5(
+        jp("matches", json_string_array(matches)),
+        jp("cursor_start", str(cursor_pos)),
+        jp("cursor_end", str(cursor_pos)),
+        jp("metadata", LB() + RB()),
+        jp("status", js("ok"))
+    )
+    send_message("shell", "complete_reply", msg_id, content)
+
+fn handle_inspect(msg_id: text, raw_msg: text):
+    val code = extract_field(raw_msg, "code")
+    val cursor_pos = extract_field(raw_msg, "cursor_pos").trim().to_i64() ?? 0
+    val (line, col) = cursor_pos_to_line_col(code, cursor_pos)
+    val bridge = get_or_start_lsp_bridge()
+    val hover_text = bridge.inspect(code, line, col)
+    val found = hover_text.trim() != ""
+    var data = LB() + RB()
+    if found:
+        data = jo1(jp("text/plain", js(hover_text)))
+    val content = jo4(
+        jp("status", js("ok")),
+        jp("found", if found: "true" else: "false"),
+        jp("data", data),
+        jp("metadata", LB() + RB())
+    )
+    send_message("shell", "inspect_reply", msg_id, content)
+
+# ============================================================================
+# interrupt_request (control channel) — design §5.1: NotebookExecutor.interrupt()
+# on the session's active lane. This kernel currently only ever runs the
+# "interpreter" lane (design §5.3 escalation applies to the other lanes'
+# executors; the local lane's interrupt() is itself still a no-op per K2 —
+# tracked there, not a new gap this handler introduces).
+# ============================================================================
+
+fn handle_interrupt(msg_id: text):
+    val diag = SESSION_MANAGER.interrupt_session(DEFAULT_SESSION_ID, "interpreter")
+    # Jupyter interrupt semantics: interrupting an idle kernel (no cell has
+    # run yet, so no cached executor exists for this lane) is a no-op
+    # success, not an error — only an unknown-session diagnostic is a real
+    # failure here.
+    val is_idle_noop = diag.starts_with("No active executor for mode:")
+    val status = if diag == "" or is_idle_noop: "ok" else: "error"
+    val content = jo1(jp("status", js(status)))
+    send_message("control", "interrupt_reply", msg_id, content)
+
+# ============================================================================
+# comm `simple_lane` (design §5.1): lane list + statuses + current mode; a
+# set-mode command runs `%mode` server-side. Powers the JupyterLab lane
+# picker (design §6) once wired there (X3).
+# ============================================================================
+
+const SIMPLE_LANE_COMM_TARGET: text = "simple_lane"
+
+fn extract_object_field(json: text, key: text) -> text:
+    """Like extract_field, but for a nested object/array value: scans
+    balanced braces/brackets from the first `{`/`[` after the key instead
+    of stopping at the first inner comma."""
+    val search = Q() + key + Q() + ":"
+    val idx = json.index_of(search)
+    if idx < 0:
+        return ""
+    val start = idx + search.len()
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    if trimmed == "":
+        return ""
+    val open_ch = trimmed.char_at(0)
+    if open_ch != "{" and open_ch != SB_L():
+        return ""
+    val close_ch = if open_ch == "{": RB() else: SB_R()
+    var depth = 0
+    var i = 0
+    var in_str = false
+    while i < trimmed.len():
+        val ch = trimmed.char_at(i)
+        if in_str:
+            if ch == r"\":
+                i = i + 1
+            elif ch == Q():
+                in_str = false
+        else:
+            if ch == Q():
+                in_str = true
+            elif ch == open_ch:
+                depth = depth + 1
+            elif ch == close_ch:
+                depth = depth - 1
+                if depth == 0:
+                    return trimmed.substring(0, i + 1)
+        i = i + 1
+    ""
+
+fn lane_status_content() -> text:
+    jo2(
+        jp("mode", js(SESSION_MANAGER.default_mode_of(DEFAULT_SESSION_ID))),
+        jp("lanes", json_string_array(["interpreter"]))
+    )
+
+fn send_comm_msg(comm_id: text, data: text):
+    val content = jo2(
+        jp("comm_id", js(comm_id)),
+        jp("data", data)
+    )
+    send_message("iopub", "comm_msg", "", content)
+
+fn handle_comm_open(raw_msg: text):
+    val target = extract_field(raw_msg, "target_name")
+    if target != SIMPLE_LANE_COMM_TARGET:
+        return
+    val comm_id = extract_field(raw_msg, "comm_id")
+    send_comm_msg(comm_id, lane_status_content())
+
+fn handle_comm_msg(raw_msg: text):
+    val comm_id = extract_field(raw_msg, "comm_id")
+    val data = extract_object_field(raw_msg, "data")
+    val new_mode = extract_field(data, "set_mode")
+    if new_mode.trim() != "":
+        SESSION_MANAGER.set_default_mode(DEFAULT_SESSION_ID, new_mode.trim())
+    send_comm_msg(comm_id, lane_status_content())
+
 fn kernel_main():
     session_init()
     while KERNEL_RUNNING:
@@ -263,6 +429,16 @@ fn kernel_main():
             handle_shutdown(msg_id)
         elif msg_type == "comm_info_request":
             handle_comm_info(msg_id)
+        elif msg_type == "complete_request":
+            handle_complete(msg_id, line)
+        elif msg_type == "inspect_request":
+            handle_inspect(msg_id, line)
+        elif msg_type == "interrupt_request":
+            handle_interrupt(msg_id)
+        elif msg_type == "comm_open":
+            handle_comm_open(line)
+        elif msg_type == "comm_msg":
+            handle_comm_msg(line)
 
 fn print_usage():
     print "Simple Jupyter Kernel"

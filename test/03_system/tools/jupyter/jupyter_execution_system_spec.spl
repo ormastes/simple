@@ -41,3 +41,28 @@ describe "Jupyter Kernel Execution":
         val msg = "{\"channel\":\"shell\",\"msg_type\":\"is_complete_request\",\"msg_id\":\"test4\",\"session\":\"s1\",\"content\":{\"code\":\"fn foo():\"}}"
         val output = send_kernel_message(msg)
         expect(output).to_contain("incomplete")
+
+    slow_it "should respond to interrupt_request on the control channel (design SS5.1)":
+        val msg = "{\"channel\":\"control\",\"msg_type\":\"interrupt_request\",\"msg_id\":\"test5\",\"session\":\"s1\",\"content\":{}}"
+        val output = send_kernel_message(msg)
+        expect(output).to_contain("interrupt_reply")
+        expect(output).to_contain("\"status\":\"ok\"")
+
+    slow_it "should reply on the simple_lane comm with the current mode (design SS5.1, SS6)":
+        val msg = "{\"channel\":\"shell\",\"msg_type\":\"comm_open\",\"msg_id\":\"test6\",\"session\":\"s1\",\"content\":{\"comm_id\":\"c1\",\"target_name\":\"simple_lane\",\"data\":{}}}"
+        val output = send_kernel_message(msg)
+        expect(output).to_contain("comm_msg")
+        expect(output).to_contain("\"comm_id\":\"c1\"")
+        expect(output).to_contain("interpreter")
+
+    slow_it "should change the session default mode via a simple_lane set_mode comm_msg":
+        val open_msg = "{\"channel\":\"shell\",\"msg_type\":\"comm_open\",\"msg_id\":\"test7a\",\"session\":\"s1\",\"content\":{\"comm_id\":\"c2\",\"target_name\":\"simple_lane\",\"data\":{}}}"
+        val set_msg = "{\"channel\":\"shell\",\"msg_type\":\"comm_msg\",\"msg_id\":\"test7b\",\"session\":\"s1\",\"content\":{\"comm_id\":\"c2\",\"data\":{\"set_mode\":\"interpreter\"}}}"
+        val combined = open_msg + "\n" + set_msg
+        val tmp = "/tmp/jupyter_test_multi_{rt_getpid()}_{rt_time_now_unix_micros()}.txt"
+        rt_file_write_text(tmp, combined + "\n")
+        val cmd = "RUNTIME=src/compiler_rust/target/release/simple; if [ ! -x \"$RUNTIME\" ]; then RUNTIME=src/compiler_rust/target/bootstrap/simple; fi; if [ ! -x \"$RUNTIME\" ]; then RUNTIME=bin/simple; fi; cat {tmp} | timeout 5 \"$RUNTIME\" run src/app/jupyter_kernel/main.spl 2>/dev/null"
+        val (output, stderr, code) = rt_process_run("bash", ["-c", cmd])
+        rt_file_delete(tmp)
+        expect(output).to_contain("\"comm_id\":\"c2\"")
+        expect(output).to_contain("\"mode\":\"interpreter\"")
