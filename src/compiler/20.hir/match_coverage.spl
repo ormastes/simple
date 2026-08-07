@@ -1,0 +1,69 @@
+# ResolvedMatchCoverage (WP-6, 2026-08-07)
+#
+# Plan: doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
+#
+# Type-resolved coverage record for one `match` over a closed enum, keyed by
+# STABLE IDS -- scrutinee_type_id + enum_symbol_id + variant ids -- never by
+# variant NAME. Names collide across unrelated enums (two enums each
+# declaring `case Ok`); ids cannot, because a variant id is only ever
+# compared against other variant ids the caller sourced from the SAME
+# enum_symbol_id. This is the HIR-level companion to the MIR switch lowering
+# in 50.mir/_MirLoweringExpr/switch_operators_calls.spl, which already
+# resolves each arm to a numeric discriminant (`enum_variant_discriminant`)
+# before a coverage record is built there -- that discriminant IS the variant
+# id used here: already unique within one enum's declaration, and the MIR
+# lowering call site only ever feeds this record discriminants it resolved
+# against a single, definitively-known enum (see that file's `lookup_key`
+# resolution, which errors out ambiguous/unknown bare variants before this
+# record would ever be built from them).
+#
+# `all_variant_ids`/`all_variant_names` are kept as PARALLEL arrays
+# (all_variant_ids[i] names all_variant_names[i]) so a missing id can be
+# reported back to the user by name without the comparison itself ever
+# touching a name -- `missing_variant_ids` below only compares the id arrays.
+
+struct ResolvedMatchCoverage:
+    """One match's coverage against its scrutinee's closed enum, id-keyed."""
+    scrutinee_type_id: i64
+    enum_symbol_id: i64
+    enum_name: text
+    all_variant_ids: [i64]
+    all_variant_names: [text]
+    covered_variant_ids: [i64]
+    has_wildcard: bool
+
+impl ResolvedMatchCoverage:
+    fn is_exhaustive() -> bool:
+        """True when a wildcard/default arm is present, or every declared
+        variant id is covered."""
+        if self.has_wildcard:
+            return true
+        self.missing_variant_ids().len() == 0
+
+    fn missing_variant_ids() -> [i64]:
+        """Declared variant ids with no covering arm. ID comparison only --
+        never name comparison, so two unrelated enums sharing a variant name
+        cannot cross-satisfy each other's coverage."""
+        if self.has_wildcard:
+            return []
+        var missing: [i64] = []
+        for vid in self.all_variant_ids:
+            var seen = false
+            for cid in self.covered_variant_ids:
+                if cid == vid:
+                    seen = true
+            if not seen:
+                missing = missing.push(vid)
+        missing
+
+    fn missing_variant_names() -> [text]:
+        """Names of missing_variant_ids(), resolved via the parallel name array."""
+        val missing_ids = self.missing_variant_ids()
+        var names: [text] = []
+        for mid in missing_ids:
+            var i = 0
+            while i < self.all_variant_ids.len():
+                if self.all_variant_ids[i] == mid:
+                    names = names.push(self.all_variant_names[i])
+                i = i + 1
+        names
