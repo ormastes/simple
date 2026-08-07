@@ -433,8 +433,33 @@ impl MirLowering:
                 # sweep (see emit_pending_resource_drops's `returned_local`).
                 self.emit_pending_resource_drops(Some(tail_local))
                 bldr2 = self.builder
-                val tail_op = mir_operand_copy(tail_local)
-                val tail_box: MirOperand? = Some(tail_op)
+                # Bug iso_transfer_sites_missing_move_return_assign_field
+                # (2026-08-06), item #1: a function's tail-expression return
+                # value reached the Ret terminator as a bare
+                # `mir_operand_copy(tail_local)` operand with no Move
+                # instruction backing it. The checker's `record_use` on a
+                # Copy operand already flags a MOVED source read AT the
+                # return site itself, but `record_use` only checks
+                # moved_now -- it never ADDS to it (only `record_move`
+                # does) -- so an early `return a` inside one branch of an
+                # if/else never marked `a` moved for the checker's
+                # block-order forward walk, and a later use of `a` in a
+                # sibling/merge block went undetected. See
+                # `iso_move_return_spec.spl`'s "early return in one branch"
+                # case for the concrete distinguishing scenario (this
+                # matters beyond the simple `val c = a; a` tail-return case,
+                # which the checker's terminator arm alone already covers
+                # via record_use).
+                var tail_operand = mir_operand_copy(tail_local)
+                if mir_hir_type_is_isolated(self.find_local_hir_type(tail_local.id)):
+                    var b_rmove = self.builder
+                    val rmove_ty = self.local_mir_type_of(tail_local) ?? MirType.i64()
+                    val rmove_local = b_rmove.new_temp(rmove_ty)
+                    b_rmove.emit_move(rmove_local, tail_local)
+                    self.builder = b_rmove
+                    bldr2 = self.builder
+                    tail_operand = mir_operand_copy(rmove_local)
+                val tail_box: MirOperand? = Some(tail_operand)
                 bldr2.terminate_return(tail_box)
             else:
                 self.emit_pending_resource_drops(nil)

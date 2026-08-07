@@ -1474,8 +1474,29 @@ impl MirLowering:
             # function_lowering.spl).
             self.emit_pending_resource_drops(Some(result))
             br = self.builder
-            val ret_op = mir_operand_copy(result)
-            val ret_box: MirOperand? = Some(ret_op)
+            # Bug iso_transfer_sites_missing_move_return_assign_field
+            # (2026-08-06), item #1's explicit-`return expr` twin of the
+            # implicit-tail-return fix in function_lowering.spl: `result`
+            # reached the Ret terminator as a bare `mir_operand_copy`
+            # operand with no Move instruction backing it. This matters
+            # even though the checker's `record_use` on a Copy operand
+            # already flags a MOVED source read at the return site itself:
+            # `record_use` only CHECKS moved_now, it never ADDS to it, so
+            # an early `return a` inside one branch of an if/else left `a`
+            # NOT marked moved for the checker's block-order forward walk
+            # -- a later use of `a` in a sibling/merge block went
+            # undetected. `record_move` (what a real Move instruction
+            # triggers) does add to moved_now, closing that gap.
+            var ret_operand = mir_operand_copy(result)
+            if mir_hir_type_is_isolated(self.find_local_hir_type(result.id)):
+                var b_rmove = self.builder
+                val rmove_ty = self.local_mir_type_of(result) ?? MirType.i64()
+                val rmove_local = b_rmove.new_temp(rmove_ty)
+                b_rmove.emit_move(rmove_local, result)
+                self.builder = b_rmove
+                br = self.builder
+                ret_operand = mir_operand_copy(rmove_local)
+            val ret_box: MirOperand? = Some(ret_operand)
             br.terminate_return(ret_box)
             self.builder = br
         else:

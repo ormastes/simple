@@ -1,8 +1,54 @@
 # iso ownership-transfer sites still missing MIR `Move` (WP-M audit)
 
-**Status:** open (2 of 4 investigated transfer sites still emit no Move; 1
-closed by this lane, 1 closed 2026-08-07 by WP-F0)
-**Lane:** WP-M (2026-08-06)
+**Status:** CLOSED — all of items #1, #2, #3 (plus the array/dict/`.push()`
+collection-store follow-up) now emit real Move facts. Item #4 remains
+unreachable per WP-S's 2026-08-07 finding (unchanged, see below).
+**Lane:** WP-M (2026-08-06); items #2/#3/collections closed by a concurrent
+WP-F lane (commit `6a53442fbd1`, checker terminator wiring commit
+`63dc29b11a2`); item #1's remaining lowering half closed by WP-F
+(2026-08-07, this update).
+
+**Update 2026-08-07 (WP-F, item #1 — returning an iso value):** Closed both
+halves.
+- The **checker** half was already closed by commit `63dc29b11a2`
+  ("detect use-after-move through call operands and terminators"): `mod.spl`
+  gained `analyze_terminator` + `record_operand_use`, which reads whatever
+  operand kind (`Copy`/`Move`) a `Ret`/`If`/`Switch`/`CallTerminator`
+  terminator carries.
+- The **lowering** half needed two sites, not one — the bug doc's original
+  description only named the implicit tail-expression return
+  (`_MirLowering/function_lowering.spl`); there is a second, independent site
+  for an *explicit* `return expr` statement
+  (`_MirLoweringExpr/expr_dispatch.spl`'s `lower_return_expr`). Both now emit
+  a synthetic `emit_move(fresh, tail_local_or_result)` ahead of the `Ret`
+  terminator, gated on `mir_hir_type_is_isolated(self.find_local_hir_type(...))`,
+  mirroring the already-landed call-argument/field-store pattern.
+- **Why the lowering half is not redundant with the already-working checker
+  half:** `record_use` (what a bare `Copy` operand on `Ret` triggers) only
+  *checks* `moved_now`, it never *adds* to it — only `record_move` does. The
+  simple `val c = a; a` (moved-then-returned, same block) case was already
+  caught by the checker alone (`record_use` sees the earlier `Move`
+  instruction's fact). But an **early `return a` inside one branch of an
+  if/else**, followed by a use of `a` in the fall-through/merge block, was
+  NOT caught without the lowering fix: the checker's `analyze_mir_borrows`
+  walk is a purely linear, already-documented-as-correct-and-out-of-scope
+  (SF1, `borrow_graph.spl`) forward walk over `func.blocks` in array order,
+  not CFG-path-sensitive — the early-return branch's `a` needs to land in
+  `moved_now` (via a real `Move` instruction) for the later block's read to
+  be flagged. Sabotage-verified this exact distinguishing scenario, not just
+  the same-block case (see Evidence trail below).
+- Proof: `test/01_unit/compiler/borrow/iso_move_return_spec.spl` (new, 5/5).
+  Sabotage (real run, `bin/simple test`):
+  - Reverting `function_lowering.spl`'s fix alone: **still 3/3 green** on the
+    tail-return cases — confirms the checker's existing `record_use`-on-Copy
+    already covers the simple same-block case, so this half is a
+    completeness/consistency fix (matches every other transfer site emitting
+    a real Move), not a detection fix, for that narrower shape.
+  - Reverting `expr_dispatch.spl`'s explicit-`return` fix (with
+    `function_lowering.spl`'s fix in place): `5 total, 4 passed, 1 failed` —
+    exactly the new "early return in an if-branch" case goes red, proving
+    that site IS load-bearing for detection. Reverted the sabotage: back to
+    `5 total, 5 passed, 0 failed`.
 
 **Update 2026-08-07 (WP-F0, commit `3f79f98cc9d97bf902db5da7d32e215e297b4ebf`):**
 Item #4's mutual-exclusivity blocker is fixed. `function_lowering.spl`'s
@@ -63,7 +109,7 @@ scoped here):
 checker-arm fix, not attempted speculatively per this lane's scope of "one
 correct site")
 
-### 1. Returning an iso value -- DOUBLE gap (lowering AND checker)
+### 1. Returning an iso value -- DOUBLE gap (lowering AND checker) — CLOSED 2026-08-07 (WP-F, see update at top of doc)
 - **Lowering:** no function in `src/compiler/50.mir/_MirLowering/**` or
   `_MirLoweringExpr/**` emits a Move ahead of a `Ret` terminator for an
   iso-typed tail/return expression; the terminator carries a bare operand.
@@ -83,7 +129,7 @@ correct site")
   existing `Move`-consuming checker arm (`Copy`/`Move` cases above) were
   already wired.
 
-### 2. Assigning an iso value to an already-existing variable (not a fresh `val`)
+### 2. Assigning an iso value to an already-existing variable (not a fresh `val`) — CLOSED (commit `6a53442fbd1`, `test/01_unit/compiler/borrow/iso_move_assign_field_spec.spl`, 8/8)
 - `src/compiler/50.mir/mir_lowering_stmts.spl:1039`:
   `b.emit_copy(local, assigned_value)` inside the plain-assignment
   (`op == nil`) arm of the `Assign` statement lowering (`Var`/`NamedVar`
@@ -93,7 +139,7 @@ correct site")
   `_MirLoweringExpr/**` only, `mir_lowering_stmts.spl` off-limits -- another
   agent was editing it concurrently), so citing file:line only, not fixing.
 
-### 3. Storing an iso value into a struct field
+### 3. Storing an iso value into a struct field — CLOSED (commit `6a53442fbd1`, same spec, 8/8; array/dict element-store follow-up below also closed by the same commit)
 - `src/compiler/50.mir/mir_lowering_stmts.spl:1147`:
   `b.emit_set_field(mir_operand_copy(receiver), field_index,
   mir_operand_copy(assigned_field_value))` inside the `Field(base, field,
