@@ -234,6 +234,50 @@ fn decode_chunked(encoded: text) -> Result<text, text>:
 
     Ok(parts.join(""))
 
+# Boundary-aware chunked body-end detector (RFC 7230 §4.1).
+#
+# Walks chunk-size lines so a "0\r\n\r\n" byte sequence inside chunk DATA is
+# never mistaken for the terminal 0-size chunk — a flat index_of scan truncates
+# any body whose payload happens to contain those 5 bytes.
+#
+# Returns:
+#   >= 0  body complete; offset one past the CRLF that ends the last-chunk's
+#         (possibly empty) trailer section — i.e. the full encoded length
+#   -1    incomplete; a partial buffer mid-chunk, need more data
+#   -2    framing error (invalid chunk-size line or bad chunk-data terminator);
+#         run decode_chunked on the buffer for the specific Err reason
+fn chunked_body_end(buffer: text) -> i64:
+    var pos = 0
+    while true:
+        val size_end = common_index_of(buffer, "\r\n", pos)
+        if size_end < 0:
+            # chunk-size line not fully received yet
+            return -1
+        var size_str = buffer.substring(pos, size_end)
+        val semi = header_find_char(size_str, ";")
+        if semi >= 0:
+            size_str = size_str.substring(0, semi)
+        if not header_is_hex_digits(size_str):
+            return -2
+        val chunk_size = parse_hex_text(size_str)
+        if chunk_size == 0:
+            # last-chunk: skip optional trailer section, ends at an empty line
+            var p = size_end + 2
+            while true:
+                val line_end = common_index_of(buffer, "\r\n", p)
+                if line_end < 0:
+                    return -1
+                if line_end == p:
+                    return line_end + 2
+                p = line_end + 2
+        val data_end = size_end + 2 + chunk_size
+        if data_end + 2 > buffer.length():
+            return -1
+        if buffer.substring(data_end, data_end + 2) != "\r\n":
+            return -2
+        pos = data_end + 2
+    -2
+
 # Index of `ch` in `s`, or -1. Scans by index because text.index_of on a
 # substring()-derived receiver returns nil for a non-zero match position.
 fn header_find_char(s: text, ch: text) -> i64:

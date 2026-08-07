@@ -18,7 +18,7 @@ if parser.is_complete():
 ```
 """
 
-use std.http.headers.{get_content_length, is_chunked, decode_chunked}
+use std.http.headers.{get_content_length, is_chunked, decode_chunked, chunked_body_end}
 use std.http_server.types.{HttpRequestData}
 use std.http_server.error.{HttpServerError}
 
@@ -125,10 +125,12 @@ class HttpRequestParser:
 
                 ParseState.Body:
                     if self.is_chunked_encoding:
-                        # Simplified: accumulate until 0-length chunk
-                        val term = self.buffer.index_of("0\r\n\r\n")
+                        # Boundary-aware: walk chunk-size headers so "0\r\n\r\n"
+                        # inside chunk DATA is never taken as the terminal
+                        # 0-size chunk (a flat index_of scan truncated there).
+                        val term = chunked_body_end(self.buffer)
                         if term >= 0:
-                            val raw = self.buffer.slice(0, term + 5)
+                            val raw = self.buffer.slice(0, term)
                             # RFC 7230 §4.1/§3.3.3: an invalid chunk-size line
                             # is a framing error, not an empty body. Rejecting
                             # keeps this server's message boundary from
@@ -140,10 +142,20 @@ class HttpRequestParser:
                                     self.error_message = "chunked framing error: " + reason
                                     self.state = ParseState.Error
                                     return Err(HttpServerError.ParseError(self.error_message))
-                            consumed = consumed + term + 5
-                            self.buffer = self.buffer.slice(term + 5, self.buffer.len())
+                            consumed = consumed + term
+                            self.buffer = self.buffer.slice(term, self.buffer.len())
                             self.state = ParseState.Complete
                         else:
+                            if term == -2:
+                                # Framing already provably invalid — surface the
+                                # specific reason via the strict decoder.
+                                match decode_chunked(self.buffer):
+                                    case Ok(_):
+                                        self.error_message = "chunked framing error: invalid chunk boundary"
+                                    case Err(reason):
+                                        self.error_message = "chunked framing error: " + reason
+                                self.state = ParseState.Error
+                                return Err(HttpServerError.ParseError(self.error_message))
                             return Ok(consumed)
                     else:
                         val remaining = self.content_length - self.body.len()

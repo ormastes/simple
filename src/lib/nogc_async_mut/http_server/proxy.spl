@@ -1850,9 +1850,27 @@ fn async_proxy_parse_chunk_size(line: text) -> i64:
     out
 
 fn async_proxy_chunked_body_complete(body: text) -> bool:
-    if body == "0\r\n\r\n":
-        return true
-    body.contains("\r\n0\r\n\r\n")
+    # Boundary-aware (RFC 7230 §4.1): walk chunk-size lines so a "0\r\n\r\n"
+    # inside chunk DATA is never taken as the terminal chunk — the previous
+    # flat contains() scan truncated any body containing those bytes.
+    var pos = 0
+    while pos < body.len():
+        val line_end_rel = body.slice(pos, body.len()).index_of("\r\n")
+        if line_end_rel < 0:
+            return false
+        val line_end = pos + line_end_rel
+        val size = async_proxy_parse_chunk_size(body.slice(pos, line_end))
+        if size < 0:
+            return false
+        pos = line_end + 2
+        if size == 0:
+            return true
+        pos = pos + size + 2
+        if pos > body.len():
+            return false
+        if body.slice(pos - 2, pos) != "\r\n":
+            return false
+    false
 
 fn async_proxy_dechunk_body(body: text) -> text?:
     var pos = 0
