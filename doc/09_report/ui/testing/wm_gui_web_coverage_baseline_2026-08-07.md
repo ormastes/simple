@@ -317,3 +317,307 @@ Binary: `readlink -f bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple
 (Rust seed, per repo policy for `test`). `df -h /`: 238G free before, 238G
 free after (no cargo/bootstrap run). Spec runs took ~3m45s-3m47s each (well
 under the new 600s slow_it ceiling and the 900s tool budget).
+
+## U4.2 closure — 2026-08-07
+
+Targets per plan: `src/os/compositor/host_gui_event_router.spl` (233 lines)
+and `src/os/compositor/hosted_backend.spl` (379 lines), line target >=90%,
+justified exclusion "SDL2/winit/win32 backend files — FFI+platform, not
+unit-coverable headlessly."
+
+### Instrumentation-gap finding (governs every number below)
+
+The coverage collector attributes hit lines only for **module-level function
+bodies**, not for `impl`-block method (`fn`/`me`) bodies. Verified directly:
+the new closure spec below calls `HostGuiEventRouter.route`,
+`.route_scalar` (4 distinct branches: WHEEL x2, KEY x3, plus the pre-existing
+spec's POINTER_MOVE/BUTTON/TEXT paths), all real `impl` methods — the
+artifact records **zero** hit lines for any of them. The only hit lines in
+`host_gui_event_router.spl` are `host_glfw_key_name`'s body (lines 22-27,
+a plain module-level `fn`). Same pattern in `hosted_backend.spl`: only
+`hosted_surface_name` (a plain `fn`, lines 323-328) is credited;
+`hosted_surface_selector` (also a plain `fn`, but a 1-line body that is
+purely a registered-extern call) gets zero hits despite being called and
+returning a real value. This is a materially bigger gap than U1.2's
+documented `<entry>`-flattening residual (<=2 lines/module) — it is a whole
+missing attribution class for `impl` methods, which is most of a typical
+compositor/backend module's real logic. **No line-% claim below should be
+read as representative of the file's actual exercised logic**; the
+enumerated-proxy method (functions closed, cross-checked against existing
+test references) is this unit's primary evidence, per the plan's own
+outcome-2 fallback.
+
+### Measured line coverage (artifact-backed, heavily capped by the gap above)
+
+Method: `SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<path> bin/simple test
+<spec> --coverage --no-cache`, `coverage:` lines cross-checked against
+`SIMPLE_COVERAGE_OUTPUT` artifact byte rows (`file, line, hit_count`).
+
+**Before** (pre-existing `host_gui_event_router_spec.spl`, exercised via a
+throwaway in-tree copy carrying a temporary `# @cover` header, never
+committed, deleted after measurement — same method U1.2 used for its
+misspelled-path sabotage check):
+`coverage: src/os/compositor/host_gui_event_router.spl 0% (0/80 lines)`,
+`coverage: src/os/compositor/hosted_backend.spl 0% (0/97 lines)`.
+0% is real, not a measurement failure: the pre-existing spec calls only
+`route_scalar` (an `impl` method, uncredited per the gap above), and
+independently 3 of its 5 examples are currently RED for an unrelated,
+already-tracked defect (`doc/08_tracking/bug/interp_enum_method_nested_call_dispatch_2026-06-29.md`
+— seed-side fix landed but not yet redeployed; see that doc's 2026-08-07
+addendum for the reproduction). Confirmed on the unmodified file, not caused
+by this unit.
+
+**After** (this unit's new spec,
+`test/01_unit/os/compositor/host_gui_event_router_coverage_closure_spec.spl`,
+run standalone): `coverage: src/os/compositor/host_gui_event_router.spl 7%
+(6/80 lines)`, `coverage: src/os/compositor/hosted_backend.spl 6% (6/97
+lines)`. Artifact `/tmp/u42/cov_new3.sdn` (52,554 bytes) rows confirm exactly
+lines 22-27 of `host_gui_event_router.spl` (host_glfw_key_name's body) and
+323-328 of `hosted_backend.spl` (hosted_surface_name's body) as the hit set
+— all 6+6 lines independently spot-checked against the source files.
+
+Both numbers are **floors**, not ceilings, for the reasons above — the
+`impl`-method attribution gap means the majority of this unit's actual test
+gains (route/route_scalar WHEEL+KEY branches, window_focused's false path)
+are real and verified by the `Results:` line and real-value assertions
+(oracle values, not smoke calls) but are invisible to the line-% collector
+today. The plan's >=90% line target is **not verifiable** with the current
+tool for either file — reported honestly as unmet-by-instrumentation, not
+silently rounded up or substituted with an enumerated-proxy percentage
+dressed up as a measurement.
+
+### Functions closed (enumerated-proxy evidence, primary for this unit)
+
+`host_gui_event_router.spl` (7 fn/me total) — previously untested directly:
+`host_glfw_key_name` (never called by any existing spec), `HostGuiEventRouter.route`
+(the non-scalar wrapper — existing spec only calls `.route_scalar` directly),
+`.route_scalar`'s `WINDOW_EVENT_WHEEL` branch (both sub-cases: pointer over
+content vs. over chrome only) and `WINDOW_EVENT_KEY` branch (ctrl+a real
+selection-state oracle, unmapped-key-code false case, and the
+window-not-focused false case — the last of these is the only place any spec
+exercises `.window_focused`'s false return). `.update_client_target` /
+`.update_captured_target` remain exercised only indirectly (via
+`route_scalar`), as in the pre-existing spec — not independently asserted,
+left for a follow-up unit since they have no externally-observable state
+beyond what the WHEEL/KEY/MOVE/BUTTON assertions above already pin down.
+
+`hosted_backend.spl` — `hosted_surface_name` (all 4 branches: cocoa, win32,
+winit-labeled-sdl2, unknown) and `hosted_surface_selector` (real call through
+the registered `rt_hosted_select_surface()` extern, oracle: result is one of
+the three documented codes) were previously untested by any spec.
+`select_hosted_backend` is a **justified exclusion**, not left uncovered by
+oversight: on this Linux host (selector 0) it falls through to
+`HostedSdl2Backend.try_create`, which calls `rt_sdl2_init` — an extern with
+NO interpreter-table registration (confirmed by grep against
+`interpreter_extern/mod.rs`: only a comment about the resulting error text
+exists, no `insert_simple!` entry). Calling it from a spec would abort the
+whole test process with `unknown extern function: rt_sdl2_init`, not
+exercise real behaviour — the same gap the module's own header comment
+documents. `HostedCompositorBackend.create(0, ...)` is already covered by
+`test/03_system/gui/wm_host_platform/hosted_backend_honesty_spec.spl` (not
+duplicated). Every other function in `hosted_backend.spl` is `rt_winit_buffer_*`
+FFI (no native definition anywhere in the repo) — the plan's own justified
+exclusion for "SDL2/winit/win32 backend files."
+
+### Real defect found and fixed during this unit
+
+`host_glfw_key_name`'s two non-trivial branches used a **chained** call
+form, `(expr).to_u8().to_char()`, which crashes on the currently-deployed
+`bin/simple` with `semantic: method 'to_char' not found on value of type i64
+in nested call context` — reproduced directly with a minimal top-level probe,
+isolated to the chained form specifically (an intermediate `val` between
+`.to_u8()` and `.to_char()` works). This meant **every uppercase letter and
+every printable-ASCII key press crashed key routing** through
+`HostGuiEventRouter.route_scalar`'s `WINDOW_EVENT_KEY` branch, previously
+undetected because no spec exercised that branch at all. Fixed at the call
+site with the documented intermediate-`val` workaround (not a fix to the
+underlying dispatcher, which remains broken repo-wide for this chained
+pattern) — full writeup, root-cause differentiation from two related
+already-closed bugs, and unblock condition:
+`doc/08_tracking/bug/int_to_u8_to_char_chained_call_nested_dispatch_2026-08-07.md`.
+
+### Sabotage check
+
+`git worktree add` from `origin/main` (local `HEAD` was independently found
+to have a wiped `src/` tree — only `compiler_rust`/`lib`/`verification`
+survive at local `HEAD`, `git ls-tree HEAD:src` — unrelated to this unit,
+not touched, `origin/main` is healthy with all 15 top-level `src/` entries
+and was used as the worktree base instead). Positive case confirmed first
+(`Results: 11 total, 11 passed, 0 failed` in the worktree, matching the main
+tree). Sabotage: changed `256: "escape"` to `256: "esc"` in the worktree's
+`host_gui_event_router.spl` only. Result: exactly the targeted example went
+red — `expected esc to equal escape`, all 10 others stayed green
+(`Results: 11 total, 10 passed, 1 failed`) — confirming the worktree copy,
+not the shared tree, was the file actually read. Restored, re-confirmed
+green (`11 total, 11 passed, 0 failed`), worktree removed.
+
+### Disk
+
+`df -h /`: 238G free before, 238G free after this unit (no cargo/bootstrap
+run).
+
+## U4.3 closure — 2026-08-07
+
+Targets per plan: `browser_engine/simple_web_html_layout_renderer_style.spl`
+(837 lines) + `_declarations.spl` (1183 lines) + `style_block.spl` (547
+lines) + `style_block_parse.spl` (752 lines) + `style_block_resolve.spl`
+(450 lines), line target >=95%, no justified exclusions stated by the plan.
+This is 3769 lines / 147 top-level declarations across 5 files — the plan's
+own U4.4/U4.5 closure (landed earlier the same day by a separate session,
+see the appendix above) already found the sibling `browser_engine` module
+family's single combined-`@cover` spec
+(`simple_web_html_layout_renderer_coverage_spec.spl`) hits the test
+runner's hard 120s per-file timeout; the same risk applies here since that
+spec also carries `@cover` headers for these files. This unit avoided that
+spec entirely and worked file-by-file with new, small, targeted closure
+specs plus the existing per-file dedicated specs where present.
+
+### Method and evidence
+
+Per file: measure the existing dedicated spec's line-% via a throwaway
+`# @cover`-header copy (never committed, deleted after measurement, same
+method U1.2 used), enumerate uncovered functions by diffing the coverage
+artifact's hit-line set against every module-level `fn`/`pub fn` body
+region, write closure specs for the pure (no DOM-tree fixture needed)
+uncovered functions, re-measure, and — because
+`SIMPLE_COVERAGE_OUTPUT` **overwrites rather than accumulates** across
+separate `bin/simple test` invocations (verified directly: running spec A
+then spec B into the same path left only spec B's rows) — compute the
+**union** of the two independently-measured hit-line sets in a short Python
+script shown in each subsection below, rather than claim a single measured
+run for the "after" number.
+
+#### `simple_web_html_layout_renderer_style.spl` — no pre-existing spec, all new
+
+Zero test/ files referenced this module before this unit. New spec:
+`test/01_unit/browser_engine/simple_web_html_layout_renderer_style_coverage_closure_spec.spl`,
+closing 13 previously-untested functions (`parse_font_shorthand_number`,
+`parse_font_shorthand_size_px`, `parse_font_shorthand_family`,
+`is_inline_tag`, `is_heading`, `is_non_rendered_tag`,
+`split_top_level_commas`, `parse_float_to_255`, `shadow_layer_alpha`,
+`shadow_length_prefix`, `paren_matching_close`, `css_important_marker_start`,
+`renderer_default_style`, `inherit_style_legacy`) with real value oracles —
+every expected value independently recomputed with a Python script before
+the run to avoid transcribing a wrong hand-calculation (two were caught and
+fixed this way: `paren_matching_close`'s expected close index and
+`css_important_marker_start`'s whitespace-tolerance case).
+`Results: 25 total, 25 passed, 0 failed`.
+`coverage: src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_style.spl
+30% (123/409 lines)` — artifact `/tmp/u43/cov2.sdn`, 123 matching rows
+confirmed. Before: 0% (no spec existed). **30% is well short of the >=95%
+target** — `parse_background_layers`, `parse_box_shadow_agg`, the `Style`
+class's own methods, and `computed_style_hot_from` remain uncovered
+(color-parsing/DOM dependencies deferred to a follow-up unit).
+
+#### `style_block.spl` — no pre-existing spec, all new
+
+Zero test/ files referenced this module before this unit either. New spec:
+`test/01_unit/browser_engine/style_block_coverage_closure_spec.spl`, closing
+11 previously-untested pure text-scanning helpers (`css_decl_property`,
+`css_decl_value`, `css_decls_contain`, `sb_find`, `sb_split_char`,
+`sb_split_selector_list`, `sb_find_top_level_child_combinator`,
+`sb_split_ws`, `sb_skip_ws_comments`, `sb_parse_int`, `find_matching_brace`)
+with real value oracles (one expected value,
+`find_matching_brace`'s close index, independently recomputed and corrected
+before the run). `Results: 14 total, 14 passed, 0 failed`.
+`coverage: src/lib/gc_async_mut/gpu/browser_engine/style_block.spl 34%
+(102/300 lines)` — artifact `/tmp/u43/cov_sb1.sdn`. Before: 0%. **34% is
+short of the >=95% target** — the DOM-tree application functions
+(`apply_css_rules_to_tree*`, `SelectorRuleIndex` construction/lookup,
+`process_style_blocks*`) need a `BeDomNode` fixture, deferred to a
+follow-up unit.
+
+#### `style_block_parse.spl` — pre-existing spec already strong, closed further
+
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/style_block_parse_malformed_spec.spl`
+already gave real 78% coverage (384/488 lines,
+`Results: 39 total, 39 passed, 0 failed`, measured this unit via a
+throwaway-header copy, artifact `/tmp/u43/cov_parse_before.sdn`). Diffing
+its hit-line set against every `fn` body found 6 fully-uncovered functions;
+5 are pure CSS shorthand-property expanders closed here with real oracles
+(`expand_flex_flow`, `expand_font`, `expand_flex`, `expand_border`,
+`expand_box_shorthand`; the private `_cascade_keyframe_declarations` needs a
+`[Keyframe]` fixture, deferred). New spec:
+`test/01_unit/browser_engine/style_block_parse_shorthand_coverage_closure_spec.spl`.
+First run caught a real ordering mistake in my own expected value
+(`expand_font("bold 14px")` emits `font-weight` before `font-size`, token
+order, not property-alphabetical order — fixed before landing).
+`Results: 15 total, 15 passed, 0 failed`.
+`coverage: ... style_block_parse.spl 11% (55/488 lines)` alone — artifact
+`/tmp/u43/cov_parse3.sdn`. **Union with the before set (computed, not a
+single measured run — `SIMPLE_COVERAGE_OUTPUT` overwrites, verified):
+55 of the 55 new-spec hit lines have ZERO overlap with the 384 before-lines
+-> union = 439/488 = 90.0%.** Sabotage-verified in a scratch worktree (see
+below). **90% is close to but still short of the >=95% target.**
+
+#### `style_block_resolve.spl` — pre-existing spec already strong, closed further
+
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/style_block_resolve_selectors_spec.spl`
+already gave real 63% coverage (200/317 lines,
+`Results: 29 total, 29 passed, 0 failed`, throwaway-header copy, artifact
+`/tmp/u43/cov_resolve_before.sdn`). Diffing found 7 fully-uncovered
+functions; 3 are pure attribute-selector text helpers closed here
+(`sb_attr_has_i_flag`, `sb_attr_has_s_flag`, `sb_attr_token_contains`); the
+other 4 (`has_descendant_selector_list_match`,
+`node_has_relative_has_option_matching`, `node_has_direct_child_matching`,
+`node_has_descendant_matching`) all take a `BeDomNode` and are deferred to a
+follow-up unit that builds a DOM fixture. New spec:
+`test/01_unit/browser_engine/style_block_resolve_attr_coverage_closure_spec.spl`.
+`Results: 6 total, 6 passed, 0 failed`.
+`coverage: ... style_block_resolve.spl 1% (6/317 lines)` alone — artifact
+`/tmp/u43/cov_resolve_new.sdn`. **Union with before (computed): 206/317 =
+65.0%** (all 6 new lines were new, no overlap). **65% is well short of the
+>=95% target** — the DOM-dependent descendant/has()-option matchers are the
+bulk of the remaining gap.
+
+#### `simple_web_html_layout_renderer_declarations.spl` — measured floor only, not closed
+
+Attempted a throwaway-header run of
+`simple_web_html_layout_renderer_module_split_spec.spl` (the narrowest
+existing spec referencing this file that isn't the known-120s-timeout
+combined spec): `Results: 2 total, 1 passed, 1 failed` (1 failure unrelated
+to this unit — not investigated further, out of scope), `coverage: ...
+declarations.spl 0% (0/748 lines)`. **0% reported as a genuine floor, not a
+measurement failure or an average.** No closure spec was written for this
+file this session — reported honestly as not-attempted rather than padded,
+per the plan's own honesty rule. A follow-up unit should either split the
+120s-timing-out combined spec (same recommendation the U4.4/U4.5 appendix
+above already made for the layout/paint files) or write small
+targeted specs the way the other four files in this unit did.
+
+### Honest gate verdict for U4.3
+
+**The plan's >=95% line target is NOT met for any of the 5 target files.**
+Real, artifact-backed gains were landed for all 5: style.spl 0%->30%,
+style_block.spl 0%->34%, style_block_parse.spl 78%->90% (computed union),
+style_block_resolve.spl 63%->65% (computed union),
+declarations.spl unmeasured (0% floor via the one non-timeout spec
+attempted). This is reported as a genuine miss, not rounded up or
+substituted with an enumerated-proxy percentage dressed as a measurement —
+consistent with the plan's own wave-4 honesty rule ("a target miss is
+reported as a miss ... never quietly rounded up"). The remaining gap is
+concentrated in DOM-tree-dependent functions (`BeDomNode` fixtures) and
+color/gradient-parsing functions across all 5 files, plus the
+still-unattempted `declarations.spl` — real work for a follow-up unit, not
+something this session's remaining scope could responsibly rush.
+
+### Sabotage check
+
+Same worktree method as U4.2 (fresh `git worktree add ... origin/main
+--detach` — local `HEAD` was independently re-confirmed to still carry the
+wiped `src/` tree noted in the U4.2 section above, unrelated to and
+untouched by this unit). Positive case confirmed first
+(`Results: 15 total, 15 passed, 0 failed` for
+`style_block_parse_shorthand_coverage_closure_spec.spl` in the worktree).
+Sabotage: changed `expand_border`'s `"thin"` width mapping from `"1px"` to
+`"9px"` in the worktree's `style_block_parse.spl` only. Result: exactly the
+targeted example went red — `expected 9px to equal 1px`, all 14 others
+stayed green (`Results: 15 total, 14 passed, 1 failed`) — confirming the
+worktree copy, not the shared tree, was the file actually read. Restored,
+re-confirmed green (`15 total, 15 passed, 0 failed`), worktree removed.
+
+### Disk
+
+`df -h /`: 238G free before this unit, 238G free after (one dip to 236G
+mid-unit during worktree creation, recovered after `git worktree remove`;
+no cargo/bootstrap run).
