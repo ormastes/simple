@@ -547,3 +547,191 @@ than an aarch64-port regression.
 - The `_parse_hhdm()` hang itself (see above).
 - Full RV64-parity virtio/PMM/FAT32 support in the aarch64 freestanding
   runtime — explicitly out of scope; only the boot-entry subset was ported.
+
+### `_parse_hhdm()` hang: root-caused and fixed (2026-08-07) — full boot to milestone marker
+
+**Root cause was NOT the missing `.limine_reqs` section** (that gap is real
+but turned out to be a red herring for the hang itself — see below). Bisected
+by adding `log_raw_println` immediately before and after
+`val resp_ptr = hhdm_request.response` and rebuilding/booting: `"_parse_hhdm:
+enter"` printed every time, `"_parse_hhdm: read done"` never did. That pins
+the fault to the field read itself, not to anything downstream of it
+(matching the earlier open question — the nil-check WARNING should have been
+"unconditionally reachable" and wasn't, because the code never got there).
+
+**Actual defect: `some_request.response` field access on a `@repr("C")`
+global struct is miscompiled on this aarch64/cranelift target.** Disassembled
+the built `kernel.elf`'s `_parse_hhdm` (`aarch64-linux-gnu-objdump -d`):
+
+```
+ldr x11, =0xffffffff80105008   ; &hhdm_request (struct base, NOT +0x28 offset)
+ldr x11, [x11]                 ; loads id[0] (the COMMON_MAGIC constant!), not .response
+and x12, x11, #0xfffffffffffffff8   ; mask low 3 bits
+cbnz x12, ...                  ; branch on tag-masked value
+```
+
+This is the tagged-pointer/`Option`-unboxing codegen pattern (mask + deref
+at a further `+16` in the taken branch) — the pattern used for boxed/nilable
+value field access — applied to what should be a flat `base + offsetof(response)`
+load on a POD `@repr("C")` struct. `id[0]` is a 64-bit magic constant, so the
+mask is (almost) never zero, so the branch always goes the "non-nil" way
+and reads structurally wrong memory beyond that — with this specific magic
+value and this specific tag-check sequence, the resulting control flow never
+reaches either print statement, which is the observed silent hang. This is
+the same defect class already catalogued in memory
+(`reference_native_dict_get_struct_corrupt_len_minus_one`,
+`reference_u32_array_is_not_a_packed_buffer` — 8-byte-stride/`<<3` tagging
+schemes leaking into plain POD struct/global codegen on native targets) but
+had not previously been observed for a **global** `@repr("C")` struct's field
+read specifically. Filing as its own compiler bug is the right next step
+(out of scope to fix in cranelift-aarch64 codegen itself this session — see
+"Fix scope" below); this doc records the concrete repro.
+
+**The `# @section(".limine_reqs")` comments were also confirmed to be dead
+comments, not a real attribute** — grepped the parser AST
+(`src/compiler_rust/parser/src/ast/nodes/definitions.rs`): `decorators`/
+`attributes: Vec<Attribute>` fields exist on `FunctionDef`, `ClassDef`,
+`ExternDef`, etc., but there is **no such field on any top-level `var`/`let`
+declaration node at all** — Simple has no attribute/decorator syntax slot on
+global variables, so `@section(...)` was never parseable there in the first
+place, comment or not. `readelf -S` on the previously-linked kernel
+confirmed zero `.limine_reqs` section, exactly as expected from "not a real
+attribute." `limine_boot.spl` (x86_64) has the identical dead comment and
+has never been run either — this is a shared, not aarch64-specific, gap.
+
+**Fix (scoped, not a general compiler feature):** matching the task's
+explicit "scope down, don't over-engineer a general section-placement
+feature" guidance, did **not** implement parser/HIR/MIR/codegen support for
+a real `@section`/`@link_section` global-var attribute. Instead, moved the
+five Limine request structs
+(`memmap`/`framebuffer`/`rsdp`/`hhdm`/`kernel_addr`) out of
+`limine_boot_aarch64.spl` entirely into
+`examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c` as
+plain C `static volatile` globals with `__attribute__((used, aligned(8)))`,
+and added five zero-arg accessor externs
+(`rt_limine_{memmap,framebuffer,rsdp,hhdm,kernel_addr}_response() -> u64`)
+that `limine_boot_aarch64.spl` now calls instead of doing
+`some_request.response` field access. This fixes both defects in one move:
+the structs are real C data (not stripped, no Simple codegen path anywhere
+near them), and Simple never does a `@repr("C")` global-struct field read on
+them again — the buggy codegen path is avoided rather than fixed at the
+root.
+
+**Named-section attempt and empirically-confirmed regression:** first tried
+adding `__attribute__((section(".limine_reqs")))` to those C globals, to
+match `linker_limine.ld`'s already-present (previously-empty)
+`.limine_reqs : AT(...) { *(.limine_reqs) }` output section and the same
+mechanism `src/os/kernel/arch/x86_64/linker.ld` documents. Confirmed via
+`readelf -SW` that this genuinely populated the section (`0xf0` = 240 bytes
+= 5 × 48-byte structs, no longer empty). But booting that build under
+`qemu-system-aarch64 -M virt -cpu cortex-a72 -pflash AAVMF_CODE.fd -pflash
+AAVMF_VARS.fd` made **Limine's own loader** fault, reproducibly (bit-identical
+across two separate runs): `Synchronous Exception at 0x000000004C66A2E0`,
+printed twice (a fault while handling the first fault), before this kernel
+printed anything at all — a regression from the prior (request-blind, hang-
+after-banner) state. Root cause not isolated (no Limine source in-tree to
+check the `AT()` physical-address arithmetic against its loader's
+expectations, and network fetch is unavailable in this environment). Removed
+the `section(...)` attribute — the plain `used`-global form (no explicit
+section) turned out to be sufficient and is what shipped (see next
+paragraph) — the `.limine_reqs` named-section path is parked, not chased
+further, per the same "don't over-engineer" scoping. `linker_limine.ld`'s
+`.limine_reqs` output section is left in place (now permanently empty,
+harmless) as a documented landing spot if this is revisited.
+
+**Confirms `linker_limine.ld`'s own x86_64-side comment was right all
+along:** `src/os/kernel/arch/x86_64/linker.ld` already states "Limine scans
+the binary for the magic IDs at boot time" — i.e. Limine's discovery does
+**not** require a specially-named/bounded section, only that the request
+structs exist as real, non-stripped bytes somewhere inside a loaded
+`PT_LOAD` segment. The plain-`used`-global (no `section(...)`) build proves
+this empirically: `readelf -SW` on that build shows **no** `.limine_reqs`
+section at all (the structs landed in ordinary `.rodata`/`.data`), yet
+Limine found and populated all five requests correctly.
+
+**Full real-firmware boot result (2026-08-07, plain-`used`-global build):**
+built via the same seed `native-build --backend cranelift --entry-closure
+--entry .../limine_entry.spl --target aarch64-unknown-none-elf
+--linker-script .../linker_limine.ld` command as the earlier banner-only
+pass (`kernel.elf`, 90 KB), copied into `build/os/aarch64_limine/esp.img`'s
+FAT filesystem via the `pyfatfs` venv at `/tmp/pyfatvenv` (no `mtools`/root
+mount available in this environment), booted under
+`qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M -pflash AAVMF_CODE.fd
+-pflash AAVMF_VARS.fd -drive if=none,file=esp.img,format=raw,id=esp -device
+virtio-blk-pci,drive=esp -serial file:serial.log` (needed a `startup.nsh`
+containing `FS0:\EFI\BOOT\BOOTAA64.EFI` on the ESP root, since this fresh
+AAVMF NVRAM has no BootOrder set and drops to the UEFI Shell rather than
+auto-booting removable media). Serial transcript, past the previously-hung
+point:
+
+```
+[BOOT] HHDM offset: 0x18446462598732840960     (= 0xffff800000000000, the standard
+                                                   higher-half-direct-map base — printed
+                                                   as decimal, not hex, a separate
+                                                   pre-existing cosmetic "0x{x}"
+                                                   interpolation-doesn't-hexify bug,
+                                                   out of scope here)
+[BOOT] Memory map: 48 entries
+[BOOT]   region 0: base=0x67108864 size=0x67108864 type=1
+  ... 46 more regions ...
+[BOOT] WARNING: No framebuffer response from Limine
+[BOOT] RSDP at physical address 0x18446462600015642648
+[BOOT] Kernel: phys=0x1336279040 virt=0x18446744071563116544
+[BOOT] Boot info assembled successfully
+[BOOT] Total memory regions: 48
+[BOOT] Handing off to memory layer...
+[BOOT] memory_init: MILESTONE STUB — Layer 1 not yet ported to the Limine boot lane (aarch64)
+[BOOT] SIMPLEOS-AARCH64-LIMINE-KERNEL-OK
+```
+
+This reaches the exact milestone marker the memory-init stub was written to
+print, i.e. the kernel now runs its **entire** boot-entry path — HHDM,
+memory map, framebuffer (correctly absent, QEMU `virt` has none by default),
+RSDP, kernel address — end to end for real, on the real-firmware AAVMF proxy
+(board-runnable rule: pflash, not `-kernel`, no `isa-debug-exit`), not just
+to the banner. Reproduced twice with identical output.
+
+**Sabotage-verification:** the fix's necessity was demonstrated by the
+natural three-way progression above, each variant deterministic and
+reproduced at least twice:
+1. Direct `hhdm_request.response` field read (original code) → hangs
+   silently right after "enter", before "read done" (bisected, see above).
+2. Extern-accessor fix + explicit `.limine_reqs` section → Limine's loader
+   itself faults (`Synchronous Exception`), a different but also-broken
+   outcome, isolating that the named-section attribute specifically (not
+   the accessor fix) causes that regression.
+3. Extern-accessor fix, no named section → full boot to milestone marker.
+Each transition was caused by exactly one code change (confirmed via
+`readelf -SW`/`readelf -lW` diffs between builds), which is the causal
+proof requested; a full revert-refix cycle of variant 1 was not repeated a
+third time since the bisection in the "root-caused" paragraph above already
+constitutes that proof for the actual shipped defect.
+
+**Files changed:**
+- `examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c`
+  — added the five Limine request structs (plain `used` C globals, no
+  section attribute — see regression note above) and five
+  `rt_limine_*_response()` accessor externs.
+- `src/os/kernel/boot/limine_boot_aarch64.spl` — removed the five
+  `LimineRequest`-typed `var` globals and their dead `# @section(...)`
+  comments; replaced all five `..._request.response` field reads with calls
+  to the new externs; removed the two temporary bisection
+  `log_raw_println` calls from `_parse_hhdm()` used to isolate the hang.
+
+**Not done this session (real gaps, not silently dropped):**
+- The aarch64/cranelift codegen defect itself (struct-global field access
+  miscompiling as tagged-pointer unboxing) is worked around here, not
+  fixed at the root. It almost certainly affects any other freestanding
+  aarch64 code that does plain field access on a `@repr("C")` global
+  struct — worth a dedicated compiler bug and a minimal standalone
+  repro/regression test outside the OS tree.
+- The `.limine_reqs`-named-section `Synchronous Exception` regression is
+  unexplained, not just unfixed — flagged above as parked, with the exact
+  repro (add `section(".limine_reqs")` back to the five C globals, rebuild,
+  reboot) preserved in this note for whoever picks it up.
+- The `"0x{offset}"`-prints-decimal cosmetic interpolation bug (string
+  interpolation of a `{u64}` inside literal `"0x"` text doesn't hex-format
+  it) is real but unrelated to boot progress; not investigated further.
+- Layer 1 memory-subsystem porting past the `memory_init` milestone stub —
+  unchanged, still explicitly out of scope (same note as the prior
+  session).

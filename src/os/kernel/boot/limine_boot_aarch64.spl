@@ -136,54 +136,46 @@ struct LimineKernelAddressResponse:
 
 @repr("C")
 struct LimineRequest:
-    """Generic Limine request header."""
+    """Generic Limine request header (kept for documentation/reference only —
+    the actual request structs live in C now, see below)."""
     id: [u64; 4]
     revision: u64
     response: u64
 
 # ============================================================================
-# Global Limine Requests (linker places in .limine_reqs section)
+# Global Limine Requests
+#
+# NOT declared as Simple `var` globals. Two independent bugs made that
+# unworkable (see doc/08_tracking/bug/aarch64_real_firmware_boot_gap_and_seed_defects_2026-07-14.md,
+# 2026-08-07 section, for the full disassembly-level analysis):
+#
+#   1. `@section(...)` is not a real Simple attribute — there is no
+#      decorator/attribute slot on top-level `var` declarations in the
+#      parser AST at all, so the `# @section(".limine_reqs")` comments that
+#      used to sit above these globals never placed anything: `readelf -S`
+#      on the linked kernel showed no `.limine_reqs` section, so Limine's
+#      ELF-section scan could never find these requests.
+#   2. Independently: `some_request.response` (field access on a
+#      `@repr("C")` global struct) was miscompiled on this aarch64/cranelift
+#      target as a tagged-pointer/Option unboxing sequence (mask low 3 bits,
+#      deref at +16) instead of a plain `base + offsetof` load — this is
+#      what actually caused `_parse_hhdm()` to hang silently right after
+#      entry, before even reaching the nil-check.
+#
+# The request structs now live in C
+# (examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c),
+# placed in `.limine_reqs` via `__attribute__((section(...)))` — the same
+# mechanism every reference Limine C kernel uses — with zero-arg accessor
+# externs returning the bootloader-filled `.response` pointer as `u64`. This
+# sidesteps bug #2 as well: Simple never does a struct-field read on these
+# globals anymore.
 # ============================================================================
 
-# @section(".limine_reqs") — applied by linker script
-var memmap_request: LimineRequest = LimineRequest(
-    id: [LIMINE_COMMON_MAGIC_0, LIMINE_COMMON_MAGIC_1,
-         LIMINE_MEMMAP_ID_0, LIMINE_MEMMAP_ID_1],
-    revision: 0,
-    response: 0
-)
-
-# @section(".limine_reqs") — applied by linker script
-var framebuffer_request: LimineRequest = LimineRequest(
-    id: [LIMINE_COMMON_MAGIC_0, LIMINE_COMMON_MAGIC_1,
-         LIMINE_FRAMEBUFFER_ID_0, LIMINE_FRAMEBUFFER_ID_1],
-    revision: 0,
-    response: 0
-)
-
-# @section(".limine_reqs") — applied by linker script
-var rsdp_request: LimineRequest = LimineRequest(
-    id: [LIMINE_COMMON_MAGIC_0, LIMINE_COMMON_MAGIC_1,
-         LIMINE_RSDP_ID_0, LIMINE_RSDP_ID_1],
-    revision: 0,
-    response: 0
-)
-
-# @section(".limine_reqs") — applied by linker script
-var hhdm_request: LimineRequest = LimineRequest(
-    id: [LIMINE_COMMON_MAGIC_0, LIMINE_COMMON_MAGIC_1,
-         LIMINE_HHDM_ID_0, LIMINE_HHDM_ID_1],
-    revision: 0,
-    response: 0
-)
-
-# @section(".limine_reqs") — applied by linker script
-var kernel_addr_request: LimineRequest = LimineRequest(
-    id: [LIMINE_COMMON_MAGIC_0, LIMINE_COMMON_MAGIC_1,
-         LIMINE_KERNEL_ADDR_ID_0, LIMINE_KERNEL_ADDR_ID_1],
-    revision: 0,
-    response: 0
-)
+extern fn rt_limine_memmap_response() -> u64
+extern fn rt_limine_framebuffer_response() -> u64
+extern fn rt_limine_rsdp_response() -> u64
+extern fn rt_limine_hhdm_response() -> u64
+extern fn rt_limine_kernel_addr_response() -> u64
 
 # ============================================================================
 # HHDM Offset (Higher-Half Direct Map)
@@ -193,7 +185,7 @@ var g_hhdm_offset: u64 = 0
 
 fn _parse_hhdm():
     """Parse HHDM response to get virtual-to-physical mapping offset."""
-    val resp_ptr = hhdm_request.response
+    val resp_ptr = rt_limine_hhdm_response()
     if resp_ptr == 0:
         log_raw_println("[BOOT] WARNING: No HHDM response from Limine")
         return
@@ -235,7 +227,7 @@ fn _parse_memory_map() -> [BootMemoryRegion]:
     """Parse Limine memory map response into BootMemoryRegion list."""
     var regions: [BootMemoryRegion] = []
 
-    val resp_ptr = memmap_request.response
+    val resp_ptr = rt_limine_memmap_response()
     if resp_ptr == 0:
         log_raw_println("[BOOT] WARNING: No memory map response from Limine")
         return regions
@@ -305,7 +297,7 @@ fn _no_framebuffer() -> FramebufferInfo:
 
 fn _parse_framebuffer() -> FramebufferInfo:
     """Parse Limine framebuffer response."""
-    val resp_ptr = framebuffer_request.response
+    val resp_ptr = rt_limine_framebuffer_response()
     if resp_ptr == 0:
         log_raw_println("[BOOT] WARNING: No framebuffer response from Limine")
         return _no_framebuffer()
@@ -348,7 +340,7 @@ fn _parse_framebuffer() -> FramebufferInfo:
 
 fn _parse_rsdp() -> PhysAddr?:
     """Parse Limine RSDP response."""
-    val resp_ptr = rsdp_request.response
+    val resp_ptr = rt_limine_rsdp_response()
     if resp_ptr == 0:
         log_raw_println("[BOOT] No RSDP from Limine (ACPI unavailable)")
         return nil
@@ -366,7 +358,7 @@ fn _parse_rsdp() -> PhysAddr?:
 
 fn _parse_kernel_address() -> (PhysAddr, VirtAddr):
     """Parse Limine kernel address response."""
-    val resp_ptr = kernel_addr_request.response
+    val resp_ptr = rt_limine_kernel_addr_response()
     if resp_ptr == 0:
         log_raw_println("[BOOT] WARNING: No kernel address response")
         return (PhysAddr(addr: 0), VirtAddr(addr: 0))

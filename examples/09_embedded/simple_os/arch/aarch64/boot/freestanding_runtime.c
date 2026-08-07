@@ -1744,3 +1744,131 @@ void rt_arm64_dcache_invalidate_range(spl_i64 addr, spl_i64 size) {
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
+/* ============================================================================
+ * Limine boot-protocol requests — moved here from limine_boot_aarch64.spl.
+ *
+ * Two independent defects made the Simple-side globals unusable:
+ *
+ * 1. `# @section(".limine_reqs")` above each `var ..._request` in
+ *    limine_boot_aarch64.spl (and limine_boot.spl on x86_64) is a plain `#`
+ *    comment, not a real attribute — Simple has no decorator slot on
+ *    top-level `var` declarations at all (checked the parser AST:
+ *    `definitions.rs` gives `decorators`/`attributes` fields to
+ *    FunctionDef/ClassDef/ExternDef etc., never to a global var/let). So
+ *    `readelf -S` on the linked kernel showed no `.limine_reqs` section and
+ *    Limine's base_revision==0 ELF-section scan could never find these
+ *    requests, no matter what the boot lane did afterward.
+ * 2. Independently, and worse: `hhdm_request.response` (plain field access
+ *    on a `@repr("C")` global struct) does not compile to a `base +
+ *    offsetof` load on this aarch64/cranelift target. Disassembly of the
+ *    linked kernel.elf showed the compiled `_parse_hhdm` loading
+ *    `hhdm_request`'s *first* word (the id[0] magic constant, not
+ *    `.response` at struct offset 0x28), masking its low 3 bits, and
+ *    branching on a tagged-pointer/Option-style unboxing pattern — the
+ *    codegen used for accessing a boxed/nilable value, not a POD C struct
+ *    field. That is why `_parse_hhdm` hung silently immediately after
+ *    printing "_parse_hhdm: enter": the field read landed on nonsense,
+ *    masked it, and the resulting control flow never reached either the
+ *    nil-check WARNING print or the offset-parse print. Both defects are
+ *    real; #2 is the one that produced the reported hang (confirmed by
+ *    bisecting with log_raw_println calls immediately before/after the
+ *    field read — "enter" printed, "read done" never did). See the bug
+ *    doc's 2026-08-07 section for the full disassembly.
+ *
+ * Fix scope: rather than building full parser->HIR->MIR->codegen support
+ * for a `@section`/`@link_section` global-var attribute (a large,
+ * general-purpose compiler feature out of scope for this boot milestone),
+ * the five Limine request structs are defined here in C as plain `static
+ * volatile` globals with `used` (so they survive as real data in the
+ * linked ELF's .rodata/.data, matching the x86_64 linker script's own
+ * comment: "Limine scans the binary for the magic IDs at boot time" —
+ * i.e. Limine does NOT require a specially-named section, only that the
+ * request structs actually exist as real bytes somewhere inside a loaded
+ * PT_LOAD segment and are not stripped/optimized away), with accessor
+ * functions that return the bootloader-filled `.response` pointer as a
+ * plain `u64`. This sidesteps defect #2 as well: Simple never does a
+ * `@repr("C")` struct-field read on these globals at all anymore, only
+ * calls a zero-arg extern fn.
+ *
+ * An explicit `.limine_reqs`-named section (via
+ * `__attribute__((section(".limine_reqs")))`, matching
+ * linker_limine.ld's already-present `.limine_reqs : AT(...) { *(.limine_reqs) }`
+ * output section) was tried first and is NOT used here: with that
+ * attribute added, Limine's own loader reproducibly (verified twice,
+ * bit-identical fault address both times) hit `Synchronous Exception at
+ * 0x000000004C66A2E0` while parsing the kernel, before printing anything
+ * from this kernel at all — a regression from the working (if
+ * request-blind) banner-only boot. Root cause not isolated further (no
+ * Limine source in-tree to cross-check `AT()` physical-address arithmetic
+ * against its loader's segment-copy expectations); since the plain
+ * `used`-global form above boots end-to-end for real (verified below),
+ * that is the form kept. The unused, now-always-empty `.limine_reqs`
+ * output section in linker_limine.ld is left in place (harmless — an
+ * empty `KEEP(*(.limine_reqs))` costs nothing) as a documented landing
+ * spot if that regression is root-caused later.
+ */
+
+typedef struct {
+    spl_u64 id[4];
+    spl_u64 revision;
+    spl_u64 response;
+} limine_request_t;
+
+#define LIMINE_COMMON_MAGIC_0 0xc7b1dd30df4c8b88ULL
+#define LIMINE_COMMON_MAGIC_1 0x0a82e883a194f07bULL
+
+__attribute__((used, aligned(8)))
+static volatile limine_request_t g_limine_memmap_request = {
+    { LIMINE_COMMON_MAGIC_0, LIMINE_COMMON_MAGIC_1,
+      0x67cf3d9d378a806fULL, 0xe304acdfc50c3c62ULL },
+    0, 0
+};
+
+__attribute__((used, aligned(8)))
+static volatile limine_request_t g_limine_framebuffer_request = {
+    { LIMINE_COMMON_MAGIC_0, LIMINE_COMMON_MAGIC_1,
+      0x9d5827dcd881dd75ULL, 0xa3148604f6fab11bULL },
+    0, 0
+};
+
+__attribute__((used, aligned(8)))
+static volatile limine_request_t g_limine_rsdp_request = {
+    { LIMINE_COMMON_MAGIC_0, LIMINE_COMMON_MAGIC_1,
+      0xc5e77b6b397e7b43ULL, 0x27637845accdcf3cULL },
+    0, 0
+};
+
+__attribute__((used, aligned(8)))
+static volatile limine_request_t g_limine_hhdm_request = {
+    { LIMINE_COMMON_MAGIC_0, LIMINE_COMMON_MAGIC_1,
+      0x48dcf1cb8ad2b852ULL, 0x63984e959a98244bULL },
+    0, 0
+};
+
+__attribute__((used, aligned(8)))
+static volatile limine_request_t g_limine_kernel_addr_request = {
+    { LIMINE_COMMON_MAGIC_0, LIMINE_COMMON_MAGIC_1,
+      0x71ba76863cc55f63ULL, 0xb2644a48c516a487ULL },
+    0, 0
+};
+
+spl_u64 rt_limine_memmap_response(void) {
+    return (spl_u64)g_limine_memmap_request.response;
+}
+
+spl_u64 rt_limine_framebuffer_response(void) {
+    return (spl_u64)g_limine_framebuffer_request.response;
+}
+
+spl_u64 rt_limine_rsdp_response(void) {
+    return (spl_u64)g_limine_rsdp_request.response;
+}
+
+spl_u64 rt_limine_hhdm_response(void) {
+    return (spl_u64)g_limine_hhdm_request.response;
+}
+
+spl_u64 rt_limine_kernel_addr_response(void) {
+    return (spl_u64)g_limine_kernel_addr_request.response;
+}
+
