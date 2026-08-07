@@ -642,3 +642,206 @@ signature, consistent with (not proof of) the unbounded-RSS branch.
 Before attributing a compiler crash to a construct in the input, compile
 `fn main(): print "hi"` with the same binary and the same env. And check the
 binary's mtime against the fix log before spending an hour on the source.
+
+---
+
+## 2026-08-07 — RESOLVED: the post-fix crash is NOT `SymbolTable.lookup`. Symbolized backtrace obtained; `0x517966` question CLOSED.
+
+The open questions this doc carried — "why do post-`1ea6599e8fb` binaries still
+SIGSEGV?" and "is this the same site as stage3's `0x517966`?" — are both
+answered. **No new build was launched**; the answer came from an existing
+*unstripped* post-fix binary that earlier lanes had left on disk.
+
+### The unstripped post-fix artifact
+
+`/home/ormastes/dev/simple-s3bisect/build/cyc/FIX8/stage2-simple`
+(2026-08-06 20:06, 128 MB, `.symtab` + `.debug_info` present, 149,123 symbols).
+Built by the Rust seed from **post-fix** source — verified in the lane worktree:
+`switch_operators_calls.spl:973` carries `case HirExprKind.NamedVar(symbol, _)`
+(the kept half of `1ea6599e8fb`) and `hir_types.spl:373,416` carry the
+"DO NOT re-add ... `rt_dict_contains(self.scopes, ...)` guard" comments (the
+reverted half). Sibling tags `FIX5/FIX6/FIX7/SAB5` are equally unstripped.
+
+Stage-2 binaries are unstripped because the **seed** builds them and does not
+strip; only the pure-Simple stage-3 driver drops debug info. **Any lane needing
+symbols should reach for a stage-2 artifact before paying for a rebuild.**
+
+### Hello-world reproduction (negative control, as required)
+
+```
+$ printf 'fn main():\n    print("hello")\n' > hello.spl
+$ SIMPLE_RUNTIME_PATH=$RT SIMPLE_NO_STUB_FALLBACK=1 \
+    <FIX8>/stage2-simple native-build --runtime-path $RT -o o2 hello.spl
+Segmentation fault (core dumped)   rc=139        # BASELINE tag: identical
+```
+
+**Harness trap worth recording:** with `SIMPLE_BOOTSTRAP=1` added, the same
+command instead exits **rc=1** with `error: bootstrap entry lowered to 0 MIR
+instructions (ret-0 stub module)` — the crash is *masked*, not absent. A lane
+that probes hello-world with `SIMPLE_BOOTSTRAP=1` set will conclude "no SIGSEGV"
+and be wrong.
+
+### Symbolized backtrace (verbatim)
+
+```
+Program received signal SIGSEGV, Segmentation fault.
+0x00000000005ae466 in compiler__borrow__borrow_check__mod__BorrowChecker.check_function ()
+
+$1 = (void *) 0x98                 # si_addr
+rax  0x90   rbx  0x6c193b1   r14  0x6c194f1   r15  0x91   rip  0x5ae466
+=> 0x5ae466 <BorrowChecker.check_function+102>:  mov    0x8(%rax),%r14
+   0x5ae46a <BorrowChecker.check_function+106>:  test   %r14,%r14
+   0x5ae46d <BorrowChecker.check_function+109>:  jle    0x5ae4ad
+   0x5ae46f <BorrowChecker.check_function+111>:  and    $0xfffffffffffffff8,%rbx
+
+#0  0x00000000005ae466 in compiler__borrow__borrow_check__mod__BorrowChecker.check_function ()
+#1  0x00000000005aef2e in compiler.borrow.borrow_check.mod.check_mir_module ()
+#2  0x0000000000711c5c in compiler__driver__driver_pipeline_passes__CompilerDriver.borrow_check ()
+#3  0x00000000007023b4 in compiler__driver__driver_aot_pipeline__CompilerDriver.aot_compile ()
+#4  0x000000000049af6d in app.cli.bootstrap_main.run_native_build_bootstrap ()
+#5  0x0000000000498217 in main ()
+```
+
+### `si_addr=0x118` / null-`Scope` hypothesis: REFUTED
+
+- The crash is **not** in `SymbolTable.lookup`, and **not** in MIR lowering at
+  all. It is in the **borrow checker**, a *later* pipeline pass
+  (`aot_compile → borrow_check`), which is why the `1ea6599e8fb` MIR-lowering
+  fix changed nothing.
+- The faulting pointer is **not NULL**. `r15 = 0x91 = (18 << 3) | 1` — a
+  **tagged small integer 18** read out of bounds. `si_addr` is simply
+  `(value & ~7) + 8`, so it varies per run/build: `0x98` here, `0x118` in the
+  stripped-stage3 report (`rax=0x110`). **Do not root-cause from the si_addr
+  value**; it is derived, not diagnostic. There is no `Scope` involved.
+- **This closes "Is this the same site as stage3's `0x517966`?" — YES.** The
+  stripped-stage3 report's `rax=0x110`, `mov 0x8(%rax),%r14` + `test`/`jle`
+  shape and its **6 user frames** match this backtrace instruction-for-
+  instruction and frame-for-frame. The earlier "plausibly two distinct crash
+  sites" working conclusion is superseded: it is one site.
+
+### Root cause: cross-module field-index collision on `NLLChecker.errors`
+
+Proven from disassembly of both sides of the module boundary in the same binary.
+
+**Producer** — `NLLChecker.create` (`nll.spl`, defining module) allocates a
+**0x28-byte (5-field)** object and stores `errors` at **0x20**:
+
+```
+5afe0f:  mov $0x28,%edi ; call rt_alloc
+5afe19:  mov %rbx,(%rax)        # cfg                0x00
+5afe1c:  mov %r14,0x8(%rax)     # borrow_graph       0x08
+5afe20:  mov %r13,0x10(%rax)    # liveness           0x10
+5afe24:  mov %r15,0x18(%rax)    # lifetime_inference 0x18
+5afe28:  mov %r12,0x20(%rax)    # errors  <-- 0x20
+```
+
+`NLLChecker.check`, in the **same** module, agrees — it reads and writes
+`self.errors` at `0x20(%rbp)` (`5aff55` / `5affc4`).
+
+**Consumer** — `BorrowChecker.check_function` (`mod.spl`) reads the *same field*
+at **0x58**, i.e. 88 bytes into a 40-byte object:
+
+```
+5ae44c:  and $~7,%r15
+5ae450:  mov 0x58(%r15),%rdi    # nll.errors   <-- WRONG: slot 11, not slot 4
+5ae458:  call rt_for_iterable   # returns the OOB garbage 0x91 unchanged
+5ae466:  mov 0x8(%rax),%r14     # FAULT: list length read on a tagged int
+```
+
+**Slot 11 is not arbitrary.** A scan of every `class`/`struct` in
+`src/{compiler,lib,app}` finds **exactly one** type with a field named `errors`
+at index 11: **`MirLowering`** (`src/compiler/50.mir/mir_lowering_types.spl:41`).
+
+The mechanism is documented by the offending function's own comment.
+`MirLowering.resolve_field_index`
+(`src/compiler/50.mir/_MirLowering/function_lowering.spl:934`) resolves a field
+through a three-tier chain, and the **middle** tier is keyed by a numeric symbol
+id:
+
+```python
+# tier 1 (SAFE, name-keyed):   struct_value_syms -> struct_field_order[value_name]
+# tier 2 (UNSAFE, id-keyed):
+val sym_id = self.symbol_id_value(found_type_sym)
+if self.field_map.has(sym_id):
+    val fields = self.field_map[sym_id]          # Dict<i64, [text]>
+    ...                                          # returns idx of field_name
+# tier 3 (SAFE, name-keyed):   struct_field_order[type_symbol.name]
+0  # fallback
+```
+
+`field_map` is declared `Dict<i64, [text]>  # type symbol ID -> ordered field
+names` (`mir_lowering_types.spl:42`), whereas `struct_field_order` is
+`Dict<text, [text]>` (`:54`) — name-keyed. The function's own leading comment
+already states the hazard:
+
+> *"Numeric SymbolIds are local to each module and can collide in an
+> entry-closure build. A lowered local's name-keyed provenance is therefore
+> authoritative when available."*
+
+An `--entry-closure` whole-program build shares **one** `MirLowering` (one
+`field_map`) across all modules, so `NLLChecker`'s module-local type symbol id
+in `55.borrow/borrow_check/mod.spl` **collides** with the id under which
+`MirLowering`'s field list was registered. Tier 1 does not apply (the base is a
+`var` from an imported static constructor, not a tracked struct value), so tier
+2 wins with the *wrong class's* field list and returns `errors`'s index in
+**`MirLowering`** — 11 — instead of 4. Tier 3, which is name-keyed and would
+have been correct, is never reached.
+
+Why only this one site: `BasicBlock.statements` (0x8), `BorrowGraph.errors`
+(0x18) and `LifetimeInference.errors` (0x10) all read **correctly** across the
+same module boundaries in this binary — a collision needs an id clash, so it is
+sparse and data-dependent, which is exactly why it produced **no diagnostic at
+all** (`FIX8/stage2.log` has zero `nll`/`borrow_check` warnings).
+
+### Two stacked failures — note for whoever fixes this
+
+1. `nll.check()` returned falsey for hello-world, which has no borrow errors.
+   It returns `self.errors.is_empty()`, read at the *correct* 0x20 inside
+   `nll.spl`; the falsey test is the `mov $0x80009,%ecx; bt` mask (values
+   {0,3,19}). Worth confirming this isn't a second defect.
+2. The consumer then read `errors` at the wrong 0x58 and faulted.
+
+Fixing only (2) makes hello-world take the `Errors([])` branch — better, but not
+obviously a green.
+
+### Proposed fix (NOT landed — deliberately)
+
+In `resolve_field_index`, make the name-keyed tier authoritative over the
+id-keyed one: either move the tier-3 `struct_field_order[type_symbol.name]`
+lookup **above** the `field_map[sym_id]` lookup, or validate a `field_map` hit
+by confirming `type_symbol.name` matches the class that registered it. This is
+what the function's own comment already prescribes.
+
+**It is not landed because it cannot be verified right now, and this doc already
+records what happens when an unverified fix to foundational compiler code is
+landed** (the `hir_types.spl` "defense-in-depth" guard, which broke Stage 3
+outright). Verification needs a stage-2 rebuild (~143 s, but ~32 GB RSS —
+earlyoom SIGTERMed two such builds at 00:59 today at 32.7 GB and 32.0 GB). At
+the time of writing, 67 GB were available with two foreign `native-build`
+processes live, so the agreed gate (no other `native-build`, >=85 GB available)
+was **not met**. **Sabotage-verification was therefore not performed and no
+green is claimed.**
+
+RED is already banked and is cheap to re-run: `FIX8/stage2-simple` on
+hello-world is rc=139, reproducible on demand.
+
+### Verification recipe for the next lane (~3 minutes of compute)
+
+1. Apply the `resolve_field_index` reorder to a private worktree.
+2. Rebuild **stage 2 only** with the seed — `/home/ormastes/dev/simple-s3bisect/build/cyc/build_stage2.sh <TAG>`
+   is the exact recipe (seed `native-build --entry-closure --threads 16
+   --entry src/app/cli/bootstrap_main.spl`); FIX8 took **143 s** (84 s compile +
+   59 s link). A full stage 3 is **not** required to discriminate.
+3. `objdump -d --start-address=0x... <new>/stage2-simple` on
+   `BorrowChecker.check_function` and confirm the `nll.errors` read is `0x20`,
+   not `0x58`.
+4. Run hello-world: expect rc=0. Sabotage by reverting and re-confirming
+   rc=139 + `si_addr = (garbage & ~7) + 8` in `check_function`.
+
+**Standing lessons.**
+- A stripped stage-3 is not a dead end: an unstripped **stage-2** built by the
+  seed from the same source reproduces the identical site with full symbols.
+  Check for one before budgeting an hour-long rebuild.
+- `si_addr` here is `(tagged_value & ~7) + 8`. Two runs disagreeing on it
+  (`0x98` vs `0x118`) is *not* evidence of two bugs.
+- `SIMPLE_BOOTSTRAP=1` masks this SIGSEGV as a clean rc=1 diagnostic.
