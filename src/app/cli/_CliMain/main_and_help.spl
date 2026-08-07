@@ -536,5 +536,40 @@ fn main() -> i64:
             j = j + 1
         return cli_run_file(first, program_args, flags.gc_log, flags.gc_off)
     else:
+        # `first` is neither a known subcommand (elif chain above) nor an
+        # existing file (checked just above): this is a usage error
+        # (unknown/misspelled/unimplemented subcommand), not a
+        # file-execution failure, so it must fail closed with a distinct exit
+        # code. See doc/08_tracking/bug/cli_unknown_subcommand_exits_zero_fail_open_2026-08-07.md
         print_error_with_help("file not found: {first}")
-        return 1
+        return cli_dispatch_fallthrough_exit_code(first)
+
+# CLI_USAGE_ERROR_EXIT_CODE is the exit code for an unknown-token dispatch
+# fall-through: `first` matched no known subcommand and does not resolve as
+# an existing file to run. Distinct from the code a real-but-failing file
+# execution returns (that path returns cli_run_file's own exit code).
+val CLI_USAGE_ERROR_EXIT_CODE: i64 = 2
+
+fn cli_dispatch_fallthrough_exit_code(token: text) -> i64:
+    """Exit code for the dispatch fall-through path given `token`.
+
+    Only meaningful when `token` has already been ruled out as a known
+    subcommand name (the caller's elif chain does that). Returns
+    CLI_USAGE_ERROR_EXIT_CODE (2) when `token` also does not resolve to an
+    existing file (pure usage error: unknown/misspelled/unimplemented
+    subcommand). Returns -1 when `token` IS an existing file, signalling the
+    caller should run the file and use its own exit code instead — this
+    function is never authoritative for that case. In `main()`, the -1
+    sentinel is unreachable as a process exit code: the caller's
+    `elif cli_file_exists(first):` branch runs `cli_run_file` and returns
+    BEFORE this function is ever called, so the `else` branch that calls
+    `cli_dispatch_fallthrough_exit_code` only fires when `cli_file_exists`
+    is already known false, and this function always returns
+    CLI_USAGE_ERROR_EXIT_CODE (2) in that path.
+
+    See doc/08_tracking/bug/cli_unknown_subcommand_exits_zero_fail_open_2026-08-07.md
+    """
+    if cli_file_exists(token):
+        -1
+    else:
+        CLI_USAGE_ERROR_EXIT_CODE
