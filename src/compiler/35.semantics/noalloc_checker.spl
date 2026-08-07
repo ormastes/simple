@@ -4,166 +4,17 @@
 # granularity. Uses alloc_inference results and the RUNTIME_FAMILY_MANIFEST
 # to reject allocation in @noalloc-annotated functions.
 #
-# Four violation kinds:
+# Three violation kinds:
 #   1. DirectAlloc    — new, array/dict literal, string interpolation in @noalloc fn
 #   2. TransitiveCall — call to a function classified as allocating by alloc_inference
 #   3. FamilyImport   — call into an allocating runtime family per the manifest
-#   4. UnknownClass   — an expression tag or callee the classifier cannot resolve at
-#                       all (WP-12) — rejected, never silently treated as safe
 #
 # Emits hard errors (not warnings) so @noalloc is a compile-time guarantee.
-#
-# WP-12 (2026-08-07) — allocation-class lattice, startup seal, steady-state
-# gate. Layered ON TOP of the pre-existing @noalloc all-or-nothing gate above
-# (which stays load-bearing and unchanged: a `@noalloc` fn must be `None`,
-# full stop — see the WP-11 regression spec, which stays green). The lattice
-# below answers a DIFFERENT, broader question the boolean `allocates` field
-# structurally cannot express (per
-# doc/08_tracking/bug/noalloc_family_manifest_prefix_match_exempts_its_own_allocators_2026-08-07.md
-# "New gap found..."): "is this symbol safe to still be running once the
-# startup seal has closed", where a caller-supplied bounded-region
-# sub-allocator (`mimalloc.alloc`, `baremetal.allocator.heap_init`) or a
-# one-time init routine is legitimately fine, but real heap growth or an
-# honestly-unresolvable callee (e.g. an indirect call through a function
-# pointer, which can never be looked up by name) is not.
-#
-# "STARTUP SEAL" / "STEADY STATE" boundary: reuses WP-10's `flight_closure`
-# concept (`llvm_native_link.spl:2506-2507`,
-# `allocator_symbol_scan.spl:25-40`) rather than inventing new terminology —
-# a build is sealed (in steady state) when `SIMPLE_NO_STUB_FALLBACK=1` OR the
-# resolved `SIMPLE_SAFETY_PROFILE` is at least `AssuranceStrictness.Critical`
-# (`compiler.common.assurance.policy`). `AllocClass.InitOnly` is exactly the
-# class of symbol that is legitimate BEFORE that seal closes (module-static
-# init, matching `__simple_call_module_inits`,
-# `llvm_native_link.spl:2638-2653`) and illegitimate after — `Unbounded` is
-# the class that is never legitimate once sealed.
 
 use compiler.semantics.gc_boundary_check.{
     RuntimeFamilyManifestEntry, RUNTIME_FAMILY_MANIFEST,
     runtime_family_manifest_entry
 }
-use compiler.common.assurance.policy.{strictness_for_profile_name}
-use compiler.common.assurance.policy_schema.{AssuranceStrictness}
-
-# ============================================================================
-# Allocation-Class Lattice (WP-12)
-# ============================================================================
-
-enum AllocClass:
-    """Allocation classification for a symbol the noalloc checker examines.
-
-    - None:        provably performs no allocation.
-    - InitOnly:     allocates only during one-time startup/init, before the
-                     startup seal closes -- never again in steady state.
-    - BoundedPool:  sub-allocates from a caller-supplied fixed-size region
-                     (`mimalloc.alloc`, `baremetal.allocator.heap_init`) --
-                     no malloc/mmap/brk/heap growth, but real sub-allocation,
-                     so it is distinct from `None`.
-    - Unbounded:    real heap growth: malloc/mmap/brk, or one of Simple's own
-                     GC-heap-allocating expression forms (`new`, array/dict
-                     literal, string interpolation/concat).
-    - Unknown:      cannot be classified at all -- e.g. an indirect call
-                     through a function-pointer parameter, or a callee name
-                     never registered in the manifest. This is a real
-                     "I don't know" state and MUST NOT silently collapse to
-                     `None`.
-    """
-    None
-    InitOnly
-    BoundedPool
-    Unbounded
-    Unknown
-
-impl AllocClass:
-    fn name() -> text:
-        """Canonical lowercase name, matching the class as spelled in the WP."""
-        match self:
-            AllocClass.None: "none"
-            AllocClass.InitOnly: "init_only"
-            AllocClass.BoundedPool: "bounded_pool"
-            AllocClass.Unbounded: "unbounded"
-            AllocClass.Unknown: "unknown"
-
-    fn is_steady_state_safe() -> bool:
-        """True for classes permitted once the startup seal has closed.
-
-        `None`/`InitOnly`/`BoundedPool` pass; `Unbounded` and `Unknown` are
-        REJECTED. `Unknown` is deliberately on the reject side, not the
-        accept side -- an unresolvable callee must never pass as if it were
-        proven safe."""
-        match self:
-            AllocClass.None: true
-            AllocClass.InitOnly: true
-            AllocClass.BoundedPool: true
-            AllocClass.Unbounded: false
-            AllocClass.Unknown: false
-
-# Family modules known to sub-allocate from a caller-supplied fixed region
-# rather than growing the heap -- exactly the two rows WP-11 marked
-# `allocates: true` for lack of a better bit
-# (`gc_boundary_check.spl` / bug doc "Fix (WP-11)"). Listed here, not in the
-# family manifest, because the manifest's `allocates` field stays a boolean
-# by design (WP-11 scope); this is the layer that recovers the finer class.
-val BOUNDED_POOL_FAMILIES = [
-    "nogc_async_mut_noalloc.mimalloc",
-    "nogc_async_mut_noalloc.baremetal.allocator",
-]
-
-fn is_bounded_pool_family(family_module: text) -> bool:
-    """Exact-or-dot-boundary match, matching WP-11's own matching discipline
-    (`family_path_matches` in `gc_boundary_check.spl`) -- a prefix match here
-    would silently swallow sibling submodules, exactly the bug WP-11 fixed.
-    Also strips a leading `std.`/`lib.` import prefix first, mirroring
-    `gc_boundary_check.normalized_family_path` (not `pub`, so replicated here
-    rather than imported) -- callers register family modules both with and
-    without that prefix (compare the real scan driver's bare
-    `nogc_async_mut_noalloc.mimalloc` against the WP-11 regression spec's
-    `std.nogc_async_mut_noalloc.mimalloc`)."""
-    var path = family_module
-    if path.starts_with("std."):
-        path = path[4:path.len()]
-    else if path.starts_with("lib."):
-        path = path[4:path.len()]
-    for f in BOUNDED_POOL_FAMILIES:
-        if path == f or path.starts_with(f + "."):
-            return true
-    false
-
-fn is_init_symbol_name(name: text) -> bool:
-    """Startup-seal recognizer: names that identify a one-time
-    initialization/construction routine, consistent with the crt0/init-array
-    boundary this project's freestanding backend already establishes at
-    `__simple_call_module_inits` (`llvm_native_link.spl:2638`) -- module
-    static initializers and type constructors run once, before steady
-    state."""
-    name == "new" or name.ends_with(".new") or name == "init" or name.starts_with("init_") or name.contains("_init")
-
-fn classify_symbol_alloc_class(name: text, allocates: bool, family_module: text) -> AllocClass:
-    """Classify one manifest-registered symbol. `Unknown` is NOT produced
-    here -- a registered symbol always carries real information (even if
-    that information is the text-scanner's `allocates: false` default);
-    `Unknown` is reserved for the lookup-miss case (see `lookup()` below),
-    which is where an honestly-unresolvable callee actually shows up."""
-    if is_bounded_pool_family(family_module):
-        return AllocClass.BoundedPool
-    if not allocates:
-        return AllocClass.None
-    if is_init_symbol_name(name):
-        return AllocClass.InitOnly
-    AllocClass.Unbounded
-
-fn classify_direct_alloc_expr(expr_tag: text) -> AllocClass:
-    """Classify one expression-kind tag found in a function body. Replaces
-    the old flat 5-string `is_direct_alloc_expr` boolean with a real class:
-    the 5 recognized allocating forms are `Unbounded` (Simple's GC heap);
-    known-safe non-allocating tags are `None`; anything else is `Unknown`
-    (not silently `None`) -- an unrecognized expression tag has not been
-    proven safe."""
-    if expr_tag == "new" or expr_tag == "array_literal" or expr_tag == "dict_literal" or expr_tag == "interpolation" or expr_tag == "string_concat":
-        return AllocClass.Unbounded
-    if expr_tag == "" or expr_tag == "call" or expr_tag == "literal_int":
-        return AllocClass.None
-    AllocClass.Unknown
 
 # ============================================================================
 # Violation Kind
@@ -174,7 +25,6 @@ enum NoallocViolationKind:
     DirectAlloc
     TransitiveCall
     FamilyImport
-    UnknownClass
 
 # ============================================================================
 # Violation
@@ -185,7 +35,7 @@ struct NoallocViolation:
 
     Fields:
         fn_name:  The @noalloc function where the violation was found.
-        kind:     DirectAlloc | TransitiveCall | FamilyImport | UnknownClass.
+        kind:     DirectAlloc | TransitiveCall | FamilyImport.
         detail:   Human-readable description (e.g. callee name, expr kind).
         line:     Source line number (0 when unavailable).
     """
@@ -206,17 +56,11 @@ struct NoallocFnEntry:
         is_noalloc:    true when the function is annotated @noalloc.
         allocates:     true when alloc_inference classifies it as allocating.
         family_module: Module path for runtime-family lookup (empty if local).
-        alloc_class:   WP-12 lattice classification -- derived from
-                       `allocates`/`family_module`/`name` at registration
-                       time by `classify_symbol_alloc_class`, EXCEPT for the
-                       synthetic lookup-miss entry (`lookup()` below), which
-                       is `Unknown` because it carries no real information.
     """
     name: text
     is_noalloc: bool
     allocates: bool
     family_module: text
-    alloc_class: AllocClass
 
 class NoallocCapabilityManifest:
     """Registry of per-function noalloc status and allocation classification.
@@ -232,32 +76,22 @@ impl NoallocCapabilityManifest:
         NoallocCapabilityManifest(entries: [], index: {})
 
     me register(name: text, is_noalloc: bool, allocates: bool, family_module: text):
-        """Register a function in the manifest. `alloc_class` is derived
-        automatically from `(name, allocates, family_module)` -- there is no
-        separate class parameter, so every existing call site keeps working
-        unchanged while every registered symbol now also carries a real
-        lattice class."""
+        """Register a function in the manifest."""
         val idx = self.entries.len()
         self.entries.push(NoallocFnEntry(
             name: name,
             is_noalloc: is_noalloc,
             allocates: allocates,
-            family_module: family_module,
-            alloc_class: classify_symbol_alloc_class(name, allocates, family_module)
+            family_module: family_module
         ))
         self.index[name] = idx
 
     fn lookup(name: text) -> NoallocFnEntry:
-        """Look up a function entry. Returns a synthetic entry if unknown --
-        `allocates: false` for backward compatibility with the pre-WP-12
-        boolean gate, but `alloc_class: Unknown`, NOT `None`: an unregistered
-        callee (e.g. the resolved target of an indirect function-pointer
-        call) has not been proven safe, and must not silently pass the
-        steady-state gate as if it had."""
+        """Look up a function entry. Returns a default non-noalloc, non-allocating entry if unknown."""
         if self.index.has(name):
             val idx = self.index[name]
             return self.entries[idx]
-        NoallocFnEntry(name: name, is_noalloc: false, allocates: false, family_module: "", alloc_class: AllocClass.Unknown)
+        NoallocFnEntry(name: name, is_noalloc: false, allocates: false, family_module: "")
 
     fn is_noalloc_fn(name: text) -> bool:
         """Check whether a function is annotated @noalloc."""
@@ -280,21 +114,16 @@ impl NoallocCapabilityManifest:
 # ============================================================================
 
 fn is_direct_alloc_expr(expr_tag: text) -> bool:
-    """Return true for expression tags that are not proven allocation-free.
+    """Return true for expression tags that represent direct heap allocation.
 
-    Derived from `classify_direct_alloc_expr` (WP-12) rather than a flat
-    5-string match: `Unbounded` (the original 5 recognized allocating forms)
-    AND `Unknown` (an unrecognized tag, not proven safe) both return true --
-    only `None` returns false.
-
-    Recognized `Unbounded` patterns:
+    Recognized patterns:
     - "new"              new Foo()
     - "array_literal"    [1, 2, 3]
     - "dict_literal"     {"a": 1}
     - "interpolation"    "hello {name}"
     - "string_concat"    a + b (when both are text — runtime alloc)
     """
-    classify_direct_alloc_expr(expr_tag) != AllocClass.None
+    expr_tag == "new" or expr_tag == "array_literal" or expr_tag == "dict_literal" or expr_tag == "interpolation" or expr_tag == "string_concat"
 
 fn direct_alloc_description(expr_tag: text) -> text:
     """Human-readable description for a direct allocation expression."""
@@ -308,8 +137,6 @@ fn direct_alloc_description(expr_tag: text) -> text:
         return "string interpolation allocates on heap"
     if expr_tag == "string_concat":
         return "string concatenation allocates on heap"
-    if classify_direct_alloc_expr(expr_tag) == AllocClass.Unknown:
-        return "unrecognized expression tag '{expr_tag}' -- not proven allocation-free (class: unknown)"
     "unknown allocation expression"
 
 # ============================================================================
@@ -326,53 +153,6 @@ fn is_allocating_family_call(callee_module: text) -> bool:
         return false
     val entry = runtime_family_manifest_entry(callee_module)
     entry.allocates
-
-# ============================================================================
-# Startup Seal / Steady-State Gate (WP-12)
-# ============================================================================
-
-struct SteadyStateViolation:
-    """One symbol that fails the steady-state gate: its `alloc_class` is not
-    `is_steady_state_safe()`. Distinct from `NoallocViolation` -- this gate
-    applies broadly (any symbol reachable in a sealed/flight-closure build),
-    not only to `@noalloc`-annotated functions."""
-    fn_name: text
-    alloc_class: AllocClass
-
-fn steady_state_gate_active(safety_profile: text, no_stub_fallback: bool) -> bool:
-    """Is the startup seal closed for this build -- i.e. is the
-    steady-state gate live? Reuses WP-10's `flight_closure` predicate
-    verbatim (`llvm_native_link.spl:2506-2507`): sealed when
-    `SIMPLE_NO_STUB_FALLBACK=1` OR the resolved `SIMPLE_SAFETY_PROFILE` is at
-    least `AssuranceStrictness.Critical`. Routes through
-    `compiler.common.assurance.policy`'s `strictness_for_profile_name`
-    resolver -- no new severity table is introduced here."""
-    no_stub_fallback or strictness_for_profile_name(safety_profile).at_least(AssuranceStrictness.Critical)
-
-fn check_steady_state_gate(manifest: NoallocCapabilityManifest, symbol_names: [text]) -> [SteadyStateViolation]:
-    """The steady-state gate itself: for each name in `symbol_names` (every
-    symbol reachable once the startup seal has closed), look it up in
-    `manifest` and reject unless `alloc_class.is_steady_state_safe()`.
-    `Unbounded` (real heap growth) and `Unknown` (unresolvable callee, e.g.
-    an indirect call through a function pointer, or a name the manifest
-    never registered) both reject; `None`/`InitOnly`/`BoundedPool` pass."""
-    var violations: [SteadyStateViolation] = []
-    for name in symbol_names:
-        val entry = manifest.lookup(name)
-        if not entry.alloc_class.is_steady_state_safe():
-            violations.push(SteadyStateViolation(fn_name: name, alloc_class: entry.alloc_class))
-    violations
-
-fn format_steady_state_violation(v: SteadyStateViolation) -> text:
-    """Format one steady-state gate rejection as a compiler diagnostic string."""
-    "error[steady-state]: symbol '{v.fn_name}' is not steady-state safe (class: {v.alloc_class.name()})"
-
-fn format_steady_state_violations(violations: [SteadyStateViolation]) -> [text]:
-    """Format all steady-state gate rejections as diagnostic strings."""
-    var messages: [text] = []
-    for v in violations:
-        messages.push(format_steady_state_violation(v))
-    messages
 
 # ============================================================================
 # Checker — Main Entry Point
@@ -405,15 +185,7 @@ fn check_noalloc_violations(fn_name: text, expr_tags: [text], callee_names: [tex
 
     # Phase 1: Direct allocation expressions
     for tag in expr_tags:
-        val direct_class = classify_direct_alloc_expr(tag)
-        if direct_class == AllocClass.Unknown:
-            violations.push(NoallocViolation(
-                fn_name: fn_name,
-                kind: NoallocViolationKind.UnknownClass,
-                detail: direct_alloc_description(tag),
-                line: 0
-            ))
-        else if is_direct_alloc_expr(tag):
+        if is_direct_alloc_expr(tag):
             violations.push(NoallocViolation(
                 fn_name: fn_name,
                 kind: NoallocViolationKind.DirectAlloc,
@@ -422,26 +194,6 @@ fn check_noalloc_violations(fn_name: text, expr_tags: [text], callee_names: [tex
             ))
 
     # Phase 2: Transitive calls to allocating functions
-    #
-    # NOTE (WP-12): the @noalloc all-or-nothing gate deliberately does NOT
-    # reject a manifest lookup-miss (`alloc_class == Unknown`) here. This
-    # driver's real caller, `90.tools/verify/noalloc_manifest_scan.spl`, is a
-    # TEXT scanner (see its own header) whose `_extract_callees` cannot
-    # distinguish a real call from an identifier inside a docstring/comment
-    # or a builtin method dispatch (`x.len()` extracts bare `len`) -- proven
-    # by running it for real: every one of `sqrt`/`O`/`lcm`/`abs`/`gcd`/`len`
-    # it currently reports as an "unresolvable callee" for the 19 real
-    # `@noalloc` functions landed in WP-12a is a false positive pulled out of
-    # a docstring's prose (`math/mod.spl:165` "lcm(a, b) = abs(a * b) /
-    # gcd(a, b)", `:12` "O(1)"/"O(n)" complexity notes) or a `.len()` method
-    # call on a builtin `text`/array receiver, never a real call to an
-    # unregistered symbol. Wiring `Unknown`-rejection into THIS gate would
-    # turn every one of those into a hard build error on correct code. The
-    # honest "reject Unknown" behaviour this WP adds instead lives in the
-    # NEW, opt-in `check_steady_state_gate` below, which a caller drives over
-    # a symbol list it actually trusts (e.g. a real object-symbol closure, or
-    # a manifest built by something better than this text scanner) rather
-    # than blindly over every text-scanned "callee".
     for callee in callee_names:
         val entry = manifest.lookup(callee)
 
@@ -516,8 +268,6 @@ fn format_noalloc_violation(v: NoallocViolation) -> text:
             kind_label = "transitive-call"
         NoallocViolationKind.FamilyImport:
             kind_label = "family-import"
-        NoallocViolationKind.UnknownClass:
-            kind_label = "unknown-class"
 
     if v.line > 0:
         return "error[noalloc]: in @noalloc fn '{v.fn_name}' (line {v.line}): {kind_label} — {v.detail}"
