@@ -402,6 +402,69 @@ B1-B6 CUDA, C2-C3 Vulkan, D1-D4 SVM-G, E1-E2 docs/CI) not started.
 - No new bugs filed for C2 itself -- the emitter/session/mailbox
   integration worked as designed on this host's real Vulkan device.
 
+## Status: D1 (ISA spec + assembler) -- landed 2026-08-07
+
+- **Recovered, not rewritten.** D1's five files
+  (`src/lib/common/svmg/{opcodes,sgp,assembler,mailbox_const}.spl` + D2's
+  `ref_vm.spl`) and their unit specs
+  (`test/01_unit/lib/svmg/{opcodes_and_sgp_header_spec,ref_vm_spec}.spl`)
+  had already been authored and were verified working in an earlier
+  session, but per
+  `doc/08_tracking/bug/svmg_d1_module_not_on_main_blocks_b3_verification_2026-08-07.md`
+  were never actually merged onto `main`/`origin/main` — confirmed absent
+  from `origin/main` at task start (`git ls-tree -r origin/main --
+  src/lib/common/svmg/` empty). The content was recovered byte-for-byte
+  from the still-reachable-but-unmerged commit `c2f18eec42e` (`git log
+  --all --oneline -- src/lib/common/svmg/opcodes.spl`), re-verified in
+  this working tree, and landed via the plumbing-commit pattern
+  (`.claude/rules/vcs.md` § "Plumbing landing for contested WC") rather
+  than trusting the shared, actively-clobbered working copy.
+- D3's and D4's deliverables
+  (`test/02_integration/svmg/conformance/conformance_suite_spec.spl`,
+  `test/fixtures/svmg/conformance_vectors.spl`,
+  `src/compiler/70.backend/svmg_lowering.spl`,
+  `test/01_unit/compiler/backend/svmg_lowering_spec.spl`) were found the
+  same way, recoverable from commit `a05020fed04` (child of `c2f18eec42e`,
+  same never-merged lineage) -- see the D2/D3/D4 status entries below (or
+  this task's commit history) for their own land status.
+- `mailbox_const.spl`'s `TRIGGER_MAGIC`/`SENTINEL_TIMEOUT`/
+  `SENTINEL_EXIT_MASK`/`CMD_*` values were diffed against A2's
+  `src/lib/nogc_sync_mut/test_runner/gpu_mailbox.spl` and are bit-for-bit
+  identical (`0x0000DEAD`/`0xDEAD0000`/`0xCAFE0000`/`0x01`/`0x02`/`0x03`).
+  Its RECORD-ring layout intentionally has **no** head-counter word
+  (records start at `record_ring_base_offset` + 0), matching D2's
+  `ref_vm.spl` and B3's checked-in `svmg_cuda_kernel.ptx`, NOT A2's
+  `MailboxArena.append_record` (which reserves +8 for a head counter) --
+  this divergence is pre-existing, documented in the file's own header
+  comment, and is the same one described in
+  `doc/08_tracking/bug/svmg_a2_record_ring_head_counter_diverges_from_d2_ref_vm_2026-08-07.md`.
+- Assembler entry point is `svmg_asm(text) -> [u8]` (not `asm` --
+  `asm` is a reserved token). 50 opcode constants (`OP_*`) match design
+  §4.3 exactly; `mnemonic_to_opcode`/`opcode_to_mnemonic`/`disasm` round-trip
+  every mnemonic.
+- Verify: `bin/simple test test/01_unit/lib/svmg/opcodes_and_sgp_header_spec.spl`
+  -- `Results: 6 total, 6 passed, 0 failed`. `bin/simple lint` on all four
+  D1 files: 0 errors (pre-existing `MODINIT001`/`non_exhaustive_match`
+  warnings only, not introduced by this recovery).
+- **Sabotage probe:** cross-wired `mnemonic_to_opcode`'s `"ADD"` arm to
+  return `OP_SUB` instead of `OP_ADD` -> RED (`6 total, 4 passed, 2
+  failed`: `expected ADD, got SUB` and the `PUSHI 1\nPUSHI 2\nADD\nHALT 0`
+  round-trip both failed as expected); reverted -> GREEN (`6 total, 6
+  passed, 0 failed`), file byte-identical to the recovered source again.
+  Note: a naive absolute-opcode-value sabotage (`OP_ADD: i64 = 0x20` ->
+  `0x99`) does **not** fail this spec, because the round-trip test only
+  checks internal mnemonic<->opcode consistency, not the literal byte
+  values the checked-in `svmg_cuda_kernel.ptx` device kernel hardcodes
+  (e.g. `setp.eq.u32 %p1, %r31, 0x20; @%p1 bra OP_ADD;`). This is a real
+  gap (an absolute-value regression in `opcodes.spl` would silently break
+  device conformance while `bin/simple test` on this spec alone stayed
+  green) -- not fixed in this pass (D1's stated Verify bar is the
+  round-trip only); flagging for whoever next touches D3's conformance
+  suite to consider pinning a few `OP_* == <literal>` assertions there.
+- Bug `svmg_d1_module_not_on_main_blocks_b3_verification_2026-08-07.md` is
+  now resolved: D1 (and D2) are present on `origin/main` as of this
+  session's commit landing this section.
+
 ## Affected Layers
 
 - [[test_runner]] — `doc/00_llm_process/layer_expert/test_runner/skill.md`

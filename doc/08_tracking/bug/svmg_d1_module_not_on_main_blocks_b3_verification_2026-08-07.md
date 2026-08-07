@@ -73,3 +73,20 @@ and drive the same table through `CudaVmExecutor.run_source` (a small
 system spec, not yet written, is the natural home for this -- see B3
 report) to get the full 44-vector pass/fail against the on-device
 interpreter rather than the standalone C harness's 3-vector spot check.
+
+## Resolution (2026-08-07, same day)
+
+D1 is landed on `origin/main`: the five files were recovered byte-for-byte
+from the never-merged commit `c2f18eec42e` (still reachable via `git log
+--all`, confirmed identical with `diff <(git show c2f18eec42e:<path>)
+<path>`), re-verified (`bin/simple test
+test/01_unit/lib/svmg/opcodes_and_sgp_header_spec.spl` ->
+`Results: 6 total, 6 passed, 0 failed`; sabotage-probed RED/GREEN; `bin/simple
+lint` on all four files -> 0 errors), and landed via the plumbing-commit
+pattern (`.claude/rules/vcs.md`). D3/D4's files were separately recovered
+from the child commit `a05020fed04` in the same never-merged lineage. See
+`doc/00_llm_process/feature_expert/gpu_remote_lanes/skill.md` § "Status: D1"
+for the full recovery record and commit SHAs once landed. The unblock
+condition (`src/lib/common/svmg/` present on `origin/main`) is now met --
+re-run the two commands above against the current tree to get a live
+signal.

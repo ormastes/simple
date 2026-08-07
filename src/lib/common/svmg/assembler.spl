@@ -1,0 +1,163 @@
+# SVM-G tiny text assembler / disassembler (Task D1).
+#
+# Text format: one instruction per line, `MNEMONIC` or `MNEMONIC operand`.
+# Comments start with `#` and run to end of line; blank lines are ignored.
+# Operand is a single decimal integer (may be signed, e.g. `-8`) or, for
+# PUSHF only, a decimal float literal (e.g. `1.5`).
+#
+#   PUSHI 42
+#   PUSHI 3
+#   ADD
+#   JZ -8
+#
+# Unknown mnemonics, wrong operand counts, and unparsable operands are all
+# fail-fast errors (`panic`) — never silently skipped or defaulted, per the
+# repo's anti-workaround rule.
+#
+# NOTE: hand-rolled little-endian codec, NOT std.common.binary_io's
+# BinaryWriter/BinaryReader -- see
+# doc/08_tracking/bug/binary_io_binaryreader_multibyte_read_returns_zero_after_binarywriter_2026-08-07.md.
+
+use std.common.binary_io.{f32_from_bits, f32_to_bits}
+use std.common.convert.{try_parse_int}
+use std.common.svmg.opcodes.{
+    mnemonic_to_opcode, opcode_to_mnemonic, operand_kind_of, operand_byte_len,
+    OPERAND_NONE, OPERAND_IMM8, OPERAND_IMM16, OPERAND_IMM16_SIGNED, OPERAND_IMM32, OPERAND_IMM32F,
+}
+
+fn _strip_comment(line: text) -> text:
+    val parts = line.split("#")
+    parts[0]
+
+fn _tokenize(line: text) -> [text]:
+    val raw = _strip_comment(line).replace("\t", " ").split(" ")
+    var out: [text] = []
+    for part in raw:
+        val trimmed = part.trim()
+        if trimmed.len() > 0:
+            out.push(trimmed)
+    out
+
+fn _push_u8(buf: [u8], v: i64) -> [u8]:
+    var out = buf
+    out.push((v & 0xFF) as u8)
+    out
+
+fn _push_u16_le(buf: [u8], v: i64) -> [u8]:
+    var out = buf
+    out.push((v & 0xFF) as u8)
+    out.push(((v >> 8) & 0xFF) as u8)
+    out
+
+fn _push_u32_le(buf: [u8], v: i64) -> [u8]:
+    var out = buf
+    out.push((v & 0xFF) as u8)
+    out.push(((v >> 8) & 0xFF) as u8)
+    out.push(((v >> 16) & 0xFF) as u8)
+    out.push(((v >> 24) & 0xFF) as u8)
+    out
+
+fn _u8_at(bytes: [u8], idx: i64) -> i64:
+    bytes[idx] as i64
+
+fn _u16_le_at(bytes: [u8], idx: i64) -> i64:
+    (bytes[idx] as i64) | ((bytes[idx + 1] as i64) << 8)
+
+fn _i16_le_at(bytes: [u8], idx: i64) -> i64:
+    val u = _u16_le_at(bytes, idx)
+    if u >= 32768: u - 65536 else: u
+
+fn _u32_le_at(bytes: [u8], idx: i64) -> i64:
+    (bytes[idx] as i64) | ((bytes[idx + 1] as i64) << 8) | ((bytes[idx + 2] as i64) << 16) | ((bytes[idx + 3] as i64) << 24)
+
+fn _i32_le_at(bytes: [u8], idx: i64) -> i64:
+    val u = _u32_le_at(bytes, idx)
+    if u >= 0x80000000: u - 0x100000000 else: u
+
+pub fn svmg_asm(text: text) -> [u8]:
+    """Assemble SVM-G mnemonic text into a bytecode blob.
+
+    Fail-fast on any unknown mnemonic, missing/extra operand, or
+    unparsable operand value — see module docstring.
+    """
+    var buf: [u8] = []
+    val lines = text.split("\n")
+    var line_no = 0
+    for line in lines:
+        line_no = line_no + 1
+        val tokens = _tokenize(line)
+        if tokens.len() == 0:
+            continue
+        val mnemonic = tokens[0]
+        val opcode = mnemonic_to_opcode(mnemonic)
+        val kind = operand_kind_of(opcode)
+        val operand_count = tokens.len() - 1
+        val expected_operands = if kind == OPERAND_NONE: 0 else: 1
+        if operand_count != expected_operands:
+            panic("svmg: asm line {line_no}: '{mnemonic}' expects {expected_operands} operand(s), got {operand_count}")
+        buf = _push_u8(buf, opcode)
+        if kind == OPERAND_IMM8:
+            val v = try_parse_int(tokens[1])
+            if v == nil:
+                panic("svmg: asm line {line_no}: bad integer operand '{tokens[1]}'")
+            buf = _push_u8(buf, v ?? 0)
+        elif kind == OPERAND_IMM16:
+            val v = try_parse_int(tokens[1])
+            if v == nil:
+                panic("svmg: asm line {line_no}: bad integer operand '{tokens[1]}'")
+            buf = _push_u16_le(buf, v ?? 0)
+        elif kind == OPERAND_IMM16_SIGNED:
+            val v = try_parse_int(tokens[1])
+            if v == nil:
+                panic("svmg: asm line {line_no}: bad integer operand '{tokens[1]}'")
+            buf = _push_u16_le(buf, v ?? 0)
+        elif kind == OPERAND_IMM32:
+            val v = try_parse_int(tokens[1])
+            if v == nil:
+                panic("svmg: asm line {line_no}: bad integer operand '{tokens[1]}'")
+            buf = _push_u32_le(buf, v ?? 0)
+        elif kind == OPERAND_IMM32F:
+            val v = tokens[1].to_f64()
+            val bits = f32_to_bits(v as f32) as i64
+            buf = _push_u32_le(buf, bits)
+        # else OPERAND_NONE: nothing more to emit
+    buf
+
+pub fn disasm(bytes: [u8]) -> text:
+    """Disassemble a bytecode blob back to mnemonic text (one insn/line).
+
+    Round-trips with `svmg_asm` for every opcode in the table (module-level
+    integer operands only — no symbolic labels). Fail-fast on truncated
+    operands or an unknown opcode byte.
+    """
+    var out = ""
+    var first = true
+    var pos = 0
+    val n = bytes.len()
+    while pos < n:
+        val opcode = _u8_at(bytes, pos)
+        pos = pos + 1
+        val mnemonic = opcode_to_mnemonic(opcode)
+        val kind = operand_kind_of(opcode)
+        val operand_len = operand_byte_len(kind)
+        if pos + operand_len > n:
+            panic("svmg: disasm: truncated operand for {mnemonic}")
+        var line = mnemonic
+        if kind == OPERAND_IMM8:
+            line = "{mnemonic} {_u8_at(bytes, pos)}"
+        elif kind == OPERAND_IMM16:
+            line = "{mnemonic} {_u16_le_at(bytes, pos)}"
+        elif kind == OPERAND_IMM16_SIGNED:
+            line = "{mnemonic} {_i16_le_at(bytes, pos)}"
+        elif kind == OPERAND_IMM32:
+            line = "{mnemonic} {_i32_le_at(bytes, pos)}"
+        elif kind == OPERAND_IMM32F:
+            val f = f32_from_bits(_u32_le_at(bytes, pos) as u32)
+            line = "{mnemonic} {f}"
+        pos = pos + operand_len
+        if first:
+            out = line
+            first = false
+        else:
+            out = out + "\n" + line
+    out
