@@ -142,38 +142,18 @@ evidence this ever happens — see below), and the family-wide "Heap-Free" /
 `fixed_set.spl`'s header gained the same inline-storage-gap pointer the
 other four now carry.
 
-## Unrelated defect surfaced while investigating a fix shape
+## Unrelated defect surfaced while investigating a fix shape — filed separately
 
 While looking for a way to eliminate `FixedMap`'s per-operation allocation
 without a full parallel-array refactor, tried the in-place field-mutation
-pattern `PoolLinkedList` (`linked_list.spl`, same directory) appears to use:
-`self.nodes[idx].next = next_free`, `self.nodes[idx].value = value`, etc.
-(`linked_list.spl:71-73,78-81,88-90,...`).
-
-**That pattern does not work.** Reproduced two ways:
-
-1. A minimal throwaway class (`Holder` with `slots: [Slot]`, a `me
-   set_via_field_write(idx, ...)` method doing `self.slots[idx].key = k`)
-   fails at `bin/simple test` time with `semantic: invalid assignment:
-   complex indexed field receiver is not supported`.
-2. **The real, shipped `PoolLinkedList.push_back` fails identically** when
-   actually exercised: `val list = PoolLinkedList.new(4); list.push_back(10)`
-   raises the same `complex indexed field receiver is not supported` error
-   and the spec fails outright.
-
-`test/01_unit/lib/nogc_async_mut_noalloc/collections/linked_list_spec.spl`
-is a text-scan spec (asserts on method signatures in the source text, never
-calls `push_back`/`push_front`/`pop_front`/etc.), so this defect has been
-invisible to the test suite. **`PoolLinkedList`'s core operations
-(`push_front`, `push_back`, `pop_front`, `pop_back`, `remove_at` — anything
-that calls `alloc_node()`/`free_node()`) are non-functional at runtime.**
-
-Not fixed here: out of scope for this bug (root cause is an interpreter
-limitation in `src/compiler/**`, which this investigation's scope excludes),
-and a distinct defect class (correctness, not allocation). Filing this
-finding here rather than silently leaving it invisible; a dedicated bug
-record for the interpreter limitation itself is recommended as a follow-up
-before `linked_list.spl` is trusted or extended.
+pattern `PoolLinkedList` (`linked_list.spl`, same directory) appears to use
+(`self.nodes[idx].next = ...`, `linked_list.spl:71-73,78-81,88-90,...`). That
+pattern does not work — verified directly against the real, shipped
+`PoolLinkedList.push_back`, not just a minimal repro — and is a distinct,
+more severe defect class (correctness, not allocation efficiency; shipped
+code that cannot run at all). Filed as its own record so it is
+independently discoverable:
+`doc/08_tracking/bug/pool_linked_list_push_fails_complex_indexed_field_receiver_2026-08-07.md`.
 
 ## Why this stays RED — the missing language feature
 
