@@ -190,8 +190,21 @@ a poll-budget fix — 15s was far too short for this environment's ~50s
 `bin/simple run` cold-start compile time, so `server.started` read `false`
 even though the server genuinely came up; bumped to 150s, re-verifying now.
 
-Not yet started or still landing: K5-K6 (GPU-dependent), L4 (protocol
-contract / "reach S4", deps: L3), H1 (deps: L3), H3, E2.
+Also landed since: **P3** (E2E Docker matrix, real green run: local lane
+executes for real via nbconvert against the unmodified kernel; QEMU
+SKIP-clean; CUDA/Vulkan fixtures structural-only), a **magics-wiring fix**
+(P1's `main.spl` never called K3's `dispatch_magics` — every `%mode`/`%%mode`/
+etc. was dead code; fixed, regression-tested), **H1** (bearer-token auth,
+origin check, body-size 413, path-traversal 403, malformed-JSON 400,
+output-cap truncation — `lab_hardening.spl`, 7/7), and **L4** (`/api/test/...`
+S4 contract on `lab_server.spl`; 4/5 — one real, filed gap: the generic
+`/api/test/click` handler doesn't invoke `SimpleLabApp`'s actual `add_cell()`,
+see `doc/08_tracking/bug/lab_test_api_click_does_not_invoke_simple_lab_app_add_cell_2026-08-07.md`).
+
+Not yet started or still landing: K5-K6 (blocked on the GPU plan's D1 —
+`src/lib/common/svmg/ref_vm.spl` doesn't exist yet, so B3/B4/C3 can't land
+either), H3 (in flight, deps: H1+L4 both landed), E2 (deps: P3 done, L4 done,
+H3 pending).
 
 ## Feature Links
 
