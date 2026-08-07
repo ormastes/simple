@@ -1,0 +1,171 @@
+"""
+# Layer-Eq Checker — Real Layout Adapter Spec
+
+**Milestone:** M2, doc/03_plan/compiler/forwarding/
+zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md
+
+Feeds `src/compiler/35.semantics/layer_eq_checker.spl`'s existing obligation
+checks 1-4 (field count, name mapping, per-field type+offset+size, whole-type
+size+align) with layouts computed by the REAL compiler type-layout engine
+(`src/compiler/30.types/type_layout.spl` -> `_TypeLayout/{layout_core,
+arch_and_verify,c_assert_gen}.spl`'s `compute_struct_layout`), not
+hand-constructed `LayerEqType`/`LayerEqField` fixture literals like
+`layer_eq_checker_spec.spl` uses. This proves `check_layer_eq` discriminates
+against the compiler's own computed truth, not just synthetic data someone
+might have gotten wrong.
+
+Runs under the Rust seed `bin/simple` (same harness discipline as
+`layer_eq_checker_spec.spl`): in-process `use` of both modules, executed via
+`bin/simple test`, tree-walk interpreter engine — no JIT/native codegen
+involved.
+"""
+
+use std.spec.{describe, it, expect, expect_not, assert_true}
+use compiler.semantics.layer_eq_checker.{LayerEqField, LayerEqType, check_layer_eq}
+use compiler.types.type_layout.{
+    LayoutAttr, TypeLayout, FieldLayout,
+    layoutattr_c_repr, compute_struct_layout, type__to_text
+}
+use compiler.hir.hir_definitions.{HirField, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.common.diagnostics.span.{Span}
+
+# ============================================================================
+# HIR construction helpers (mirrors test/01_unit/compiler/types/
+# layout_verification_spec.spl's helpers, so this exercises the exact same
+# real-layout code path those specs already trust).
+# ============================================================================
+
+fn empty_span() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1)
+
+fn make_hir_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: empty_span())
+
+fn i32_t() -> HirType:
+    make_hir_type(HirTypeKind.Int(32, true))
+
+fn i64_t() -> HirType:
+    make_hir_type(HirTypeKind.Int(64, true))
+
+fn f32_t() -> HirType:
+    make_hir_type(HirTypeKind.Float(32))
+
+fn dummy_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.UnitLit, has_type_: false,
+        type_: make_hir_type(HirTypeKind.Unit), span: empty_span())
+
+fn hfield(name: text, type_: HirType) -> HirField:
+    HirField(
+        symbol: SymbolId(id: 0),
+        name: name,
+        type_: type_,
+        has_default: false,
+        default: dummy_expr(),
+        is_public: true,
+        is_volatile: false,
+        has_bits_attr: false,
+        bits_width: 0,
+        has_fixed_address: false,
+        fixed_address: 0,
+        span: empty_span()
+    )
+
+fn no_renames() -> [text]:
+    ["", "", "", ""]
+
+# ============================================================================
+# Adapter: real compiler TypeLayout -> layer_eq_checker's LayerEqType shape.
+#
+# `renames[i]` (parallel to layout.fields, by real declaration-order index)
+# supplies the @layer_field target name for field i; "" means infer by same
+# name — the same convention LayerEqField.mapped_name already uses.
+# ============================================================================
+
+fn layer_eq_type_from_layout(name: text, layout: TypeLayout, renames: [text]) -> LayerEqType:
+    var out: [LayerEqField] = []
+    var i = 0
+    while i < layout.fields.len():
+        val f = layout.fields[i]
+        val rename = if i < renames.len(): renames[i] else: ""
+        out.push(LayerEqField(
+            name: f.name,
+            type_name: type__to_text(f.type_),
+            offset: f.offset,
+            size: f.size,
+            mapped_name: rename
+        ))
+        i = i + 1
+    LayerEqType(name: name, total_size: layout.size, align: layout.align, fields: out)
+
+describe "layer_eq checker against REAL compiler type_layout":
+    """
+    Real-layout-backed exercise of check_layer_eq's obligations 1-4. Every
+    LayerEqType consumed here is produced by compute_struct_layout — the same
+    engine @export("C") header generation and SFFI layout verification run —
+    not synthetic fixture literals.
+    """
+
+    it "accepts two independently-computed real layouts with identical field shape (same-name)":
+        val target_fields = [hfield("x", i32_t()), hfield("y", i32_t()),
+            hfield("width", i32_t()), hfield("height", i32_t())]
+        val view_fields = [hfield("x", i32_t()), hfield("y", i32_t()),
+            hfield("width", i32_t()), hfield("height", i32_t())]
+        val target = layer_eq_type_from_layout("draw.DeviceRect",
+            compute_struct_layout(target_fields, layoutattr_c_repr()), no_renames())
+        val view = layer_eq_type_from_layout("gui.GuiDeviceRect",
+            compute_struct_layout(view_fields, layoutattr_c_repr()), no_renames())
+        val v = check_layer_eq(view, target)
+        assert_true(v.ok)
+        expect(v.diagnostic).to_equal("")
+
+    it "accepts a real renamed view (full @layer_field tag set) over real layouts":
+        val target_fields = [hfield("x", i32_t()), hfield("y", i32_t()),
+            hfield("width", i32_t()), hfield("height", i32_t())]
+        val view_fields = [hfield("left", i32_t()), hfield("top", i32_t()),
+            hfield("extent_x", i32_t()), hfield("extent_y", i32_t())]
+        val target = layer_eq_type_from_layout("draw.DeviceRect",
+            compute_struct_layout(target_fields, layoutattr_c_repr()), no_renames())
+        val view = layer_eq_type_from_layout("gui.GuiBounds",
+            compute_struct_layout(view_fields, layoutattr_c_repr()),
+            ["x", "y", "width", "height"])
+        assert_true(check_layer_eq(view, target).ok)
+
+    it "SABOTAGE: rejects a real layout whose field ORDER differs (real offsets diverge)":
+        val target_fields = [hfield("x", i32_t()), hfield("y", i32_t()),
+            hfield("width", i32_t()), hfield("height", i32_t())]
+        val view_fields = [hfield("y", i32_t()), hfield("x", i32_t()),
+            hfield("width", i32_t()), hfield("height", i32_t())]
+        val target = layer_eq_type_from_layout("draw.DeviceRect",
+            compute_struct_layout(target_fields, layoutattr_c_repr()), no_renames())
+        val view = layer_eq_type_from_layout("gui.SwappedRect",
+            compute_struct_layout(view_fields, layoutattr_c_repr()), no_renames())
+        val v = check_layer_eq(view, target)
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("error[layer_eq]"))
+
+    it "SABOTAGE: rejects a real layout with a widened field type (i64 vs i32 shifts every later offset)":
+        val target_fields = [hfield("x", i32_t()), hfield("y", i32_t()),
+            hfield("width", i32_t()), hfield("height", i32_t())]
+        val view_fields = [hfield("x", i64_t()), hfield("y", i32_t()),
+            hfield("width", i32_t()), hfield("height", i32_t())]
+        val target = layer_eq_type_from_layout("draw.DeviceRect",
+            compute_struct_layout(target_fields, layoutattr_c_repr()), no_renames())
+        val view = layer_eq_type_from_layout("gui.WidenedRect",
+            compute_struct_layout(view_fields, layoutattr_c_repr()), no_renames())
+        val v = check_layer_eq(view, target)
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("error[layer_eq]"))
+
+    it "SABOTAGE: rejects a real layout with a same-size field-type swap (f32 vs i32)":
+        val target_fields = [hfield("x", i32_t()), hfield("y", i32_t()),
+            hfield("width", i32_t()), hfield("height", i32_t())]
+        val view_fields = [hfield("x", f32_t()), hfield("y", i32_t()),
+            hfield("width", i32_t()), hfield("height", i32_t())]
+        val target = layer_eq_type_from_layout("draw.DeviceRect",
+            compute_struct_layout(target_fields, layoutattr_c_repr()), no_renames())
+        val view = layer_eq_type_from_layout("gui.FloatRect",
+            compute_struct_layout(view_fields, layoutattr_c_repr()), no_renames())
+        val v = check_layer_eq(view, target)
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("f32"))
