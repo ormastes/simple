@@ -211,4 +211,45 @@ under `bin/simple test` — the test runner's interpreter loads source
 directly, so no bootstrap rebuild is needed to iterate on this layer. That
 says nothing about the compiled/JIT path or `bin/simple run` (seed).
 
+### `struct_value_syms` provenance registration: every struct-value-producing site must register (2026-08-07)
+
+`struct_value_syms` (`Dict<LocalId, text>`, `expr_dispatch.spl`) is the
+provenance map `resolve_field_index` and friends fall back to when a struct
+value's static HIR type is missing/erased — keyed by the producing local's
+id, valued by the struct's name. The convention: **any lowering site that
+produces a struct-typed SSA value must register that value's local id in
+`struct_value_syms`** (construction, nested-struct-field reads, dict-decoded
+structs, binop results propagating a struct operand, unwrap of `!`/`.unwrap()`
+on a struct-typed optional, etc. — see the call sites at `expr_dispatch.spl:229,
+390, 1045, 1334, 1651, 2526, 3080, 3211, 3309`).
+
+`try_lower_global_read` (`expr_dispatch.spl:202`) was the one struct-value-
+producing site that did **not** register — it read a global's HIR-typed value
+without adding a `struct_value_syms` entry for the resulting local. Fixed in
+`606bae83998` (+19 lines). **When adding or auditing a new lowering arm that
+can produce a struct value, check it registers `struct_value_syms` on its
+result local** — grep `struct_value_syms\[.*\] =` in this file for the
+existing pattern to follow.
+
+**Probe technique — `SIMPLE_MIR_FIELD_TRACE=1`:** set this env var to trace
+field-read/global-read lowering decisions at `expr_dispatch.spl:218,1046` and
+`function_lowering.spl:1068`. Used as a **discriminating** probe (not just a
+log dump) to test the struct-provenance-gap hypothesis for the aarch64
+`@repr("C")` global-struct field misread — see next entry.
+
+**Refuted-hypothesis note:** the `try_lower_global_read` gap fixed above was
+suspected as the CAUSE of the aarch64 real-firmware `@repr("C")` global-struct
+field-read defect, but the `SIMPLE_MIR_FIELD_TRACE=1` probe REFUTED that:
+x86_64 JIT already covers the read via the HIR-type fallback, independent of
+`struct_value_syms`. The fix is still correct/worth keeping (closes a real
+provenance gap for other callers), but it is not the aarch64 root cause.
+Surviving candidates for the aarch64 defect: Cranelift `GetField`'s uniform
+8-byte field stride, and an unconditional `band(addr, -8)` tag-strip applied
+regardless of field alignment. Verifying either is blocked on the tracked
+native-build SIGSEGV (see `layer_expert/os_kernel_exec/skill.md` and
+`doc/08_tracking/bug/mir_lowering_codegen_error_first_call_zero_core_dump_2026-08-06.md`).
+Full writeup + probe transcript:
+`doc/08_tracking/bug/aarch64_real_firmware_boot_gap_and_seed_defects_2026-07-14.md`.
+New regression spec: `test/01_unit/compiler/global_c_repr_struct_field_read_spec.spl`.
+
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

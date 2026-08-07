@@ -192,6 +192,36 @@ has the right *shape*.
   (function-pointer-to-`u64` cast unsupported in the tree-walk interpreter) —
   check that doc for current status before assuming it's fixed.
 
+## 2026-08-07 landing: aarch64 `@repr("C")` global-struct field-read status update
+
+The aarch64 real-firmware global-struct field-misread defect (tracked in
+`doc/08_tracking/bug/aarch64_real_firmware_boot_gap_and_seed_defects_2026-07-14.md`)
+has a narrower root-cause set as of `606bae83998`:
+
+- **Workaround remains live** — no change to the runtime mitigation.
+- **One suspected cause was investigated and REFUTED**, not confirmed: MIR
+  lowering's `try_lower_global_read` was missing a `struct_value_syms`
+  provenance registration (real gap, now fixed — see
+  [layer_expert/mir_lowering/skill.md](../mir_lowering/skill.md)), but a
+  discriminating `SIMPLE_MIR_FIELD_TRACE=1` probe showed x86_64 JIT already
+  covers this read via the HIR-type fallback, independent of that map. So this
+  gap is NOT the aarch64 cause.
+- **Root cause narrowed to two Cranelift-side candidates**, both still
+  unverified: `GetField`'s uniform 8-byte field stride (wrong for
+  sub-8-byte-aligned fields), and an unconditional `band(addr, -8)` tag-strip
+  applied to every struct-field address regardless of the field's actual
+  alignment.
+- **Verification of either candidate is still blocked** on the same
+  native-build SIGSEGV this layer already tracks (fact/trap section above;
+  `doc/08_tracking/bug/mir_lowering_codegen_error_first_call_zero_core_dump_2026-08-06.md`).
+  Do not attempt to close this defect without a native build that survives
+  past first call.
+- **A regression spec now exists**:
+  `test/01_unit/compiler/global_c_repr_struct_field_read_spec.spl` — exercises
+  the `try_lower_global_read` fix path directly, but does not by itself prove
+  the aarch64 field-misread fixed (different engine, currently unreachable per
+  the SIGSEGV blocker).
+
 ## Verification Commands
 
 ```sh
