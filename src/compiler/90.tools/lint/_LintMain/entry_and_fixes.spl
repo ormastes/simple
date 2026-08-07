@@ -29,6 +29,7 @@ use compiler.semantics.lint.star_import.{check_star_export_file}
 use compiler.semantics.lint.stub_impl.{check_stub_impl}
 use compiler.semantics.lint.wide_public.{check_wide_public_file}
 use compiler.semantics.lint.option_me_call.{check_option_me_call_source}
+use compiler.semantics.lint.required_comment.{check_required_comment}
 
 # File I/O wrapper
 
@@ -159,6 +160,23 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
             continue
         val base_level = if warning.code == "STUB001": LintLevel.Warn else: LintLevel.Allow
         val level = apply_config_level(config, warning.code, base_level)
+        val lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
+            .with_fix(warning.hint)
+        results.push(LintResult.new(path, warning.line, 0, lint))
+    # REQC00x — WP-7: the AST-based `check_required_comment` (35.semantics)
+    # is now the ONLY live REQC001-004 emitter. Its predicate walks the real
+    # `pass_*`/`todo`/dangerous-keyword/wildcard-arm AST nodes rather than
+    # scanning source text line-by-line, so it does not false-positive on a
+    # call whose rationale string is on a different physical line than the
+    # opening paren (the old `lint_checks.spl` text scanner did — see
+    # doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
+    # WP-7). The old text reimplementation (lint_checks.spl
+    # `check_required_comment_source` + helpers) has been deleted, so this
+    # loop is the single source of REQC001-004 diagnostics.
+    for warning in check_required_comment(decls):
+        if not should_keep_lint_result(config, warning.code):
+            continue
+        val level = apply_config_level(config, warning.code, LintLevel.Warn)
         val lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
             .with_fix(warning.hint)
         results.push(LintResult.new(path, warning.line, 0, lint))
