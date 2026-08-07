@@ -66,11 +66,30 @@ lists its exact file set; never edit a file outside your unit's set.
    `bin/simple run` — different engines, see `.claude/rules/testing.md`); assert the
    honest-gate invariant (registered ⟺ measured faster), never assert "SIMD wins".
    All current numbers are interpreter-only; Wave 1 adds the JIT lane.
-4. **Coverage tooling exists**: `src/app/spl_coverage/main.spl` — branch/decision
-   coverage for `.spl` files. Enable with `SIMPLE_COVERAGE=1` during test runs; then
-   `bin/simple spl-coverage dump > coverage.sdn` / `status` / `clear`. Function-level
-   and per-module rollup granularity must be VERIFIED (and extended if absent) by unit
-   B1 before any percentage target is enforced.
+4. **Coverage tooling does NOT reproduce end-to-end — corrected 2026-08-07,
+   disproves the earlier draft of this finding.** `src/app/spl_coverage/main.spl`
+   exists as **source only** (`ls -la src/app/spl_coverage/` confirms one file,
+   5176 bytes) — it is **not wired into the deployed binary's dispatch table**:
+   `bin/simple spl-coverage dump` fails with `error: file not found:
+   spl-coverage`. Do not conflate "source file exists in the tree" with
+   "subcommand exists." Worse, even plain line coverage does not export an
+   artifact via the actual test-runner path: `SIMPLE_COVERAGE=1
+   SIMPLE_COVERAGE_OUTPUT=/tmp/cov.sdn bin/simple test --coverage --no-cache
+   <spec>` prints only `coverage: SIMPLE_COVERAGE set; bypassing test daemon`
+   and produces no artifact at the configured output path. Structural causes
+   (production MIR lowering never calls the coverage-instrumented lowering
+   path; decision probes hardcode file identity `"<source>"` and
+   `line=0, column=0`; export never fires on the spipe/.spl runner path) are
+   traced file:line in
+   `doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md`.
+   **Consequence for this plan**: unit B1 is no longer "verify and extend an
+   existing tool" — it is now "build the instrumentation primitive from
+   scratch," and every unit downstream of it (C1-C3) is blocked until B1 lands
+   real dispatch wiring, real per-decision source spans, and a real export
+   path. No branch-coverage percentage may be reported until B1's five
+   prerequisites (listed in the bug doc) are met. This is a direct instance of
+   the repo's "measure the primitive before building on a derived signal"
+   rule — the original claim here was written without running the CLI.
 5. **Container**: there is NO `scripts/local-container-test.shs` in the tree (checked
    2026-08-07). Container lane = plain podman/docker mount (recipe below). Every
    engine2d/render_opt/compositor unit in this plan is pure-CPU and needs no display,
@@ -115,32 +134,65 @@ probe (a subcommand only the current build has) — size and banner both lie.
 
 ## Wave 1 — Baseline (3 units, no dependencies, run in parallel)
 
-### Unit B1 — Coverage measurement bring-up + per-module baseline
-- **Files**: read `src/app/spl_coverage/main.spl`; create
-  `scripts/check/check-render2d-coverage.shs`; report table goes into
-  `doc/09_report/ui/testing/render2d_coverage_baseline_2026-08-07.md` (NOT committed
-  unless requested — repo rule; keep in PR only if user asks).
-- **Steps**:
-  1. `SIMPLE_COVERAGE=1 bin/simple test test/01_unit/lib/common/gpu/engine2d/ --no-cache --no-cover-check`
-     then `bin/simple spl-coverage dump > /tmp/claude-1000/render2d_cov.sdn` and `status`.
-  2. Verify the dump distinguishes (a) function hit/miss and (b) branch/decision arms
-     per `.spl` file. If either is missing, extend `src/app/spl_coverage/main.spl` with
-     a `report --filter <path-prefix>` subcommand that rolls up per-file
-     `functions_hit/functions_total` and `branches_hit/branches_total`. That extension
-     is IN SCOPE for this unit and must itself get a spec:
+### Unit B1 — Coverage instrumentation PREREQUISITE bring-up (not a baseline measurement — the primitive does not exist yet)
+- **Reframed 2026-08-07**: the earlier draft of this unit assumed
+  `bin/simple spl-coverage` worked and only needed a baseline run. Empirically
+  false — see
+  `doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md`.
+  `bin/simple spl-coverage dump` fails with `error: file not found:
+  spl-coverage`; `src/app/spl_coverage/main.spl` exists only as unwired
+  source. Even line coverage does not export an artifact via the spipe/.spl
+  runner path (`SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=... bin/simple test
+  --coverage --no-cache <spec>` produces only a "bypassing test daemon" line,
+  no artifact). This unit now BUILDS the primitive, in the order the bug
+  doc's five prerequisites list, before any percentage may be reported by C1-C3.
+- **Files**: `src/app/spl_coverage/main.spl` (wire real dispatch so
+  `spl-coverage` is a reachable subcommand — verify by which binary actually
+  reads it; this may require touching the seed's CLI dispatch table, not just
+  the `.spl` source, per "Fix .spl not Rust" — if so, treat that Rust touch as
+  in-scope collector plumbing, same carve-out the bug doc records for
+  U1.3-equivalent work); create `scripts/check/check-render2d-coverage.shs`;
+  report table goes into
+  `doc/09_report/ui/testing/render2d_coverage_baseline_2026-08-07.md` (NOT
+  committed unless requested — repo rule; keep in PR only if user asks).
+- **Steps** (prerequisites 3 and 4 from the bug doc first — a subcommand that
+  can't be invoked and a runner path that doesn't export are the two
+  blockers this plan's own inventory hit; prerequisites 1/2/5 are import-time
+  span/branch-probe work shared with the wm_gui_web plan's U1.3 — coordinate,
+  do not duplicate, check `git log` on the shared Rust files first):
+  1. Confirm `spl-coverage` is dispatchable from the deployed binary
+     (`bin/simple spl-coverage status` exits 0, not `file not found`).
+  2. Confirm a real `.sdn` or JSON artifact is written by
+     `SIMPLE_COVERAGE=1 bin/simple test <spec>` — pick a real branching spec,
+     assert the artifact file exists and is non-empty, not just that a stdout
+     banner appeared.
+  3. Verify the artifact/dump distinguishes (a) function hit/miss and (b)
+     branch/decision arms per `.spl` file, with REAL (non-`"<source>"`,
+     non-`0,0`) file/line identity. If either is missing, extend
+     `src/app/spl_coverage/main.spl` with a `report --filter <path-prefix>`
+     subcommand that rolls up per-file `functions_hit/functions_total` and
+     `branches_hit/branches_total`. That extension is IN SCOPE for this unit
+     and must itself get a spec:
      `test/01_unit/app/spl_coverage/spl_coverage_report_filter_spec.spl` with its:
      `it "report --filter narrows to prefix"`, `it "reports function and branch totals per file"`,
-     `it "empty filter matches nothing and says so"` .
-  3. Record baseline numbers for each module group: `src/lib/common/gpu/engine2d`,
-     `src/lib/common/ui/render_opt`, `src/lib/nogc_sync_mut/gpu/engine2d`,
-     `src/os/compositor` (engine2d+vulkan files only), `src/os/drivers/virtio` (gpu files).
+     `it "empty filter matches nothing and says so"`.
+  4. Only after 1-3 pass: record baseline numbers for each module group:
+     `src/lib/common/gpu/engine2d`, `src/lib/common/ui/render_opt`,
+     `src/lib/nogc_sync_mut/gpu/engine2d`, `src/os/compositor` (engine2d+vulkan
+     files only), `src/os/drivers/virtio` (gpu files).
 - **Sabotage**: mark one known-covered function as uncovered by clearing
   (`spl-coverage clear`) and re-running only an unrelated spec — the report must show
   the drop; if it stays green the measurement is fail-open, STOP and fix.
 - **Container**: recipe above with `SIMPLE_COVERAGE=1` inside the `sh -c`.
-- **Done**: dump parses; function+branch granularity confirmed or built; baseline table
-  exists with real numbers; sabotage red observed.
-- **Collision set**: `src/app/spl_coverage/**`, `scripts/check/check-render2d-coverage.shs`.
+- **Done**: `spl-coverage` subcommand dispatchable (no "file not found");
+  artifact written and parses; function+branch granularity confirmed with real
+  file/line identity; baseline table exists with real numbers; sabotage red
+  observed. **Any of these unmet ⇒ unit is NOT done and C1-C3 stay blocked —
+  update the bug doc with what was tried instead of reporting a partial
+  baseline as if it were complete.**
+- **Collision set**: `src/app/spl_coverage/**`, `scripts/check/check-render2d-coverage.shs`,
+  plus the shared Rust coverage files listed in the bug doc's prerequisite 1/2
+  (coordinate with the wm_gui_web plan's U1.3 if concurrent).
 
 ### Unit B2 — JIT-engine timing baseline for SIMD kernels
 - **Files**: create `scripts/check/check-engine2d-jit-timing.shs` and harness
@@ -339,8 +391,25 @@ Wave 2 units are mutually independent; all depend on B3 (suite verified green).
 
 ## Wave 3 — Branch coverage closure (~100% with honest exclusions)
 
-Acceptance for every unit: the B1 measurement command, before/after numbers recorded.
-Target: **100% function coverage; ≥95% branch coverage per module**, with a named
+**Hard dependency, not just an ordering preference**: every unit below assumes
+B1 has already built a working `spl-coverage` dispatch path, a real export
+artifact, and real per-decision file/line identity — none of which existed as
+of 2026-08-07 (see
+`doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md`).
+**Do not start C1-C3 until B1's done-checklist is fully met.** If B1 is only
+partially done (e.g. the CLI dispatches but export still doesn't write a real
+artifact), these units cannot report a trustworthy percentage — fall back to
+the enumerated-branch-table proxy (list every `if`/`match` arm per file via
+`grep -n "if \|match \|elif \|else" <file>` in a table mapping branch →
+covering `it`, no empty rows) exactly as the sibling wm_gui_web plan's U1.3
+outcome 2 defines it, and say so explicitly rather than reporting a
+fabricated or partial percentage.
+
+Acceptance for every unit: the B1 measurement command, before/after numbers recorded
+— OR, if B1 landed only the enumerated-proxy outcome, the branch table with no
+empty rows, labeled `branch_coverage=enumerated-proxy`, never a fabricated %.
+Target: **100% function coverage; ≥95% branch coverage per module** (real
+number) **or a complete enumerated-branch table** (proxy), with a named
 exclusion list — each exclusion justified in the spec file header comment.
 
 **Honest exclusions (pre-approved):**

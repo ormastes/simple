@@ -61,31 +61,64 @@ cross-reference the sibling plan instead of fixing it in this campaign.
   plan does not depend on them (they need a running MCP server — wrong shape
   for container specs).
 
-### 1.2 Coverage tooling — what is REAL
-- `SIMPLE_COVERAGE=1` is real, line-granularity, seed-collected:
-  `src/compiler_rust/compiler/src/coverage.rs:296-300`; test-runner client
-  bypasses the daemon (`src/app/test_runner_new/test_runner_client.spl:368-398`,
-  prints `coverage: SIMPLE_COVERAGE set; bypassing test daemon`).
-- Report is **stdout only**: per-target lines
-  `coverage: <path> NN% (hit/total lines)` from
-  `src/app/test_runner_new/test_runner_single.spl:668-713`. Targets come from
-  `# @cover <path>` headers in the spec's first ~30 lines plus use-imports
-  (`test_runner_single.spl:490-524`).
+### 1.2 Coverage tooling — CORRECTED 2026-08-07: line coverage is NOT confirmed real either, not just branch coverage
+
+**This section originally claimed line coverage was "REAL" and only branch
+coverage was inert. A 2026-08-07 empirical re-check disproves the "REAL"
+half too — full trace:
+`doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md`.**
+Re-running the exact primitive this section describes —
+`SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=/tmp/cov.sdn bin/simple test
+--coverage --no-cache <a real branching spec>` — produced only the
+`coverage: SIMPLE_COVERAGE set; bypassing test daemon` banner line and **no
+`coverage: <path> NN%` line, no artifact at the configured output path, no
+line data at all.** The only coverage artifact anywhere in the tree,
+`build/coverage/coverage.sdn`, is stale (untouched since 2026-08-02) and
+carries a branch-shaped schema with `total_decisions: 0`.
+
+- `SIMPLE_COVERAGE=1` genuinely sets a flag the test-runner client reads
+  (`src/compiler_rust/compiler/src/coverage.rs:296-300`;
+  `src/app/test_runner_new/test_runner_client.spl:368-398` does print the
+  "bypassing test daemon" banner) — that much is confirmed. What is **not**
+  confirmed is that anything downstream of that flag actually writes or
+  prints per-file coverage data on the spipe/.spl runner path an agent would
+  actually invoke. The per-target `coverage: <path> NN% (hit/total lines)`
+  line this doc originally cited from `test_runner_single.spl:668-713` did
+  not appear in the 2026-08-07 repro.
+- Root cause: `save_coverage_data`
+  (`src/compiler_rust/driver/src/cli/test_runner/coverage.rs:8`) is called
+  from `runner.rs:434`, but the spipe/.spl runner path bypasses that call
+  chain entirely (that's what the "bypassing test daemon" banner is
+  reporting) — so export never fires for a `.spl` spec run this way,
+  regardless of `# @cover` headers being correct.
 - Function coverage exists only as a *gate* on line counting
-  (`test_runner_single.spl:602-668`), not a separate percentage.
-- **Branch (decision/condition) coverage is INERT**: C probes exist
-  (`src/runtime/runtime_coverage_core.c:127-134`,
+  (`test_runner_single.spl:602-668`), not a separate percentage — this claim
+  is unaffected by the correction above (it was never claimed to reproduce
+  independently).
+- **Branch (decision/condition) coverage is INERT**, as originally stated:
+  C probes exist (`src/runtime/runtime_coverage_core.c:127-134`,
   `rt_coverage_decision_probe`/`rt_coverage_condition_probe`) but nothing
-  instruments `.spl` under `bin/simple test`; `build/coverage/summary.md`
-  shows `Decisions 0/0`. Authoritative bug:
-  `doc/08_tracking/bug/instrumented_statement_coverage_tooling_inert_2026-08-02.md`.
+  instruments `.spl` under `bin/simple test`, and production MIR lowering
+  never calls the coverage-instrumented lowering path at all (JIT/native
+  codegen emit zero decision probes — see the bug doc's root-cause list).
+  Authoritative bugs:
+  `doc/08_tracking/bug/instrumented_statement_coverage_tooling_inert_2026-08-02.md`
+  and (this correction, plus the line-coverage finding)
+  `doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md`.
   The Yes/Yes table in `doc/07_guide/infra/testing/coverage.md:30-35` is
   aspirational. `bin/simple doc-coverage` is DOCUMENTATION coverage — never
   cite it as code coverage.
-- Consequence (repo standing rule "measure the primitive first"): Wave 1 unit
-  U1.3 establishes the branch-coverage story BEFORE any wave-4 closure unit
-  claims a branch number. Until U1.3 lands, every report in this campaign
-  writes `branch_coverage=unavailable(line-proxy)` — never a fabricated %.
+- **Consequence (repo standing rule "measure the primitive first" — this is a
+  live example of that rule firing on this very plan's own §1.2)**: U1.3 is
+  no longer "resolve the branch-coverage question, line coverage already
+  works" — it is now **the single prerequisite unit that must build a working
+  measurement primitive (line AND branch) before U1.2's baseline numbers or
+  ANY wave-4 closure unit's percentage can be trusted.** Until U1.3 lands and
+  is independently reproduced (artifact exists, non-empty, parses), every
+  report in this campaign writes `line_coverage=unconfirmed`,
+  `branch_coverage=unavailable(pending-U1.3)` — never a fabricated %, and
+  never citing a "bypassing test daemon" banner alone as evidence of a
+  working measurement.
 
 ### 1.3 Container / headless reality
 - **`scripts/local-container-test.shs` DOES NOT EXIST** (rules
@@ -234,11 +267,17 @@ Matchers: `to_equal/to_contain/...`; bare bools via `assert_true`/`assert_false`
 
 ## 4. Waves and units
 
-Dependency DAG: U1.1 → (all wave 2+3 container done-checks). U1.2 → wave 4.
-U1.3 → wave-4 branch reporting. Wave 2 and wave 3 units are mutually
-independent (parallelizable, one agent each). Wave 4 after its module's wave-2/3
-units land. Each unit = one agent, one commit, pushed immediately (standing
-rule), guards + ls-remote every time.
+Dependency DAG (**corrected 2026-08-07**: U1.3 now precedes U1.2, not the
+reverse — see U1.3's reframing and
+`doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md`):
+U1.1 → (all wave 2+3 container done-checks). **U1.3 → U1.2 → wave 4** (U1.3
+must land or formally park BOTH line and branch measurement before U1.2's
+baseline table is trustworthy, and before any wave-4 unit reports a
+percentage). Wave 2 and wave 3 units are mutually independent (parallelizable,
+one agent each) and do NOT depend on the coverage chain — they can start
+immediately. Wave 4 after its module's wave-2/3 units land AND U1.3/U1.2.
+Each unit = one agent, one commit, pushed immediately (standing rule), guards
++ ls-remote every time.
 
 ---
 
@@ -298,7 +337,15 @@ esac
   build (see Dockerfile) — rebuild the image after any bootstrap redeploy, and
   record the image's binary md5 in evidence.
 
-#### U1.2 Coverage baseline for the three module families
+#### U1.2 Coverage baseline for the three module families — BLOCKED ON U1.3, reordered
+- **Reframed 2026-08-07**: this unit originally assumed the §3.2 `coverage:`
+  line reliably appears and only needed running. A 2026-08-07 repro of the
+  exact §3.2 command produced no `coverage:` line at all (see
+  `doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md`)
+  — so **U1.2 now DEPENDS ON U1.3 landing a working export first**, reversing
+  the original "U1.2 host baseline, U1.3 branch bonus" ordering implied by
+  their numbering. Do not start U1.2's baseline table until U1.3's acceptance
+  probe (a 10-line fixture reporting real coverage data) passes.
 - **Goal:** measured (not guessed) line-coverage baseline for
   `src/os/compositor/**`, `src/lib/gc_async_mut/gpu/browser_engine/**` (layout/
   style/paint core files only — net/, js/, script/ excluded from this campaign),
@@ -312,53 +359,100 @@ esac
   ifc_linebox + margin_collapse + `simple_web_browser_production_hardening_spec.spl`;
   common/ui: pick by `grep -l "use common.ui" test/01_unit -r | head -5`). Add
   a temporary `# @cover` header ONLY if missing — commit such header additions
-  as part of this unit. Run §3.2 per spec SEQUENTIALLY, record every
-  `coverage:` line verbatim into the baseline doc, one table per family, plus
-  a `branch_coverage=unavailable(pending-U1.3)` banner.
+  as part of this unit. Run §3.2 per spec SEQUENTIALLY, **first confirm a
+  `coverage:` line actually appears at all (it did not, pre-U1.3, on
+  2026-08-07)**, then record every `coverage:` line verbatim into the baseline
+  doc, one table per family, plus a `branch_coverage=unavailable(pending-U1.3)`
+  banner. If a run produces the "bypassing test daemon" banner but no
+  `coverage:` line, record that explicitly as `line_coverage=unconfirmed` for
+  that spec rather than silently omitting the row.
 - **Sabotage:** run one spec with the `# @cover` target misspelled — the
   coverage line must NOT appear (proves lines are per-declared-target, not
-  invented).
-- **Done checklist:** [ ] ≥15 coverage lines recorded verbatim; [ ] daemon-bypass
-  banner confirmed each run; [ ] misspelled-target sabotage documented;
-  [ ] provenance recorded; [ ] committed+pushed.
+  invented). This sabotage is only meaningful once the POSITIVE case (correct
+  target → real coverage line) is independently confirmed first.
+- **Done checklist:** [ ] ≥15 coverage lines recorded verbatim (not banners);
+  [ ] daemon-bypass banner confirmed each run; [ ] misspelled-target sabotage
+  documented; [ ] provenance recorded; [ ] committed+pushed.
 - **Collision set:** the new report file; any spec files that gain a `# @cover`
-  header (list them in the commit message). **Deps:** none (host runs; repeat
-  one run via U1.1 `cov` mode when it lands, as cross-check).
+  header (list them in the commit message). **Deps: U1.3 (reversed from the
+  original "none" — the primitive must work before it can be baselined).**
 
-#### U1.3 Branch-coverage primitive: wire or formally park
-- **Goal:** resolve the branch-coverage question honestly. Timebox: one agent
-  session. Two allowed outcomes, decided by a probe, no third option:
-  1. **Wire it (preferred):** make the interpreter test lane call
+#### U1.3 Coverage measurement primitive (line AND branch): wire or formally park — THE prerequisite unit blocking U1.2 and all of Wave 4
+- **Reframed 2026-08-07, scope widened**: originally titled/scoped as
+  "branch-coverage primitive," implying line coverage was already solid and
+  only branch needed this treatment. A 2026-08-07 repro disproved that: the
+  exact §3.2 line-coverage command produced no `coverage:` line at all, only
+  the "bypassing test daemon" banner — see
+  `doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md`
+  for the full trace (production MIR lowering never reaches the
+  coverage-instrumented path; decision probes hardcode `"<source>"` file
+  identity and `line=0,column=0`; export never fires on the spipe/.spl runner
+  path — `save_coverage_data` at `driver/src/cli/test_runner/coverage.rs:8`
+  is called from `runner.rs:434`, which this path bypasses). **This unit must
+  now confirm or build the LINE-coverage export path before attempting the
+  branch-coverage wiring below** — a branch primitive built on top of an
+  unconfirmed line-coverage export inherits the same "bypassing" gap.
+- **Goal:** resolve the coverage-measurement question honestly, for both line
+  and branch. Timebox: one agent session per axis (two sessions total if both
+  need building). Two allowed outcomes per axis, decided by a probe, no third
+  option:
+  1. **Wire it (preferred):** for line coverage, trace why
+     `test_runner_single.spl:668-713`'s `coverage: <path> NN%` line did not
+     print in the 2026-08-07 repro (check whether `runner.rs:434`'s
+     `save_coverage_data` call is actually reachable from the spipe/.spl
+     runner entrypoint, or whether a different, disconnected code path needs
+     the same wiring) and fix the disconnect. For branch coverage, make the
+     interpreter test lane call
      `rt_coverage_decision_probe`/`rt_coverage_condition_probe`
      (`src/runtime/runtime_coverage_core.c:127-134`) for `if`/`match` arms of
      `# @cover` targets, and extend `test_runner_single.spl:668` to print
      `coverage-branch: <path> NN% (hit/total decisions)`. Start from the seed
      interpreter statement-hook sites already used for line coverage
      (`src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:530`).
-     Acceptance probe: a 10-line fixture spec with one `if` taken one way must
+     Acceptance probes: (a) line — a 10-line fixture spec run through the
+     real `bin/simple test <spec>` command must produce a `coverage: <path>
+     NN%` line AND a non-empty artifact on disk, not just the banner;
+     (b) branch — a 10-line fixture spec with one `if` taken one way must
      report `1/2 decisions`.
-  2. **Park it (if wiring exceeds the timebox):** update
+  2. **Park it (if wiring exceeds the timebox), per axis independently:**
+     update
      `doc/08_tracking/bug/instrumented_statement_coverage_tooling_inert_2026-08-02.md`
-     with the exact blocker found, and adopt the campaign-wide proxy:
-     **enumerated-branch tables** — each wave-4 unit lists every `if`/`match`
-     arm of its module (via `grep -n "if \|match \|elif \|else" <file>`)
-     in a table `branch → covering it-block`, and "branch coverage" for this
-     campaign means that table has no empty rows. All campaign reports then say
-     `branch_coverage=enumerated-proxy`, never a fabricated %.
+     and/or `doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md`
+     with the exact blocker found, and adopt the campaign-wide proxy for
+     branch: **enumerated-branch tables** — each wave-4 unit lists every
+     `if`/`match` arm of its module (via `grep -n "if \|match \|elif \|else"
+     <file>`) in a table `branch → covering it-block`, and "branch coverage"
+     for this campaign means that table has no empty rows. If line coverage
+     itself must be parked too, the campaign-wide proxy for line is: cite
+     only the `# @gui: headless` / `# @req` traceability of which functions
+     have a covering `it` at all (existence, not percentage) and label every
+     report `line_coverage=unconfirmed`. All campaign reports then say
+     `branch_coverage=enumerated-proxy` and/or `line_coverage=unconfirmed`,
+     never a fabricated %.
 - **Files:** outcome 1: `src/compiler_rust/compiler/src/coverage.rs`,
+  `.../driver/src/cli/test_runner/coverage.rs`, `.../runner.rs`,
   `.../interpreter_call/core/function_exec.rs`,
-  `src/app/test_runner_new/test_runner_single.spl`, fixture spec
+  `src/app/test_runner_new/test_runner_single.spl`, fixture specs
+  `test/01_unit/infra/coverage_line_probe_spec.spl` (new),
   `test/01_unit/infra/coverage_branch_probe_spec.spl` (new). Outcome 2: the
-  bug doc only. (Outcome 1 touches Rust seed — allowed here because coverage
-  collection already lives in the seed; note "Fix .spl not Rust" applies to
-  product code, not the seed's own collector.)
-- **Sabotage (outcome 1):** flip the fixture's `if` so both arms execute →
-  must report `2/2`; comment the probe call → must report `0/2` not green.
-- **Done checklist:** [ ] probe fixture verdict quoted; [ ] outcome recorded in
-  the baseline doc from U1.2 (edit its banner); [ ] bug doc updated;
-  [ ] committed+pushed. **Collision set:** listed files; coordinate with any
-  session touching `test_runner_single.spl` (check `git log -1 --format=%ci`
-  + `git status` on it first). **Deps:** none.
+  bug doc(s) only. (Outcome 1 touches Rust seed — allowed here because
+  coverage collection already lives in the seed; note "Fix .spl not Rust"
+  applies to product code, not the seed's own collector.)
+- **Sabotage (outcome 1):** line — comment out the export call → the fixture
+  must report no artifact / non-green, not a false "bypassing" pass; branch —
+  flip the fixture's `if` so both arms execute → must report `2/2`; comment
+  the probe call → must report `0/2` not green.
+- **Done checklist:** [ ] line-probe fixture verdict quoted (artifact exists,
+  non-empty, real `coverage:` line, not just banner); [ ] branch-probe fixture
+  verdict quoted; [ ] outcome recorded in the baseline doc from U1.2 (edit its
+  banner — note U1.2 now depends on this unit, not the reverse); [ ] both bug
+  docs updated with final status; [ ] committed+pushed. **Collision set:**
+  listed files; coordinate with any session touching `test_runner_single.spl`
+  or the render_2d sibling plan's Unit B1 (same underlying primitive — check
+  `git log -1 --format=%ci` + `git status` on shared Rust files first, and
+  grep the render_2d plan's B1 section for "IN PROGRESS" before duplicating
+  work). **Deps:** none (this is the root prerequisite; nothing in either
+  plan's coverage wave should start before this lands or is formally parked).
 
 ---
 
@@ -577,11 +671,23 @@ Closes the **contain zero-coverage gap** (landed 2026-08-06 wiring:
 
 ---
 
-### Wave 4 — coverage closure (after U1.2/U1.3 and the module's wave-2/3 units)
+### Wave 4 — coverage closure (after U1.3 AND U1.2 land or formally park, and the module's wave-2/3 units)
+
+**Gate, not a formality**: do not start Wave 4 until U1.3's done-checklist
+shows either a working artifact-producing measurement (outcome 1) or a
+formally parked proxy (outcome 2) for BOTH line and branch — see
+`doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md`.
+Every unit below that cites §3.2's `coverage:` line must first confirm that
+line actually appears for its target (it did not, pre-U1.3, on 2026-08-07);
+if U1.3 parked line coverage too, substitute the enumerated-proxy / existence
+citation defined in U1.3 outcome 2 and label the report accordingly — never
+report a percentage derived from a "bypassing test daemon" banner alone.
 
 Method for every unit, executable verbatim:
 1. Re-run §3.2 with the unit's spec set (sequentially) and record the fresh
-   `coverage: <path> NN%` lines.
+   `coverage: <path> NN%` lines. If no such line appears, STOP — U1.3 has not
+   actually landed a working line-coverage export for this target; do not
+   proceed to step 2 with a banner-only "pass."
 2. Produce the uncovered-line list: coverage collector output is line-keyed;
    diff hit-lines against `grep -n "" <target> | wc -l` per function region
    (function regions via `grep -n "^fn \|^    fn \|^  fn " <target>`); list
