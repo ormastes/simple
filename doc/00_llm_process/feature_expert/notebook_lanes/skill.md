@@ -49,7 +49,32 @@ Implementation in progress, parallel-agent execution against
   (`unknown extern function: rt_string_ends_with`), filed separately rather than
   weakened.
 
-Not yet started: K2-K6, P1-P3, X2-X4, L2-L4, H1-H3, E2.
+- **L2** — Simple Lab UI widget layer (`src/app/simple_lab/main.spl`,
+  `SimpleLabApp`): toolbar (add cell/run all/reset) + per-cell panel
+  (textarea editor, run button, lane badge, output text), stable element IDs
+  documented in the module's header comment. Driven by `KernelSessionManager`
+  (K1) in-process — no HTTP/WS (that's L3). K2 ("Port existing local
+  execution behind `LocalExec`") hasn't landed yet, and the repo's
+  anti-dummy-body rule forbids a fabricated/stub executor, so L2 ships its
+  own small real-execution stand-in, `src/app/simple_lab/lab_executor.spl`
+  (`LabLocalExec`/`LabLocalExecFactory`): per-instance accumulated cell
+  source run through a real `bin/simple run` subprocess (same mechanism
+  `session.spl` uses, but instance-scoped instead of module-global so
+  concurrent sessions can't corrupt each other). Meant to be deleted and
+  replaced by K2's shared `LocalExec` once that lands.
+  Verify: `bin/simple test test/01_unit/app/simple_lab/lab_ui_semantic_spec.spl`
+  — 4/4, S1-level (`semantic_ui_snapshot_from_state_with_capabilities`),
+  driven entirely through `SemanticUiCommand` + `semantic_ui_command_to_event`
+  (never raw widget-tree poking), covering cell add / source edit / run /
+  output read-after-write with a real subprocess execution in the "run" case.
+  **Bug filed:** matching the `UIEvent?` result of `semantic_ui_command_to_event`
+  directly against enum-variant patterns (`match ev: UIEvent.Action(name): ...`)
+  silently falls to the wildcard arm on this binary — pre-existing, also
+  breaks 3 examples in `test/01_unit/app/ui/semantic_contract_spec.spl`.
+  Worked around with a `!= nil` check instead of `match`; see
+  `doc/08_tracking/bug/match_on_optional_enum_variant_falls_to_wildcard_2026-08-07.md`.
+
+Not yet started: K2-K6, P1-P3, X2-X4, L3-L4, H1-H3, E2.
 
 ## Feature Links
 
@@ -72,11 +97,12 @@ Not yet started: K2-K6, P1-P3, X2-X4, L2-L4, H1-H3, E2.
   contract spec `test/system/ui/shared_ui_contract_spec.spl`.
 - LSP backend: `src/app/lsp/main.spl`; editor grammar donor: `src/app/vscode_extension/`.
 - Landed: `src/lib/nogc_sync_mut/notebook/{session_manager,executor,types,ipynb,
-  snb_sdn}.spl` (K1/L1); `src/app/simple_lab/export_sdoctest.spl` (L1);
-  `tools/jupyter/kernel_wrapper.py` (Python ZMQ transport, P0);
+  snb_sdn}.spl` (K1/L1); `src/app/simple_lab/{export_sdoctest,main,lab_executor}.spl`
+  (L1/L2); `tools/jupyter/kernel_wrapper.py` (Python ZMQ transport, P0);
   `tools/jupyter/labextension/` (CM6 grammar, X1) with generator
   `scripts/gen_cm6_grammar.mjs`. Still to add: `magics.spl`, `remote_exec.spl`,
-  `lane_locks.spl` (K3/K4/H2).
+  `lane_locks.spl` (K3/K4/H2), the shared `local_exec.spl` (K2, will retire
+  `lab_executor.spl`).
 
 ## Known Constraints
 

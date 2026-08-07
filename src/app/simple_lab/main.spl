@@ -1,0 +1,166 @@
+# Simple Lab — notebook UI on `app.ui.web` (Stream L, task L2).
+#
+# Design: doc/05_design/app/tools/notebook_lanes_architecture.md §7.1
+# Plan:   doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md (Stream L, L2)
+#
+# Scope (L2 only): the UI widget layer, driven by `KernelSessionManager`
+# (K1, `src/lib/nogc_sync_mut/notebook/session_manager.spl`) in-process. No
+# HTTP/WS transport yet (that's L3) — this module only builds the widget tree
+# from app state (MDSOC+ "outer" shape: `SimpleLabApp` owns state + wiring,
+# `build_ui()`/`handle_event()` are the composition seam a future ECS
+# business layer or L3's route handlers can drive).
+#
+# ============================================================================
+# Stable element IDs (documented per the semantic UI contract convention,
+# `src/lib/common/ui/semantic_contract.spl` — every id below is stable across
+# rebuilds so a UITestClient/S4 suite, and this task's own S1/S2 spec, can
+# address elements without re-deriving them from render order):
+#
+#   lab_root                    — column: toolbar + cell list
+#   lab_toolbar                 — row: global actions
+#     lab_add_cell              — button, action "lab_add_cell"
+#     lab_run_all               — button, action "lab_run_all"
+#     lab_reset                 — button, action "lab_reset"
+#   lab_cells                   — column: one panel per cell, in order
+#     cell_<n>                  — panel for cell index n (0-based, stable: an
+#                                  add never renumbers existing cells)
+#       cell_<n>_editor          — textarea, cell source (InputChange -> edit)
+#       cell_<n>_toolbar         — row
+#         cell_<n>_run            — button, action "cell_run_<n>"
+#       cell_<n>_lane_badge      — text, lane status (design §3 %lanes wording)
+#       cell_<n>_output          — text, last run's stdout delta or error
+# ============================================================================
+
+use common.ui.widget.{UITree, UIEvent}
+use common.ui.widget_store_ops.{WidgetNode}
+use common.ui.builder.{column, row, panel, textarea, button, text_widget, build_tree}
+use std.notebook.types.{CellResult}
+use std.notebook.session_manager.{KernelSessionManager}
+use app.simple_lab.lab_executor.{LabLocalExecFactory}
+
+val LAB_DEFAULT_MODE: text = "interpreter"
+val LAB_SESSION_ID: text = "lab_session_1"
+
+struct LabCellState:
+    source: text
+    output_text: text
+    lane_status: text
+    execution_count: i64
+
+fn lab_cell_new() -> LabCellState:
+    LabCellState(source: "", output_text: "", lane_status: "not run", execution_count: 0)
+
+class SimpleLabApp:
+    session_mgr: KernelSessionManager
+    cells: [LabCellState]
+
+    static fn create() -> SimpleLabApp:
+        var mgr = KernelSessionManager.create(LabLocalExecFactory.create())
+        mgr.create_session(LAB_SESSION_ID, LAB_DEFAULT_MODE)
+        var app = SimpleLabApp(session_mgr: mgr, cells: [])
+        app.add_cell()
+        app
+
+    me add_cell():
+        self.cells.push(lab_cell_new())
+
+    me build_ui() -> UITree:
+        val toolbar = row("lab_toolbar", [
+            button("lab_add_cell", "+ Cell", "lab_add_cell"),
+            button("lab_run_all", "Run All", "lab_run_all"),
+            button("lab_reset", "Reset", "lab_reset")
+        ])
+        var cell_nodes: [WidgetNode] = []
+        var i = 0
+        while i < self.cells.len():
+            cell_nodes.push(self.build_cell_ui(i))
+            i = i + 1
+        val cell_list = column("lab_cells", cell_nodes)
+        val root = column("lab_root", [toolbar, cell_list])
+        build_tree(root)
+
+    me build_cell_ui(index: i64) -> WidgetNode:
+        val cell = self.cells[index]
+        val cell_toolbar = row("cell_{index}_toolbar", [
+            button("cell_{index}_run", "Run", "cell_run_{index}")
+        ])
+        panel("cell_{index}", "Cell {index}", [
+            textarea("cell_{index}_editor", cell.source, "code...", 4),
+            cell_toolbar,
+            text_widget("cell_{index}_lane_badge", cell.lane_status),
+            text_widget("cell_{index}_output", cell.output_text)
+        ])
+
+    me handle_event(event: UIEvent):
+        match event:
+            UIEvent.Action(name):
+                self.handle_action(name)
+            UIEvent.InputChange(target_id, value):
+                self.handle_input_change(target_id, value)
+            _:
+                pass_do_nothing("only Action/InputChange affect Simple Lab state")
+
+    me handle_action(name: text):
+        if name == "lab_add_cell":
+            self.add_cell()
+            return
+        if name == "lab_run_all":
+            var i = 0
+            while i < self.cells.len():
+                self.run_cell(i)
+                i = i + 1
+            return
+        if name == "lab_reset":
+            self.session_mgr.reset_session(LAB_SESSION_ID)
+            var i = 0
+            while i < self.cells.len():
+                var cell = self.cells[i]
+                cell.output_text = ""
+                cell.lane_status = "not run"
+                self.cells[i] = cell
+                i = i + 1
+            return
+        val cell_index = _lab_parse_action_cell_index(name, "cell_run_")
+        if cell_index >= 0:
+            self.run_cell(cell_index)
+
+    me run_cell(index: i64):
+        if index < 0 or index >= self.cells.len():
+            return
+        val cell = self.cells[index]
+        val result: CellResult = self.session_mgr.execute_cell(LAB_SESSION_ID, cell.source, "cell_{index}", "")
+        var updated = cell
+        if result.is_ok():
+            updated.output_text = result.stdout_delta
+            updated.lane_status = "available"
+        else:
+            updated.output_text = result.error
+            updated.lane_status = "blocked: {result.error}"
+        updated.execution_count = updated.execution_count + 1
+        self.cells[index] = updated
+
+    me handle_input_change(target_id: text, value: text):
+        val cell_index = _lab_parse_editor_cell_index(target_id)
+        if cell_index < 0:
+            return
+        var cell = self.cells[cell_index]
+        cell.source = value
+        self.cells[cell_index] = cell
+
+fn _lab_parse_action_cell_index(action: text, prefix: text) -> i64:
+    if not action.starts_with(prefix):
+        return -1
+    _lab_parse_i64(action.substring(prefix.length(), action.length()))
+
+fn _lab_parse_editor_cell_index(target_id: text) -> i64:
+    if not target_id.starts_with("cell_") or not target_id.ends_with("_editor"):
+        return -1
+    val body = target_id.substring(5, target_id.length() - 7)
+    _lab_parse_i64(body)
+
+fn _lab_parse_i64(text_val: text) -> i64:
+    if text_val == "":
+        return -1
+    text_val.to_i64()
+
+export SimpleLabApp, LabCellState
