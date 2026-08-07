@@ -1,8 +1,18 @@
 # Fixed-Size Array - Capacity-Bounded Array
 #
-# A dynamic array wrapper that enforces a maximum capacity.
+# A heap-backed [i64] array wrapper that enforces a maximum capacity.
 # Push operations fail (return false) when capacity is reached.
-# In compiled baremetal targets, this lowers to stack-allocated storage.
+#
+# NOT stack-allocated / not genuinely inline storage: the `items: [i64]`
+# field is a real heap array. Simple's `[T; N]` sized-array type syntax is
+# parsed but its size expression is discarded (see
+# src/compiler/10.frontend/core/parser.spl:789-798 — "stage4 arrays are
+# dynamic"), so there is currently no language feature for inline
+# fixed-capacity storage in a struct field. See
+# doc/08_tracking/bug/noalloc_collections_backed_by_growable_heap_array_2026-08-07.md.
+# What IS true here: new() reserves the full `capacity` once, and push()
+# writes by index — no heap growth during steady-state operation after
+# construction.
 #
 # Usage:
 #   val arr = FixedArray.new(32)
@@ -15,24 +25,37 @@
 # ============================================================================
 
 class FixedArray:
-    """Fixed-capacity array backed by bounded storage.
+    """Fixed-capacity array backed by a heap [i64] array reserved once at
+    construction.
 
     All operations are O(1) except remove() which is O(n).
-    No heap growth — push returns false when full.
+    No heap growth after construction — push returns false when full and
+    never reallocates the backing array. This is NOT inline/stack storage;
+    see the module header for the language-feature gap.
     """
     items: [i64]
     len: i32
     capacity: i32
 
     static fn new(capacity: i32) -> FixedArray:
-        """Create a new fixed array with the given capacity."""
-        FixedArray(items: [], len: 0, capacity: capacity)
+        """Create a new fixed array with the given capacity.
+
+        Backing storage is reserved to full capacity here, once. push()
+        writes by index into the already-reserved storage — it never grows
+        the backing array during steady-state use.
+        """
+        var items: [i64] = []
+        var i = 0
+        while i < capacity:
+            items.push(0)
+            i = i + 1
+        FixedArray(items: items, len: 0, capacity: capacity)
 
     me push(value: i64) -> bool:
         """Append value. Returns false if array is full."""
         if self.len >= self.capacity:
             return false
-        self.items.push(value)
+        self.items[self.len] = value
         self.len = self.len + 1
         true
 
@@ -63,8 +86,11 @@ class FixedArray:
         self.len == 0
 
     me clear():
-        """Remove all elements (capacity unchanged)."""
-        self.items = []
+        """Remove all elements (capacity unchanged).
+
+        Does not release backing storage — only new() and drop do that.
+        Releasing here would force the next push() to reallocate.
+        """
         self.len = 0
 
     fn size() -> i32:
