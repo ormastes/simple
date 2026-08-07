@@ -7,13 +7,22 @@
   built branch-coverage and line-coverage closure units on top of tooling that
   does not currently work end-to-end. No product functionality is broken by
   this; it blocks trustworthy coverage MEASUREMENT, both branch and line.
-- **Status:** open, PARTIALLY RESOLVED. Structural root causes pinned by
-  source read (file:line below). Prerequisite 4 (export) landed in commit
-  `ae97a34cd365` ("fix(test-runner): export coverage SDN to
-  SIMPLE_COVERAGE_OUTPUT (U1.3 prereq 4)") — `check-render2d-coverage.shs`
-  row `prereq4_artifact_export` now reads MET; see the "Correction" section
-  below. Prerequisites 1 (partially), 2, 3, 5 remain unmet. Overall gate
-  verdict is still FAIL.
+- **Status:** open, RESOLVED AGAINST THE DEPLOYED BINARY WITH A CAVEAT. As of
+  the "Gate rebuilt with real mechanical probes for all 5 prerequisites
+  (fourth pass)" section near the end of this doc,
+  `check-render2d-coverage.shs` mechanically probes all five prerequisites
+  (no more placeholder/UNVERIFIED-BY-SCRIPT rows) and the current verdict,
+  reproduced twice for stability, is **PASS — 5 prerequisite(s) checked, all
+  met**. Read the fourth-pass section's caveat before relying on this: the
+  MET result for prereqs 1 and 2 depends on Rust seed source
+  (`interpreter_extern/coverage.rs`, `coverage.rs`) that is currently
+  **uncommitted local working-copy state**, not yet landed on `origin/main`
+  — a clean rebuild from `origin/main` alone would very likely revert those
+  two rows to UNMET until that source lands as a real commit. This doc is
+  therefore left open (not closed) pending that commit. Earlier history below
+  (original filing, "Correction," "Unit B1 execution note," "Unit C2/C3
+  assessment") is preserved as-is per this repo's append-don't-rewrite
+  convention; treat the fourth-pass section as the current state.
 
 ## Correction 2026-08-07 (later pass, after `ae97a34cd365`)
 
@@ -399,3 +408,92 @@ Neither unit's blocker is the deployed-binary gate
 (`check-render2d-coverage.shs`) — both are blocked upstream of it, on the
 collector/exporter itself and on unlanded Wave 2 specs. Fixing the deploy
 would not unblock either unit today.
+
+## Gate rebuilt with real mechanical probes for all 5 prerequisites (2026-08-07, fourth pass)
+
+`scripts/check/check-render2d-coverage.shs` previously probed prerequisites 3
+and 4 mechanically and recorded 1, 2, 5 as permanent placeholder UNMET rows
+("not mechanically probed ... treated as unmet until re-verified"). This pass
+replaced every row with a real probe against the live deployed binary
+(`bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`, rebuilt
+2026-08-07 22:59) and fixed a bug in the prereq-3 probe itself:
+
+- **Prereq 3 probe bug fixed:** the old probe ran `bin/simple spl-coverage
+  status` with `SIMPLE_COVERAGE` unset and treated its exit 1 as failure —
+  but exit 1 there is documented, correct behavior ("Coverage tracking is
+  DISABLED"), not a dispatch failure. Fixed to run with `SIMPLE_COVERAGE=1`
+  and check for the actual failure signature (`file not found:
+  spl-coverage`) instead of conflating "coverage disabled" with "subcommand
+  absent."
+- **Prereq 1 and 2 probe redesigned mid-pass** after review flagged that the
+  first version (inspecting a `bin/simple test --coverage` artifact) could
+  not distinguish "the interpreter recorded a decision" from "MIR lowering
+  emitted a real probe" — both an interpret-mode-forced run and the default
+  `bin/simple test` run produced identical `total_decisions=57`, an
+  inconclusive A/B. Replaced with a probe that compiles a tiny self-contained
+  branching `.spl` file through `bin/simple compile --emit-mir=<path>`
+  twice — once with `SIMPLE_COVERAGE` unset, once with `SIMPLE_COVERAGE=1` —
+  and inspects the MIR JSON directly, independent of both the interpreter and
+  the test runner. Empirically: 0 `DecisionProbe` instructions unset, 1 with
+  `SIMPLE_COVERAGE=1`, and the probe's own `file`/`line` Debug fields name
+  the real compiled source path and a positive line number (not `<source>`
+  or `0,0`).
+- **Prereq 5** now runs the probe spec twice, rolls up both artifacts via
+  `spl-coverage rollup`, and confirms a specific decision id's `true_count`
+  in the merged output equals the sum of the two inputs' counts for that id
+  (picked to be nonzero in both inputs, so a broken no-op merge landing on
+  `0+0=0` cannot read as a false MET) — verified real per-site summation
+  (e.g. `72 + 72 = 144`), not dedup or passthrough of one input.
+
+**Current verdict (reproduced twice for stability):**
+```
+check-render2d-coverage: PASS — 5 prerequisite(s) checked, all met (branch-coverage % may be reported)
+```
+All five rows MET. Sabotage-verified fail-closed: (a) pointing the probe spec
+at a nonexistent file correctly flips prereqs 1/2/4/5 to UNMET and the
+verdict to FAIL; (b) a mutated copy that breaks prereq 2's env-gating check
+(forces the "gated correctly" branch to `false`) correctly reports
+`DecisionProbe emitted regardless of SIMPLE_COVERAGE (nocov=0, cov=1)` and
+flips the overall verdict to FAIL.
+
+### Important caveat: the underlying fix is currently UNCOMMITTED local WC state, not yet on origin/main
+
+The deployed binary's prereq-1/2 MET result depends on
+`src/compiler_rust/compiler/src/interpreter_extern/coverage.rs`'s
+`rt_coverage_decision_probe_fn`/`rt_coverage_condition_probe_fn` no longer
+being no-op stubs — confirmed by direct source read, they now forward to a
+real runtime decision store. **This file, and
+`src/compiler_rust/compiler/src/coverage.rs`, both show as locally modified
+(`git status --porcelain`) with no matching commit on `origin/main`** as of
+this pass; `CoverageCollector` itself (`coverage.rs:79-84`) still has no
+decision/branch field and `stats()` (`coverage.rs:170-181`) still hardcodes
+`branches_hit: 0, branches_total: 0` unchanged — the decision data flows
+through a separate runtime store merged at dump time, not through
+`CoverageCollector`. The deployed binary's mtime (22:59) postdates both
+files' mtimes (16:52, 17:12), confirming the binary under test was built
+from this uncommitted WC state, not from a clean `origin/main` checkout. This
+pass did not touch, commit, or revert these two files — they belong to
+in-flight work from a concurrent session/agent (see the shared-WC hazard
+notes in this repo's standing rules) and are out of scope for a
+shell-script-gate-only change. **Anyone rebuilding `bin/simple` from a clean
+`origin/main` checkout today would very likely see prereqs 1 and 2 revert to
+UNMET** until those two Rust files land as a real commit. The gate script
+itself is correct and will catch that regression immediately if it happens —
+this caveat is about the state of the Rust seed source, not the shell script.
+
+### Relationship to the "Unit C2/C3 assessment (third pass)" section above
+
+That section's Axis 1 (`CoverageCollector` has no decisions field,
+`rt_coverage_decision_probe_fn` is a no-op stub) was accurate against the
+binary it tested at the time. The uncommitted WC changes described above
+supersede part of that finding for the interpreter-probe-forwarding half, but
+`CoverageCollector`'s own schema is unchanged (still no decisions field, no
+real branches/total accounting) — so Axis 1's core conclusion ("no
+percentage can be computed from the `CoverageCollector`-only artifact, do not
+report one") still stands for the `lines`/`functions` half of the SDN. The
+`decisions` section this pass's probes rely on comes from the separate
+runtime-store merge, not from `CoverageCollector.to_sdn()`. Axis 2 (Wave 2
+prerequisite specs F7/F8 absent from `origin/main`) is unaffected by
+anything in this pass and still blocks C2/C3 regardless. **This pass does
+not reopen or re-assess C2/C3 achievability** — it only rebuilds the
+render_2d Wave-3 prerequisite gate script itself, per its own scope.
