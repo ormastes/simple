@@ -479,3 +479,123 @@ there: `SIGSEGV {si_code=SEGV_MAPERR, si_addr=NULL}`. Recorded as its own
 open finding, not folded into this doc's `0x118` mechanism — see
 `mir_lowering_codegen_error_first_call_zero_core_dump_2026-08-06.md`'s
 2026-08-06 "later" update for the exact repro and stderr capture.
+
+## 2026-08-07 — symbolized backtrace, and the "enum misclassification" diagnosis is FALSIFIED
+
+A lane was handed a "30-second reproduction": an 8-line program
+(`enum Shape: Circle(i64)/Square(i64)` + `val s = Shape.Circle(7)`) that
+SIGSEGVs the compiler at `rc=139`, with the diagnosis *"`Shape.Circle(7)` is
+misclassified as an unresolved method call, lowered to a const-0 placeholder,
+and then dereferenced."* That diagnosis does not survive a negative control.
+
+**Harness under test.** `stage2-admitted/simple` (128 MB, self-hosted) from
+`build/bootstrap-t3-redeploy-retry-20260806-cycle3/stage3/x86_64-unknown-linux-gnu/`,
+replaying only the stage-3 `native-build` against a tiny entry, env mirrored
+from `stage3-command.transcript`.
+
+**Negative control (the finding).** Seven inputs, one binary:
+
+| probe | program | rc |
+|-------|---------|----|
+| ER | `enum Shape` + `Shape.Circle(7)` | 139 |
+| PB | `Option.Some(7)` | 139 |
+| PC | `Shape.Circle(7)` + `match` | 139 |
+| PD | bare `Some(7)` | 139 |
+| PE | `Shape.Circle(7)` inside an uncalled fn | 139 |
+| PG | `struct P: x: i64` + `P(x: 3)` | 139 |
+| **PF** | **`fn main(): print "hi"`** | **139** |
+| PA | `val s: Shape = .Circle(7)` | 1 (parse error — never reaches the backend) |
+
+**`fn main(): print "hi"` SIGSEGVs.** The only non-139 run is the one that
+fails at parse time and never reaches lowering. There is no green baseline on
+this harness, so no crash observed on it can be attributed to any language
+construct in the input. The enum program is not special.
+
+**Symbolized backtrace (gdb, hello-world `print "hi"`):**
+
+```
+Program received signal SIGSEGV
+#0  compiler__hir__hir_types__SymbolTable.lookup ()
+#1  compiler__mir___MirLoweringExpr__switch_operators_calls__MirLowering.try_lower_bitfield_construct ()
+#2  compiler__mir___MirLoweringExpr__switch_operators_calls__MirLowering.lower_call ()
+#3  compiler__mir___MirLoweringExpr__expr_dispatch__MirLowering.lower_expr ()
+#4  ... lower_stmt_impl / lower_stmt / lower_block_expected
+#7  ... lower_function_with_gpu_metadata
+#8  ... bootstrap_lower_flat_hir_module_to_mir
+#10 compiler.driver.driver_bootstrap.bootstrap_lower_to_mir_context ()
+#11 compiler__driver__driver_aot_pipeline__CompilerDriver.aot_compile ()
+#12 app.cli.bootstrap_main.run_native_build_bootstrap ()
+```
+
+Not LLVM codegen, not the link path, not enum lowering: `SymbolTable.lookup`
+walking a scope chain from `try_lower_bitfield_construct`.
+
+**It is a stale binary. The fix already landed.**
+
+- `stage2-admitted/simple` mtime: **2026-08-06 06:33:43 UTC**
+- `1ea6599e8fb` *"fix(compiler): stop try_lower_bitfield_construct SIGSEGV,
+  guard SymbolTable scope-chain reads"*: **2026-08-06 13:52:27 UTC**
+- follow-up `030ff43e330` (15:27) removed the over-broad `rt_dict_contains`
+  guard that had stack-overflowed Stage 3, keeping the correct
+  `next_scope_id` range check.
+
+The binary predates its own fix by 7h19m. The fix's code comment at
+`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:971-985`
+describes this exact fault: on the bootstrap flat symbol table
+(`bootstrap_flat_symbol_table`, `bootstrap_globals.spl`) `self.scopes` is `{}`
+with `current_scope` at id 0, so `self.scopes[0]` reads past an empty dict and
+returns a null `Scope` under native codegen — the next field read
+(`scope.symbols`) SIGSEGVs. The fix is to use the symbol already resolved onto
+the HIR node instead of re-resolving by name via `self.symbols.lookup()`.
+
+**Same root cause explains the enum symptom.** The
+`enum_variant_index` reclassification at
+`50.mir/_MirLoweringExpr/method_calls_literals.spl:1046-1069` derives
+`recv_enum_name` from `self.symbols.get_symbol_raw(rsym.id)`. On the same
+unpopulated flat symbol table that returns nil, so `recv_enum_name` stays `""`
+and the block falls through to the unresolved-method path — which is exactly
+what the traces show (`[mir-method-call] enum-owner` printed, no return).
+Corroborating: `Option.Some(7)` fell through identically even though
+`"Option"` is registered unconditionally (`module_lowering.spl:895`,
+`bootstrap_globals.spl:544/655`), so the index is not the problem — the symbol
+lookup is. The "misclassification" is a downstream symptom of the same broken
+symbol table, in the same stale binary.
+
+**Two numbers cited as evidence are not garbage.** `disc=1851930204` and
+`local=103079215111` (`0x1800000007`) are byte-identical across every probe,
+including `Circle` and `Some`. They are stable name-hash / sentinel values of
+the kind the code deliberately computes (`rt_enum_discriminant(...)`, cf. the
+`[hir-field-type]` traces), not corrupted per-site data. Do not root-cause
+from them.
+
+**This harness cannot validate a compiler source fix.** Control: an `XYZZY`
+marker was added to the const-0 warning string at
+`method_calls_literals.spl:2673` in the compiled worktree; the run printed the
+**original** string (0 hits). The probe entry imports nothing from
+`src/compiler/**`, so the worktree's compiler sources are never read — the
+prebuilt binary is authoritative. Any "prove the fix on the 30-second repro"
+plan is unreachable by construction; validating a `50.mir` change requires a
+full stage-2/3 rebuild.
+
+**On the const-0 placeholder path.** No change is warranted. `origin/main`
+already calls `self.error("unresolved method call: {method}", nil)`
+(`method_calls_literals.spl:2664`) *and* emits `rt_panic` before the const-0
+temp, and the comment there explains the const-0 def is retained deliberately:
+removing it yields a use-before-def local (NULL `llvm::Value*` → ICmp SIGSEGV
+in llvm-lib). The residual defect is not the warning — it is that
+`driver_bootstrap.bootstrap_lower_to_mir_context` returns
+`next_ctx.errors.len() == 0` and never copies `MirLowering.errors` into `ctx`
+(unlike the default lane's `_driver_collect_mir_errors`), so the collected
+error is dropped. That is the precise place to fix, and it is the same
+already-documented Task #145 gap.
+
+**Bearing on the rc=1 vs unbounded-RSS harness divergence:** none. Different
+input (tiny entry vs full `bootstrap_main.spl`), so these runs do not
+adjudicate it. One data point worth recording: a full-entry run on this same
+cycle3 stage2 gave **rc=143 with no `error:` lines** — the external-kill/OOM
+signature, consistent with (not proof of) the unbounded-RSS branch.
+
+**Standing lesson.** A reproduction is only evidence if a control passes.
+Before attributing a compiler crash to a construct in the input, compile
+`fn main(): print "hi"` with the same binary and the same env. And check the
+binary's mtime against the fix log before spending an hour on the source.
