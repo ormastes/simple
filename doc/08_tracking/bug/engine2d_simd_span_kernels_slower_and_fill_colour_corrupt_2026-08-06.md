@@ -37,6 +37,18 @@ the kernels remain testable.
 
 ## 2. `rt_engine2d_simd_fill_span_u32` corrupts the fill colour
 
+> **RETRACTED 2026-08-07 — false positive.** The "expected"/"observed" decimal
+> values below are both mis-converted from hex: `0xFF112233` = `4279312947`
+> (not `4279173683`), and `4279312947` is therefore the **correct** decimal
+> value of the input colour, not a corrupted output. A live re-run of this
+> exact repro against current `main` produced byte-exact output
+> (`255.17.34.51` = `0xFF.0x11.0x22.0x33`, verified via shift+mask, not
+> decimal comparison). There is no colour-boxing defect in
+> `engine2d_box_pixel`/`engine2d_unbox_pixel` and no fix is needed. Full
+> evidence: `doc/03_plan/ui/perf/engine2d_simd_fill_span_colour_boxing_fix_plan_2026-08-07.md`.
+> §1 (perf) and §3 (missing blend span kernel) are unaffected by this
+> retraction.
+
 The in-place span externs (`simd_native_rows.spl:5,6`) look like the right fix
 for §1 — `fill_span`/`copy_span` mutate `dst` and return it, no marshalling. But:
 
