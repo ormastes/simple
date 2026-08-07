@@ -33,6 +33,31 @@ Implementation in progress, parallel-agent execution against
   packaging, so `jupyter labextension develop` can't load it — galata/browser
   verification for X2/X3/X4 is blocked until that's added (see
   `doc/08_tracking/bug/jupyter_labextension_missing_federated_build_packaging_2026-08-07.md`).
+- **X3** — `tools/jupyter/labextension/src/lane.ts`: toolbar `LanePickerWidget`
+  (`<select>` wrapped in a Lumino `Widget`, same style as `status.ts`) driven by a
+  `LanePickerController` bound to the `simple_lane` comm (P1's
+  `handle_comm_open`/`handle_comm_msg`/`lane_status_content`); selecting a lane sends
+  `{set_mode}` with no optimistic update — the picker only ever reflects a
+  server-confirmed `comm_msg` reply. `index.ts` hoists a single `ModeStatusWidget`
+  instance shared between `mode-status` and the new `lane-picker` plugin so the status
+  bar shows whichever notebook is currently active (`isActive` guard), and it stays
+  live per notebook thereafter via the comm's own pushes. Math outputs needed **no**
+  extension code: `@jupyterlab/rendermime`'s `defaultRendererFactories` already
+  includes a `text/latex` factory whose `RenderedLatex` widget calls MathJax through
+  the app-wide `ILatexTypesetter` token — verified against the vendored package
+  source (`node_modules/@jupyterlab/rendermime/lib/{factories,renderers}.js`), not
+  assumed. Two real gaps, not implementable from this stream: (1) P1 doesn't emit
+  `text/latex` `display_data` for `m{}` blocks yet (kernel-side, out of X3 scope by
+  design); (2) `ILatexTypesetter`'s provider, `@jupyterlab/mathjax-extension`, ships
+  with the `jupyterlab` Python distribution, not as a dependency of this package —
+  absent it, `RenderedLatex` degrades to raw source silently (no error) rather than
+  failing loud. Design §6's "shows lanes with ✓/skip/blocked and the reason on
+  hover" is not implementable either: P1's comm payload is a flat `{mode, lanes:
+  string[]}`, no per-lane status field yet. galata verification stays blocked on the
+  same federated-build packaging gap X2 filed. Verify: Jest 17/17 new
+  (`tests/lane.test.ts`) + 48/48 full suite green, `tsc -b` clean. Also fixed a
+  pre-existing break in `tests/index.test.ts` (missing `@jupyterlab/apputils` jest
+  mock, left broken since X4 landed) while updating its plugin-count assertion.
 
 - **K1** — `KernelSessionManager` + `NotebookExecutor` trait
   (`src/lib/nogc_sync_mut/notebook/{session_manager,executor,types}.spl`). GPU-A1's
@@ -131,15 +156,51 @@ Implementation in progress, parallel-agent execution against
   `class` with `me` methods (same shape as `KernelSessionManager`), which mutates
   correctly under both engines.
 
-Not yet started or still landing: K5-K6 (GPU-dependent), P2-P3, X3-X4, L3-L4
-(in flight), H1, H3, E1-E2.
+- **L3** — Simple Lab HTTP/WS API (`src/app/simple_lab/lab_server.spl`,
+  `LabServer`): wires L2's in-process `KernelSessionManager` behind real
+  HTTP/WS routes (`/api/lab/status`, `/lanes`, `/sessions`,
+  `/sessions/:id/cells/:cid/execute`, `/interrupt`, `/reset`,
+  `/notebooks/:name` GET/PUT, `/sessions/:id/events` WS upgrade). Plan-path
+  correction: `SimpleHttpServer.handle_connection` unconditionally closes the
+  socket after one request/response, so a WebSocket upgrade can't go through
+  it — this module runs its own accept loop, reusing `Router`/`parse_request`/
+  `write_response` for ordinary routes and hand-rolling only the WS handshake
+  and frame writer (same shape as `app.ui.web.server.WebServer`). Streaming is
+  buffered-at-cell-end (design §7.1): `execute` runs synchronously and appends
+  `stream`+`status` frames to an in-memory per-session buffer that a
+  `.../events` WS connection drains at connect time — a client must connect
+  the WS stream before issuing `execute` to see it. Auth/hardening (token,
+  origin allow-list) is explicitly out of scope, deferred to H1; server binds
+  localhost-only. Still uses L2's `LabLocalExecFactory`
+  (`lab_executor.spl`), not K2's shared `local_exec.spl` — see the L2 entry
+  above. Verify: `bin/simple test
+  test/03_system/tools/simple_lab/lab_http_api_spec.spl` (real subprocess +
+  real loopback socket, create session -> execute -> WS events -> save/load
+  notebook).
+
+Landed since the above was written: **X3** (lane picker + math outputs,
+`tools/jupyter/labextension/src/lane.ts`), **X4** (SDoctest export command,
+`tools/jupyter/labextension/src/export.ts` + `main.spl`'s `simple_export`
+comm), **P2** (wrapper plumbing fix: `interrupt_request` was fabricating a
+fake `{"status":"ok"}` reply instead of relaying the kernel's real one —
+fixed in `tools/jupyter/kernel_wrapper.py`), **P3** (E2E matrix, in flight).
+**L3** landed (`src/app/simple_lab/lab_server.spl`, real HTTP/WS API) but its
+system spec (`test/03_system/tools/simple_lab/lab_http_api_spec.spl`) needed
+a poll-budget fix — 15s was far too short for this environment's ~50s
+`bin/simple run` cold-start compile time, so `server.started` read `false`
+even though the server genuinely came up; bumped to 150s, re-verifying now.
+
+Not yet started or still landing: K5-K6 (GPU-dependent), L4 (protocol
+contract / "reach S4", deps: L3), H1 (deps: L3), H3, E2.
 
 ## Feature Links
 
 - Research: `doc/01_research/app/tools/notebook_lanes_research.md`
 - Design/Architecture: `doc/05_design/app/tools/notebook_lanes_architecture.md`
 - Plan: `doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md`
-- Guide (needs update as tasks land): `doc/07_guide/app/tools/jupyter.md`
+- Guides: `doc/07_guide/app/tools/jupyter.md` (kernel);
+  `doc/07_guide/app/tools/simple_lab.md` (Lab UI + HTTP/WS API, E1, added
+  once L2/L3 landed) — both linked from `doc/07_guide/README.md` § Tooling
 - Linked GPU-lane plan: `doc/03_plan/agent_tasks/gpu_remote_interpreter_parallel_plan_2026-08-07.md`
 - Web contract: `doc/04_architecture/ui/shared_ui_contract.md`;
   hardening track: `doc/03_plan/compiler/perf/webserver_hardening_optimization_plan_2026-05-26.md`
@@ -155,12 +216,14 @@ Not yet started or still landing: K5-K6 (GPU-dependent), P2-P3, X3-X4, L3-L4
   contract spec `test/system/ui/shared_ui_contract_spec.spl`.
 - LSP backend: `src/app/lsp/main.spl`; editor grammar donor: `src/app/vscode_extension/`.
 - Landed: `src/lib/nogc_sync_mut/notebook/{session_manager,executor,types,ipynb,
-  snb_sdn}.spl` (K1/L1); `src/app/simple_lab/{export_sdoctest,main,lab_executor}.spl`
-  (L1/L2); `tools/jupyter/kernel_wrapper.py` (Python ZMQ transport, P0);
+  snb_sdn,magics,lane_locks,remote_exec,local_exec,lsp_bridge}.spl` (K1-K4/L1/H2/P1/K2);
+  `src/app/simple_lab/{export_sdoctest,main,lab_executor,lab_server}.spl`
+  (L1/L2/L3); `tools/jupyter/kernel_wrapper.py` (Python ZMQ transport, P0);
   `tools/jupyter/labextension/` (CM6 grammar, X1) with generator
-  `scripts/gen_cm6_grammar.mjs`. Still to add: `magics.spl`, `remote_exec.spl`,
-  `lane_locks.spl` (K3/K4/H2), the shared `local_exec.spl` (K2, will retire
-  `lab_executor.spl`).
+  `scripts/gen_cm6_grammar.mjs`. K2's shared `local_exec.spl` has landed but
+  is NOT yet wired into Simple Lab — `main.spl` and `lab_server.spl` both
+  still construct `lab_executor.spl`'s `LabLocalExecFactory`; retiring it is
+  still open. Not yet landed: K5-K6 (GPU-dependent), L4 (protocol contract).
 
 ## Known Constraints
 
