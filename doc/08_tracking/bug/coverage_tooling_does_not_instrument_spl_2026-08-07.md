@@ -219,3 +219,12 @@ primitive before building on a derived signal**
 (`feedback_measure_the_primitive_before_building_on_a_derived_signal.md`).
 Both plans cited a CLI/pipeline as working evidence without running it; a
 five-minute empirical repro (the two commands above) disproved both claims.
+
+## Patch prep landed (2026-08-07)
+
+A doc-only patch-preparation pass pinned exact file:line diffs, verification
+steps, and ordering for all five prerequisites (with two corrections to this
+doc's original claims: the interpreter file path and the scope of prerequisite
+2's production-path gap). See
+`doc/03_plan/ui/testing/u1_3_coverage_primitive_patch_prep_2026-08-07.md` —
+apply in an isolated bootstrap session, not this shared working tree.
