@@ -277,3 +277,125 @@ primitive before building on a derived signal**
 (`feedback_measure_the_primitive_before_building_on_a_derived_signal.md`).
 Both plans cited a CLI/pipeline as working evidence without running it; a
 five-minute empirical repro (the two commands above) disproved both claims.
+
+## Unit C2/C3 assessment 2026-08-07 (third pass) — branch export has NO denominator, and the collector emits no branch data at all
+
+Tasked with assessing whether Wave 3 units C2 (`src/lib/nogc_sync_mut/gpu/engine2d/`
+closure) and C3 (`src/os/compositor/` engine2d+software+vulkan closure) are now
+achievable, given that the same-day commits `ae97a34cd365`, `736d741ff68e`,
+`70907278997d`, `9c5bcf074498`, `4ee7a8f47f08` landed real export, CLI dispatch,
+app imports, cross-process `--file` load, and real file identity on decision
+probes. **Verdict: NOT achievable — on two independent axes, not one.**
+
+### Axis 1: branch/decision data is structurally absent from the exported artifact (deeper than the known line:0/column:0 gap)
+
+Ran the real acceptance flow with the locally-built binary
+(`src/compiler_rust/target/release/simple`, confirmed non-seed-warning build
+containing all five 2026-08-07 fixes):
+
+```
+SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=/tmp/c3_cov_test2.sdn \
+  src/compiler_rust/target/release/simple test \
+  test/01_unit/os/compositor/engine2d_damage_report_spec.spl --no-cache --no-cover-check
+```
+Verdict line: `Results: 7 total, 7 passed, 0 failed`. Artifact written,
+22275 bytes non-empty, real per-line paths (e.g.
+`/home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_software.spl, 1413, 1`).
+
+But the artifact has **only two sections**: `lines |file, line, hit_count|` and
+`functions |name, call_count|`. There is no `branches` or `decisions` section
+at all, and `summary:` reports `total_functions: 37` / `covered_functions: 37`
+and `total_lines: 396` / `covered_lines: 396` — i.e. `covered == total`
+identically, which is what the collector always emits, not a measured 100%.
+
+Root cause, traced to source (this binary's build, matches origin/main at
+fetch time):
+- `src/compiler_rust/compiler/src/coverage.rs:79-84` — `CoverageCollector`
+  has three fields: `line_hits`, `function_calls`, `sffi_calls`. No decision/
+  branch field exists on the struct that backs `to_sdn()`.
+- `src/compiler_rust/compiler/src/coverage.rs:109-149` (`to_sdn`) — emits
+  `lines`, `functions`, optional `sffi_calls`, and `summary`. No branches
+  section is ever written, structurally — there is no code path that could
+  emit one.
+- `src/compiler_rust/compiler/src/coverage.rs:170-181` (`stats()`) —
+  `total_lines = self.line_hits.values().map(len).sum()`,
+  `lines_hit: total_lines` (same value twice); `total_functions =
+  self.function_calls.len()`, `functions_hit: total_functions` (same value
+  twice); and `branches_hit: 0, branches_total: 0` hardcoded. The collector
+  records only HITS — nothing enumerates a file's total executable lines/
+  functions/branches, so "coverage" here is 100%-by-construction for any run,
+  not a measured ratio. **No percentage can be computed from this artifact,
+  for lines or branches — do not report one.**
+- `src/compiler_rust/compiler/src/interpreter_extern/coverage.rs:590-597` —
+  `rt_coverage_decision_probe_fn` and `rt_coverage_condition_probe_fn` (the
+  interpreter-path entry points, i.e. what `bin/simple test` actually calls)
+  are literal no-op stubs: `Ok(Value::Nil)`. Even where the interpreter's six
+  decision-probe call sites now pass a real file path (per `4ee7a8f47f08`),
+  the receiving function on the interpreter path discards it.
+- Contradiction to flag: `coverage.rs:3-4`'s module comment claims "Runtime
+  decision/condition probes live in simple_runtime and are merged when
+  saving" — no merge step exists anywhere in `to_sdn()` or `stats()`. That
+  comment is aspirational, not descriptive, as of this build.
+- `src/app/spl_coverage/main.spl` — confirmed unchanged from origin/main
+  (byte-identical `diff`), dispatch has only `dump`/`status`/`clear`
+  (lines 176/178/199). No `report --filter` rollup subcommand exists, so
+  even if branch data existed in the artifact there is no per-file
+  functions/branches rollup command for C1-C3's acceptance flow to pipe into.
+
+So the C2/C3 acceptance command
+(`bin/simple spl-coverage dump | <B1 report filter> <path-prefix>`) cannot
+identify "remaining uncovered arms" for two independent reasons: the
+`report --filter` half doesn't exist, and even a hand-rolled substitute has
+no branch rows to filter — the collector never captures them past a no-op
+stub, and the exporter has no schema slot for them if it did.
+
+### Axis 2: the corresponding Wave 2 units are unlanded (plan's own dependency, unmet regardless of B1)
+
+The plan states "Wave 3 depends on B1 (measurement) and the corresponding
+Wave 2 unit per module." Checked against `origin/main` directly
+(`git ls-tree origin/main -- <path>`, not the stale local WC):
+
+- F7 (`simd_native_rows.spl` closure) spec
+  `test/01_unit/lib/nogc_sync_mut/gpu/engine2d/simd_native_rows_spec.spl` —
+  **absent from origin/main** (empty `git ls-tree` result).
+- F8 (`compositor_engine2d.spl` surface closure) spec
+  `test/01_unit/os/compositor/compositor_engine2d_surface_spec.spl` —
+  **absent from origin/main** (empty `git ls-tree` result).
+- F6's target spec `test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl` does
+  exist (blob `abb0ce4...` in origin/main), so F6 is at least startable, but
+  C2 spans both F6- and F7-covered source files, so C2 is still gated on F7.
+
+This means C2 and C3 would stay blocked even if B1's branch-export gap were
+fixed today — they are additionally blocked on Wave 2 prerequisite units that
+have not landed. This closes the "is it purely a deploy dependency" question:
+it is not; it is two unmet prerequisite units plus a real primitive gap, none
+of which this pass fabricated a workaround for.
+
+### What was NOT done, and why
+
+No spec was added for C2 or C3's target files. Writing "closure" `it` blocks
+against branch arms requires knowing which arms are uncovered; the only
+available signal (line hits) reports covered==total by construction (see
+Axis 1), so any such spec would be closing arms selected by guesswork, not by
+measurement — exactly the fail-open shape this doc exists to prevent. No gate
+script or CLI subcommand was edited to force a flip, per this plan's own
+explicit prohibition against editing `check-render2d-coverage.shs` to fabricate
+a pass.
+
+**C2 status: NOT achievable this pass. Unblock condition:** (a) F7's spec
+lands (Wave 2 prerequisite), AND (b) branch/decision data gets a real field on
+`CoverageCollector`, a real emission block in `to_sdn()`, real per-branch
+hit/total accounting in `stats()` (not hardcoded zero), and the interpreter's
+`rt_coverage_decision_probe_fn`/`rt_coverage_condition_probe_fn` stop being
+no-ops — four concrete Rust-side changes, all in
+`src/compiler_rust/compiler/src/coverage.rs` and
+`src/compiler_rust/compiler/src/interpreter_extern/coverage.rs`.
+
+**C3 status: NOT achievable this pass. Unblock condition:** (a) F8's spec
+lands (Wave 2 prerequisite), AND (b) same four branch-export changes as C2
+(shared primitive, not a per-unit gap).
+
+Neither unit's blocker is the deployed-binary gate
+(`check-render2d-coverage.shs`) — both are blocked upstream of it, on the
+collector/exporter itself and on unlanded Wave 2 specs. Fixing the deploy
+would not unblock either unit today.
