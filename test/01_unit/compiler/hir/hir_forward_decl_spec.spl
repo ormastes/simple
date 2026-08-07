@@ -6,6 +6,7 @@
 
 use std.spec.{describe, it, expect, assert_true}
 use compiler.hir.hir_forward_decl.{HirForwardDecl}
+use app.desugar.forwarding.{desugar_forwarding}
 
 fn plain_symbol_decl() -> HirForwardDecl:
     HirForwardDecl(
@@ -48,3 +49,21 @@ describe "HirForwardDecl (C2 data shape, unwired)":
         val a = plain_symbol_decl()
         val b = field_path_decl()
         assert_true(a.logical_join_point_id != b.logical_join_point_id)
+
+describe "T15 gate: plain-symbol `fn name = target` has no HIR-lowering site (characterization, not a wiring)":
+    it "desugar_forwarding still emits a one-hop text wrapper — HirForwardDecl is not consulted":
+        # This records the CURRENT behavior of the offline `simple desugar`
+        # text pass (src/app/desugar/forwarding.spl), which is NOT part of
+        # the live compile pipeline (src/compiler/** never calls
+        # app.desugar.mod — see doc/08_tracking/bug/
+        # t15_hir_forward_decl_target_pass_does_not_exist_2026-08-07.md).
+        # No production .spl file exercises this syntax, so there is no
+        # live hop count for HirForwardDecl to shrink. This assertion is a
+        # tripwire: if this pass is ever wired into the real pipeline and
+        # HirForwardDecl starts being consulted, this wrapper-body shape
+        # should disappear and this spec should be revisited.
+        val src = "fn target(x: i64) -> i64:\n    x + 1\n\nfn alias_name = target\n"
+        val out = desugar_forwarding(src)
+        expect(out.contains("# DEPRECATED: fn alias_name = target")).to_equal(true)
+        expect(out.contains("fn alias_name(x):")).to_equal(true)
+        expect(out.contains("    target(x)")).to_equal(true)
