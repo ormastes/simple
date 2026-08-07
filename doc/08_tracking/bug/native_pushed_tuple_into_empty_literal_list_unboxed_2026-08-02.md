@@ -349,3 +349,156 @@ patched blind in this pass.
 **Verification status: repro re-confirmed on freshly built artifact,
 root cause localized to two specific `.spl` file:line pairs above,
 no code changed.**
+
+---
+
+## 2026-08-07 follow-up: both fixes landed for the flat-tuple case; two pre-existing, unrelated gaps found during verification
+
+Implemented both parts the previous pass root-caused but left unpatched:
+
+### 1. Type-preservation fix (`src/compiler/50.mir/mir_lowering_stmts.spl`)
+
+Added `fn local_is_tuple(local: LocalId) -> bool` (mirrors the existing
+`local_is_float`/`local_is_bool`, right above `local_is_unit`) and wired it
+into both `effective_type` computations inside the `Let` lowering (the
+disc==1 early-Let path and the Let match arm, kept in sync per the existing
+convention in that file) alongside the pre-existing
+str/float/bool/runtime-array/runtime-dict checks:
+
+```
+else if self.local_is_tuple(init_local):
+    self.local_mir_type_of(init_local) ?? mir_type
+```
+
+This closes the exact gap identified in the 08-07 root-cause pass: an
+un-annotated `val t = (7, 9)` binding's `effective_type` previously had no
+Tuple arm and fell through to the plain-`i64` default, discarding the
+tuple-literal local's correctly-registered `MirTypeKind.Tuple` type.
+
+### 2. Compile-time Tuple-to-text rendering (`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`)
+
+Added a `MirTypeKind.Tuple(field_types)` arm to `coerce_concat_operand`'s
+type switch that returns early (before the scalar is_bool/is_float/...
+dispatch) and delegates to two new helper methods:
+
+- `lower_tuple_field_raw(base_local, elem_type, index)` — reads one tuple
+  field via a direct GEP+load off the tuple's raw `rt_alloc(field_count*8)`
+  block (the same raw representation `lower_tuple_lit` builds; there is no
+  `rt_tuple_*` runtime API to call instead, confirmed by grep).
+- `coerce_tuple_to_raw_str(local, field_types)` — renders `"(a, b, ...)"` at
+  compile time: reads each field, recursively coerces it through
+  `bootstrap_coerce_to_raw_str` (safe recursion — a field's own type is
+  never the same Tuple local unless genuinely nested), and splices the
+  pieces with `emit_raw_strcat`, mirroring the array-literal `.join()`
+  lowering's element-by-element pattern in
+  `method_calls_literals.spl` (the pattern the original root-cause note
+  pointed at).
+
+### Repro verification (`SIMPLE_BOOTSTRAP=1 native-build`, freshly built)
+
+```simple
+fn main():
+    val t = (7, 9)
+    print("field: {t.0}\n")
+    print("tuple: {t}\n")
+```
+
+| | Before this fix | After this fix |
+|---|---|---|
+| `tuple: {t}` | `tuple: 103443101213344` (raw pointer, exit 0) | `tuple: (7, 9)` — **correct** |
+
+The originally-reported defect (tuple interpolation prints a raw pointer
+under AOT) is fixed for the exact repro shape in the bug title and every
+"scope correction" repro added earlier in this doc.
+
+### Regression checks
+
+Scalar concat/interpolation unaffected (`n=42 f=3.5 b=true s=hi` from
+`"n=" + str(n) + " f={f} b={b} s={s}"` — all correct, same as before).
+
+Spec suite (widest reasonably-reachable set — `bin/simple test` on this repo
+runs specs through the **interpreter**, which never touches
+`coerce_concat_operand` at all; that function is MIR/native-only, so this is
+a sanity/no-crash check, not a native-lane regression oracle):
+
+```
+test/01_unit/compiler/interpreter/string_interpolation_spec.spl   FAIL (2/3) -- PRE-EXISTING, see below
+test/feature/usage/string_interpolation_spec.spl                  PASS (15/15)
+test/01_unit/compiler/mir/struct_text_field_interpolation_source_spec.spl  FAIL (1/2) -- PRE-EXISTING, see below
+test/01_unit/app/extended/join_basic_spec.spl                     PASS (12/12)
+```
+
+Both failures were confirmed **unrelated** to this change, not new
+regressions:
+- `struct_text_field_interpolation_source_spec.spl` asserts the literal
+  source string `self.local_hir_types[field_result.id] = declared_field_type`
+  is present in `expr_dispatch.spl`; the current source (far from anything
+  touched here) has since been refactored to
+  `self.remember_local_hir_type(field_result.id, declared_field_type)` — a
+  stale source-content assertion, not a behavior regression.
+- `interpreter/string_interpolation_spec.spl`'s two failures
+  (`semantic: variable 'literal' not found` / `'value' not found`) are
+  **interpreter-path** spec-DSL failures; `coerce_concat_operand` is
+  MIR/native-lowering-only code the interpreter never calls, so these cannot
+  be caused by this change.
+
+### Two pre-existing gaps discovered during verification (NOT fixed here, NOT caused by this change)
+
+**(a) `{t.0}` (plain tuple field read/interpolation) is currently BROKEN
+under `SIMPLE_BOOTSTRAP=1 native-build`, independent of this fix.** Isolated
+by testing an **explicitly annotated** `val t: (i64, i64) = (7, 9)` (which
+bypasses the new `local_is_tuple` code path entirely, since `mir_type` is
+already `Tuple` from the annotation) — `{t.0}` still prints empty, not `7`,
+on a freshly built artifact. Root cause: `lower_index_expr`
+(`expr_dispatch.spl`, ~line 1560) has
+
+```
+if (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not result_type_from_base:
+    result_type = self.bootstrap_text_type()   # unconditionally Opaque("str")
+elif not result_type_from_base and has_index_result_hir_type:
+    result_type = self.lower_type(index_result_hir_type)
+```
+
+`result_type_from_base` is never true for a `Tuple`-typed base (the match
+above it only covers `Array`/`Slice`/`Ptr`/`Ref`/`Dict`), so under
+`SIMPLE_BOOTSTRAP=1` the field read always decodes through
+`rt_array_get` + `decode_runtime_value(..., Opaque("str"))` regardless of
+the field's real type (`i64` here) or `has_index_result_hir_type`, which is
+checked in a dead `elif`. This is scoped entirely inside `lower_index_expr`,
+which this pass did not touch, and reproduces identically with or without
+the type-preservation fix above (confirmed via the annotated-type isolation
+test) — a genuine separate, pre-existing defect. A contradictory earlier
+note in this same doc's "2026-08-07 update" section claimed `field: 7
+(correct)` for the identical repro/build command; that measurement no
+longer reproduces on the current tree (this is a heavily-loaded shared
+working copy — plausible that `lower_index_expr` changed under a different
+lane between the two measurements). Needs its own bug doc / lane; not
+patched here per the "be conservative on a shared hot path" scope for this
+task.
+
+**(b) Nested and mixed-element-type tuples render incorrectly** through the
+new `coerce_tuple_to_raw_str`, because `lower_tuple_lit`
+(`_MirLoweringExpr/literals.spl:562-577`) derives each `field_types[i]`
+entry from the element's HIR `.type_` annotation, which — per this
+codebase's own well-documented pattern (see e.g. `local_is_str`/
+`local_is_float`'s docstrings) — is frequently nil/unreliable, unlike the
+element's own reliably-tracked MIR local type. Observed:
+`(1, (2, 3))` renders as `(1, 152833168)` (nested tuple field prints as a
+raw pointer) and `(1, "x", true)` renders as `(1, 2100391, 1)` (string and
+bool fields both fall back to the numeric-scalar branch). The homogeneous
+`(i64, i64)` case from the bug's actual title/repro is unaffected and
+verified correct above. Follow-up: `lower_tuple_lit` should prefer
+`self.local_mir_type_of(local)` over `elem.type_` for each field, matching
+the rest of this file's established workaround for the same HIR-type
+reliability gap — out of scope for this pass (a change to `lower_tuple_lit`
+itself, which the original root-cause note explicitly said was "not at
+fault" for the reported bug).
+
+**Files changed:** `src/compiler/50.mir/mir_lowering_stmts.spl` (new
+`local_is_tuple`, two `effective_type` call sites),
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` (new
+`MirTypeKind.Tuple` arm in `coerce_concat_operand`, new
+`lower_tuple_field_raw`/`coerce_tuple_to_raw_str` helpers). No Rust seed
+changes; no bootstrap rebuild performed or required (native-build
+interprets these `.spl` sources live under `SIMPLE_BOOTSTRAP=1`, confirmed
+by re-running the repro immediately after each edit).

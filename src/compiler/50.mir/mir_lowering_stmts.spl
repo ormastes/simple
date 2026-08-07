@@ -205,6 +205,25 @@ impl MirLowering:
                     case _: return false
         false
 
+    fn local_is_tuple(local: LocalId) -> bool:
+        """True when a lowered local's registered MIR type is Tuple(...).
+        Mirrors local_is_bool/local_is_float. Without this, a `val t = (7,
+        9)` binding's effective_type computation (below) has no Tuple check
+        and falls through to the plain-i64 default for an un-annotated
+        `val`/`var`, losing the tuple-literal local's correctly-registered
+        MirTypeKind.Tuple type (see lower_tuple_lit,
+        _MirLoweringExpr/literals.spl). That loss is why
+        coerce_concat_operand later saw I64 for `t` and rendered its pointer
+        bits via rt_raw_i64_to_string instead of a Tuple arm (bug doc
+        native_pushed_tuple_into_empty_literal_list_unboxed_2026-08-02.md,
+        2026-08-07 update)."""
+        for item in self.builder.locals:
+            if item.id.id == local.id:
+                match item.type_.kind:
+                    case MirTypeKind.Tuple(_): return true
+                    case _: return false
+        false
+
     fn local_is_unit(local: LocalId) -> bool:
         """True when a lowered local's registered MIR type is Unit -- e.g. the
         placeholder result of a void statement like `print "x"` used as a
@@ -725,6 +744,8 @@ impl MirLowering:
                             self.local_mir_type_of(init_local) ?? mir_type
                         else if self.local_is_bool(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
+                        else if self.local_is_tuple(init_local):
+                            self.local_mir_type_of(init_local) ?? mir_type
                         else:
                             mir_type
                         val bf_sym = self.bitfield_value_syms.get(init_local_id)
@@ -927,6 +948,8 @@ impl MirLowering:
                         else if has_init and self.local_is_float(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else if has_init and self.local_is_bool(init_local):
+                            self.local_mir_type_of(init_local) ?? mir_type
+                        else if has_init and self.local_is_tuple(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else:
                             mir_type

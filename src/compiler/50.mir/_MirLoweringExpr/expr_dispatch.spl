@@ -566,6 +566,14 @@ impl MirLowering:
                 case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64
                    | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32:
                     is_numeric = true
+                case MirTypeKind.Tuple(field_types):
+                    # AOT tuples have no runtime type tag (bare rt_alloc
+                    # block, no rt_tuple_* runtime API) -- render
+                    # "(a, b, ...)" at COMPILE TIME via coerce_tuple_to_raw_str
+                    # below (mirrors the array-literal `.join()` lowering's
+                    # element splice). Return directly -- skip the scalar
+                    # is_bool/is_float/... dispatch below.
+                    return mir_operand_copy(self.coerce_tuple_to_raw_str(local, field_types))
                 case _: ()
         if not (is_bool or is_float or is_u64 or is_numeric):
             return mir_operand_copy(local)
@@ -603,6 +611,60 @@ impl MirLowering:
         if val num_local = num_res:
             return mir_operand_copy(num_local)
         mir_operand_copy(local)
+
+    me lower_tuple_field_raw(base_local: LocalId, elem_type: MirType, index: i64) -> LocalId:
+        """Read tuple field `index` via a direct GEP+load off the tuple's
+        raw rt_alloc(field_count*8) block. This is the SAME representation
+        lower_tuple_lit builds (_MirLoweringExpr/literals.spl -- raw i64-slot
+        GEP stores, no rt_tuple_* runtime header). Used only by
+        coerce_tuple_to_raw_str below to render a tuple to text at compile
+        time; NOT a general tuple-index lowering (that remains the
+        HIR-level Index desugar, lower_index_expr above)."""
+        var b = self.builder
+        val idx_local = b.emit_const_int(index)
+        val ptr = b.emit_gep(
+            mir_operand_copy(base_local),
+            [mir_operand_copy(idx_local)],
+            MirType.ptr(elem_type, false)
+        )
+        val loaded = b.emit_load(mir_operand_copy(ptr), elem_type)
+        self.builder = b
+        loaded
+
+    me coerce_tuple_to_raw_str(local: LocalId, field_types: [MirType]) -> LocalId:
+        """Render a Tuple-typed local as "(a, b, ...)" at COMPILE TIME --
+        see coerce_concat_operand's Tuple case above for why (no runtime
+        tuple type tag under AOT). Reads each field via
+        lower_tuple_field_raw, recursively renders it through
+        bootstrap_coerce_to_raw_str (which itself routes back through
+        coerce_concat_operand -- safe recursion, since a field's own type is
+        never the SAME Tuple local), and splices the pieces with
+        emit_raw_strcat, mirroring the array-literal `.join()` lowering
+        (method_calls_literals.spl, ArrayLit case) element-by-element."""
+        if field_types.len() == 0:
+            var b_empty = self.builder
+            val empty = b_empty.emit_const_str("()")
+            self.builder = b_empty
+            return empty
+        var b_open = self.builder
+        var acc = b_open.emit_const_str("(")
+        self.builder = b_open
+        var i = 0
+        while i < field_types.len():
+            if i > 0:
+                var b_sep = self.builder
+                val sep = b_sep.emit_const_str(", ")
+                self.builder = b_sep
+                acc = self.emit_raw_strcat(acc, sep)
+            val field_local = self.lower_tuple_field_raw(local, field_types[i], i)
+            val field_raw = self.bootstrap_coerce_to_raw_str(field_local)
+            acc = self.emit_raw_strcat(acc, field_raw)
+            i = i + 1
+        var b_close = self.builder
+        val close_paren = b_close.emit_const_str(")")
+        self.builder = b_close
+        acc = self.emit_raw_strcat(acc, close_paren)
+        acc
 
     me box_runtime_value(local: LocalId) -> LocalId:
         if self.nil_locals.contains(local.id):
