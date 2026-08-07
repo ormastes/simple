@@ -118,6 +118,35 @@ describe "resource declaration: Grammar-A parsing":
         # File2 declared no `sharing:` — a leaked pending slot would show it.
         assert_false(resource_meta_of(decls[1]).contains("sharing="))
 
+    it "does not leak @sffi metadata across an intervening fn declaration":
+        # The pending slot is cleared per-declaration, not only when a
+        # `resource` consumes it -- so an `@sffi` that lands on a non-resource
+        # decl must not survive to the next `resource`.
+        val decls = parse_ok(
+            "@sffi(prefix: \"rt_a\", sharing: foreign)\nfn f() -> i64:\n    1\n" +
+            "@sffi(prefix: \"rt_b\")\nresource B\n"
+        )
+        var b_meta = ""
+        for d in decls:
+            val m = resource_meta_of(d)
+            if m.contains("prefix=rt_b"):
+                b_meta = m
+        assert_false(b_meta.contains("sharing="))
+
+    it "does not leak @sffi metadata across an intervening pub fn declaration":
+        # `pub fn` goes through parse_module_decl_with_visibility, a separate
+        # dispatch path with its own reset placement.
+        val decls = parse_ok(
+            "@sffi(prefix: \"rt_a\", sharing: foreign)\npub fn g() -> i64:\n    1\n" +
+            "@sffi(prefix: \"rt_c\")\nresource C\n"
+        )
+        var c_meta = ""
+        for d in decls:
+            val m = resource_meta_of(d)
+            if m.contains("prefix=rt_c"):
+                c_meta = m
+        assert_false(c_meta.contains("sharing="))
+
 describe "resource declaration: fail-closed validation":
     it "errors when the required prefix key is missing":
         assert_true(parse_reports_error("@sffi(invalid: -1)\nresource File\n"))
