@@ -4,6 +4,7 @@
 # Catches dangling imports before they cause fatal module resolution errors.
 #
 # W0407: Unresolved import — module file not found                    WARNING
+#         (promoted to ERROR under the `critical` assurance profile, WP-10)
 #
 # Checks both direct file (module.spl) and directory module (module/__init__.spl).
 # Derives source root from the file path being linted.
@@ -14,8 +15,22 @@ use compiler.core.ast.{
     DECL_USE,
     decl_get_tag, decl_get_name
 }
+use compiler.common.assurance.policy.{strictness_for_profile_name}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 
 extern fn rt_file_exists(path: text) -> bool
+
+# WP-10 (aerospace hardening plan, doc/03_plan/language/assurance/
+# aerospace_hardening_plan_2026-08-07.md): W0407 was warning-only under every
+# profile, including `critical`, so an unresolved import could reach import
+# admission (module_loader_core.spl) with no error anywhere in the chain.
+# Severity is routed through the WP-3 canonical policy resolver
+# (strictness_for_profile_name) rather than a hardcoded string compare, so a
+# future alias/rung change to the ladder does not require a second edit here.
+fn _w0407_severity(profile_name: text) -> text:
+    if strictness_for_profile_name(profile_name).at_least(AssuranceStrictness.Critical):
+        return "ERROR"
+    "WARNING"
 
 # ============================================================================
 # Warning Struct
@@ -57,13 +72,17 @@ fn _derive_src_root(file_path: text) -> text:
 # Main Entry Point
 # ============================================================================
 
-fn check_use_resolution(decl_indices: [i64], file_path: text) -> [UseResolutionWarning]:
+fn check_use_resolution(decl_indices: [i64], file_path: text, profile_name: text) -> [UseResolutionWarning]:
     """Check that all use imports resolve to existing .spl files.
 
     For each use declaration, converts the module path to a file path
     and checks if the file exists. Emits W0407 for unresolved imports.
+    `profile_name` is the resolved assurance-profile name (e.g. "critical",
+    "" for the permissive default); it decides whether the finding reports
+    as WARNING or is promoted to ERROR.
     """
     var warnings: [UseResolutionWarning] = []
+    val severity = _w0407_severity(profile_name)
 
     val src_root = _derive_src_root(file_path)
     if src_root == "":
@@ -83,7 +102,7 @@ fn check_use_resolution(decl_indices: [i64], file_path: text) -> [UseResolutionW
         if (not rt_file_exists(target_file) and not rt_file_exists(dir_init)):
             warnings.push(UseResolutionWarning(
                 code: "W0407",
-                severity: "WARNING",
+                severity: severity,
                 message: "unresolved import — module file not found",
                 module_path: mod_path
             ))
@@ -93,4 +112,3 @@ fn check_use_resolution(decl_indices: [i64], file_path: text) -> [UseResolutionW
 # ============================================================================
 # Exports
 # ============================================================================
-

@@ -205,6 +205,29 @@ fn module_alias_loaded(alias_name: text, file_path: text) -> i64:
 var _module_load_depth: i64 = 0
 val _MODULE_LOAD_MAX_DEPTH = 16
 
+# ===== Import-Admission Fail-Closed Switch (WP-10, aerospace hardening) =====
+#
+# doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md WP-10,
+# plan premise 8: the lenient fallback below (an unresolvable module whose
+# every requested name is ALREADY registered elsewhere is accepted anyway) is
+# the actual leniency in the unresolved-identifier chain -- HIR own
+# identifier lowering hard-errors correctly (hir_lowering/expressions.spl:398)
+# but a module can still get IN through this import-admission path. Under the
+# critical assurance profile that fallback must not run: an unresolvable
+# import is a hard failure, matching the caller existing "failed to load
+# module" error path (eval_decls.spl DECL_USE handling). Default is false
+# (today lenient behaviour, unchanged for every other profile) so this is
+# opt-in exactly like match_fallthrough_abort next to it in eval_tables.spl.
+# Set via eval_apply_assurance_profile (eval_decls.spl), never read directly
+# from the env var here -- same latch fix as premise 5b.
+var _import_admission_deny: bool = false
+
+fn import_admission_set_deny(enabled: bool):
+    _import_admission_deny = enabled
+
+fn import_admission_get_deny() -> bool:
+    _import_admission_deny
+
 # ===== Module Loading =====
 
 fn load_module_source(file_path: text) -> text:
@@ -427,6 +450,10 @@ fn load_module_selective(module_name: text, imported_names: [text], current_file
 
     # Fallback (module file unresolvable only): if every requested name is
     # already registered, treat them as built-ins and accept the import.
+    # Under critical (import_admission_set_deny(true)) this fallback is
+    # forbidden.
+    if _import_admission_deny:
+        return 0
     var all_available = true
     for name in imported_names:
         if func_table_lookup(name) < 0:
