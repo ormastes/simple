@@ -109,3 +109,24 @@ it always has, since the Rust seed rebuild is only needed for
 - `.claude/rules/bootstrap.md`
 - Commits: `b9e23914a0e`, `976c44a28f6`, `f7cf6c87b02`, `39a2c7c2040`,
   `030ff43e330`, `9bb8727cbc3` (superseded), `548f2d3b1f6`
+
+## UPDATE 2026-08-07 — decisive experiment run: blocked at Stage 2 by an eighth,
+independent blocker before Stage 3 could even start
+
+The "decisive experiment" above was run in an isolated linked worktree
+(`/home/ormastes/dev/simple-s3bisect`, pinned to `origin/main`
+`6ac02f5d8a93`, all four cited fix commits confirmed ancestors) using the
+same `build/cyc/build_stage2.sh` + `run_stage3.sh` technique. **Stage 2
+itself failed** (`STAGE2_EXIT=1`, `Build failed: ambiguous package export
+`Mailbox` in src/lib/nogc_async_mut/__init__.spl: mailbox.spl,
+mailbox_actor.spl`) — deterministic across two runs — so `run_stage3.sh` was
+never reached and the seven-fix chain remains unverified together. Root
+cause: two distinct types (`struct Mailbox` at
+`src/lib/nogc_async_mut/mailbox.spl:18`, `class Mailbox` at
+`src/lib/nogc_async_mut/mailbox_actor.spl:103`) are both exported under the
+bare name `Mailbox`; this is pure-Simple, independent of and newer than the
+seven traced blockers (both types already coexisted at the older pinned
+commit prior lanes built Stage 2 from without hitting this, so something in
+the intervening commits changed what the entry-closure discovery now
+requests). Full writeup, disk-space log, and evidence caveats:
+`doc/09_report/compiler/stage3_replay_verification_2026-08-07.md`.
