@@ -6,7 +6,7 @@ Own feature-specific process knowledge for the `cuda`/`vulkan` remote test lanes
 (`interpreter(remote(cuda(sm80)))` family): current docs, source entry points, known
 constraints, and the pipeline artifacts to update as work progresses.
 
-## Status (2026-08-07, updated — plan substantially implemented)
+## Status (2026-08-07, updated — plan substantially implemented; E2 landed, Streams A-E addressed)
 
 **Landed on `origin/main`:** A1 (grammar), A2 (GMB-1 mailbox library), A3
 (runner routing to `GpuLaneExecutor`), B0 (CUDA interpreter adapter), B1
@@ -19,9 +19,20 @@ executor), D1 (SVM-G ISA spec + assembler), D2 (host reference VM), D3
 (conformance vector suite), D4 (test-body lowering to SVM-G). This is now the
 great majority of the plan's Streams A-D.
 
-**Not yet landed:** B5-B6 (further CUDA lane work), C3 (SVM-G Vulkan device
-executor — the Vulkan-side counterpart to B3), E2 (`doc/08_tracking/lane_matrix.md`
-does not exist yet). E1 (this doc-linking task) is in progress here.
+**Landed since the paragraph above was written:** C3 (SVM-G Vulkan device
+executor, verified 58/58 non-excluded D3 vectors on real hardware), E1
+(doc-linking), E2 (lane matrix + status spec + CI, this section).
+
+**Not yet landed / not attempted:** B5-B6 (further CUDA lane work beyond
+resident; B6 itself already has a landed no-go verdict per the plan). Two
+real, filed, NOT-fixed-by-E2 gaps remain within the landed streams: the
+generic composite-runner GPU-lane dispatch (`route_gpu_lane`) is not wired
+to the real B2-C3 `GpuLaneExecutor` implementations
+(`gpu_lane_generic_routing_not_wired_to_real_executors_2026-08-07.md`), and
+`cuda_vm` (`CudaVmExecutor`) has no in-tree system spec driving the D3
+conformance table (B3's own pre-existing gap). `doc/08_tracking/lane_matrix.md`
+now exists (E2) and is the single place both are tracked alongside the rest
+of the lane matrix.
 
 Status sections below are per-task, in landing order. Where a task's section
 was itself lost to shared-working-copy churn during this session and later
@@ -368,11 +379,11 @@ rewritten").
 - Vulkan: no forward-progress guarantee ⇒ buffered mailbox only, no resident submode
   (grammar rejects it); step budget mandatory.
 - CUDA resident mode refused on watchdog devices unless `CUDA_RESIDENT_FORCE=1`.
-- `doc/08_tracking/lane_matrix.md` does not exist yet — plan Task E2 creates it;
-  authoritative lane status today is
-  `doc/06_spec/03_system/hardware/remote_baremetal_lane_status_spec.md`
-  (now cross-linked back to this skill doc, the design doc, and the plan —
-  see its "Related: GPU Remote Lanes" note, added for plan Task E1).
+- `doc/08_tracking/lane_matrix.md` now exists (plan Task E2, landed
+  2026-08-07) — 8 baremetal rows + 5 GPU rows, cross-referencing
+  `remote_baremetal_lane_status_spec.md`,
+  `test/03_system/gpu_lane/gpu_lane_matrix_status_spec.spl`, and this skill
+  doc's own B2-C3 status sections.
 - User-facing entry point: `doc/07_guide/testing/gpu_remote_lanes_testing.md`
   (new, added for plan Task E1 — this domain had no guide before).
 
@@ -774,6 +785,85 @@ rewritten").
   errors (2 pre-existing-style warnings, same class as B3's
   `cuda_vm_executor.spl`: `unnamed_duplicate_typed_args`,
   `non_exhaustive_match`).
+
+## Status: E2 (lane matrix + system status spec) -- landed 2026-08-07
+
+- New `doc/08_tracking/lane_matrix.md` (did not exist before this task):
+  seeded with the 8 authoritative baremetal lanes from
+  `remote_baremetal_lane_status_spec.md`/`LaneRegistry.default()` (3 stable +
+  5 host-aware) plus the 5 GPU rows from design §7 (`cuda_jit`, `cuda_vm`,
+  `cuda_vm_resident`, `vulkan_jit`, `vulkan_vm`), each with spec string,
+  readiness-probe mechanism, executor + spec file paths, and current
+  per-host status pulled from this skill's own B2-C3 sections above --
+  precise about "working" vs "blocked-with-filed-bug" vs "not-yet-verified
+  in-tree" (e.g. `cuda_vm` has a real executor, `CudaVmExecutor`, but still
+  no in-tree system spec driving the D3 conformance table -- B3's own
+  status section already said as much; not upgraded to "working" here).
+- New `test/03_system/gpu_lane/gpu_lane_matrix_status_spec.spl` (12
+  examples), `remote_baremetal_lane_status_spec.spl`-style: a `GpuLaneRow`
+  matrix-shape block (4 examples, asserts the design §7 spec strings
+  exactly), a readiness-probing contract block (3 examples) that pins
+  `driver_present: false` so it asserts the no-GPU-host `skip:`/`blocked:`
+  contract portably regardless of what hardware actually runs the spec, a
+  `cuda_vm_resident`-specific block (4 examples) exercising B4's
+  `resident_refusal_gate` (the one row with novel logic beyond A3's generic
+  `route_gpu_lane`), and one host-aware `slow_it` that probes the REAL host
+  and only asserts well-formedness (never hard-requires `skip:`, since a
+  host WITH GPU hardware legitimately does not get `skip:` today -- see
+  below).
+- **Real finding, not assumed away**: this dev host has 2 real NVIDIA GPUs
+  with both `nvidia-smi` and `vulkaninfo` succeeding, and all 4 probed
+  `rt_*` symbols (`rt_cuda_init`, `rt_cuda_module_load_data_bytes`,
+  `rt_vulkan_alloc_buffer`, `rt_vulkan_begin_compute`) resolve on the
+  deployed binary -- so on THIS host, `route_gpu_lane` returns the generic
+  `"<backend> lane executor not yet implemented (see B2/B3/C2/C3)"` FAIL for
+  every GPU lane, not `skip:`, even though B2/C2's real executors
+  (`CudaJitLaneExecutor`/`VulkanJitLaneExecutor`) exist and independently
+  pass their own dedicated specs. `route_gpu_lane`'s generic composite-runner
+  dispatch was never updated to actually invoke the real B2-C3 executors --
+  filed
+  `doc/08_tracking/bug/gpu_lane_generic_routing_not_wired_to_real_executors_2026-08-07.md`.
+  The plan's E2 "Verify" bar ("status spec passes on a no-GPU host with all
+  GPU lanes reporting skip:") is met by the spec's pure-function
+  `driver_present: false` scenarios (portable by construction, independent
+  of host hardware), not by the host-aware `slow_it`, which is
+  intentionally only an informational well-formedness check on a host that
+  does have GPU hardware.
+- Verify: `bin/simple test test/03_system/gpu_lane/gpu_lane_matrix_status_spec.spl`
+  -> `Results: 12 total, 12 passed, 0 failed` (ran on this host, which does
+  have real GPU hardware; all 12 pass regardless, per the design above).
+- **Sabotage probe**: changed one `expect(...).to_equal(...)` assertion's
+  expected spec string for `cuda_vm_resident` from `sm80` to `sm90` (leaving
+  the row definition itself correct) -> RED (`12 total, 11 passed, 1
+  failed`, `expected interpreter(remote(cuda(sm80(resident)))) to equal
+  interpreter(remote(cuda(sm90(resident))))`); reverted -> GREEN (`12 total,
+  12 passed, 0 failed`).
+- Lint: `bin/simple lint test/03_system/gpu_lane/gpu_lane_matrix_status_spec.spl`
+  -> 0 errors (7 pre-existing-style warnings, same class as sibling B2-C3
+  files: `SPIPE006` boolean-matcher hints, `spipe_missing_docstrings`).
+- CI: new `.github/workflows/gpu-lane-tests.yml` -- `portable-gates` job
+  (Linux/macOS/Windows, runs on every push/PR, no GPU hardware required:
+  A1-A3 routing specs, D1-D4 SVM-G host-reference conformance specs, this
+  task's status spec) plus two `workflow_dispatch`-only jobs,
+  `cuda-live` (`runs-on: [self-hosted, cuda-live]`) and the NEW
+  `vulkan-live` (`runs-on: [self-hosted, vulkan-live]`), running the real
+  B2/B4/C2/C3 hardware specs. Neither `cuda-live` nor `vulkan-live` is
+  provisioned as an actual self-hosted runner label in this repo's Actions
+  fleet yet (same honest-placeholder situation `notebook-lanes-tests.yml`'s
+  `gpu-notebook-fixtures` job already documents) -- gated
+  `workflow_dispatch`-only specifically so an unprovisioned label never
+  silently blocks push/PR status checks by queuing forever. Never infers
+  GPU presence from OS/platform anywhere in the file.
+- This effectively completes the whole
+  `gpu_remote_interpreter_parallel_plan_2026-08-07.md` plan, barring B6's
+  already-landed no-go verdict, B5 (not attempted, no status section exists
+  for it above), and the two known real gaps this task did NOT fix (out of
+  scope by design): the generic-routing wiring gap filed just above, and
+  `cuda_vm`'s missing in-tree D3-conformance system spec (B3's own gap,
+  restated in the lane matrix). Streams A, C, D are landed and verified on
+  real hardware where hardware-dependent; Stream B is landed except B3's
+  in-tree-conformance follow-up and B4's 3 missing SFFI bindings (both
+  already filed, both pre-existing, neither reopened or "fixed" by E2).
 
 ## Affected Layers
 
