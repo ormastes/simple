@@ -35,6 +35,9 @@ use compiler.core.types.{is_isolated_tag, isolated_tag_to_id, isolated_type_get_
 use compiler.core.types.{is_exclusive_tag, exclusive_tag_to_id, exclusive_type_get_inner}
 use compiler.core.types.{is_reference_tag, reference_tag_to_id, reference_type_get_inner, reference_type_is_mutable}
 use compiler.core.types.{is_pointer_tag, pointer_tag_to_id, pointer_type_get_inner, pointer_type_is_mutable}
+use compiler.core.types.{is_atomic_tag, atomic_tag_to_id, atomic_type_get_inner}
+use compiler.core.types.{is_weak_tag, weak_tag_to_id, weak_type_get_inner}
+use compiler.frontend.resource_registry.{resource_is_declared, resource_meta_thread_safe, resource_registry_note_ownership}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
@@ -420,7 +423,43 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
         val pointer_id = pointer_tag_to_id(type_expr_idx)
         val pointer_inner_tag = pointer_type_get_inner(pointer_id)
         val pointer_mutable = pointer_type_is_mutable(pointer_id)
-        return Type(kind: TypeKind.Pointer(convert_flat_type(pointer_inner_tag), pointer_mutable), span: make_span())
+        val pointer_inner_type = convert_flat_type(pointer_inner_tag)
+        # `*R` on a declared resource is the "shared RC" ownership sigil
+        # (WP-B design §3/§7); on any other type it stays a plain raw
+        # pointer. Recorded here, not in the parser -- see the note on the
+        # `@T`/`-T` parser branches in `core/parser.spl` for why bridge time
+        # is the earliest point `resource_is_declared` can read true.
+        val pointer_resource_name = parser_type_kind_named_name(pointer_inner_type.kind)
+        if pointer_resource_name != "" and resource_is_declared(pointer_resource_name):
+            resource_registry_note_ownership(pointer_resource_name, "shared")
+        return Type(kind: TypeKind.Pointer(pointer_inner_type, pointer_mutable), span: make_span())
+    # Resource-ownership sigil `@T` -- atomic ref-counted sharing (WP-B).
+    # Gated on the resource's own `thread_safe: true` metadata (design §3/§7
+    # invariant 8): an atomic-shared resource whose extern retain/release
+    # pair is not documented thread-safe is a silent-corruption trap, not a
+    # style choice, so this is a hard diagnostic, not a warning.
+    if is_atomic_tag(type_expr_idx):
+        val atomic_id = atomic_tag_to_id(type_expr_idx)
+        val atomic_inner_tag = atomic_type_get_inner(atomic_id)
+        val atomic_inner_type = convert_flat_type(atomic_inner_tag)
+        val atomic_resource_name = parser_type_kind_named_name(atomic_inner_type.kind)
+        if atomic_resource_name != "" and resource_is_declared(atomic_resource_name):
+            if resource_meta_thread_safe(atomic_resource_name) != "true":
+                parser_error("'@" + atomic_resource_name + "' (atomic RC sharing) requires resource '" + atomic_resource_name + "' to declare thread_safe: true")
+            else:
+                resource_registry_note_ownership(atomic_resource_name, "atomic")
+        return Type(kind: TypeKind.Atomic(atomic_inner_type), span: make_span())
+    # Resource-ownership sigil `-T` -- weak reference (WP-B). No legality
+    # gate: a weak reference to a resource is always representable regardless
+    # of that resource's sharing/thread-safety metadata.
+    if is_weak_tag(type_expr_idx):
+        val weak_id = weak_tag_to_id(type_expr_idx)
+        val weak_inner_tag = weak_type_get_inner(weak_id)
+        val weak_inner_type = convert_flat_type(weak_inner_tag)
+        val weak_resource_name = parser_type_kind_named_name(weak_inner_type.kind)
+        if weak_resource_name != "" and resource_is_declared(weak_resource_name):
+            resource_registry_note_ownership(weak_resource_name, "weak")
+        return Type(kind: TypeKind.Weak(weak_inner_type), span: make_span())
     if is_union_base_or_above(type_expr_idx):
         return Type(kind: TypeKind.Named(type_tag_name(type_expr_idx), []), span: make_span())
     # type_expr_idx falls in the tag-space hole (34..TYPE_UNION_BASE-1) here, so

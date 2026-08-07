@@ -25,6 +25,7 @@ use compiler.core.tokens.{TOK_QUESTION, TOK_DOUBLE_QUESTION}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
 use compiler.core.tokens.{TOK_SEMICOLON}
 use compiler.core.tokens.{TOK_AMPERSAND, TOK_STAR, TOK_KW_NIL}
+use compiler.core.tokens.{TOK_AT, TOK_MINUS}
 use compiler.core.lexer_chars.{is_digit}
 use compiler.frontend.core.lexer.{lex_init, lex_init_with_path, lex_next, lex_mark_current_token_as_generic_close}
 use compiler.frontend.core.lexer.{lex_token_kind, lex_token_text, lex_token_line, lex_token_col}
@@ -54,6 +55,8 @@ use compiler.core.types.{isolated_type_register}
 use compiler.core.types.{exclusive_type_register}
 use compiler.core.types.{reference_type_register}
 use compiler.core.types.{pointer_type_register}
+use compiler.core.types.{atomic_type_register}
+use compiler.core.types.{weak_type_register}
 use std.string_core.{char_code}
 
 # Import from split modules
@@ -506,6 +509,34 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             parser_error("too many distinct pointer type annotations")
             return pointer_inner
         return pointer_tag
+    # Resource-ownership sigil `@T` -- atomic ref-counted sharing (WP-B,
+    # doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md).
+    # Just parse-and-register here, same shape as the pointer branch above.
+    # Ownership-kind recording and the `thread_safe:` legality gate happen at
+    # bridge time (_FlatAstBridge/convert_nodes.spl convert_flat_type), NOT
+    # here: resource_registry_declare (WP-C) is only called from
+    # module_assembly's __resource_decl handling, which runs during the flat
+    # bridge walk -- at raw-parse time (this function) no resource has been
+    # registered yet even if its `@sffi resource` decl appears earlier in the
+    # same source, so resource_is_declared would always read false here.
+    if kind == TOK_AT:
+        parser_advance()
+        val atomic_inner = parser_parse_type_impl(allow_spaced_generics)
+        val atomic_tag = atomic_type_register(atomic_inner)
+        if atomic_tag < 0:
+            parser_error("too many distinct atomic type annotations")
+            return atomic_inner
+        return atomic_tag
+    # Resource-ownership sigil `-T` -- weak reference (WP-B). Same
+    # bridge-time-not-parse-time note as `@T` above.
+    if kind == TOK_MINUS:
+        parser_advance()
+        val weak_inner = parser_parse_type_impl(allow_spaced_generics)
+        val weak_tag = weak_type_register(weak_inner)
+        if weak_tag < 0:
+            parser_error("too many distinct weak type annotations")
+            return weak_inner
+        return weak_tag
     # Canonical exclusive-capability type `mut T`. Unlike `mut name: T`
     # parameter-binding syntax, this modifier follows the colon and belongs to
     # the type. Preserve it through the flat type registry for the AST bridge.

@@ -317,6 +317,16 @@ val TYPE_REFERENCE_LIMIT = 8000
 # Raw/shared pointer types `*T`, `*const T`, and `*mut T`.
 val TYPE_POINTER_BASE = 8000
 val TYPE_POINTER_LIMIT = 9000
+# Resource-ownership sigils (WP-B, doc/03_plan/language/resource/
+# resource_parallel_agent_plan_2026-08-06.md): atomic ref-counted type `@T`
+# and weak-reference type `-T`. Mirror the isolated/exclusive/reference/
+# pointer side-registries above -- the flat i64 tag space has no room to
+# carry a wrapped inner type directly. 500-wide (half the usual 1000): this
+# is the only gap available before TYPE_NAMED_BASE without renumbering it.
+val TYPE_ATOMIC_BASE = 9000
+val TYPE_ATOMIC_LIMIT = 9500
+val TYPE_WEAK_BASE = 9500
+val TYPE_WEAK_LIMIT = 10000
 val TYPE_NAMED_BASE = 10000
 
 # Helper predicates for encoded type tags
@@ -385,6 +395,18 @@ fn is_pointer_tag(tag: i64) -> bool:
 
 fn pointer_tag_to_id(tag: i64) -> i64:
     tag - TYPE_POINTER_BASE
+
+fn is_atomic_tag(tag: i64) -> bool:
+    tag >= TYPE_ATOMIC_BASE and tag < TYPE_ATOMIC_LIMIT
+
+fn atomic_tag_to_id(tag: i64) -> i64:
+    tag - TYPE_ATOMIC_BASE
+
+fn is_weak_tag(tag: i64) -> bool:
+    tag >= TYPE_WEAK_BASE and tag < TYPE_WEAK_LIMIT
+
+fn weak_tag_to_id(tag: i64) -> i64:
+    tag - TYPE_WEAK_BASE
 
 # Stage-3 imported-module-`val` misread (blocker #7, cd81ef3d85df): a caller in
 # ANOTHER module that writes `tag == TYPE_ANY` reads TYPE_ANY as an IMPORTED
@@ -1315,6 +1337,52 @@ fn pointer_type_is_mutable(pointer_id: i64) -> bool:
         return pointer_mutable_flags[pointer_id] != 0
     false
 
+# ===== Atomic RC Type Registry =====
+# `@T` -- atomic reference-counted sharing sigil (WP-B). Mirrors the
+# isolated-type registry directly above.
+
+var atomic_inner_tags: [i64] = []
+
+fn atomic_type_register(inner_tag: i64) -> i64:
+    var existing = 0
+    while existing < atomic_inner_tags.len():
+        if atomic_inner_tags[existing] == inner_tag:
+            return TYPE_ATOMIC_BASE + existing
+        existing = existing + 1
+    val idx = atomic_inner_tags.len()
+    if idx >= TYPE_ATOMIC_LIMIT - TYPE_ATOMIC_BASE:
+        return -1
+    atomic_inner_tags.push(inner_tag)
+    TYPE_ATOMIC_BASE + idx
+
+fn atomic_type_get_inner(atomic_id: i64) -> i64:
+    if atomic_id >= 0 and atomic_id < atomic_inner_tags.len():
+        return atomic_inner_tags[atomic_id]
+    TYPE_ANY
+
+# ===== Weak Reference Type Registry =====
+# `-T` -- weak-reference sigil (WP-B). Mirrors the isolated-type registry
+# above.
+
+var weak_inner_tags: [i64] = []
+
+fn weak_type_register(inner_tag: i64) -> i64:
+    var existing = 0
+    while existing < weak_inner_tags.len():
+        if weak_inner_tags[existing] == inner_tag:
+            return TYPE_WEAK_BASE + existing
+        existing = existing + 1
+    val idx = weak_inner_tags.len()
+    if idx >= TYPE_WEAK_LIMIT - TYPE_WEAK_BASE:
+        return -1
+    weak_inner_tags.push(inner_tag)
+    TYPE_WEAK_BASE + idx
+
+fn weak_type_get_inner(weak_id: i64) -> i64:
+    if weak_id >= 0 and weak_id < weak_inner_tags.len():
+        return weak_inner_tags[weak_id]
+    TYPE_ANY
+
 # ===== Pool Reset =====
 # Call before parsing a new file to reset all pools.
 
@@ -1387,6 +1455,8 @@ fn reset_all_pools():
     reference_mutable_flags = clear_i64_pool(reference_mutable_flags)
     pointer_inner_tags = clear_i64_pool(pointer_inner_tags)
     pointer_mutable_flags = clear_i64_pool(pointer_mutable_flags)
+    atomic_inner_tags = clear_i64_pool(atomic_inner_tags)
+    weak_inner_tags = clear_i64_pool(weak_inner_tags)
 
 export TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT
 export TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32
@@ -1411,5 +1481,9 @@ export TYPE_REFERENCE_BASE, is_reference_tag, reference_tag_to_id
 export reference_type_register, reference_type_get_inner, reference_type_is_mutable
 export TYPE_POINTER_BASE, is_pointer_tag, pointer_tag_to_id
 export pointer_type_register, pointer_type_get_inner, pointer_type_is_mutable
+export TYPE_ATOMIC_BASE, is_atomic_tag, atomic_tag_to_id
+export atomic_type_register, atomic_type_get_inner
+export TYPE_WEAK_BASE, is_weak_tag, weak_tag_to_id
+export weak_type_register, weak_type_get_inner
 export SYM_UNKNOWN, SYM_FN, SYM_VAL, SYM_VAR, SYM_STRUCT, SYM_ENUM, SYM_CLASS
 export scope_push, scope_pop, scope_depth
