@@ -167,11 +167,46 @@ fn scan_file_calls(path: text) -> ScannedModuleCalls:
     path."""
     scan_source_calls(path, file_read(path))
 
+fn _local_fn_names(lines: [text]) -> {text: bool}:
+    """Names declared by a `fn NAME(` line (any indentation: free function or
+    method) in this file. A bare `NAME(` call site whose name also appears
+    here resolves lexically to the LOCAL declaration, not to any same-named
+    imported symbol -- so this file's own definitions shadow imports of the
+    same name. Fixes the documented false-positive gap: "a local fn sharing
+    an imported symbol's name is misattributed as a call into that module"
+    (see this file's header and layer_call_wiring.spl's)."""
+    var names: {text: bool} = {}
+    for line in lines:
+        val trimmed = line.trim()
+        if not trimmed.starts_with("fn "):
+            continue
+        val after_fn = trimmed[3:trimmed.len()]
+        var name = ""
+        var i = 0
+        while i < after_fn.len():
+            val ch = after_fn[i:i + 1]
+            val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+            val is_digit = ch >= "0" and ch <= "9"
+            if is_alpha or (is_digit and name != ""):
+                name = name + ch
+            else:
+                break
+            i = i + 1
+        if name != "":
+            names[name] = true
+    names
+
 fn scan_source_calls(path: text, content: text) -> ScannedModuleCalls:
     """Same as scan_file_calls, but takes already-loaded source text instead
     of re-reading it from disk. Lets a caller that already holds every
     module's content in memory (e.g. a compile driver's in-flight source
-    list) reuse this scan without a second filesystem pass."""
+    list) reuse this scan without a second filesystem pass.
+
+    Callee attribution is shadow-aware: a bare `NAME(` call is only
+    attributed to an imported module if this file does NOT also declare a
+    local `fn NAME(` -- the local declaration lexically shadows the import,
+    so attributing the call to the import there would be a false positive.
+    See `_local_fn_names`."""
     val lines = content.split("\n")
 
     var symbol_module: [{text: text}] = []
@@ -187,10 +222,14 @@ fn scan_source_calls(path: text, content: text) -> ScannedModuleCalls:
             entry[symbol] = resolved
             symbol_module.push(entry)
 
+    val local_names = _local_fn_names(lines)
+
     var callee_modules: [text] = []
     var seen: {text: bool} = {}
     for line in lines:
         for callee in _extract_callees(line):
+            if local_names.has(callee):
+                continue
             for entry in symbol_module:
                 if entry.has(callee):
                     val resolved = entry[callee]

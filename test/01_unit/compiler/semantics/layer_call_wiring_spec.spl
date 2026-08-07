@@ -133,3 +133,31 @@ describe "layer_call_wiring: check_project_layer_calls":
         _teardown()
 
         expect(result.len()).to_equal(1)
+
+    it "M1b promotion: a local fn sharing an imported symbol's name is NOT misattributed as a cross-layer call":
+        # T13 (doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md):
+        # the documented false-positive gap. This caller file both imports
+        # `helper_fn` from CALLEE_PATH (tagged 'draw', downward-illegal from
+        # 'gui' with no uses edge) AND declares its OWN local `fn helper_fn`.
+        # The bare `helper_fn()` call site is ambiguous text -- under the OLD
+        # text-scan (no local-declaration awareness, verified by temporarily
+        # reverting the fix under test) this misattributes the call to the
+        # imported module and reports a spurious violation. Under the fix
+        # (layer_call_scan._local_fn_names shadow check) it must NOT, because
+        # a local `fn helper_fn(...)` declaration lexically shadows the
+        # import in this file -- the call resolves locally, not to
+        # CALLEE_PATH. This is the discriminating case: it would have FAILED
+        # (found 1 violation) under the pre-fix text edges and must PASS
+        # (find 0) now, or the promotion proved nothing.
+        _setup()
+        val caller_path = "caller_probe_shadow.spl"
+        val shadowing_caller_source = CALLER_SOURCE + "\nfn helper_fn() -> i64:\n    2\n"
+        val result = check_project_layer_calls(
+            [caller_path, CALLEE_PATH],
+            [shadowing_caller_source, CALLEE_SOURCE],
+            ["gui", "draw"],
+            ["D:gui", "D:draw"]
+        )
+        _teardown()
+
+        expect(result.len()).to_equal(0)
