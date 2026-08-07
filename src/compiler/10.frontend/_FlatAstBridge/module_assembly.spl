@@ -28,6 +28,7 @@ use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind,
 use compiler.frontend.desugar.collection_desugar.{desugar_collections}
 use compiler.frontend.lexer_types.{Span}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use compiler.frontend.resource_registry.{resource_registry_declare}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_env_get(key: text) -> text
@@ -555,14 +556,28 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                                     # (doc/03_plan/language/resource/
                                     # resource_parallel_agent_plan_2026-08-06.md).
                                     # Parse + validation + type pre-registration
-                                    # all happen in the parser; WP-A explicitly
-                                    # excludes lowering, drop edges, RC and
-                                    # borrow enforcement (WP-C/E/G). So the
-                                    # marker is dropped here and the decl emits
-                                    # zero HIR/MIR/codegen, exactly like
-                                    # __layer_decl above. WP-C replaces this arm
-                                    # with a real carrier when it needs the
-                                    # metadata downstream.
+                                    # all happen in the parser. WP-C: feed the
+                                    # parsed (name, meta_csv) facts into
+                                    # resource_registry (compiler.frontend.
+                                    # resource_registry), the same trick
+                                    # layer_registry uses above, so later
+                                    # layers (WP-E drop edges, WP-G borrow
+                                    # enforcement) can query the metadata by
+                                    # name without a HirModule/ParserModule
+                                    # field. The marker itself is still
+                                    # dropped -- WP-C is metadata propagation
+                                    # only, not codegen (still zero
+                                    # HIR/MIR/codegen output for the decl
+                                    # itself, exactly like __layer_decl).
+                                    match args[0].value.kind:
+                                        case ExprKind.StringLit(resource_name, _):
+                                            match args[1].value.kind:
+                                                case ExprKind.StringLit(meta_csv, _):
+                                                    resource_registry_declare(resource_name, meta_csv)
+                                                case _:
+                                                    pass
+                                        case _:
+                                            pass
                                     di = di + 1
                                     continue
                                 elif helper_name == "__module_layer_tag" and args.len() >= 1:

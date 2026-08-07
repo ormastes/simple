@@ -1,0 +1,110 @@
+# Resource declaration registry (WP-C, doc/03_plan/language/resource/
+# resource_parallel_agent_plan_2026-08-06.md).
+#
+# WP-A parses `@sffi(...) resource Name` and lowers it to an inert
+# `__resource_decl(name, meta_csv)` marker that `module_assembly.spl` drops
+# (zero HIR/MIR/codegen output, by WP-A's own design). WP-C's job is to carry
+# the parsed metadata forward to later layers (WP-E's drop-edge emission,
+# WP-G's borrow enforcement) WITHOUT inflating `ParserModule`/`HirModule`
+# with a new field + struct type, which would force edits across 10.frontend,
+# 20.hir, 35.semantics, 70.backend and 80.driver -- several of those are
+# owned by other WPs / other in-flight sessions on this shared working copy.
+#
+# Precedent for a side-registry instead of a struct field:
+# `LayerDagRegistry` in `_FlatAstBridge/module_assembly.spl` -- a per-parse
+# registry consulted by later logic without living on `ParserModule` itself.
+#
+# `resource` is affine/move-only BY DEFINITION (design doc §3/§7): every
+# name that reaches `resource_registry_declare` is move-only unless a later
+# WP (sigil handling, WP-B/WP-G) relaxes it at a *use site* (`*R`/`@R`).
+# `resource_is_move_only` is therefore currently just
+# `resource_is_declared` -- no separate move-only bit is stored.
+#
+# Reset: `parser_init_with_path` (10.frontend/core/parser.spl) calls
+# `resource_registry_reset()` on every fresh parse, exactly like `ast_reset()`
+# a few lines below it -- otherwise a second `parse_module_body()` call in
+# the same process (every spec that parses more than one source string, or
+# any multi-module compile) would leak the previous parse's resource facts.
+
+var resource_registry_names: [text] = []
+var resource_registry_meta: Dict<text, text> = {}
+
+fn resource_registry_reset():
+    resource_registry_names = []
+    resource_registry_meta = {}
+
+fn resource_meta_key(name: text, key: text) -> text:
+    name + "::" + key
+
+# Parses one `resource NAME` decl's `@sffi` metadata, encoded by
+# `parse_resource_decl` (10.frontend/core/_ParserDecls/enum_module_body.spl)
+# as `"key1=val1;key2=val2;..."`. Idempotent -- re-declaring the same name
+# (should not happen for valid source, but a spec may probe it) overwrites
+# rather than duplicates.
+fn resource_registry_declare(name: text, meta_csv: text):
+    if name == "":
+        return
+    if not resource_registry_names.contains(name):
+        resource_registry_names.push(name)
+    if meta_csv == "":
+        return
+    for part in meta_csv.split(";"):
+        if part == "":
+            continue
+        val eq_parts = part.split("=")
+        if eq_parts.len() < 2:
+            continue
+        val key = eq_parts[0]
+        # A value can legitimately contain "=" (none of the schema's actual
+        # values do today, but re-joining is cheap insurance against a
+        # silent truncation later). `invalid: -1` is untouched by this --
+        # its sign was already folded into the value text by
+        # `parse_sffi_arg_value` before it ever reached the CSV encoding.
+        var value = eq_parts[1]
+        var i = 2
+        while i < eq_parts.len():
+            value = value + "=" + eq_parts[i]
+            i = i + 1
+        resource_registry_meta[resource_meta_key(name, key)] = value
+
+fn resource_is_declared(name: text) -> bool:
+    resource_registry_names.contains(name)
+
+# WP-C's "mark the type affine/move-only" requirement, exposed as a query
+# rather than a mutation on a shared type table (design §3: ownership
+# strategy is per-resource `@sffi` metadata + use-site sigil, not a global
+# type-table flag). Every declared resource is move-only until a later WP's
+# use-site sigil (`*R`/`@R`) relaxes it -- that relaxation is out of WP-C's
+# scope (WP-B parses the sigils; WP-G enforces).
+fn resource_is_move_only(name: text) -> bool:
+    resource_is_declared(name)
+
+fn resource_meta_get(name: text, key: text) -> text:
+    val k = resource_meta_key(name, key)
+    if resource_registry_meta.contains_key(k):
+        return resource_registry_meta[k]
+    ""
+
+fn resource_meta_handle(name: text) -> text:
+    resource_meta_get(name, "handle")
+
+fn resource_meta_invalid(name: text) -> text:
+    resource_meta_get(name, "invalid")
+
+fn resource_meta_retain(name: text) -> text:
+    resource_meta_get(name, "retain")
+
+fn resource_meta_release(name: text) -> text:
+    resource_meta_get(name, "release")
+
+fn resource_meta_sharing(name: text) -> text:
+    resource_meta_get(name, "sharing")
+
+fn resource_meta_thread_safe(name: text) -> text:
+    resource_meta_get(name, "thread_safe")
+
+fn resource_meta_prefix(name: text) -> text:
+    resource_meta_get(name, "prefix")
+
+fn resource_registry_names_get() -> [text]:
+    resource_registry_names
