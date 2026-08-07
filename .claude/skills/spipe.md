@@ -1105,6 +1105,25 @@ absent from rodata in a perfectly good gui build → false
 was a 4-line probe spec that CALLS the extern: a capable driver validates the
 argument types, an incapable one reports `unknown extern function`.
 
+## Shared working tree: blob-first landing (2026-08-07)
+
+On this repo's shared working tree, a concurrent session's checkout/reconcile
+can silently WIPE an in-progress file — no `git status` trace, not even
+"deleted". Mitigate immediately after writing anything you intend to land:
+
+1. `git hash-object -w <file>` right after writing it; record the blob SHA.
+2. Build the landing commit from blob SHAs, never a working-tree re-read:
+   `git update-index --add --cacheinfo <mode>,<sha>,<path>` into a scratch
+   index, then `write-tree` / `commit-tree`.
+3. If a file vanishes from the tree, restore it with
+   `git cat-file -p <sha> > <path>` using the SHA you recorded in step 1.
+
+The three push guards (`check-no-conflict-tree-push.shs`,
+`check-no-conflict-markers-push.shs`, `check-tree-size-push.shs`) default to a
+jj/HEAD-relative range that is WRONG for a plumbing-built commit — always
+invoke them with an explicit `BASE..NEWCOMMIT` range, or they silently check
+the wrong diff and pass vacuously.
+
 ## Reading the verdict — how a spec run lies to you (2026-08-05)
 
 Everything below cost a lane real hours on 2026-08-04/05, and every item is

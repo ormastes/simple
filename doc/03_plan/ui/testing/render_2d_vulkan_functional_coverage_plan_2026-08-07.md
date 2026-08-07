@@ -7,6 +7,15 @@ All executable units are container-headless. Written at single-agent (Sonnet/Hai
 granularity: exact files, named `it` blocks, copy-pasteable commands, sabotage recipes,
 done checklists, collision sets. No deferred design decisions.
 
+**Sabotage targets are unverified.** Sabotage recipes and behavioral
+assumptions below were derived from expected structure, not verified call
+paths or bodies. Confirmed wrong so far: Unit V1 assumed
+`detect_virtio_gpu_device` returns `false` for an existing plain file — it is
+actually a bare `file_exists(render_node)` check, so it returns `true` for ANY
+existing path regardless of device type (see the corrected note at V1). Before
+executing a sabotage step, read the real function body / grep the real call
+chain and correct the unit inline if it disagrees.
+
 ## Scope boundary (coordinated with sibling plan)
 
 A sibling plan (`doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md`)
@@ -458,13 +467,21 @@ Wave 3 depends on B1 (measurement) and the corresponding Wave 2 unit per module.
   `clear`, `fill_rect`, `draw_text`, `draw_char_8x16`, `put_pixel`, `blit_pixels`,
   `present`, `present_rect`, `width`, `height`, `as_glass_capable`, plus
   `create_from_env`, `create_with_render_node`, `unavailable_reason`,
-  `detect_virtio_gpu_device` (nonexistent node → false; a plain file → false).
+  `detect_virtio_gpu_device` — **CORRECTED 2026-08-07:** this plan originally
+  assumed nonexistent node → false, plain file → false. The actual
+  implementation (`vulkan_compositor_backend.spl:42`) is a bare
+  `file_exists(render_node)` existence probe (its own docstring calls it a
+  "REAL, VERIFIABLE capability probe" that does NOT mean device-specific), so
+  nonexistent path → false, but ANY existing path — including a plain
+  non-device file — → **true**. Filed as a fail-open risk:
+  `doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md`
+  (file that bug before writing the `it` below if it does not yet exist).
 - **its**: `it "every drawing op is rejected exactly once per call (count delta per op)"`,
   `it "last_rejection names the most recent op in call order"`,
   `it "width/height report constructed dimensions without rejection"`,
   `it "as_glass_capable is nil and does not count as a rejection"`,
   `it "unavailable_reason names virtio-gpu qemu-only gap and board gap"`,
-  `it "detect_virtio_gpu_device false for missing and non-device paths"`.
+  `it "detect_virtio_gpu_device false for a missing path, true for ANY existing path including a non-device plain file"`.
 - **Sabotage**: remove one `self.reject(...)` call → per-op count `it` red.
 - **Honesty rule**: no `it` may flip `is_available()`; the live-flip proof exists.
 

@@ -12,6 +12,13 @@ judgment. All design decisions are made here.
 
 ---
 
+**Sabotage targets are unverified.** Where a unit below names a sabotage
+target (a function/line to stub or invert to prove a spec is real), that
+target was derived from expected structure, not a grepped call chain — sibling
+plans in this campaign have each had at least one named target turn out wrong
+or nonexistent on verification. Grep the real call chain before executing a
+sabotage step, and correct the unit inline (with a note) if it disagrees.
+
 ## Investigation findings (ground truth, verified 2026-08-07)
 
 What exists TODAY:

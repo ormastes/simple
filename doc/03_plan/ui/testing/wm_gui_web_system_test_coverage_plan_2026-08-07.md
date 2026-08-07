@@ -10,6 +10,14 @@ decision is made HERE. Do not redesign; execute units as written. When a spec
 rightly fails against a real defect, leave it RED and file the bug (see
 `.claude/rules/testing.md`) — never soften an assertion.
 
+**Sabotage targets are unverified.** Sabotage/reject-path targets named below
+were derived from expected structure, not a grepped call chain, and at least
+two are confirmed wrong (U2.1's `report_damage` is not on the `render_frame()`
+path; U2.2's raise/z-order grep returns nothing in the named file — see the
+corrected notes inline at those units). Before executing a sabotage step, grep
+the real call chain yourself and, if it disagrees with the plan, correct the
+unit inline and note the discrepancy rather than silently reinterpreting it.
+
 ## 0. Scope boundary with the sibling plan
 
 A sibling plan, `doc/03_plan/ui/testing/render_2d_vulkan_functional_coverage_plan_2026-08-07.md`,
@@ -331,6 +339,10 @@ esac
   container with `Results:` line quoted; [ ] wrong-oracle sabotage exits
   non-zero; [ ] `cov` mode shows `bypassing test daemon` + `coverage:` lines;
   [ ] provenance recorded (§3.3); [ ] committed+pushed.
+  **CORRECTED 2026-08-07:** the landed `scripts/local-container-test.shs`
+  implements only `unit` and `quick <spec>` — there is no `cov` mode. Either
+  implement `cov` per the sketch above before checking this item, or strike it
+  and record the gap; do not mark it done against a mode that isn't there.
 - **Collision set:** `scripts/local-container-test.shs` (new; nothing else
   writes it). **Deps:** none.
 - **Risk note:** the container binary is `bin/release/simple` baked at image
@@ -482,9 +494,16 @@ structure: `wm_full_stack_demo_spec.spl`; for oracles:
    oracle from `wm_showcase_session_capture_spec.spl`).
 5. `"a no-op frame after close skips presentation"` — present twice with no
    changes; `skipped_frame_count` increments (bridge to U2.3).
-- **Sabotage:** in scratch worktree, stub `report_damage` in
-  `src/os/compositor/compositor_engine2d.spl:351` to a no-op → blocks 2 and 5
-  must go RED.
+- **Sabotage — CORRECTED 2026-08-07 (originally-named target was wrong):**
+  `compositor_engine2d.spl:351`'s `report_damage` is NOT on the
+  `render_frame()` path (grep confirms it is unreferenced there). The real
+  chokepoint is `HostCompositor._mark_geometry_damage`
+  (`src/os/compositor/host_compositor_core.spl:1832`); stub that to a no-op in
+  a scratch worktree → blocks 2 and 5 must go RED. Note also that
+  `set_external_web_frame` drives its own separate
+  `self.dirty.add_full_screen(...)` damage path, not
+  `_mark_geometry_damage` — if a unit needs to sabotage the web-frame path
+  specifically, target that call instead.
 - **Done:** [ ] 5 its green host; [ ] green in container; [ ] sabotage RED with
   quoted assertion; [ ] `Results:` line quoted; [ ] provenance; [ ] pushed.
 - **Collision set:** the new spec file only. **Deps:** U1.1 for container check.
@@ -501,9 +520,14 @@ structure: `wm_full_stack_demo_spec.spl`; for oracles:
 3. `"z-order is stable across a damage-only redraw"` — mark damage on the
    lower window; overlap pixel still belongs to the upper one.
 4. `"closing the focused window passes focus to the next in z-order"`.
-- **Sabotage:** invert the raise ordering in the compositor's window-list
-  reordering (find via `grep -n "raise\|to_front\|z_order" src/os/compositor/host_compositor_core.spl`)
-  → 1 and 3 RED.
+- **Sabotage — CORRECTED 2026-08-07 (originally-named target does not exist):**
+  `grep -n "raise\|to_front\|z_order" src/os/compositor/host_compositor_core.spl`
+  returns NOTHING — there is no raise/reorder logic in that file. The real
+  chokepoint is the focus chain `HostCompositor.focus_window` →
+  `apply_wm_action` → `host_compositor_apply_lifecycle_action` →
+  `wm_lifecycle_focus_window` (`src/os/compositor/wm_action_lifecycle.spl:171`,
+  called from `apply_wm_action_to_lifecycle_windows` at lines 301/311/336/341);
+  invert or no-op the reordering there → 1 and 3 RED.
 - **Done/collision/deps:** as U2.1; extra `# @cover src/os/compositor/host_gui_event_router.spl`.
 
 #### U2.3 `wm_damage_present_skip_system_spec.spl` — REQ-WM-SYS-003

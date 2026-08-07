@@ -19,6 +19,14 @@ number in this campaign is a pure-Simple AOT measurement. `bin/simple build
 bootstrap` has an open Stage-3 blocker (`.claude/rules/bootstrap.md`), so any
 claim requiring a self-hosted binary is gated on an isolated bootstrap window.
 
+**Sabotage targets are unverified.** Where a unit below names a sabotage
+target (a function/line to stub or invert to prove a spec is real), that
+target was derived from expected structure, not a grepped call chain — the
+sibling plans in this campaign have each had at least one named target turn
+out wrong or nonexistent on verification. Grep the real call chain before
+executing a sabotage step, and correct the unit inline (with a note) if it
+disagrees.
+
 ---
 
 ## 0. Corrections to the previously-believed state

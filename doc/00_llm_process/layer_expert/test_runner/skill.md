@@ -152,6 +152,18 @@ harness plumbing, not the spec".
 start, budget `SIMPLE_CACHE_MAX_GB` (default 20). It is off unless that env var
 is set, so it cannot silently delete a session's artifacts.
 
+## Shared working tree: blob-first landing (2026-08-07)
+
+A concurrent session's checkout/reconcile can silently wipe an in-progress
+file on this shared working tree — no `git status` trace. Persist each
+written file's blob immediately (`git hash-object -w <file>`, record the
+SHA), build the landing commit from blob SHAs via a scratch
+`update-index --add --cacheinfo` (never re-read the working tree at landing
+time), and restore a vanished file with `git cat-file -p <sha> > <path>`. The
+three push guards default to a jj/HEAD-relative range that is wrong for a
+plumbing commit — invoke them with an explicit `BASE..NEWCOMMIT` range. Full
+detail: `.claude/skills/spipe.md` §"Shared working tree: blob-first landing".
+
 ## Feature experts depending on this layer
 
 - [gpu_offload_check](../../feature_expert/gpu_offload_check/skill.md) — seven
