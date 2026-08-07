@@ -164,3 +164,84 @@ Reproduced independently of the original report, on a freshly built artifact:
 
 Caveat: all measurements are **Rust seed** evidence
 (`strings bin/simple | grep -c "enum construction: unregistered enum"` -> 0).
+
+---
+
+## 2026-08-07 update: JIT lane fixed, AOT (`native-build`) lane still open
+
+Commit `81c58562fac` ("fix(jit): format tuples as (a, b) not `<tuple@ptr>` in
+native/JIT value printer", 2026-07-29) landed a fix in the runtime shared by
+every native-codegen lane:
+`src/compiler_rust/runtime/src/value/sffi/io_print.rs:533-550`
+(`heap_value_to_display_string`, `HeapObjectType::Tuple` arm) — it mirrors the
+`Array` arm just above it: iterate `rt_tuple_len`/`rt_tuple_get`, recurse
+through `value_to_display_string`, join with `", "`, wrap in `()`; empty tuple
+-> `()`.
+
+Re-running the "scope correction" repro above today, **per-engine, on a
+freshly built binary**, splits the family:
+
+```simple
+fn main():
+    val t = (7, 9)
+    print("field: {t.0}\n")
+    print("tuple: {t}\n")
+```
+
+| Engine | Command | `tuple: {t}` output | Verdict |
+|---|---|---|---|
+| Interpreter | `bin/simple test` (spec form) | `tuple=(1, 2, 3)` | correct |
+| JIT (default) | `bin/simple run tt2.spl` | `(7, 9)` | **correct — fixed** |
+| JIT (`SIMPLE_EXECUTION_MODE=jit`) | `bin/simple run tt2.spl` | `(7, 9)` | **correct — fixed** |
+| JIT (`SIMPLE_EXECUTION_MODE=native`) | `bin/simple run tt2.spl` | `(7, 9)` | **correct — fixed** (this env var selects a JIT variant, not AOT, despite the name) |
+| AOT (`bin/simple native-build tt2.spl -o tt2.bin` then run) | direct execution | `95289575723680` | **STILL BROKEN — raw pointer, exit 0** |
+
+So `81c58562fac` fixed the Cranelift JIT lane (the one `bin/simple run` and
+ordinary `bin/simple test`-adjacent execution use) but the **LLVM AOT
+(`native-build`) lane still reproduces the original defect**, unchanged from
+the 2026-08-02 report.
+
+### Why this isn't the same code path
+
+The obvious hypothesis — "the AOT binary links a stale prebuilt
+`libsimple_runtime.a`" — does not hold: `build/simple-core/libsimple_runtime.a`
+has an mtime newer than `io_print.rs`, i.e. it was rebuilt after the fix
+landed, and `native-build` recompiles the runtime from
+`src/compiler_rust/runtime` rather than reusing a cached archive from an
+unrelated location.
+
+Traced the LLVM backend for a divergent code path and ruled out the obvious
+candidates without finding the actual break:
+- `compile_tuple_lit` (`src/compiler_rust/compiler/src/codegen/llvm/functions/collections.rs:65-105`)
+  builds the tuple via `rt_tuple_new`/`rt_tuple_set` the same way both
+  backends do; the returned `collection` register is used directly, matching
+  Cranelift's tuple construction.
+- The int/float/bool boxing decision for `rt_value_to_string` args
+  (`src/compiler_rust/compiler/src/mir/lower/lowering_expr_builtin.rs:324-399`)
+  is backend-agnostic MIR-lowering logic — it runs once, before backend
+  selection, so it can't be the source of a JIT-vs-AOT split.
+- `compile_call` in the LLVM backend
+  (`src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs:1726`) has
+  no `rt_value_to_string`/boxing special-casing that could diverge from the
+  MIR-level decision.
+- `MirInst::FStringFormat` has its own (boxing-free) `rt_value_to_string` call
+  in the LLVM emitter (`codegen/llvm/functions.rs:2001-2069`), which looked
+  like a promising duplicate-path candidate, but no MIR lowering pass
+  constructs that instruction (`grep -rn MirInst::FStringFormat
+  src/compiler_rust/compiler/src/mir/lower/` is empty) — it is dead code, not
+  the path actually taken.
+
+None of these rule-outs identify the true divergence; root-causing the AOT
+lane specifically needs an LLVM-IR-level dump of the `rt_value_to_string` call
+site for this repro (the call's argument value and its LLVM type), which is
+follow-up work, not done here.
+
+**Status of this bug doc's overall title ("push into empty-literal list SEGVs")
+remains OPEN and untouched by the above** — the m3 SEGV variant is a distinct
+mechanism (unboxed array-element storage from `push`, localized to
+`codegen/instr/methods.rs:228`) from the general tuple-to-text stringification
+issue, and was not re-verified in this pass.
+
+Repro files for the fixed/still-open split above:
+`test/01_unit/language/tuple_to_text_native_repro_spec.spl` (interpreter- and
+documentation-only; `bin/simple test` cannot reach either native lane).
