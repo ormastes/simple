@@ -41,6 +41,17 @@ Implementation in progress, parallel-agent execution against
   `bin/simple test test/01_unit/lib/notebook/` — 18/18. Found and filed a real fixer
   bug: `bin/simple fix` on `spipe_missing_docstrings` corrupts a bare `describe "..."`
   string literal.
+- **K2** — `src/lib/nogc_sync_mut/notebook/local_exec.spl` (`LocalExec`/
+  `LocalExecFactory`): accumulation/rollback/delta-output logic ported verbatim from
+  pre-K2 `jupyter_kernel/main.spl`, which is now a thin JSON-lines front-end over
+  `KernelSessionManager`. Fixed two real bugs while porting: (1) K1's
+  `session_manager.spl` mutated a value-copy of the cached `KernelSession` without
+  writing it back to `self.sessions[idx]`, silently discarding executor state after
+  every call (cross-cell state loss); (2) `CellResult.is_ok()` treated an empty
+  `error` string as success, but subprocess stderr is redirected into stdout so a
+  real failure with blank `err` read as success. Verify: `test/03_system/tools/
+  jupyter/` 22/22 (bit-identical to pre-K2 baseline), `jupyter_kernel_log_modes_spec`
+  5/5, `test/01_unit/lib/notebook/` 18/18 (K1 regression).
 - **L1** — `ipynb.spl`/`snb_sdn.spl` doc model + `src/app/simple_lab/export_sdoctest.spl`
   exporter. `.snb.sdn` is a dict-shaped SDN doc, not `Table` (SDN tables can't nest).
   Verify: ipynb round-trip 9/9, snb_sdn round-trip (incl. required
