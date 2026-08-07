@@ -145,23 +145,6 @@ CLI usage/help text interleaved in the log, is this class — re-run with
 regression. Detail: `.claude/skills/spipe.md` §"A `Results:` FAIL can be
 harness plumbing, not the spec".
 
-## Container test runs must NOT `COPY` the repo (2026-08-07)
-
-`tools/docker/Dockerfile.test-isolation:12` did `COPY . /opt/simple` with the
-repo root as build context. In this shared dev tree `build/` is 184GB and
-`.git/` is 51GB (~235GB context) — a `.dockerignore` for `.git/`/`build/`/
-`target/` does NOT help, the builder still walks the full tree to filter. A
-`docker build` on this pattern ran 10+ minutes at high CPU with no end in
-sight and had to be killed. Fix: deps-only image (no repo COPY) + runtime
-bind-mount, e.g. `docker run --rm -v "$REPO_ROOT":/opt/simple:ro -w
-/opt/simple simple-test-isolation:local bin/simple test <target>` — image
-build drops to seconds and stops depending on repo size. Writable paths (test
-db, `doc/08_tracking` outputs) need specific `rw` mounts or tmpfs, not a
-whole-tree rw mount. No display server needed for WM/GUI specs in-container:
-`HostCompositor.new_headless` is fully in-process. Canonical harness:
-`scripts/local-container-test.shs` (cited by `.claude/rules/testing.md`).
-Detail: `.claude/skills/spipe.md` § "Container test runs".
-
 ## Adjacent tooling: `simple clean`
 
 `src/app/clean/main.spl` — manual + automatic temp/cache cleanup. Auto mode is
@@ -181,6 +164,15 @@ is set, so it cannot silently delete a session's artifacts.
 - [browser_engine layer](../browser_engine/skill.md) — the render-budget
   silent-truncation hazard is the sibling trap to `@exec_limit`; a
   long-running renderer spec usually needs BOTH.
+- [gpu_remote_lanes](../../feature_expert/gpu_remote_lanes/skill.md) — planned
+  `cuda`/`vulkan` composite remote backends; extends the mode extractors in
+  `test_executor_composite.spl` AND its duplicate
+  `test_executor_composite_parse.spl` (both must change together, plus a seed
+  driver parser audit). Design:
+  `doc/05_design/runtime/gpu_remote_interpreter_architecture.md`.
+- [notebook_lanes](../../feature_expert/notebook_lanes/skill.md) — notebook
+  executors validate mode specs through this layer's extractor helpers and
+  share the planned lane_locks module with the GPU lanes.
 - [prevention_mocks](../../feature_expert/prevention_mocks/skill.md) — its
   directory-wide scope is blocked specifically by this layer's lack of a
   per-directory config/fixture hook (`find_config_file`,

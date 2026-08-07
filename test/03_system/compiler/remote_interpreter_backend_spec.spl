@@ -4,7 +4,7 @@
 
 use std.test_runner.test_executor_composite_parse.{
     extract_base_runtime, extract_platform_layer, extract_arch_from_spec,
-    extract_target_from_spec, extract_remote_backend,
+    extract_target_from_spec, extract_remote_backend, extract_gpu_submode,
     qemu_binary_for_arch, qemu_machine_for_arch
 }
 
@@ -51,3 +51,59 @@ describe "Remote interpreter backend routing":
         expect(extract_target_from_spec(spec)).to_equal("riscv32")
         expect(qemu_binary_for_arch("riscv32")).to_equal("qemu-system-riscv32")
         expect(qemu_machine_for_arch("riscv32")).to_equal("virt")
+
+describe "GPU remote backend routing (design doc §2.2)":
+    it "routes jit(remote(cuda(sm80))) as a JIT-base cuda spec":
+        val spec = "jit(remote(cuda(sm80)))"
+        expect(extract_base_runtime(spec)).to_equal("jit")
+        expect(extract_platform_layer(spec)).to_equal("remote")
+        expect(extract_remote_backend(spec)).to_equal("cuda")
+        expect(extract_arch_from_spec(spec)).to_equal("ptx64")
+        expect(extract_target_from_spec(spec)).to_equal("cuda_sm80")
+
+    it "defaults interpreter(remote(cuda(sm80))) to the launch submode":
+        val spec = "interpreter(remote(cuda(sm80)))"
+        expect(extract_base_runtime(spec)).to_equal("interpreter")
+        expect(extract_remote_backend(spec)).to_equal("cuda")
+        expect(extract_arch_from_spec(spec)).to_equal("ptx64")
+        expect(extract_target_from_spec(spec)).to_equal("cuda_sm80")
+        expect(extract_gpu_submode(spec)).to_equal("launch")
+
+    it "routes interpreter(remote(cuda(sm80(resident)))) to the resident submode":
+        val spec = "interpreter(remote(cuda(sm80(resident))))"
+        expect(extract_remote_backend(spec)).to_equal("cuda")
+        expect(extract_target_from_spec(spec)).to_equal("cuda_sm80")
+        expect(extract_gpu_submode(spec)).to_equal("resident")
+
+    it "routes jit(remote(vulkan(spv15))) as a JIT-base vulkan spec":
+        val spec = "jit(remote(vulkan(spv15)))"
+        expect(extract_base_runtime(spec)).to_equal("jit")
+        expect(extract_remote_backend(spec)).to_equal("vulkan")
+        expect(extract_arch_from_spec(spec)).to_equal("spirv")
+        expect(extract_target_from_spec(spec)).to_equal("vulkan_spv15")
+        expect(extract_gpu_submode(spec)).to_equal("dispatch")
+
+    it "always dispatches interpreter(remote(vulkan(spv15)))":
+        val spec = "interpreter(remote(vulkan(spv15)))"
+        expect(extract_remote_backend(spec)).to_equal("vulkan")
+        expect(extract_target_from_spec(spec)).to_equal("vulkan_spv15")
+        expect(extract_gpu_submode(spec)).to_equal("dispatch")
+
+    it "accepts any smNN token and forwards it into the target id":
+        expect(extract_target_from_spec("interpreter(remote(cuda(sm90)))")).to_equal("cuda_sm90")
+        expect(extract_arch_from_spec("interpreter(remote(cuda(sm90)))")).to_equal("ptx64")
+
+    it "accepts spv13..spv16 tokens and forwards them into the target id":
+        expect(extract_target_from_spec("interpreter(remote(vulkan(spv13)))")).to_equal("vulkan_spv13")
+        expect(extract_target_from_spec("interpreter(remote(vulkan(spv16)))")).to_equal("vulkan_spv16")
+
+    it "routes the exploratory cuda-gdb semihost lane token (parse-only)":
+        val spec = "interpreter(remote(cudagdb(sm80)))"
+        expect(extract_remote_backend(spec)).to_equal("cudagdb")
+        expect(extract_arch_from_spec(spec)).to_equal("ptx64")
+        expect(extract_target_from_spec(spec)).to_equal("cudagdb_sm80")
+
+    it "rejects resident submode under vulkan with the forward-progress diagnostic":
+        val spec = "interpreter(remote(vulkan(spv15(resident))))"
+        expect(extract_gpu_submode(spec)).to_equal(
+            "resident submode requires forward-progress guarantees; vulkan lanes are per-dispatch (see gpu_remote_interpreter_architecture.md §6.3)")

@@ -457,8 +457,7 @@ use simple_runtime::cuda_runtime::{
     rt_cuda_f64_slice_2d, rt_cuda_f64_sum, rt_cuda_f64_sum_axis, rt_cuda_get_error_string, rt_cuda_init,
     rt_cuda_launch_kernel, rt_cuda_mem_alloc, rt_cuda_mem_free, rt_cuda_memcpy_dtoh, rt_cuda_memcpy_dtod,
     rt_cuda_memcpy_htod, rt_cuda_memset, rt_cuda_memset_d32, rt_cuda_module_get_function, rt_cuda_module_load,
-    rt_cuda_module_load_data,
-    rt_cuda_module_unload, rt_cuda_sync,
+    rt_cuda_module_load_data, rt_cuda_module_load_data_bytes, rt_cuda_module_unload, rt_cuda_sync,
 };
 
 use simple_runtime::metal_graphics_runtime::{
@@ -1490,6 +1489,44 @@ pub fn rt_cuda_module_load_data_fn(args: &[Value]) -> Result<Value, CompileError
     {
         if let Some(fns) = get_cuda_dl() {
             let c_ptx = c_string_or_error(ptx, "rt_cuda_module_load_data")?;
+            let mut module: *mut std::os::raw::c_void = std::ptr::null_mut();
+            let r = unsafe { (fns.module_load_data)(&mut module, c_ptx.as_ptr() as *const std::os::raw::c_void) };
+            if r == 0 {
+                return Ok(Value::Int(module as i64));
+            }
+            return Ok(Value::Int(-(r as i64)));
+        }
+        Ok(Value::Int(-3))
+    }
+}
+
+/// `doc/08_tracking/bug/rt_cuda_module_load_data_bytes_missing_interpreter_adapter_2026-08-05.md`:
+/// `rt_cuda_module_load_data_bytes` has a real codegen/JIT registration
+/// (`&[I64,I64],&[I64]` in `runtime_sffi.rs`) but had no `interpreter_extern`
+/// adapter, so `bin/simple test` (interpreter engine) died with `unknown
+/// extern function: rt_cuda_module_load_data_bytes`. Unlike
+/// `rt_cuda_module_load_data` (which takes a `text` PTX source and is
+/// ABI-expanded to `(ptr,len)` by codegen), `_bytes` takes an explicit raw
+/// `(ptr,len)` pair pointing at an already-materialized byte buffer (e.g. a
+/// cubin binary obtained via `rt_array_data_ptr_u8`), so the interpreter
+/// args here are two `Value::Int`s, not a `Value::Str`.
+pub fn rt_cuda_module_load_data_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let ptx_ptr = arg_i64(args, 0, "rt_cuda_module_load_data_bytes", 2)?;
+    let ptx_len = arg_i64(args, 1, "rt_cuda_module_load_data_bytes", 2)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_module_load_data_bytes(ptx_ptr, ptx_len)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        if let Some(fns) = get_cuda_dl() {
+            if ptx_ptr == 0 || ptx_len < 0 {
+                return Ok(Value::Int(-1));
+            }
+            let bytes = unsafe { std::slice::from_raw_parts(ptx_ptr as *const u8, ptx_len as usize) };
+            let c_ptx = CString::new(bytes).map_err(|_| {
+                CompileError::semantic("rt_cuda_module_load_data_bytes does not accept embedded NUL bytes".to_string())
+            })?;
             let mut module: *mut std::os::raw::c_void = std::ptr::null_mut();
             let r = unsafe { (fns.module_load_data)(&mut module, c_ptx.as_ptr() as *const std::os::raw::c_void) };
             if r == 0 {

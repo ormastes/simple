@@ -930,6 +930,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cuda_memset_d32", gpu::rt_cuda_memset_d32_fn);
     insert_simple!("rt_cuda_module_get_function", gpu::rt_cuda_module_get_function_fn);
     insert_simple!("rt_cuda_module_load_data", gpu::rt_cuda_module_load_data_fn);
+    insert_simple!("rt_cuda_module_load_data_bytes", gpu::rt_cuda_module_load_data_bytes_fn);
     insert_simple!("rt_cuda_module_load", gpu::rt_cuda_module_load_fn);
     insert_simple!("rt_cuda_module_unload", gpu::rt_cuda_module_unload_fn);
     insert_simple!("rt_cuda_sync", gpu::rt_cuda_sync_fn);

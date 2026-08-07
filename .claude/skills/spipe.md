@@ -1582,6 +1582,26 @@ same false-green rules apply (conditional PASS markers only; final line
   `doc/00_llm_process/feature_expert/riscv_soc_linux/skill.md` — read it
   before any "does X exist / why does it fail" hardware question.
 
+## GPU / notebook remote lanes (planned, 2026-08-07)
+
+`cuda` and `vulkan` are planned composite remote backends at the same grammar depth as
+`t32`/`openocd`/`ghdl` — e.g. `--mode='interpreter(remote(cuda(sm80)))'`,
+`jit(remote(vulkan(spv15)))`. Nothing is implemented yet; do not write specs that assume
+these modes parse.
+
+- Grammar/extractors live in `src/lib/nogc_sync_mut/test_runner/test_executor_composite.spl`
+  AND its duplicate `test_executor_composite_parse.spl` — a grammar change must touch
+  both (plus audit the Rust seed driver's parser). Extending one copy only = specs pass
+  under one runner and fail under the other.
+- The GPU lanes reuse the GHDL mailbox constants byte-for-byte (trigger `0x0000DEAD`,
+  exit `0xCAFE0000|ec`, timeout `0xDEAD0000`); host-aware `skip:`/`blocked:` semantics
+  unchanged. FAIL is never converted to SKIP once a GPU is required or detected.
+- Design + task breakdown: `doc/05_design/runtime/gpu_remote_interpreter_architecture.md`,
+  `doc/03_plan/agent_tasks/gpu_remote_interpreter_parallel_plan_2026-08-07.md`; notebook
+  consumers: `doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md`.
+  Feature knowledge: `doc/00_llm_process/feature_expert/gpu_remote_lanes/skill.md`,
+  `doc/00_llm_process/feature_expert/notebook_lanes/skill.md`.
+
 ## Reproduce-first for bug-fix specs
 
 A regression spec that was written *after* the fix is unproven — it may assert
