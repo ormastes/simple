@@ -198,7 +198,8 @@ unverified, not as pass.*
 | WP | Task | Files | Model | Reach | Accept |
 |---|---|---|---|---|---|
 | **WP-11** | **Close the circular hole first.** Split the noalloc family manifest so `…noalloc.mimalloc` / `.memory` are not covered by the family's `allocates: false`; replace prefix matching with exact/explicit submodule rows | `gc_boundary_check.spl:94-106,:140` | Sonnet | 🔴 | A `@noalloc` fn calling `mimalloc_alloc` is **rejected** — spec proves it was accepted before and rejected after |
-| **WP-12** | Allocation classes `none`/`init_only`/`bounded_pool`/`unbounded`/`unknown` over the existing checker; startup **seal**; steady-state gate | `noalloc_checker.spl:23-27,:116-126`; new lifecycle lib | Sonnet | 🔴 | Every critical symbol carries a class; `unbounded`/`unknown` reject; DirectAlloc no longer 5 hard-coded strings |
+| **WP-12a** | **The `@noalloc` apparatus is vacuous end-to-end — fix that before the lattice.** Two independent reasons, both measured 2026-08-07 while landing WP-11: (a) `90.tools/verify/noalloc_manifest_scan.spl:159`, the ONLY real driver of `check_all_noalloc_fns`, registers every scanned fn with `family_module: ""` and never registers callees at all, so `FamilyImport` is **structurally unreachable through it regardless of a correct manifest** — the audit printed identical output before and after WP-11's fix; (b) **zero functions in the tree carry `@noalloc`**, so there is nothing for it to check even if it worked | `noalloc_manifest_scan.spl:159`; annotation rollout | Sonnet | 🔴 | The audit driver derives `family_module` per callee and the WP-11 regression case is reachable THROUGH the driver, not only through a direct unit call. Report the count of `@noalloc`-annotated fns before and after — if it is still 0, the WP is not done |
+| **WP-12** | Allocation classes `none`/`init_only`/`bounded_pool`/`unbounded`/`unknown` over the existing checker; startup **seal**; steady-state gate | `noalloc_checker.spl:23-27,:116-126`; new lifecycle lib | Sonnet | 🔴 | Every critical symbol carries a class; `unbounded`/`unknown` reject; DirectAlloc no longer 5 hard-coded strings. **Needs WP-12a first** — a lattice over a driver that cannot observe callees classifies nothing. Also: the manifest's `allocates` boolean cannot today express "bounded static-region sub-allocation" (`baremetal.allocator`, `mimalloc` — no malloc/mmap/brk, caller-supplied `(base,size)`) as distinct from heap allocation; both collapse to `true`. Making that distinction expressible is this WP's core job |
 | **WP-13** | Clean the noalloc facade: allocator exports move out of the default surface or the no-heap claim is corrected | `nogc_async_mut_noalloc/__init__.spl:1-5,:29-33,:76,:77,:152,:190` | Sonnet | 🟢 (lib) | Root export surface and the `alloc_allowed: false` claim agree — whichever direction is chosen, they stop contradicting |
 | **WP-14** | Loop bounds (ranges, fixed collections, refinement types, constants), recursion SCC, stack frames, queue/task capacity — report-only first | new CFG/MIR analysis modules | Sonnet | 🔴 | No `unknown` termination result in the flight closure; report names the dominant call path, not just the total |
 | **WP-15** | Object-level allocator-symbol scan of the steady-state closure | `70.backend` + `90.tools/verify` | Sonnet | 🔴 | Forbidden allocator symbol in a sealed build fails the link |
@@ -246,6 +247,21 @@ WP** → WP-12…15 → Wave 4.
 - Do not touch files outside your WP; commit and push per WP.
 
 ---
+
+## Execution log
+
+| WP | Commit | Outcome |
+|---|---|---|
+| WP-11 | `ed493da4c99` | **Landed.** Exact-or-dot-boundary matching replaces `starts_with`; `…noalloc.mimalloc` + `…noalloc.baremetal.allocator` marked allocating, `…noalloc.memory` deliberately NOT (WP-13 proved `SharedHeap.allocate()` returns a logical `BinaryRef`, never an address — marking it would be a false positive as damaging as the false negative). Regression through the real checker: before `4 total, 2 passed, 2 failed` → after `4 total, 4 passed, 0 failed`. Also fixed the `pure → gc_async_mut` alias gap and documented the dead `async` row |
+| WP-13 | `977a401a05c` | **Landed**, comment-only. Consumer audit found 0 facade callers for `mimalloc_*`/`SharedHeap` and 3 submodule-path callers for the allocator classes; `allocator.spl`/`mimalloc.spl` sub-allocate inside a caller-supplied region with no malloc/mmap/brk/libc. So the exports are legitimate and the *claim text* was wrong — corrected the header, kept the API |
+| WP-22 | `21154033918` | **Landed, but the filed premise was wrong.** `bin/simple inspect` exits **rc=1**, not rc=0 — measured across 7 token shapes; `main.rs:1674` has read `return 1` since introduction. Real (smaller) fix: the fall-through returned a flat `1`, indistinguishable from a genuine file-execution failure; now returns `2` for usage errors. Function-level RED→GREEN proven; **process-boundary verification impossible today** — no self-hosted binary is deployed |
+| REQ-MC-023 | `82fd43ad4df` | **Landed.** `W-MC-RES-001 unwrapped_foreign_resource`: allow in moderate/strict/robust, warn in `critical`, deny at v2 — same two-phase pattern as REQ-MC-002/011. Marked SPECIFIED-NOT-IMPLEMENTED with all three blockers named. Skipped REQ-MC-013…022 (reserved by WP-5). No `doc/06_spec` entry written: that tree is generated from `test/**` and no sspec source exists yet, so writing one would fabricate evidence of a test that does not run |
+| Foreign-resource migration | `c038cd1e6df` | **Blocked, correctly.** The tier→strategy hypothesis was **refuted**: strategy is selected by per-resource `@sffi` metadata + use-site sigil (`R`/`*R`/`@R`), NOT by defining tier — tier only constrains legality. Census: 85 release-families. Migration cannot proceed because `resource`/`@sffi` parsing does not exist (WP-A). Pilot spec left RED with a bug record rather than hand-rolling wrappers that would reproduce the boilerplate `resource` exists to delete |
+
+**Method note earned the hard way:** the WP-22 premise came from a verification
+agent's report that was never independently measured before being filed as a bug.
+An agent-reported measurement is a hypothesis until re-measured — the same
+standard this plan applies to absence-greps applies to reported numbers.
 
 ## Defects surfaced by this audit — where each is tracked
 
