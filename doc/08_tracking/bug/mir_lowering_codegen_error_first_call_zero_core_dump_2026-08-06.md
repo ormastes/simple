@@ -526,6 +526,99 @@ this fix explains and the previously-suspected type-resolution theory does
 not). Not claimed as "confirmed" — flagged accordingly for the next lane
 that has a working rebuild path.
 
+## Update (2026-08-07, diagnostic-only lane): re-confirms this worktree's `0x118` fault IS the already-root-caused borrow-check field-index collision; no env bypass found
+
+Diagnostic-only pass (no source edits). Read this doc plus the fuller
+`stage3_native_build_segv_generic_codegen_link_path_2026-08-06.md` (which now
+carries the deep root-cause work — see its "RESOLVED" section) before doing
+anything here, per instructions.
+
+**Fresh gdb repro, this worktree's own stale stage3 binary**
+(`bootstrap/stage3/x86_64-unknown-linux-gnu/simple`, BuildID `3b41f55f...`,
+mtime 2026-08-06 04:14 — predates both the `try_lower_bitfield_construct` fix
+and the (unlanded) `resolve_field_index` reorder fix, so it is expected to
+still crash regardless of either):
+
+```
+gdb -batch -ex run -ex bt -ex 'info registers' -ex 'x/4i $pc' \
+  --args bootstrap/stage3/x86_64-unknown-linux-gnu/simple native-build probe.spl -o probe.bin
+# probe.spl: fn main(): print("hello")
+
+Program received signal SIGSEGV, Segmentation fault.
+0x0000000000517966 in ?? ()
+#0  0x0000000000517966 in ?? ()
+#1  0x000000000051842e in ?? ()
+#2  0x000000000067b29c in ?? ()
+#3  0x000000000066b928 in ?? ()
+#4  0x000000000040533d in ?? ()
+#5  0x00000000004025f5 in ?? ()
+#6  __libc_start_call_main (...)
+rax 0x110  rdi 0x111  r15 0x111  rip 0x517966
+=> 0x517966: mov 0x8(%rax),%r14
+   0x51796a: test %r14,%r14
+   0x51796d: jle 0x5179ad
+```
+
+This is a byte-for-byte match (same `rip=0x517966`, same `rax=0x110`, same
+`mov 0x8(%rax),%r14; test; jle` shape, same 6-user-frame depth above
+`__libc_start_call_main`) to the symbolized crash the sibling doc's
+"2026-08-07 — RESOLVED" section already pinned via an unstripped stage2
+artifact: `BorrowChecker.check_function` reading `nll.errors` at the *wrong*
+field offset (`0x58` instead of the correct `0x20`) because
+`MirLowering.resolve_field_index`'s id-keyed tier
+(`field_map[sym_id]`, `Dict<i64,[text]>`) collides across module boundaries
+in the `--entry-closure` whole-program build — the numeric type-symbol id
+that should resolve `NLLChecker` (5 fields, `errors` at 0x20) instead
+resolves to `MirLowering` (which happens to also have a field named `errors`,
+at index 11 → offset 0x58), returning a garbage tagged-int "pointer" that
+`rt_for_iterable`/the length read then dereferences.
+`si_addr = (rax & ~7) + 8 = 0x118` here, matching this doc's own historical
+`0x118` sighting and the "si_addr is derived, not diagnostic" lesson already
+recorded in the sibling doc — **no new information from the address itself.**
+
+**Nil/garbage receiver, pinned (reconfirming, not re-discovering):** the
+"receiver" at the crash is not a nil struct pointer in the classic sense —
+it's a **tagged small integer** (`rax=0x110` = `(17<<3)|0`, i.e. field value
+`17`) read out of `BorrowChecker.check_function`'s `nll` local at the wrong
+byte offset, then treated as a list handle and dereferenced via
+`rt_for_iterable` → `mov 0x8(%rax)`. Fix location (already proposed, not
+landed, per sibling doc): `resolve_field_index`
+(`src/compiler/50.mir/_MirLowering/function_lowering.spl:934`) — make the
+name-keyed tier (`struct_field_order[type_symbol.name]`) authoritative over
+the id-keyed tier (`field_map[sym_id]`), or validate an id-keyed hit against
+`type_symbol.name` before trusting it.
+
+**Env-bypass check (this lane's task step 3): no working bypass found.**
+- Grepped `src/app/cli/bootstrap_main.spl`,
+  `src/app/cli/native_build_worker.spl`, and the `driver_aot_pipeline.spl`
+  family for an env var that skips the `uname -m`/`uname -s` pair
+  specifically. None exists on this path — the only `uname` callers found
+  in-repo (`src/app/cli/check_entry.spl`, used by MCP/tool wrappers to pick
+  which `simple` binary to invoke; `src/compiler/90.tools/header_gen/shared_lib_flags.spl`'s
+  `host_os()`, used only for `--shared` library builds) are not the ones
+  `native-build hello.spl`'s default (non-`--shared`) path exercises, and
+  neither exposes a `SIMPLE_TARGET`-style override.
+- **`SIMPLE_BOOTSTRAP=1` re-tested here and does NOT mask this crash on this
+  binary** — `SIMPLE_BOOTSTRAP=1 native-build probe.spl` still dumped core
+  (`timeout: the monitored command dumped core`). This differs from the
+  sibling doc's report that `SIMPLE_BOOTSTRAP=1` turns the crash into a clean
+  `rc=1` ("bootstrap entry lowered to 0 MIR instructions") — that result was
+  obtained on a **stage2** binary built by the Rust seed
+  (`FIX8/stage2-simple`); this worktree's binary is a **stage3** binary
+  (pure-Simple-emitted). The masking behavior is apparently specific to
+  which stage/codegen produced the binary, not a general property of the
+  flag — recording this discrepancy so the next lane doesn't assume
+  `SIMPLE_BOOTSTRAP=1` is a universal workaround for `native-build`.
+- **Bottom line: the uname pair is a timing landmark, not a causal
+  ingredient.** The crash is in the borrow-check pass, which the pipeline
+  reaches regardless of how target-triple detection resolved; nothing
+  observed in this pass suggests an env var can route around it. The only
+  real fix path remains the unlanded `resolve_field_index` reorder, which
+  per the sibling doc requires a full stage-3 rebuild to verify (a stage-2-only
+  build is proven blind to `src/compiler` changes on this exact function).
+
+**No source edits made in this pass**, per lane scope.
+
 ## Why the original "core-dumps" description pointed at the wrong layer
 
 The task that surfaced this bug reasonably assumed the crash was in MIR
