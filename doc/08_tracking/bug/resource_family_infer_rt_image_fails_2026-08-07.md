@@ -1,6 +1,6 @@
 # Bug: Resource family inference fails for rt_image family
 
-**Status:** Open
+**Status:** FIXED
 **Date:** 2026-08-07
 **Component:** WP-D convention inference engine (`src/compiler/35.semantics/resource_families.spl`)
 
@@ -47,10 +47,24 @@ Likely root causes:
 
 **File:Line:** `test/01_unit/compiler/resource/resource_family_inference_spec.spl:45-63`
 
+## Root Cause
+
+The `acquire_verbs()` verb list at `src/compiler/35.semantics/resource_families.spl:8-9` was missing "load" as a recognized acquire verb. The rt_image family's "rt_image_load" verb was being classified as a method (unrecognized) instead of acquire, leaving the family with no acquire verb but a valid release verb ("free"). This caused correct classification success but with acquire_verb=nil, failing the spec assertion.
+
+## Fix
+
+Added "load" to the acquire_verbs list:
+```
+fn acquire_verbs() -> [text]:
+    ["open", "create", "new", "alloc", "acquire", "copy", "clone", "load"]
+```
+
+"load" semantically represents resource acquisition (loading/reading data structures like images, tensors, buffers), matching the pattern of other acquire verbs.
+
 ## Verification
 
-Once fixed, the failing spec should turn green:
+Fixed spec now passes:
 ```bash
 bin/simple test test/01_unit/compiler/resource/resource_family_inference_spec.spl
-# Expected: 17 total, 17 passed, 0 failed
+# Results: 17 total, 17 passed, 0 failed
 ```
