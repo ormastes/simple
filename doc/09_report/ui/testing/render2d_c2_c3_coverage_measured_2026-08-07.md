@@ -112,3 +112,104 @@ measured file in the unit.
 `/tmp/c2c3_cov/*.sdn` (8 per-spec artifacts), `/tmp/c2c3_cov/rollup_c2_full.txt`,
 `/tmp/c2c3_cov/rollup_c3_full.txt` (raw unioned dumps backing the two ratios
 above).
+
+## Follow-up (2026-08-07, same day, later session): dedicated specs for the two named C3 gaps
+
+New files (unit tests only, real hand-derived oracles — `assert_true` /
+`assert_false` / `expect(...).to_equal(...)`, no faked-green assertions):
+
+- `test/01_unit/os/compositor/dirty_rect_spec.spl` (new — `dirty_rect.spl` had
+  zero specs before this) — 30 `it`s covering `IRect` construction,
+  `irect_union`, `irect_intersects` (including the edge-touching non-overlap
+  case), `irect_intersection` (overlap / disjoint / contained), `irect_area` /
+  `irect_is_empty`, and the `DirtyRegion` accumulator (`add_rect` zero-w/h
+  no-ops, `add_full_screen`, `bounding_box` fold-over-union, `clear`,
+  `count`).
+- `test/01_unit/os/compositor/engine2d_baremetal_core_spec.spl` (new,
+  companion to the existing `engine2d_baremetal_core_parity_spec.spl`) — 19
+  `it`s targeting branches the parity spec's happy-path coverage left
+  untouched: `draw_rect_stroked`/`draw_circle_stroked` outline-only behavior
+  (vs the filled variants), zero/negative-size no-op guards, a clip rect that
+  fully excludes the draw, the `gradient_rect` single-row `denom==1` fallback,
+  `draw_line`'s sign/step branches in all four diagonal directions and its
+  `thickness<=0` fallback, `draw_image`'s run-length collapsing (solid-color
+  vs multi-color rows, zero-width no-op), and `draw_codes12_block`'s
+  per-slot skip (code 0/space) and `scale<=0` vs `scale>0` cell-size branches.
+  `display_backend_core.spl` was left unspec'd: it is a pure trait
+  declaration (18 signatures, no function bodies), so there is no
+  deterministic logic to hand-derive an oracle against — writing a spec for
+  it would mean spec'ing a mock implementation of the trait, not the trait
+  itself, which is out of scope for closing the *file's* coverage gap.
+
+**Hardware-bound paths intentionally not spec'd** (documented in the new
+spec's header docstring rather than mocked or faked green):
+`create_fb_engine_core`'s direct-framebuffer draw path (writes through extern
+`rt_gui_fill4` to live MMIO with no readback) and
+`baremetal_simd_fill_enabled/hits/chunks/tail_pixels` (thin wrappers over
+extern `rt_gui_simd_fill_*` counters reflecting live runtime SIMD-dispatch
+state, not deterministic pure logic).
+
+### Spec verdicts (both green, run individually per the mandatory foreground
+invocation)
+
+```
+bin/simple run src/app/test_runner_new/test_runner_single.spl \
+  test/01_unit/os/compositor/dirty_rect_spec.spl --no-session-daemon --sequential
+→ Results: 30 total, 30 passed, 0 failed   (66ms)
+
+bin/simple run src/app/test_runner_new/test_runner_single.spl \
+  test/01_unit/os/compositor/engine2d_baremetal_core_spec.spl --no-session-daemon --sequential
+→ Results: 19 total, 19 passed, 0 failed   (86ms)
+```
+
+### Coverage before/after
+
+Method: `SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<distinct>.sdn bin/simple run
+... test_runner_single.spl <one spec> ...` per spec (confirmed this session:
+`test_runner_single.spl` only accepts a single spec path — a second path
+argument is silently ignored, `Files: 1` in the summary — so the tool's own
+printed `coverage: <file> N% (X/Y lines)` line can only be obtained per single
+spec, never pre-combined across specs in one process). For a combined-spec
+number, `bin/simple spl-coverage rollup --file <a>.sdn --file <b>.sdn` unions
+the raw `lines:` rows from both artifacts and the union was counted by hand
+(`grep '<file>,' | awk -F', ' '{print $2}' | sort -n -u | wc -l`), divided by
+the same per-file total (`Y` from the single-spec run, which is constant for a
+given file regardless of which spec exercises it — confirmed: both
+`engine2d_baremetal_core_parity_spec.spl` alone and the new
+`engine2d_baremetal_core_spec.spl` alone independently printed the same `209`
+total for `engine2d_baremetal_core.spl`).
+
+| file | before | after | delta |
+|---|---|---|---|
+| `dirty_rect.spl` | 0/38 lines (0% — no spec existed) | 35/38 lines (92.1%, single-spec printed value) | +92.1 pts |
+| `engine2d_baremetal_core.spl` | 25/209 lines (11.0%, parity spec alone, matches the C3 table above) | 29/209 lines (13.9%, rollup union of parity + new spec) | +2.9 pts |
+
+Caveat on the `engine2d_baremetal_core.spl` delta: the union only picked up 3
+lines net-new beyond the parity spec's 26 (`72`, `74`, `75` — inside the
+`_pixel_at` helper, reached via the new `draw_image` multi-color-row test).
+The new spec's other 16 `it`s (`draw_rect_stroked`, `draw_circle_stroked`,
+`draw_image`'s run-collapsing loop, `draw_codes12_block`'s 12-slot dispatch)
+all pass with correct hand-derived pixel assertions — proving that code
+executes correctly — but the `lines:` rows the coverage artifact emits for
+those functions did not increase. The recorded `line` numbers in the rollup
+dump (max value seen: `143`) are well below those functions' physical source
+line numbers (`draw_rect_stroked` starts at line 244, `draw_circle_stroked` at
+344, `draw_image` at 366, `draw_codes12_block` at 381, in a 389-line file) —
+i.e. the artifact's line numbers are the coverage instrumentation's own
+numbering (likely desugared/lowered IR line positions), not raw source line
+numbers, and its "lines" tracking appears to record only a sparse subset of
+executed statements (concentrated in small always-called helper functions
+like `_bm_a`/`_bm_r`/`_bm_g`/`_bm_b`/`_bm_clamp`) rather than full per-statement
+coverage of larger multi-statement function bodies. This matches the
+already-documented "DECISION-ONLY" caveat above (the runtime's coverage
+artifact under-reports relative to what the passing assertions prove was
+exercised) and is reported here as a measurement-methodology caveat, not
+re-litigated as a fresh defect — the +2.9pt delta is what the tool itself will
+report; the *real* increase in exercised, assertion-backed behavior is far
+larger (19 new `it`s across 4 previously-unspec'd/under-spec'd code paths).
+
+### Artifacts (this follow-up session, local scratch — not committed)
+
+`/tmp/c3_cov_new/{parity_before,ebc_new,dirty_rect,ebc_combined}.sdn` (per-spec
+coverage artifacts), `/tmp/c3_cov_new/rollup_ebc.txt` (raw unioned dump backing
+the `engine2d_baremetal_core.spl` before/after row above).
