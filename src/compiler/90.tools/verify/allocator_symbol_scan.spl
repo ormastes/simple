@@ -1,0 +1,193 @@
+# Object-level allocator-symbol scan — WP-15 of the aerospace hardening plan.
+#
+# Plan: doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
+#
+# WHAT THIS IS, AND HOW IT DIFFERS FROM WP-11/WP-12a (source-level @noalloc):
+# `noalloc_checker.spl` + `noalloc_manifest_scan.spl` classify allocation from
+# `.spl` SOURCE TEXT — they can only see a call that is visibly written as
+# Simple source and reachable through the manifest-registered call graph. This
+# module classifies allocation from the COMPILED OBJECT's symbol table, after
+# codegen and after any C shim / vendored `.o` / archive member has been
+# linked in. That closes a real, distinct gap: a forbidden allocator symbol
+# can reach the final closure through a path source analysis structurally
+# cannot observe --
+#   - a hand-written C shim (`.c`/`.o`) linked into the closure that a
+#     `.spl`-only source scan never reads at all,
+#   - a vendored pre-built `.o`/archive member with no source in this tree,
+#   - a codegen lowering path that emits a direct call/intrinsic without ever
+#     producing `.spl` text containing the callee's name (so even a perfect
+#     source scanner has nothing to match against).
+# Source-level and object-level are complementary, not redundant: WP-11 closes
+# the family-manifest hole in the SOURCE picture; this WP is the independent
+# check on the OBJECT picture that source analysis cannot perform by
+# construction.
+#
+# "SEALED BUILD" / "STEADY-STATE CLOSURE" — definition and source: this module
+# reuses the "flight closure" concept WP-10 established at
+# `llvm_native_link.spl:2499-2507` rather than inventing new terminology: a
+# link is sealed when `SIMPLE_NO_STUB_FALLBACK=1` OR the active
+# `SIMPLE_SAFETY_PROFILE` resolves (`compiler.common.assurance.policy`) to at
+# least `AssuranceStrictness.Critical`. Today the only closures that predicate
+# gates are the four SimpleOS freestanding links in `llvm_native_link.spl`
+# (`simpleos_check_no_fabricated_rt_stubs` call sites at :2674, :2786, :2960,
+# :3032) — this module's enforcement point is designed to sit alongside those
+# calls, over the SAME `real_objects`/`user_objects` closure passed to that
+# function, i.e. the "steady-state closure" is the final set of `.o`/archive
+# inputs to one of those four links. This module does not itself edit
+# `llvm_native_link.spl` (see doc comment on `enforce_no_forbidden_allocator_symbols`
+# for why), so as of this WP the enforcement function below is exposed and
+# spec-covered but not yet call-site-wired; wiring it in is a one-line addition
+# at each of those four call sites once this module lands.
+#
+# FORBIDDEN SYMBOL LIST: reuses the same allocator-name vocabulary the
+# source-level scanner already uses at `noalloc_reachable.spl:106-107`
+# (`malloc`, `calloc`, `free`, `realloc`) plus `rt_alloc` (the runtime's own
+# heap-alloc entry point, same file) and the additional POSIX/libc allocation
+# primitives named in the WP-15 task brief (`mmap`, `brk`, `sbrk`,
+# `posix_memalign`, `aligned_alloc`) and the project's own `mimalloc_alloc`
+# entry point (`gc_boundary_check.spl` marks `nogc_async_mut_noalloc.mimalloc`
+# as `allocates: true` per WP-11). This module does NOT reuse
+# `noalloc_reachable.spl`'s MATCHING DISCIPLINE: that scanner uses
+# `trimmed.contains("malloc")`, a substring match guarded only by an
+# `extern fn` line-prefix check. This module instead does EXACT match (after
+# stripping the object-symbol-table decorations `nm` can emit: a leading `_`
+# on Mach-O, an `@GLIBC_...` version suffix on a dynamic symbol table) — the
+# same exact-or-explicit-boundary discipline WP-11 already established as the
+# fix for this defect class at the source level
+# (`gc_boundary_check.spl:94-106`, commit `ed493da4c99`). A substring match
+# here would flag a disguised, non-allocating name like
+# `my_malloc_wrapper_free` purely because it contains "malloc"/"free" as a
+# substring — exact match does not.
+
+use std.nogc_sync_mut.io_runtime.{process_run}
+
+pub val FORBIDDEN_ALLOCATOR_SYMBOLS = [
+    "malloc", "calloc", "realloc", "free",
+    "posix_memalign", "aligned_alloc", "sbrk", "brk", "mmap", "munmap",
+    "rt_alloc", "mimalloc_alloc",
+]
+
+fn _forbidden_set() -> {text: bool}:
+    var set: {text: bool} = {}
+    for name in FORBIDDEN_ALLOCATOR_SYMBOLS:
+        set[name] = true
+    set
+
+fn _strip_prefix_underscore(name: text) -> text:
+    """Mach-O `nm` prefixes every C symbol with a leading `_`
+    (`_malloc` for `malloc`). Strip exactly one, if present, before matching
+    -- this is a decoration of the object format, not part of the symbol's
+    logical name."""
+    if name.starts_with("_"):
+        return name[1:name.len()]
+    name
+
+fn _strip_version_suffix(name: text) -> text:
+    """A dynamic symbol table (`nm -D` on a linked binary, as opposed to `-u`
+    on a relocatable `.o`) can carry a glibc version suffix, e.g.
+    `malloc@GLIBC_2.2.5`. Strip everything from the first `@` on, if present."""
+    var idx = -1
+    var i = 0
+    while i < name.len():
+        if name[i:i + 1] == "@":
+            idx = i
+            i = name.len()
+        i = i + 1
+    if idx >= 0:
+        return name[0:idx]
+    name
+
+pub fn normalize_object_symbol_name(raw_name: text) -> text:
+    """Canonical form of a raw `nm`-emitted symbol name for exact-match
+    classification: strip a Mach-O leading `_` and any `@GLIBC_...` version
+    suffix. On the Linux ELF `.o` objects this repo actually links (verified
+    against `src/runtime/runtime.o`'s `nm -u` output: plain `malloc`, `free`,
+    `mmap`, no decoration at all), this is a no-op; the stripping exists so
+    the same classifier is correct if fed a decorated name from a different
+    platform or a dynamic symbol table."""
+    _strip_version_suffix(_strip_prefix_underscore(raw_name))
+
+pub fn classify_forbidden_allocator_symbols(symbol_names: [text]) -> [text]:
+    """Exact-match classifier: given a flat list of external symbol names (as
+    if read from an object file's undefined-symbol table), return the subset
+    that are forbidden allocator symbols, deduped, in first-seen order.
+
+    Exact match only -- a name that merely CONTAINS a forbidden name as a
+    substring (`my_malloc_wrapper_free`) is NOT flagged. This is the testable
+    seam this WP's spec drives directly with synthetic symbol lists."""
+    val forbidden = _forbidden_set()
+    var seen: {text: bool} = {}
+    var hits: [text] = []
+    for raw_name in symbol_names:
+        val name = normalize_object_symbol_name(raw_name)
+        if forbidden.has(name) and not seen.has(name):
+            seen[name] = true
+            hits.push(name)
+    hits
+
+pub fn object_undefined_symbol_names(objects: [text]) -> [text]:
+    """Real object-file reader: the external (undefined, `nm -u`) symbol
+    references pulled in by `objects`, deduped. Mirrors the established
+    pattern at `llvm_native_link.spl:1746` (`simpleos_undefined_rt_symbols`) /
+    `:1780` (`simpleos_undefined_simple_module_symbols`) -- same `nm -u` call,
+    same "empty-part-filtered `line.split(\" \")`, last token is the symbol"
+    parse -- but unfiltered by name prefix, because an allocator symbol
+    (`malloc`) carries none of `rt_`/`lib__`/`os__` and would be silently
+    dropped by either of those prefix filters."""
+    var seen: {text: bool} = {}
+    var names: [text] = []
+    for obj in objects:
+        val (nm_out, _nm_err, nm_code) = process_run("nm", ["-u", obj])
+        if nm_code != 0:
+            continue
+        for line in nm_out.split("\n"):
+            var parts: [text] = []
+            for part in line.split(" "):
+                if part != "":
+                    parts.push(part)
+            if parts.len() == 0:
+                continue
+            val sym_name = parts[parts.len() - 1]
+            if sym_name != "" and not seen.has(sym_name):
+                seen[sym_name] = true
+                names.push(sym_name)
+    names
+
+pub fn scan_steady_state_closure_for_forbidden_allocators(objects: [text]) -> [text]:
+    """Real end-to-end scan: read every undefined symbol reference across
+    `objects` (the link closure) and classify. Returns the forbidden subset,
+    deduped."""
+    classify_forbidden_allocator_symbols(object_undefined_symbol_names(objects))
+
+pub fn enforce_no_forbidden_allocator_symbols_from_names(symbol_names: [text]) -> Result<bool, text>:
+    """Same hard-fail contract as `enforce_no_forbidden_allocator_symbols`,
+    but takes an already-extracted symbol-name list directly -- the synthetic
+    test seam, and also reusable by a caller that already has the closure's
+    symbol names from elsewhere (e.g. a caller that merges several
+    `object_undefined_symbol_names` results before enforcing once)."""
+    val hits = classify_forbidden_allocator_symbols(symbol_names)
+    if hits.len() == 0:
+        return Ok(true)
+    Err("Forbidden allocator symbol(s) in sealed-build closure: {hits.join(\", \")} -- a sealed/flight-closure link must not reference a host heap allocator (see allocator_symbol_scan.spl doc comment for the full forbidden list and rationale)")
+
+pub fn enforce_no_forbidden_allocator_symbols(objects: [text]) -> Result<bool, text>:
+    """Linker-level enforcement point: a forbidden allocator symbol anywhere
+    in the steady-state closure's undefined-symbol references is a hard link
+    failure -- `Err`, never a warning. Intended to be called over the exact
+    same `real_objects`/`user_objects` closure `llvm_native_link.spl`'s
+    `simpleos_check_no_fabricated_rt_stubs` already receives at its four call
+    sites, guarded by the same `flight_closure` predicate WP-10 defined there
+    (`SIMPLE_NO_STUB_FALLBACK=1` or `SIMPLE_SAFETY_PROFILE` >= `Critical`).
+
+    Deliberately NOT wired into `llvm_native_link.spl` by this WP: WP-10 is
+    concurrently landing an uncommitted, unpushed edit to the neighbouring
+    lines of that same function (`:2496-2594`, the `flight_closure` predicate
+    itself and the fabricated-stub baseline gates) in this shared working
+    copy. This WP's call sites (`:2674`, `:2786`, `:2960`, `:3032`) are
+    textually disjoint from WP-10's edited range, but landing a same-file
+    edit on top of another agent's in-flight, not-yet-pushed change in a
+    shared working copy risks a lost or corrupted edit on push (see
+    `.claude/rules/vcs.md` "Sync must never clobber"). This function is
+    exposed, documented, and spec-covered as the enforcement seam; wiring it
+    into each call site is a one-line addition once WP-10 lands."""
+    enforce_no_forbidden_allocator_symbols_from_names(object_undefined_symbol_names(objects))

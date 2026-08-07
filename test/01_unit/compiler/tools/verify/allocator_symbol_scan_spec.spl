@@ -1,0 +1,74 @@
+# Spec for allocator_symbol_scan.spl (WP-15 of
+# doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md).
+#
+# TEST SEAM: mostly (a) synthetic symbol lists fed directly into
+# classify_forbidden_allocator_symbols/enforce_no_forbidden_allocator_symbols
+# -- the classifier doesn't care where a symbol name came from, so this is a
+# faithful, direct test of the exact-match discipline (forbidden hit / clean
+# pass / disguised-substring non-match). Plus one (b) real-artifact case: this
+# repo already has real compiled `.o` files under src/runtime/ with genuine
+# libc allocator symbols in their `nm -u` undefined-symbol table (verified
+# directly: `nm -u src/runtime/runtime.o` lists plain `malloc`, `free`,
+# `mmap`, no decoration), so object_undefined_symbol_names is exercised
+# against a REAL object rather than only a synthetic list -- no fresh
+# compiled artifact was built for this spec; an existing tree object was
+# reused because producing a new one would cost a build for no additional
+# coverage.
+
+use std.spec.{describe, it, expect}
+use compiler.tools.verify.allocator_symbol_scan.{
+    classify_forbidden_allocator_symbols, normalize_object_symbol_name,
+    object_undefined_symbol_names, scan_steady_state_closure_for_forbidden_allocators,
+    enforce_no_forbidden_allocator_symbols,
+}
+
+describe "allocator_symbol_scan":
+
+    it "flags a forbidden allocator symbol present in the symbol list":
+        val hits = classify_forbidden_allocator_symbols(["mimalloc_alloc", "rt_memcpy", "puts"])
+        expect(hits.len()).to_equal(1)
+        expect(hits[0]).to_equal("mimalloc_alloc")
+
+    it "reports a clean pass when no forbidden symbol is present":
+        val hits = classify_forbidden_allocator_symbols(["rt_memcpy", "puts", "write", "close"])
+        expect(hits.len()).to_equal(0)
+
+    it "does NOT false-positive on a name that merely contains an allocator name as a substring":
+        val hits = classify_forbidden_allocator_symbols(["my_malloc_wrapper_free", "malloc_stats_print"])
+        expect(hits.len()).to_equal(0)
+
+    it "flags exact 'malloc' but not a name containing it, in the same list":
+        val hits = classify_forbidden_allocator_symbols(["my_malloc_wrapper_free", "malloc"])
+        expect(hits.len()).to_equal(1)
+        expect(hits[0]).to_equal("malloc")
+
+    it "normalizes a Mach-O leading underscore before matching":
+        expect(normalize_object_symbol_name("_malloc")).to_equal("malloc")
+
+    it "normalizes a glibc version suffix before matching":
+        expect(normalize_object_symbol_name("malloc@GLIBC_2.2.5")).to_equal("malloc")
+
+    it "enforce_no_forbidden_allocator_symbols returns Err (fails the link) when a forbidden symbol is present":
+        val result = enforce_no_forbidden_allocator_symbols_from_names(["mmap", "rt_memcpy"])
+        match result:
+            case Err(_msg): assert_true(true)
+            case Ok(_): assert_true(false)
+            case _: todo()
+
+    it "enforce_no_forbidden_allocator_symbols returns Ok when the closure is clean":
+        val result = enforce_no_forbidden_allocator_symbols_from_names(["rt_memcpy", "write"])
+        match result:
+            case Ok(clean): assert_true(clean)
+            case Err(_msg): assert_true(false)
+            case _: todo()
+
+    it "reads real undefined symbols off a real object file and flags real libc allocator refs":
+        val names = object_undefined_symbol_names(["src/runtime/runtime.o"])
+        expect(names.len()).to_be_greater_than(0)
+        expect(names).to_contain("malloc")
+        expect(names).to_contain("free")
+
+        val hits = scan_steady_state_closure_for_forbidden_allocators(["src/runtime/runtime.o"])
+        expect(hits).to_contain("malloc")
+        expect(hits).to_contain("free")
+        expect(hits).to_contain("mmap")
