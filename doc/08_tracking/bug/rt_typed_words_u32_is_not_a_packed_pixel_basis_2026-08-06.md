@@ -180,3 +180,79 @@ be fixed. It is not; the premise still holds exactly as filed.
   (value round-trip) contract that IS testable today.
 
 **Verdict: LIVE.** No part of the original finding has been superseded.
+
+## T6 follow-up (2026-08-07) — RT_CORE_ARRAY_FLAG_BYTES / `rt_typed_bytes_u32_le_*`
+
+Scoped follow-up from `doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md`
+T6, closing the one "not verified here" gap above: is
+`RT_CORE_ARRAY_FLAG_BYTES` (accessed via `rt_typed_bytes_u32_le_at/set`) a
+real 4-byte-stride packed basis, and is it reachable from `.spl`?
+
+### Stride: YES, confirmed by source + a running probe
+
+- `runtime_native.c:5197`: `elem_size = (flags & RT_CORE_ARRAY_FLAG_BYTES) ?
+  sizeof(uint8_t) : sizeof(int64_t)` — a `RT_CORE_ARRAY_FLAG_BYTES` array is
+  genuinely 1-byte-stride storage, unlike the 8-byte-stride `[u32]` literal
+  array this doc already refuted above.
+- Ran a probe (`/tmp/t6_probe2.spl`) under `bin/simple run` (the seed's
+  default JIT-attempt-then-interpret path):
+  ```
+  extern fn rt_byte_array_new_len(len: u64) -> [u8]
+  extern fn rt_typed_bytes_u32_le_at(buf: [u8], off: u64) -> u64
+  val buf: [u8] = rt_byte_array_new_len(8u64 * 4u64)
+  println("buf_len=" + buf.len().to_text())
+  ```
+  Output: `buf_len=32` for `n=8` — i.e. `rt_byte_array_new_len(n*4)` allocates
+  exactly `n*4` bytes (1 byte/element), not `n*4*8`. This is the "running
+  probe, not headers" measurement the T6 acceptance bar requires.
+- Production code already reads 4-byte LE words out of such buffers today:
+  `src/os/crypto/crc32.spl`, `adler32.spl`, `chacha20.spl`, `xxhash.spl` all
+  declare `extern fn rt_typed_bytes_u32_le_at(buf: [u8], off: u64) -> u64`
+  and read pre-packed 256×4-byte lookup tables through it at production
+  call sites (not comments) — the read half of this basis is not
+  hypothetical, it is load-bearing today.
+
+### `.spl` reachability: SPLIT — read YES, write NO (under the seed's default path)
+
+- `rt_typed_bytes_u32_le_at` (read) is wired into the interpreter's SFFI
+  table: `src/compiler_rust/compiler/src/interpreter_extern/mod.rs:1927`
+  (`insert_simple!("rt_typed_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn)`).
+  Confirmed reachable — no error, and it is the mechanism the crypto modules
+  above depend on.
+- `rt_typed_bytes_u32_le_set` (write) is declared `extern fn` in `.spl`
+  (`test/05_perf/port_algorithms/port_algorithms_simple.spl:205` et al.) and
+  has dedicated native-codegen lowering (`compiler/src/codegen/instr/calls.rs:3225`,
+  `compiler/src/codegen/llvm/functions/calls.rs:1786` both special-case the
+  symbol name), but it is **absent from `interpreter_extern/mod.rs`**. Ran
+  the same probe calling `rt_typed_bytes_u32_le_set(buf, i*4u64, ...)` under
+  `bin/simple run`: every call logs
+  `rt_interp_call error: ... "unknown extern function: rt_typed_bytes_u32_le_set"`
+  (`E1002`) and **the write silently no-ops** — the loop does not abort, and
+  the subsequent `rt_typed_bytes_u32_le_at` reads back `0` for every index
+  instead of the written value. This is a second, narrower instance of the
+  "silent interpreted fallback" trap: a per-call SFFI miss that swallows the
+  write rather than crashing.
+- Attempted to confirm the write half through a true AOT/native-build
+  (where the codegen special-case above should apply) via
+  `bin/simple native-build --entry /tmp/t6_probe2.spl -o /tmp/t6nb/probe`.
+  This triggered an unrelated whole-repo native-build worker failure (exit
+  code 1, truncated stderr) — consistent with the known
+  `--entry` delegates-to-Rust-runtime trap, not evidence about `le_set`
+  itself. **Left open**, see below.
+
+### Verdict
+
+**Partially reopens F2, narrowly.** `RT_CORE_ARRAY_FLAG_BYTES` +
+`rt_typed_bytes_u32_le_at/set` is a genuine 4-byte-packed basis (unlike the
+refuted `rt_typed_words_u32` / `[u32]`-literal lead above), and its *read*
+half is already production-reachable from `.spl` under the seed's default
+execution path. Its *write* half is declared reachable in `.spl` and has
+native-codegen support, but is unregistered in the interpreter's SFFI table,
+so it silently no-ops under `bin/simple run` today — it is not yet a usable
+end-to-end packed-pixel write path without either (a) registering
+`rt_typed_bytes_u32_le_set` in `interpreter_extern/mod.rs`, or (b) a clean
+AOT/native-build run proving the codegen path actually works (not
+established here — the native-build attempt failed for unrelated reasons).
+Follow-up scope, not done in this unit: register the missing interpreter
+extern (small, mechanical) and get one clean native-build run of the probe
+to close the AOT gap.
