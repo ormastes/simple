@@ -86,7 +86,15 @@ for old in "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_sanity" "$ma
   if [ -e "$old" ]; then cp -p "$old" "$archive/$(basename "$old").before-resume"; fi
 done
 rm -f "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_sanity" "$manifest"
-rm -rf "$stage3_cache"
+# stage3-native-cache is content-hash scoped by the pure-Simple driver itself
+# (driver_native_sources_fingerprint in
+# src/compiler/80.driver/driver_aot_native_output.spl), so a resumed run with
+# an unchanged source tree can reuse it. Wiping it unconditionally on every
+# resume defeated cross-run incrementality. Preserve by default;
+# RESUME_STAGE3_FRESH_CACHE=1 forces a clean rebuild.
+if [ "${RESUME_STAGE3_FRESH_CACHE:-0}" = 1 ]; then
+  rm -rf "$stage3_cache"
+fi
 mkdir -p "$stage3_cache" "$home" "$tmp" "$(dirname "$stage3_log")"
 
 # Recovery starts a fresh evidence interval after the immutable Stage-2 checks.

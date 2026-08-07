@@ -1297,10 +1297,21 @@ else
     "${stage3_git_before}" "${stage3_git_after}" \
     "${stage2_command_transcript}" "${stage3_command_transcript}" \
     "${stage2_sanity_evidence}" "${stage3_sanity_evidence}"
-  rm -rf "${stage2_provenance_cache}" "${stage3_provenance_cache}" \
-    "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
+  rm -rf "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
     "${stage3_provenance_home}" "${stage3_provenance_tmp}" \
     "${stage2_admitted_dir}" "${stage2_runtime_authority}"
+  # Stage 2/3 native-build caches are content-hash keyed by the pure-Simple
+  # driver itself (driver_native_sources_fingerprint scopes each cache entry
+  # under the loaded source set's combined hash — see
+  # src/compiler/80.driver/driver_aot_native_output.spl), so an unchanged
+  # source tree naturally misses on any real change and never serves a stale
+  # object. Unconditionally wiping them here defeated ALL cross-run
+  # incrementality even when nothing changed. Preserve them by default;
+  # --fresh-cache/--clean-release still forces a clean rebuild.
+  if [ "${fresh_cache}" -eq 1 ] || [ "${execution_profile}" = "clean-release" ]; then
+    echo "  provenance: clearing stage2/stage3 native caches (--fresh-cache/--clean-release)"
+    rm -rf "${stage2_provenance_cache}" "${stage3_provenance_cache}"
+  fi
   mkdir -p "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
     "${stage3_provenance_home}" "${stage3_provenance_tmp}"
   runtime_origin_absolute=$(bootstrap_stage3_physical_directory \
@@ -1579,7 +1590,12 @@ else
   mkdir -p "${output_dir}/stage3/${PLATFORM}"
   echo "Stage 3: stage2 → bootstrap_main.spl (self-host)"
   bootstrap_progress_mark stage3 "$(absolute_path "${log_dir}/stage3-native-build.log")"
-  rm -rf "${stage3_provenance_cache}"
+  # See the cache-preservation note above (~line 1300): this cache is
+  # content-hash scoped by the driver itself, so keep it across runs unless
+  # a clean rebuild was explicitly requested.
+  if [ "${fresh_cache}" -eq 1 ] || [ "${execution_profile}" = "clean-release" ]; then
+    rm -rf "${stage3_provenance_cache}"
+  fi
   mkdir -p "${stage3_provenance_cache}"
 
   stage3_ok=0
