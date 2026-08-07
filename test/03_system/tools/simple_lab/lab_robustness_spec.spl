@@ -16,12 +16,12 @@ Three pieces of evidence, per design §8.5:
      `/api/test/click` — see the filed gap
      `doc/08_tracking/bug/lab_test_api_click_does_not_invoke_simple_lab_app_add_cell_2026-08-07.md`),
      all must return `ok:true`, panic-free.
-  3. **Fuzz-lite corpus** — malformed JSON bodies (already covered by H1's
-     spec; re-asserted here as part of the combined evidence run), an
-     oversized header line, a too-many-headers request, and a WS handshake
-     request truncated mid-write — every one of these must produce a 4xx
-     response or a clean connection close, never a crash/hang, and the
-     server must still answer the next request afterward.
+  3. **Fuzz-lite corpus** — malformed JSON bodies, an oversized header line,
+     a too-many-headers request, and a WS handshake truncated mid-write.
+     Each gets its own example so a genuinely-failing assertion (see the
+     oversized-header example below) stays visibly RED per
+     `.claude/rules/testing.md` instead of being merged into one aggregate
+     pass/fail that would hide it.
 
 Numbers this spec measures are recorded verbatim into
 `doc/09_report/notebook_lanes_robustness_evidence_2026-08-07.md` (H3 verify
@@ -343,40 +343,81 @@ describe "Simple Lab robustness evidence (H3: load smoke + 100-cell soak + fuzz-
 
         server.stop()
 
-    it "fuzz-lite corpus: malformed JSON, oversized header, too-many-headers, and a truncated WS handshake all get 4xx/close, never a panic":
-        val server = start_lab_server(30)
+    it "fuzz-lite: malformed JSON body corpus all get 4xx, never a panic":
+        val server = start_lab_server(20)
         if not server.started:
             fail("lab_server subprocess did not start listening")
 
-        var fuzz_ok: i64 = 0
-        var fuzz_total: i64 = 0
-
-        step("malformed JSON body corpus on POST /api/lab/sessions")
         val bad_bodies = [
             "not json at all",
             "{{{{",
             "{\"default_mode\":}",
             "[1,2,",
-            " binary-garbage",
+            " binary-garbage",
             "{\"default_mode\":\"interpreter\"" # missing closing brace
         ]
+        var ok_count: i64 = 0
         for bad in bad_bodies:
-            fuzz_total = fuzz_total + 1
+            step("POST /api/lab/sessions with malformed body: {bad}")
             val resp = http_request(server.addr, "POST", "/api/lab/sessions", bad)
             if resp.ok and resp.status >= 400 and resp.status < 500:
-                fuzz_ok = fuzz_ok + 1
+                ok_count = ok_count + 1
             else:
                 record("fuzz_fail malformed_json body={bad} status={resp.status}")
+        record("fuzz_malformed_json total={bad_bodies.len()} ok={ok_count}")
+        expect(ok_count).to_equal(bad_bodies.len())
+
+        step("the server survived the whole corpus and still answers correctly")
+        val final_status = http_request(server.addr, "GET", "/api/lab/status", "")
+        expect(final_status.status).to_equal(200)
+
+        server.stop()
+
+    it "fuzz-lite: oversized single header line (20000 bytes) does not crash the server -- KNOWN GAP, not yet rejected with 4xx":
+        """
+        Design §8.5 requires oversized headers to answer 4xx. What actually
+        happens: `read_line_chunked` (the Rust runtime primitive backing
+        `TcpStream.read_line()`, `src/compiler_rust/runtime/src/value/net_tcp.rs`)
+        silently truncates any line at 8192 bytes without a trailing newline
+        and without an error -- exactly the same boundary `parser.spl`'s own
+        `hl.len() > max_header_line` check is trying to catch -- so that
+        check can never fire for this input shape and the request is
+        silently accepted (200), with the tail of the oversized header
+        dropped as a colon-less "header". Filed, not silently worked around:
+        `doc/08_tracking/bug/lab_http_parser_oversized_header_line_silently_truncated_not_rejected_2026-08-07.md`.
+        This example asserts the H3 hard gate that DOES hold today -- no
+        panic, no hang, the server stays alive and correct -- and leaves the
+        4xx expectation RED per `.claude/rules/testing.md` ("a correct spec
+        that fails is a legitimate artifact ... never weaken the
+        assertion").
+        """
+        val server = start_lab_server(10)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
 
         step("oversized single header line (20000 bytes, well over the 8192-byte cap)")
         val fuzz_x = "x"
         val huge_header = "X-Fuzz-Oversized: {repeat_char(fuzz_x, 20000)}\r\n"
-        fuzz_total = fuzz_total + 1
         val oversized_resp = http_request_ex(server.addr, "GET", "/api/lab/status", "", "Authorization: Bearer {TEST_TOKEN}\r\n{huge_header}")
-        if oversized_resp.ok and oversized_resp.status >= 400 and oversized_resp.status < 500:
-            fuzz_ok = fuzz_ok + 1
-        else:
-            record("fuzz_fail oversized_header status={oversized_resp.status} ok={oversized_resp.ok}")
+        record("fuzz_oversized_header status={oversized_resp.status} ok={oversized_resp.ok}")
+
+        step("hard gate: the server answered something -- not a crashed/dropped connection")
+        expect(oversized_resp.ok).to_equal(true)
+
+        step("hard gate: the server is still alive and correct for the next request")
+        val final_status = http_request(server.addr, "GET", "/api/lab/status", "")
+        expect(final_status.ok).to_equal(true)
+        expect(final_status.status).to_equal(200)
+
+        step("design contract (4xx) -- currently fails; see the filed bug in this example's docstring")
+        expect(oversized_resp.status >= 400 and oversized_resp.status < 500).to_equal(true)
+
+        server.stop()
+
+    it "fuzz-lite: too-many-headers request (110 headers) gets 4xx, never a panic":
+        val server = start_lab_server(10)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
 
         step("too-many-headers request (110 headers, over the 100-header cap)")
         var many_headers = "Authorization: Bearer {TEST_TOKEN}\r\n"
@@ -384,35 +425,36 @@ describe "Simple Lab robustness evidence (H3: load smoke + 100-cell soak + fuzz-
         while h < 110:
             many_headers = "{many_headers}X-Fuzz-{h}: v\r\n"
             h = h + 1
-        fuzz_total = fuzz_total + 1
         val many_resp = http_request_ex(server.addr, "GET", "/api/lab/status", "", many_headers)
-        if many_resp.ok and many_resp.status >= 400 and many_resp.status < 500:
-            fuzz_ok = fuzz_ok + 1
-        else:
-            record("fuzz_fail too_many_headers status={many_resp.status} ok={many_resp.ok}")
+        record("fuzz_too_many_headers status={many_resp.status} ok={many_resp.ok}")
+        expect(many_resp.ok).to_equal(true)
+        expect(many_resp.status >= 400 and many_resp.status < 500).to_equal(true)
 
-        step("WS handshake request truncated mid-write (connection closed before the terminating CRLFCRLF) — must not hang or crash the server")
-        fuzz_total = fuzz_total + 1
+        step("the server is still alive")
+        val final_status = http_request(server.addr, "GET", "/api/lab/status", "")
+        expect(final_status.status).to_equal(200)
+
+        server.stop()
+
+    it "fuzz-lite: a WebSocket handshake truncated mid-write does not crash or hang the server":
+        val server = start_lab_server(10)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+
+        step("WS handshake request truncated mid-write (connection closed before the terminating CRLFCRLF) -- must not hang or crash the server")
         val trunc_stream_res = TcpStream.connect(server.addr)
-        var trunc_survived = false
-        if trunc_stream_res.is_ok():
-            var trunc_stream = trunc_stream_res.unwrap()
-            # Deliberately incomplete: request line + one header, no blank
-            # line, then close — simulates a client that dies mid-handshake.
-            val partial = "GET /api/lab/sessions/nonexistent/events HTTP/1.1\r\nUpgrade: websocket\r\n"
-            val _w = trunc_stream.write_text(partial)
-            val _f2 = trunc_stream.flush()
-            val _c2 = trunc_stream.close()
-            trunc_survived = true
-        if trunc_survived:
-            fuzz_ok = fuzz_ok + 1
-        else:
-            record("fuzz_fail truncated_ws_handshake connect_failed")
+        if trunc_stream_res.is_err():
+            fail("could not open the probe connection at all")
+        var trunc_stream = trunc_stream_res.unwrap()
+        # Deliberately incomplete: request line + one header, no blank line,
+        # then close -- simulates a client that dies mid-handshake.
+        val partial = "GET /api/lab/sessions/nonexistent/events HTTP/1.1\r\nUpgrade: websocket\r\n"
+        val _w = trunc_stream.write_text(partial)
+        val _f2 = trunc_stream.flush()
+        val _c2 = trunc_stream.close()
+        record("fuzz_truncated_ws_handshake survived=true")
 
-        record("fuzz_lite total={fuzz_total} ok_or_4xx={fuzz_ok}")
-        expect(fuzz_ok).to_equal(fuzz_total)
-
-        step("the server survived the entire fuzz-lite corpus and still answers correctly")
+        step("the server is still alive and correct after the truncated handshake")
         val final_status = http_request(server.addr, "GET", "/api/lab/status", "")
         expect(final_status.ok).to_equal(true)
         expect(final_status.status).to_equal(200)
