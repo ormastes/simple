@@ -137,6 +137,7 @@ impl MirLowering:
             bitfield_map: {},
             bitfield_value_syms: {},
             struct_field_order: {},
+            struct_field_order_conflict_warned: {},
             struct_field_has_default: {},
             struct_field_default_expr: {},
             class_type_names: {},
@@ -574,6 +575,29 @@ impl MirLowering:
             field_array_element_type_names.push(field_array_element_type_name)
             field_elem_types.push(field_elem_type)
             fi = fi + 1
+        # Field-index-collision diagnostic (stage3 borrow-checker SIGSEGV,
+        # 2026-08-07): ~1,500 struct/class names are duplicated across
+        # src/{compiler,lib,app}. A bare-name re-registration with a
+        # DIFFERENT field list silently overwrote (overwrite=true) or was
+        # silently dropped against (overwrite=false) the existing entry with
+        # ZERO diagnostics, so every bare-name field lookup for that type was
+        # ambiguous across modules of an entry-closure build. Warn ONCE per
+        # bare name; an identical re-registration (same field list) stays
+        # silent, and module-qualified '<module>::<Name>' keys (from
+        # composite_layout_key) never collide, so they are exempt.
+        if not name.contains("::") and self.struct_field_order.has(name):
+            val existing_fields = self.struct_field_order[name]
+            var fields_differ = existing_fields.len() != field_names.len()
+            if not fields_differ:
+                var cmp_i = 0
+                while cmp_i < existing_fields.len():
+                    if existing_fields[cmp_i] != field_names[cmp_i]:
+                        fields_differ = true
+                    cmp_i = cmp_i + 1
+            if fields_differ and not self.struct_field_order_conflict_warned.contains(name):
+                self.struct_field_order_conflict_warned[name] = true
+                val kept_side = if overwrite: "keeping NEW" else: "keeping EXISTING"
+                print "[mir-lower] WARNING: struct/class name '{name}' re-registered with a DIFFERENT field list (existing=[{existing_fields.join(", ")}] vs new=[{field_names.join(", ")}]; {kept_side}); bare-name field-index lookups for this type are ambiguous across modules — module-qualified keys stay correct (field-index collision, 2026-08-07)"
         if overwrite or not self.struct_field_order.has(name):
             self.struct_field_order[name] = field_names
         if overwrite or not self.struct_field_type_name.has(name):

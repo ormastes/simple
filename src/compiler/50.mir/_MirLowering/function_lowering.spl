@@ -953,6 +953,28 @@ impl MirLowering:
         # Try to get the type symbol from the base expression's type
         val type_sym = self.expr_type_symbol(base)
         if val found_type_sym = type_sym:
+            # MODULE-QUALIFIED name tier FIRST (stage3 borrow-checker
+            # field-index-collision SIGSEGV, 2026-08-07): both fallback tiers
+            # below are ambiguous in an entry-closure build — field_map keys
+            # by per-module numeric SymbolIds that collide across modules
+            # (NLLChecker's sym_id hit MirLowering's field_map entry, and
+            # since BOTH classes have an `errors` field the wrong index was
+            # returned, reading NLLChecker.errors at MirLowering.errors'
+            # offset), and bare struct_field_order names are duplicated
+            # ~1,500x across src/{compiler,lib,app}. composite_layout_key's
+            # '<defining_module>::<Name>' key (registered alongside the bare
+            # name by register_composite_field_metadata) is unambiguous, so a
+            # qualified hit is authoritative over either fallback tier.
+            val q_type_symbol = self.symbols.get_symbol_raw(found_type_sym.id)
+            if q_type_symbol != nil:
+                val qualified_key = self.composite_layout_key(q_type_symbol)
+                if qualified_key != q_type_symbol.name and self.struct_field_order.has(qualified_key):
+                    val qualified_fields = self.struct_field_order[qualified_key]
+                    var q_idx = 0
+                    while q_idx < qualified_fields.len():
+                        if qualified_fields[q_idx] == field_name:
+                            return q_idx
+                        q_idx = q_idx + 1
             val sym_id = self.symbol_id_value(found_type_sym)
             if self.field_map.has(sym_id):
                 val fields = self.field_map[sym_id]

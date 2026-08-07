@@ -1013,3 +1013,48 @@ any point while the seed builds stage 2. The `0x58` in `stage2-simple` is
 seed-emitted, the stage-2-only recipe is blind to `src/compiler` changes, and
 `61197205501`'s worker statement does not hold for this build path
 (`SIMPLE_NATIVE_BUILD_RUST=1`).
+
+## Update (2026-08-07): field-index-collision fix IMPLEMENTED (module-qualified struct_field_order tier + conflict diagnostic)
+
+The agreed durable fix for the borrow-checker field-index collision
+(`resolve_field_index` reading `NLLChecker.errors` via `MirLowering`'s
+layout) has landed:
+
+- **`resolve_field_index` now consults a MODULE-QUALIFIED name tier FIRST**
+  (`src/compiler/50.mir/_MirLowering/function_lowering.spl`): before the
+  id-keyed `field_map` tier (whose per-module numeric SymbolIds collide in
+  an entry-closure build) it resolves the base type's symbol and looks up
+  `composite_layout_key`'s `'<defining_module>::<Name>'` key in
+  `struct_field_order`. Those qualified keys were ALREADY being registered
+  alongside the bare names (prescan + `lower_module`, both via
+  `register_composite_field_metadata`) — but no lookup ever used them. A
+  qualified hit is unambiguous and now wins over both the collided
+  `field_map` tier and the bare-name tier (~1,522 duplicated class/struct
+  names across `src/{compiler,lib,app}`).
+- **Conflicting bare-name re-registration is no longer silent**
+  (`src/compiler/50.mir/_MirLowering/module_lowering.spl`,
+  `register_composite_field_metadata`): re-registering a bare name with a
+  DIFFERENT field list prints a one-shot
+  `[mir-lower] WARNING: struct/class name '<N>' re-registered with a
+  DIFFERENT field list ...` naming both field lists and which side was
+  kept. Identical re-registration stays silent; qualified keys are exempt.
+  Warn-once bookkeeping: new `struct_field_order_conflict_warned` field
+  (`src/compiler/50.mir/mir_lowering_types.spl`).
+
+Interpreter-level verification (compiler `.spl` sources run LIVE under
+`bin/simple test`):
+`test/01_unit/compiler/mir/struct_field_order_module_qualified_spec.spl` —
+`SPEC FILE VERDICT: declared>=4 executed=4 passed=4 failed=0 dropped=0`.
+The decisive case registers mod_a's `Config` (`errors` at index 2), poisons
+`field_map` at mod_a's SymbolId with a colliding other-module layout
+(`errors` at index 0), and asserts `resolve_field_index` returns 2.
+Sabotage check: disabling the qualified tier flips exactly that case to
+FAIL (passed=3 failed=1), so the spec discriminates the fix.
+
+**Honest status:** the full ~40GB/~1h stage-3 rebuild + hello-world SIGSEGV
+retest is PENDING — not run in this pass (box under heavy build contention,
+load avg ~75; and the stage-2-only recipe is seed-emitted and structurally
+blind to `src/compiler` edits, so only a full stage-3 run can observe this
+change natively). Next stage-3 lane should retest hello-world and expect
+the `[mir-lower] WARNING` lines to enumerate the real cross-module
+collision family.
