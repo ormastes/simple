@@ -22,12 +22,51 @@ exposure — always also search for `: {`-style dict declarations.
 > **`text`-valued dicts are still broken on a miss** — the `contains_key(k)` +
 > `d[k]` replacement below is still mandatory for those.
 
+> **RE-VERIFIED 2026-08-07 on the current working tree, real JIT execution
+> (`bin/simple run`, Cranelift JIT — the native-codegen lane; see
+> `.claude/rules/testing.md` "run and test are DIFFERENT ENGINES"; confirmed
+> via `cranelift_jit::backend` log lines, not a silent interpreter fallback).
+> `d.len()` (local + parameter), `.get()` hit for `i64`/`text`/struct, and
+> `.get()` miss for `i64`/`text` (both `== nil` and `?? default`) all measured
+> **correct**. The `text`-miss row above is now STALE: `guardable_value_type`
+> at `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:991` already
+> includes `mir_type_is_str`, so `dict_get_preserve_flat_nil` guards `text`
+> the same way it guards integers — the "still broken" note predates that
+> guard landing. Root cause for every row above, in one place: `rt_dict_get`
+> (`src/runtime/runtime_native.c:7137`, flat-Option ABI) returns the nil
+> sentinel `RT_NIL == 3` on a miss; `decode_runtime_value`
+> (`expr_dispatch.spl:741`) has per-type arms that TRANSFORM the raw word
+> (`>>3` for ints, `rt_interp_cstr` for text) and would destroy that sentinel
+> on a miss; `dict_get_preserve_flat_nil` (`expr_dispatch.spl:833`) routes the
+> sentinel around the transform via a branch-and-select, gated by
+> `guardable_value_type` (`expr_dispatch.spl:991`, integer or str). Struct/
+> enum/array/dict decode arms need no guard — their arm already passes the raw
+> word through untouched, so nil survives for free.
+>
+> **One row is confirmed still genuinely broken: `.get()` miss for `V = f64`.**
+> Reproduced live: `Dict<text, f64>` with one stored key, `.get()` on an absent
+> key, `== nil` is **false**. This is not a stale doc gap — it's a *deliberate,
+> commented* exclusion at `expr_dispatch.spl:987-990`: `guardable_value_type`
+> (line 991) only matches `mir_type_is_integer` or `mir_type_is_str`; f64 is
+> explicitly left out because `rt_value_as_float` cannot round-trip the `3`
+> sentinel through a float bit pattern, and the flat `Option<f64>` ABI has no
+> spare bits to carry a sentinel alongside a real float payload. Fixing this
+> needs an ABI change (e.g. a boxed/side-channel discriminant for float
+> Options), not a decode-arm guard — out of scope for a minimal fix. Tracked
+> with the bool case in
+> `doc/08_tracking/bug/native_dict_get_miss_returns_zero_not_nil_2026-07-28.md`.
+> Spec coverage for both the fixed rows and this open gap:
+> `test/01_unit/compiler/dict_get_miss_returns_nil_spec.spl` (passes under the
+> interpreter always — see that file's lane-coverage warning; the f64 case is
+> not currently reproducible through the interpreter-only `bin/simple test`
+> runner, only through `bin/simple run`).
+
 | Operation | Native codegen result | Safe to use? |
 |---|---|---|
 | `d.len()` / `d.length()` | correct count since 2026-08-01 (measured: local **and** function parameter). The old **-1** does not reproduce; struct-field receivers remain unmeasured | yes for locals/params |
 | `d.get(k)` — miss, `V` = `i64` / `bool` | correct `nil` since 2026-08-01 — `== nil` true, `?? default` fires | yes |
-| `d.get(k)` — **miss, `V` = `text`** | **not `nil`** — `== nil` is **false**, a miss is indistinguishable from a hit | **NO** |
-| `d.get(k)` — miss, `V` = `f64` | unfixed and unmeasured — the flat Option ABI cannot carry a sentinel in a float word | **NO** |
+| `d.get(k)` — miss, `V` = `text` | correct `nil` — re-verified 2026-08-07 on current source (see re-verification note above); the row title below was stale | yes |
+| `d.get(k)` — miss, `V` = `f64` | **confirmed broken 2026-08-07** — `== nil` is false; flat Option ABI cannot carry a sentinel in a float word; deliberately unguarded, see note above | **NO** |
 | `d.get(k)` — hit, `V` = `bool`, value `true` | correct since 2026-08-01 (`.get()` on a bool dict now returns the raw 3-state word) | yes |
 | `d.get(k)` — hit, `V` = `i64` / `text` | correct since `7e83e92ce314` (was `7`→`56`) | yes |
 | `d.get(k)` — hit, `V` = struct/class/enum | correct since `7e83e92ce314` (was a segfaulting corrupt `Option`) | yes |
@@ -64,7 +103,11 @@ exposure — always also search for `: {`-style dict declarations.
 - **Miss / default handling** — `.get(k) ?? default` and `val Some(x) = .get(k) else:`
   both take the present-value branch on a miss. Test `contains_key(k)` first and
   supply the default yourself. `.get(k).?` is also unsafe — it reports empty for a
-  stored `0`.
+  stored `0`. **Exception, re-verified 2026-08-07:** for `V = i64`, `bool`, or
+  `text`, `.get(k)`'s miss handling (`== nil`, `?? default`) is correct on the
+  current native/JIT lane — the guard above is still the right default for
+  everything else (struct/enum/array/dict decode is unmeasured on a miss; `f64`
+  is confirmed still broken).
 - **Count** — `d.len()` is correct again as of 2026-08-01 for local and
   parameter receivers; the `d.keys().len()` workaround is no longer required
   for those, though it stays correct. Struct-field receivers have **not** been

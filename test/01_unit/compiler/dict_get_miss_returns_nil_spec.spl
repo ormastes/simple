@@ -29,6 +29,11 @@ the resulting ELF (transcript in the bug doc above).
 use std.spec
 
 
+struct Pt:
+    x: i64
+    y: i64
+
+
 describe "Dict.get() miss vs stored zero":
     """
     ## Miss must not look like a stored zero
@@ -60,6 +65,12 @@ describe "Dict.get() miss vs stored zero":
         expect(t.get("zz") == nil).to_equal(true)
         expect(t.get("k") == nil).to_equal(false)
 
+    it "applies ?? default only on a miss for text values":
+        var t: Dict<text, text> = {}
+        t["k"] = "yes"
+        expect(t.get("zz") ?? "DEFAULT").to_equal("DEFAULT")
+        expect(t.get("k") ?? "DEFAULT").to_equal("yes")
+
     it "keeps a stored true distinguishable from a miss":
         var b: Dict<text, bool> = {}
         b["t"] = true
@@ -67,6 +78,37 @@ describe "Dict.get() miss vs stored zero":
         expect(b.get("t") == nil).to_equal(false)
         expect(b.get("f") == nil).to_equal(false)
         expect(b.get("zz") == nil).to_equal(true)
+
+    it "returns the correct hit for a struct-valued dict":
+        var s: Dict<i64, Pt> = {}
+        s[1] = Pt(x: 3, y: 4)
+        val hit = s.get(1)
+        if val hv = hit:
+            expect(hv.x).to_equal(3)
+            expect(hv.y).to_equal(4)
+        else:
+            assert_true(false, "expected a hit, got nil")
+
+    it "reproduces the OPEN f64-miss gap on the native/JIT lane (interpreter-only green here)":
+        """
+        `d.get(k)` on a MISS for `V = f64` is a documented, still-open gap
+        (dict_native_pitfalls.md's truth table, and the deliberate exclusion
+        comment at
+        src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:987-990):
+        `rt_value_as_float` cannot round-trip the flat-Option nil sentinel
+        `RT_NIL == 3` through a float bit pattern, so `dict_get_preserve_flat_nil`
+        (expr_dispatch.spl:991) deliberately does NOT guard the F64 decode arm.
+        Verified live 2026-08-07 with `bin/simple run` (Cranelift JIT, the
+        native-codegen lane -- see .claude/rules/testing.md "run and test are
+        DIFFERENT ENGINES"): a miss decodes to a real float bit pattern instead
+        of nil, so `== nil` is false. This assertion documents the CORRECT
+        interpreter-lane contract (which has always worked) -- it is NOT a gate
+        for the native lane, exactly like the miss-lane note above.
+        """
+        var f: Dict<text, f64> = {}
+        f["pi"] = 3.5
+        expect(f.get("zz") == nil).to_equal(true)
+        expect(f.get("pi") == nil).to_equal(false)
 
 
 describe "Dict.len() on the native lane":
