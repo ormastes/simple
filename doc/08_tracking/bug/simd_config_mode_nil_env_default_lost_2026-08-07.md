@@ -1,7 +1,8 @@
 ---
 title: "simd_config_mode() returns nil instead of the documented \"auto\" default when SIMPLE_2D_SIMD is unset"
-status: open
+status: resolved
 date: 2026-08-07
+resolved_date: 2026-08-07
 ---
 
 ## Summary
@@ -59,9 +60,10 @@ test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl --no-cache
 `env_set`) passes, confirming the non-nil path is fine and the defect is
 specific to the unset/nil path.
 
-## Fix (not applied — spec stays RED per testing rules)
+## Fix (applied)
 
-`simd_config_mode()` needs the same nil guard as `env_get`:
+`simd_config_mode()` now carries the same nil guard as `env_get`, in
+`src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl:346-350`:
 
 ```
 pub fn simd_config_mode() -> text:
@@ -71,9 +73,28 @@ pub fn simd_config_mode() -> text:
     raw
 ```
 
-## Unblock condition
+## Resolution evidence
+
+No spec changes were needed — the existing `simd_config_mode` describe block
+in `test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl` already asserted the
+correct (previously-RED) behavior. With the nil guard applied, `bin/simple
+test test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl --no-cache
+--no-cover-check` shows all three `simd_config_mode` its green:
+
+```
+✓ F6: empty/unset SIMPLE_2D_SIMD defaults to auto
+✓ F6: SIMPLE_2D_SIMD=off is honored verbatim
+✓ F6: an explicit ISA name passes through unmodified
+```
+
+Full-file run: `Results: 45 total, 44 passed, 1 failed` — the sole remaining
+failure (`uses the cross-mode return-array span bridge for backend fills`) is
+unrelated to env handling / `simd_config_mode` and pre-exists this fix; out
+of scope here.
+
+## Unblock condition (met)
 
 Land the nil guard above (or route through `std.env.variables.env_get_or`,
 which already has it), then the two RED its in the `simd_config_mode`
 describe block in `test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl` go
-green with no further spec changes.
+green with no further spec changes. Done.
