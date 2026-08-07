@@ -185,31 +185,35 @@ describe "unavailable_reason names the honest gap for both branches":
         assert_contains(backend.unavailable_reason(), "qemu_only")
 
     it "unavailable_reason names the unimplemented venus session and open board gap when the render node is present":
-        step("Use a plain, always-present file to reach the node-present branch honestly (container-portable)")
-        val backend = VulkanCompositorBackend.create_with_render_node(10, 10, "/etc/hostname")
+        step("Use a real character device (/dev/null, always present on Linux/container hosts) to reach the node-present branch honestly and portably")
+        val backend = VulkanCompositorBackend.create_with_render_node(10, 10, "/dev/null")
         assert_true(backend.device_node_present)
         assert_contains(backend.unavailable_reason(), "vulkan_venus_session_not_implemented")
         assert_contains(backend.unavailable_reason(), "qemu_only")
         assert_contains(backend.unavailable_reason(), "board_gap_open")
 
-describe "detect_virtio_gpu_device is a plain filesystem existence probe (KNOWN LIMITATION, tracked)":
-    """The implementation's own docstring is explicit that this is NOT a
-    device-type check: any path that exists on disk reports true, including
-    a plain non-device file. This spec pins that DOCUMENTED, REAL behavior --
-    it does not invent a stricter expectation the code does not implement.
-    But this is a genuine fail-open risk, not a non-issue: because
-    `device_node_present` (and therefore `unavailable_reason()`'s branch
-    selection) is derived directly from this probe, pointing it at an
-    arbitrary existing non-device file makes the backend report
-    `vulkan_venus_session_not_implemented` (node-present branch) instead of
-    the truthful `no_drm_render_node` -- a misrouted honesty-gate reason.
-    Tracked, not silently accepted: see
-    doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md."""
+describe "detect_virtio_gpu_device requires a real device node, not just an existing path (fixed 2026-08-07)":
+    """Previously this probe was a bare `file_exists` call: it reported
+    `true` for ANY existing path, including a plain regular file, which
+    misrouted `unavailable_reason()`'s branch selection (see
+    doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md).
+    The fix checks `stat` mode bits (`test -c`) so only a character device
+    -- the shape every DRM render node has -- passes. A plain file that
+    merely exists on disk must now report false."""
 
-    it "reports false for a missing path and true for an existing plain file (documented limitation, tracked as a bug)":
+    it "reports false for a missing path":
         assert_false(detect_virtio_gpu_device("/nonexistent/render-node-for-spec"))
-        step("A plain, non-device file still exists on disk, so the probe honestly reports true per its own docstring -- a filesystem check, not a device-type check. See the bug doc for the fail-open consequence.")
-        assert_true(detect_virtio_gpu_device("/etc/hostname"))
+
+    it "reports false for an existing plain (non-device) file":
+        step("A regular file exists on disk but is not a character device, so the probe now correctly rejects it -- this is the exact case the bug doc filed")
+        assert_false(detect_virtio_gpu_device("/etc/hostname"))
+
+    it "reports false for an existing directory":
+        assert_false(detect_virtio_gpu_device("/tmp"))
+
+    it "reports true for a real character device (environment-dependent path, /dev/null is portable)":
+        step("/dev/null is a character device on every Linux/container host this suite runs on -- it exercises the positive branch without depending on real GPU hardware. A real DRM render node (e.g. /dev/dri/renderD128) is host-hardware-dependent and not asserted here.")
+        assert_true(detect_virtio_gpu_device("/dev/null"))
 
 describe "sabotage test: the honesty gate itself is verified":
     """If `is_available()` were mutated to return `true` (the exact failure

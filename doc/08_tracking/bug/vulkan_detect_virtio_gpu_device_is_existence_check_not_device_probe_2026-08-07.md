@@ -1,7 +1,8 @@
 # `detect_virtio_gpu_device` is a plain existence check, not a device-type probe — misroutes `unavailable_reason()` on any existing non-device file
 
-**Status:** Open
+**Status:** Resolved
 **Filed:** 2026-08-07
+**Resolved:** 2026-08-07
 **Component:** `src/os/compositor/vulkan_compositor_backend.spl`
 **Found by:** V1 unit (`doc/03_plan/ui/testing/render_2d_vulkan_functional_coverage_plan_2026-08-07.md`)
 
@@ -69,3 +70,39 @@ Either:
 
 Not scheduled as part of V1 (V1 is spec-closure only, source only gets the
 minimal trait-conformance `report_damage` addition it needed to compile).
+
+## Resolution (2026-08-07)
+
+Took unblock option 1: `detect_virtio_gpu_device` (`src/os/compositor/vulkan_compositor_backend.spl`)
+now checks `stat` mode bits via `shell_bool("test -c '{render_node}'")`
+instead of a bare `file_exists`. `test -c` is true only for a character
+device — the shape every DRM render node has — so a plain regular file or a
+directory that merely exists on disk is now correctly rejected. Empty path
+short-circuits to `false`. The `file_exists` import was removed (no longer
+used); `shell_bool` is imported from `std.io_runtime` instead.
+
+`test/01_unit/os/compositor/vulkan_compositor_backend_spec.spl` updated:
+- The `"detect_virtio_gpu_device is a plain filesystem existence probe
+  (KNOWN LIMITATION, tracked)"` describe block is replaced with
+  `"detect_virtio_gpu_device requires a real device node, not just an
+  existing path (fixed 2026-08-07)"`, asserting `false` for a missing path,
+  an existing plain file (`/etc/hostname` — the exact case this bug
+  reported), and an existing directory (`/tmp`); and `true` for a real
+  character device (`/dev/null`, chosen because it is present on every
+  Linux/container host this suite runs on, unlike a real DRM render node
+  which is hardware-dependent and not asserted here).
+- `"unavailable_reason names the unimplemented venus session and open board
+  gap when the render node is present"` now points at `/dev/null` instead
+  of `/etc/hostname` to reach the node-present branch, since a plain file
+  no longer does.
+
+Verified with `bin/simple test test/01_unit/os/compositor/vulkan_compositor_backend_spec.spl`:
+
+```
+Results: 21 total, 21 passed, 0 failed
+```
+
+`unavailable_reason()` no longer misroutes for an arbitrary existing
+non-device file: pointing the constructor at `/etc/hostname` now correctly
+reports the `no_drm_render_node` branch instead of falsely claiming a
+render node was found.

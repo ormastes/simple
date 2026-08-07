@@ -24,15 +24,19 @@
 #     / `last_rejection_reason()` so a spec (or a future caller) can observe
 #     that nothing was drawn. It never silently delegates to another backend.
 #   * The ONE real, verifiable piece of behavior is
-#     `detect_virtio_gpu_device()`: a plain filesystem check for a DRM render
-#     node. That proves a render node exists — it proves NOTHING about
+#     `detect_virtio_gpu_device()`: a filesystem check that the path exists
+#     AND is a character device (stat mode bits), the DRM render-node shape.
+#     That proves a device node exists — it proves NOTHING about
 #     venus/Vulkan capset support, and QEMU-side venus is itself unproven on
 #     the research host (`doc/08_tracking/bug/simpleos_vulkan_board_gap_venus_is_qemu_only_2026-08-06.md`).
-#     No board path exists for virtio-gpu at all (same doc).
+#     No board path exists for virtio-gpu at all (same doc). Fixed
+#     2026-08-07 (`doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md`):
+#     it previously reported `true` for ANY existing path, including a plain
+#     regular file, which is not a device probe at all.
 #
 # MDSOC: feature dimension, compositor layer
 
-use std.io_runtime.{file_exists}
+use std.io_runtime.{shell_bool}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 
 ## Default DRM render node checked for virtio-gpu/any-GPU device presence.
@@ -40,13 +44,19 @@ use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapabl
 pub val VULKAN_VENUS_DEFAULT_RENDER_NODE: text = "/dev/dri/renderD128"
 
 pub fn detect_virtio_gpu_device(render_node: text) -> bool:
-    """REAL, VERIFIABLE capability probe: does a DRM render node exist at
-    this path on disk? This is the only claim this file is willing to make
-    about hardware. It does NOT mean virtio-gpu specifically (any DRM render
-    node passes), and it does NOT mean venus/Vulkan capset support -- those
+    """REAL, VERIFIABLE capability probe: does a character device exist at
+    this path on disk? A DRM render node is always a character device, so
+    checking `stat` mode bits (via `test -c`) rejects plain files and
+    directories that merely happen to exist -- unlike a bare existence
+    check, which cannot tell a device node from `/etc/hostname`. This is
+    the only claim this file is willing to make about hardware. It does NOT
+    mean virtio-gpu specifically (any character device passes, e.g.
+    /dev/null), and it does NOT mean venus/Vulkan capset support -- those
     require protocol negotiation this file does not implement. Callers must
     not read a `true` result as "Vulkan works"."""
-    file_exists(render_node)
+    if render_node == "":
+        return false
+    shell_bool("test -c '{render_node}'")
 
 pub class VulkanCompositorBackend:
     w: i32
