@@ -40,13 +40,47 @@ verbatim into LLVM inline asm, where the integrated assembler chokes on `{`.
 Five files were written against an imagined Rust-`asm!`-style syntax that this
 language never had, using the template half without the operand half.
 
-**Verified working, for reference** — this compiles, links, and runs (rc=0):
+## Root cause C — `out(reg)` bindings compile and are then SILENTLY DROPPED
+
+**Do not "fix" the remaining files by rewriting them to the bound form.** The
+bound form parses, compiles, links, and runs — and never writes its outputs back.
+
+Initially the bound form looked correct because it built at rc=0. That test was
+vacuous: it checked compilation, not binding. Checking the *value* shows the
+output operand is discarded:
 
 ```
-fn b_call(op: i64) -> i64:
-    var result: i64 = 0
-    asm volatile("movq $1, $0", result = out(reg) result, op = in(reg) op)
-    result
+fn asm_copy(src: i64) -> i64:
+    var dst: i64 = 0
+    asm volatile("movq $1, $0", dst = out(reg) dst, src = in(reg) src)
+    dst                          # returns 0, expected 7
+
+fn asm_const() -> i64:
+    var dst: i64 = 0
+    asm volatile("movq $$42, $0", dst = out(reg) dst)
+    dst                          # returns 0, expected 42
+```
+
+Both build at rc=0 and both return `0`. A constant load that cannot fail still
+returns zero, so this is the output path, not operand numbering or syntax.
+
+Consequence: **inline assembly is currently non-functional for any
+value-producing use, and it fails silently.** Nothing diagnoses it — no warning,
+no error, just zeros. A `rdtsc` rewritten to the bound form compiles cleanly and
+reports a timestamp of 0 forever.
+
+This was caught while evaluating whether to rewrite `timer.spl` /
+`topology.spl`. Verified there too: `read_tsc()` returned `tsc1=0 tsc2=0`
+(non-increasing) and `cpuid_leaf(0,0)` returned max-leaf `0`. Landing that
+rewrite would have put silently-zero TSC and CPUID into the kernel while looking
+green. Those two files are therefore left with their (loud, obvious) placeholder
+breakage rather than converted to quiet, plausible wrongness.
+
+Explicit register constraints, which `rdtsc` / `cpuid` actually need, are not
+supported either — `out("eax")` fails to parse:
+
+```
+parse: Unexpected token: expected identifier, found FString([Literal("eax")])
 ```
 
 ## Root cause B — `@cfg("target_arch", ...)` parses but gates nothing
@@ -145,8 +179,13 @@ fixing one file only moved the error to the next.
   Fixing this is the prerequisite for restoring the real semihosting traps.
 - **`asm match:` does not parse in stage2** despite being spec'd and having HIR /
   MIR representations.
-- **`timer.spl` / `topology.spl`** — 8 placeholder lines, mechanical rewrite to
-  the bound form.
+- **`out(reg)` write-back is silently dropped** (root cause C). This is the most
+  serious of the three: inline asm is non-functional for any value-producing use
+  and reports nothing. It must be fixed BEFORE any file is converted to the bound
+  form, otherwise the conversion trades a loud assembler error for a silent zero.
+- **`timer.spl` / `topology.spl`** — 8 placeholder lines. Blocked on root cause C;
+  they also need explicit register constraints (`rdtsc` writes EDX:EAX, `cpuid`
+  clobbers RBX), which do not parse today. Left loudly broken on purpose.
 - **Diagnostic gap.** The compiler silently accepts an `asm` template containing
   `{ident}` with an empty constraint list and lets LLVM report it three phases
   later, against `<inline asm>` with no Simple file or line. It should error at
