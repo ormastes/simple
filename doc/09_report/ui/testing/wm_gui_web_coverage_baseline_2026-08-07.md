@@ -704,3 +704,66 @@ origin/main -- <path>` was empty again afterward.
 ### Disk
 
 `df -h /`: 238G free before, 238G free after (no cargo/bootstrap run).
+
+## `browser_engine/layout.spl` line-coverage closure — 2026-08-07 (session N+2)
+
+**Target:** `src/lib/gc_async_mut/gpu/browser_engine/layout.spl` (64 executable
+lines per the tool's own line count; not to be confused with the *renamed*
+`simple_web_html_layout_renderer_layout.spl` from the U4.4 table above, a
+different file with a similar name).
+
+**Note on the stated 57% starting point:** grepping this entire doc for
+`layout.spl` alongside a percentage found no prior `57%` entry for this file —
+the only pre-existing number for it is the U1.2 table's `0% (0/64 lines)`,
+recorded when the three specs that reference it (`ifc_linebox_spec.spl`,
+`margin_collapse_spec.spl`, `table_layout_spec.spl`) all failed every example
+before executing any layout.spl code. Re-measured fresh in this unit instead
+of trusting the unverified 57% figure (see repo memory: measurement claims get
+verified against origin, not carried forward as given).
+
+**Baseline (re-measured this unit):** the only spec targeting this file that
+currently passes, `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_spec.spl`,
+gives:
+```
+Results: 1 total, 1 passed, 0 failed
+coverage: src/lib/gc_async_mut/gpu/browser_engine/layout.spl 35% (23/64 lines)
+```
+The other three specs referencing this file (`ifc_linebox_spec.spl`,
+`margin_collapse_spec.spl`, `table_layout_spec.spl`, plus
+`anonymous_block_spec.spl`) still fail all their examples for reasons
+unrelated to coverage instrumentation (pre-existing, out of scope, matches the
+U1.2 finding above); `browser_renderer_hit_test_events_spec.spl` timed out at
+120s and was not used. Rolling up baseline + these four failing runs'
+artifacts via `bin/simple spl-coverage rollup` raises the *floor* only
+marginally, to 24/64 unique lines (37.5%) — confirming these failing specs
+contribute almost nothing to layout.spl coverage.
+
+**New spec:** `test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_coverage_closure_spec.spl`
+(new file, 13 examples, real `assert_true`/`assert_false`/`assert_equal`
+assertions) targets the paths `layout_spec.spl` doesn't exercise:
+`layout_to_scene`/`paint_box` paint-command emission (background fill,
+border stroke, text draw, and child recursion, plus the no-background
+negative case), the `layout_get_x`/`_y`/`_width`/`_node` accessors,
+`hit_test`/`hit_test_anchor`/`first_anchor_box` tree walks including their
+nil/miss paths, and the `layout_flex`/`layout_text` passthrough stubs.
+
+**After (this spec alone):**
+```
+Results: 13 total, 13 passed, 0 failed
+coverage: src/lib/gc_async_mut/gpu/browser_engine/layout.spl 96% (62/64 lines)
+```
+
+**After (rolled up with the pre-existing `layout_spec.spl`):**
+`bin/simple spl-coverage rollup --file <layout_spec artifact> --file <closure
+spec artifact>` merges to 63 of 64 unique lines hit (98%) — one line remains
+outside either spec's exercised paths; not investigated further as both specs
+individually already clear the reported target range.
+
+**Line delta:** 35% (23/64) -> 96% (62/64) solo, 98% (63/64) combined with the
+pre-existing spec. Both runs are `Results: N total, N passed, 0 failed` — no
+faked coverage, no defect filed (all exercised paths behaved as documented; no
+uncovered path was found unreachable or defective).
+
+Artifacts: `/tmp/layoutcov/baseline.sdn` (layout_spec.spl solo),
+`/tmp/layoutcov/closure.sdn` (new spec solo), rollup dump cross-checked by
+`browser_engine/layout.spl, <line>, <hit_count>` row count.
