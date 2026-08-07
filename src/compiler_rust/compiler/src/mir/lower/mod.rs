@@ -114,13 +114,30 @@ pub fn lower_to_mir_full(
     di_config: Option<crate::di::DiConfig>,
     coverage_enabled: bool,
 ) -> MirLowerResult<MirModule> {
-    MirLowerer::with_contract_mode(contract_mode)
+    lower_to_mir_full_with_file(hir, contract_mode, di_config, coverage_enabled, None)
+}
+
+/// Lower HIR to MIR with all options, additionally attaching the originating
+/// source file so coverage `DecisionProbe`/`ConditionProbe` instructions carry
+/// real file identity instead of an empty string. `file` is `None` when the
+/// caller has no source file to attribute (e.g. context-free/bootstrap paths).
+pub fn lower_to_mir_full_with_file(
+    hir: &HirModule,
+    contract_mode: ContractMode,
+    di_config: Option<crate::di::DiConfig>,
+    coverage_enabled: bool,
+    file: Option<String>,
+) -> MirLowerResult<MirModule> {
+    let mut lowerer = MirLowerer::with_contract_mode(contract_mode)
         .with_di_config(di_config)
         .with_coverage(coverage_enabled)
         .with_refined_types(&hir.refined_types)
         .with_type_registry(&hir.types)
-        .with_trait_infos(&hir.trait_infos)
-        .lower_module(hir)
+        .with_trait_infos(&hir.trait_infos);
+    if let Some(file) = file {
+        lowerer = lowerer.with_file(file);
+    }
+    lowerer.lower_module(hir)
 }
 
 /// Lower HIR to MIR with all options, including the active DI profile.

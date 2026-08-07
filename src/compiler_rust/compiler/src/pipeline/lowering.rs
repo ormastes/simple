@@ -1643,7 +1643,16 @@ impl CompilerPipeline {
 
     /// Process HIR module through architecture checks, verification, and MIR lowering.
     /// This is the common logic shared by both type_check_and_lower variants.
-    fn process_hir_to_mir(&mut self, mut hir_module: hir::HirModule) -> Result<mir::MirModule, CompileError> {
+    ///
+    /// `source_file`, when known, is threaded into MIR lowering so coverage
+    /// `DecisionProbe`/`ConditionProbe` instructions carry a real file identity
+    /// instead of an empty string. It is `None` for the context-free variant,
+    /// which has no source file to attribute probes to.
+    fn process_hir_to_mir(
+        &mut self,
+        mut hir_module: hir::HirModule,
+        source_file: Option<&Path>,
+    ) -> Result<mir::MirModule, CompileError> {
         // Emit HIR if requested (LLM-friendly #886)
         if let Some(path) = &self.emit_hir {
             crate::ir_export::export_hir(&hir_module, path.as_deref()).map_err(|e| {
@@ -1698,8 +1707,15 @@ impl CompilerPipeline {
         // Lower HIR to MIR with contract mode, DI config, and coverage (#674)
         let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
         let coverage_enabled = self.coverage_enabled || crate::coverage::is_coverage_enabled();
-        let mut mir_module = mir::lower_to_mir_full(&hir_module, self.contract_mode, di_config, coverage_enabled)
-            .map_err(|e| crate::error::factory::mir_lowering_failed(&e))?;
+        let file_for_coverage = source_file.map(|p| p.display().to_string());
+        let mut mir_module = mir::lower_to_mir_full_with_file(
+            &hir_module,
+            self.contract_mode,
+            di_config,
+            coverage_enabled,
+            file_for_coverage,
+        )
+        .map_err(|e| crate::error::factory::mir_lowering_failed(&e))?;
 
         // Ghost erasure pass: remove ghost variables before codegen
         let (ghost_stats, ghost_errors) = mir::erase_ghost_from_module(&mut mir_module);
@@ -1756,8 +1772,9 @@ impl CompilerPipeline {
         // Lower AST to HIR (using lenient mode for bootstrap)
         let hir_module = hir::lower_lenient(ast_module).map_err(convert_lower_error)?;
 
-        // Process HIR to MIR using common logic
-        self.process_hir_to_mir(hir_module)
+        // Process HIR to MIR using common logic. No source file is known in this
+        // context-free variant, so coverage probes lowered here keep an empty file.
+        self.process_hir_to_mir(hir_module, None)
     }
 
     /// Type check and lower AST to MIR with module resolution support.
@@ -1799,7 +1816,7 @@ impl CompilerPipeline {
             .map_err(convert_lower_error)?;
 
         // Process HIR to MIR using common logic
-        self.process_hir_to_mir(hir_module)
+        self.process_hir_to_mir(hir_module, Some(source_file))
     }
 
     /// Type check and lower AST to MIR with strict memory safety checking.
@@ -1839,7 +1856,7 @@ impl CompilerPipeline {
             .map_err(convert_lower_error)?;
 
         // Process HIR to MIR using common logic
-        self.process_hir_to_mir(hir_module)
+        self.process_hir_to_mir(hir_module, Some(source_file))
     }
 }
 

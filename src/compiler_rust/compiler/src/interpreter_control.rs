@@ -73,7 +73,9 @@ use super::interpreter_call::exec_block_value;
 use super::interpreter_patterns::{is_catch_all_pattern, pattern_matches};
 
 // Import coverage helpers
-use super::coverage_helpers::{decision_id_from_span, is_coverage_enabled, record_decision_coverage_sffi};
+use super::coverage_helpers::{
+    current_coverage_file, decision_id_from_span, is_coverage_enabled, record_decision_coverage_sffi,
+};
 
 /// Handle loop control flow result. Returns Some if we should exit the loop.
 /// `my_label` is this loop's label (if any).
@@ -276,7 +278,7 @@ pub(super) fn exec_if(
         let decision_result = is_condition_present(&if_stmt.condition, &cond_val);
 
         // COVERAGE: Record decision for if statement
-        record_decision_coverage_sffi("<source>", if_stmt.span.line, if_stmt.span.column, decision_result);
+        record_decision_coverage_sffi(&current_coverage_file(), if_stmt.span.line, if_stmt.span.column, decision_result);
 
         if decision_result {
             return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
@@ -314,7 +316,12 @@ pub(super) fn exec_if(
 
             // COVERAGE: Record decision for elif statement
             let elif_decision_id = if_stmt.span.line as u32 + idx as u32;
-            record_decision_coverage_sffi("<source>", if_stmt.span.line + idx, if_stmt.span.column, elif_decision);
+            record_decision_coverage_sffi(
+                &current_coverage_file(),
+                if_stmt.span.line + idx,
+                if_stmt.span.column,
+                elif_decision,
+            );
 
             if elif_decision {
                 return exec_block(block, env, functions, classes, enums, impl_methods);
@@ -441,7 +448,7 @@ pub(super) fn exec_while(
                     let cond_val = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
                     let decision_result = is_condition_present(&while_stmt.condition, &cond_val);
                     record_decision_coverage_sffi(
-                        "<source>",
+                        &current_coverage_file(),
                         while_stmt.span.line,
                         while_stmt.span.column,
                         decision_result,
@@ -482,7 +489,7 @@ pub(super) fn exec_while(
             };
 
             record_decision_coverage_sffi(
-                "<source>",
+                &current_coverage_file(),
                 while_stmt.span.line,
                 while_stmt.span.column,
                 decision_result,
@@ -514,7 +521,7 @@ pub(super) fn exec_while(
 
         // COVERAGE: Record decision for while condition on each iteration
         record_decision_coverage_sffi(
-            "<source>",
+            &current_coverage_file(),
             while_stmt.span.line,
             while_stmt.span.column,
             decision_result,
@@ -4739,7 +4746,7 @@ pub(crate) fn exec_match_core(
 
             // COVERAGE: Record that this match arm was taken
             record_decision_coverage_sffi(
-                "<source>",
+                &current_coverage_file(),
                 match_stmt.span.line + arm_index,
                 match_stmt.span.column,
                 true, // We matched an arm

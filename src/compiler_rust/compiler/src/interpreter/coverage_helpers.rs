@@ -65,13 +65,24 @@ pub fn extract_expr_location(_expr: &Expr) -> Option<(String, usize, usize)> {
 /// the `"<entry>"` sentinel already used by `FUNCTION_MODULE_OWNER` for the
 /// root script, rather than to a name that could collide with a real file.
 fn span_to_location(span: &Span) -> (String, usize, usize) {
-    let file = crate::interpreter::CURRENT_EXEC_MODULE
-        .with(|cell| cell.borrow().clone())
-        .map(|owner| owner.to_string())
-        .unwrap_or_else(|| "<entry>".to_string());
+    let file = current_coverage_file();
     let line = span.line;
     let column = span.column;
     (file, line, column)
+}
+
+/// Resolve the file owning the currently-executing function body, for coverage
+/// call sites that already have a real line/column (from a statement's own
+/// `Span`) but historically hardcoded the file to the `"<source>"` placeholder.
+///
+/// Shares the same `CURRENT_EXEC_MODULE` thread-local as `span_to_location`
+/// (see its doc comment for why file can't come from `Span` itself and why
+/// pooling every file under one placeholder previously inflated coverage).
+pub fn current_coverage_file() -> String {
+    crate::interpreter::CURRENT_EXEC_MODULE
+        .with(|cell| cell.borrow().clone())
+        .map(|owner| owner.to_string())
+        .unwrap_or_else(|| "<entry>".to_string())
 }
 
 /// Generate a deterministic decision ID from location info
