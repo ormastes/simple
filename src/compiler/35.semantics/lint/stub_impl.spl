@@ -6,6 +6,8 @@
 # STUB001: Function with params returns trivial value (params unused)   WARNING
 # STUB002: Zero-param function returns default value (possible stub)    INFO
 # STUB003: Function body is an explicit placeholder marker              ERROR
+#          (also covers an empty concrete body under the `critical`
+#          assurance profile — see `_empty_body_is_error`, WP-8)
 #
 # Trivial "default" values: 0, "", false, nil, [], {}, (), Ok(nil)
 #
@@ -13,7 +15,17 @@
 # - extern fn declarations (no body)
 # - Single-expression constant functions returning non-default literals
 #   e.g. fn method_get() -> text: "GET"  or  fn API_KEY() -> i64: 3
-# - Functions with a plain pass marker or _noop_ prefix (already self-documenting)
+# - Functions whose body satisfies the typed NoOp contract (WP-8, aerospace
+#   hardening plan): exactly one `pass_do_nothing("non-empty reason")` call.
+#   This is the ONLY exemption tied to intent — there is no name-based
+#   exemption (`_noop_` prefix) and no "contains a pass marker anywhere"
+#   exemption anymore. A function named `_noop_x` and one named
+#   `helper_noop_x` are treated IDENTICALLY: both are flagged unless their
+#   body is the typed NoOp contract. See `_is_noop_contract_body` below and
+#   flight_rules.spl's placeholder list ("a `_noop_` name without a typed
+#   NoOp contract" is itself a placeholder).
+# - A lone bare `pass` (tag 35) as the WHOLE body — unchanged, out of this
+#   WP's scope (see `_is_bare_pass_body`).
 #
 # Works with the arena-based core AST (integer-tagged nodes).
 
@@ -29,6 +41,19 @@ use compiler.core.ast.{
     decl_get_span, span_is_valid, span_line
 }
 use std.string_core.{char_code}
+use compiler.common.assurance.policy.{strictness_for_profile_name}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+
+# WP-8 (aerospace hardening plan, doc/03_plan/language/assurance/
+# aerospace_hardening_plan_2026-08-07.md): an empty concrete function body
+# used to be silently skipped under EVERY profile — see the removed skip in
+# check_stub_impl. flight_rules.spl lists "an empty body" among the explicit
+# placeholder shapes, so under `critical` it must be a hard error instead of
+# invisible. Severity is routed through the WP-3 canonical policy resolver
+# (strictness_for_profile_name) rather than a hardcoded string compare, same
+# pattern as use_resolution.spl's `_w0407_severity`.
+fn _empty_body_is_error(profile_name: text) -> bool:
+    strictness_for_profile_name(profile_name).at_least(AssuranceStrictness.Critical)
 
 fn stub_expr_get_tag(idx: i64) -> i64:
     expr_get_tag(idx)
@@ -133,7 +158,7 @@ fn int_to_str(n: i64) -> text:
 # Main Entry Point
 # ============================================================================
 
-fn check_stub_impl(decl_indices: [i64]) -> [StubImplWarning]:
+fn check_stub_impl(decl_indices: [i64], profile_name: text = "") -> [StubImplWarning]:
     """Run stub-implementation lint on module declarations.
 
     For each function, checks whether its body is a single trivial expression
@@ -141,6 +166,12 @@ fn check_stub_impl(decl_indices: [i64]) -> [StubImplWarning]:
     If the function has parameters that are never referenced in the body,
     emits STUB001 (WARNING). If the function has no parameters but returns
     a default value, emits STUB002 (INFO).
+
+    `profile_name` is the resolved assurance-profile name (e.g. "critical",
+    "" for the permissive default). It currently decides only whether an
+    empty concrete body is promoted from silently-skipped to STUB003 ERROR
+    (WP-8); default "" preserves the pre-WP-8 behavior for every existing
+    call site that has not been wired to a real resolved profile yet.
     """
     var warnings: [StubImplWarning] = []
 
@@ -157,16 +188,35 @@ fn check_stub_impl(decl_indices: [i64]) -> [StubImplWarning]:
         val decl_span = decl_get_span(idx)
         val warning_line = if span_is_valid(decl_span): span_line(decl_span) else: 0
 
-        # Skip _noop_ prefixed functions (self-documenting stubs)
-        if fn_name.starts_with("_noop_"):
+        # WP-8: name-based exemption removed. The ONLY intent-based exemption
+        # is the typed NoOp contract — a body that is exactly one
+        # `pass_do_nothing("non-empty reason")` call. `_noop_x` and
+        # `helper_noop_x` are therefore treated identically: both fall
+        # through to ordinary trivial-value analysis below unless their body
+        # satisfies the contract.
+        if _is_noop_contract_body(body):
             continue
 
-        # Skip empty bodies (no stmts at all — parsed error or abstract)
+        # An empty body (no statements at all) used to be silently skipped
+        # under every profile. Under `critical` it is promoted to a hard
+        # STUB003 error instead of being invisible; every other profile keeps
+        # the historical silent skip (see `_empty_body_is_error`).
         if body.len() == 0:
+            if _empty_body_is_error(profile_name):
+                warnings.push(StubImplWarning(
+                    code: "STUB003",
+                    severity: "ERROR",
+                    message: "empty function body (no statements) — no implementation present",
+                    hint: "implement the function, or if it is intentionally a permanent no-op use a single pass_do_nothing(\"reason\") body",
+                    fn_name: fn_name,
+                    line: warning_line
+                ))
             continue
 
-        # Whole-body explicit placeholder markers are hard failures unless the
-        # function is intentionally marked as a no-op by name.
+        # Whole-body explicit placeholder markers (pass_todo / pass_dn /
+        # pass_do_nothing with no reason) are hard failures. A
+        # pass_do_nothing body WITH a reason never reaches this point — it
+        # was already exempted above by `_is_noop_contract_body`.
         val placeholder_expr = get_single_placeholder_expr(body)
         if placeholder_expr >= 0:
             warnings.push(StubImplWarning(
@@ -179,8 +229,21 @@ fn check_stub_impl(decl_indices: [i64]) -> [StubImplWarning]:
             ))
             continue
 
-        # Check if body contains a pass marker anywhere
-        if body_has_pass_marker(body):
+        # WP-8: the old "body contains a pass marker ANYWHERE" skip was
+        # removed — it silently exempted any function whose body merely
+        # MENTIONED `pass`/`pass_todo`/`pass_do_nothing`/`pass_dn` somewhere
+        # (e.g. buried in a nested branch), not just a body that WAS one.
+        # What remains is narrower and scoped only to the WHOLE body: a lone
+        # bare `pass` (tag 35, carrying no message) as the entire function
+        # body keeps its pre-WP-8 silent-skip treatment — this is unchanged,
+        # out-of-scope behavior for this WP, not a new exemption; everything
+        # else (pass_todo/pass_dn/unexplained pass_do_nothing -> STUB003
+        # above, explained pass_do_nothing -> the typed NoOp contract above)
+        # IS scoped by WP-8. `body_has_pass_marker`/`stmt_has_pass_marker`/
+        # `expr_has_pass_marker` stay defined and exported below — they are
+        # exercised directly by their own spec coverage, independent of this
+        # lint's exemption path now.
+        if _is_bare_pass_body(body):
             continue
 
         # Extract the single effective expression from the body
@@ -202,7 +265,17 @@ fn check_stub_impl(decl_indices: [i64]) -> [StubImplWarning]:
                     code: "STUB001",
                     severity: "WARNING",
                     message: "trivial " + trivial_kind + " return with " + param_count + " unused param(s)",
-                    hint: "body is just '" + trivial_kind + "' — implement or mark with pass_todo",
+                    # WP-8 self-trigger fix: this hint used to recommend
+                    # `pass_todo` as the fix. `pass_todo` is itself an
+                    # explicit placeholder marker (STUB003, see
+                    # get_single_placeholder_expr) — a function that follows
+                    # this hint literally by making its whole body
+                    # `pass_todo("...")` immediately re-triggers STUB003. The
+                    # hint now recommends `pass_do_nothing`, the typed NoOp
+                    # contract (`_is_noop_contract_body`), which is EXEMPT
+                    # rather than a placeholder, so following it cannot
+                    # self-trigger.
+                    hint: "body is just '" + trivial_kind + "' — implement it, or if intentionally a permanent no-op use a single pass_do_nothing(\"reason\") body (not pass_todo, which is itself flagged as STUB003)",
                     fn_name: fn_name,
                     line: warning_line
                 ))
@@ -265,7 +338,19 @@ fn get_single_trivial_expr(stmts: [i64]) -> i64:
 
 fn get_single_placeholder_expr(stmts: [i64]) -> i64:
     """Return the placeholder expression if the whole function body is only a
-    single explicit placeholder marker. Otherwise return -1."""
+    single explicit placeholder marker: `pass_todo`, `pass_dn`, or a
+    `pass_do_nothing` call with NO reason. Otherwise return -1.
+
+    A `pass_do_nothing("non-empty reason")` body is deliberately NOT included
+    here — it is the typed NoOp contract (`_is_noop_contract_body`) and is
+    exempted earlier in `check_stub_impl`, before this function is ever
+    reached for that body. But a bare `pass_do_nothing()` / `pass_do_nothing`
+    with an EMPTY reason carries none of the contract's evidence (no reason
+    was ever recorded — the parser's REQC001 check for this is only a warn,
+    not an error, so it cannot be relied on to block it), so it falls through
+    to here and is treated the same as any other unexplained placeholder
+    marker. This mirrors the `_noop_`-name rule: an unexplained marker is
+    never a contract any more than a bare name is."""
     if stmts.len() != 1:
         return -1
 
@@ -281,10 +366,67 @@ fn get_single_placeholder_expr(stmts: [i64]) -> i64:
     if e < 0:
         return -1
 
-    if stub_expr_get_tag(e) == 40 or stub_expr_get_tag(e) == 41 or stub_expr_get_tag(e) == 43:
+    val e_tag = stub_expr_get_tag(e)
+    if e_tag == 40 or e_tag == 43:
+        return e
+    if e_tag == 41 and stub_expr_get_str(e) == "":
         return e
 
     -1
+
+# ============================================================================
+# NoOp Contract (WP-8)
+# ============================================================================
+#
+# The ONLY sanctioned way to mark a function as an intentional, permanent
+# no-op is a body that is EXACTLY one `pass_do_nothing("non-empty reason")`
+# call. This replaces both the old name-based exemption (`_noop_` prefix) and
+# the old "any pass marker anywhere in the body" skip — a name is never a
+# contract, and `pass_todo`/`pass_dn`/an unexplained `pass_do_nothing` remain
+# explicit placeholders that require a real implementation or a reviewed
+# waiver (flight_rules.spl lists all of these, plus a `_noop_` name without
+# this contract, as placeholder shapes), not a name or a passing mention deep
+# in a larger body.
+fn _is_noop_contract_body(body: [i64]) -> bool:
+    """True iff `body` is a single statement whose expression is exactly a
+    `pass_do_nothing("non-empty reason")` call (tag 41) — the typed NoOp
+    contract. A non-empty reason is REQUIRED: `pass_do_nothing()` /
+    `pass_do_nothing("")` records no evidence of a deliberate decision and is
+    NOT exempt (see `get_single_placeholder_expr`, which flags it instead) —
+    an empty message is exactly as insufficient as a bare name."""
+    if body.len() != 1:
+        return false
+    val s = body[0]
+    if s < 0:
+        return false
+    val tag = stub_stmt_get_tag(s)
+    if tag != 1 and tag != 5:
+        return false
+    val e = stub_stmt_get_expr(s)
+    if e < 0:
+        return false
+    if stub_expr_get_tag(e) != 41:
+        return false
+    stub_expr_get_str(e) != ""
+
+# A lone bare `pass` (tag 35) as the WHOLE function body — not a typed
+# contract, just the historical (pre-WP-8, and still out of this WP's scope)
+# "this is deliberately empty" shorthand. Narrower than the removed
+# `body_has_pass_marker` skip: only fires when `pass` IS the entire body, not
+# when it merely appears somewhere inside a larger one.
+fn _is_bare_pass_body(body: [i64]) -> bool:
+    if body.len() != 1:
+        return false
+    val s = body[0]
+    if s < 0:
+        return false
+    val tag = stub_stmt_get_tag(s)
+    if tag != 1 and tag != 5:
+        return false
+    val e = stub_stmt_get_expr(s)
+    if e < 0:
+        return false
+    stub_expr_get_tag(e) == 35
 
 # ============================================================================
 # Trivial Expression Classification

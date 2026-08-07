@@ -32,6 +32,27 @@ use compiler.semantics.lint.option_me_call.{check_option_me_call_source}
 
 # File I/O wrapper
 
+# Project the resolved `LintProfile` onto the assurance-policy name text that
+# `compiler.common.assurance.policy.strictness_for_profile_name` (the WP-3
+# canonical resolver) understands, for callers — e.g. check_stub_impl (WP-8)
+# — that take a profile NAME rather than the lint-local enum. `nil` (no
+# profile configured) maps to "", the resolver's own permissive default.
+fn _lint_profile_to_assurance_name(profile: Option<LintProfile>) -> text:
+    match profile:
+        case Some(p):
+            match p:
+                case Critical:
+                    return "critical"
+                case Robust:
+                    return "robust"
+                case Strict:
+                    return "strict"
+                case Moderate:
+                    return "moderate"
+        case nil:
+            return ""
+    ""
+
 fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult]:
     var results = linter.lint_source(path, content)
     if not path.ends_with(".spl"):
@@ -91,6 +112,7 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
     val config = resolve_lint_config(linter.config, path, content)
     val decls = module_get_decls()
     val lines = content.split("\n")
+    val stub_profile_name = _lint_profile_to_assurance_name(config.profile)
     for warning in check_argument_count(decls):
         if not should_keep_lint_result(config, warning.code):
             continue
@@ -120,8 +142,17 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
                 case nil:
                     val _ = 0
         results.push(LintResult.new(path, coll_line, 0, lint))
-    for warning in check_stub_impl(decls):
-        # STUB003 remains the generic source lint so one placeholder emits once.
+    for warning in check_stub_impl(decls, stub_profile_name):
+        # The line-scan text reimplementation in lint_checks.spl (`pass_todo`
+        # substring scan) remains the ONE live STUB003 source for this CLI
+        # path — see flight_rules.spl's note that the live STUB003 emitter is
+        # the text reimplementation, not this AST checker. This filter is
+        # what keeps it that way: it drops every STUB003 this AST pass would
+        # otherwise also emit (explicit placeholder bodies AND, since WP-8,
+        # the empty-body-under-critical case), so a placeholder still emits
+        # exactly once, not twice. See
+        # test/01_unit/compiler/lint/lint_cli_stub_impl_contract_check.spl
+        # (`cli_stub003_count != 1`) for the regression probe.
         if warning.code != "STUB001" and warning.code != "STUB002":
             continue
         if not should_keep_lint_result(config, warning.code):

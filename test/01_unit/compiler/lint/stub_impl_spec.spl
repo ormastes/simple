@@ -33,7 +33,7 @@ use compiler.core.ast_expr.{
     expr_int_lit, expr_string_lit, expr_bool_lit, expr_nil_lit,
     expr_array_lit, expr_unit, expr_dict_lit, expr_ident,
     expr_return_expr, expr_call, expr_pass,
-    expr_pass_todo, expr_pass_do_nothing, expr_binary, expr_method_call
+    expr_pass_todo, expr_pass_do_nothing, expr_pass_dn, expr_binary, expr_method_call
 }
 use compiler.core.ast_stmt.{
     stmt_expr_stmt, stmt_return_stmt
@@ -360,7 +360,7 @@ describe "Stub Impl Lint — No Warning Cases":
             val ws = check_stub_impl([d])
             expect(ws.len()).to_equal(0)
 
-    context "when function has noop marker":
+    context "when function body is bare pass (unchanged, out of WP-8 scope)":
         it "does NOT warn":
             ast_reset()
             val e = expr_pass(0)
@@ -368,11 +368,19 @@ describe "Stub Impl Lint — No Warning Cases":
             val ws = check_stub_impl([d])
             expect(ws.len()).to_equal(0)
 
-    context "when function body is explicit pass_do_nothing placeholder":
-        it "emits STUB003":
+    context "when function body is the typed NoOp contract (pass_do_nothing with a reason)":
+        it "does NOT warn — pass_do_nothing is the sanctioned no-op marker, not a placeholder":
             ast_reset()
             val e = expr_pass_do_nothing("intentional", 0)
             val d = make_fn_with_body("noop_handler", ["event"], e)
+            val ws = check_stub_impl([d])
+            expect(ws.len()).to_equal(0)
+
+    context "when function body is pass_do_nothing with NO reason (empty message)":
+        it "emits STUB003 — an unexplained marker is never a contract, same as a bare name":
+            ast_reset()
+            val e = expr_pass_do_nothing("", 0)
+            val d = make_fn_with_body("unexplained_noop", ["event"], e)
             val ws = check_stub_impl([d])
             val stub003 = find_warnings_by_code(ws, "STUB003")
             expect(stub003.len()).to_equal(1)
@@ -386,12 +394,103 @@ describe "Stub Impl Lint — No Warning Cases":
             val stub003 = find_warnings_by_code(ws, "STUB003")
             expect(stub003.len()).to_equal(1)
 
-    context "when function name starts with _noop_":
+    context "when function body is explicit pass_dn placeholder":
+        it "emits STUB003":
+            ast_reset()
+            val placeholder = expr_pass_dn("shorthand marker", 0)
+            val d = make_fn_with_body("still_dn", ["value"], placeholder)
+            val ws = check_stub_impl([d])
+            val stub003 = find_warnings_by_code(ws, "STUB003")
+            expect(stub003.len()).to_equal(1)
+
+# ============================================================================
+# Test Group 3b: NoOp Contract — name is never sufficient (WP-8)
+# ============================================================================
+#
+# Regression coverage for the aerospace hardening plan WP-8: the `_noop_`
+# name prefix used to be a self-documenting exemption on its own. It is not
+# anymore — a `_noop_x` function and a `helper_noop_x` function (same body
+# shape, unrelated names) must be treated IDENTICALLY, based only on whether
+# the body satisfies the typed NoOp contract.
+
+describe "Stub Impl Lint — NoOp contract is name-independent (WP-8)":
+    """
+    ## Typed NoOp Contract
+
+    A name is never sufficient to exempt a function from stub detection —
+    only a body that is exactly one `pass_do_nothing("reason")` call is a
+    genuine, typed no-op. `_noop_x` and `helper_noop_x` must behave
+    identically for the same body shape.
+    """
+
+    context "both a `_noop_`-prefixed and an unrelated-named function with a trivial unused-param body":
+        it "flags both identically with STUB001 — the name grants no exemption":
+            ast_reset()
+            val e1 = expr_int_lit(0, 0)
+            val d1 = make_fn_with_body("_noop_load", ["path"], e1)
+            val ws1 = check_stub_impl([d1])
+            val stub001_a = find_warnings_by_code(ws1, "STUB001")
+            expect(stub001_a.len()).to_equal(1)
+
+            ast_reset()
+            val e2 = expr_int_lit(0, 0)
+            val d2 = make_fn_with_body("helper_noop_load", ["path"], e2)
+            val ws2 = check_stub_impl([d2])
+            val stub001_b = find_warnings_by_code(ws2, "STUB001")
+            expect(stub001_b.len()).to_equal(1)
+
+    context "both a `_noop_`-prefixed and an unrelated-named function with the typed NoOp contract body":
+        it "exempts both identically — the contract, not the name, decides":
+            ast_reset()
+            val e1 = expr_pass_do_nothing("deliberately does nothing", 0)
+            val d1 = make_fn_with_body("_noop_flush", ["buf"], e1)
+            val ws1 = check_stub_impl([d1])
+            expect(ws1.len()).to_equal(0)
+
+            ast_reset()
+            val e2 = expr_pass_do_nothing("deliberately does nothing", 0)
+            val d2 = make_fn_with_body("helper_noop_flush", ["buf"], e2)
+            val ws2 = check_stub_impl([d2])
+            expect(ws2.len()).to_equal(0)
+
+# ============================================================================
+# Test Group 3c: Empty concrete body under `critical` (WP-8)
+# ============================================================================
+
+describe "Stub Impl Lint — empty concrete body severity (WP-8)":
+    """
+    ## Empty Body Under `critical`
+
+    An empty concrete function body (no statements at all) used to be
+    silently skipped under every profile. Under `critical` it must be a hard
+    STUB003 ERROR instead of invisible; every other profile keeps the
+    pre-WP-8 silent skip so this is not a repo-wide regression.
+    """
+
+    context "when body has zero statements and profile is critical":
+        it "emits STUB003 ERROR":
+            ast_reset()
+            var param_types: [i64] = [0]
+            val d = decl_fn("empty_body_fn", ["x"], param_types, 0, [], 0, [], 0)
+            val ws = check_stub_impl([d], "critical")
+            val stub003 = find_warnings_by_code(ws, "STUB003")
+            expect(stub003.len()).to_equal(1)
+            expect(stub003[0].severity).to_equal("ERROR")
+
+    context "when body has zero statements and no profile is resolved (default)":
+        it "does NOT warn — matches the pre-WP-8 behavior":
+            ast_reset()
+            var param_types: [i64] = [0]
+            val d = decl_fn("empty_body_fn2", ["x"], param_types, 0, [], 0, [], 0)
+            val ws = check_stub_impl([d])
+            expect(ws.len()).to_equal(0)
+
+    context "when body has zero statements and profile is moderate":
         it "does NOT warn":
             ast_reset()
-            val e = expr_int_lit(0, 0)
-            val d = make_fn_with_body("_noop_load", ["path"], e)
-            val ws = check_stub_impl([d])
+            var param_types: [i64] = [0]
+            val d = decl_fn("empty_body_fn3", ["x"], param_types, 0, [], 0, [], 0)
+            val ws = check_stub_impl([d], "moderate")
             expect(ws.len()).to_equal(0)
 
     context "when function has multi-statement body":
