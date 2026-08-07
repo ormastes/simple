@@ -143,6 +143,150 @@ B1-B6 CUDA, C2-C3 Vulkan, D1-D4 SVM-G, E1-E2 docs/CI) not started.
   reporting cadence); resolved it (kept side #2, "200k") since it blocked
   `bin/simple test` for every spec in the repo, not just this task's files.
 
+### B2 — landed (host-independent logic fully green; live dispatch blocked by a deployed-binary environment issue, filed)
+- New `src/lib/gc_async_mut/gpu_lane/cuda_jit_lane_executor.spl`
+  (`CudaJitLaneExecutor`): `GpuLaneExecutor` for `jit(remote(cuda(...)))` per
+  design §5.1. `lower_vector_add_ptx()` lowers a hand-written `@gpu("cuda")`
+  vector-add kernel through the SAME frontend -> HIR -> MIR -> `CudaBackend`
+  pipeline `test/02_integration/rendering/cuda_compiler_ptx_live_spec.spl`
+  already uses (the "existing PTX emitter" — no PTX text hand-authored for
+  the actual artifact). `validate_ptx_artifact(ptx, expected_entry)` is a
+  pure, host-independent structural pre-flight check (SHA-256 via
+  `std.common.crypto.sha256.sha256_text`, `.target`/entry parsing) —
+  every row of the ten-row CUDA validation table
+  (`doc/03_plan/sys_test/cuda_host_validation_2026-07-11.md`) maps to one
+  of its `Err` branches and therefore FAILs deterministically on ANY host,
+  never SKIPs. `record_artifact_in_lane_log` writes the PTX SHA-256/
+  `.target`/entries into a host-side GMB-1 `MailboxArena` LOG ring (A2) —
+  kept separate from CUDA device memory so this bookkeeping never depends
+  on a live device. `CudaJitLaneExecutor.prepare/run_program/teardown` wrap
+  B1's `CudaLaneSession`: uploads vector-add operands into the guarded
+  device arena, launches/syncs via B1's `launch_once`, reads back, compares
+  against a CPU oracle, and on success appends a GMB-1 RECORD plus the
+  GMB-1 EXIT sentinel `0xCAFE0000` into the lane log; on any failure it
+  appends a failing RECORD and returns `Err` (never silently swallowed).
+- New `test/03_system/gpu_lane/cuda_jit_hello_spec.spl`: ten-row validation
+  table (10 examples, each asserting the specific `Err` reason — includes
+  the required malformed-PTX and bad-entry rows plus 8 more: missing
+  `.address_size`, missing `.target`, garbage/short `sm_` suffix (x2), no
+  entries, duplicate entries, empty expected-entry), 1 control example
+  (valid PTX accepted), 2 lane-log recording examples, and 1 live
+  vector-add dispatch example (SKIP-clean via `probe().starts_with("skip:")`
+  — the same contract B1's own spec established — on hosts without a live
+  CUDA device; on a live host asserts readback + expected RECORD
+  (seq=0,pass=true,value=8) + sentinel `0xCAFE0000`).
+- Verify: `bin/simple test test/03_system/gpu_lane/cuda_jit_hello_spec.spl`
+  → `Results: 14 total, 13 passed, 1 failed`. All 10 validation-table rows
+  PASS, both lane-log examples PASS, the control PASS; the 1 failure is the
+  live-dispatch example, blocked before it can even reach the
+  probe/skip branch — see blocker below, filed separately (not routed
+  around, not weakened).
+- Sabotage probe: removed the `entries.contains(expected_entry)` check in
+  `validate_ptx_artifact` (replaced with `if false: return Err(...)`) →
+  rows 8 ("nonexistent entry") and 10 ("empty expected entry") went RED
+  (`Results: 14 total, 11 passed, 3 failed`; the live-dispatch example was
+  already failing independently, so 3 total), all other rows/examples
+  unaffected; reverted → back to `13 passed, 1 failed` baseline. Confirms
+  the ten-row table actually exercises the code path it claims to, not a
+  vacuous pass.
+- Lint: `bin/simple lint src/lib/gc_async_mut/gpu_lane/cuda_jit_lane_executor.spl
+  test/03_system/gpu_lane/cuda_jit_hello_spec.spl` → 0 errors (2 + 1
+  warnings, both pre-existing-style advisories: `.contains()` on a
+  10-element array in a loop, a `spipe_missing_docstrings` hint that was
+  fixed).
+- **Blocker (filed, not routed around):**
+  `doc/08_tracking/bug/cuda_lane_session_create_unresolved_across_module_boundary_2026-08-07.md`
+  — `CudaLaneSession.create()` (B1's own static factory) fails to resolve
+  from ANY calling module on this host right now, under both engines
+  `bin/simple` dispatches to (`semantic: variable CudaLaneSession not
+  found` under `test`; `Runtime error: Function 'create' not found` under
+  `run`, via a 4-line minimal repro). Strong evidence this is a
+  deployed-binary/environment issue rather than a B1/B2 code defect: B1's
+  own pre-existing, previously-landed spec
+  (`test/02_integration/gpu_lane/cuda_lane_session_spec.spl`) now ALSO
+  fails, but with a completely different, unrelated error (`no main
+  function... no examples executed`); and `bin/simple --version` currently
+  prints the seed-only warning banner (`bin/simple` is resolving to the
+  Rust seed, not the mandated pure-Simple self-hosted binary — see
+  `.claude/rules/bootstrap.md`). This session also recovered from a
+  mid-task shared-WC wipe (this file and several sibling A3/B1 files
+  vanished from disk between reads; recovered via `jj --at-op <snapshot>
+  file show`, per memory `reference_recover_clobbered_files_from_jj_snapshot_commits`)
+  — both point to unstable shared-WC/deployed-binary state on this host
+  during this session, not a regression in the landed lane code. Re-run the
+  three commands in the bug doc once the self-hosted binary is
+  rebuilt/redeployed to confirm.
+
+### B3 — landed (kernel + executor written and verified out-of-tree; in-tree conformance run blocked, see below)
+- New `src/lib/gc_async_mut/gpu_lane/svmg_cuda_kernel.ptx`: hand-written PTX
+  device interpreter implementing **all 50** SVM-G opcodes
+  (`src/lib/common/svmg/opcodes.spl`) as a fetch-decode-execute loop on
+  thread 0 of block 0, matching `ref_vm.spl`'s `SvmgVm.step`/`run`
+  instruction-for-instruction (same PC model, i32-wraparound stack repr,
+  trap values `TRAP_OOB=1`/`TRAP_DIV0=2`, sentinel values). No `.cu`
+  source — the `.ptx` file IS the source, following the existing
+  hand-written-PTX-with-no-.cu precedent
+  (`src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_forward.ptx`).
+  SHA-256 sidecar: `svmg_cuda_kernel.ptx.sha256`. Regen/verify script:
+  `scripts/build/regen_svmg_cuda_kernel.shs` (re-runs `ptxas -arch=sm_75`
+  and `sm_86` for syntax/register-allocation validation, rewrites the
+  sha256 sidecar).
+- New `src/lib/gc_async_mut/gpu_lane/cuda_vm_executor.spl`
+  (`CudaVmExecutor`): assembles SVM-G source via D1's `svmg_asm`, builds a
+  GMB-1 arena with an SGP-blob header, uploads/launches 1x1/syncs/drains
+  through B1's `CudaLaneSession`, decodes sentinel/log/records. Reads
+  `SVMG_STEP_BUDGET` from the environment (`step_budget_from_env`,
+  default 100000 on unset/non-positive).
+- **Real bug found and fixed in the kernel during verification**: the
+  initial draft used `mov.u64 %rd, arrayName; cvta.local.u64 %rd, %rd;`
+  then `st.local`/`ld.local` on the *converted-to-generic* address —
+  `cvta.local` produces a **generic**-space address, which `st.local`/
+  `ld.local` (which require a *local*-space address) silently
+  misinterpret, corrupting local memory (`CUDA_ERROR_ILLEGAL_ADDRESS` at
+  runtime, confirmed via `compute-sanitizer --tool memcheck` on a minimal
+  repro). Fix: drop the `cvta.local` call and index the raw local-space
+  address directly (`ld.local`/`st.local` need no conversion when both
+  sides stay in `.local` space). This is exactly the kind of thing the
+  anti-dummy-body / sabotage-probe discipline is for — the pre-fix kernel
+  *assembled cleanly* with `ptxas` (a syntax check only) and only failed
+  at actual GPU execution.
+- **Verification performed**: this host has 2 real GPUs (NVIDIA RTX A6000
+  sm_86, NVIDIA TITAN RTX sm_75) and a full CUDA 13.0 toolkit
+  (`ptxas`/`nvcc`/`compute-sanitizer`). The kernel was assembled cleanly
+  for both `sm_75` and `sm_86`, then run against 3 hand-encoded vectors
+  (matching D1's byte-exact opcode encoding) via a standalone CUDA-driver-
+  API C test harness (bypassing the Simple module system, kept as scratch
+  tooling, not shipped) on the real RTX A6000: `nop_passthrough`,
+  `halt_with_code`, and — the task's explicitly mandated check —
+  `budget_exhaustion_timeout` (`NOP; JMP -4` at `step_budget=10`) all
+  PASS, with the timeout vector's sentinel landing exactly on
+  `0xDEAD0000`.
+- **Blocked**: could not run the full D3 conformance table (>=40 vectors,
+  `test/fixtures/svmg/conformance_vectors.spl`) against
+  `CudaVmExecutor.run_source`, and could not `bin/simple lint`
+  `cuda_vm_executor.spl` in-repo, because **D1's `src/lib/common/svmg/`
+  module was absent from the shared checkout's `main`/`origin/main` for
+  the duration of this task** despite the task brief listing D1 as
+  already landed — see
+  `doc/08_tracking/bug/svmg_d1_module_not_on_main_blocks_b3_verification_2026-08-07.md`
+  for the full evidence (git ancestry checks, a 0-byte sibling-owned file
+  observed mid-churn, and this skill doc's own pre-B3 Status section
+  independently corroborating D1 as not-yet-landed).
+- **Second bug filed, not routed around**: A2's `gpu_mailbox.MailboxArena`
+  RECORD-ring layout (head-counter word + records at `+8`) diverges from
+  D2's `ref_vm.spl` RECORD-ring layout (no counter, records at `+0`), which
+  is what the D3 conformance table is defined against. The kernel and
+  `cuda_vm_executor.read_records` follow D2's format; see
+  `doc/08_tracking/bug/svmg_a2_record_ring_head_counter_diverges_from_d2_ref_vm_2026-08-07.md`.
+- Opcode coverage: **50/50** (full ISA), not a subset — includes all 10
+  float ops (`mov.b32` bit-reinterpret between `.b32`/`.f32` registers,
+  matching `ref_vm.pop_f32`/`push_f32`'s `f32_from_bits`/`f32_to_bits`) and
+  `CALL`/`RET` (32-slot local callstack array).
+- Follow-up once D1 is reachable from this checkout: re-run
+  `bin/simple lint` on `cuda_vm_executor.spl`, drive the full D3 table
+  through `CudaVmExecutor` (system spec not yet written), and reconcile
+  the record-ring divergence bug above.
+
 ## Feature Links
 
 - Research: `doc/01_research/runtime/gpu_remote_interpreter_research.md`
