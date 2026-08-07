@@ -343,17 +343,16 @@ class Bridge:
         msg_type = header.get("msg_type", "")
         msg_id = header.get("msg_id", "")
 
-        # control-channel interrupt/shutdown that the kernel process itself
-        # can't answer over stdin (process-level signal) are handled here;
-        # everything else is relayed verbatim as JSON-lines.
+        # control-channel interrupt_request (design §5.1/§5.3): SIGINT is a
+        # best-effort, process-level escalation the kernel subprocess itself
+        # cannot trigger from inside its own stdin loop -- fire it here, in
+        # addition to (not instead of) relaying the request below. The
+        # kernel's own interrupt_reply, produced by its cooperative
+        # NotebookExecutor.interrupt() handling and relayed like every other
+        # reply, is the source of truth for the reply status; the wrapper
+        # never fabricates one.
         if msg_type == "interrupt_request":
             self.kernel.interrupt()
-            reply_header = build_header("interrupt_reply", self.session_id)
-            frames = build_multipart(
-                wire_msg.identities, reply_header, header, {}, {"status": "ok"}, self.signer
-            )
-            self.control_sock.send_multipart(frames)
-            return
 
         with self._lock:
             self._pending[msg_id] = (wire_msg.identities, header, channel)
