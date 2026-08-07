@@ -2,8 +2,70 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** P0 — silent wrong values, no error, on the DEFAULT engine
-- **Status:** OPEN
+- **Status:** FIXED on the JIT (cranelift) + tree-walk interpreter lanes,
+  re-verified 2026-08-07 — see *Re-verification* below. **AOT/native-codegen
+  lane (`native-build --backend cranelift/llvm`) NOT re-verified** (a
+  `native-build` attempt this session failed for an unrelated pipeline reason
+  before reaching the probe; no bootstrap rebuild was in scope). Do **not**
+  read this doc as blanket-closed for the native lane.
 - **Affects:** every `list.get(i)` call site returning an integer. Index read `a[i]` is CORRECT.
+- **`src/os/crypto/**` `mut`-annotation prohibition (see *Blast radius* below):
+  STILL STANDS.** It was written against the JIT lane specifically
+  (`bin/simple run` demoting via W1006), which is now confirmed fixed — but
+  since the native/AOT lane is unverified and the crypto code is
+  correctness-critical, do not lift the prohibition without re-checking that
+  lane too.
+
+## Re-verification 2026-08-07 — the `<< 3` shift defect is FIXED (JIT + interpreter lanes)
+
+Re-ran the exact repro from this doc's *Symptom* section byte-for-byte,
+plus a fresh minimal probe (`val xs=[10,20,30]; xs.get(1)`, `xs.get(9)`,
+`xs.get(9) ?? -1`), under both engines via `bin/simple run`. Binary used:
+`bin/release/x86_64-unknown-linux-gnu/simple` (the Rust seed — it prints the
+"bootstrap seed only" banner; this is the same lane the 2026-07-28 filing
+itself used, so the A/B is apples-to-apples, but results below are
+attributed to the seed's Cranelift JIT, not the pure-Simple self-hosted
+binary, which was not separately re-checked this session):
+
+| expr | JIT (default, confirmed real via `cranelift_jit::backend` log lines) | `SIMPLE_EXECUTION_MODE=interpret` |
+|---|---|---|
+| `a.get(0)` on `[5, 7]` | `5` (was `40`) | `5` |
+| `a.get(1)` after `a[1]=9` | `9` (was `72`) | `9` |
+| `b.get(0)` after `push(42)` | `42` (was `336`) | `42` |
+| `xs.get(1)` on `[10,20,30]` | `20`, matches `xs[1]` | `20`, matches `xs[1]` |
+| `xs.get(9) ?? -1` (miss, default) | `-1` | `-1` |
+
+The hit-path `value << 3` corruption reported above no longer reproduces on
+either engine. Exact landing commit not pinned (not a dedicated "list.get
+shift" commit in recent `git log` on `expr_dispatch.spl`/
+`method_calls_literals.spl`); most likely folded into the runtime-array
+element decode/registration hardening documented inline at
+`expr_dispatch.spl` lines ~1590-1652 (`elem_struct_name`/
+`elem_is_runtime_array` gating around `decode_runtime_value`) alongside the
+`Array.first()`/`.last()` MIR-lowering fixes (`c49bb5606de`,
+`1692ceb0b9a`) landed since this doc was filed.
+
+**Residual, narrower, separate defect found while re-verifying:** printing a
+list-get MISS directly (no `??`) — `print("{xs.get(9)}")` — renders the raw
+`RT_NIL` sentinel `3` as text under the JIT (`miss=3`), while the interpreter
+correctly renders `miss=nil`. The `??` operator itself is unaffected on
+either engine (`-1` both lanes) — this is an Option-to-text formatting gap
+for a bare list-get miss under native codegen, not the `<<3` shift this doc
+tracks. Sibling check: bare out-of-bounds indexing (`xs[9]`, no `.get`) under
+the JIT also silently prints `3` instead of panicking/erroring — same raw
+`RT_NIL` sentinel leak, so this looks shared with the index-read path, not
+`.get()`-specific. Filed as its own doc:
+`doc/08_tracking/bug/jit_array_oob_read_leaks_raw_rt_nil_sentinel_2026-08-07.md`
+— not chased further here since it's out of scope for this doc's original
+symptom.
+
+Regression spec added: `test/01_unit/std/improved/list_get_hit_miss_spec.spl`
+(`Results: 4 total, 4 passed, 0 failed` under `bin/simple test`, which runs
+the interpreter lane only — see caveat in that spec's docstring; the JIT lane
+this doc is actually about still needs manual `bin/simple run` reconfirmation
+after any future MIR lowering change in this area).
+
+## Original filing (2026-07-28) — kept for history
 
 ## Symptom
 
