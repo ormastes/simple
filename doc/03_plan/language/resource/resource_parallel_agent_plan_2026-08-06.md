@@ -102,6 +102,21 @@ suspect.
 
 ## Status as of 2026-08-07 (read before picking a WP — avoids redoing landed work)
 
+- **WP-E, WP-H, WP-J now confirmed landed on `origin/main`** (2026-08-07,
+  later pass). WP-E (MIR drop edges, `794bbf6642f`) and WP-H (`sffi_gen`
+  wrapper emitter, `51e08eb7ead`) were already correctly pushed. WP-J was
+  NOT: its `Image`/`FileLock` wrapper classes existed only in two local
+  commits that were never pushed, while a separate already-pushed commit
+  (`7868b6ab6e2`) had landed a spec fix whose `use` imports referenced those
+  classes — so `origin/main` briefly had a spec importing symbols that did
+  not exist anywhere in the tree. Fixed by landing the real wrapper classes
+  scoped to their 3 actual files (`35889a86f4f`); re-verified with real spec
+  runs, not file presence alone — `image_sffi_resource_wrapper_spec.spl`
+  9/9, `file_lock_resource_wrapper_spec.spl` 6/6. Full account:
+  `doc/00_llm_process/feature_expert/resource_ownership/skill.md`'s WP-J row.
+  Lesson: a subagent's own "landed" self-report and even a locally-committed
+  git history are not proof of presence on `origin/main` — always verify
+  against fetched origin content directly.
 - **LANDED — WP-F progress (use-detection half):** `src/compiler/55.borrow/borrow_check/mod.spl`
   gained a `case Call(dest, func, args)` arm in `analyze_instruction` plus a
   `me record_operand_use(op, nll, point)` helper. Call arguments previously

@@ -110,7 +110,10 @@ round-trip today (`doc/00_llm_process/feature_expert/resource_ownership/skill.md
 but no production `.spl` source can use it yet — `bin/simple` is still the Rust
 seed, which reparses a source file's own syntax and doesn't know this grammar.
 See `doc/07_guide/platform/ffi/sffi.md` § Opaque Handle Pattern for the
-wrapping shape to use today.
+wrapping shape to use today. Two real hand-written examples using that shape:
+`Image` (`src/lib/nogc_sync_mut/io/image_sffi.spl`) and `FileLock`
+(`src/lib/nogc_sync_mut/sffi/io.spl`) — both a plain `class` with an
+invalid-sentinel check and a consuming `close()` guarding against double-close.
 
 ---
 
