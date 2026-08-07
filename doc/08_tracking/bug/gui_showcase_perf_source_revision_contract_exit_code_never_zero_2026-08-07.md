@@ -1,6 +1,72 @@
 # `gui_showcase_perf_source_revision_contract_spec.spl` stays RED on `expect(code).to_equal(0)` — aggregate-gate/exit-code mismatch
 
-## Status: Defect 2 fixed for THIS spec only (T9, 2026-08-07); family-wide sibling fix remains T18's scope
+## Status: T18 (2026-08-07) landed the family-wide exit-code fix; see "T18 update" below
+
+## T18 update (2026-08-07)
+
+Fixed the `expect(code).to_equal(0)` (and `code_4k`/`code_8k` variants) pattern
+in all 9 remaining sibling files under
+`test/03_system/check/gui_showcase_perf_*_contract_spec.spl`
+(`gui_showcase_perf_alias_runtime_contract_spec.spl`,
+`gui_showcase_perf_artifact_provenance_contract_spec.spl`,
+`gui_showcase_perf_backend_contract_spec.spl`,
+`gui_showcase_perf_checksum_contract_spec.spl`,
+`gui_showcase_perf_frame_timing_contract_spec.spl`,
+`gui_showcase_perf_nonzero_contract_spec.spl`,
+`gui_showcase_perf_resolution_contract_spec.spl`,
+`gui_showcase_perf_retained_mode_contract_spec.spl`,
+`gui_showcase_perf_rss_contract_spec.spl`) — same fix T9 applied to
+`gui_showcase_perf_source_revision_contract_spec.spl`: drop the assertion on
+the aggregate wrapper's overall process exit code, assert only on the
+evidence.env content it writes before exiting non-zero.
+`gui_showcase_perf_probe_exit_contract_spec.spl` was checked and excluded —
+it invokes `check-widget-showcase-4k-200fps.shs --self-test` directly, not
+the whole-repo aggregate wrapper, so its `expect(code).to_equal(0)` is a
+different, legitimate assertion, not an instance of this bug.
+
+Removing the wrong exit-code oracle unmasked two further **pre-existing**,
+systemic fixture-completeness bugs shared by most of the family (previously
+invisible because the exit-code assertion failed first, before the file ever
+reached the real evidence assertions):
+
+1. Every synthetic `status.env` fixture in the family omitted the
+   `*_backend=` and/or `*_readback_mode=` fields, which
+   `check-gui-renderdoc-feature-coverage-status.shs`'s
+   `missing_4k_fields`/`missing_8k_fields` check (~line 1604, ~1798) requires
+   non-empty. Without them, every row failed with
+   `missing-required-*-perf-evidence:backend,readback_mode` instead of
+   reaching the specific defect (checksum/RSS/nonzero-pixel/etc.) each spec
+   claims to test. Fixed by adding the missing fields to each fixture (all 9
+   files) and to `_fixture_command()` in
+   `gui_showcase_perf_artifact_provenance_contract_spec.spl` (also missing
+   `warmup_frames`/`frame_sample_count`, same failure mode).
+2. `gui_showcase_perf_alias_runtime_contract_spec.spl` and
+   `gui_showcase_perf_backend_contract_spec.spl` fixtures listed only 6 of the
+   8 required `source_revision_files=` entries (missing the two `engine2d/`
+   paths — the same Defect 1 pattern T9 already fixed once in the
+   source_revision spec, recurring independently in these two siblings).
+   Fixed by adding the two missing paths.
+
+**Result after both fixes:** 8 of the 9 sibling files are fully green
+(`Results: N total, N passed, 0 failed` each). One file remains partially
+red: `gui_showcase_perf_artifact_provenance_contract_spec.spl` —
+`Results: 9 total, 2 passed, 7 failed`. The 7 residual failures are a
+**distinct, not-yet-diagnosed** defect: in 6 of that file's 7 multi-row `it`
+blocks (all except the already-fixed `_fixture_command`-driven scenarios),
+`gui_showcase_8k_perf_status`/`_reason` are entirely absent from the written
+`out-8k/evidence.env` (empty-string actual vs. expected reason), while the
+matching 4K assertions in the same blocks pass. This looks like the two
+sequential aggregate invocations in one shell command
+(`... BUILD_DIR=.../out-4k ... sh check-... && ... BUILD_DIR=.../out-8k ...
+sh check-...`) sharing `GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR` may be
+interfering with each other, but this was not confirmed — left RED and
+undiagnosed rather than guessed at further, per "leave a correct-but-failing
+spec RED and file it, don't weaken the assertion." One additional, unrelated
+failure in the same file (`"keeps the aggregate wired to regular showcase
+artifact checks"`, a direct script-content `to_contain` check) also needs
+separate triage.
+
+## Status (superseded, kept for history): Defect 2 fixed for THIS spec only (T9, 2026-08-07); family-wide sibling fix remains T18's scope
 
 **Update (T9, 2026-08-07):** Defect 2 below is now fixed, but scoped
 deliberately narrow — only in
