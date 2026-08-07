@@ -197,3 +197,128 @@ resource-registry tables: no `Dict.len()`, no `.get()` on struct-valued dicts.
   pre-existing cleanup debt (tracked in plan WP-0).
 - No bulk rewrite: existing raw wrappers keep working; families convert
   one-by-one, each with specs.
+
+## Appendix A — Selection-rule verification + census (2026-08-07)
+
+**Status check first:** as of this appendix, `resource`/`@sffi` are not
+parsed by the real frontend at all — repo-wide grep for
+`parse_resource_decl`/`DECL_RESOURCE`/`@sffi` (as consumed attribute) in
+`src/compiler/` returns zero hits; this is WP-A of
+`doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md`,
+not yet landed (confirmed also absent from every live sibling session's
+uncommitted tree at check time). See
+`doc/08_tracking/bug/resource_decl_and_sffi_attribute_not_parsed_2026-08-07.md`.
+Everything below is therefore validated against the design **on paper** and
+against a real, currently-RED pilot spec — not against a working compiler.
+
+### A.1 Selection-rule verdict: tier does not select strategy; it constrains availability
+
+The task's working hypothesis — "runtime family / lib tier of the defining
+module picks unique-vs-shared" — is **not** what the design specifies, and
+the doc set already disproves it directly:
+
+- §3 here: RC "activates only when the program writes `*R`/`@R`" — the
+  *use-site sigil* selects sharing, not the declaration's tier.
+  `sharing: auto` (§4 of the schema table above) picks foreign-vs-wrapper RC
+  from **retain/release pair presence**, a per-resource `@sffi` metadata
+  fact, not a tier fact.
+- Architecture doc §7: `@R` is gated on the resource's own declared
+  `thread_safe:` flag, again per-resource metadata, not tier.
+- Architecture doc §3: unique `R` is explicitly "the right default for
+  files, sockets, command buffers, transactions, locks" regardless of which
+  tier declares them — `nogc_sync_mut/io/file.spl` and
+  `gc_async_mut/atomic.spl` both default to unique ownership unless the
+  program writes `*R`.
+
+**Adopted rule:** ownership strategy (unique / wrapper-RC / foreign-RC) is
+selected by **per-resource `@sffi` metadata** (`sharing:`, presence of
+`retain:`/`release:`, `thread_safe:`) plus **the sigil written at each use
+site** (`R` vs `*R` vs `@R`). Tier is not a selection input.
+
+**Refinement that *is* tier-dependent (constrains, not selects):** tier
+bounds which strategies are *legal*, because `sharing: wrapper` allocates a
+Simple-side control block (`{strong, weak, raw_handle, release_fn}`, §6
+above) and `nogc_async_mut_noalloc` forbids allocation by contract
+(`doc/05_design/lib/runtime/noalloc_stdlib_design.md`). Evidence: a
+repo-wide scan for `_free`/`_close`/`_destroy`/`_release`/`_unref`/`_dispose`
+extern declarations under `src/lib/nogc_async_mut_noalloc/**` returns **zero
+matches** — the noalloc tier currently declares no foreign resource handles
+at all, consistent with (not proof of) the constraint. Under this rule, in
+`nogc_async_mut_noalloc` only unique `R` (`sharing: none`, no allocation) or
+`sharing: foreign` (retain/release calls, no control block, per §6 "Foreign
+RC: ... no control block") would be legal; `sharing: wrapper` would not be,
+until/unless a noalloc-safe control-block allocator exists. This is a
+constraint to enforce later in WP-A/WP-C, not evidence against the adopted
+rule.
+
+### A.2 Census (owned code only; vendor paths excluded per task scope)
+
+Method: `grep -rEon "extern fn (rt_[a-z0-9_]+)_(free|close|destroy|release|unref|dispose)\("`
+over `src/lib/**` and `src/app/**` (`.spl` only), excluding
+`src/lib/nogc_sync_mut/ffi/` (the `sffi/` twin is canonical — see research
+doc §3.1) and the parallel `src/app/io/*_ffi.spl` twins of `*_sffi.spl`, and
+filtering 3 false positives (`rt_glfw_should_close`,
+`rt_sdl2_window_should_close`, `rt_sdl_window_should_close` — status queries,
+not release calls; matched only because the name ends in `_close`).
+
+**Total: 85 distinct release-family externs** (88 raw matches − 3 false
+positives), spanning acquire verbs (`_open`/`_load`/`_create`/`_alloc`/
+`_new`) paired 1:1 with a release verb per family, plus a handful with a real
+`retain`/`release` pair (foreign-RC candidates: `rt_cuda_primary_ctx_retain`/
+`_release` in `src/lib/nogc_sync_mut/gpu/engine2d/cuda_session.spl:21-22`).
+
+**Per-tier split (declaration sites, not deduplicated families — a family
+can appear once per tier that reimplements it):**
+
+| Tier | Declaration sites |
+|------|-------------------|
+| `nogc_sync_mut` | 100 |
+| `app/io` (application layer, not a stdlib tier) | 21 |
+| `nogc_async_mut` | 12 |
+| `gc_async_mut` | 7 |
+| `common` | 4 (baseline debt — pure tier should not declare impure externs, matches the 14-file baseline in `doc/04_architecture/lib/host_io_layering/three_tier_lib.md`) |
+| `app/ui.chromium`, `app/ui.web`, `app/simple_process_manager`, `app/ffi_gen.specs`, `app/debug` | 1 each |
+| `nogc_async_mut_noalloc` | **0** — supports §A.1's constraint finding |
+
+Representative families (acquire → release, tier, defining module):
+
+| Family | Acquire | Release | Tier | Module |
+|--------|---------|---------|------|--------|
+| File | `rt_io_file_open` | `rt_io_file_close` | nogc_sync_mut | `io/file.spl` |
+| Image | `rt_image_load` | `rt_image_free` | nogc_sync_mut | `io/image_sffi.spl` (existing design-doc exemplar) |
+| CudaPrimaryContext | `rt_cuda_primary_ctx_retain` | `rt_cuda_primary_ctx_release` | nogc_sync_mut | `gpu/engine2d/cuda_session.spl` (real retain/release pair) |
+| CudaContext | `rt_cuda_ctx_create` | `rt_cuda_ctx_destroy` | gc_async_mut, nogc_sync_mut (dup) | `cuda/ffi.spl` |
+| HttpClient | (impl.) | `rt_http_client_destroy` | nogc_sync_mut, app/io (dup) | `io/http_sffi.spl` |
+| Sqlite | (impl.) | `rt_sqlite_close` | nogc_sync_mut, app/io (dup) | `io/sqlite_sffi.spl` |
+| AtomicCounter | (impl.) | `rt_atomic_int_free` | gc_async_mut, nogc_sync_mut (dup) | `atomic.spl` |
+| TorchTensor | (impl.) | `rt_torch_torchtensor_free` | nogc_sync_mut, common (dup) | `torch/sffi.spl` |
+| Rapier2dWorld/Body/Collider/Joint/Contacts (5 families) | (impl.) | `rt_rapier2d_*_free` | nogc_sync_mut, app/io (dup) | `io/rapier2d_sffi.spl` |
+| LyonPath/PathBuilder/Transform/VertexBuffer/IndexBuffer/FillTessellation/StrokeTessellation (7 families) | (impl.) | `rt_lyon_*_free`/`_close` | nogc_sync_mut, app/io (dup) | `io/graphics2d_sffi.spl` |
+
+### A.3 Pilot migration (2026-08-07)
+
+Per §8 above ("No bulk rewrite... families convert one-by-one"), 4 of the 85
+families were selected for the pilot, chosen for ownership-strategy and tier
+diversity: **File**, **Image** (unique `R`, `nogc_sync_mut`, `sharing:
+none`), **CudaPrimaryContext** (`sharing: foreign`, `nogc_sync_mut`, the one
+family in the census with a genuine retain/release pair), **AtomicCounter**
+(`sharing: wrapper`, `gc_async_mut`, tests that wrapper-RC allocation is
+legal in an allocating tier).
+
+Because WP-A has not landed (§ above), the pilot could not migrate callers
+to a working `resource` surface — there is nothing yet to migrate them to.
+Per the task's own stated fallback ("if the compiler cannot yet reject them,
+leave the spec RED and file a `doc/08_tracking/bug/` record"), the pilot
+instead wrote the **intended** Grammar-A source
+(`@sffi(prefix: "rt_io_file", invalid: -1) resource File`, etc.) as real
+module-level declarations in
+`test/01_unit/compiler/resource/resource_sffi_pilot_spec.spl` and ran it
+through the real frontend via `bin/simple test`. It fails to parse
+(`Unexpected token: expected Fn, found Identifier { name: "resource", ... }`,
+`Results: 1 total, 0 passed, 1 failed`, exit 1) — left RED intentionally, not
+weakened to test a hand-rolled `class X { handle: i64 }` workaround (which
+would just reproduce the exact boilerplate `resource` exists to delete — see
+§3.1 image_sffi exemplar). Bug doc with unblock condition:
+`doc/08_tracking/bug/resource_decl_and_sffi_attribute_not_parsed_2026-08-07.md`.
+No existing callers were touched — there is no working target to migrate
+them to yet.
