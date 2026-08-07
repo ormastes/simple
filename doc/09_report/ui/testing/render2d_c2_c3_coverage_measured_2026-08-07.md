@@ -113,6 +113,75 @@ measured file in the unit.
 `/tmp/c2c3_cov/rollup_c3_full.txt` (raw unioned dumps backing the two ratios
 above).
 
+## C2 follow-up — kernel_registry boundary + residual-arm closure (2026-08-07, later same day)
+
+New spec: `test/01_unit/lib/gpu/engine2d/kernel_registry_boundaries_spec.spl`
+(18 examples, 0 failures — verdict `18 total, 18 passed, 0 failed`).
+
+Method: reused the prior session's `/tmp/c2c3_cov/{simd_isa,simd_native_rows,
+simd_provider,simd_span_batch}.sdn` artifacts unchanged (same 4 specs, same
+baseline — no re-run needed), ran the new spec with
+`SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=/tmp/cov_kernel_registry_boundaries.sdn`,
+then `bin/simple spl-coverage rollup --file <4 baseline artifacts> --file
+/tmp/cov_kernel_registry_boundaries.sdn`. The rollup's `summary:` block
+(`total_decisions: 68`, `covered_decisions: 49`) was hand-verified by parsing
+the raw `decisions |id, file, line, column, true_count, false_count|` rows
+directly and counting `covered = true_count>0 and false_count>0`, excluding
+neither real-path nor `<entry>` rows (both counted, per the original report's
+convention) — the manual parse reproduced 49/68 exactly.
+
+**Before: 31/68 (45.6%). After: 49/68 (72.1%).** All 18 newly-covered rows
+came from the new spec; `total_decisions` stayed at 68 (same decision-hash
+identities, only hit-counts changed) so the two rollups are directly
+comparable and this is not crediting another session's landed work — the
+pre-existing `test/01_unit/lib/common/gpu/engine2d/kernel_registry_spec.spl`
+(committed `dc60d433f05`, outside `test/01_unit/lib/nogc_sync_mut/gpu/engine2d/`)
+was intentionally NOT added to this rollup's artifact set, since it was never
+part of the 31/68 baseline either.
+
+Newly-covered decision rows (18, by file:line, true/false arm now both hit):
+
+- `kernel_registry.spl:79,81,83` — `kernel_size_bucket`'s three `count<N`
+  bucket-boundary ifs; only the false (large-count) arm was hit before.
+  Closed with `kernel_size_bucket(5)==TINY`, `(30)==SMALL`, `(100)==MEDIUM`.
+- `kernel_registry.spl:91,93,95,97,99` — `kernel_slot_key`'s five
+  out-of-range axis checks (op/format/alignment/contiguity/bucket); the
+  true (rejection) arm was never hit before. Closed with five isolated calls,
+  each with exactly one axis out of range.
+- `kernel_registry.spl:148` — `kernel_table_register`'s `key<0` short-circuit;
+  closed with an out-of-range `op`.
+- `kernel_registry.spl:168` — `kernel_table_lookup`'s `key<0` short-circuit;
+  closed the same way.
+- `kernel_registry.spl:217` — `span_batch_push`'s overflow-refusal true arm;
+  closed by pushing past a capacity-1 batch.
+- `scalar_oracle.spl:161,191,205,217,242` — the `count<=0` early return in
+  `oracle_fill_const`/`oracle_src_over_const`/`oracle_src_over_image`/
+  `oracle_mask_src_over`/`oracle_hash_span`; closed by calling each with
+  `count=0` and asserting `dst`/the hash seed is untouched.
+- `scalar_oracle.spl:222` — `oracle_mask_src_over`'s per-pixel `m>0` check;
+  the false (zero-coverage-pixel-skipped) arm was never hit before. Closed
+  with a 2-pixel mask `[0, 0xFF]` and asserting only index 1 changed.
+- `simd_kernels.spl:127` — `detect_simd_level`'s `_simd_detected` in-process
+  cache-hit true arm; closed by calling it twice in the same spec process.
+
+Documented-unreachable / left open (15 real rows, all in `simd_isa_provider.spl`
+and `simd_kernels.spl`, none forced): `simd_isa_provider.spl` lines 65, 68, 87,
+101, 116, 127, 144, 156, 183, 196, 225, 233, 234 are CPU-feature-gated or
+probe-count branches whose alternate arm needs either a host lacking the
+detected ISA or a differently-shaped registration sequence than this box's
+specs exercise — not attempted this round (would need its own harness, out
+of scope for a boundary-focused spec). `simd_kernels.spl:130`
+(`if engine2d_simd_has_avx2():`) is the same class — this host has AVX2, so
+the false arm cannot be forced without mocking the extern. `simd_kernels.spl:64`
+is a `match` arm inside `feature_text()`, not an independent branch pair;
+forcing the "other case" side was judged not a meaningful additional test.
+These 15 rows plus the 4 `<entry>`-placeholder rows account for the
+`68 - 49 = 19` gap (68-49-4=15, matches).
+
+Artifacts: `/tmp/cov_kernel_registry_boundaries.sdn`, `/tmp/rollup_c2_after.txt`
+(raw unioned dump backing 49/68), spec durably content-addressed at git blob
+`cabd98bd20ae2c8ca9f0b2b977d250a9fdb7539b` before the run.
+
 ## Follow-up (2026-08-07, same day, later session): dedicated specs for the two named C3 gaps
 
 New files (unit tests only, real hand-derived oracles — `assert_true` /
