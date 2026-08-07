@@ -32,6 +32,7 @@ use common.gpu.engine2d.scalar_oracle.{
     oracle_clip_span,
     oracle_clip_offset,
     oracle_clip_count,
+    oracle_clip_pack,
     oracle_clip_span_pair,
     oracle_clip_paired_src,
 }
@@ -91,6 +92,14 @@ describe "exact 8-bit formula — channel layout (contract §1)":
         assert_true(c == 0x11223344)
         assert_true(oracle_alpha(c) == 0x11)
         assert_true(oracle_blue(c) == 0x44)
+
+    it "pack(alpha,red,green,blue) roundtrips all four channel extractors (F2)":
+        val c = oracle_pack(0xAB, 0x12, 0x34, 0x56)
+        assert_true(c == 0xAB123456)
+        assert_true(oracle_alpha(c) == 0xAB)
+        assert_true(oracle_red(c) == 0x12)
+        assert_true(oracle_green(c) == 0x34)
+        assert_true(oracle_blue(c) == 0x56)
 
 describe "exact 8-bit formula — src-over (contract §2, §4)":
     it "returns the source unchanged when fully opaque":
@@ -167,6 +176,10 @@ describe "exact 8-bit formula — coverage masks (contract §7)":
         assert_true(oracle_alpha(oracle_modulate_alpha(0xFF112233, 128)) == 128)
         assert_true(oracle_alpha(oracle_modulate_alpha(0x80112233, 128)) == 64)
 
+    it "modulate_alpha 0 and 255 endpoints pinned (F2)":
+        assert_true(oracle_modulate_alpha(0xAB112233, 0) == 1122867)
+        assert_true(oracle_modulate_alpha(0xAB112233, 255) == 2870026803)
+
 describe "clipping (contract §8)":
     it "drops a negative head without relocating content":
         val c = oracle_clip_span(0 - 5, 20, 10)
@@ -191,6 +204,27 @@ describe "clipping (contract §8)":
         val c = oracle_clip_span_pair(0 - 4, 10, 20, 100, 100)
         assert_true(oracle_clip_offset(c) == 0)
         assert_true(oracle_clip_paired_src(10, 0 - 4, c) == 14)
+
+    it "clip pack/unpack roundtrips count and offset (F2)":
+        val p = oracle_clip_pack(37, 91)
+        assert_true(oracle_clip_offset(p) == 37)
+        assert_true(oracle_clip_count(p) == 91)
+
+    it "clip_span degenerate: zero-width, full-width, off-left, off-right (F2)":
+        # zero-width: count==0 is a no-op span regardless of offset/capacity.
+        assert_true(oracle_clip_count(oracle_clip_span(5, 0, 10)) == 0)
+        # full-width: [0, capacity) intersected with itself is unchanged.
+        val full = oracle_clip_span(0, 10, 10)
+        assert_true(oracle_clip_offset(full) == 0)
+        assert_true(oracle_clip_count(full) == 10)
+        # off-left: head partially precedes 0, tail stays inside capacity.
+        val off_left = oracle_clip_span(0 - 3, 8, 10)
+        assert_true(oracle_clip_offset(off_left) == 0)
+        assert_true(oracle_clip_count(off_left) == 5)
+        # off-right: head is inside capacity, tail overruns it.
+        val off_right = oracle_clip_span(7, 8, 10)
+        assert_true(oracle_clip_offset(off_right) == 7)
+        assert_true(oracle_clip_count(off_right) == 3)
 
 describe "kernel set v1 — canonical results":
     it "fill_const stores the colour verbatim":
@@ -218,6 +252,29 @@ describe "kernel set v1 — canonical results":
         assert_true(c[3] == 0xFF808080)
         assert_true(c[69] == 0xFF000000)
         assert_true(oracle_hash_span(c, 0, 70) == 252553557263509)
+
+    it "src_over_image pinned hash on 64px pseudo-random span (F2)":
+        var dst64 = filled_random(64, 4242)
+        var src64 = filled_random(64, 8484)
+        assert_true(oracle_hash_span(dst64, 0, 64) == 40647574349990)
+        oracle_src_over_image(dst64, 0, src64, 0, 64)
+        assert_true(oracle_hash_span(dst64, 0, 64) == 150957248013032)
+
+    it "mask_src_over with mask=0 is identity and mask=255 equals src_over (pinned hash) (F2)":
+        # mask=0: every entry skipped by the `m > 0` guard, buffer unchanged.
+        var d0: [u32] = [0xFF102030; 64]
+        var mask0: [u32] = [0; 64]
+        val before0 = oracle_hash_span(d0, 0, 64)
+        oracle_mask_src_over(d0, 0, 0x80FFFFFF, mask0, 0, 64)
+        assert_true(oracle_hash_span(d0, 0, 64) == before0)
+        assert_true(before0 == 102140269063461)
+
+        # mask=255: modulate_alpha is identity at full coverage, so this must
+        # equal a plain oracle_src_over applied element-wise.
+        var d255 = filled_random(64, 999)
+        var mask255: [u32] = [255; 64]
+        oracle_mask_src_over(d255, 0, 0x80FFFFFF, mask255, 0, 64)
+        assert_true(oracle_hash_span(d255, 0, 64) == 223432289154982)
 
     it "mask_src_over across a coverage ramp":
         var d: [u32] = [0xFF000000; 64]
