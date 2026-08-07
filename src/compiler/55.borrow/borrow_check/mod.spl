@@ -194,6 +194,35 @@ class BorrowChecker:
                 val dest_local: LocalId = dest
                 nll.record_assign(point, Place.local(dest_local.id))
 
+            case Drop(local):
+                # WP-G (resource ownership invariants 1/6, doc/04_architecture/
+                # language/resource/resource_declaration_architecture_2026-08-06.md
+                # §8): a resource-owned local's consuming release. WP-E emits
+                # this at scope exit, `return`, `?` early-return, AND at an
+                # explicit `.close()` call site (method_calls_literals.spl) --
+                # but until this arm, `MirInstKind.Drop` fell through to the
+                # catch-all `case _: pass_do_nothing` below and produced NO
+                # move/consume fact at all, so a resource dropped/closed twice
+                # (invariant 1, exactly-once release) or used after `.close()`
+                # (invariant 6, `close()` consumes) went completely
+                # undetected. Treating a Drop as a Move of its place reuses
+                # `record_move`'s existing double-move detection (LANE ISO1,
+                # borrow_graph.spl) for free -- a second Drop of an
+                # already-dropped place IS a use-after-move by the same
+                # reasoning a second Move is.
+                # doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md
+                # (WP-G). Known, accepted over-approximation inherited from
+                # SF1 (borrow_graph.spl): the checker's walk is linear over
+                # `func.blocks` in array order, not CFG-path-sensitive, so
+                # two Drops of the same local on genuinely MUTUALLY EXCLUSIVE
+                # branches (e.g. WP-E's independent per-exit drop edges) can
+                # false-positive as a double-drop. This mirrors the exact,
+                # already-documented limitation WP-F accepted for Move
+                # (iso_transfer_sites_missing_move_return_assign_field_2026-08-06.md)
+                # rather than introducing a new one.
+                val drop_local: LocalId = local
+                nll.record_move(point, Place.local(drop_local.id))
+
             case Const(dest, _, _):
                 # Constant write re-initializes the destination: this KILLS
                 # any moved-out state (re-init revives the local) — it is
