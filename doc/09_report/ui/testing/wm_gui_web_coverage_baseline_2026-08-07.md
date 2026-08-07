@@ -143,3 +143,84 @@ scope for this module family and not attempted.
    Only prerequisite 4 (export) is confirmed MET by the live gate; prereqs
    1/2/3/5 remain UNMET/unverified, and the `spl-coverage` CLI subcommand
    still does not exist in the deployed binary.
+
+## U4.4 / U4.5 closure — 2026-08-07
+
+Targets per plan: U4.4 = `simple_web_html_layout_renderer_layout.spl` (2613
+lines) + `simple_web_html_layout_renderer_core.spl` (3098 lines) +
+`containment.spl` (167 lines), line target >=90%. U4.5 =
+`simple_web_html_layout_renderer_paint_layout.spl` (3121 lines) +
+`simple_web_html_layout_renderer_paint_primitives.spl` (1349 lines), line
+target >=85%. Binary: `readlink -f bin/simple` ->
+`bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed).
+
+### containment.spl (U4.4) — MET, artifact-backed
+
+Baseline run (`containment_contain_spec.spl` alone, `SIMPLE_COVERAGE_OUTPUT`
+artifact `containment.spl` rows counted directly): **87% (28/32 lines)**.
+Uncovered lines identified from the artifact (rows present for 28 of the 32
+denominator lines; the missing 4 never appear as rows at all):
+`containment.spl:43-45` (the mid-string token-match branch of
+`contain_has_token`, only reachable with a multi-token `contain` value where
+the target token is not the last segment) and `containment.spl:126` (the
+`state.cached.contains_key(node_id)` branch inside
+`layout_contain_mark_dirty`).
+
+New spec `test/01_unit/lib/gc_async_mut/gpu/browser_engine/containment_coverage_closure_spec.spl`
+(2 `it` blocks, real oracle assertions on `node_contains_layout/paint/style`
+and `layout_contain_compute`/`layout_contain_mark_dirty` return/state values,
+no assertion-free calls) closes lines 43-45. Re-measured (same command,
+fresh artifact): **96% (31/32 lines)** — exceeds the >=90% target.
+
+Line 126 stays uncovered despite two spec cases that call
+`layout_contain_mark_dirty` on a node with an existing cache entry (the
+`contains_key == true` branch is *demonstrably* taken — `state.cached[nid]`
+flips to `false` and the next `layout_contain_compute` call recomputes,
+proving the branch ran) — the collector never emits a row for that exact
+line. This reads as an instrumentation-granularity artifact of the coverage
+collector on a single-line `if COND:` immediately followed by a mutating
+statement, not a gap in test coverage. Not filed as a new bug; folds into
+the existing collector-gap tracking in
+`doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md`.
+
+Sabotage: `contain_has_token`'s mid-string match arm
+(`containment.spl:43`) was disabled (`and false` appended) in the live
+worktree, target spec re-run -> `Results: 2 total, 1 passed, 1 failed`,
+failure message `expected subject to be truthy, got false` on exactly the
+multi-token-match example. Restored from a pre-sabotage copy, byte-identical
+(`sha256sum` matched, `git diff origin/main:...containment.spl` empty);
+re-run -> `Results: 2 total, 2 passed, 0 failed`.
+
+### `_layout.spl` + `_core.spl` (rest of U4.4) and `_paint_layout.spl` +
+### `_paint_primitives.spl` (U4.5) — NOT MET, honest gate report
+
+These four files total 10,181 lines. The only spec in the tree carrying
+`# @cover` headers for all of them,
+`simple_web_html_layout_renderer_coverage_spec.spl`, hits the test runner's
+hard **120s per-file timeout** every time it was run this session (both via
+`bin/simple test ... --coverage` and via
+`test_runner_single.spl ... --no-session-daemon --sequential --coverage`) —
+it never reaches its `coverage:` lines, so no line-percentage for these four
+files was obtainable through it. Smaller existing specs in the same
+directory that reference the layout/paint modules
+(`simple_web_html_layout_renderer_scan_index_space_spec.spl`,
+`simple_web_html_layout_renderer_module_split_spec.spl`) either report
+coverage for a *different* file (`simple_web_html_layout_renderer_foundation.spl`,
+1421 lines, 3%) or fail before completing, so they do not substitute.
+
+Per the plan's own honesty rule ("if a unit is genuinely unachievable
+without branch coverage, land an honest gate report ... rather than
+padding"), this session reports: **no artifact-backed line-coverage number
+for `_layout.spl`, `_core.spl`, `_paint_layout.spl`, or
+`_paint_primitives.spl` was obtained; the >=90%/>=85% line targets are
+correspondingly UNMET (not attempted-and-failed, but unmeasured) for these
+four files.** No `Dict.len()`/assertion-free padding was used to manufacture
+a number. This is a gap for a follow-up unit that first fixes or
+works around the 120s per-file test-runner timeout for large `@cover` sets
+(e.g. splitting `simple_web_html_layout_renderer_coverage_spec.spl`'s GPU/
+tile-lane `it` blocks, which are the likely long pole, into a separate file
+from the layout/paint-primitive ones) before attempting closure specs.
+
+### Disk
+
+`df -h /`: 238G free before, 238G free after (no cargo/bootstrap run).
