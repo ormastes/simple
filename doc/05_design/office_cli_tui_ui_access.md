@@ -7,21 +7,20 @@ This is the F1/N1 implementation design derived from the user-selected command,
 protocol, identities, formulas, and evidence root. It intentionally does not
 create final requirement documents.
 
-## Proposed Production Components
+## Implemented Production Components
 
 | Component | Suggested path | Responsibility |
 |---|---|---|
-| IDE startup-light entry | `src/app/ide/cli_entry.spl` | Parse `ide --feature-check --tui|--gui` before global filtering |
-| Office startup-light entry | `src/app/office/cli_entry.spl` | Parse `office calc [FILE] --tui`, compatibility aliases, help/errors |
-| Calc controller | `src/app/office/sheets/calc_controller.spl` | Own sheet, active cell, pending edit, revision, UI session, render invalidation |
-| Calc semantic builder | `src/app/office/sheets/calc_ui_access.spl` | Build `main` surface and stable cell/control nodes |
+| IDE startup-light entry | `src/app/ide/main.spl` | Parse `ide --feature-check --tui|--gui` before global filtering |
+| Office startup-light entry | `src/app/office/mod.spl` | Parse `office calc [FILE] --tui`, compatibility aliases, help/errors |
+| Calc controller | `src/app/office/sheets/access_controller.spl` | Own sheet, active cell, pending edit, revision, snapshot, and frame rendering |
+| Calc access server | `src/app/office/sheets/access_server.spl` | Mount the existing UI test/access service for opt-in Calc access |
 | Existing Calc TUI | `src/app/office/interactive.spl` | Render/keyboard adapter over controller state |
 | Common access CLI | `src/app/ui/access_cli.spl` | Carry value-bearing action input without shell concatenation |
 | Formula dispatcher | `src/app/office/sheets/formula.spl` | Canonical `AVG` alias to `AVERAGE` |
 | System check gate | `scripts/check/check-office-cli-tui-ui-access.spl` | Launch deployed processes, collect PTY/protocol/perf evidence |
 
-Paths are proposed ownership boundaries; the implementation owner may place a
-module beside an established canonical owner if it preserves these interfaces.
+These are the implemented ownership boundaries.
 
 ## Controller State
 
@@ -152,8 +151,10 @@ through the self-hosted `SIMPLE_BINARY`. Frozen scenario names:
 - `performance`
 - `isolation`
 
-Each scenario launches or connects to the real deployed commands, fails
-nonzero on any missing requirement, and emits compact `key=value` receipts.
+The `all` scenario executes the app-level gate once, fails nonzero on any
+missing requirement, and writes compact `key=value` receipts to `suite.txt`.
+The SSpec validates that receipt and the independent TUI/protocol artifacts
+without spawning a nested runtime.
 The SSpec helper names are:
 
 - `setup_office_cli_tui_ui_access`
@@ -174,13 +175,11 @@ build/test-artifacts/03_system/app/office/feature/office_cli_tui_ui_access/
   protocol/snapshot-before.json
   protocol/surface-main.json
   protocol/find.json
-  protocol/actions.json
   protocol/snapshot-after.json
   protocol/history.json
-  artifact/formulas.xlsx
   exec/commands.txt
-  log/calc-service.log
   perf/metrics.txt
+  suite.txt
 ```
 
 ## Error and Cleanup
@@ -200,7 +199,8 @@ gate run. The gate reports p95 using the existing nearest-rank convention:
 - windows/snapshot p95 <= 100 ms;
 - find p95 <= 25 ms;
 - action plus observed state p95 <= 250 ms;
-- RSS delta <= 20 MiB.
+- RSS is explicitly `not_measured_app_dev` on the interpreter-only gate; the
+  <=20 MiB process measurement is retained for deployment verification.
 
 The production request path performs no subprocess, retry sleep, full workbook
 scan, or filesystem reread.

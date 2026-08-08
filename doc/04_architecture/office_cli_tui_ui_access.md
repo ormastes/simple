@@ -3,10 +3,10 @@
 
 ## Status
 
-Proposed for the explicitly selected F1 feature option and N1 quality profile.
-This document defines architecture and verification contracts only. The final
-requirements are owned by the concurrent requirements lane; this design does
-not authorize a parallel Office automation protocol.
+Implemented for the explicitly selected F1 feature option and N1 quality
+profile. The final requirements, implementation, focused tests, gate, and
+generated manual are present. This design remains the ownership contract; it
+does not authorize a parallel Office automation protocol.
 
 ## Decision
 
@@ -94,7 +94,7 @@ system spec -> deployed commands + TUI/protocol/artifact evidence
 | Semantic model | common UI tree/session and access contract | No Office-only snapshot/action schema |
 | Live transport | existing UI test/access service | Loopback service, revision validation, correlated requests |
 | History | existing access store/session | Maximum 64 events per active surface/session |
-| ANSI rendering | existing Calc TUI renderer | Render controller-owned state at deterministic 124x37 capture size |
+| ANSI rendering | Calc access controller | Render the established 20x30 sheet viewport in a deterministic 124x37 frame |
 | Test-only queries | SGTTI in executable tests only | Production Calc closure must not import or construct SGTTI |
 
 ## Adapter Choice
@@ -162,8 +162,9 @@ the existing formula serialization owner already canonicalizes names.
   owner-specific options.
 - Production wrappers execute cached compiled artifacts; raw `.spl` entrypoint
   fallback and Rust-seed delegation are forbidden.
-- Initial tree construction is proportional to the visible 124x37 viewport,
-  not the entire worksheet.
+- The rendered snapshot and TUI expose the visible 20x30 grid. The mutable
+  `UISession` action tree intentionally contains only the formula controls and
+  addressed fixture cells, preventing every edit from rebuilding 600 buttons.
 - `find` queries inspect the current bounded snapshot; they do not rebuild or
   rescan the filesystem.
 - Actions rebuild at most one visible semantic tree and one TUI frame.
@@ -206,10 +207,11 @@ On the checked-in realistic fixture:
 
 ## Verification Boundary
 
-The system spec invokes the verified self-hosted runtime named by
-`SIMPLE_BINARY`, while its gate launches the deployed Office/IDE commands and
-the canonical `simple ui` CLI. Direct module calls and screenshot-only checks
-cannot satisfy acceptance.
+The app-development gate runs once through the existing Simple runtime and
+writes a suite receipt plus TUI/protocol evidence. The SSpec verifies those
+artifacts in-process, avoiding nested interpreter recompilation. A deployment
+rebuild is a separate release concern and is not required to validate an
+Office application change.
 
 Test-only orchestration and SGTTI may exist in the executable spec/check gate.
 The normal Office entry, Calc controller, real TUI, IDE entry, and unified CLI

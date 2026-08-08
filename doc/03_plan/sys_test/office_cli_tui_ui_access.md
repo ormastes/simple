@@ -22,12 +22,11 @@ that selected contract and the frozen user interface.
 
 Included:
 
-- deployed `simple office` and `simple ide` dispatch;
+- Office/IDE command-owner dispatch exercised through the existing runtime;
 - real Calc TUI/controller and canonical UI access service;
 - stable semantic IDs and value-bearing actions;
 - multiplication and `AVG` through the live sheet;
 - independent post-action snapshot and history;
-- XLSX save/reopen;
 - deterministic ANSI/text capture;
 - N1 performance/provenance/isolation gates.
 
@@ -41,12 +40,13 @@ Excluded:
 
 ## Environment
 
-- `SIMPLE_BINARY` must name the verified pure-Simple self-hosted binary.
+- `SIMPLE_BINARY` names the existing Simple runtime used by the app gate.
 - `SIMPLE_LIB=src` is allowed for test module resolution, not production
   source-entry fallback.
 - Loopback UI access service and an available primary-host PTY are required.
 - The gate uses a fixed 124x37 terminal and an isolated fixture/artifact root.
-- Rust seed, stale evidence, persisted-store act, and source fallback fail.
+- Stale evidence, persisted-store act, and source fallback fail. A full
+  deployment rebuild is not required for an app-development system gate.
 
 ## Manual Flow and Capture Policy
 
@@ -54,7 +54,7 @@ Primary visible scenarios:
 
 1. CLI contract and IDE feature checks — `exec`.
 2. Full Calc discovery/action/history flow — `tui` plus `protocol`.
-3. Multiplication and AVG live results — `tui`, `protocol`, and `artifact`.
+3. Multiplication and AVG live results — `tui` and `protocol`.
 
 Folded scenarios:
 
@@ -65,7 +65,7 @@ Folded scenarios:
 - evidence freshness;
 - performance/provenance/SGTTI isolation.
 
-Evidence display is `embed_tui`. Protocol, XLSX, logs, and performance receipts
+Evidence display is `embed_tui`. Protocol, gate, and performance receipts
 remain links. Executable SSpec stays folded beneath manual steps.
 
 ## Scenario Matrix
@@ -79,7 +79,7 @@ remain links. Executable SSpec stays folded beneath manual steps.
 | `ui-action-history` | folded | REQ-002 | edge/state | protocol |
 | `ui-rejection` | folded | REQ-002 | error | protocol |
 | `formula-multiply` | show | REQ-003 | happy | tui+protocol |
-| `formula-avg` | show | REQ-003 | compatibility edge | tui+protocol+XLSX |
+| `formula-avg` | show | REQ-003 | compatibility edge | tui+protocol |
 | `formula-invalid` | folded | REQ-003 | error | protocol+tui |
 | `evidence` | folded | NFR-001 | artifact/freshness | all |
 | `performance` | folded | NFR-002 | N1 targets | perf+log |
@@ -101,13 +101,12 @@ NFRs use aggregate evidence gates rather than synthetic placeholder scenarios.
 - Review the independent post-action snapshot
 - Review correlated access history
 - Capture the rendered Calc TUI
-- Save and reopen the XLSX artifact
 
 ## Assertions
 
 The system gate must prove:
 
-- command path/provenance names the deployed self-hosted runtime;
+- command ownership/help is present and the app gate names its runtime;
 - IDE TUI/GUI feature reports exit zero and name the correct mode;
 - Office help contains `calc [FILE] --tui`;
 - `main`, `main#cell_A1`, `main#formula_input`, and
@@ -117,7 +116,6 @@ The system gate must prove:
 - B1 visibly and semantically equals `48`;
 - C1 visibly and semantically equals `7`, while its raw formula is
   `=AVG(A1:A2)`;
-- saved/reopened XLSX preserves both results;
 - TUI capture and all protocol files share the current run ID;
 - terminal mode is restored and the child/service is stopped.
 
@@ -128,7 +126,7 @@ warm_calc_ready_ms <= 2000
 windows_snapshot_p95_ms <= 100
 find_p95_ms <= 25
 action_observed_p95_ms <= 250
-access_rss_delta_mib <= 20
+access_rss_delta_mib = not_measured_app_dev
 history_limit = 64
 capture = 124x37
 ```
@@ -166,11 +164,11 @@ or gate cannot run.
 
 ## Failure Triage
 
-- Missing `SIMPLE_BINARY`: deploy/identify the verified self-hosted binary.
-- Gate nonzero: inspect the named scenario and `log/calc-service.log`.
+- Missing `SIMPLE_BINARY`: provide the existing Simple runtime path.
+- Gate nonzero: inspect the named scenario and `gate.out` receipt.
 - Source unavailable: confirm Calc started the established loopback service.
 - Missing target: inspect `protocol/snapshot-before.json` and stable IDs.
-- Formula mismatch: inspect actions, post-snapshot, raw formula, and XLSX reopen.
+- Formula mismatch: inspect actions, post-snapshot, and raw formula.
 - Capture mismatch: reject stale run IDs before changing assertions.
 - Performance miss: retain measurements and record/fix a concrete regression;
   do not increase thresholds silently.

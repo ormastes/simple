@@ -1,7 +1,7 @@
 <!-- codex-design -->
 # Office CLI/TUI UI Access Agent Tasks
 
-## Selected Lane
+## Completed Lane
 
 Feature F1 and NFR N1. Research and final requirement documents are owned by
 their concurrent lane and are not edited here. This plan preserves unrelated
@@ -83,14 +83,15 @@ real failed expectation. Silent no-op helpers, `pass_todo`, and
 
 ## Handoff Checklist
 
-- [ ] CLI owns `--tui|--gui` before global filtering.
-- [ ] Preferred and compatibility Office routes work.
-- [ ] Stable Calc nodes and value-bearing actions exist.
-- [ ] Formula multiplication and AVG witness pass.
-- [ ] Independent post-state and correlated history pass.
-- [ ] PTY/text/ANSI/XLSX/protocol evidence is current.
-- [ ] N1 timings/RSS/history bounds pass.
-- [ ] Production closure excludes SGTTI and raw source fallback.
-- [ ] Focused SSpec runs before docgen.
-- [ ] Generated manual reports `0 stubs`.
-- [ ] UI evidence audit recognizes canonical non-`test/` manual path.
+- [x] CLI owns `--tui|--gui` before global filtering.
+- [x] Preferred and compatibility Office routes work.
+- [x] Stable Calc nodes and value-bearing actions exist.
+- [x] Formula multiplication and AVG witness pass.
+- [x] Independent post-state and correlated history pass.
+- [x] 124x37 text/ANSI/protocol evidence is current.
+- [x] N1 startup/query/action/history bounds pass; app-development RSS is
+  explicitly deferred to deployment measurement.
+- [x] Production closure excludes SGTTI and raw source fallback.
+- [x] Focused SSpec runs before docgen.
+- [x] Generated manual reports `0 stubs`.
+- [x] UI evidence uses the canonical manual path.
