@@ -139,6 +139,85 @@ assertions kept):
 3. `test/01_unit/lib/common/spec/evidence/legacy_facade_spec.spl`
 4. `test/01_unit/lib/common/spec/scenario_evidence_spec.spl`
 
+## Untyped-capture adapter (`untyped_capture.spl`)
+
+Design: `doc/05_design/infra/sspec/untyped_evidence_migration_design.md`.
+
+`legacy_facade.spl` above adapts specs that already build a
+`ScenarioEvidenceArtifact`. Most existing specs never do that — they assert on
+a raw captured value (process stdout, rendered UI/terminal text, a log line)
+directly with `to_contain`/`to_equal`, with no evidence envelope at all.
+`src/lib/common/spec/evidence/untyped_capture.spl` is the adapter for exactly
+that shape:
+
+```spl
+use std.common.spec.evidence.untyped_capture.{untyped_capture, untyped_capture_to_canonical}
+use std.common.spec.evidence.model.{oracle_spec_open, check_exact, EvidenceStatus}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+
+val capture = untyped_capture("status line", raw_output, "stdout")   # source_kind: "stdout" | "rendered_text" | "log_line"
+val evidence = untyped_capture_to_canonical(capture, "my_profile_id")
+val comparison = compare_evidence(evidence, oracle_spec_open("my_profile_id", [
+    check_exact("value", raw_output)
+]))
+expect(comparison.status).to_equal(EvidenceStatus.passed)
+```
+
+It wraps the raw value into exactly one `EvidenceNode` at path `"value"`,
+tagged by `source_kind` — no structure inference. An empty `raw_value` still
+produces a valid node (a legitimate captured value, e.g. no stdout produced,
+not the same as a missing capture). An unrecognized `source_kind` fails
+closed via `canonical_evidence_parse_error` instead of silently mislabeling
+the evidence.
+
+**Triage rule (do not skip this) — per the design doc's three categories:**
+
+1. **Category 1 (in scope):** a real captured value (process stdout, rendered
+   text) asserted with `to_contain`/`to_equal`, never wrapped in any evidence
+   artifact. Convert this.
+2. **Category 2 (out of scope):** an in-memory value the spec computed
+   directly, with no external capture. Do not touch — forcing a
+   `CanonicalEvidence` wrapper around a plain value comparison adds no value.
+3. **Category 3 (out of scope):** print-only output with no real assertion.
+   This is a correctness gap (`SSDOC-ORA-001`), not a migration; track it
+   separately via `sspec-maintain scan`, do not "fix" it here.
+
+Convert a category-1 candidate only when a `check_exact`/`check_full_pattern`/
+`check_multiset` would express the assertion more precisely than substring
+containment (e.g. an exact value embedded in free text, or a field that could
+legitimately repeat). Leave the substring check alone when it is already the
+right precision — this is judgment per spec, not a scripted sweep.
+
+**Migrated candidate (2026-08-08): `test/01_unit/app/io/process_ops_ext_spec.spl`**
+
+`describe "shell" / it "returns ProcessResult with stdout"` spawns a real
+subprocess (`shell("echo hello")`) and asserts `result.stdout` with
+`to_contain("hello")` — a genuine category-1 shape: a real captured value
+(actual child-process stdout), never wrapped in any evidence artifact. Added,
+additively, right after the existing assertion:
+
+```spl
+val capture = untyped_capture("shell echo stdout", result.stdout, "stdout")
+val evidence = untyped_capture_to_canonical(capture, "process_ops_shell_echo_hello")
+val comparison = compare_evidence(evidence, oracle_spec_open("process_ops_shell_echo_hello", [
+    check_exact("value", "hello\n")
+]))
+expect(comparison.status).to_equal(EvidenceStatus.passed)
+```
+
+Note this uses `check_exact`, not `check_full_pattern` — `echo hello`'s stdout
+is a fixed literal (`"hello\n"`), so exact match is the correct precision
+here per the triage rule; `check_full_pattern`/`check_multiset` apply when the
+value has a shape (hex id, repeatable field) rather than a fixed literal.
+
+Other specs found in the same sweep that call `to_contain`/`to_equal` on
+subprocess-looking output (`test/01_unit/app/io/timeout_spec.spl`) are further
+genuine category-1 candidates left for a future pass; several look-alikes
+(`t32_cli_render_spec.spl`, `chat_tui_spec.spl`,
+`cli_run_output_owner_spec.spl`) were checked and rejected as category 2 —
+they assert on in-memory-constructed values or `rt_file_read_text` source
+reads, not on an external process/render capture.
+
 **Corpus note (2026-08-08):** a full search of `test/01_unit/` and
 `test/02_integration/` for `scenario_helpers`/`scenario_evidence` usage turns
 up exactly 5 files total. With the 4 above migrated, only one file remains:

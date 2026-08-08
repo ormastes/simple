@@ -1,0 +1,97 @@
+# Untyped-evidence capture adapter (category-1 migration lane).
+#
+# @manual_section Untyped evidence capture adapter
+# @req REQ-SSPEC-EVD-FR14
+
+use std.spec.*
+use std.common.spec.evidence.untyped_capture.{
+    UntypedCapture, untyped_capture, untyped_capture_to_canonical,
+    untyped_capture_source_kind_valid
+}
+use std.common.spec.evidence.model.{EvidenceStatus, oracle_spec_open, check_exact, check_full_pattern}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+
+describe "Untyped evidence capture adapter":
+    """
+    Most existing specs never build a ScenarioEvidenceArtifact at all — they
+    assert on a raw captured value (process stdout, rendered text, a log
+    line) directly. This adapter wraps that already-captured raw value into
+    one typed-evidence node so it can flow through the same comparator and
+    manual renderer as fully typed evidence, WITHOUT inferring any structure
+    from the raw text. It exists for category-1 captures only, per the
+    triage rule in doc/05_design/infra/sspec/untyped_evidence_migration_design.md:
+    a real captured value that was never wrapped in an evidence envelope. It
+    is not for in-memory value comparisons with no capture (category 2), and
+    not for print-only specs with no assertion at all (category 3).
+    """
+
+    it "wraps a captured stdout value into a single 'value' node":
+        step("Build an untyped capture from a real process-output shape")
+        val capture = untyped_capture("build output", "$ build\nexit: 0", "stdout")
+
+        step("Convert it into CanonicalEvidence")
+        val evidence = untyped_capture_to_canonical(capture, "untyped_build_output")
+
+        step("Verify the raw value round-trips into the single value node")
+        expect(evidence.parse_ok).to_equal(true)
+        expect(evidence.nodes.len()).to_equal(1)
+        expect(evidence.nodes[0].path).to_equal("value")
+        expect(evidence.nodes[0].value).to_equal("$ build\nexit: 0")
+
+    it "treats an empty raw_value as a legitimate captured value, not an error":
+        step("Build an untyped capture whose process produced no stdout")
+        val capture = untyped_capture("silent run", "", "stdout")
+
+        step("Convert it into CanonicalEvidence")
+        val evidence = untyped_capture_to_canonical(capture, "untyped_silent_run")
+
+        step("Verify it still parses ok with a valid (empty) value node")
+        expect(evidence.parse_ok).to_equal(true)
+        expect(evidence.nodes.len()).to_equal(1)
+        expect(evidence.nodes[0].value).to_equal("")
+
+    it "rejects an unrecognized source_kind instead of silently mislabeling evidence":
+        step("Build an untyped capture with a typo'd source_kind")
+        val capture = untyped_capture("mystery", "some text", "stdouts")
+
+        step("Verify the validator flags it before conversion")
+        expect(untyped_capture_source_kind_valid(capture.source_kind)).to_equal(false)
+
+        step("Convert it and verify the conversion fails closed rather than accepting the typo")
+        val evidence = untyped_capture_to_canonical(capture, "untyped_mystery")
+        expect(evidence.parse_ok).to_equal(false)
+        expect(evidence.parse_error).to_contain("stdouts")
+
+    it "accepts every fixed source_kind in the set":
+        step("Verify stdout, rendered_text, and log_line are all valid")
+        expect(untyped_capture_source_kind_valid("stdout")).to_equal(true)
+        expect(untyped_capture_source_kind_valid("rendered_text")).to_equal(true)
+        expect(untyped_capture_source_kind_valid("log_line")).to_equal(true)
+
+    it "flows an untyped capture through the real typed-evidence comparator end to end, via check_exact":
+        step("Build an untyped capture of rendered text")
+        val capture = untyped_capture("status line", "status: ready", "rendered_text")
+        val evidence = untyped_capture_to_canonical(capture, "untyped_status_line")
+
+        step("Check it with a real OracleSpec using check_exact")
+        val oracle = oracle_spec_open("untyped_status_line", [
+            check_exact("value", "status: ready")
+        ])
+        val comparison = compare_evidence(evidence, oracle)
+
+        step("Verify the comparator reports a real pass")
+        expect(comparison.status).to_equal(EvidenceStatus.passed)
+
+    it "flows an untyped capture through the real typed-evidence comparator end to end, via check_full_pattern":
+        step("Build an untyped capture of a log line whose value is a bare hex request id")
+        val capture = untyped_capture("log line", "deadbeefcafebabe", "log_line")
+        val evidence = untyped_capture_to_canonical(capture, "untyped_log_line")
+
+        step("Check it with a real OracleSpec using check_full_pattern")
+        val oracle = oracle_spec_open("untyped_log_line", [
+            check_full_pattern("value", "hex:16")
+        ])
+        val comparison = compare_evidence(evidence, oracle)
+
+        step("Verify the comparator reports a real pass")
+        expect(comparison.status).to_equal(EvidenceStatus.passed)
