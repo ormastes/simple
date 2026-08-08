@@ -2606,6 +2606,83 @@ impl MirLowering:
                         if val conversion_local = conversion_result:
                             return conversion_local
 
+                # Primitive NUMERIC conversions (`to_u8`/`to_i32`/`to_u32`/
+                # `to_i64`/`to_f64`/...) have no MethodResolver entry either:
+                # the builtin numeric types carry no symbol-bearing HIR type,
+                # exactly the same gap the builtin-Array methods below document
+                # (try_instance_method/try_trait_method/try_ufcs in
+                # resolve_strategies.spl all require one). So every `n.to_u8()`
+                # reaches this Unresolved arm and fell through to the loud
+                # "unresolved method call: to_u8" failure at the end of the arm,
+                # which aborts the whole native build -- see bug doc
+                # native_mir_lowering_unresolved_to_u8_and_join_2026-08-08.md.
+                # Measured on a clean tree, the native-lane family reaching that
+                # failure is 9 names; these conversions are 5 of them and are one
+                # shared mechanism, so they are fixed together here rather than
+                # one at a time. Concretely this is what made the typed AES path
+                # (src/lib/common/aes/modes.spl `_i64_to_u8`, called by every
+                # aes_cbc_encrypt/decrypt entry point, plus 28 sites in
+                # crypto/aes_gcm.spl) unbuildable under native codegen.
+                #
+                # Lower as a real MirInstKind.Cast to the narrow target and then
+                # back to i64, which is what every other integer value in this
+                # arm is typed as. A Cast pair is used rather than a hand-rolled
+                # BitAnd mask so the BACKEND's own trunc/zext/sext selection
+                # supplies the signedness: casting through U8 zero-extends
+                # (300 -> 44, -1 -> 255) while casting through I32 sign-extends
+                # (4294967296 -> 0). Both match the interpreter oracle, which is
+                # the reference engine for these methods.
+                if args.len() == 0:
+                    var conv_narrow = MirType.i64()
+                    var conv_is_int = false
+                    if method == "to_u8":
+                        conv_narrow = MirType(kind: MirTypeKind.U8)
+                        conv_is_int = true
+                    if method == "to_u16":
+                        conv_narrow = MirType(kind: MirTypeKind.U16)
+                        conv_is_int = true
+                    if method == "to_u32":
+                        conv_narrow = MirType(kind: MirTypeKind.U32)
+                        conv_is_int = true
+                    if method == "to_u64":
+                        conv_narrow = MirType(kind: MirTypeKind.U64)
+                        conv_is_int = true
+                    if method == "to_i8":
+                        conv_narrow = MirType(kind: MirTypeKind.I8)
+                        conv_is_int = true
+                    if method == "to_i16":
+                        conv_narrow = MirType(kind: MirTypeKind.I16)
+                        conv_is_int = true
+                    if method == "to_i32":
+                        conv_narrow = MirType(kind: MirTypeKind.I32)
+                        conv_is_int = true
+                    if conv_is_int:
+                        if (rt_env_get("SIMPLE_MIR_LOG_CONV") ?? "") == "1":
+                            eprint("[conv-lower] narrowing conversion arm hit method={method}\n")
+                        var b_conv_n = self.builder
+                        val conv_narrowed = b_conv_n.emit_cast(mir_operand_copy(unresolved_receiver_local), conv_narrow)
+                        val conv_widened = b_conv_n.emit_cast(mir_operand_copy(conv_narrowed), MirType.i64())
+                        self.builder = b_conv_n
+                        return conv_widened
+                    # `to_i64` on an already-i64 receiver is the identity; the
+                    # receiver local is already lowered and i64-typed.
+                    if method == "to_i64":
+                        if (rt_env_get("SIMPLE_MIR_LOG_CONV") ?? "") == "1":
+                            eprint("[conv-lower] identity conversion arm hit method={method}\n")
+                        return unresolved_receiver_local
+                    # Float conversions genuinely change representation, so they
+                    # are a single Cast with no widen-back (the result IS f64).
+                    if method == "to_f64" or method == "to_f32":
+                        if (rt_env_get("SIMPLE_MIR_LOG_CONV") ?? "") == "1":
+                            eprint("[conv-lower] float conversion arm hit method={method}\n")
+                        var conv_float_ty = MirType.f64()
+                        if method == "to_f32":
+                            conv_float_ty = MirType(kind: MirTypeKind.F32)
+                        var b_conv_f = self.builder
+                        val conv_floated = b_conv_f.emit_cast(mir_operand_copy(unresolved_receiver_local), conv_float_ty)
+                        self.builder = b_conv_f
+                        return conv_floated
+
                 # Task #155: native lowering for array `map`/`filter`/`fold` with
                 # lambda arguments, on top of #165's lambda-lift/fnptr machinery
                 # (lower_lambda_value in switch_operators_calls.spl). Like `push`
