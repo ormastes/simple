@@ -136,6 +136,43 @@ current wave status first:
   addr `0x1234_5000`) — use this as the canonical worked example when writing
   a `bit_range`/`binary_field` selector spec against a real PTE value.
 
+## What landed since (2026-08-08, untyped-evidence migration lane, E8)
+
+- Legacy-migration sub-lane (moving existing loose-text specs onto the typed
+  pipeline additively) is live and bounded: candidate population enumerated
+  once via `scripts/check/scan-untyped-evidence-candidates.shs` at 1119
+  category-1 rows across 414 files (doc:
+  [doc/08_tracking/audit/untyped_evidence_migration_candidates_2026-08-08.md](../../../08_tracking/audit/untyped_evidence_migration_candidates_2026-08-08.md)).
+  Progress as of the 8th worked batch: 30 rows migrated ("yes"), 135
+  explicitly rejected with a recorded one-line reason each (numeric-only,
+  in-memory, static `file_read` source-text, or duplicate) — the rest remain
+  unmarked "no" (not yet triaged). Triage rule and worked examples:
+  [doc/05_design/infra/sspec/untyped_evidence_migration_design.md](../../../05_design/infra/sspec/untyped_evidence_migration_design.md),
+  [doc/07_guide/infra/sspec_legacy_migration.md](../../../07_guide/infra/sspec_legacy_migration.md).
+  Tracked backlog with resume instructions:
+  [doc/08_tracking/todo/untyped_evidence_migration_backlog_2026-08-08.md](../../../08_tracking/todo/untyped_evidence_migration_backlog_2026-08-08.md).
+- Yield rate on unmigrated rows has fallen sharply batch over batch (roughly
+  5/8 → 1/24 → 0/26 → 1/41 accepted) as the easy front-loaded category-1 wins
+  are exhausted; most of the remaining population is the scanner's known
+  false-positive class (a spec `file_read`s its own source and asserts on the
+  literal text — a static-authorship check, not a live-system observation,
+  explicitly out of scope per the design doc). This lane has no natural
+  single-session completion point at the current per-batch rate.
+- A companion, unstarted lane — real live-capture infrastructure per domain
+  (TUI/GUI action trace/2D-3D scene/simulation/audio/ML) so `format/*.spl`
+  adapters stop taking only constructed fixture input — is tracked separately
+  and explicitly scoped as multi-session research+design+implement work, not
+  a bounded backlog like the migration above:
+  [doc/08_tracking/todo/sspec_live_capture_infrastructure_2026-08-08.md](../../../08_tracking/todo/sspec_live_capture_infrastructure_2026-08-08.md).
+- Shared-tree operating note for anyone resuming this lane: the migration
+  candidate audit doc and backlog TODO are hot-contended files edited by many
+  concurrent batches. When landing a batch's changes, diff its final doc
+  version against the row set it actually started from and apply only the
+  rows it newly touched onto a freshly-fetched `origin/main` copy — never
+  push a batch's full doc blob wholesale, since a batch that started from a
+  stale local snapshot will otherwise silently drop rows another batch
+  already landed.
+
 ## Update Rule
 
 When the project process creates or changes research, requirements,
