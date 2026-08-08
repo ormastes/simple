@@ -795,3 +795,48 @@ alongside this doc update. §11's row for this pair should be read as
 superseded by this section (its A/B behavioral labels were reversed; the
 correctness gap it flagged as "a real incremental-rebuild correctness
 question" is now fixed in the copy that actually runs).
+
+## 14. §12 correction — `associated_types_defs.spl` is text-fixture load-bearing; whole-cluster deletion is NOT clean (2026-08-08, follow-up verification pass)
+
+§12's "confirmed-safe (never co-load)" verdict and its "recommend a
+follow-up cleanup bug to delete the orphaned `30.types/associated_types*`
+cluster" note scoped the reachability grep to `src/compiler` only ("outside
+that cluster across all of `src/compiler` returns zero hits"). Re-running
+`/usr/bin/grep -rl` for the cluster's module names across the **whole repo**
+(not just `src/compiler`) finds one hit §12 missed:
+`test/01_unit/compiler/bootstrap/hir_symbol_alias_owner_collision_spec.spl:18`
+does `file_read("src/compiler/30.types/associated_types_defs.spl")` and
+asserts the raw text contains `"type Symbol = text"` and `"export Symbol"`
+(a regression check for
+`doc/08_tracking/bug/stage3_selfhost_symbol_alias_conflict_2026-08-04.md`,
+confirming a module-local `Symbol` alias survives untouched). That spec lives
+under `test/01_unit/`, the default `bin/simple test` discovery tree, so
+`associated_types_defs.spl` is load-bearing as a **text fixture**, even
+though (per §12, still correct) it is never `use`-imported/compiled outside
+the cluster itself.
+
+This complicates "delete the whole cluster": `associated_types_defs.spl`
+must keep existing with matching content, and the cluster's internal imports
+are circular (`associated_types_defs.spl:14` does
+`use compiler.types.associated_types_solvers.*`, while
+`associated_types_solvers.spl:14-16` imports back from
+`associated_types_defs.spl`) — so deleting `associated_types_solvers.spl`
+(the file that actually contains the orphaned `AssocTypeProjection` class
+§11/§12 investigated) would leave a dangling `use` clause in the file the
+test depends on. That `use` is never exercised (the test only greps text,
+never compiles the module), so it would not break the test, but it leaves
+invalid-looking Simple source sitting in a tree that's otherwise supposed to
+compile.
+
+**Verdict, corrected:** not a clean "genuinely dead, delete it" case as §12's
+recommendation implied. `associated_types_defs.spl` is referenced/load-bearing
+(via the test above) and must stay; `associated_types_solvers.spl`,
+`associated_types.spl`, `associated_types_tests_def_impl.spl`, and
+`associated_types_tests_resolve.spl` remain unreachable from any compiled
+pipeline (`run`/`native-build`/`test`/`lint`) as §12 found, but partial
+deletion would strand a dangling import in the sibling the test needs.
+Left the cluster untouched this pass rather than partially delete it; if
+this is revisited, the safe order is (a) drop the now-unnecessary
+`use compiler.types.associated_types_solvers.*` from
+`associated_types_defs.spl` first, verify the two `file_read` assertions in
+the spec above still pass, and only then remove the other four files.
