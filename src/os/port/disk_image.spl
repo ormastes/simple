@@ -56,7 +56,7 @@ struct DiskImageConfig:
     # doc/08_tracking/bug/disk_image_fat32_builder_defects.md #1: omitting a
     # non-defaulted `[T]` struct field silently binds it to `nil` at runtime
     # (a compiler struct-literal-init defect, not caught at compile time),
-    # and `for x in nil:` / `nil.length` then blow up downstream. Working
+    # and `for x in nil:` / `nil.len()` then blow up downstream. Working
     # around it here with a field default avoids relying on a fix to that
     # compiler defect.
     nested_payloads: [PayloadEntry] = []
@@ -97,7 +97,7 @@ fn _push_str8(buf: [u8], s: text) -> [u8]:
     """Push exactly 8 ASCII bytes, space-padded (BS_OEMName field)."""
     var i: u64 = 0u64
     while i < 8u64:
-        if i < s.length:
+        if i < s.len():
             buf.push(s[i] as u8)
         else:
             buf.push(0x20u8)
@@ -108,7 +108,7 @@ fn _push_str11(buf: [u8], s: text) -> [u8]:
     """Push exactly 11 ASCII bytes, space-padded (8.3 FAT name / vol_label)."""
     var i: u64 = 0u64
     while i < 11u64:
-        if i < s.length:
+        if i < s.len():
             buf.push(s[i] as u8)
         else:
             buf.push(0x20u8)
@@ -120,7 +120,7 @@ fn _pad_trunc(s: text, width: u64) -> text:
     var result: text = ""
     var i: u64 = 0u64
     while i < width:
-        if i < s.length:
+        if i < s.len():
             result = result + s.substring(i, i + 1u64)
         else:
             result = result + " "
@@ -139,7 +139,7 @@ fn _to_8_3_name(name: text) -> text:
     8.3-normalized lookup never matched)."""
     var dot_idx: i64 = -1
     var i: u64 = 0u64
-    while i < name.length:
+    while i < name.len():
         if (name[i] as u8) == 0x2Eu8:
             dot_idx = i as i64
         i = i + 1u64
@@ -147,7 +147,7 @@ fn _to_8_3_name(name: text) -> text:
     var ext: text = ""
     if dot_idx >= 0:
         base = name.substring(0u64, dot_idx as u64)
-        ext = name.substring((dot_idx as u64) + 1u64, name.length)
+        ext = name.substring((dot_idx as u64) + 1u64, name.len())
     _pad_trunc(base.upper(), 8u64) + _pad_trunc(ext.upper(), 3u64)
 
 fn _fat_short_char_valid(b: u8) -> bool:
@@ -161,12 +161,12 @@ fn _fat_short_char_valid(b: u8) -> bool:
 
 fn _vfat_name_valid(name: text) -> bool:
     val units = utf16_encode_all(text_codepoints(name))
-    if name == "" or units.length > 255u64 or name == "." or name == ".." or not text_is_valid_utf8(name):
+    if name == "" or units.len() > 255u64 or name == "." or name == ".." or not text_is_valid_utf8(name):
         return false
-    if (name[name.length - 1u64] as u8) == 0x20u8 or (name[name.length - 1u64] as u8) == 0x2Eu8:
+    if (name[name.len() - 1u64] as u8) == 0x20u8 or (name[name.len() - 1u64] as u8) == 0x2Eu8:
         return false
     var i: u64 = 0u64
-    while i < name.length:
+    while i < name.len():
         val b = name[i] as u8
         if b < 0x20u8 or b == 0x22u8 or b == 0x2Au8 or
            b == 0x2Fu8 or b == 0x3Au8 or b == 0x3Cu8 or b == 0x3Eu8 or
@@ -179,23 +179,23 @@ fn _fat_short_name_lossless(name: text) -> bool:
     var dot_idx: i64 = -1
     var dot_count: u64 = 0u64
     var i: u64 = 0u64
-    while i < name.length:
+    while i < name.len():
         if (name[i] as u8) == 0x2Eu8:
             dot_idx = i as i64
             dot_count = dot_count + 1u64
         i = i + 1u64
     if dot_count > 1u64:
         return false
-    var base_len = name.length
-    var ext_start = name.length
+    var base_len = name.len()
+    var ext_start = name.len()
     if dot_idx >= 0:
         base_len = dot_idx as u64
         ext_start = base_len + 1u64
-    val ext_len = name.length - ext_start
+    val ext_len = name.len() - ext_start
     if base_len == 0u64 or base_len > 8u64 or ext_len > 3u64:
         return false
     i = 0u64
-    while i < name.length:
+    while i < name.len():
         val b = name[i] as u8
         if b != 0x2Eu8 and not _fat_short_char_valid(b):
             return false
@@ -203,7 +203,7 @@ fn _fat_short_name_lossless(name: text) -> bool:
     true
 
 fn _fat_raw_name83_valid(name: text) -> bool:
-    if name.length != 11u64 or (name[0] as u8) == 0x20u8:
+    if name.len() != 11u64 or (name[0] as u8) == 0x20u8:
         return false
     var i: u64 = 0u64
     while i < 11u64:
@@ -216,7 +216,7 @@ fn _fat_raw_name83_valid(name: text) -> bool:
 fn _take_text(value: text, width: u64) -> text:
     var out = ""
     var i: u64 = 0u64
-    while i < value.length and i < width:
+    while i < value.len() and i < width:
         out = out + value.substring(i, i + 1u64)
         i = i + 1u64
     out
@@ -224,7 +224,7 @@ fn _take_text(value: text, width: u64) -> text:
 fn _fat_short_alias_candidate(name: text, ordinal: u64) -> text:
     var dot_idx: i64 = -1
     var i: u64 = 0u64
-    while i < name.length:
+    while i < name.len():
         if (name[i] as u8) == 0x2Eu8:
             dot_idx = i as i64
         i = i + 1u64
@@ -232,11 +232,11 @@ fn _fat_short_alias_candidate(name: text, ordinal: u64) -> text:
     var ext = ""
     if dot_idx >= 0:
         base = name.substring(0u64, dot_idx as u64)
-        ext = name.substring((dot_idx as u64) + 1u64, name.length)
+        ext = name.substring((dot_idx as u64) + 1u64, name.len())
     var clean_base = ""
     val upper_base = base.upper()
     i = 0u64
-    while i < upper_base.length:
+    while i < upper_base.len():
         if _fat_short_char_valid(upper_base[i] as u8):
             clean_base = clean_base + upper_base.substring(i, i + 1u64)
         else:
@@ -247,7 +247,7 @@ fn _fat_short_alias_candidate(name: text, ordinal: u64) -> text:
     var clean_ext = ""
     val upper_ext = ext.upper()
     i = 0u64
-    while i < upper_ext.length:
+    while i < upper_ext.len():
         if _fat_short_char_valid(upper_ext[i] as u8):
             clean_ext = clean_ext + upper_ext.substring(i, i + 1u64)
         else:
@@ -255,8 +255,8 @@ fn _fat_short_alias_candidate(name: text, ordinal: u64) -> text:
         i = i + 1u64
     val suffix = "~" + ordinal.to_text()
     var prefix_width: u64 = 1u64
-    if suffix.length < 8u64:
-        prefix_width = 8u64 - suffix.length
+    if suffix.len() < 8u64:
+        prefix_width = 8u64 - suffix.len()
     val short_base = _take_text(clean_base, prefix_width) + suffix
     _pad_trunc(short_base, 8u64) + _pad_trunc(clean_ext, 3u64)
 
@@ -266,17 +266,17 @@ fn _fat_short_alias_used(alias: text, parent: i64,
                          leaf_names: [text], leaf_parents: [i64]) -> bool:
     var i: u64 = 0u64
     if parent == -1:
-        while i < flat_names.length:
+        while i < flat_names.len():
             if flat_names[i] == alias:
                 return true
             i = i + 1u64
     i = 0u64
-    while i < dir_names.length:
+    while i < dir_names.len():
         if dir_parents[i] == parent and dir_names[i] == alias:
             return true
         i = i + 1u64
     i = 0u64
-    while i < leaf_names.length:
+    while i < leaf_names.len():
         if leaf_parents[i] == parent and leaf_names[i] == alias:
             return true
         i = i + 1u64
@@ -294,7 +294,7 @@ fn _fat_short_name_checksum(name83: text) -> u8:
 fn _vfat_lfn_slot_count(name: text) -> u64:
     if name == "": return 0u64
     val units = utf16_encode_all(text_codepoints(name))
-    (units.length + 12u64) / 13u64
+    (units.len() + 12u64) / 13u64
 
 fn _named_dir_entry_slot_count(long_name: text) -> u64:
     1u64 + _vfat_lfn_slot_count(long_name)
@@ -303,10 +303,10 @@ fn _push_vfat_name_units(buf: [u8], units: [i64], start: u64, count: u64) -> [u8
     var i: u64 = 0u64
     while i < count:
         val index = start + i
-        if index < units.length:
+        if index < units.len():
             buf = _push_u16(buf, units[index] as u32)
         else:
-            if index == units.length:
+            if index == units.len():
                 buf = _push_u16(buf, 0u32)
             else:
                 buf = _push_u16(buf, 0xFFFFu32)
@@ -334,16 +334,16 @@ fn _split_guest_path(guest_path: text) -> [text]:
     var parts: [text] = []
     var current: text = ""
     var i: u64 = 0u64
-    while i < guest_path.length:
+    while i < guest_path.len():
         val b: u8 = guest_path[i] as u8
         if b == 0x2Fu8:
-            if current.length > 0u64:
+            if current.len() > 0u64:
                 parts.push(current)
                 current = ""
         else:
             current = current + guest_path.substring(i, i + 1u64)
         i = i + 1u64
-    if current.length > 0u64:
+    if current.len() > 0u64:
         parts.push(current)
     parts
 
@@ -479,7 +479,7 @@ fn _build_dir_entry(buf: [u8], name83: text, first_cluster: u32, file_size: u32)
 fn _build_named_dir_entry_attr(buf: [u8], short_name83: text, long_name: text,
                                first_cluster: u32, file_size: u32, attr: u8) -> [u8]:
     val units = utf16_encode_all(text_codepoints(long_name))
-    val slot_count = (units.length + 12u64) / 13u64
+    val slot_count = (units.len() + 12u64) / 13u64
     if slot_count > 0u64:
         val checksum = _fat_short_name_checksum(short_name83)
         var ordinal = slot_count
@@ -508,7 +508,7 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
     """
     if cfg.size_mb == 0u64:
         return Err("disk_image.build: size_mb must be > 0")
-    if cfg.payloads.length == 0 and cfg.nested_payloads.length == 0:
+    if cfg.payloads.len() == 0 and cfg.nested_payloads.len() == 0:
         return Err("disk_image.build: at least one payload required")
 
     val total_sectors: u32 = (cfg.size_mb * 2048u64) as u32
@@ -518,7 +518,7 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
     var cluster_counts: [u64] = []
     var flat_name83: [text] = []
     for p in cfg.payloads:
-        cluster_counts.push(_payload_cluster_count(p.data.length as u64, bytes_per_cluster))
+        cluster_counts.push(_payload_cluster_count(p.data.len() as u64, bytes_per_cluster))
         flat_name83.push(_to_8_3_name(p.path))
 
     # Directory-node tracking arrays. Built up directly in this function's own
@@ -536,11 +536,11 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
 
     for np in cfg.nested_payloads:
         val comps = _split_guest_path(np.guest_path)
-        if comps.length == 0u64:
+        if comps.len() == 0u64:
             return Err("disk_image.build: nested payload missing guest_path: " + np.path)
         var parent_idx: i64 = -1
         var ci: u64 = 0u64
-        while ci < comps.length - 1u64:
+        while ci < comps.len() - 1u64:
             val component = comps[ci]
             if not _vfat_name_valid(component):
                 return Err("disk_image.build: invalid VFAT directory component: '" + component + "'")
@@ -551,14 +551,14 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
             # mutate its own local copies and silently drop every insert.
             var found_idx: i64 = -1
             var si: u64 = 0u64
-            while si < dir_keys.length:
+            while si < dir_keys.len():
                 if dir_keys[si] == key:
                     found_idx = si as i64
                 si = si + 1u64
             if found_idx == -1:
                 var leaf_conflict = false
                 si = 0u64
-                while si < nested_leaf_keys.length:
+                while si < nested_leaf_keys.len():
                     if nested_leaf_keys[si] == key:
                         leaf_conflict = true
                     si = si + 1u64
@@ -578,20 +578,20 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
                 dir_name83.push(short_name)
                 dir_long_name.push(long_name)
                 dir_parent.push(parent_idx)
-                found_idx = (dir_keys.length - 1u64) as i64
+                found_idx = (dir_keys.len() - 1u64) as i64
             parent_idx = found_idx
             ci = ci + 1u64
-        val leaf = comps[comps.length - 1u64]
+        val leaf = comps[comps.len() - 1u64]
         if not _vfat_name_valid(leaf):
             return Err("disk_image.build: invalid VFAT leaf name: '" + leaf + "'")
         val leaf_key = parent_idx.to_text() + "/" + leaf.upper()
         var li: u64 = 0u64
-        while li < dir_keys.length:
+        while li < dir_keys.len():
             if dir_keys[li] == leaf_key:
                 return Err("disk_image.build: path is already a directory: '" + leaf + "'")
             li = li + 1u64
         li = 0u64
-        while li < nested_leaf_keys.length:
+        while li < nested_leaf_keys.len():
             if nested_leaf_keys[li] == leaf_key:
                 return Err("disk_image.build: duplicate nested payload path: '" + np.guest_path + "'")
             li = li + 1u64
@@ -614,14 +614,14 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
         nested_leaf_long_name.push(leaf_long_name)
         nested_leaf_keys.push(leaf_key)
         nested_parent_idx.push(parent_idx)
-        cluster_counts.push(_payload_cluster_count(np.data.length as u64, bytes_per_cluster))
+        cluster_counts.push(_payload_cluster_count(np.data.len() as u64, bytes_per_cluster))
 
-    val flat_count: u64 = cfg.payloads.length as u64
-    val nested_count: u64 = cfg.nested_payloads.length as u64
+    val flat_count: u64 = cfg.payloads.len() as u64
+    val nested_count: u64 = cfg.nested_payloads.len() as u64
 
     var root_entry_slots = flat_count
     var root_di: u64 = 0u64
-    while root_di < dir_keys.length:
+    while root_di < dir_keys.len():
         if dir_parent[root_di] == -1:
             root_entry_slots = root_entry_slots + _named_dir_entry_slot_count(dir_long_name[root_di])
         root_di = root_di + 1u64
@@ -635,10 +635,10 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
             " entries but the fixed root cluster holds 16")
 
     var di: u64 = 0u64
-    while di < dir_keys.length:
+    while di < dir_keys.len():
         var entry_slots: u64 = 0u64
         var child_di: u64 = 0u64
-        while child_di < dir_keys.length:
+        while child_di < dir_keys.len():
             if dir_parent[child_di] == (di as i64):
                 entry_slots = entry_slots + _named_dir_entry_slot_count(dir_long_name[child_di])
             child_di = child_di + 1u64
@@ -658,7 +658,7 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
     var first_cluster_all: [u64] = []
     var running: u64 = 3u64
     var fci: u64 = 0u64
-    while fci < cluster_counts.length:
+    while fci < cluster_counts.len():
         first_cluster_all.push(running)
         running = running + cluster_counts[fci]
         fci = fci + 1u64
@@ -717,17 +717,17 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
     var pi: u64 = 0u64
     while pi < flat_count:
         val p = cfg.payloads[pi]
-        img = _build_dir_entry(img, flat_name83[pi], first_cluster: first_cluster_all[pi] as u32, file_size: p.data.length as u32)
+        img = _build_dir_entry(img, flat_name83[pi], first_cluster: first_cluster_all[pi] as u32, file_size: p.data.len() as u32)
         pi = pi + 1u64
     var di2: u64 = 0u64
-    while di2 < dir_keys.length:
+    while di2 < dir_keys.len():
         if dir_parent[di2] == -1:
             img = _build_named_dir_entry_attr(img, dir_name83[di2], dir_long_name[di2], first_cluster: first_cluster_all[flat_count + nested_count + di2] as u32, file_size: 0u32, attr: 0x10u8)
         di2 = di2 + 1u64
     var nj: u64 = 0u64
     while nj < nested_count:
         if nested_parent_idx[nj] == -1:
-            img = _build_named_dir_entry(img, nested_leaf_name83[nj], nested_leaf_long_name[nj], first_cluster: first_cluster_all[flat_count + nj] as u32, file_size: cfg.nested_payloads[nj].data.length as u32)
+            img = _build_named_dir_entry(img, nested_leaf_name83[nj], nested_leaf_long_name[nj], first_cluster: first_cluster_all[flat_count + nj] as u32, file_size: cfg.nested_payloads[nj].data.len() as u32)
         nj = nj + 1u64
     # Pad root directory cluster to 512 bytes (each entry is 32 bytes)
     val dir_used: u64 = root_entry_slots * 32u64
@@ -741,11 +741,11 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
         val p = cfg.payloads[i2]
         val cnt = cluster_counts[i2]
         var bi: u64 = 0u64
-        while bi < p.data.length as u64:
+        while bi < p.data.len() as u64:
             img.push(p.data[bi])
             bi = bi + 1u64
         val padded: u64 = cnt * bytes_per_cluster
-        val written: u64 = p.data.length as u64
+        val written: u64 = p.data.len() as u64
         if padded > written:
             img = _push_zeros(img, padded - written)
         i2 = i2 + 1u64
@@ -755,22 +755,22 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
         val np = cfg.nested_payloads[nk]
         val cnt = cluster_counts[flat_count + nk]
         var bi2: u64 = 0u64
-        while bi2 < np.data.length as u64:
+        while bi2 < np.data.len() as u64:
             img.push(np.data[bi2])
             bi2 = bi2 + 1u64
         val padded2: u64 = cnt * bytes_per_cluster
-        val written2: u64 = np.data.length as u64
+        val written2: u64 = np.data.len() as u64
         if padded2 > written2:
             img = _push_zeros(img, padded2 - written2)
         nk = nk + 1u64
 
     var dn: u64 = 0u64
-    while dn < dir_keys.length:
+    while dn < dir_keys.len():
         var dir_buf: [u8] = []
         var dir_entry_slots: u64 = 0u64
         # Child subdirectories of this node.
         var cd: u64 = 0u64
-        while cd < dir_keys.length:
+        while cd < dir_keys.len():
             if dir_parent[cd] == (dn as i64):
                 dir_buf = _build_named_dir_entry_attr(dir_buf, dir_name83[cd], dir_long_name[cd], first_cluster: first_cluster_all[flat_count + nested_count + cd] as u32, file_size: 0u32, attr: 0x10u8)
                 dir_entry_slots = dir_entry_slots + _named_dir_entry_slot_count(dir_long_name[cd])
@@ -779,7 +779,7 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
         var cf: u64 = 0u64
         while cf < nested_count:
             if nested_parent_idx[cf] == (dn as i64):
-                dir_buf = _build_named_dir_entry(dir_buf, nested_leaf_name83[cf], nested_leaf_long_name[cf], first_cluster: first_cluster_all[flat_count + cf] as u32, file_size: cfg.nested_payloads[cf].data.length as u32)
+                dir_buf = _build_named_dir_entry(dir_buf, nested_leaf_name83[cf], nested_leaf_long_name[cf], first_cluster: first_cluster_all[flat_count + cf] as u32, file_size: cfg.nested_payloads[cf].data.len() as u32)
                 dir_entry_slots = dir_entry_slots + _named_dir_entry_slot_count(nested_leaf_long_name[cf])
             cf = cf + 1u64
         val used: u64 = dir_entry_slots * 32u64
@@ -788,7 +788,7 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
         if used < dir_capacity:
             dir_buf = _push_zeros(dir_buf, dir_capacity - used)
         var db: u64 = 0u64
-        while db < dir_buf.length:
+        while db < dir_buf.len():
             img.push(dir_buf[db])
             db = db + 1u64
         dn = dn + 1u64
@@ -800,7 +800,7 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
     if not rt_file_write_bytes(out_path, img):
         return Err("disk_image.build: write failed: " + out_path)
     if not rt_file_truncate(out_path, img_bytes):
-        val current_len = img.length as u64
+        val current_len = img.len() as u64
         if cfg.size_mb <= 1u64 and current_len < img_bytes:
             img = _push_zeros(img, img_bytes - current_len)
             if not rt_file_write_bytes(out_path, img):
