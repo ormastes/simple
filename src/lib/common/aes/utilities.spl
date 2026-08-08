@@ -125,7 +125,14 @@ fn text_to_bytes(text: text) -> list:
     bytes
 
 # Convert byte list to text
-fn bytes_to_text(bytes: list) -> text:
+#
+# The parameter is spelled `[i64]` and NOT `list` / `list<i64>` deliberately.
+# Under the seed JIT, reading `data[i]` from a param declared `list` or
+# `list<i64>` yields the element arithmetically SHIFTED LEFT BY 3 (v*8), so
+# `byte.chr()` would decode the wrong character for every byte. `[i64]` is the
+# only spelling that reads correctly. See
+# doc/08_tracking/bug/jit_param_passed_list_element_read_returns_tagged_2026-08-08.md
+fn bytes_to_text(bytes: [i64]) -> text:
     var parts: [text] = []
     var i = 0
     val len = bytes.length()
@@ -146,7 +153,17 @@ fn byte_to_hex(byte: i64) -> text:
     hex_chars[high] + hex_chars[low]
 
 # Convert byte list to hex string
-fn bytes_to_hex(bytes: list) -> text:
+#
+# `[i64]` and NOT `list` / `list<i64>` — same seed-JIT shift-left-3 defect as
+# bytes_to_text. This one is security-load-bearing: the credential store
+# serializes BOTH the KDF salt and the 32-byte AES key through this function
+# ("v2:<hex_salt>:<hex_key>"). With a `list`-spelled param every emitted byte
+# was b*8 mod 256, i.e. always ≡ 0 mod 8 — the stored key was neither the key
+# that was derived nor a full-entropy one (~160 bits of the 256 survived), and
+# the stored salt did not match the salt actually used, so regeneration could
+# not reproduce the install's key.
+# See doc/08_tracking/bug/credential_store_key_and_salt_corrupted_by_list_param_hex_2026-08-08.md
+fn bytes_to_hex(bytes: [i64]) -> text:
     var parts: [text] = []
     var i = 0
     val len = bytes.length()
