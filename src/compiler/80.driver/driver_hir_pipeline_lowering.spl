@@ -125,14 +125,31 @@ impl CompilerDriver:
 
             lowering.begin_module(source.path)
             log_phase("phase3:hir:file:start {source.path} module={source.module_name}")
+            # Baseline for the per-module poison check: pre-existing errors
+            # belong to EARLIER modules and must not poison this one.
+            val module_errors_before: i64 = self.ctx.errors.len()
             val lower_result = self.lower_streaming_surface_source(lowering, source)
             if lower_result.is_err():
+                # No HIR aggregate exists for this unit (parse/ownership
+                # failure), so it is poisoned by definition -- but the other
+                # units are still checkable.
                 self.ctx.add_error("Streaming HIR lowering error: {lower_result.unwrap_err()}")
-                return (self.ctx, false)
+                self.ctx.mark_module_poisoned(source.module_name)
+                if self.ctx.poison_budget_exhausted():
+                    return (self.ctx, false)
+                source_index = source_index + 1
+                continue
             val hir_module = lower_result.unwrap()
             _driver_collect_hir_errors(self.ctx, source.module_name, lowering.errors)
-            if self.ctx.errors.len() > 0:
-                return (self.ctx, false)
+            if self.ctx.errors.len() > module_errors_before:
+                # Drop the partially-lowered aggregate (never store it) and
+                # keep checking the remaining modules. See the non-streaming
+                # loop below for the full rationale.
+                self.ctx.mark_module_poisoned(source.module_name)
+                if self.ctx.poison_budget_exhausted():
+                    return (self.ctx, false)
+                source_index = source_index + 1
+                continue
             lowered_by_surface[surface_index] = hir_module
             progress_hir_done = progress_hir_done + 1
             phase_hir_modules[source.module_name] = hir_module
@@ -148,6 +165,20 @@ impl CompilerDriver:
                     surfaces.surfaces.len(), source.module_name,
                     2, 6, 0, 0, "running")
             source_index = source_index + 1
+
+        # Collect-all summary (streaming surfaces path). Same provenance marker
+        # as the non-streaming loop -- see the comment there.
+        if self.ctx.poisoned_module_count() > 0:
+            eprint("[collect-all] {self.ctx.poisoned_module_count()} module(s) poisoned, "
+                + "{self.ctx.errors.len()} error(s) collected across "
+                + "{self.ctx.sources.len()} source(s) in phase 3 (streaming HIR).")
+            eprint("[collect-all] Poisoned modules are DROPPED; downstream passes do not run. "
+                + "Diagnostics below are ROOT causes, not a cascade. "
+                + "Set SIMPLE_COMPILE_FAIL_FAST=1 for the old stop-at-first behavior.")
+            var poisoned_idx = 0
+            while poisoned_idx < self.ctx.poisoned_modules.len():
+                eprint("[collect-all]   poisoned: {self.ctx.poisoned_modules[poisoned_idx]}")
+                poisoned_idx = poisoned_idx + 1
 
         var phase_ctx: CompileContext = self.ctx
         phase_ctx.hir_modules = phase_hir_modules
@@ -239,6 +270,9 @@ impl CompilerDriver:
         while source_idx < self.ctx.sources.len():
             val src = self.ctx.sources[source_idx]
             val name = src.module_name
+            # Baseline for the per-module poison check below. Errors already in
+            # the list belong to EARLIER modules and must not poison this one.
+            val module_errors_before: i64 = self.ctx.errors.len()
             log_phase("phase3:hir:file:start {src.path} module={name}")
             log_trace("processing module")
 
@@ -341,12 +375,26 @@ impl CompilerDriver:
             if focused_future_driver_diag:
                 eprint("[driver-hir] errors done")
 
-            # Fatal lowering diagnostics belong to the source module and must
-            # stop this phase before its partially-lowered aggregate is kept.
-            # Continuing used to retain async/future's corrupt HirModule and
-            # enter unbounded downstream CPU/RSS growth.
-            if self.ctx.errors.len() > 0:
-                return (self.ctx, false)
+            # Fatal lowering diagnostics belong to the source module and its
+            # partially-lowered aggregate must NOT be kept -- retaining
+            # async/future's corrupt HirModule is what caused unbounded
+            # downstream CPU/RSS growth. That danger is in RETAINING the
+            # aggregate, not in continuing the loop, so poison this module
+            # (drop it) and keep checking the remaining ones. Stopping here
+            # instead is why the same defect family cost one whole build
+            # iteration per module.
+            #
+            # The comparison is a DELTA against the count taken before this
+            # module was lowered. A global `errors.len() > 0` would report
+            # every module after the first failure as poisoned too.
+            if self.ctx.errors.len() > module_errors_before:
+                self.ctx.mark_module_poisoned(name)
+                if self.ctx.poison_budget_exhausted():
+                    return (self.ctx, false)
+                # Skip the shared-trait fold and the phase_hir_modules store
+                # below: neither may observe a poisoned module.
+                source_idx = source_idx + 1
+                continue
 
             val hir_function_count: i64 = driver_dict_entry_count(hir_module.functions)
             if focused_future_driver_diag:
@@ -377,6 +425,22 @@ impl CompilerDriver:
         log_debug("effect inference done")
 
         log_debug("HIR lowering complete")
+
+        # Collect-all summary. This line is also the PROVENANCE MARKER for the
+        # collect-all build: if a run reports errors without emitting it, the
+        # binary predates this change and its error count is the old
+        # stop-at-first-module number, not a family enumeration.
+        if self.ctx.poisoned_module_count() > 0:
+            eprint("[collect-all] {self.ctx.poisoned_module_count()} module(s) poisoned, "
+                + "{self.ctx.errors.len()} error(s) collected across "
+                + "{self.ctx.sources.len()} source(s) in phase 3 (HIR lowering).")
+            eprint("[collect-all] Poisoned modules are DROPPED; downstream passes do not run. "
+                + "Diagnostics below are ROOT causes, not a cascade. "
+                + "Set SIMPLE_COMPILE_FAIL_FAST=1 for the old stop-at-first behavior.")
+            var poisoned_idx = 0
+            while poisoned_idx < self.ctx.poisoned_modules.len():
+                eprint("[collect-all]   poisoned: {self.ctx.poisoned_modules[poisoned_idx]}")
+                poisoned_idx = poisoned_idx + 1
 
         val phase_entry_hir: HirModule? = if phase_entry_source_index >= 0:
             val entry_source = self.ctx.sources[phase_entry_source_index]
