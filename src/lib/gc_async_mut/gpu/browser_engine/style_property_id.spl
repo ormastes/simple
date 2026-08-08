@@ -34,7 +34,62 @@
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{ComputedStyleHot}
 use std.gc_async_mut.gpu.browser_engine.dom_color.{parse_color_value}
-use std.gc_async_mut.gpu.browser_engine.style_block.{sb_parse_int, sb_find}
+
+# NOTE: this file intentionally does NOT `use style_block.{sb_parse_int,
+# sb_find}` even though those helpers exist there — T1
+# (doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md) wires
+# style_block.spl's live cascade to import FROM this module
+# (apply_declarations et al), and style_block already importing FROM
+# style_property_id would make a style_block -> style_property_id ->
+# style_block cycle. Local, private duplicates below break that cycle.
+
+fn spid_parse_int(s: text) -> i32:
+    """Private duplicate of style_block.sb_parse_int -- see note above for
+    why this isn't a shared import."""
+    val t = s.trim()
+    if t.len() == 0:
+        return 0
+    var neg = false
+    var start = 0
+    if t.slice(0, 1) == "-":
+        neg = true
+        start = 1
+    elif t.slice(0, 1) == "+":
+        start = 1
+    var result = 0
+    var idx = start
+    val slen = t.len()
+    while idx < slen:
+        val ch = t.char_at(idx)
+        var digit = -1
+        if ch == "0": digit = 0
+        elif ch == "1": digit = 1
+        elif ch == "2": digit = 2
+        elif ch == "3": digit = 3
+        elif ch == "4": digit = 4
+        elif ch == "5": digit = 5
+        elif ch == "6": digit = 6
+        elif ch == "7": digit = 7
+        elif ch == "8": digit = 8
+        elif ch == "9": digit = 9
+        if digit < 0:
+            break
+        result = result * 10 + digit
+        idx = idx + 1
+    if neg:
+        return 0 - result
+    result
+
+fn spid_find(s: text, target: text, start: i64) -> i64:
+    """Private duplicate of style_block.sb_find -- see note above."""
+    var i = start
+    val tlen = target.len()
+    val slen = s.len()
+    while i + tlen <= slen:
+        if s.slice(i, i + tlen) == target:
+            return i
+        i = i + 1
+    999999999
 
 # --- PropertyId table (append-only i64 constants) --------------------------
 
@@ -98,16 +153,16 @@ fn style_property_id_parse_opacity_pct(value: text) -> i64:
     if v.len() == 0:
         return 100
     if v.ends_with("%"):
-        return sb_parse_int(v.slice(0, v.len() - 1)) as i64
-    val dot = sb_find(v, ".", 0)
+        return spid_parse_int(v.slice(0, v.len() - 1)) as i64
+    val dot = spid_find(v, ".", 0)
     if dot < 999999999:
-        val int_part = sb_parse_int(v.slice(0, dot)) as i64
+        val int_part = spid_parse_int(v.slice(0, dot)) as i64
         val frac_str = v.slice(dot + 1, v.len())
         var frac_digit: i64 = 0
         if frac_str.len() > 0:
-            frac_digit = sb_parse_int(frac_str.slice(0, 1)) as i64
+            frac_digit = spid_parse_int(frac_str.slice(0, 1)) as i64
         return int_part * 100 + frac_digit * 10
-    (sb_parse_int(v) as i64) * 100
+    (spid_parse_int(v) as i64) * 100
 
 pub fn declaration_from_name_value(name: text, value: text, important: bool) -> Declaration:
     """Build a Declaration: property name→PropertyId and value→typed form are
@@ -122,7 +177,7 @@ pub fn declaration_from_name_value(name: text, value: text, important: bool) -> 
     elif pid == PROPERTY_ID_COLOR:
         value_id = parse_color_value(value) as i64
     elif pid == PROPERTY_ID_WIDTH or pid == PROPERTY_ID_HEIGHT or pid == PROPERTY_ID_Z_INDEX:
-        value_id = sb_parse_int(value) as i64
+        value_id = spid_parse_int(value) as i64
     Declaration(property: pid, value_text: value.trim(), value_id: value_id, flags: flags)
 
 # --- apply_declarations: O(k) in decls.len() --------------------------------
