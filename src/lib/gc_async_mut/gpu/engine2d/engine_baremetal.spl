@@ -1,0 +1,464 @@
+# Concrete Engine2D facade for freestanding SimpleOS builds.
+#
+# Keep this module deliberately small: the live target is BaremetalBackend and
+# embedded surfaces are SoftwareBackend.  In particular, do not import the
+# desktop Engine2D facade here; its eager accelerator imports make unreachable
+# host APIs part of a freestanding entry closure.
+
+use common.ui.draw_ir.{DrawIrGlyphRunPayload}
+use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback}
+use std.gc_async_mut.gpu.engine2d.backend_baremetal.{BaremetalBackend}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
+    Engine2dGlassExecutionResult,
+    Engine2dGlassMaterialConfig,
+    engine2d_glass_execution_unavailable
+}
+use std.nogc_sync_mut.text_layout.font_types.{FontRenderBatch}
+use std.gc_async_mut.gpu.engine2d.color.{color_a, color_b, color_g, color_r, rgba}
+use std.gc_async_mut.gpu.engine2d.backend_emu_math.{
+    _emu_cos_approx, _emu_isqrt, _emu_max, _emu_sin_approx
+}
+
+struct DrawIrTargetFontEvidence:
+    batch_identity: text = ""
+    readback_source: text = ""
+    device_checksum: i64 = 0
+    oracle_checksum: i64 = 0
+    readback_nonblank_pixels: i64 = 0
+    parity: bool = false
+    device_executed: bool = false
+    promotion_ready: bool = false
+    atlas_upload_count: i64 = 0
+    atlas_upload_bytes: i64 = 0
+    atlas_payload_sha256: text = ""
+
+# Minimal owner required by the shared fresh-device preflight. Baremetal never
+# claims that preflight: its invalid batches make that GPU-only lane fail
+# closed, while ordinary Draw IR text uses the bitmap backend below.
+class BaremetalFontRenderer:
+    me prepare_selected_glyph_run(
+        glyph_run: DrawIrGlyphRunPayload, color: u32, font_size: i32
+    ) -> FontRenderBatch:
+        _baremetal_invalid_font_batch()
+    me prepare_text_with_advances(
+        text_val: text, advances: [i32], color: u32, font_size: i32
+    ) -> FontRenderBatch:
+        _baremetal_invalid_font_batch()
+
+fn _baremetal_invalid_font_batch() -> FontRenderBatch:
+    FontRenderBatch(
+        program_version: 0,
+        font_identity: "",
+        face_generation: 0,
+        valid: false,
+        atlas_width: 0,
+        atlas_height: 0,
+        atlas_pixels: [],
+        quads: [],
+        atlas_generation: 0,
+        dirty_rects: []
+    )
+
+fn _baremetal_gradient_color_at(
+    colors: [u32], positions: [i32], position: i32
+) -> u32:
+    val count = colors.len().to_i32()
+    if count <= 0:
+        return 0u32
+    if count == 1 or positions.len() < count.to_i64():
+        return colors[0]
+    if position <= positions[0]:
+        return colors[0]
+    var i: i32 = 1
+    while i < count:
+        if position <= positions[i]:
+            val p0 = positions[i - 1]
+            val span = _emu_max(positions[i] - p0, 1)
+            val amount = position - p0
+            val first = colors[i - 1]
+            val second = colors[i]
+            return rgba(
+                color_r(first) + (color_r(second) - color_r(first)) * amount / span,
+                color_g(first) + (color_g(second) - color_g(first)) * amount / span,
+                color_b(first) + (color_b(second) - color_b(first)) * amount / span,
+                color_a(first) + (color_a(second) - color_a(first)) * amount / span)
+        i = i + 1
+    colors[count - 1]
+
+class Engine2D:
+    baremetal: BaremetalBackend?
+    software: SoftwareBackend?
+    live_baremetal: bool
+    w: i32
+    h: i32
+    font_renderer: BaremetalFontRenderer
+    selected_identity: text
+    last_font_target: text
+
+    static fn create_with_baremetal_backend(backend: BaremetalBackend) -> Engine2D:
+        Engine2D.create_with_baremetal_backend_dims(
+            backend.w, backend.h, backend)
+
+    static fn create_with_baremetal_backend_dims(
+        width: i32, height: i32, backend: BaremetalBackend
+    ) -> Engine2D:
+        Engine2D(
+            baremetal: Some(backend),
+            software: nil,
+            live_baremetal: true,
+            w: width,
+            h: height,
+            font_renderer: BaremetalFontRenderer(),
+            selected_identity: "bitmap-5x7",
+            last_font_target: ""
+        )
+
+    static fn create_offscreen(width: i32, height: i32) -> Engine2D:
+        var backend = SoftwareBackend.create_cpu_simd()
+        backend.init(width, height)
+        Engine2D(
+            baremetal: nil,
+            software: Some(backend),
+            live_baremetal: false,
+            w: width,
+            h: height,
+            font_renderer: BaremetalFontRenderer(),
+            selected_identity: "bitmap-5x7",
+            last_font_target: ""
+        )
+
+    static fn create_with_backend_fast(
+        width: i32, height: i32, backend_name: text
+    ) -> Engine2D:
+        # A freestanding facade has no host accelerator selection.  This
+        # constructor exists for shared compositor code and is an honest
+        # software target when no framebuffer owner was supplied.
+        Engine2D.create_offscreen(width, height)
+
+impl Engine2D:
+    me backend_name() -> text:
+        if self.live_baremetal:
+            return "baremetal"
+        "software"
+
+    me width() -> i32: self.w
+    me height() -> i32: self.h
+
+    me clear(color: u32):
+        if val Some(backend) = self.baremetal:
+            backend.clear(color)
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.clear(color)
+            self.software = Some(backend)
+    me present():
+        if val Some(backend) = self.baremetal:
+            backend.present()
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.present()
+            self.software = Some(backend)
+    me shutdown():
+        if val Some(backend) = self.baremetal:
+            backend.shutdown()
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.shutdown()
+            self.software = Some(backend)
+        self.last_font_target = ""
+    me submit_batch() -> bool:
+        if val Some(backend) = self.baremetal:
+            val ok = backend.submit_batch()
+            self.baremetal = Some(backend)
+            return ok
+        if val Some(backend) = self.software:
+            val ok = backend.submit_batch()
+            self.software = Some(backend)
+            return ok
+        false
+    me read_pixels() -> [u32]:
+        if val Some(backend) = self.baremetal:
+            return backend.read_pixels()
+        if val Some(backend) = self.software:
+            return backend.read_pixels()
+        []
+    me read_pixels_with_source() -> Engine2DReadback:
+        if val Some(backend) = self.baremetal:
+            return backend.read_pixels_with_source()
+        if val Some(backend) = self.software:
+            return backend.read_pixels_with_source()
+        Engine2DReadback(pixels: [], source: "unavailable", backend_handle: 0,
+            device_identity: 0, pixel_count: 0, checksum: 0)
+
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        if val Some(backend) = self.baremetal:
+            backend.set_clip(x, y, w, h)
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.set_clip(x, y, w, h)
+            self.software = Some(backend)
+    me clear_clip():
+        if val Some(backend) = self.baremetal:
+            backend.clear_clip()
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.clear_clip()
+            self.software = Some(backend)
+    me clear_mask():
+        if val Some(backend) = self.baremetal:
+            backend.clear_mask()
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.clear_mask()
+            self.software = Some(backend)
+
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if val Some(backend) = self.baremetal:
+            backend.draw_rect_filled(x, y, w, h, color)
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.draw_rect_filled(x, y, w, h, color)
+            self.software = Some(backend)
+    me draw_rounded_rect(
+        x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32
+    ):
+        if val Some(backend) = self.baremetal:
+            backend.draw_rounded_rect(x, y, w, h, radius, color)
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.draw_rounded_rect(x, y, w, h, radius, color)
+            self.software = Some(backend)
+    me draw_rounded_rect_outline(
+        x: i32, y: i32, w: i32, h: i32, radius: i32,
+        color: u32, thickness: i32
+    ):
+        if val Some(backend) = self.baremetal:
+            backend.draw_rounded_rect_outline(
+                x, y, w, h, radius, color, thickness)
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.draw_rounded_rect_outline(
+                x, y, w, h, radius, color, thickness)
+            self.software = Some(backend)
+    me draw_gradient_rect(
+        x: i32, y: i32, w: i32, h: i32,
+        top_color: u32, bottom_color: u32
+    ):
+        if val Some(backend) = self.baremetal:
+            backend.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+            self.software = Some(backend)
+    me draw_gradient_rect_stops(
+        x: i32, y: i32, w: i32, h: i32,
+        stop_colors: [u32], stop_positions: [i32], angle_deg: i32
+    ):
+        if w <= 0 or h <= 0 or stop_colors.len() == 0:
+            return
+        val dx1000 = _emu_sin_approx(angle_deg)
+        val dy1000 = 0 - _emu_cos_approx(angle_deg)
+        val hw = w - 1
+        val hh = h - 1
+        val t00 = (0 - hw) * dx1000 + (0 - hh) * dy1000
+        val t10 = hw * dx1000 + (0 - hh) * dy1000
+        val t01 = (0 - hw) * dx1000 + hh * dy1000
+        val t11 = hw * dx1000 + hh * dy1000
+        var low = t00
+        if t10 < low: low = t10
+        if t01 < low: low = t01
+        if t11 < low: low = t11
+        var high = t00
+        if t10 > high: high = t10
+        if t01 > high: high = t01
+        if t11 > high: high = t11
+        val span = _emu_max(high - low, 1)
+        var py = 0
+        while py < h:
+            var px = 0
+            while px < w:
+                val projected = (2 * px - hw) * dx1000 + (2 * py - hh) * dy1000
+                var position = (projected - low) * 1000 / span
+                if position < 0: position = 0
+                if position > 1000: position = 1000
+                self.draw_rect_filled(x + px, y + py, 1, 1,
+                    _baremetal_gradient_color_at(
+                        stop_colors, stop_positions, position))
+                px = px + 1
+            py = py + 1
+    me draw_radial_gradient_rect_stops(
+        cx: i32, cy: i32, r: i32,
+        stop_colors: [u32], stop_positions: [i32]
+    ):
+        if stop_colors.len() == 0:
+            return
+        if r <= 0:
+            self.draw_rect_filled(cx, cy, 1, 1, stop_colors[0])
+            return
+        var py = 0 - r
+        while py <= r:
+            var px = 0 - r
+            while px <= r:
+                val distance_sq = px * px + py * py
+                if distance_sq <= r * r:
+                    val position = _emu_isqrt(distance_sq) * 1000 / r
+                    self.draw_rect_filled(cx + px, cy + py, 1, 1,
+                        _baremetal_gradient_color_at(
+                            stop_colors, stop_positions, position))
+                px = px + 1
+            py = py + 1
+    me draw_shadow_rect(
+        x: i32, y: i32, w: i32, h: i32,
+        offset_x: i32, offset_y: i32, blur_r: i32, color: u32
+    ):
+        if val Some(backend) = self.baremetal:
+            backend.draw_shadow_rect(
+                x, y, w, h, offset_x, offset_y, blur_r, color)
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.draw_shadow_rect(
+                x, y, w, h, offset_x, offset_y, blur_r, color)
+            self.software = Some(backend)
+
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if val Some(backend) = self.baremetal:
+            backend.draw_image(x, y, w, h, pixels)
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.draw_image(x, y, w, h, pixels)
+            self.software = Some(backend)
+    me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if val Some(backend) = self.baremetal:
+            backend.draw_image_blend(x, y, w, h, pixels)
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.draw_image_blend(x, y, w, h, pixels)
+            self.software = Some(backend)
+    me draw_image_scaled(
+        dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32,
+        src_w: i32, src_h: i32, pixels: [u32]
+    ):
+        if val Some(backend) = self.baremetal:
+            backend.draw_image_scaled(
+                dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.draw_image_scaled(
+                dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
+            self.software = Some(backend)
+    me draw_image_scaled_blend(
+        dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32,
+        src_w: i32, src_h: i32, pixels: [u32]
+    ):
+        if dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0:
+            return
+        var scaled: [u32] = [0u32; dst_w * dst_h]
+        var y = 0
+        while y < dst_h:
+            var x = 0
+            while x < dst_w:
+                val source_x = x * src_w / dst_w
+                val source_y = y * src_h / dst_h
+                val source_index = source_y * src_w + source_x
+                if source_index >= 0 and source_index.to_i64() < pixels.len():
+                    scaled[y * dst_w + x] = pixels[source_index]
+                x = x + 1
+            y = y + 1
+        self.draw_image_blend(dst_x, dst_y, dst_w, dst_h, scaled)
+
+    me draw_text(
+        x: i32, y: i32, text_val: text, color: u32, font_size: i32
+    ):
+        self.last_font_target = "bitmap"
+        if val Some(backend) = self.baremetal:
+            backend.draw_text(x, y, text_val, color, font_size)
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.draw_text(x, y, text_val, color, font_size)
+            self.software = Some(backend)
+
+    me draw_text_bg(
+        x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32
+    ):
+        if val Some(backend) = self.baremetal:
+            backend.draw_text_bg(x, y, text_val, fg, bg, font_size)
+            self.baremetal = Some(backend)
+        elif val Some(backend) = self.software:
+            backend.draw_text_bg(x, y, text_val, fg, bg, font_size)
+            self.software = Some(backend)
+
+    me draw_text_with_advances(
+        x: i32, y: i32, text_val: text, advance_widths: [i32],
+        color: u32, font_size: i32
+    ) -> bool:
+        if text_val.len() == 0 or advance_widths.len() != text_val.len():
+            return false
+        # The freestanding bitmap atlas has fixed advances. Rendering it is an
+        # honest CPU fallback; no vector/font-atlas receipt is emitted.
+        self.draw_text(x, y, text_val, color, font_size)
+        self.last_font_target = "bitmap"
+        true
+
+    me draw_shaped_text(
+        x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload,
+        color: u32, font_size: i32
+    ) -> bool:
+        # Glyph ids require the selected vector face. Baremetal owns only the
+        # bitmap codepoint atlas, so shaped runs fail closed instead of drawing
+        # incorrect glyphs or claiming execution.
+        self.last_font_target = ""
+        false
+
+    me select_font_identity(identity: text) -> bool:
+        if identity == "":
+            return false
+        self.selected_identity = identity
+        true
+
+    me fonts() -> BaremetalFontRenderer: self.font_renderer
+    me install_font_renderer(renderer: BaremetalFontRenderer):
+        self.font_renderer = renderer
+        self.last_font_target = ""
+    me selected_font_identity() -> text:
+        self.selected_identity
+    fn font_execution_target() -> text: self.last_font_target
+    fn draw_ir_font_evidence() -> DrawIrTargetFontEvidence?: nil
+
+    me draw_ir_apply_glass_material(
+        config: Engine2dGlassMaterialConfig
+    ) -> Engine2dGlassExecutionResult:
+        # This facade owns no GPU device.  The shared executor may perform its
+        # bounded CPU material fallback from readback, but must never receive a
+        # fabricated device receipt from this target.
+        engine2d_glass_execution_unavailable(
+            "baremetal-device-glass-unavailable")
+
+    me draw_ir_create_offscreen_engine(
+        width: i32, height: i32
+    ) -> Result<Engine2D, text>:
+        val pixels = width.to_i64() * height.to_i64()
+        if width <= 0 or height <= 0 or pixels <= 0 or pixels > 2147483647:
+            return Err("invalid-baremetal-offscreen-size")
+        Ok(Engine2D.create_offscreen(width, height))
+
+    me draw_ir_composite_readback(
+        dst_x: i32, dst_y: i32, width: i32, height: i32,
+        readback: Engine2DReadback, opacity_milli: i32
+    ) -> bool:
+        if (width <= 0 or height <= 0 or opacity_milli <= 0 or
+            opacity_milli > 1000 or
+            readback.pixels.len() != width.to_i64() * height.to_i64()):
+            return false
+        var pixels: [u32] = []
+        var i: i64 = 0
+        while i < readback.pixels.len():
+            val pixel = readback.pixels[i]
+            val alpha = ((pixel >> 24u32) & 0xFFu32).to_i64()
+            val scaled = (alpha * opacity_milli.to_i64() / 1000) as u32
+            pixels.push((pixel & 0x00FFFFFFu32) | (scaled << 24u32))
+            i = i + 1
+        self.draw_image_blend(dst_x, dst_y, width, height, pixels)
+        true
+
+export Engine2D
