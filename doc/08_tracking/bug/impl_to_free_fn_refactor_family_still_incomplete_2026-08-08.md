@@ -320,3 +320,83 @@ warnings — that diagnostic samples rather than enumerates.
 - `b0c98541d2a`, `bc052a4470d` (the two incomplete restorations)
 - `doc/08_tracking/bug/impl_to_free_fn_refactor_family_sweep_2026-08-07.md`
 - `.claude/rules/code-style.md` (native-codegen Dict pitfalls, applied by both commits)
+
+## Update 2026-08-08 (session 3): the 6-site reconciled list closed 5/6
+
+Per `doc/08_tracking/bug/two_standing_limits_independently_verified_2026-08-08.md`,
+the reconciled genuine-survivor list was `template.spl:165`,
+`effects.spl:117,353,361`, `recovery.spl:215`, `blocks/testing.spl:294` (6
+sites). **5 of 6 fixed and landed** (commit `cd5286d33ec`):
+
+- `effects.spl:117,353,361` — `Effect.is_async()`/`.is_sync()` recovered (not
+  invented): `infer_promise_type_info` at `effects.spl:~316` already calls
+  `infer_function_effect(func, env).is_async()`, pinning the method shape.
+  Added `effect_is_async`/`effect_is_sync` free functions and restored the 3
+  call sites to the `if val x = opt.?:` binding idiom
+  (`doc/07_guide/quick_reference/syntax_quick_reference.md` § Existence
+  Check) — the dangling `..._value` names were literally this idiom's
+  binding names, dropped by the refactor.
+- `recovery.spl:215` — same missing-binding shape, restored with
+  `.get(0).unwrap().is_lowercase()` (precedent: `erlang.spl:54`). Also fixed
+  the identical damage 4 lines away at `:170` (a bare dangling identifier,
+  not a call — outside the oracle's regex shape, so never counted, but the
+  same bug in the same function), using the file's own established
+  `(next_lexeme ?? "") == "..."` idiom (`:193`,`:203`).
+- `blocks/testing.spl:294` — `value_type_name(value: BlockValue)` added as a
+  free function, mirroring the file's own `const_value_to_string(value:
+  ConstValue)` precedent immediately below it. Zero callers exist tree-wide
+  (dead test helper) — no calling convention to verify against beyond that
+  in-file precedent.
+
+**NOT fixed — `template.spl:165` `kind_can_follow(kind, prev_kind)`.**
+Unlike the other 5, there is no sibling call site or in-repo prior
+implementation pinning the semantics. Rust's macro_rules follow-set rules
+(the file's own stated basis) constrain a fragment specifier against a
+*following raw token*, not against another `FragmentKind` as this
+`(kind, prev_kind)` signature requires — applying them here would be
+translating the concept across a different domain, not recovering it, i.e.
+inventing. The function body also references three OTHER undefined
+identifiers in the same few lines (`prev_kind_value`, `has_sep`,
+`sep_value`) that gate any real verification regardless of the
+`kind_can_follow` fix. Left dead, per this family's own stated policy: a
+wrong body is worse than a missing one. Two ways forward, neither taken:
+(a) implement Rust's actual follow-set table projected onto fragment-vs-
+fragment adjacency (a judgment call, needs a domain expert or an actual
+spec written first), or (b) delete the check and the empty "FragmentKind
+Methods" block outright. Recommendation: (b) is lower-risk until a spec
+exists, since (a) ships an unverifiable invented rule.
+
+**New adjacent finding, NOT fixed (separate defect, out of this family's
+scope):** `effects.spl` calls `env_get(env, key)` and `env_contains(env,
+key)` seven times as an in-file convention for `Dict<text, Effect>` access.
+`env_contains` has **zero** definitions tree-wide, so it should have been a
+survivor — but it escaped the oracle's shape-2 regex (`<X>_<Y>(<X>,...)`)
+because the argument at its one non-underscore-suffixed call site is
+`env_mut`, not `env`, and the regex backreferences the literal argument
+text. `env_get(env, key)` (2-arg, `Dict<text,Effect>` lookup) escaped the
+**definition**-existence half of the oracle because 17 unrelated 1-arg
+`env_get(key: text) -> text` definitions exist elsewhere under the same
+bare name — a second, distinct blind spot from the first (arity/type is
+never checked, only name). Confirmed both are broken by isolated
+`bin/simple compile` probes with a throwaway 2-arg stub: without a stub,
+`effects.spl` fails at `env_get`; with `env_get` stubbed, it fails at
+`env_contains`; with both stubbed, `infer_mutual_effects`'s whole
+`env_get`/`env_contains`/`Dict<text,Effect>` cluster **as written cannot be
+the flat bare-name-table `env_get` the file appears to assume** — under
+this repo's rule against `.get()` on struct/enum-valued dicts (`Effect` is
+an enum), the likely-correct restore is a locally-scoped
+`effect_env_get`/`effect_env_contains` pair using
+`contains_key`+index-read, not a reused bare `env_get` name (reusing it
+would recreate the exact wrong-binding hazard documented for `args_len`
+elsewhere in this family). Not fixed here — outside the assigned 6 sites,
+and it makes `infer_function_effect`, `needs_await`, and `needs_await_typed`
+(the 3 functions my 3 fixes live in) still functionally dead pending that
+separate fix, even though their own unresolved-call errors are now gone.
+
+RED->GREEN: grepped tree-wide `fn`/`me` definitions against an isolated
+`origin/main` archive (MISSING for all 4 added names) vs. the fixed tree
+(DEFINED); per-file `bin/simple compile` before/after shows the target
+unresolved-identifier error is gone and the next error is unrelated
+pre-existing damage. Push guards `check-no-conflict-tree-push`,
+`check-no-conflict-markers-push`, `check-tree-size-push` all PASS on the
+explicit landed range.
