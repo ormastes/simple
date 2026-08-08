@@ -264,6 +264,13 @@ separate claim levels.
 
 ## SimpleOS toolchain self-host / "clang on SimpleOS" / clang+Simple migration
 
+- **Cross-layer POSIX/startup lookup:**
+  `doc/07_guide/app/llm/simpleos_posix_host_interface_index.md` maps the
+  existing pure-Simple POSIX facade, host mmap helpers, SimpleOS VFS prewarm,
+  startup argv policy, and LLVM/Clang port owners. It explicitly separates
+  recovered/current code from the planned dedicated-host provider and marks
+  Clang-consumer integration as unverified until evidence exists.
+
 - **Canonical meaning:** building an `x86_64-unknown-simpleos` LLVM/clang/lld
   cross toolchain whose outputs are *guest-runnable*, plus a Simple payload that
   links and runs in-guest. Campaign lane:

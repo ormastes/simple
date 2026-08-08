@@ -487,3 +487,27 @@ Before merging any adapter:
    upstream/vendor driver and firmware contract is explicit.
 9. Run the same exact artifact and operator-manual gate for every row; retain
    unavailable rows as blocked.
+
+## Config-driven environment admission
+
+The canonical test configuration is
+`src/lib/common/spec/environment_profile.spl`. Tests select a stable profile
+by ID or enumerate the bounded catalog instead of recreating host/arch/QEMU
+string tables. `UiEnvironmentProfile` types the expected Draw IR/Vulkan,
+host-event or VirtIO-input, and host-audio or VirtIO-snd interfaces.
+
+`UiEnvironmentEvidence` is an observation supplied by a strict checker. The
+pure `validate_ui_environment_evidence` function returns:
+
+- `Ready` for valid configuration/readiness that still lacks required live
+  host or live guest execution;
+- `Pass` only for the profile's exact live evidence class with correlated
+  rendering and I/O proof and no fallback;
+- `Blocked` for unavailable configuration/runtime/QEMU binding;
+- `Fail` for malformed, mismatched, incomplete, or fallback live evidence.
+
+The validator adds no subprocesses and no per-frame work. Its validation cost
+is constant; profile lookup scans five immutable entries only during test or
+session setup. Existing receipt validators continue to check exact pixels,
+device handles, event ordering, audio hashes, and latency/RSS counters before
+their observations may populate the typed evidence.

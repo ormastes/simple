@@ -16,6 +16,12 @@ capability-gated out of the launched path.
 
 ## Current Repo Inventory
 
+For cross-layer discovery, start with
+[`simpleos_posix_host_interface_index.md`](../../07_guide/app/llm/simpleos_posix_host_interface_index.md).
+That index distinguishes the existing pure-Simple POSIX compatibility and
+startup/cache pieces from the still-unverified dedicated-host facade and
+LLVM/Clang consumer integration.
+
 Existing pieces to reuse:
 
 - Host early startup prefetch and file detection:

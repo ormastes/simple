@@ -1,5 +1,10 @@
 # SimpleOS LLVM/Clang Toolchain — Where It Lives & How To Build Hello World
 
+For the related pure-Simple POSIX, startup argv, host mmap, and SimpleOS VFS
+provider map, see
+[`simpleos_posix_host_interface_index.md`](../app/llm/simpleos_posix_host_interface_index.md).
+That index is a discovery aid, not additional LLVM/Clang live evidence.
+
 Quick-find guide for the LLVM→SimpleOS port. If you are asked to "build hello
 world with clang for SimpleOS", start here.
 

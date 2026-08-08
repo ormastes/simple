@@ -306,3 +306,12 @@ Temporary helpers named
 `check_engine2d_argb_metadata`, `check_exact_argb_parity`, and
 `check_unavailable_gpu_row` must call `fail("not implemented: <helper>")`
 until backed by real evidence.
+
+The reusable profile/admission unit gate is
+`test/01_unit/lib/common/spec/environment_profile_spec.spl`. The narrow Vulkan
+and I/O owner gate at
+`test/01_unit/os/simpleos_vulkan_io_interface_contract_spec.spl` consumes the
+same catalog, and `test/03_system/os/qemu/simpleos_io_audio_spec.spl` classifies
+preflight as `Ready` while retaining `LiveGuest` as its required evidence
+class. This covers REQ-003, REQ-008, REQ-011, REQ-019, REQ-020, NFR-009, and
+NFR-013 without treating configuration as live execution.

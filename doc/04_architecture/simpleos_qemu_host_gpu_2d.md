@@ -469,3 +469,26 @@ resource format, and device generation. Device reset/loss, firmware or driver
 change, protocol change, or backend loss invalidates the session before the
 next submission. Fallback is explicit and retains the existing Engine2D
 backend preference order.
+
+### Reusable environment-profile contract
+
+`common.spec.environment_profile` is the pure configuration and admission
+owner shared by host and SimpleOS/QEMU tests. It models host OS, target OS,
+architecture, execution mode, Draw IR/Vulkan, input, audio, and required
+evidence class as enums. Linux host, Linux-hosted x86_64/AArch64/RISC-V
+SimpleOS QEMU, and postponed macOS profiles are selected by stable profile ID.
+
+The contract deliberately represents `Ready` separately from `Pass`.
+Configured loaders, QEMU arguments, virtual devices, or host drivers can reach
+only `Ready`. A SimpleOS QEMU profile reaches `Pass` only from `LiveGuest`
+evidence containing guest boot, Draw IR execution, Vulkan device execution,
+device-origin readback, correlated device/frame identities, delivered input,
+completed audio, and no fallback. Receipt-field parsing remains with the
+existing strict Vulkan and VirtIO validators; the profile contract cannot
+weaken those owners or synthesize their observations.
+
+The module is a test-support capsule and performs no environment reads,
+process launches, device probes, caching, or backend dispatch. Catalog
+construction is bounded to five profiles and ID lookup is O(5), outside the
+render/event/audio hot paths. Production capability discovery remains cached
+once per boot/session and follows the invalidation rules above.

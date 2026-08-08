@@ -126,6 +126,18 @@ This layer's public contract is **the guest-runnable ELF**: `Type=EXEC`, entry
 
 ## Verification Commands
 
+## POSIX and startup boundary
+
+When porting LLVM/Clang-hosted tools or changing the SimpleOS sysroot/runtime,
+use `doc/07_guide/app/llm/simpleos_posix_host_interface_index.md` as the
+cross-layer index. The existing pure-Simple POSIX compatibility layer starts at
+`src/os/posix/mod.spl`; startup policy and argv normalization start at
+`src/app/startup/launch_metadata.spl`; host file mapping and SimpleOS VFS
+prewarm are separate owners. Do not claim that Clang consumes the POSIX facade
+or that SimpleOS has complete file-backed mmap until a dedicated-host provider
+and positive tests establish those facts. Keep the C sysroot/crt0/libc path in
+this skill separate from the Simple-language POSIX facade.
+
 ```sh
 LLVM_SRC=/home/ormastes/llvm-project sh src/os/port/llvm/build.shs   # or: … host-tools|cross|compiler-rt
 bin/simple run src/os/port/llvm/build.spl
