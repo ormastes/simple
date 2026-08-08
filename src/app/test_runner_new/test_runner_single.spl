@@ -303,7 +303,7 @@ fn extract_number_after(s: text, keyword: text) -> i64:
         return -1
     value
 
-fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64):
+fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64, i64):
     """Parse the driver's authoritative per-file verdict line.
 
     `report_spec_file_verdict` (src/compiler_rust/driver/src/cli/basic.rs)
@@ -317,23 +317,38 @@ fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64):
     omits the substrings `examples, ` / `failures` so parse_child_example_summary
     never double-counts it.
 
-    Returns (executed, passed, failed, has_verdict)."""
+    `dropped` is `declared - executed`: examples the file DECLARED but never
+    ran. A verdict with `dropped>0` is NOT a clean bill of health -- it is the
+    signature of a file that silently ran a fraction of itself
+    (`declared>=10 executed=1 passed=1 failed=0 dropped=9`). Every consumer
+    below that treats a verdict as POSITIVE evidence of completion must
+    therefore also require `dropped == 0`, or it greenwashes exactly that case.
+    Bug: spec_runner_verdict_dropped_gate_reverted.
+
+    Returns (executed, passed, failed, dropped, has_verdict)."""
     var executed = -1
     var passed = -1
     var failed = -1
+    var dropped = -1
     val lines = output.split("\n")
     for line in lines:
         if line.contains("SPEC FILE VERDICT:"):
             val e = extract_number_after(line, " executed=")
             val p = extract_number_after(line, " passed=")
             val f = extract_number_after(line, " failed=")
+            val d = extract_number_after(line, " dropped=")
             if e >= 0 and p >= 0 and f >= 0:
                 executed = e
                 passed = p
                 failed = f
+                dropped = d
     if executed >= 0:
-        return (executed, passed, failed, 1)
-    (0, 0, 0, 0)
+        # A verdict line with no parseable `dropped=` field is treated as
+        # dropped-unknown, and unknown must fail closed: report a nonzero
+        # value so neither bypass below can accept it as clean.
+        val d_out = if dropped >= 0: dropped else: 1
+        return (executed, passed, failed, d_out, 1)
+    (0, 0, 0, 0, 0)
 
 fn output_was_truncated(output: text) -> bool:
     """True when the bounded-capture reader discarded part of the child output.
@@ -909,10 +924,10 @@ fn main() -> i64:
     val (real_passed, real_failed) = count_real_examples(combined)
     val real_executed = real_passed + real_failed
     val (summary_passed, summary_failed, has_summary) = parse_child_example_summary(combined)
-    val (verdict_executed, verdict_passed, verdict_failed, has_verdict) = parse_spec_file_verdict(combined)
+    val (verdict_executed, verdict_passed, verdict_failed, verdict_dropped, has_verdict) = parse_spec_file_verdict(combined)
     val was_truncated = output_was_truncated(combined)
     if env_get("SIMPLE_TEST_RUNNER_DEBUG") == "1":
-        print "test-runner debug: code={code} assert_ran={assert_ran} has_evidence={has_evidence} ev_p={evidence_passed} ev_f={evidence_failed} real_p={real_passed} real_f={real_failed} has_sum={has_summary} sum_p={summary_passed} sum_f={summary_failed} has_v={has_verdict} v_e={verdict_executed} v_p={verdict_passed} v_f={verdict_failed} trunc={was_truncated}"
+        print "test-runner debug: code={code} assert_ran={assert_ran} has_evidence={has_evidence} ev_p={evidence_passed} ev_f={evidence_failed} real_p={real_passed} real_f={real_failed} has_sum={has_summary} sum_p={summary_passed} sum_f={summary_failed} has_v={has_verdict} v_e={verdict_executed} v_p={verdict_passed} v_f={verdict_failed} v_d={verdict_dropped} trunc={was_truncated}"
     var failed = 0
     var passed = 0
     if code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out")):
@@ -937,7 +952,7 @@ fn main() -> i64:
         failed = evidence_failed
         if failed > 0:
             print "error: test-runner: spec failed"
-    elif was_truncated and has_verdict == 1 and verdict_executed > 0 and real_executed == 0 and has_summary == 0:
+    elif was_truncated and has_verdict == 1 and verdict_executed > 0 and verdict_dropped == 0 and real_executed == 0 and has_summary == 0:
         # BUG FIX (spec_harness_truncated_output_false_red): the bounded-capture
         # reader keeps the first and last 2MB of a >4MB child stream and DROPS
         # THE MIDDLE. A spec that prints heavily both before its first example
@@ -1002,7 +1017,14 @@ fn main() -> i64:
         # POSITIVE evidence that the process completed and nothing failed —
         # exactly the shape of the truncation fix above. Every genuinely
         # nonzero exit that is not backed by that evidence still fails closed.
-        val verdict_clean = has_verdict == 1 and verdict_executed > 0 and verdict_failed == 0
+        # `verdict_dropped == 0` is load-bearing and was MISSING when this
+        # bypass first landed: without it, a file reporting
+        # `declared>=10 executed=1 passed=1 failed=0 dropped=9` plus a nonzero
+        # exit read as fully GREEN -- reopening the greenwash that
+        # 24cfc32db98 closed on the truncation bypass above. Same rule, same
+        # reason: a verdict is positive evidence of completion only when it
+        # accounts for every example the file declared.
+        val verdict_clean = has_verdict == 1 and verdict_executed > 0 and verdict_dropped == 0 and verdict_failed == 0
         val exit_code_spurious = code != 0 and verdict_clean and real_failed == 0 and (has_summary == 0 or summary_failed == 0)
         if exit_code_spurious:
             print "warning: test-runner: child exit {code} contradicted by a clean SPEC FILE VERDICT; trusting the verdict"
