@@ -810,6 +810,22 @@ impl RenderBackend for VulkanBackend:
         vulkan_order_trace("readback-entry dirty={self.dirty} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown} fb={self.d_framebuffer}")
         if self.completion_unknown:
             return engine2d_readback([], "completion_unknown")
+        # With frame batching enabled (enable_frame_batching(), used by the
+        # "vulkan"/"metal-on-vulkan"/"directx-on-vulkan" Engine2D lanes),
+        # draw calls only enqueue compute dispatches into a not-yet-submitted
+        # command buffer; only present()/submit_batch() used to force that
+        # submission. A caller reading pixels directly (never calling
+        # present()) previously read the device framebuffer before the
+        # batched draws were ever submitted, so the readback silently
+        # reflected an earlier (or empty) frame. Flush here too, exactly as
+        # present() does, so read_pixels()/read_pixels_with_source() are
+        # correct regardless of whether present() was ever called.
+        val pending_status = self._flush_pending_compute()
+        if pending_status < 0:
+            self.completion_unknown = true
+            return engine2d_readback([], "completion_unknown")
+        if pending_status == VK_DISPATCH_COMPLETED_INELIGIBLE:
+            self.mark_cpu_fallback("readback-batch-cleanup-ineligible")
         # fn contract forbids self mutation: dirty reads fetch straight from the
         # device; present() owns the host_buf cache refresh.
         if self.dirty:

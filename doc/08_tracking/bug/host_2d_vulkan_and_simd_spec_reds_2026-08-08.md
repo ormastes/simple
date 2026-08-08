@@ -12,77 +12,83 @@ implementation does not currently have (or, for #3/#4, source-scan checks
 that are stale against the current file layout). Left RED per
 `.claude/rules/testing.md` — not weakened, not marked pending.
 
-## 1. Vulkan `draw_rect_filled` writes a wrong interior colour — CLOSED 2026-08-08
+## 1. Vulkan `draw_rect_filled` writes a wrong interior colour — high
 
 `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_processing_spec.spl:185,198`
 
-**Root cause (two stacked issues, both resolved):**
+```
+it "draw_rect_filled leaves corners untouched":
+    ...
+    expect(pixel_at_p(pixels, 4, 4, 8)).to_equal(fg)   # line 198, fails
+```
 
-1. **Real cross-backend blend-formula divergence (the actual defect).**
-   `draw_rect_filled` routes any color whose top ARGB byte (alpha, per
-   `color.spl`'s `0xAARRGGBB` layout) is `< 255` through
-   `draw_image_blend` → `_draw_image_blend_native` → the hand-assembled
-   `spirv_blit` SPIR-V kernel in `backend_vulkan_spirv_raster_blobs.spl`
-   (compiled from the "src-over" branch of `_glsl_blit()` in
-   `backend_vulkan_glsl.spl`). That kernel computed
-   `out_r/out_g/out_b = (src*sa + dst*inv) / 255` — the *old*,
-   pre-2026-XX-XX formula that `color.spl`'s CPU `blend()` explicitly
-   documents as wrong and was fixed away from (it "treated dst's RGB as
-   if dst were always opaque and never unpremultiplied the result"). The
-   CPU `SoftwareBackend.draw_rect_filled` already uses the corrected
-   Porter-Duff formula, `out = (src*sa + dst*dst_weight) / out_a` where
-   `dst_weight = (dst_alpha*inv)/255` and `out_a = sa+dst_weight`. For an
-   opaque destination (`dst_alpha=255`) the two formulas coincide, which
-   is why this was invisible until a destination with `dst_alpha != 255`
-   was exercised (as `0x111111FF` is, under ARGB: alpha byte `0x11`).
-   **Fixed** by disassembling `spirv_blit` with `spirv-dis`, reordering
-   the src-over block so `dst_weight`/`out_a` are computed before the
-   per-channel divide and dividing by `out_a` instead of the `255`
-   constant (matching `color.spl`'s `blend()` exactly), reassembling with
-   `spirv-as --target-env vulkan1.1` (`spirv-val` clean, byte-identical
-   size 4016), and updating the `[u8]` blob in
-   `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv_raster_blobs.spl`
-   (`spirv_blit()`). Verified: for `bg=0x111111FF`, `fg=0xAABBCCFF` the
-   Vulkan and CPU backends now both produce `0xAFB6C6FF` (previously
-   Vulkan produced `0xAF828DFF`, CPU produced `0xAFB6C6FF` — a real,
-   reproducible divergence, confirmed via a standalone probe dumping the
-   full 8×8 grid from each backend before any spec edit was made).
+8×8 buffer, `clear(0x111111FF)`, `draw_rect_filled(2, 2, 4, 4, 0xAABBCCFF)`.
+Pixel `(4,4)` — strictly interior to the filled region, not an edge — reads
+`0xAF828DFF` instead of `0xAABBCCFF`. The two corner assertions in the same
+test (`(0,0)` and `(7,7)`, both expecting the background colour) pass (the
+failure message names only the fg-vs-observed comparison, not the bg
+value), so: the clear/background path round-trips exactly, the fill path
+does not, and the corruption pattern (`0xAA`→`0xAF`, `0xBB`→`0x82`,
+`0xCC`→`0x8D`) is not a uniform channel shift. Mechanism undiagnosed.
 
-2. **Spec literal used a translucent color and asserted opaque-fill
-   semantics.** Per `color.spl`'s documented ARGB layout, `0xAABBCCFF`
-   decodes as alpha=`0xAA`(170), not 255 — so `draw_rect_filled`
-   *correctly* took the alpha-blend path rather than a flat opaque
-   store; a `[vk-order]` trace with `SIMPLE_VK_ORDER_TRACE=1` showed
-   `image-composite … mode=1` (blend) instead of a `pipe_rect_filled`
-   dispatch, confirming this before any implementation change. The
-   filing's premise that "corners round-trip, only the interior pixel is
-   wrong" was a spec-coverage artifact, not a real edge/interior split: a
-   full-grid probe showed the **entire filled region** (`(2,2)`–`(5,5)`,
-   not just `(4,4)`) got the wrong, uniformly-computed blended value —
-   the spec just never asserted an edge pixel. Fixed by changing the
-   test's `bg`/`fg` literals to `0xFF111111`/`0xFFAABBCC` (true ARGB
-   opaque) so the assertion exercises the intended flat-fill path.
+**Unblock condition:** trace `draw_rect_filled`'s SPIR-V/GLSL path
+(`backend_vulkan_spirv*.spl`, `backend_vulkan_glsl.spl`) for the interior
+fragment-shading or descriptor-write step and compare against the
+`draw_rect` (outline) path, which is unaffected per the same spec file's
+passing cases.
 
-Both fixes are pure `.spl` (SPIR-V blob + one spec file). Verified:
-`bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_processing_spec.spl`
-→ `Results: 22 total, 22 passed, 0 failed` (previously 21/22). No
-regression in `backend_vulkan_drawing_spec.spl` (30/30),
-`bridge_drawing_compositor_spec.spl` (4/4), or
-`engine2d_cpu_simd_parity_spec.spl` (5/5), all re-run after the blob
-edit.
-
-## 2. Metal-on-Vulkan / DirectX-on-Vulkan emulation do not match the Vulkan reference — medium
+## 2. Metal-on-Vulkan / DirectX-on-Vulkan emulation do not match the Vulkan reference — CLOSED 2026-08-08
 
 `test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl:354,382`
 
 Both `it` blocks assert the emulated backend's rendered buffer equals the
-real-Vulkan reference buffer; both fail with `expected 2240 to equal 0`
-(2240 mismatching values in the comparison, i.e. the buffers differ).
+real-Vulkan reference buffer; both failed with `expected 2240 to equal 0`
+(2240 mismatching values — for a 56×40 buffer, `56*40 == 2240`: literally
+every pixel differed, not a partial divergence).
 
-**Unblock condition:** diff the emulation-layer draw-call translation
-(`backend_metal.spl` / `backend_directx.spl`) against the Vulkan reference
-kernel invoked by `vulkan_compute_oracle_spec.spl`, isolate the first
-divergent pixel.
+**Root cause: a real batching/readback ordering bug, not an emulation-layer
+draw-call translation defect.** Both `"metal-on-vulkan"` and
+`"directx-on-vulkan"` requests in
+`src/lib/gc_async_mut/gpu/engine2d/engine.spl` construct a plain
+`VulkanBackend` and call `vulkan.enable_frame_batching()` (same as the plain
+`"vulkan"` request). With frame batching enabled, `clear()` /
+`draw_rect_filled()` / `draw_circle_filled()` (via `emu_draw_circle`'s
+`draw_rect_filled` calls) only *enqueue* SPIR-V compute dispatches into a
+not-yet-submitted command buffer (`_dispatch_framebuffer_checked` →
+`_enqueue_framebuffer_compute` in `backend_vulkan_helpers.spl`); only
+`present()` and `submit_batch()` called `_flush_pending_compute()` to
+actually submit that command buffer to the GPU queue and fence-wait. But
+`VulkanBackend.read_pixels()` / `read_pixels_with_source()`
+(`backend_vulkan.spl`) never flushed — it read `vulkan_sffi_read_buffer_bytes`
+straight off the device buffer whenever `self.dirty` was true, which the
+enqueue path also (correctly) sets, so the stale-vs-flushed distinction was
+invisible to every other caller/receipt. The spec calls `eng.read_pixels()`
+directly (no `present()`), so it read the device framebuffer before the
+batched clear+rect+circle dispatches were ever submitted — i.e. it read
+uninitialized/leftover device memory, diverging from the `SoftwareBackend`
+reference at every pixel. The plain-`"vulkan"` and real-GPU-gradient specs in
+this same file never called `enable_frame_batching()` directly (they use
+`VulkanBackend.create()` + `vk.init()` with no batching), so they dispatched
+immediately and never hit this path — which is why the bug was invisible
+outside these two emulation-lane `it` blocks specifically.
+
+**Fix:** `read_pixels_with_source()` now flushes pending batched compute
+first, exactly mirroring what `present()` already does (same
+`_flush_pending_compute()` call, same `completion_unknown` /
+`VK_DISPATCH_COMPLETED_INELIGIBLE` handling), so pixel reads are correct
+whether or not `present()` was ever called. One file, `.spl` only:
+`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl`
+(`read_pixels_with_source()`).
+
+Verified: `bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl`
+→ `Results: 8 total, 8 passed, 0 failed` (previously 6/8). No regression in
+`backend_vulkan_processing_spec.spl` (22/22),
+`backend_vulkan_drawing_spec.spl` (30/30),
+`bridge_drawing_compositor_spec.spl` (4/4), or
+`engine2d_cpu_simd_parity_spec.spl` (5/5), all re-run after the edit. Item 3
+(`vulkan_engine2d_frame_batch_contract_spec.spl`) is unaffected by this fix —
+its failure is a pre-existing, unrelated `Module count limit (800) exceeded`
+load error under `test/01_unit/check/`, not a pixel-correctness assertion.
 
 ## 3. `vulkan_engine2d_frame_batch_contract_spec.spl` fenced-submit dependency check — needs triage
 
