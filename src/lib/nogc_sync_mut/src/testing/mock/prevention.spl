@@ -1,0 +1,42 @@
+# ============================================================================
+# Prevention Mocks - guards that FAIL verification on a forbidden call path
+# ============================================================================
+#
+# A prevention mock is the inverse of a normal expectation: instead of
+# asserting a call DID happen, a ForbiddenCallGuard asserts a call did NOT
+# happen (or happened at most N times). Register the mocked seam wherever the
+# forbidden call would be routed, then call check_guards() to collect
+# human-readable failure messages naming the mock and the reason it is
+# forbidden. See doc/07_guide/infra/testing/prevention_mocks.md.
+#
+# ============================================================================
+
+# Re-import required types from builder
+use testing.mock.builder.{MockFunction, VerificationResult}
+
+class ForbiddenCallGuard:
+    mockfn: MockFunction
+    reason: text          # user-voice: WHY this call is forbidden
+    max_allowed: i32      # normally 0; N>0 = "at most N" budget guards
+
+    static fn new(mockfn: MockFunction, reason: text) -> ForbiddenCallGuard:
+        ForbiddenCallGuard(mockfn: mockfn, reason: reason, max_allowed: 0)
+
+    static fn at_most(mockfn: MockFunction, n: i32, reason: text) -> ForbiddenCallGuard:
+        ForbiddenCallGuard(mockfn: mockfn, reason: reason, max_allowed: n)
+
+    fn check() -> VerificationResult:
+        val n = self.mockfn.call_count()
+        if n <= self.max_allowed:
+            return VerificationResult.success()
+        val name = self.mockfn.name
+        VerificationResult.failure(
+            "forbidden call: {name} called {n}x (allowed {self.max_allowed}) — {self.reason}")
+
+pub fn check_guards(guards: [ForbiddenCallGuard]) -> [text]:
+    var failures: [text] = []
+    for g in guards:
+        val r = g.check()
+        if not r.passed:
+            failures.push(r.error_message)
+    failures

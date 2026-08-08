@@ -1,0 +1,122 @@
+# codex-system-test
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    HtmlFlatNode, html_tree_builder_flat_projection,
+    html_tree_builder_flat_projection_with_limits
+}
+
+fn _projection_index_by_id(nodes: [HtmlFlatNode], id: text) -> i32:
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].normalized_attrs.contains("id=\"{id}\""):
+            return i
+        i = i + 1
+    -1
+
+fn _nested_divs(depth: i32) -> text:
+    var opens = ""
+    var closes = ""
+    var i = 0
+    while i < depth:
+        opens = opens + "<div>"
+        closes = closes + "</div>"
+        i = i + 1
+    opens + closes
+
+describe "Canonical HTML flat projection":
+    it "should preserve canonical pre-order parentage for fostered subtrees":
+        step("Project a table document containing foster-parented elements")
+        val projected = html_tree_builder_flat_projection(
+            "<table id='table'><div id='foster'><span id='nested'>" +
+            "FOSTER</span></div></table>"
+        )
+        val table = _projection_index_by_id(projected.nodes, "table")
+        val foster = _projection_index_by_id(projected.nodes, "foster")
+        val nested = _projection_index_by_id(projected.nodes, "nested")
+        expect(foster).to_be_less_than(table)
+        expect(projected.nodes[foster].parent).to_equal(
+            projected.nodes[table].parent
+        )
+        expect(projected.nodes[nested].parent).to_equal(foster)
+        expect(projected.nodes[nested + 1].text_data).to_equal("FOSTER")
+        expect(projected.nodes[nested + 1].parent).to_equal(nested)
+
+    it "should use exact ASCII-insensitive textarea end tags":
+        step("Project a textarea with a near-match and mixed-case end tag")
+        val projected = html_tree_builder_flat_projection(
+            "<textarea id='editor'>alpha</textareaevil><b>x</b>" +
+            "</TEXTAREA><div id='after'></div>"
+        )
+        val editor = _projection_index_by_id(projected.nodes, "editor")
+        val after = _projection_index_by_id(projected.nodes, "after")
+        expect(projected.nodes[editor + 1].text_data).to_contain(
+            "</textareaevil><b>x</b>"
+        )
+        expect(projected.nodes[after].parent).to_equal(
+            projected.nodes[editor].parent
+        )
+
+    it "should normalize attributes and synthesize document structure":
+        step("Project a body fragment with mixed-case attribute content")
+        val projected = html_tree_builder_flat_projection(
+            "<body id='page' data-mode='Glass'><main id='main'></main>"
+        )
+        expect(projected.nodes[0].tag).to_equal("#document")
+        expect(projected.nodes[1].tag).to_equal("html")
+        val page = _projection_index_by_id(projected.nodes, "page")
+        val main = _projection_index_by_id(projected.nodes, "main")
+        expect(projected.nodes[page].tag).to_equal("body")
+        expect(projected.nodes[page].normalized_attrs).to_contain(
+            "data-mode=\"Glass\""
+        )
+        expect(projected.nodes[main].parent).to_equal(page)
+
+    it "should synthesize body for empty and head-only documents":
+        step("Project empty and head-only documents")
+        val empty = html_tree_builder_flat_projection("")
+        val head_only = html_tree_builder_flat_projection(
+            "<head><title data-kind='α'>A&amp;&#x4E2D;</title></head>"
+        )
+        var empty_bodies = 0
+        var head_bodies = 0
+        var title = -1
+        var title_text = ""
+        for node in empty.nodes:
+            if node.tag == "body":
+                empty_bodies = empty_bodies + 1
+        var i = 0
+        while i < head_only.nodes.len():
+            if head_only.nodes[i].tag == "body":
+                head_bodies = head_bodies + 1
+            if head_only.nodes[i].tag == "title":
+                title = i
+            elif (
+                title >= 0 and head_only.nodes[i].tag == "#text" and
+                head_only.nodes[i].parent == title
+            ):
+                title_text = title_text + head_only.nodes[i].text_data
+            i = i + 1
+        expect(empty_bodies).to_equal(1)
+        expect(head_bodies).to_equal(1)
+        expect(head_only.nodes[title].normalized_attrs).to_contain(
+            "data-kind=\"α\""
+        )
+        expect(title_text).to_equal("A&中")
+
+    it "should retain bounded node token and attribute receipts":
+        step("Project a document with bounded nodes, tokens, and attributes")
+        val projected = html_tree_builder_flat_projection_with_limits(
+            "<div id='a' data-a='1' data-b='2'><span>x</span></div>",
+            5, 32, 1
+        )
+        expect(projected.nodes.len()).to_be_less_than(6)
+        expect(projected.truncated).to_equal(true)
+
+    it "should retain the canonical open-element depth cap":
+        step("Project a document deeper than the open-element limit")
+        val projected = html_tree_builder_flat_projection(_nested_divs(700))
+        var max_depth = 0
+        for node in projected.nodes:
+            if node.depth > max_depth:
+                max_depth = node.depth
+        expect(max_depth).to_be_less_than(515)

@@ -1,0 +1,149 @@
+# Seed JIT: `text.to_i64()` / `.to_int()` return a FLOAT-tagged value — silent wrong results
+
+- **Status:** OPEN (pre-existing; found while landing an unrelated interpreter-lane fix)
+- **Severity:** high — silent wrong values, not a crash. `"42".to_i64() == 42`
+  evaluates to **false**.
+- **Lane:** Rust bootstrap seed, **JIT (cranelift) lane**. `bin/simple run` is
+  JIT-first with an interpreter fallback — an invocation that fails to compile
+  prints `[INFO] JIT compilation failed, falling back to interpreter`. The
+  reproduction below printed no such line, so JIT compilation succeeded and the
+  program ran on the JIT lane. That is how the lane is attributed here.
+- **NOT affected:** the seed tree-walk **interpreter** lane, which handles the
+  method correctly (see "Lane split" below).
+
+## Reproduction
+
+Against the deployed, **unpatched** `bin/simple`
+(`bin/release/x86_64-unknown-linux-gnu/simple`, self-identifies as the Rust
+bootstrap seed via its startup WARNING):
+
+```
+fn main():
+    print("42".to_i64())     # => 0.00000000000000000
+    print("42".to_int())     # => 0.00000000000000000
+    print(int("42"))         # => 42          (CORRECT)
+    val v = "42".to_i64()
+    print(v + 1)             # => <special:5>
+    print(v == 42)           # => false       (SILENT WRONG)
+    print("-5".to_i64())     # => <special:2305843009213693951>
+```
+
+## Bit-pattern evidence
+
+- `"42".to_i64()` prints `0.00000000000000000`. That is `f64::from_bits(42)`
+  = 2.08e-322, a subnormal double, rendered with fixed precision. The integer
+  payload **42 is correct**; it is the *tag* that is wrong — the raw i64 is
+  being interpreted as an IEEE-754 double.
+- `"-5".to_i64()` prints `<special:2305843009213693951>` =
+  `0x1FFF_FFFF_FFFF_FFFF`, i.e. the raw bits fall into the NaN-box "special"
+  range rather than the integer range.
+- `v + 1` printing `<special:5>` shows the corruption propagates through
+  arithmetic, not just through `print`.
+
+So the defect is a **tag/box** defect, not a parse defect: the parse produces
+the right integer and the boxing step marks it as float/special.
+
+## Why the JIT lane specifically
+
+In codegen, `to_int` / `to_i64` / `parse_int` are rewritten to the runtime
+symbol `rt_string_to_int`:
+
+- `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:1236`
+- `src/compiler_rust/compiler/src/codegen/instr/calls.rs:2793`, `:3226`
+- `src/compiler_rust/compiler/src/codegen/llvm/emitter.rs:190`
+- `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs:1941`, `:2098`
+
+`rt_string_to_int` (`src/compiler_rust/runtime/src/value/collections.rs:2356`)
+returns a **bare `i64`**, deliberately strict (whole-string `str::parse`,
+0 on failure) precisely because it backs these method calls. The returned raw
+i64 is then not re-tagged as an integer before it re-enters the boxed value
+domain.
+
+Contrast: `int("42")` is CORRECT because the `int()` cast routes to the sibling
+`rt_string_to_int_lenient` (`collections.rs:2387`) through a different lowering
+that does tag its result.
+
+## Lane split (important when reproducing)
+
+| Lane | `"42".to_i64()` path | Result | Evidence |
+|------|----------------------|--------|----------|
+| JIT / cranelift | `sffi_alias_target` → `rt_string_to_int` (raw i64) | **BROKEN** (float-tagged) | PROVEN by execution (above) |
+| Seed interpreter | `interpreter_method/string.rs:323` — `s.trim().parse::<i64>()` → `Value::Int(n)`, `Value::Int(0)` on error | expected correct | INFERRED from source only; not executed in isolation |
+| Native / LLVM | `codegen/llvm/emitter.rs:190` → `rt_string_to_int` | unknown | NOT TESTED; shares the JIT alias so likely the same |
+
+Note that the interpreter row is a source reading, not a measurement: forcing
+the interpreter lane in isolation was not attempted here. A second divergent
+copy of the method also exists at `interpreter_helpers/method_dispatch.rs:105`,
+which returns `Value::Nil` on a parse failure where `string.rs:323` returns
+`Value::Int(0)` — so the two interpreter paths do not even agree with each
+other, and neither agrees with the strict `rt_string_to_int`. That three-way
+disagreement is worth folding into the fix.
+
+Because `bin/simple run` silently falls back from JIT to the interpreter when
+JIT compilation fails, **the same program can print a different answer on two
+runs**. Any A/B of this bug must pin the lane, or the fallback will look like
+nondeterminism. This is also the most likely explanation for an earlier report
+that the raw bits differed between two builds that both exhibited the bug.
+
+## UNRESOLVED: the patched-vs-control bit difference
+
+An earlier session reported that the raw bits of `"42".to_i64()` *differed*
+between a patched and a control build, both of which exhibited the bug. That
+claim could **not be reproduced or confirmed here**, and it is left open
+deliberately rather than resolved by assertion in either direction.
+
+Static analysis says the bits should be **identical**: the patch that session
+was testing only adds interpreter `EXTERN_DISPATCH` entries, and `.to_i64()`
+never consults that table, so the two builds should agree on this expression.
+
+Working hypothesis, unproven: `bin/simple run` silently falls back from JIT to
+the interpreter when JIT compilation fails, and the two lanes genuinely produce
+different values here (JIT float-tagged, interpreter a correct `Int`). If the
+two runs happened to take different lanes, the bits would differ for a reason
+that has nothing to do with the patch. Anyone re-testing must pin the lane
+first, or this will keep looking like nondeterminism.
+
+## Relationship to the known tag-box family
+
+Same family as the already-tracked defects: integers boxed with a `<<3` tag,
+`Option<i64>` payload 3 colliding with nil, and the `char.to_i64()` tag-box
+landmine. The common shape is a raw machine integer crossing a runtime boundary
+without being re-tagged for the boxed value representation.
+
+## Not caused by the interpreter EXTERN_DISPATCH fix
+
+This was found while landing an interpreter-lane fix that registers
+`rt_string_to_int` and `rt_raw_i64_to_string` in
+`src/compiler_rust/compiler/src/interpreter_extern/mod.rs`'s `EXTERN_DISPATCH`.
+That fix is **interpreter-only** and cannot reach the JIT lane where this bug
+lives. The reproduction above is on the unpatched deployed binary, which proves
+the defect pre-exists that change.
+
+## Suggested fix direction
+
+Re-tag the `rt_string_to_int` return value as an integer at the call-site
+lowering in the codegen paths listed above, the same way the
+`rt_string_to_int_lenient` (`int()` cast) lowering already does. Add a
+regression assertion that `"42".to_i64() == 42` is **true** on every engine,
+since equality — not `print` — is the sharpest detector.
+
+## Harness note: `build/sffi/libspl_winit.so` must exist
+
+Unrelated to the tag bug but repeatedly costly: `GuiRenderer` returns
+`no-gui-runtime` when `build/sffi/libspl_winit.so` is absent. The file is
+present in the main repo checkout but is **absent in fresh `git worktree`
+checkouts**, which has silently produced false "no GUI available" conclusions.
+Before concluding a GUI lane is unavailable, verify that file exists in the
+tree you are actually running from.
+
+## Related divergence spotted (not yet a bug, but inconsistent)
+
+The extern `rt_raw_i64_to_string` is declared with **two different return
+types** in Simple source:
+
+- `src/lib/common/ui/wm_app_process_contract.spl:7` — `-> text`
+- `src/runtime/simple_core/core_bdd.spl:5` — `-> i64` (raw handle ABI)
+
+`core_bdd.spl` is the native/freestanding SPipe BDD subset and does not run
+through the seed interpreter, so the two do not collide today. If that file
+ever runs interpreted, the declarations disagree about the encoding.

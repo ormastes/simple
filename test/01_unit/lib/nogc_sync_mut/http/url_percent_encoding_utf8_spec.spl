@@ -1,0 +1,35 @@
+use std.spec.{describe, it, assert_equal}
+use std.nogc_sync_mut.http.url.{url_decode, url_encode}
+
+# RFC 3986 §2.5: "When a new URI scheme defines a component that represents
+# textual data ... the data should first be encoded as octets according to the
+# UTF-8 character encoding; then only those octets that do not correspond to
+# characters in the unreserved set should be percent-encoded."
+#
+# Octets verified independently on this box:
+#   printf 'é' | od -An -tx1  ->  c3 a9
+#   printf '中' | od -An -tx1  ->  e4 b8 ad
+
+describe "HTTP URL percent-encoding operates on UTF-8 octets":
+    it "leaves unreserved ASCII untouched (control)":
+        assert_equal(url_encode("abcXYZ019-_.~"), "abcXYZ019-_.~")
+
+    it "percent-encodes reserved ASCII":
+        assert_equal(url_encode("a b"), "a%20b")
+        assert_equal(url_encode("a/b?c=d"), "a%2Fb%3Fc%3Dd")
+
+    it "percent-encodes each UTF-8 octet of a non-ASCII character":
+        assert_equal(url_encode("é"), "%C3%A9")
+        assert_equal(url_encode("中"), "%E4%B8%AD")
+
+    it "decodes multi-octet percent escapes back to the character":
+        assert_equal(url_decode("%C3%A9"), "é")
+        assert_equal(url_decode("%E4%B8%AD"), "中")
+
+    it "round-trips ASCII and non-ASCII alike":
+        assert_equal(url_decode(url_encode("a b/c")), "a b/c")
+        assert_equal(url_decode(url_encode("café 中")), "café 中")
+
+    it "still decodes plain ASCII escapes (control)":
+        assert_equal(url_decode("a%20b%2Fc"), "a b/c")
+        assert_equal(url_decode("a+b"), "a b")

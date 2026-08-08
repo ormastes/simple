@@ -1,0 +1,197 @@
+# TLS 1.3 KeyUpdate — RFC 8446 section 4.6.3
+#
+# Implements the KeyUpdate post-handshake message for TLS 1.3.
+# KeyUpdate allows either peer to request fresh traffic keys by triggering
+# a re-derivation of application_traffic_secret_N+1 from the current secret.
+#
+# Wire format (RFC 8446 section 4.6.3):
+#   struct {
+#       KeyUpdateRequest request_update;
+#   } KeyUpdate;
+#
+#   enum { update_not_requested(0), update_requested(1), (255) } KeyUpdateRequest;
+#
+# The KeyUpdate message is a handshake message (type 24) encapsulated in a
+# TLS record with content_type = handshake(22). After sending KeyUpdate, the
+# sender MUST re-derive its sending traffic keys. If request_update ==
+# update_requested, the receiver MUST also send its own KeyUpdate
+# (with update_not_requested) and re-derive its sending keys.
+#
+# Key re-derivation (RFC 8446 section 7.2):
+#   application_traffic_secret_N+1 =
+#       HKDF-Expand-Label(application_traffic_secret_N, "traffic upd", "", Hash.length)
+#
+# This module provides:
+#   - Constants for handshake type and request mode
+#   - KeyUpdate message parse and emit (hex-encoded for wire safety)
+#   - Key re-derivation helper (given current secret + HKDF, returns next secret)
+#
+# Reference: RFC 8446 section 4.6.3, section 7.2
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+# Handshake message type for KeyUpdate (RFC 8446 section 4)
+val TLS13_HANDSHAKE_TYPE_KEY_UPDATE: i64 = 24
+
+# KeyUpdateRequest enum values (RFC 8446 section 4.6.3)
+val KEY_UPDATE_NOT_REQUESTED: i64 = 0
+val KEY_UPDATE_REQUESTED: i64     = 1
+
+# ============================================================================
+# Result types
+# ============================================================================
+
+class KeyUpdateMsg:
+    """Parsed KeyUpdate message."""
+    request_update: i64   # 0 = update_not_requested, 1 = update_requested
+
+enum KeyUpdateResult:
+    """Result of parsing a KeyUpdate message."""
+    Ok(KeyUpdateMsg)
+    Err(msg: text)
+
+class KeyUpdateEmitOk:
+    """Emitted KeyUpdate bytes: handshake type(1) + length(3) + request(1) = 5 bytes."""
+    data: [u8]
+
+# ============================================================================
+# Parse — RFC 8446 section 4.6.3
+#
+# Input: the handshake body bytes (after the 4-byte handshake header has been
+# stripped). A KeyUpdate body is exactly 1 byte: the KeyUpdateRequest value.
+# ============================================================================
+
+pub fn tls13_key_update_parse(body: [u8]) -> KeyUpdateResult:
+    """Parse a KeyUpdate handshake body (1 byte).
+
+    Returns Ok with the request_update value (0 or 1).
+    Returns Err if body length is wrong or value is out of range.
+    """
+    if body.len() != 1:
+        return KeyUpdateResult.Err("KeyUpdate body must be exactly 1 byte, got " + body.len().to_text())
+    val request = body[0] & 0xff
+    if request != KEY_UPDATE_NOT_REQUESTED and request != KEY_UPDATE_REQUESTED:
+        return KeyUpdateResult.Err("invalid KeyUpdateRequest value: " + request.to_text())
+    return KeyUpdateResult.Ok(KeyUpdateMsg(request_update: request))
+
+# ============================================================================
+# Emit — RFC 8446 section 4.6.3
+#
+# Produces the full handshake message: type(1) + length(3) + body(1).
+# Total: 5 bytes.
+# ============================================================================
+
+pub fn tls13_key_update_emit(request_update: i64) -> KeyUpdateEmitOk:
+    """Build a KeyUpdate handshake message (5 bytes).
+
+    request_update: 0 = update_not_requested, 1 = update_requested.
+    Returns the complete handshake message bytes.
+    """
+    var out: [u8] = []
+    # Handshake type: KeyUpdate (24)
+    out.push(TLS13_HANDSHAKE_TYPE_KEY_UPDATE & 0xff)
+    # Length: 3 bytes big-endian, value = 1 (body is 1 byte)
+    out.push(0x00)
+    out.push(0x00)
+    out.push(0x01)
+    # Body: KeyUpdateRequest
+    out.push(request_update & 0xff)
+    return KeyUpdateEmitOk(data: out)
+
+# ============================================================================
+# Hex-safe variants
+# ============================================================================
+
+pub fn tls13_key_update_emit_hex(request_update: i64) -> text:
+    """Build a KeyUpdate handshake message as hex string (10 hex chars = 5 bytes)."""
+    val msg = tls13_key_update_emit(request_update)
+    var hex = ""
+    var i = 0
+    while i < msg.data.len():
+        val b = msg.data[i] & 0xff
+        val hi = (b >> 4) & 0x0f
+        val lo = b & 0x0f
+        hex = hex + _ku_nibble_to_hex(hi) + _ku_nibble_to_hex(lo)
+        i = i + 1
+    return hex
+
+fn _ku_nibble_to_hex(n: i64) -> text:
+    """Convert a nibble (0-15) to a single hex character."""
+    if n == 0: return "0"
+    if n == 1: return "1"
+    if n == 2: return "2"
+    if n == 3: return "3"
+    if n == 4: return "4"
+    if n == 5: return "5"
+    if n == 6: return "6"
+    if n == 7: return "7"
+    if n == 8: return "8"
+    if n == 9: return "9"
+    if n == 10: return "a"
+    if n == 11: return "b"
+    if n == 12: return "c"
+    if n == 13: return "d"
+    if n == 14: return "e"
+    if n == 15: return "f"
+    return "0"
+
+# ============================================================================
+# Key re-derivation — RFC 8446 section 7.2
+#
+# application_traffic_secret_N+1 =
+#     HKDF-Expand-Label(application_traffic_secret_N, "traffic upd", "", Hash.length)
+#
+# HKDF-Expand-Label(Secret, Label, Context, Length) =
+#     HKDF-Expand(Secret, HkdfLabel, Length)
+# where HkdfLabel is:
+#     struct {
+#         uint16 length = Length;
+#         opaque label<7..255> = "tls13 " + Label;
+#         opaque context<0..255> = Context;
+#     } HkdfLabel;
+#
+# This function builds the HkdfLabel info bytes for the "traffic upd" label.
+# The caller must invoke HKDF-Expand with the current secret and this info.
+# ============================================================================
+
+pub fn tls13_key_update_hkdf_label(hash_len: i64) -> [u8]:
+    """Build the HKDF-Expand info parameter for KeyUpdate key re-derivation.
+
+    hash_len: the output length of the negotiated hash (e.g. 32 for SHA-256,
+              48 for SHA-384).
+    Returns the serialized HkdfLabel struct for label="traffic upd", context="".
+    """
+    # Full label = "tls13 " + "traffic upd" = "tls13 traffic upd" (18 bytes)
+    val label_str = "tls13 traffic upd"
+    val label_len = 18
+
+    var info: [u8] = []
+    # uint16 length (big-endian)
+    info.push((hash_len >> 8) & 0xff)
+    info.push(hash_len & 0xff)
+    # opaque label<7..255>: length prefix (1 byte) + label bytes
+    info.push(label_len & 0xff)
+    # Append label bytes
+    var i = 0
+    while i < label_len:
+        val c = label_str[i]
+        info.push(c & 0xff)
+        i = i + 1
+    # opaque context<0..255>: length prefix (1 byte) + empty context
+    info.push(0x00)
+    return info
+
+# ============================================================================
+# Convenience: should receiver send KeyUpdate back?
+# ============================================================================
+
+pub fn tls13_key_update_requires_response(msg: KeyUpdateMsg) -> bool:
+    """Returns true if the receiver must respond with its own KeyUpdate.
+
+    Per RFC 8446 section 4.6.3: if request_update == update_requested(1), the
+    receiver MUST transmit a KeyUpdate with update_not_requested before sending
+    any more application data.
+    """
+    return msg.request_update == KEY_UPDATE_REQUESTED

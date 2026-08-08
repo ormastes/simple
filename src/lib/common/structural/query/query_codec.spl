@@ -1,0 +1,379 @@
+# ============================================================================
+# common/structural/query/query_codec.spl — CPU reference serializers
+#
+# CPU reference codec for the frozen QueryIR bytecode and capture format
+# (architecture §7.3/§7.4/§7.5, §26 deliverable). This is the oracle: any future
+# SIMD, CUDA or Vulkan QueryIR loader must accept exactly these bytes and any
+# compiler must produce them, which is what §30.4's "scalar, SIMD, CUDA, and
+# Vulkan evaluators produce identical stable entity/capture order" needs in
+# order to be testable at all.
+#
+# Layout (little-endian, no padding — see common/structural/wire.spl):
+#
+#   EntitySetView  13  object_slot u32 | offset u32 | count u32 | order u8
+#
+#   QueryOp        18  kind u8 | reserved u8 | input_a u32 | input_b u32
+#                      | operand u32 | constant u32
+#
+#   CaptureSlot     6  name u32 | kind u8 | reserved u8
+#
+#   QueryProgram       envelope(8) | dialect u8 | schema_version u32
+#                      | determinism u8 | index_requirements u32
+#                      | op_count u32 | const_count u32 | capture_count u32
+#                      | ops QueryOp * op_count
+#                      | constants u64 * const_count
+#                      | captures CaptureSlot * capture_count
+#
+# The three counts sit together, ahead of all three runs, so a decoder can bound
+# every variable region before allocating for any of them — the same ordering
+# rule wave 0b used for the mapping shard.
+#
+# HARD REJECTS, never a silent default:
+#   - wrong magic, wrong version, non-zero envelope reserved;
+#   - unknown QueryDialect, QueryOpKind, QueryDeterminism, CaptureKind or
+#     EntitySetOrder discriminant;
+#   - a non-zero QueryOp.reserved or CaptureSlot.reserved byte;
+#   - a TagIndexSet reserved bit set;
+#   - an empty op arena, or a first op that is not a seed;
+#   - an op input that names itself or a later op;
+#   - a seed carrying an input, or a non-set-algebra op carrying `input_b`;
+#   - a Capture operand or a constant index past its arena;
+#   - a duplicated capture slot name;
+#   - trailing bytes after the record.
+#
+# The op-arena checks matter here for the reason the CSR checks mattered in wave
+# 0b: a forward or self reference in a straight-line program does not fail
+# loudly, it silently evaluates a DIFFERENT query than the one that compiled,
+# and a query that quietly returns the wrong join points is exactly what §7.1
+# set out to replace.
+# ============================================================================
+
+use std.common.structural.wire.{
+    WIRE_ENVELOPE_LEN,
+    wire_check_envelope,
+    wire_get_u32,
+    wire_get_u64,
+    wire_get_u8,
+    wire_has,
+    wire_magic,
+    wire_put_envelope,
+    wire_put_u32,
+    wire_put_u64,
+    wire_put_u8
+}
+use std.common.structural.query.query_contracts.{
+    QUERY_SCHEMA_VERSION,
+    QueryDeterminism,
+    QueryDialect,
+    query_determinism_from_u8,
+    query_determinism_to_u8,
+    query_determinism_valid,
+    query_dialect_from_u8,
+    query_dialect_to_u8,
+    query_dialect_valid,
+    query_op_kind_from_u8,
+    query_op_kind_to_u8,
+    query_op_kind_valid,
+    tag_index_set_valid
+}
+use std.common.structural.query.query_program.{
+    CAPTURE_SLOT_LEN,
+    ENTITY_SET_VIEW_LEN,
+    QUERY_OP_LEN,
+    CaptureSlot,
+    EntitySetView,
+    QueryOp,
+    QueryProgram,
+    capture_kind_from_u8,
+    capture_kind_to_u8,
+    capture_kind_valid,
+    capture_slot,
+    capture_zero_slot,
+    entity_set_order_from_u8,
+    entity_set_order_to_u8,
+    entity_set_order_valid,
+    entity_set_view,
+    entity_set_view_empty,
+    entity_set_view_well_formed,
+    query_op,
+    query_program,
+    query_program_valid,
+    query_zero_op
+}
+
+fn query_magic_op() -> i64:
+    wire_magic("SQOP")
+
+fn query_magic_capture_slot() -> i64:
+    wire_magic("SQCP")
+
+fn query_magic_entity_set_view() -> i64:
+    wire_magic("SQSV")
+
+fn query_magic_program() -> i64:
+    wire_magic("SQPG")
+
+# ----------------------------------------------------------------------------
+# Result carriers — same shape as the ID-TAG and MAP lanes', so a caller that
+# already handles an EntityRefResult or a MappingEdgeResult handles these
+# without a new idiom.
+# ----------------------------------------------------------------------------
+
+struct QueryOpResult:
+    ok: bool
+    value: QueryOp
+
+struct CaptureSlotResult:
+    ok: bool
+    value: CaptureSlot
+
+struct EntitySetViewResult:
+    ok: bool
+    value: EntitySetView
+
+struct QueryProgramResult:
+    ok: bool
+    value: QueryProgram
+
+fn query_empty_program() -> QueryProgram:
+    """The rejection carrier. Deliberately NOT a valid program — `ops` is empty,
+    which `query_program_valid` refuses — so a caller that ignores `ok` and uses
+    the value cannot mistake it for a query that legitimately selects nothing."""
+    val ops: [QueryOp] = []
+    val consts: [u64] = []
+    val caps: [CaptureSlot] = []
+    query_program(QueryDialect.Syntax, QUERY_SCHEMA_VERSION, ops, consts, caps,
+                  0, QueryDeterminism.SetDeterministic)
+
+# ----------------------------------------------------------------------------
+# EntitySetView
+# ----------------------------------------------------------------------------
+
+fn entity_set_view_put(out: [u8], v: EntitySetView) -> [u8]:
+    var b = wire_put_u32(out, v.object_slot)
+    b = wire_put_u32(b, v.offset)
+    b = wire_put_u32(b, v.count)
+    wire_put_u8(b, entity_set_order_to_u8(v.order))
+
+fn entity_set_view_read(data: [u8], off: i64) -> EntitySetViewResult:
+    if not wire_has(data, off, ENTITY_SET_VIEW_LEN):
+        return EntitySetViewResult(ok: false, value: entity_set_view_empty())
+    val raw_order = wire_get_u8(data, off + 12)
+    if not entity_set_order_valid(raw_order):
+        return EntitySetViewResult(ok: false, value: entity_set_view_empty())
+    val v = entity_set_view(wire_get_u32(data, off),
+                            wire_get_u32(data, off + 4),
+                            wire_get_u32(data, off + 8),
+                            entity_set_order_from_u8(raw_order))
+    if not entity_set_view_well_formed(v):
+        return EntitySetViewResult(ok: false, value: entity_set_view_empty())
+    EntitySetViewResult(ok: true, value: v)
+
+fn encode_entity_set_view(v: EntitySetView) -> [u8]:
+    var b: [u8] = []
+    b = wire_put_envelope(b, query_magic_entity_set_view(), QUERY_SCHEMA_VERSION)
+    entity_set_view_put(b, v)
+
+fn decode_entity_set_view(data: [u8]) -> EntitySetViewResult:
+    if not wire_check_envelope(data, 0, query_magic_entity_set_view(),
+                               QUERY_SCHEMA_VERSION):
+        return EntitySetViewResult(ok: false, value: entity_set_view_empty())
+    if data.len() != WIRE_ENVELOPE_LEN + ENTITY_SET_VIEW_LEN:
+        return EntitySetViewResult(ok: false, value: entity_set_view_empty())
+    entity_set_view_read(data, WIRE_ENVELOPE_LEN)
+
+# ----------------------------------------------------------------------------
+# QueryOp
+# ----------------------------------------------------------------------------
+
+fn query_op_put(out: [u8], op: QueryOp) -> [u8]:
+    var b = wire_put_u8(out, query_op_kind_to_u8(op.kind))
+    b = wire_put_u8(b, op.reserved)
+    b = wire_put_u32(b, op.input_a)
+    b = wire_put_u32(b, op.input_b)
+    b = wire_put_u32(b, op.operand)
+    wire_put_u32(b, op.constant)
+
+fn query_op_read(data: [u8], off: i64) -> QueryOpResult:
+    """Read one QueryOp. The opcode discriminant and the reserved byte are both
+    validated; either failure fails the whole read. The arena-position rules
+    (`query_op_well_formed`) are applied by the program decoder, which is the
+    only place the op's index and the arena sizes are known."""
+    if not wire_has(data, off, QUERY_OP_LEN):
+        return QueryOpResult(ok: false, value: query_zero_op())
+    val raw_kind = wire_get_u8(data, off)
+    if not query_op_kind_valid(raw_kind):
+        return QueryOpResult(ok: false, value: query_zero_op())
+    if wire_get_u8(data, off + 1) != 0:
+        return QueryOpResult(ok: false, value: query_zero_op())
+    QueryOpResult(ok: true,
+                  value: query_op(query_op_kind_from_u8(raw_kind),
+                                  wire_get_u32(data, off + 2),
+                                  wire_get_u32(data, off + 6),
+                                  wire_get_u32(data, off + 10),
+                                  wire_get_u32(data, off + 14)))
+
+fn encode_query_op(op: QueryOp) -> [u8]:
+    """Framed standalone op, for storage or transport outside a program."""
+    var b: [u8] = []
+    b = wire_put_envelope(b, query_magic_op(), QUERY_SCHEMA_VERSION)
+    query_op_put(b, op)
+
+fn decode_query_op(data: [u8]) -> QueryOpResult:
+    if not wire_check_envelope(data, 0, query_magic_op(), QUERY_SCHEMA_VERSION):
+        return QueryOpResult(ok: false, value: query_zero_op())
+    if data.len() != WIRE_ENVELOPE_LEN + QUERY_OP_LEN:
+        return QueryOpResult(ok: false, value: query_zero_op())
+    query_op_read(data, WIRE_ENVELOPE_LEN)
+
+# ----------------------------------------------------------------------------
+# CaptureSlot
+# ----------------------------------------------------------------------------
+
+fn capture_slot_put(out: [u8], s: CaptureSlot) -> [u8]:
+    var b = wire_put_u32(out, s.name)
+    b = wire_put_u8(b, capture_kind_to_u8(s.kind))
+    wire_put_u8(b, s.reserved)
+
+fn capture_slot_read(data: [u8], off: i64) -> CaptureSlotResult:
+    if not wire_has(data, off, CAPTURE_SLOT_LEN):
+        return CaptureSlotResult(ok: false, value: capture_zero_slot())
+    val raw_kind = wire_get_u8(data, off + 4)
+    if not capture_kind_valid(raw_kind):
+        return CaptureSlotResult(ok: false, value: capture_zero_slot())
+    if wire_get_u8(data, off + 5) != 0:
+        return CaptureSlotResult(ok: false, value: capture_zero_slot())
+    CaptureSlotResult(ok: true,
+                      value: capture_slot(wire_get_u32(data, off),
+                                          capture_kind_from_u8(raw_kind)))
+
+fn encode_capture_slot(s: CaptureSlot) -> [u8]:
+    var b: [u8] = []
+    b = wire_put_envelope(b, query_magic_capture_slot(), QUERY_SCHEMA_VERSION)
+    capture_slot_put(b, s)
+
+fn decode_capture_slot(data: [u8]) -> CaptureSlotResult:
+    if not wire_check_envelope(data, 0, query_magic_capture_slot(),
+                               QUERY_SCHEMA_VERSION):
+        return CaptureSlotResult(ok: false, value: capture_zero_slot())
+    if data.len() != WIRE_ENVELOPE_LEN + CAPTURE_SLOT_LEN:
+        return CaptureSlotResult(ok: false, value: capture_zero_slot())
+    capture_slot_read(data, WIRE_ENVELOPE_LEN)
+
+# ----------------------------------------------------------------------------
+# QueryProgram
+# ----------------------------------------------------------------------------
+
+val QUERY_PROGRAM_HEADER_LEN: i64 = 22
+
+fn query_program_reject() -> QueryProgramResult:
+    QueryProgramResult(ok: false, value: query_empty_program())
+
+fn encode_query_program(p: QueryProgram) -> [u8]:
+    """Serialize a program. An invalid program encodes to an EMPTY buffer rather
+    than to bytes no decoder will accept — a compiler must not be able to put a
+    self-referential op arena on the wire."""
+    var b: [u8] = []
+    if not query_program_valid(p):
+        return b
+    b = wire_put_envelope(b, query_magic_program(), QUERY_SCHEMA_VERSION)
+    b = wire_put_u8(b, query_dialect_to_u8(p.dialect))
+    b = wire_put_u32(b, p.schema_version)
+    b = wire_put_u8(b, query_determinism_to_u8(p.determinism))
+    b = wire_put_u32(b, p.index_requirements)
+    b = wire_put_u32(b, p.ops.len())
+    b = wire_put_u32(b, p.constants.len())
+    b = wire_put_u32(b, p.captures.len())
+    var i = 0
+    while i < p.ops.len():
+        b = query_op_put(b, p.ops[i])
+        i = i + 1
+    var c = 0
+    while c < p.constants.len():
+        b = wire_put_u64(b, p.constants[c])
+        c = c + 1
+    var s = 0
+    while s < p.captures.len():
+        b = capture_slot_put(b, p.captures[s])
+        s = s + 1
+    b
+
+fn decode_query_program(data: [u8]) -> QueryProgramResult:
+    if not wire_check_envelope(data, 0, query_magic_program(),
+                               QUERY_SCHEMA_VERSION):
+        return query_program_reject()
+    if not wire_has(data, WIRE_ENVELOPE_LEN, QUERY_PROGRAM_HEADER_LEN):
+        return query_program_reject()
+    val raw_dialect = wire_get_u8(data, WIRE_ENVELOPE_LEN)
+    if not query_dialect_valid(raw_dialect):
+        return query_program_reject()
+    val schema_version = wire_get_u32(data, WIRE_ENVELOPE_LEN + 1)
+    val raw_det = wire_get_u8(data, WIRE_ENVELOPE_LEN + 5)
+    if not query_determinism_valid(raw_det):
+        return query_program_reject()
+    val index_req = wire_get_u32(data, WIRE_ENVELOPE_LEN + 6)
+    if not tag_index_set_valid(index_req):
+        return query_program_reject()
+    val op_count = wire_get_u32(data, WIRE_ENVELOPE_LEN + 10)
+    val const_count = wire_get_u32(data, WIRE_ENVELOPE_LEN + 14)
+    val capture_count = wire_get_u32(data, WIRE_ENVELOPE_LEN + 18)
+    var off = WIRE_ENVELOPE_LEN + QUERY_PROGRAM_HEADER_LEN
+
+    # Bound all three runs BEFORE allocating for any declared count.
+    if not wire_has(data, off, op_count * QUERY_OP_LEN):
+        return query_program_reject()
+    if not wire_has(data, off + op_count * QUERY_OP_LEN, const_count * 8):
+        return query_program_reject()
+    if not wire_has(data, off + op_count * QUERY_OP_LEN + const_count * 8,
+                    capture_count * CAPTURE_SLOT_LEN):
+        return query_program_reject()
+
+    var ops: [QueryOp] = []
+    var i = 0
+    while i < op_count:
+        val r = query_op_read(data, off)
+        if not r.ok:
+            return query_program_reject()
+        ops.push(r.value)
+        off = off + QUERY_OP_LEN
+        i = i + 1
+
+    var consts: [u64] = []
+    var c = 0
+    while c < const_count:
+        consts.push(wire_get_u64(data, off))
+        off = off + 8
+        c = c + 1
+
+    var caps: [CaptureSlot] = []
+    var s = 0
+    while s < capture_count:
+        val cr = capture_slot_read(data, off)
+        if not cr.ok:
+            return query_program_reject()
+        caps.push(cr.value)
+        off = off + CAPTURE_SLOT_LEN
+        s = s + 1
+
+    if data.len() != off:
+        return query_program_reject()
+    val out = query_program(query_dialect_from_u8(raw_dialect), schema_version,
+                            ops, consts, caps, index_req,
+                            query_determinism_from_u8(raw_det))
+    # Re-run the full structural rule so decode accepts exactly the set encode
+    # emits; this is what catches an op whose input names a later op.
+    if not query_program_valid(out):
+        return query_program_reject()
+    QueryProgramResult(ok: true, value: out)
+
+export QueryOpResult, CaptureSlotResult, EntitySetViewResult, QueryProgramResult
+export QUERY_PROGRAM_HEADER_LEN
+export query_magic_op, query_magic_capture_slot
+export query_magic_entity_set_view, query_magic_program
+export query_empty_program
+export entity_set_view_put, entity_set_view_read
+export encode_entity_set_view, decode_entity_set_view
+export query_op_put, query_op_read, encode_query_op, decode_query_op
+export capture_slot_put, capture_slot_read
+export encode_capture_slot, decode_capture_slot
+export encode_query_program, decode_query_program

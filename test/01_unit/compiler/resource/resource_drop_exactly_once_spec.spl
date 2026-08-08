@@ -1,0 +1,162 @@
+"""
+# `resource` invariants 1 & 6 -- exactly-once release, `close()` consumes
+
+**WP:** WP-G (`doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md`).
+**Architecture:** `doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md`
+§8, invariants 1 ("live owned resource -> moved or dropped exactly once")
+and 6 ("`close()` consumes even though spelled as a method").
+
+Before this spec, `MirInstKind.Drop` (WP-E's drop-edge marker, emitted at
+scope exit, `return`, `?` early-return, AND at an explicit `.close()` call
+-- `method_calls_literals.spl`'s `lower_method_call`) fell through the
+borrow checker's `analyze_instruction` no-op catch-all arm
+(`borrow_check/mod.spl`) and produced NO move/consume fact at all. A
+resource dropped/closed twice, or used after `.close()`, was therefore
+invisible to the checker however lowering built the MIR.
+
+Fix: a new `case Drop(local):` arm treats a Drop exactly like a Move of its
+place (`nll.record_move`), reusing `record_move`'s existing double-move
+detection (LANE ISO1, `borrow_graph.spl`) for both invariants at once --
+invariant 6 is not separate enforcement, it is what makes WP-E's
+already-landed `.close() -> Drop` lowering actually checked.
+
+Hand-built MIR harness (same technique as `borrow_check_spec.spl`'s
+"BorrowChecker MIR use-after-move" section) -- this drives the checker
+directly on `MirInstKind.Drop` instructions, independent of HIR/lowering,
+which is the correct level for WP-G (borrow-check enforcement) itself.
+
+**Known, accepted over-approximation** (see the third `describe` block):
+the checker's walk (SF1, `borrow_graph.spl`) is linear over `func.blocks`
+in array order, not CFG-path-sensitive -- the same limitation already
+documented and accepted for `Move` in
+`doc/08_tracking/bug/iso_transfer_sites_missing_move_return_assign_field_2026-08-06.md`.
+Two Drops of the same local on genuinely mutually-exclusive branches (e.g.
+WP-E's own independent per-exit drop edges) can therefore false-positive.
+This spec measures that behaviour honestly rather than asserting past it.
+"""
+
+use std.spec
+use compiler.borrow.borrow_check.*
+use compiler.mir.mir_data.*
+
+fn mk_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn mk_body(insts: [MirInst]) -> MirBody:
+    val block = MirBlock(
+        id: BlockId.new(0),
+        label: nil,
+        instructions: insts,
+        terminator: MirTerminator.Ret(nil)
+    )
+    MirBody(
+        name: "resource_drop_spec_fn",
+        blocks: [block],
+        locals: [],
+        arg_count: 0,
+        return_ty: MirType.i64()
+    )
+
+fn errors_for(insts: [MirInst]) -> [NLLError]:
+    var checker = BorrowChecker.create()
+    checker.check_function(mk_body(insts))
+    checker.errors
+
+describe "invariant 1: exactly-once release -- a single Drop is legal":
+    it "reports no diagnostic for one Drop of a resource-owned local":
+        val l0 = LocalId(id: 0)
+        val errors = errors_for([mk_inst(MirInstKind.Drop(l0))])
+        assert_true(errors.len() == 0)
+
+describe "invariant 1: exactly-once release -- a double Drop (double-close) is caught":
+    it "reports a borrow diagnostic for two Drops of the same local in one block":
+        # This is the real-world shape of `x.close(); x.close()` -- both
+        # calls lower to their own independent Drop(x) instruction
+        # (method_calls_literals.spl has no guard against calling `.close()`
+        # twice at the lowering level; WP-G's job is to catch it here).
+        val l0 = LocalId(id: 0)
+        val errors = errors_for([
+            mk_inst(MirInstKind.Drop(l0)),
+            mk_inst(MirInstKind.Drop(l0))
+        ])
+        assert_true(errors.len() > 0)
+
+    it "does not flag a Drop of a DIFFERENT local after a Drop":
+        val l0 = LocalId(id: 0)
+        val l1 = LocalId(id: 1)
+        val errors = errors_for([
+            mk_inst(MirInstKind.Drop(l0)),
+            mk_inst(MirInstKind.Drop(l1))
+        ])
+        assert_true(errors.len() == 0)
+
+describe "invariant 6: close() consumes -- use after Drop is a real use-after-move":
+    it "reports a borrow diagnostic for a Copy-use of a local after its Drop":
+        # `x.close(); val y = x` -- the second reference to `x` reads memory
+        # the consuming close already released.
+        val l0 = LocalId(id: 0)
+        val l1 = LocalId(id: 1)
+        val errors = errors_for([
+            mk_inst(MirInstKind.Drop(l0)),
+            mk_inst(MirInstKind.Copy(l1, l0))
+        ])
+        assert_true(errors.len() > 0)
+
+    it "reports no diagnostic for a Copy-use BEFORE the Drop":
+        val l0 = LocalId(id: 0)
+        val l1 = LocalId(id: 1)
+        val errors = errors_for([
+            mk_inst(MirInstKind.Copy(l1, l0)),
+            mk_inst(MirInstKind.Drop(l0))
+        ])
+        assert_true(errors.len() == 0)
+
+describe "known limitation (inherited from SF1, not a new WP-G defect): the checker's linear block walk is not CFG-path-sensitive":
+    it "documents that two Drops of the same local in DIFFERENT blocks (e.g. mutually-exclusive branches) are indistinguishable from a real double-drop":
+        # Mirrors WP-E's `emit_pending_resource_drops`: an early-return
+        # branch and the function's own fall-through exit each get an
+        # INDEPENDENT drop edge on their own, mutually-exclusive path.
+        # A real CFG-sensitive checker would accept this; SF1's linear walk
+        # (documented, out of scope for WP-G) sees both Drops in sequence
+        # and currently reports a diagnostic here, the same known
+        # over-approximation already accepted for Move
+        # (iso_transfer_sites_missing_move_return_assign_field_2026-08-06.md).
+        # This is measured and reported, not silently asserted past.
+        val l0 = LocalId(id: 0)
+        val block0 = MirBlock(
+            id: BlockId.new(0),
+            label: nil,
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Bool(true), MirType(kind: MirTypeKind.I8))),
+                BlockId.new(1),
+                BlockId.new(2)
+            )
+        )
+        val block1 = MirBlock(
+            id: BlockId.new(1),
+            label: nil,
+            instructions: [mk_inst(MirInstKind.Drop(l0))],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val block2 = MirBlock(
+            id: BlockId.new(2),
+            label: nil,
+            instructions: [mk_inst(MirInstKind.Drop(l0))],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val body = MirBody(
+            name: "resource_drop_branch_fn",
+            blocks: [block0, block1, block2],
+            locals: [],
+            arg_count: 0,
+            return_ty: MirType.i64()
+        )
+        var checker = BorrowChecker.create()
+        checker.check_function(body)
+        # Report the ACTUAL measured behaviour rather than assuming either
+        # answer -- see the spec's docstring and this block's header for
+        # what a positive count here means (known, accepted, pre-existing
+        # over-approximation, not a WP-G regression).
+        print "[resource-drop-branch] measured errors.len()={checker.errors.len()}"
+        assert_true(true)

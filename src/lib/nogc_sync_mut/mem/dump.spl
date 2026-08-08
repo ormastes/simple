@@ -1,0 +1,86 @@
+# Memory snapshot dump — versioned TSV per M8 `simple mem` CLI design.
+#
+# See doc/05_design/app/mem_cli/m8_simple_mem_cli_design.md section 3.
+#
+# Format (one snapshot per file/string):
+#   simple-mem-snapshot\tv1\t{unix_ts}
+#   KIND\t{kind}\t{live_bytes}\t{live_count}
+#   OWNER\t{name}\t{live}\t{peak}\t{allocs}      (one per rt_mem_attr_report row,
+#                                                 absent when attribution is off)
+#   RSS\t{bytes}
+
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros, env_get, file_write}
+use std.nogc_sync_mut.io.signal_handlers.{install_sigusr2_handler}
+
+# Heap object kind tags run 1..28 (HeapObjectType); kind 0 is reserved/unused.
+val MEM_DUMP_KIND_MIN = 1
+val MEM_DUMP_KIND_MAX = 28
+
+val MEM_DUMP_DEFAULT_PATH = "build/mem_snapshot.tsv"
+
+extern fn rt_heap_live_bytes_by_kind(kind: i64) -> i64
+extern fn rt_heap_live_count_by_kind(kind: i64) -> i64
+extern fn rt_mem_attr_report(n: i64) -> text
+extern fn memory_usage() -> i64
+
+# Build the KIND/OWNER portion of a v1 snapshot (everything except RSS).
+# Split out from mem_dump_tsv() because on_mem_dump_usr2() (below) cannot
+# safely call memory_usage() -- see its own comment.
+fn mem_dump_tsv_no_rss() -> text:
+    val ts = time_now_unix_micros() / 1000000
+    var out = "simple-mem-snapshot\tv1\t{ts}\n"
+
+    var kind = MEM_DUMP_KIND_MIN
+    while kind <= MEM_DUMP_KIND_MAX:
+        val bytes = rt_heap_live_bytes_by_kind(kind)
+        val count = rt_heap_live_count_by_kind(kind)
+        out = out + "KIND\t{kind}\t{bytes}\t{count}\n"
+        kind = kind + 1
+
+    val owner_report = rt_mem_attr_report(32)
+    if owner_report.len() > 0:
+        for line in owner_report.split("\n"):
+            if line.len() > 0:
+                out = out + "OWNER\t{line}\n"
+    out
+
+# Build one versioned TSV memory snapshot as a string (KIND/OWNER + RSS).
+fn mem_dump_tsv() -> text:
+    val rss = memory_usage()
+    mem_dump_tsv_no_rss() + "RSS\t{rss}\n"
+
+# Write a memory snapshot to `path`. Returns true on success.
+fn mem_dump_to(path: text) -> bool:
+    file_write(path, mem_dump_tsv())
+
+fn mem_dump_target_path() -> text:
+    val configured = env_get("SIMPLE_MEM_DUMP_PATH")
+    if configured.len() > 0:
+        return configured
+    MEM_DUMP_DEFAULT_PATH
+
+# SIGUSR2 handler body. Deliberately writes mem_dump_tsv_no_rss(), NOT
+# mem_dump_tsv(): under the interpreter engine, a signal callback is invoked
+# through rt_interp_call (src/compiler_rust/compiler/src/interpreter_sffi.rs
+# ::interp_call_handler), whose function-name dispatch only resolves names
+# starting with `rt_`/`spl_` (plus a tiny print-family allowlist) -- see
+# `interp_call_uses_extern_dispatch`. `memory_usage()` is bare-named and not
+# on that list, so calling it from here raises "function not found: E3008"
+# and mem_dump_tsv() never returns, silently dropping the WHOLE dump (KIND
+# and OWNER rows included, since they never get written either). KIND/OWNER
+# rows use rt_-prefixed externs (rt_heap_live_bytes_by_kind, rt_mem_attr_report)
+# and are unaffected, so this handler still delivers real live data; only the
+# RSS row is unavailable via the live SIGUSR2 channel until the interpreter's
+# rt_interp_call allowlist is extended (or memory_usage gains an rt_ alias).
+# `simple mem snapshot` (a normal top-level call, not a signal callback)
+# still gets the real RSS row via mem_dump_tsv().
+fn on_mem_dump_usr2():
+    file_write(mem_dump_target_path(), mem_dump_tsv_no_rss())
+
+# Install a SIGUSR2 handler that dumps a memory snapshot to
+# $SIMPLE_MEM_DUMP_PATH (default 'build/mem_snapshot.tsv') whenever the
+# process receives SIGUSR2. Returns true if the handler installed.
+fn install_mem_dump_on_usr2() -> bool:
+    install_sigusr2_handler(on_mem_dump_usr2)
+
+export mem_dump_tsv, mem_dump_to, mem_dump_target_path, install_mem_dump_on_usr2

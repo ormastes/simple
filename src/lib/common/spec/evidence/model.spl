@@ -1,0 +1,520 @@
+# Modern SSpec typed-evidence contract (E0 lane, evidence manifest v1).
+#
+# This module is intentionally pure: it owns the shared records that flow
+# through the staged evidence pipeline
+#
+#   EvidenceRequest -> provider -> RawArtifact -> format adapter
+#   -> CanonicalEvidence -> OracleSpec/comparator -> ComparisonResult
+#   -> ManualBlock -> spipe_docgen
+#
+# It deliberately holds NO acquisition, parsing, or Markdown-rendering code.
+# The capture runtime and spipe_docgen run in separate processes and share only
+# files, so a rendering method on a runtime object can never be invoked by the
+# generator. Providers emit generic ManualBlock records instead; docgen stays
+# the sole Markdown renderer.
+#
+# Design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# Research: doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md
+
+pub val EVIDENCE_MANIFEST_SCHEMA: text = "simple.sspec.evidence.v1"
+
+# ---------------------------------------------------------------------------
+# Selectors
+# ---------------------------------------------------------------------------
+
+# Typed selector namespaces. A single free-form text namespace cannot express
+# "byte 7 bit 63" and "main#task_list" and "/response/items/0" without
+# ambiguity, so the kind is carried explicitly.
+pub enum EvidenceSelectorKind:
+    canonical_node
+    protocol_field
+    json_pointer
+    terminal_region
+    pixel_region
+    byte_range
+    bit_range
+    binary_field
+    scene_path
+    simulation_signal
+
+# `start`/`length` carry the numeric half of a selector: byte offset+length,
+# bit lsb+width, or pixel rect origin+extent. They are 0 for name selectors.
+#
+# `cardinality` is the number of nodes the selector MUST resolve to. -1 means
+# "at least one". Resolving a different count is a failure, never a silent
+# first-match, because an ambiguous selector is how a passing check stops
+# describing the thing it claims to describe.
+pub struct EvidenceSelector:
+    kind: EvidenceSelectorKind
+    path: text
+    start: i64
+    length: i64
+    cardinality: i64
+    optional: bool
+
+pub fn selector_node(path: text) -> EvidenceSelector:
+    EvidenceSelector(
+        kind: EvidenceSelectorKind.canonical_node,
+        path: path,
+        start: 0,
+        length: 0,
+        cardinality: 1,
+        optional: false
+    )
+
+pub fn selector_field(path: text) -> EvidenceSelector:
+    EvidenceSelector(
+        kind: EvidenceSelectorKind.protocol_field,
+        path: path,
+        start: 0,
+        length: 0,
+        cardinality: 1,
+        optional: false
+    )
+
+pub fn selector_json_pointer(pointer: text) -> EvidenceSelector:
+    EvidenceSelector(
+        kind: EvidenceSelectorKind.json_pointer,
+        path: pointer,
+        start: 0,
+        length: 0,
+        cardinality: 1,
+        optional: false
+    )
+
+pub fn selector_terminal_region(node_id: text) -> EvidenceSelector:
+    EvidenceSelector(
+        kind: EvidenceSelectorKind.terminal_region,
+        path: node_id,
+        start: 0,
+        length: 0,
+        cardinality: 1,
+        optional: false
+    )
+
+pub fn selector_binary_field(path: text, lsb: i64, width: i64) -> EvidenceSelector:
+    EvidenceSelector(
+        kind: EvidenceSelectorKind.binary_field,
+        path: path,
+        start: lsb,
+        length: width,
+        cardinality: 1,
+        optional: false
+    )
+
+pub fn selector_byte_range(offset: i64, length: i64) -> EvidenceSelector:
+    EvidenceSelector(
+        kind: EvidenceSelectorKind.byte_range,
+        path: "bytes",
+        start: offset,
+        length: length,
+        cardinality: 1,
+        optional: false
+    )
+
+pub fn selector_kind_name(kind: EvidenceSelectorKind) -> text:
+    match kind:
+        case EvidenceSelectorKind.canonical_node: "canonical_node"
+        case EvidenceSelectorKind.protocol_field: "protocol_field"
+        case EvidenceSelectorKind.json_pointer: "json_pointer"
+        case EvidenceSelectorKind.terminal_region: "terminal_region"
+        case EvidenceSelectorKind.pixel_region: "pixel_region"
+        case EvidenceSelectorKind.byte_range: "byte_range"
+        case EvidenceSelectorKind.bit_range: "bit_range"
+        case EvidenceSelectorKind.binary_field: "binary_field"
+        case EvidenceSelectorKind.scene_path: "scene_path"
+        case EvidenceSelectorKind.simulation_signal: "simulation_signal"
+
+pub fn selector_display(selector: EvidenceSelector) -> text:
+    if selector.length > 0:
+        return selector.path + "[" + "{selector.start}" + ":" + "{selector.length}" + "]"
+    selector.path
+
+# ---------------------------------------------------------------------------
+# Oracles
+# ---------------------------------------------------------------------------
+
+pub enum OracleMode:
+    exact
+    semantic
+    subset
+    ordered_sequence
+    multiset
+    full_pattern
+    numeric_tolerance
+    image_exact
+    image_threshold
+    invariant
+    timeline
+    distribution
+    ignore
+
+pub fn oracle_mode_name(mode: OracleMode) -> text:
+    match mode:
+        case OracleMode.exact: "exact"
+        case OracleMode.semantic: "semantic"
+        case OracleMode.subset: "subset"
+        case OracleMode.ordered_sequence: "ordered_sequence"
+        case OracleMode.multiset: "multiset"
+        case OracleMode.full_pattern: "full_pattern"
+        case OracleMode.numeric_tolerance: "numeric_tolerance"
+        case OracleMode.image_exact: "image_exact"
+        case OracleMode.image_threshold: "image_threshold"
+        case OracleMode.invariant: "invariant"
+        case OracleMode.timeline: "timeline"
+        case OracleMode.distribution: "distribution"
+        case OracleMode.ignore: "ignore"
+
+# An `ignore` or a tolerance carries a positive claim about WHY the value is
+# not being checked. Without it, "ignore" is indistinguishable from "we never
+# looked", which is exactly the state a manual must not present as verified.
+pub struct OracleCheck:
+    selector: EvidenceSelector
+    mode: OracleMode
+    expected: text
+    expected_items: [text]
+    tolerance: i64
+    bind_name: text
+    reason: text
+    requirement_id: text
+
+# `closed` rejects nodes the oracle never mentions. `open` must be stated
+# deliberately, because an open document silently absorbs new protocol fields.
+pub struct OracleSpec:
+    profile_id: text
+    closed: bool
+    checks: [OracleCheck]
+
+pub fn oracle_check_defaults() -> OracleCheck:
+    OracleCheck(
+        selector: selector_field(""),
+        mode: OracleMode.exact,
+        expected: "",
+        expected_items: [],
+        tolerance: 0,
+        bind_name: "",
+        reason: "",
+        requirement_id: ""
+    )
+
+pub fn check_exact(path: text, expected: text) -> OracleCheck:
+    var check = oracle_check_defaults()
+    check.selector = selector_field(path)
+    check.mode = OracleMode.exact
+    check.expected = expected
+    check
+
+pub fn check_exact_selector(selector: EvidenceSelector, expected: text) -> OracleCheck:
+    var check = oracle_check_defaults()
+    check.selector = selector
+    check.mode = OracleMode.exact
+    check.expected = expected
+    check
+
+# `expected` is a pattern class token, not a regex: "hex:16", "digit:3",
+# "alnum:*". It is anchored to the whole selected scalar by construction, so a
+# substring can never satisfy it.
+pub fn check_full_pattern(path: text, pattern: text) -> OracleCheck:
+    var check = oracle_check_defaults()
+    check.selector = selector_field(path)
+    check.mode = OracleMode.full_pattern
+    check.expected = pattern
+    check
+
+pub fn check_ignore(path: text, reason: text) -> OracleCheck:
+    var check = oracle_check_defaults()
+    check.selector = selector_field(path)
+    check.mode = OracleMode.ignore
+    check.reason = reason
+    check
+
+pub fn check_multiset(path: text, items: [text]) -> OracleCheck:
+    var check = oracle_check_defaults()
+    check.selector = selector_field(path)
+    check.selector.cardinality = -1
+    check.mode = OracleMode.multiset
+    check.expected_items = items
+    check
+
+pub fn check_ordered(path: text, items: [text]) -> OracleCheck:
+    var check = oracle_check_defaults()
+    check.selector = selector_field(path)
+    check.selector.cardinality = -1
+    check.mode = OracleMode.ordered_sequence
+    check.expected_items = items
+    check
+
+pub fn check_numeric_tolerance(path: text, expected: text, tolerance: i64, reason: text) -> OracleCheck:
+    var check = oracle_check_defaults()
+    check.selector = selector_field(path)
+    check.mode = OracleMode.numeric_tolerance
+    check.expected = expected
+    check.tolerance = tolerance
+    check.reason = reason
+    check
+
+# Correlation: capture a value under `bind_name`, then require another
+# selector to carry the same value. Neither side is an expected literal, so a
+# correlation check cannot be satisfied by a hard-coded transcript.
+pub fn check_bind(path: text, bind_name: text) -> OracleCheck:
+    var check = oracle_check_defaults()
+    check.selector = selector_field(path)
+    check.mode = OracleMode.semantic
+    check.bind_name = bind_name
+    check
+
+pub fn check_same_as(path: text, bind_name: text) -> OracleCheck:
+    var check = oracle_check_defaults()
+    check.selector = selector_field(path)
+    check.mode = OracleMode.semantic
+    check.expected = "$" + bind_name
+    check
+
+pub fn oracle_spec(profile_id: text, checks: [OracleCheck]) -> OracleSpec:
+    OracleSpec(profile_id: profile_id, closed: true, checks: checks)
+
+pub fn oracle_spec_open(profile_id: text, checks: [OracleCheck]) -> OracleSpec:
+    OracleSpec(profile_id: profile_id, closed: false, checks: checks)
+
+# ---------------------------------------------------------------------------
+# Canonical evidence
+# ---------------------------------------------------------------------------
+
+# One resolved observation. `value` is the canonical text form; adapters keep
+# the raw bytes in the artifact store so a parsed comparison never discards the
+# wire evidence it was derived from.
+pub struct EvidenceNode:
+    path: text
+    kind: EvidenceSelectorKind
+    value: text
+    raw: text
+    order: i64
+
+pub struct CanonicalEvidence:
+    kind: text
+    profile_id: text
+    parse_ok: bool
+    parse_error: text
+    nodes: [EvidenceNode]
+
+pub fn evidence_node(path: text, value: text) -> EvidenceNode:
+    EvidenceNode(
+        path: path,
+        kind: EvidenceSelectorKind.protocol_field,
+        value: value,
+        raw: value,
+        order: 0
+    )
+
+pub fn evidence_node_at(path: text, value: text, order: i64) -> EvidenceNode:
+    EvidenceNode(
+        path: path,
+        kind: EvidenceSelectorKind.protocol_field,
+        value: value,
+        raw: value,
+        order: order
+    )
+
+pub fn canonical_evidence(kind: text, profile_id: text, nodes: [EvidenceNode]) -> CanonicalEvidence:
+    CanonicalEvidence(
+        kind: kind,
+        profile_id: profile_id,
+        parse_ok: true,
+        parse_error: "",
+        nodes: nodes
+    )
+
+# A parse failure is a first-class evidence state, not an empty node list: an
+# empty list would satisfy any "subset" oracle and read as a clean pass.
+pub fn canonical_evidence_parse_error(kind: text, profile_id: text, error: text) -> CanonicalEvidence:
+    CanonicalEvidence(
+        kind: kind,
+        profile_id: profile_id,
+        parse_ok: false,
+        parse_error: error,
+        nodes: []
+    )
+
+# ---------------------------------------------------------------------------
+# Comparison results
+# ---------------------------------------------------------------------------
+
+pub enum EvidenceStatus:
+    passed
+    failed
+    ignored
+    pending_review
+
+pub fn evidence_status_name(status: EvidenceStatus) -> text:
+    match status:
+        case EvidenceStatus.passed: "PASS"
+        case EvidenceStatus.failed: "FAIL"
+        case EvidenceStatus.ignored: "IGNORED"
+        case EvidenceStatus.pending_review: "PENDING-REVIEW"
+
+pub struct EvidenceCheckResult:
+    selector: text
+    mode: text
+    expected: text
+    actual: text
+    status: EvidenceStatus
+    detail: text
+
+pub struct ComparisonResult:
+    status: EvidenceStatus
+    summary: text
+    checks: [EvidenceCheckResult]
+
+pub fn check_result(
+    selector: text,
+    mode: text,
+    expected: text,
+    actual: text,
+    status: EvidenceStatus,
+    detail: text
+) -> EvidenceCheckResult:
+    EvidenceCheckResult(
+        selector: selector,
+        mode: mode,
+        expected: expected,
+        actual: actual,
+        status: status,
+        detail: detail
+    )
+
+# ---------------------------------------------------------------------------
+# Manual projection
+# ---------------------------------------------------------------------------
+
+# Generic block vocabulary shared by every provider. A custom provider extends
+# the pipeline by emitting these, never by shipping renderer code into docgen.
+pub enum ManualBlockKind:
+    paragraph
+    action_list
+    code_block
+    terminal_grid
+    image
+    table
+    field_tree
+    byte_table
+    expected_actual
+    warning
+    troubleshooting
+    artifact_link
+
+pub fn manual_block_kind_name(kind: ManualBlockKind) -> text:
+    match kind:
+        case ManualBlockKind.paragraph: "paragraph"
+        case ManualBlockKind.action_list: "action_list"
+        case ManualBlockKind.code_block: "code_block"
+        case ManualBlockKind.terminal_grid: "terminal_grid"
+        case ManualBlockKind.image: "image"
+        case ManualBlockKind.table: "table"
+        case ManualBlockKind.field_tree: "field_tree"
+        case ManualBlockKind.byte_table: "byte_table"
+        case ManualBlockKind.expected_actual: "expected_actual"
+        case ManualBlockKind.warning: "warning"
+        case ManualBlockKind.troubleshooting: "troubleshooting"
+        case ManualBlockKind.artifact_link: "artifact_link"
+
+pub enum EvidenceAudience:
+    user
+    qa
+
+pub fn evidence_audience_name(audience: EvidenceAudience) -> text:
+    match audience:
+        case EvidenceAudience.user: "user"
+        case EvidenceAudience.qa: "qa"
+
+pub struct ManualBlock:
+    kind: ManualBlockKind
+    title: text
+    audience: EvidenceAudience
+    lines: [text]
+
+pub fn manual_block(kind: ManualBlockKind, title: text, lines: [text]) -> ManualBlock:
+    ManualBlock(kind: kind, title: title, audience: EvidenceAudience.qa, lines: lines)
+
+pub fn manual_block_for(
+    kind: ManualBlockKind,
+    title: text,
+    audience: EvidenceAudience,
+    lines: [text]
+) -> ManualBlock:
+    ManualBlock(kind: kind, title: title, audience: audience, lines: lines)
+
+# ---------------------------------------------------------------------------
+# Manifest / provenance
+# ---------------------------------------------------------------------------
+
+# The receipt that makes a generated manual falsifiable. Without the hashes a
+# regenerated manual cannot be distinguished from a stale one that merely looks
+# current.
+pub struct EvidenceManifest:
+    schema: text
+    evidence_id: text
+    profile_id: text
+    spec_path: text
+    spec_sha256: text
+    provider_id: text
+    provider_version: text
+    run_id: text
+    environment: text
+    artifact_sha256: text
+    status: EvidenceStatus
+
+pub fn evidence_manifest(
+    evidence_id: text,
+    profile_id: text,
+    spec_path: text,
+    spec_sha256: text,
+    provider_id: text,
+    provider_version: text,
+    run_id: text,
+    environment: text,
+    artifact_sha256: text,
+    status: EvidenceStatus
+) -> EvidenceManifest:
+    EvidenceManifest(
+        schema: EVIDENCE_MANIFEST_SCHEMA,
+        evidence_id: evidence_id,
+        profile_id: profile_id,
+        spec_path: spec_path,
+        spec_sha256: spec_sha256,
+        provider_id: provider_id,
+        provider_version: provider_version,
+        run_id: run_id,
+        environment: environment,
+        artifact_sha256: artifact_sha256,
+        status: status
+    )
+
+# Deterministic serialization: field order is fixed so two runs of the same
+# evidence produce byte-identical manifests and a diff means a real change.
+pub fn evidence_manifest_lines(manifest: EvidenceManifest) -> [text]:
+    [
+        "schema: " + manifest.schema,
+        "evidence_id: " + manifest.evidence_id,
+        "profile_id: " + manifest.profile_id,
+        "spec_path: " + manifest.spec_path,
+        "spec_sha256: " + manifest.spec_sha256,
+        "provider_id: " + manifest.provider_id,
+        "provider_version: " + manifest.provider_version,
+        "run_id: " + manifest.run_id,
+        "environment: " + manifest.environment,
+        "artifact_sha256: " + manifest.artifact_sha256,
+        "status: " + evidence_status_name(manifest.status)
+    ]
+
+# A manifest whose hashes are empty describes nothing checkable, so it is never
+# acceptable as evidence even when every oracle passed.
+pub fn evidence_manifest_is_complete(manifest: EvidenceManifest) -> bool:
+    if manifest.schema != EVIDENCE_MANIFEST_SCHEMA:
+        return false
+    if manifest.spec_path == "" or manifest.spec_sha256 == "":
+        return false
+    if manifest.provider_id == "" or manifest.provider_version == "":
+        return false
+    if manifest.run_id == "" or manifest.artifact_sha256 == "":
+        return false
+    true

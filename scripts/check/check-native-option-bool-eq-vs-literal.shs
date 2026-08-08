@@ -1,0 +1,99 @@
+#!/bin/sh
+# Regression gate for AOT (`native-build`) `Option<bool>` equality against a
+# raw bool/nil LITERAL (as opposed to Option-vs-Option equality, which
+# already works -- see check-native-option-eq-representation.shs).
+#
+# WHY THIS EXISTS: `bin/simple test` hard-defaults to the tree-walk
+# interpreter and has no AOT mode, so a spec can only ever prove the
+# interpreter lane. This defect was silent-wrong (returned "no-match" for a
+# logically-true comparison): `Some(true) == true` printed "false".
+#
+# Bug: doc/08_tracking/bug/native_option_bool_eq_against_raw_literal_2026-08-06.md
+# Root cause: src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl,
+# Binary's `case _:` arm. `bin_is_enum_eq` required BOTH operands of `==`/
+# `!=` to resolve to the same declared enum id via `local_enum_type_id`.
+# Option-typed locals never get a declared HIR enum type recorded (Option is
+# intentionally exempted in lower_enum_construct_named), and a raw
+# `true`/`false`/`nil` literal never has one either -- so the check always
+# missed this pairing and fell through to a representation-blind raw scalar
+# Eq comparing a boxed `rt_enum_new` handle against a raw 0/1/3 word, which
+# can never match regardless of the real value.
+#
+# Fix: when exactly one operand of `==`/`!=` is a registered Option handle
+# (option_value_locals) and the other is a bool-typed or nil-marked raw
+# local, box the literal side into the same canonical Option handle
+# (ensure_option_handle) before routing both sides through the existing
+# rt_native_eq enum-equality call.
+#
+# This gate hard-asserts ALL rows: hit1-3 (correct answer is "match" --
+# these were the defect) and miss1-4 (correct answer was already "no-match"
+# on all three engines, and must stay that way).
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+WORK_DIR="${WORK_DIR:-/tmp/check-native-option-bool-eq-vs-literal.$$}"
+FIXTURE="test/fixtures/native_option_bool_eq_vs_literal/main.spl"
+
+test -x "$SIMPLE_BINARY"
+mkdir -p "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+binary="$WORK_DIR/option-bool-eq-vs-literal"
+log="$WORK_DIR/option-bool-eq-vs-literal.log"
+
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+    "$SIMPLE_BINARY" native-build \
+    --source test/fixtures --entry-closure --entry "$FIXTURE" \
+    --cache-dir "$WORK_DIR/cache" --output "$binary" >"$log" 2>&1
+
+if [ ! -x "$binary" ]; then
+    echo "ERROR — nothing was checked (native-build did not produce a binary)"
+    tail -n 40 "$log" || true
+    exit 2
+fi
+
+out="$(timeout 60 "$binary" 2>>"$log")"
+
+get() {
+    printf '%s\n' "$out" | sed -n "s/.*\b$1=\([a-z-]*\).*/\1/p"
+}
+
+hit1="$(get hit1)"
+hit2="$(get hit2)"
+hit3="$(get hit3)"
+miss1="$(get miss1)"
+miss2="$(get miss2)"
+miss3="$(get miss3)"
+miss4="$(get miss4)"
+
+fail=0
+check() {
+    name="$1"; actual="$2"; expected="$3"
+    if [ "$actual" != "$expected" ]; then
+        echo "FAIL — native-build $name wrong"
+        echo "  expected: $expected"
+        echo "  actual:   $actual"
+        fail=1
+    fi
+}
+
+# hit1-3: the defect rows -- must now be "match".
+check "Some(true) == true (hit1)" "$hit1" "match"
+check "Some(false) == false (hit2)" "$hit2" "match"
+check "nil == nil (hit3)" "$hit3" "match"
+
+# miss1-4: already-correct rows -- must stay "no-match" (regression fence,
+# guards against an over-broad fix that starts matching everything).
+check "nil == true (miss1)" "$miss1" "no-match"
+check "nil == false (miss2)" "$miss2" "no-match"
+check "Some(true) == false (miss3)" "$miss3" "no-match"
+check "Some(false) == true (miss4)" "$miss4" "no-match"
+
+if [ "$fail" -ne 0 ]; then
+    echo "raw output: $out"
+    exit 1
+fi
+echo "PASS — native-build Option<bool>-vs-literal equality: all 7 rows correct (hit1-3 fixed, miss1-4 unchanged)"

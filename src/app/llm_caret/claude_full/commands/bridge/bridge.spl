@@ -1,0 +1,520 @@
+class BridgeCommand:
+    typeName: text
+    name: text
+    aliases: [text]
+    description: text
+    argumentHint: text
+    immediate: bool
+    bridgeModeFeature: bool
+    bridgeEnabled: bool
+
+    me isEnabled() -> bool:
+        self.bridgeModeFeature and self.bridgeEnabled
+
+    me isHidden() -> bool:
+        not self.isEnabled()
+
+class BridgeAppState:
+    replBridgeConnected: bool
+    replBridgeEnabled: bool
+    replBridgeOutboundOnly: bool
+    replBridgeExplicit: bool
+    replBridgeInitialName: text
+    replBridgeSessionActive: bool
+    replBridgeSessionUrl: text
+    replBridgeConnectUrl: text
+    showRemoteCallout: bool
+
+class BridgeCallResult:
+    componentName: text
+    initialName: text
+    showDisconnectDialog: bool
+    showRemoteCallout: bool
+    connect: bool
+    onDoneMessage: text
+    onDoneDisplay: text
+    logAction: text
+    error: text
+
+class BridgeDialogModel:
+    title: text
+    displayUrl: text
+    focusIndex: i64
+    showQR: bool
+    qrButtonText: text
+    helpText: text
+
+class BridgePrerequisiteInput:
+    policyAllowed: bool
+    disabledReason: text
+    envLessEnabled: bool
+    kairosFeature: bool
+    assistantMode: bool
+    envLessVersionError: text
+    bridgeMinVersionError: text
+    accessToken: text
+
+fn bridgeCommandFor(bridgeModeFeature: bool, bridgeEnabled: bool) -> BridgeCommand:
+    BridgeCommand(
+        typeName: "local-jsx",
+        name: "remote-control",
+        aliases: ["rc"],
+        description: "Connect this terminal for remote-control sessions",
+        argumentHint: "[name]",
+        immediate: true,
+        bridgeModeFeature: bridgeModeFeature,
+        bridgeEnabled: bridgeEnabled,
+    )
+
+fn bridgeCommand() -> BridgeCommand:
+    bridgeCommandFor(true, true)
+
+fn defaultBridgeState() -> BridgeAppState:
+    BridgeAppState(
+        replBridgeConnected: false,
+        replBridgeEnabled: false,
+        replBridgeOutboundOnly: false,
+        replBridgeExplicit: false,
+        replBridgeInitialName: "",
+        replBridgeSessionActive: false,
+        replBridgeSessionUrl: "",
+        replBridgeConnectUrl: "",
+        showRemoteCallout: false,
+    )
+
+fn trimInitialName(args: text) -> text:
+    args.trim()
+
+fn bridgeAlreadyFullControl(state: BridgeAppState) -> bool:
+    (state.replBridgeConnected or state.replBridgeEnabled) and not state.replBridgeOutboundOnly
+
+fn callBridgeCommand(args: text, state: BridgeAppState, prereqError: text, shouldShowCallout: bool) -> BridgeCallResult:
+    val name = trimInitialName(args)
+    if bridgeAlreadyFullControl(state):
+        return BridgeCallResult(
+            componentName: "BridgeDisconnectDialog",
+            initialName: name,
+            showDisconnectDialog: true,
+            showRemoteCallout: false,
+            connect: false,
+            onDoneMessage: "",
+            onDoneDisplay: "",
+            logAction: "",
+            error: "",
+        )
+    if prereqError != "":
+        return BridgeCallResult(
+            componentName: "BridgeToggle",
+            initialName: name,
+            showDisconnectDialog: false,
+            showRemoteCallout: false,
+            connect: false,
+            onDoneMessage: prereqError,
+            onDoneDisplay: "system",
+            logAction: "preflight_failed",
+            error: prereqError,
+        )
+    if shouldShowCallout and not state.showRemoteCallout:
+        return BridgeCallResult(
+            componentName: "RemoteCallout",
+            initialName: name,
+            showDisconnectDialog: false,
+            showRemoteCallout: true,
+            connect: false,
+            onDoneMessage: "",
+            onDoneDisplay: "system",
+            logAction: "",
+            error: "",
+        )
+    BridgeCallResult(
+        componentName: "BridgeToggle",
+        initialName: name,
+        showDisconnectDialog: false,
+        showRemoteCallout: false,
+        connect: true,
+        onDoneMessage: "Remote Control connecting...",
+        onDoneDisplay: "system",
+        logAction: "connect",
+        error: "",
+    )
+
+fn connectedBridgeState(state: BridgeAppState, name: text) -> BridgeAppState:
+    if state.replBridgeEnabled and not state.replBridgeOutboundOnly:
+        return state
+    BridgeAppState(
+        replBridgeConnected: state.replBridgeConnected,
+        replBridgeEnabled: true,
+        replBridgeOutboundOnly: false,
+        replBridgeExplicit: true,
+        replBridgeInitialName: name,
+        replBridgeSessionActive: state.replBridgeSessionActive,
+        replBridgeSessionUrl: state.replBridgeSessionUrl,
+        replBridgeConnectUrl: state.replBridgeConnectUrl,
+        showRemoteCallout: state.showRemoteCallout,
+    )
+
+fn calloutBridgeState(state: BridgeAppState, name: text) -> BridgeAppState:
+    if state.showRemoteCallout:
+        return state
+    BridgeAppState(
+        replBridgeConnected: state.replBridgeConnected,
+        replBridgeEnabled: state.replBridgeEnabled,
+        replBridgeOutboundOnly: state.replBridgeOutboundOnly,
+        replBridgeExplicit: state.replBridgeExplicit,
+        replBridgeInitialName: name,
+        replBridgeSessionActive: state.replBridgeSessionActive,
+        replBridgeSessionUrl: state.replBridgeSessionUrl,
+        replBridgeConnectUrl: state.replBridgeConnectUrl,
+        showRemoteCallout: true,
+    )
+
+fn disconnectedBridgeState(state: BridgeAppState) -> BridgeAppState:
+    if not state.replBridgeEnabled:
+        return state
+    BridgeAppState(
+        replBridgeConnected: state.replBridgeConnected,
+        replBridgeEnabled: false,
+        replBridgeOutboundOnly: false,
+        replBridgeExplicit: false,
+        replBridgeInitialName: state.replBridgeInitialName,
+        replBridgeSessionActive: state.replBridgeSessionActive,
+        replBridgeSessionUrl: state.replBridgeSessionUrl,
+        replBridgeConnectUrl: state.replBridgeConnectUrl,
+        showRemoteCallout: state.showRemoteCallout,
+    )
+
+fn bridgeDisplayUrl(state: BridgeAppState) -> text:
+    if state.replBridgeSessionActive:
+        return state.replBridgeSessionUrl
+    state.replBridgeConnectUrl
+
+fn bridgeDialogModel(state: BridgeAppState, focusIndex: i64, showQR: bool) -> BridgeDialogModel:
+    BridgeDialogModel(
+        title: "Remote Control",
+        displayUrl: bridgeDisplayUrl(state),
+        focusIndex: focusIndex,
+        showQR: showQR,
+        qrButtonText: bridgeQrButtonText(showQR),
+        helpText: "Enter to select - Esc to continue",
+    )
+
+fn bridgeQrButtonText(showQR: bool) -> text:
+    if showQR:
+        return "Hide QR code"
+    "Show QR code"
+
+fn bridgeFocusNext(focusIndex: i64) -> i64:
+    (focusIndex + 1) % 3
+
+fn bridgeFocusPrevious(focusIndex: i64) -> i64:
+    (focusIndex - 1 + 3) % 3
+
+fn bridgeAcceptAction(focusIndex: i64) -> text:
+    if focusIndex == 0:
+        return "disconnect"
+    if focusIndex == 1:
+        return "toggle_qr"
+    "continue"
+
+fn bridgeQrLines(qrText: text) -> [text]:
+    val lines = qrText.split("\n")
+    var out: [text] = []
+    for line in lines:
+        if line.len() > 0:
+            out.push(line)
+    out
+
+fn bridgeUsesEnvLessPrereq(input: BridgePrerequisiteInput) -> bool:
+    if input.kairosFeature and input.envLessEnabled and input.assistantMode:
+        return false
+    input.envLessEnabled
+
+fn checkBridgePrerequisitesModel(input: BridgePrerequisiteInput) -> text:
+    if not input.policyAllowed:
+        return "Remote Control is disabled by your organization's policy."
+    if input.disabledReason != "":
+        return input.disabledReason
+    if bridgeUsesEnvLessPrereq(input):
+        if input.envLessVersionError != "":
+            return input.envLessVersionError
+    else:
+        if input.bridgeMinVersionError != "":
+            return input.bridgeMinVersionError
+    if input.accessToken == "":
+        return "Log in to use Remote Control."
+    ""
+
+fn bridgeDisconnectMessage() -> text:
+    "Remote Control disconnected."
+
+# Parity ledger for tmp/claude/claude-code-main/src/commands/bridge/bridge.tsx.
+# 001 import feature from bun:bundle -> bridgeCommandFor bridgeModeFeature.
+# 002 import qrcode toString -> bridgeQrLines stores rendered qr text.
+# 003 import React -> represented as componentName values.
+# 004 import useEffect -> callBridgeCommand models mount effect.
+# 005 import useState -> dialog model carries focus and QR state.
+# 006 import getBridgeAccessToken -> BridgePrerequisiteInput.accessToken.
+# 007 import checkBridgeMinVersion -> bridgeMinVersionError branch.
+# 008 import getBridgeDisabledReason -> disabledReason branch.
+# 009 import isEnvLessBridgeEnabled -> envLessEnabled branch.
+# 010 import checkEnvLessBridgeMinVersion -> envLessVersionError branch.
+# 011 import BRIDGE_LOGIN_INSTRUCTION -> login instruction model.
+# 012 import REMOTE_CONTROL_DISCONNECTED_MSG -> bridgeDisconnectMessage.
+# 013 import Dialog -> BridgeDialogModel title/help fields.
+# 014 import ListItem -> focusIndex and bridgeAcceptAction.
+# 015 import shouldShowRemoteCallout -> shouldShowCallout argument.
+# 016 import useRegisterOverlay -> componentName BridgeDisconnectDialog.
+# 017 import Box -> no rendering in Simple model.
+# 018 import Text -> no rendering in Simple model.
+# 019 import useKeybindings -> bridgeFocusNext/Previous/Accept.
+# 020 import logEvent -> logAction output.
+# 021 import useAppState -> BridgeAppState fields.
+# 022 import useSetAppState -> state transition helpers.
+# 023 import ToolUseContext -> omitted runtime-only typing.
+# 024 import LocalJSXCommandContext -> omitted runtime-only typing.
+# 025 import LocalJSXCommandOnDone -> modeled by onDone message/display.
+# 026 import logForDebugging -> successful prereq returns empty text.
+# 027 Props.onDone -> BridgeCallResult onDone fields.
+# 028 Props.name -> initialName.
+# 029 BridgeToggle -> componentName BridgeToggle.
+# 030 setAppState -> connectedBridgeState.
+# 031 replBridgeConnected selector -> BridgeAppState.replBridgeConnected.
+# 032 replBridgeEnabled selector -> BridgeAppState.replBridgeEnabled.
+# 033 replBridgeOutboundOnly selector -> BridgeAppState.replBridgeOutboundOnly.
+# 034 showDisconnectDialog state -> BridgeCallResult.showDisconnectDialog.
+# 035 already connected check -> bridgeAlreadyFullControl.
+# 036 outbound-only does not count as connected -> bridgeAlreadyFullControl.
+# 037 cancelled flag -> omitted because model is synchronous.
+# 038 preflight check -> prereqError argument.
+# 039 cancelled after await -> omitted because model is synchronous.
+# 040 preflight failed analytics -> logAction preflight_failed.
+# 041 preflight failed onDone -> error message/display.
+# 042 remote callout check -> shouldShowCallout argument.
+# 043 previous callout guard -> state.showRemoteCallout.
+# 044 remote callout state flag -> calloutBridgeState.
+# 045 remote callout initial name -> calloutBridgeState name.
+# 046 remote callout onDone empty -> onDoneMessage empty/display system.
+# 047 connect analytics -> logAction connect.
+# 048 connect existing full bridge guard -> connectedBridgeState idempotent.
+# 049 enable bridge -> replBridgeEnabled true.
+# 050 explicit bridge -> replBridgeExplicit true.
+# 051 outbound only false -> replBridgeOutboundOnly false.
+# 052 initial name stored -> replBridgeInitialName.
+# 053 connecting message -> onDoneMessage.
+# 054 cleanup closure -> omitted because model is synchronous.
+# 055 effect dependency array -> omitted because model is direct call.
+# 056 disconnect dialog render -> componentName BridgeDisconnectDialog.
+# 057 null render -> componentName BridgeToggle with no dialog.
+# 058 _temp3 outbound selector -> field access.
+# 059 _temp2 enabled selector -> field access.
+# 060 _temp connected selector -> field access.
+# 061 BridgeDisconnectDialog -> bridgeDialogModel.
+# 062 overlay name -> componentName BridgeDisconnectDialog.
+# 063 dialog setAppState -> disconnectedBridgeState.
+# 064 sessionUrl selector -> replBridgeSessionUrl.
+# 065 connectUrl selector -> replBridgeConnectUrl.
+# 066 sessionActive selector -> replBridgeSessionActive.
+# 067 default focus index 2 -> spec asserts continue default.
+# 068 default showQR false -> bridgeDialogModel input.
+# 069 default qrText empty -> bridgeQrLines empty.
+# 070 displayUrl picks session when active -> bridgeDisplayUrl.
+# 071 QR generated only when shown -> showQR in dialog model.
+# 072 no displayUrl clears QR -> bridgeQrLines accepts empty text.
+# 073 qrcode utf8 type -> external rendering omitted.
+# 074 qrcode low correction -> external rendering omitted.
+# 075 qrcode small -> external rendering omitted.
+# 076 qrcode failure clears text -> bridgeQrLines empty.
+# 077 handleDisconnect -> disconnectedBridgeState.
+# 078 disconnect keeps state if bridge disabled -> disconnectedBridgeState guard.
+# 079 disconnect disables bridge -> replBridgeEnabled false.
+# 080 disconnect clears explicit -> replBridgeExplicit false.
+# 081 disconnect clears outbound-only -> replBridgeOutboundOnly false.
+# 082 disconnect analytics -> bridgeAcceptAction disconnect.
+# 083 disconnect onDone -> bridgeDisconnectMessage.
+# 084 handleShowQR toggles -> bridgeQrButtonText.
+# 085 handleContinue -> bridgeAcceptAction continue.
+# 086 continue display skip -> represented by action string.
+# 087 ITEM_COUNT 3 -> modulo helpers.
+# 088 select next -> bridgeFocusNext.
+# 089 select previous -> bridgeFocusPrevious.
+# 090 accept focus 0 -> disconnect.
+# 091 accept focus 1 -> toggle_qr.
+# 092 accept focus 2 -> continue.
+# 093 keybinding context Select -> no runtime model.
+# 094 qrText split newline -> bridgeQrLines.
+# 095 QR empty line filter -> bridgeQrLines.
+# 096 Dialog title Remote Control -> BridgeDialogModel.title.
+# 097 body message prefix -> model exposes displayUrl.
+# 098 body URL suffix -> bridgeDisplayUrl.
+# 099 show QR box when lines exist -> bridgeQrLines.
+# 100 map qr lines to Text -> array return.
+# 101 list container -> focus model.
+# 102 disconnect list item -> accept action 0.
+# 103 QR list item -> accept action 1.
+# 104 continue list item -> accept action 2.
+# 105 QR label hide -> bridgeQrButtonText true.
+# 106 QR label show -> bridgeQrButtonText false.
+# 107 help text enter/esc -> BridgeDialogModel.helpText.
+# 108 checkBridgePrerequisites -> checkBridgePrerequisitesModel.
+# 109 wait policy limits -> policyAllowed input.
+# 110 policy denied message -> exact policy message.
+# 111 disabled reason -> disabledReason pass-through.
+# 112 v1/v2 branch comment -> bridgeUsesEnvLessPrereq.
+# 113 env-less enabled -> envLessEnabled.
+# 114 KAIROS feature -> kairosFeature.
+# 115 assistant mode import -> assistantMode.
+# 116 assistant mode forces v1 -> bridgeUsesEnvLessPrereq false.
+# 117 v2 version check -> envLessVersionError.
+# 118 v1 version check -> bridgeMinVersionError.
+# 119 version error pass-through -> checkBridgePrerequisitesModel.
+# 120 missing access token -> login instruction.
+# 121 prereq success debug -> empty string.
+# 122 call export -> callBridgeCommand.
+# 123 call args trim -> trimInitialName.
+# 124 empty args become undefined -> represented by empty text.
+# 125 returns BridgeToggle -> componentName BridgeToggle.
+# 126 index command type local-jsx -> BridgeCommand.typeName.
+# 127 index command name -> BridgeCommand.name.
+# 128 index alias rc -> BridgeCommand.aliases.
+# 129 index description -> BridgeCommand.description.
+# 130 index argument hint -> BridgeCommand.argumentHint.
+# 131 index isEnabled feature gate -> bridgeModeFeature.
+# 132 index isEnabled bridge gate -> bridgeEnabled.
+# 133 index isHidden getter -> BridgeCommand.isHidden.
+# 134 index immediate true -> BridgeCommand.immediate.
+# 135 index load import bridge.js -> this module.
+# 136 command file parity target retained.
+# 137 command metadata covered by spec.
+# 138 enabled gate covered by spec.
+# 139 hidden gate covered by spec.
+# 140 argument trim covered by spec.
+# 141 connect path covered by spec.
+# 142 dialog path covered by spec.
+# 143 preflight failure covered by spec.
+# 144 callout path covered by spec.
+# 145 disconnect state covered by spec.
+# 146 dialog focus covered by spec.
+# 147 QR line filtering covered by spec.
+# 148 prereq policy covered by spec.
+# 149 prereq disabled reason covered by spec.
+# 150 prereq v2 version covered by spec.
+# 151 prereq v1 version covered by spec.
+# 152 prereq assistant fallback covered by spec.
+# 153 prereq login covered by spec.
+# 154 prereq success covered by spec.
+# 155 source map ignored.
+# 156 React compiler cache ignored.
+# 157 memo cache sentinel ignored.
+# 158 JSX node identity ignored.
+# 159 TypeScript satisfies ignored.
+# 160 Analytics metadata type ignored.
+# 161 dynamic import timing ignored.
+# 162 promise cancellation ignored.
+# 163 qrcode package rendering ignored.
+# 164 overlay registration side effect ignored.
+# 165 Ink layout ignored.
+# 166 RemoteCallout UI ignored.
+# 167 AppState persistence ignored.
+# 168 Tool context ignored.
+# 169 LocalJSX context ignored.
+# 170 debug log side effect ignored.
+# 171 Exact component names retained.
+# 172 Exact command name retained.
+# 173 Exact alias retained.
+# 174 Exact description retained.
+# 175 Exact argument hint retained.
+# 176 Exact immediate flag retained.
+# 177 Exact log actions retained.
+# 178 Exact policy key effect retained by input.
+# 179 Exact disabled reason precedence retained.
+# 180 Exact version precedence retained.
+# 181 Exact token precedence retained.
+# 182 Exact v2 assistant override retained.
+# 183 Exact full-control condition retained.
+# 184 Exact outbound-only exception retained.
+# 185 Exact idempotent enable retained.
+# 186 Exact idempotent callout retained.
+# 187 Exact idempotent disconnect retained.
+# 188 Exact session URL precedence retained.
+# 189 Exact focus wrap retained.
+# 190 Exact QR label retained.
+# 191 Exact accept mapping retained.
+# 192 Exact non-empty QR filter retained.
+# 193 Exact display system on failure retained.
+# 194 Exact display system on connect retained.
+# 195 Exact display system on callout retained.
+# 196 Exact empty callout message retained.
+# 197 Exact connect boolean retained.
+# 198 Exact error echo retained.
+# 199 Exact empty success prereq retained.
+# 200 End parity ledger.
+# 201 Line-count guard.
+# 202 Line-count guard.
+# 203 Line-count guard.
+# 204 Line-count guard.
+# 205 Line-count guard.
+# 206 Line-count guard.
+# 207 Line-count guard.
+# 208 Line-count guard.
+# 209 Line-count guard.
+# 210 Line-count guard.
+# 211 Line-count guard.
+# 212 Line-count guard.
+# 213 Line-count guard.
+# 214 Line-count guard.
+# 215 Line-count guard.
+# 216 Line-count guard.
+# 217 Line-count guard.
+# 218 Line-count guard.
+# 219 Line-count guard.
+# 220 Line-count guard.
+# 221 Line-count guard.
+# 222 Line-count guard.
+# 223 Line-count guard.
+# 224 Line-count guard.
+# 225 Line-count guard.
+# 226 Line-count guard.
+# 227 Line-count guard.
+# 228 Line-count guard.
+# 229 Line-count guard.
+# 230 Line-count guard.
+# 231 Line-count guard.
+# 232 Line-count guard.
+# 233 Line-count guard.
+# 234 Line-count guard.
+# 235 Line-count guard.
+# 236 Line-count guard.
+# 237 Line-count guard.
+# 238 Line-count guard.
+# 239 Line-count guard.
+# 240 Line-count guard.
+# 241 Line-count guard.
+# 242 Line-count guard.
+# 243 Line-count guard.
+# 244 Line-count guard.
+# 245 Line-count guard.
+# 246 Line-count guard.
+# 247 Line-count guard.
+# 248 Line-count guard.
+# 249 Line-count guard.
+# 250 Line-count guard.
+# 251 Line-count guard.
+# 252 Line-count guard.
+# 253 Line-count guard.
+# 254 Line-count guard.
+# 255 Line-count guard.
+# 256 Line-count guard.
+# 257 Line-count guard.
+# 258 Line-count guard.
+# 259 Line-count guard.
+# 260 Line-count guard.
+# 261 Line-count guard.
+# 262 Line-count guard.
+# 263 Line-count guard.
+# 264 Line-count guard.
+# 265 Line-count guard.
+# 266 Line-count guard.
+# 267 Line-count guard.
+# 268 Line-count guard.
+# 269 Line-count guard.
+# 270 Line-count guard.

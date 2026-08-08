@@ -1,0 +1,65 @@
+# @req NFR-012
+use std.spec.*
+use std.sffi.io.{file_read_text}
+use os.crypto.x25519_mlkem768.cuda_ntt_provider.{
+    X25519MlKem768CudaNttExecutor
+}
+
+describe "X25519MLKEM768 CUDA cold setup contract":
+    it "should fail closed on missing pinned PTX before CUDA access for NFR-012":
+        step("Warm a CUDA executor whose pinned PTX artifact is missing")
+        var executor = X25519MlKem768CudaNttExecutor.create(
+            "test/fixtures/crypto/x25519mlkem768/missing.ptx")
+        expect(executor.warmup()).to_equal("cuda-ntt-artifact-invalid")
+        expect(executor.warmup()).to_equal("cuda-ntt-artifact-invalid")
+        expect(executor.kernel_invocations).to_equal(0)
+        executor.shutdown()
+
+    it "should fail closed on missing pinned CUBIN before CUDA access for NFR-012":
+        step("Warm a CUDA executor whose pinned CUBIN artifact is missing")
+        var executor = X25519MlKem768CudaNttExecutor.create_binary(
+            "test/fixtures/crypto/x25519mlkem768/missing.cubin",
+            "0000000000000000000000000000000000000000000000000000000000000000")
+        expect(executor.warmup()).to_equal(
+            "cuda-ntt-binary-artifact-invalid")
+        expect(executor.warmup()).to_equal(
+            "cuda-ntt-binary-artifact-invalid")
+        expect(executor.kernel_invocations).to_equal(0)
+        executor.shutdown()
+
+    it "should validate provenance before initialization and load once for NFR-012":
+        step("Inspect CUDA warmup ordering, module reuse, and process isolation")
+        val provider = file_read_text(
+            "src/os/crypto/x25519_mlkem768/cuda_ntt_provider.spl")
+        val warmup = provider.index_of("me warmup() -> text:")
+        val warmup_ready = provider.index_of("self._ensure_ready()", warmup)
+        val ensure_ready = provider.index_of("me _ensure_ready() -> text:")
+        val binary_digest = provider.index_of(
+            "self.artifact_digest != self.expected_artifact_digest",
+            ensure_ready)
+        val source_digest = provider.index_of(
+            "self.source_digest != self.expected_source_digest",
+            ensure_ready)
+        val initialize = provider.index_of("self.session.init()", ensure_ready)
+        val module_guard = provider.index_of(
+            "if self.session.module == 0:", ensure_ready)
+        val module_load = provider.index_of(
+            "self.session.load_module(", module_guard)
+        val device_identity = provider.index_of(
+            "val identity = self.session.identity()", module_guard)
+        val cache_device_bind = provider.index_of(
+            "x25519_mlkem768_cache_bind_device(", device_identity)
+        val execute = provider.index_of("fn _cuda_ntt_execute(")
+        val launch = provider.index_of("executor.session.launch(", execute)
+        expect(warmup).to_be_greater_than(0)
+        expect(warmup_ready).to_be_greater_than(warmup)
+        expect(binary_digest).to_be_less_than(initialize)
+        expect(source_digest).to_be_less_than(initialize)
+        expect(module_guard).to_be_greater_than(initialize)
+        expect(module_load).to_be_greater_than(module_guard)
+        expect(device_identity).to_be_greater_than(module_load)
+        expect(cache_device_bind).to_be_greater_than(device_identity)
+        expect(launch).to_be_greater_than(execute)
+        expect(warmup).to_be_less_than(execute)
+        expect(provider.contains("process_run(")).to_be(false)
+        expect(provider.contains("rt_process_run")).to_be(false)

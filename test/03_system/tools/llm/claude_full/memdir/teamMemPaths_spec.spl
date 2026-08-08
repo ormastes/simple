@@ -1,0 +1,130 @@
+# codex-system-test
+"""
+# Claude Full Team Memory Paths
+
+Checks team memory path validation and traversal rejection.
+
+REQ-LLM-CARET-HIDDEN-008 applies only to team-memory enablement with derived
+paths and enabled-file classification. Error construction, key sanitization,
+write/key containment, and realpath mechanics remain supporting security/path
+evidence.
+
+Claim boundary: this focused owner spec proves team-memory enablement, path
+derivation, containment, and fail-closed traversal behavior from
+`teamMemPaths.spl`. The aggregate feature-gate registry owns the exhaustive
+enablement matrix. This spec does not prove shipped CLI/TUI reachability,
+host-filesystem effects, or live process behavior.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.memdir.teamMemPaths.*
+
+fn expectPathFailure(result: PathValidationResult, message: text):
+    expect(result.ok).to_equal(false)
+    expect(result.path).to_equal("")
+    expect(result.error == nil).to_equal(false)
+    expect(result.error.?.name).to_equal("PathTraversalError")
+    expect(result.error.?.message).to_equal(message)
+
+describe "Claude full team memory paths":
+    describe "supporting team-memory security and path behavior":
+        it "should create PathTraversalError with stable name":
+            step("Construct a traversal error")
+            val error = PathTraversalError.new("bad path")
+            expect(error.name).to_equal("PathTraversalError")
+            expect(error.message).to_equal("bad path")
+
+        it "should reject dangerous path keys":
+            step("Validate direct injection vectors")
+            expect(sanitizePathKey("ok/file.md").ok).to_equal(true)
+            expectPathFailure(
+                sanitizePathKey("bad\u0000key"),
+                "Null byte in path key: \"bad\u0000key\"",
+            )
+            expectPathFailure(
+                sanitizePathKey("%2e%2e%2fsecret"),
+                "URL-encoded traversal in path key: \"%2e%2e%2fsecret\"",
+            )
+            expectPathFailure(
+                sanitizePathKey("．．／secret"),
+                "Unicode-normalized traversal in path key: \"．．／secret\"",
+            )
+            expectPathFailure(
+                sanitizePathKey("a\\b"),
+                "Backslash in path key: \"a\\b\"",
+            )
+            expectPathFailure(
+                sanitizePathKey("/absolute"),
+                "Absolute path key: \"/absolute\"",
+            )
+
+    describe "REQ-LLM-CARET-HIDDEN-008: team-memory enablement and derived paths":
+        it "should derive team memory paths below auto memory":
+            step("Build directory and entrypoint paths")
+            expect(isTeamMemoryEnabled(false, true)).to_equal(false)
+            expect(isTeamMemoryEnabled(true, true)).to_equal(true)
+            expect(getTeamMemPath("/mem/project")).to_equal("/mem/project/team/")
+            expect(getTeamMemEntrypoint("/mem/project")).to_equal("/mem/project/team/MEMORY.md")
+
+    describe "supporting team-memory containment behavior":
+        it "should validate write paths with string and realpath containment":
+            step("Validate safe, escaping, and symlink-escaping writes")
+            val safe = validateTeamMemWritePath("/mem/project/team/a.md", "/mem/project/team/", true)
+            expect(safe.ok).to_equal(true)
+            expect(safe.path).to_equal("/mem/project/team/a.md")
+            expect(safe.error).to_be_nil()
+            expectPathFailure(
+                validateTeamMemWritePath("/mem/project/team/../../secret", "/mem/project/team/", true),
+                "Path escapes team memory directory: \"/mem/project/team/../../secret\"",
+            )
+            expectPathFailure(
+                validateTeamMemWritePath("/mem/project/team/link", "/mem/project/team/", false),
+                "Path escapes team memory directory via symlink: \"/mem/project/team/link\"",
+            )
+            expectPathFailure(
+                validateTeamMemWritePath("/mem/project/team/bad\u0000name.md", "/mem/project/team/", true),
+                "Null byte in path: \"/mem/project/team/bad\u0000name.md\"",
+            )
+
+        it "should validate relative keys against the team directory":
+            step("Join a relative key and reject traversal")
+            val safe = validateTeamMemKey("dir/a.md", "/mem/project/team/", true)
+            expect(safe.ok).to_equal(true)
+            expect(safe.path).to_equal("/mem/project/team/dir/a.md")
+            expect(safe.error).to_be_nil()
+            expectPathFailure(
+                validateTeamMemKey("../secret", "/mem/project/team/", true),
+                "Key escapes team memory directory: \"../secret\"",
+            )
+            expectPathFailure(
+                validateTeamMemKey("dir/a.md", "/mem/project/team/", false),
+                "Key escapes team memory directory via symlink: \"dir/a.md\"",
+            )
+
+    describe "REQ-LLM-CARET-HIDDEN-008: enabled team-memory file classification":
+        it "should classify team memory files only when enabled":
+            step("Check enabled and disabled file detection")
+            expect(isTeamMemFile("/mem/project/team/a.md", "/mem/project/team/", true, true)).to_equal(true)
+            expect(isTeamMemFile("/mem/project/team/a.md", "/mem/project/team/", false, true)).to_equal(false)
+            expect(isTeamMemFile("/mem/project/team-evil/a.md", "/mem/project/team/", true, true)).to_equal(false)
+
+    describe "supporting team-memory realpath behavior":
+        it "should fail closed for dangerous realpath states":
+            step("Classify filesystem containment status")
+            val missing = realpathDeepestExistingStatus("ENOENT", false)
+            expect(missing.ok).to_equal(true)
+            expect(missing.path).to_equal("ancestor")
+            expect(missing.error).to_be_nil()
+            expectPathFailure(
+                realpathDeepestExistingStatus("", true),
+                "Dangling symlink detected (target does not exist)",
+            )
+            expectPathFailure(
+                realpathDeepestExistingStatus("ELOOP", false),
+                "Symlink loop detected in path",
+            )
+            expectPathFailure(
+                realpathDeepestExistingStatus("EACCES", false),
+                "Cannot verify path containment (EACCES)",
+            )
+            expect(teamMemPathsSourceLinesModeled()).to_equal(292)

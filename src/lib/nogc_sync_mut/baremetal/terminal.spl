@@ -1,0 +1,137 @@
+# Baremetal Host Communication - Interactive Terminal
+#
+# HostTerminal provides an interactive REPL for communicating with baremetal devices.
+# Supports command history, special commands (quit, help, clear), and line editing.
+
+use std.nogc_sync_mut.baremetal.host_comm.HostComm
+
+extern fn rt_readline(prompt: text) -> text
+
+# Interactive terminal REPL for baremetal communication
+class HostTerminal:
+    comm: HostComm
+    history: [text]
+    max_history: i32
+    prompt: text
+    running: bool
+
+impl HostTerminal:
+    static fn create(comm: HostComm) -> HostTerminal:
+        HostTerminal(
+            comm: comm,
+            history: [],
+            max_history: 100,
+            prompt: "baremetal> ",
+            running: false
+        )
+
+    static fn with_prompt(comm: HostComm, prompt: text) -> HostTerminal:
+        HostTerminal(
+            comm: comm,
+            history: [],
+            max_history: 100,
+            prompt: prompt,
+            running: false
+        )
+
+    # Start the interactive REPL loop
+    me run() -> Result<text, text>:
+        # Connect if not already connected
+        if not self.comm.is_connected():
+            val connect_result = self.comm.connect()
+            match connect_result:
+                Ok(msg): print "Connected: {msg}"
+                Err(e): return Err("failed to connect: {e}")
+
+        self.running = true
+        print "Baremetal terminal started. Type 'help' for commands, 'quit' to exit."
+
+        while self.running:
+            val line = rt_readline(self.prompt)
+
+            # EOF or empty
+            if line == "__EOF__":
+                self.running = false
+                continue
+
+            val trimmed = line.trim()
+            if trimmed.len() == 0:
+                continue
+
+            # Add to history
+            self.add_history(trimmed)
+
+            # Handle built-in commands
+            if self.handle_builtin(trimmed):
+                continue
+
+            # Send command to device
+            val result = self.comm.send_command(trimmed)
+            match result:
+                Ok(response):
+                    if response.len() > 0:
+                        print response
+                Err(e):
+                    print "Error: {e}"
+
+        # Disconnect
+        self.comm.disconnect()
+        Ok("terminal session ended")
+
+    # Handle built-in terminal commands. Returns true if handled.
+    me handle_builtin(cmd: text) -> bool:
+        if cmd == "quit" or cmd == "exit":
+            self.running = false
+            return true
+
+        if cmd == "help":
+            self.print_help()
+            return true
+
+        if cmd == "clear":
+            print "\x1b[2J\x1b[H"
+            return true
+
+        if cmd == "history":
+            self.print_history()
+            return true
+
+        if cmd == "status":
+            val connected = if self.comm.is_connected(): "connected" else: "disconnected"
+            print "Transport: {self.comm.name()} ({connected})"
+            return true
+
+        if cmd == "reconnect":
+            self.comm.disconnect()
+            val result = self.comm.connect()
+            match result:
+                Ok(msg): print "Reconnected: {msg}"
+                Err(e): print "Reconnect failed: {e}"
+            return true
+
+        false
+
+    fn print_help():
+        print "Built-in commands:"
+        print "  help       - Show this help"
+        print "  quit/exit  - Exit terminal"
+        print "  clear      - Clear screen"
+        print "  history    - Show command history"
+        print "  status     - Show connection status"
+        print "  reconnect  - Reconnect to device"
+        print ""
+        print "All other input is sent to the baremetal device."
+
+    fn print_history():
+        var i = 0
+        for cmd in self.history:
+            i = i + 1
+            print "  {i}: {cmd}"
+
+    me add_history(cmd: text):
+        self.history.push(cmd)
+        if self.history.len() > self.max_history:
+            self.history = self.history[1:]
+
+    fn get_history() -> [text]:
+        self.history

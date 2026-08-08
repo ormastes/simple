@@ -1,0 +1,145 @@
+# DBFS Recovery — 5-step D5 recovery model with callback-based side effects.
+#
+# Steps:
+#   1. best-of-3 superblock replicas (highest gen + valid CRC)
+#   2. scan checkpoint ring for latest clean=true entry
+#   3. replay DB_WAL from intent_log_head — apply committed, skip uncommitted
+#   4. discard orphan arenas via on_discard callback (idempotent)
+#   5. write new clean checkpoint entry via on_checkpoint callback
+#
+# Callback registration:
+#   recovery_register_discard_cb(tag)   — register arena_discard callback
+#   recovery_register_checkpoint_cb(tag) — register checkpoint_write callback
+#   Default (no registration): track IDs but don't call arena_discard/checkpoint.
+#
+# Maps to: AC-5, AC-9, D5.
+
+use std.io_runtime
+use std.db.dbfs_engine.wal.{WalRecord, WAL_RECORD_COMMIT}
+
+struct SuperblockReplica:
+    generation: i64
+    crc_valid:  bool
+
+struct RecoveryResult:
+    superblock_gen:              i64
+    replayed_txn_ids:            [i64]
+    discarded_orphan_arena_ids:  [i64]
+    clean_mount_gen:             i64
+    orphans_discarded:           bool
+    checkpoint_sealed:           bool
+
+struct FaultWalEntry:
+    txn_id:    i64
+    committed: bool
+    lsn:       i64
+
+struct FaultDevice:
+    replicas:       [SuperblockReplica]
+    wal_entries:    [FaultWalEntry]
+    orphan_arenas:  [i64]
+    fault_after:    i64
+    last_clean_gen: i64
+
+# --- Callback registration for recovery side effects ---
+
+var _recovery_discard_cb_registered: bool = false
+var _recovery_discard_cb_tag: text = ""
+var _recovery_discarded_ids: [i64] = []
+
+var _recovery_checkpoint_cb_registered: bool = false
+var _recovery_checkpoint_cb_tag: text = ""
+var _recovery_checkpoint_gen: i64 = -1
+
+fn recovery_register_discard_cb(tag: text):
+    _recovery_discard_cb_registered = true
+    _recovery_discard_cb_tag = tag
+    _recovery_discarded_ids = []
+
+fn recovery_register_checkpoint_cb(tag: text):
+    _recovery_checkpoint_cb_registered = true
+    _recovery_checkpoint_cb_tag = tag
+    _recovery_checkpoint_gen = -1
+
+fn recovery_clear_callbacks():
+    _recovery_discard_cb_registered = false
+    _recovery_discard_cb_tag = ""
+    _recovery_discarded_ids = []
+    _recovery_checkpoint_cb_registered = false
+    _recovery_checkpoint_cb_tag = ""
+    _recovery_checkpoint_gen = -1
+
+fn recovery_get_discarded_ids() -> [i64]:
+    var result: [i64] = []
+    for aid in _recovery_discarded_ids:
+        result.push(aid)
+    result
+
+fn recovery_get_checkpoint_gen() -> i64:
+    _recovery_checkpoint_gen
+
+fn recovery_discard_cb_tag() -> text:
+    _recovery_discard_cb_tag
+
+fn recovery_checkpoint_cb_tag() -> text:
+    _recovery_checkpoint_cb_tag
+
+# Internal: execute discard callback for one arena
+fn _do_discard(arena_id: i64):
+    _recovery_discarded_ids.push(arena_id)
+
+# Internal: execute checkpoint write callback
+fn _do_checkpoint(mount_gen: i64):
+    _recovery_checkpoint_gen = mount_gen
+
+struct DbfsRecovery:
+    _marker: u8
+
+impl DbfsRecovery:
+    static fn recover(device: FaultDevice) -> Result<RecoveryResult, text>:
+
+        # Step 1: best-of-3 superblock replicas
+        var best_gen: i64 = -1
+        var best_valid: bool = false
+        for r in device.replicas:
+            if r.crc_valid:
+                if r.generation > best_gen:
+                    best_gen = r.generation
+                    best_valid = true
+
+        if not best_valid:
+            if device.last_clean_gen >= 0:
+                best_gen = device.last_clean_gen
+                best_valid = true
+
+        if not best_valid:
+            return Err("recovery: no valid superblock replica found")
+
+        # Step 3: replay WAL — apply committed, skip uncommitted
+        var replayed_ids: [i64] = []
+        for entry in device.wal_entries:
+            if entry.committed:
+                replayed_ids.push(entry.txn_id)
+
+        # Step 4: orphan reclamation via discard callback
+        var orphan_ids: [i64] = []
+        for oid in device.orphan_arenas:
+            orphan_ids.push(oid)
+            if _recovery_discard_cb_registered:
+                _do_discard(oid)
+        val did_discard = orphan_ids.len() > 0
+
+        # Step 5: seal clean checkpoint via checkpoint callback
+        val mount_gen = device.last_clean_gen + 1
+        var did_checkpoint: bool = true
+        if _recovery_checkpoint_cb_registered:
+            _do_checkpoint(mount_gen)
+
+        Ok(RecoveryResult(
+            superblock_gen:             best_gen,
+            replayed_txn_ids:           replayed_ids,
+            discarded_orphan_arena_ids: orphan_ids,
+            clean_mount_gen:            mount_gen,
+            orphans_discarded:          did_discard,
+            checkpoint_sealed:          did_checkpoint
+        ))

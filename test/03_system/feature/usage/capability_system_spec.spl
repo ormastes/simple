@@ -1,0 +1,640 @@
+"""
+# Reference Capability System Specification
+
+**Feature IDs:** #CAP-SYS-001 to #CAP-SYS-034
+**Category:** Type System | Capabilities
+**Status:** Implemented (iso T); mut T type-position parsing not yet implemented
+
+Tests the reference capability system for memory safety:
+- Parsing `mut T` and `iso T` syntax
+- Aliasing rules (Shared, Exclusive, Isolated)
+- Capability conversion rules
+- Concurrency mode validation (Actor, LockBase, Unsafe)
+- Zero-cost abstraction guarantee
+
+## Capability Types
+
+- `T` (default) - Shared, no mutation, no transfer
+- `mut T` - Exclusive, allows mutation, no transfer
+- `iso T` - Isolated, allows mutation and transfer
+
+## Concurrency Modes
+
+- Actor (default) - Only `iso T` allowed, `mut T` rejected
+- LockBase - `mut T` and `iso T` allowed
+- Unsafe - All capabilities allowed
+
+## Syntax
+
+```simple
+@concurrency_mode(lock_base)
+fn update(counter: mut Counter, delta: i64) -> i64:
+counter.value = counter.value + delta
+counter.value
+```
+
+## 2026-07-29 assertion-strengthening pass (lane CAP1 `capability-spec-truth`)
+
+Per `doc/08_tracking/bug/iso_mut_capability_prefix_not_parsed_2026-07-29.md`:
+this spec's `iso`/`mut` examples previously defined nested `fn`s inline in
+`it` bodies and asserted only `expect true`. Those bodies run through the
+test runner's own body-execution path, not the real recursive-descent
+frontend (`parse_full_frontend`) that `CompilerDriver.compile()` uses, so a
+green result proved nothing about the real parser.
+
+As of 2026-07-29 (lane ISO2 `iso-parse`), `iso T` genuinely parses through
+the real frontend end-to-end: parser -> `TypeKind.Isolated` ->
+`HirTypeKind.Isolated` -> MIR `Move` -> borrow-check use-after-move
+diagnostics. `mut T` in type position (after `:`, on a parameter or return
+type) is a DIFFERENT, still-unimplemented capability -- confirmed by direct
+probe below: it fails with a real parser error in every concurrency mode,
+every position (param, return, nested, mixed with other params), regardless
+of `@concurrency_mode(...)`. The `iso` cases below now drive real source text
+through `parse_full_frontend` (+ `HirLowering` / borrow-check where the
+example is about behavior) and assert real pipeline outcomes. The `mut`
+cases now assert the CURRENT TRUTHFUL behavior -- a real parser error --
+instead of a fabricated "works" claim, and say so in a comment. No example
+was deleted.
+"""
+
+use compiler.common.config.Logger
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.core.ast.{ast_reset}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirTypeKind}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.borrow.borrow_check.*
+
+
+# ============================================================================
+# Test Group 1: Parsing Capabilities
+# ============================================================================
+
+describe "Parsing Capabilities":
+    # ## Capability Syntax Parsing
+    #
+    # Tests that `mut T` and `iso T` syntax parses correctly.
+
+    it "parses mut capability":
+        # NOTE (bug: iso_mut_capability_prefix_not_parsed_2026-07-29): the
+        # nested `fn update` below is illustrative syntax only -- it is
+        # evaluated by the test runner's own lenient body-execution path, not
+        # by the real frontend, so its mere presence proves nothing. Kept for
+        # documentation; the real assertion is the probe underneath it.
+        @concurrency_mode(lock_base)
+        fn update(x: mut i64) -> i64:
+            x
+
+        # TRUTH: `mut T` in parameter-type position is NOT implemented in the
+        # real recursive-descent parser yet -- it still fails with a real
+        # parser error (`mut` consumed as an ordinary type name, then chokes
+        # on the type token that follows it). Document that truthfully.
+        ast_reset()
+        val real_src = "@concurrency_mode(lock_base)\nfn update(x: mut i64) -> i64:\n    x\n"
+        parse_full_frontend(real_src, "cap1_probe_mut_param.spl", "cap1_probe_mut_param", Logger(level: 0))
+        assert_true(parser_has_errors())  # real gap, not "parsed successfully"
+
+    it "parses iso capability":
+        fn transfer(data: iso i64) -> i64:
+            data
+
+        # STRENGTHENED: drive the identical source text through the real
+        # frontend + HIR lowering and assert the parameter's type actually
+        # lowered to `HirTypeKind.Isolated` (LANE ISO2, 2026-07-29).
+        ast_reset()
+        val real_src = "fn transfer(data: iso i64) -> i64:\n    data\n"
+        val parsed = parse_full_frontend(real_src, "cap1_probe_iso_param.spl", "cap1_probe_iso_param", Logger(level: 0))
+        assert_false(parser_has_errors())
+        var hir_lowering = HirLowering.with_filename("cap1_probe_iso_param.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        if val fn_id = hir.symbols.lookup("transfer"):
+            val fn_ = hir.functions[fn_id]
+            var is_isolated = false
+            match fn_.params[0].type_.kind:
+                case HirTypeKind.Isolated(_):
+                    is_isolated = true
+                case _:
+                    pass
+            assert_true(is_isolated)
+        else:
+            fail("transfer function not found in lowered HIR")
+
+    it "parses capability with generic type":
+        @concurrency_mode(lock_base)
+        fn process(items: mut [i64]) -> i64:
+            0
+
+        # TRUTH (verified by direct probe during this pass, same anchor gap
+        # as "parses mut capability" above): `mut` is never special-cased
+        # before the generic type parser either, so `mut [i64]` fails to
+        # parse for the identical reason `mut i64` does -- confirmed via
+        # parse_full_frontend + parser_has_errors() == true. Not re-run live
+        # here (redundant real-pipeline calls made this whole file too slow
+        # under the test daemon's per-file budget); see the anchor test.
+        expect true
+
+    it "parses default shared capability (no prefix)":
+        fn read(x: i64) -> i64:
+            x
+
+        expect read(42) == 42  # Default is implicitly Shared
+
+
+# ============================================================================
+# Test Group 2: Aliasing Rules
+# ============================================================================
+
+describe "Aliasing Rules":
+    # ## Capability Aliasing Semantics
+    #
+    # Tests that aliasing rules are correctly enforced.
+
+    it "allows multiple shared capabilities":
+        # Shared capabilities can coexist
+        fn use_shared(a: i64, b: i64) -> i64:
+            a + b
+
+        expect use_shared(10, 20) == 30
+
+    it "exclusive capability prevents aliasing":
+        # `mut T` ("Exclusive") has no real-pipeline aliasing enforcement to
+        # check yet: `mut` in type position does not even parse today (same
+        # anchor gap as "parses mut capability" in Group 1, verified there),
+        # so there is nothing downstream to exercise. Documented gap, not a
+        # fabricated "enforced at compile time" claim.
+        expect true
+
+    it "isolated capability prevents aliasing":
+        # STRENGTHENED (real pipeline): iso's "prevents aliasing" guarantee
+        # is enforced today via move-only semantics -- reading an iso-typed
+        # binding a second time after it has already been read/bound
+        # elsewhere is a real use-after-move borrow-check diagnostic through
+        # the actual parse_full_frontend -> HirLowering -> MirLowering ->
+        # check_mir_module pipeline (mirrors
+        # test/01_unit/compiler/borrow/iso_parse_pipeline_spec.spl).
+        ast_reset()
+        val src = "fn take(a: iso i64) -> i64:\n" +
+            "    val b = a\n" +
+            "    val c = a\n" +
+            "    0\n"
+        val parsed = parse_full_frontend(src, "cap1_probe_iso_alias.spl", "cap1_probe_iso_alias", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("cap1_probe_iso_alias.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+        val mir = lowering.lower_module(hir)
+        val errors = check_mir_module(mir)
+        assert_true(errors.len() > 0)  # real use-after-move diagnostic
+
+
+# ============================================================================
+# Test Group 3: Capability Conversion Rules
+# ============================================================================
+
+describe "Capability Conversion Rules":
+    # ## Valid and Invalid Conversions
+    #
+    # Tests capability downgrade and upcast rules.
+    #
+    # NOTE: none of these are checked by the pure-Simple compiler yet -- there
+    # is no `CapabilityEnv`/aliasing-downgrade equivalent anywhere under
+    # `src/compiler/**` (only the Rust seed has one, at
+    # `src/compiler_rust/compiler/src/hir/capability.rs`), and `mut T` does
+    # not even parse (see
+    # `doc/08_tracking/bug/iso_mut_capability_prefix_not_parsed_2026-07-29.md`).
+    # These remain documented-gap placeholders rather than fabricated
+    # "enforced" claims.
+
+    context "valid downgrades":
+        it "allows Exclusive to Shared":
+            # mut T -> T is allowed (downgrade) -- NOT YET CHECKED: no
+            # capability-conversion logic exists in the pure-Simple compiler.
+            expect true
+
+        it "allows Isolated to Exclusive":
+            # iso T -> mut T is allowed (downgrade) -- NOT YET CHECKED (same
+            # gap; also `mut T` doesn't parse as a conversion target).
+            expect true
+
+        it "allows Isolated to Shared":
+            # iso T -> T is allowed (downgrade) -- NOT YET CHECKED: no
+            # capability-conversion logic exists in the pure-Simple compiler.
+            expect true
+
+    context "invalid upcasts":
+        it "rejects Shared to Exclusive":
+            # T -> mut T is not allowed (upcast) -- NOT YET CHECKED: no
+            # capability-conversion logic exists in the pure-Simple compiler.
+            expect true
+
+        it "rejects Shared to Isolated":
+            # T -> iso T is not allowed (upcast) -- NOT YET CHECKED: no
+            # capability-conversion logic exists in the pure-Simple compiler.
+            expect true
+
+        it "rejects Exclusive to Isolated":
+            # mut T -> iso T is not allowed (upcast) -- NOT YET CHECKED: no
+            # capability-conversion logic exists in the pure-Simple compiler.
+            expect true
+
+
+# ============================================================================
+# Test Group 4: Capability Properties
+# ============================================================================
+
+describe "Capability Properties":
+    # ## Mutation and Transfer Properties
+    #
+    # Tests capability mutation and transfer semantics.
+
+    it "shared allows no mutation":
+        # T cannot be mutated -- NOT YET CHECKED (no capability enforcement
+        # in the pure-Simple compiler); no `mut`/`iso` involved here.
+        expect true
+
+    it "exclusive allows mutation":
+        # mut T can be mutated
+        @concurrency_mode(lock_base)
+        fn mutate(x: mut i64) -> i64:
+            x = x + 1
+            x
+
+        # TRUTH (same anchor gap as Group 1's "parses mut capability", proven
+        # live there): `mut i64` in parameter-type position is a real parser
+        # error today -- document the gap instead of asserting it "works".
+        expect true
+
+    it "isolated allows mutation and transfer":
+        # iso T can be mutated and transferred
+        fn take_ownership(data: iso i64) -> i64:
+            data
+
+        # Same shape and anchor proof as Group 1's "parses iso capability"
+        # (real frontend + HIR lowering confirms `iso i64` parses clean and
+        # lowers to HirTypeKind.Isolated) -- not re-run live here to keep
+        # this file's total real-pipeline invocation count within the test
+        # daemon's per-file time budget.
+        expect true
+
+
+# ============================================================================
+# Test Group 5: Nested Capabilities
+# ============================================================================
+
+describe "Nested Capabilities":
+    # ## Nested Capability Types
+    #
+    # Tests parsing and handling of nested capabilities.
+
+    it "parses nested mut mut T":
+        @concurrency_mode(lock_base)
+        fn weird(x: mut mut i64) -> i64:
+            0
+
+        # TRUTH (verified by direct probe during this pass): `mut mut i64`
+        # fails to parse for the same reason a single `mut i64` does -- `mut`
+        # is never special-cased in type position (see the Group 1 anchor).
+        expect true
+
+
+# ============================================================================
+# Test Group 6: Capability Environment
+# ============================================================================
+
+describe "Capability Environment":
+    # ## Acquire and Release
+    #
+    # Tests capability acquisition and release semantics.
+
+    it "can acquire and release capability":
+        # After acquiring exclusive, cannot acquire shared
+        # After release, can acquire again
+        # NOT YET CHECKED: no runtime capability-acquisition tracking exists
+        # in the pure-Simple compiler.
+        expect true
+
+
+# ============================================================================
+# Test Group 7: Concurrency Mode - Actor
+# ============================================================================
+
+describe "Concurrency Mode - Actor":
+    # ## Default Actor Mode
+    #
+    # Tests that actor mode (default) only allows iso T.
+
+    it "defaults to actor mode":
+        fn process(x: i64) -> i64:
+            x
+
+        expect process(42) == 42
+
+    it "actor mode allows iso":
+        fn transfer(data: iso i64) -> i64:
+            data
+
+        expect transfer(42) == 42
+        # Real-frontend confirmation is the Group 1 "parses iso capability"
+        # anchor (same shape); not re-run live here for file runtime budget.
+
+    it "actor mode rejects mut in params":
+        # This would be a compile error:
+        # fn update(x: mut i64) -> i64:  # Error in actor mode
+        #     x
+        #
+        # TRUTH (verified by direct probe during this pass): this is not
+        # actually an actor-mode-specific rejection today -- `mut i64` in
+        # parameter-type position fails to parse in EVERY concurrency mode
+        # (no `@concurrency_mode` attribute at all, i.e. default/actor mode
+        # included, probed with parser_has_errors() == true), because the
+        # real parser has no `mut`-prefix handling at all yet (Group 1
+        # anchor). Document the real, broader gap instead of the narrower
+        # "actor mode enforces this" claim.
+        expect true
+
+
+# ============================================================================
+# Test Group 8: Concurrency Mode - LockBase
+# ============================================================================
+
+describe "Concurrency Mode - LockBase":
+    # ## Lock-Based Mode
+    #
+    # Tests that lock_base mode allows mut T.
+
+    it "parses lock_base mode attribute":
+        @concurrency_mode(lock_base)
+        fn update(x: mut i64) -> i64:
+            x
+
+        # TRUTH (verified by direct probe during this pass): `lock_base` does
+        # not unblock `mut T` parsing -- the real parser error is
+        # unconditional regardless of the concurrency-mode attribute (the
+        # attribute itself is a separate, unrelated parse). Same anchor gap
+        # as Group 1's "parses mut capability".
+        expect true
+
+    it "lock_base allows mut T":
+        @concurrency_mode(lock_base)
+        fn increment(counter: mut i64, delta: i64) -> i64:
+            counter + delta
+
+        # TRUTH: same real-parser gap -- `mut T` fails regardless of mode
+        # (Group 1 anchor).
+        expect true
+
+
+# ============================================================================
+# Test Group 9: Concurrency Mode - Unsafe
+# ============================================================================
+
+describe "Concurrency Mode - Unsafe":
+    # ## Unsafe Mode
+    #
+    # Tests that unsafe mode allows all capabilities.
+
+    it "parses unsafe mode attribute":
+        @concurrency_mode(unsafe)
+        fn raw_ptr(x: i64) -> i64:
+            x
+
+        # This fn uses no capability prefix at all, so the real frontend
+        # parses it clean (verified by direct probe during this pass, same
+        # ordinary-fn shape as Group 1's "parses default shared capability").
+        expect true
+
+    it "unsafe mode allows all capabilities":
+        @concurrency_mode(unsafe)
+        fn unsafe_process(a: mut i64, b: iso i64, c: i64) -> mut i64:
+            0
+
+        # TRUTH (verified by direct probe during this pass, real defect):
+        # "unsafe mode allows all capabilities" is NOT actually true at the
+        # real-parser level today -- the `mut` prefix on `a` (and the `mut`
+        # return type) still fails to parse even under
+        # `@concurrency_mode(unsafe)`, exactly like every other mode (Group 1
+        # anchor). This is a real gap between the documented promise and
+        # current behavior; document it rather than asserting the promise as
+        # fact.
+        expect true
+
+
+# ============================================================================
+# Test Group 10: iso T in All Modes
+# ============================================================================
+
+describe "iso T in All Modes":
+    # ## Universal iso Support
+    #
+    # Tests that iso T succeeds in all concurrency modes.
+
+    it "iso works in actor mode":
+        fn transfer_actor(x: iso i64) -> i64:
+            x
+
+        expect transfer_actor(42) == 42
+        # Real-frontend proof is the Group 1 "parses iso capability" anchor
+        # (concurrency-mode attributes don't affect type-position parsing).
+
+    it "iso works in lock_base mode":
+        @concurrency_mode(lock_base)
+        fn transfer_lock(x: iso i64) -> i64:
+            x
+
+        expect transfer_lock(42) == 42
+        # See Group 1 anchor.
+
+    it "iso works in unsafe mode":
+        @concurrency_mode(unsafe)
+        fn transfer_unsafe(x: iso i64) -> i64:
+            x
+
+        expect transfer_unsafe(42) == 42
+        # See Group 1 anchor.
+
+
+# ============================================================================
+# Test Group 11: Zero-Cost Abstraction
+# ============================================================================
+
+describe "Zero-Cost Abstraction":
+    # ## Runtime Cost Verification
+    #
+    # Tests that capabilities have no runtime overhead.
+
+    it "capabilities compile to same representation":
+        # mut T, iso T, and T all have the same size
+        # Capabilities only affect compile-time checking
+        # NOT YET CHECKED via the real pipeline: `mut T` does not parse, so
+        # there is no way to compare its layout against `T`/`iso T` today.
+        expect true
+
+
+# ============================================================================
+# Test Group 12: Multiple Parameters
+# ============================================================================
+
+describe "Multiple Parameters with Capabilities":
+    # ## Mixed Capability Parameters
+    #
+    # Tests functions with multiple parameters having different capabilities.
+
+    it "allows mixed capabilities in lock_base":
+        @concurrency_mode(lock_base)
+        fn process(a: mut i64, b: iso i64, c: i64) -> i64:
+            a + c
+
+        # TRUTH (verified by direct probe during this pass): the `mut a`
+        # parameter still fails to parse even though `iso b` and plain `c`
+        # are both fine -- one `mut` anywhere in the signature is enough to
+        # fail the whole declaration (Group 1 anchor gap).
+        expect true
+
+    it "allows all shared in actor mode":
+        fn read_all(a: i64, b: i64, c: i64) -> i64:
+            a + b + c
+
+        expect read_all(10, 20, 12) == 42
+
+
+# ============================================================================
+# Test Group 13: Return Type Capabilities
+# ============================================================================
+
+describe "Return Type Capabilities":
+    # ## Capability in Return Types
+    #
+    # Tests that return types can have capabilities.
+
+    it "allows mut return in lock_base":
+        @concurrency_mode(lock_base)
+        fn create_mut() -> mut i64:
+            42
+
+        # TRUTH (verified by direct probe during this pass): `mut` in
+        # return-type position fails to parse too, same gap as parameter
+        # position (Group 1 anchor).
+        expect true
+
+    it "allows iso return in all modes":
+        fn send(data: iso i64) -> iso i64:
+            data
+
+        # STRENGTHENED: confirm both the parameter AND the return type lower
+        # to HirTypeKind.Isolated through the real pipeline.
+        ast_reset()
+        val real_src = "fn send(data: iso i64) -> iso i64:\n    data\n"
+        val parsed = parse_full_frontend(real_src, "cap1_probe_iso_return.spl", "cap1_probe_iso_return", Logger(level: 0))
+        assert_false(parser_has_errors())
+        var hir_lowering = HirLowering.with_filename("cap1_probe_iso_return.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        if val fn_id = hir.symbols.lookup("send"):
+            val fn_ = hir.functions[fn_id]
+            var param_isolated = false
+            match fn_.params[0].type_.kind:
+                case HirTypeKind.Isolated(_):
+                    param_isolated = true
+                case _:
+                    pass
+            var ret_isolated = false
+            match fn_.return_type.kind:
+                case HirTypeKind.Isolated(_):
+                    ret_isolated = true
+                case _:
+                    pass
+            assert_true(param_isolated)
+            assert_true(ret_isolated)
+        else:
+            fail("send function not found in lowered HIR")
+
+
+# ============================================================================
+# Test Group 14: Class Methods
+# ============================================================================
+
+describe "Class Method Capabilities":
+    # ## Methods and Concurrency Modes
+    #
+    # Tests that class methods respect concurrency modes.
+
+    it "class methods default to actor mode":
+        class Counter:
+            value: i64
+
+            fn get_value() -> i64:
+                self.value
+
+        val c = Counter(value: 42)
+        expect c.get_value() == 42
+
+
+# ============================================================================
+# Test Group 15: Integration Patterns
+# ============================================================================
+
+describe "Integration Patterns":
+    # ## Realistic Capability Usage
+    #
+    # Tests capabilities in realistic programming patterns.
+
+    it "actor message passing with iso":
+        fn process_message(msg: iso i64) -> i64:
+            msg
+
+        expect process_message(42) == 42
+        # Real-frontend proof is the Group 1 "parses iso capability" anchor.
+
+    it "lock-based concurrent modification":
+        @concurrency_mode(lock_base)
+        fn increment(counter: mut i64, delta: i64) -> i64:
+            counter + delta
+
+        # TRUTH: same `mut T` parser gap as the Group 1 anchor.
+        expect true
+
+    it "builder pattern with mut":
+        @concurrency_mode(lock_base)
+        fn with_value(builder: mut i64, value: i64) -> mut i64:
+            builder
+
+        # TRUTH (verified by direct probe during this pass): both the `mut`
+        # parameter and `mut` return type fail to parse today (Group 1 /
+        # Group 13 anchors).
+        expect true
+
+    it "unsafe mode escape hatch":
+        @concurrency_mode(unsafe)
+        fn unsafe_modify(data: mut i64, value: i64) -> i64:
+            value
+
+        # TRUTH (verified by direct probe during this pass): the "unsafe
+        # mode escape hatch" does not currently work at the real-parser
+        # level -- `mut data` still fails to parse under
+        # `@concurrency_mode(unsafe)`, same as every other mode (Group 1
+        # anchor / Group 9 finding).
+        expect true
+
+    it "iso transfer semantics":
+        fn consume(data: iso i64) -> i64:
+            data
+
+        expect consume(42) == 42
+        # Real-frontend proof is the Group 1 "parses iso capability" anchor.
+
+    it "mixed const and mut parameters":
+        @concurrency_mode(lock_base)
+        fn update_with_config(state: mut i64, config: i64, multiplier: i64) -> i64:
+            config * multiplier
+
+        expect update_with_config(0, 6, 7) == 42
+
+        # NOTE: the value assertion above never actually exercises `state`
+        # (the body is `config * multiplier`), and it runs through the
+        # lenient test-body path, not the real frontend. The `mut state`
+        # parameter itself fails to parse today (verified by direct probe
+        # during this pass, Group 1 anchor) -- document that truthfully.
+        expect true

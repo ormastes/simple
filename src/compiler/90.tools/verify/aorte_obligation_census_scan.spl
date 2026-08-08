@@ -1,0 +1,547 @@
+# AoRTE obligation census — WP-16 of the aerospace hardening plan.
+#
+# Plan: doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
+# "AoRTE obligations (init, globals, overflow, div, shift, cast, bounds) with
+# per-SymbolId proved/checked/assumed status. Feeds doc/03_plan/cert/ formal
+# lane."
+#
+# WHAT THIS IS: a read-only, reproducible census, same shape and honesty
+# discipline as the WP-2 flight-rule census (flight_rule_census_scan.spl):
+# a text-based fact extractor over owned-code `.spl` source, NOT invoking
+# `bin/simple lint` (deployed lint binary predates its own source) and NOT an
+# AST/HIR/MIR pass. It does not fix anything and does not claim to check
+# obligations it cannot mechanically evaluate.
+#
+# "per-SymbolId": this census has no symbol table. A site is identified by
+# (path, fn_name, line) — the same approximation WP-2 uses — not a real
+# `SymbolId`. Do not read `fn_name` as a resolved symbol-table lookup.
+#
+# Per obligation category, every planted site gets exactly one of three
+# verdicts:
+#   - "proved"  — the scanner's own sound, purely-syntactic reasoning
+#                 statically discharges the obligation for that exact site
+#                 (e.g. "divide by the literal 7" can never divide by zero,
+#                 regardless of what any compiler pass does). Not a claim
+#                 that any compiler pass proved it.
+#   - "checked" — a REAL, independently-verified runtime or compile-time
+#                 check in this tree covers the site. Cited against actual
+#                 code below, not invented.
+#   - "assumed" — no real check exists for that site on that axis. The
+#                 absence-of-error property is simply assumed, unverified.
+#
+# CATEGORY-BY-CATEGORY: what "checked" means and what was found (2026-08-07
+# investigation; see doc/09_report for the full citation trail):
+#
+#   1. init (definite assignment / storage initialized before use):
+#      Searched 35.semantics/ and 55.borrow/ for anything resembling
+#      definite-assignment analysis. Found none. `unsafe.spl`'s
+#      `UnsafeOp.ReadUninitialized` is a documentation TAG applied to known
+#      unsafe blocks (like Rust's `MaybeUninit::assume_init()`), not an
+#      analyzer — nothing in the tree evaluates whether a read is actually
+#      preceded by a write. Site = one per struct/class field declaration
+#      (a real, enumerable init obligation: every field must be set by every
+#      constructor). Always "assumed": no detector exists.
+#
+#   2. globals (module-level mutable state safety):
+#      Searched for thread-safety / initialization-order checking of
+#      module-level `val`/`var` bindings. Found none in 35.semantics or
+#      55.borrow. `val`'s reassignment-rejection could not be positively
+#      confirmed as implemented within this scan's scope (no "cannot
+#      reassign val"-shaped diagnostic text found), so even immutable
+#      globals are NOT upgraded to "checked" — that would be an overclaim.
+#      Site = one per indent-0 `val NAME = ...` / `var NAME = ...` binding
+#      outside any function/struct body. Always "assumed".
+#
+#   3. overflow (integer overflow):
+#      Searched 50.mir/ and 70.backend/ for `overflow`/checked-arithmetic on
+#      general integer binops. Found none — only unrelated bitfield-layout
+#      "layout overflow" text (custom_primitive_bitfield.spl) which checks a
+#      struct-layout invariant, not run-time integer arithmetic. cranelift's
+#      binop lowering (cranelift_codegen_adapter.spl) emits raw add/sub/mul
+#      with no overflow trap wiring found. Site = one per line containing a
+#      naive arithmetic-operator token (" + ", " - ", " * ") in a non-comment
+#      line — a text substring match, so it over-counts (e.g. text
+#      concatenation via `+` also matches); stated limitation, same tier as
+#      WP-2's naive paren tracking. Always "assumed".
+#
+#   4. div (division/modulo by zero):
+#      Found REAL `Err("division by zero", ...)` raising in the tree-walk
+#      interpreter (`70.backend/backend/interpreter.spl:926,929`) and the
+#      backend constant-expression evaluator
+#      (`70.backend/backend/common/expression_evaluator.spl:144`), plus a
+#      constant-fold guard in `codegen_enhanced.spl:316-330`
+#      (`validate_binop` rejects `Div`/`Rem` by a literal 0 or 0.0). BUT per
+#      the "weakest guarantee across engines" rule: a text census cannot know
+#      which engine (interpreter vs cranelift JIT vs LLVM native) a given
+#      symbol executes under, and this repo's own memory record documents
+#      interpreter/JIT/native divergence repeatedly. No divide-by-zero guard
+#      was found in `src/runtime/runtime.c`/`runtime_native.c` (the native
+#      execution path), and cranelift's div lowering
+#      (`cranelift_codegen_adapter.spl`) was not found to wire in the
+#      constant-fold guard from `codegen_enhanced.spl` (only one call site
+#      for `validate_binop`, itself only reachable via `codegen_enhanced.spl`
+#      re-exported from `70.backend/__init__.spl` — wiring into the live
+#      pipeline is NOT confirmed in scope). So a general (variable-divisor)
+#      division site is "assumed", with a stated note that the interpreter
+#      path specifically does return `Err`. TWO real exceptions:
+#        - "proved": the divisor is a non-zero integer LITERAL immediately
+#          after the operator (e.g. `x / 7`). This is the scanner's own
+#          sound arithmetic reasoning (a nonzero-literal divisor can never be
+#          zero), not a compiler-pass claim.
+#        - "checked": the site is textually guarded — the same line or the
+#          immediately preceding non-blank line contains a zero-guard-shaped
+#          substring ("!= 0", "> 0", or the word "assert"). This is a real,
+#          independent text detector (adjacent-line substring match, not
+#          real control-flow/dataflow analysis) — stated limitation.
+#
+#   5. shift (shift-amount-in-range):
+#      Searched cranelift/LLVM emission for shift-amount masking or a range
+#      check. `cranelift_codegen_adapter.spl` (Shl/Shr cases) passes the
+#      shift amount straight to `cranelift_ishl`/`cranelift_ushr`/
+#      `cranelift_sshr` with no masking or guard found. Site = one per line
+#      containing " << " or " >> " in a non-comment line. Always "assumed".
+#
+#   6. cast (narrowing/truncating cast safety):
+#      Read `lower_cast_expr` (50.mir/_MirLoweringExpr/expr_dispatch.spl:
+#      1750-1799): the general integer-cast path calls `emit_cast`, a raw
+#      truncating cast with no range check. This session's own WP-20 code
+#      (`70.backend/linker/smf_writer.spl`, `u32_to_bytes_u8`/
+#      `u64_to_bytes_u8`) uses `(value >> n & 0xFF) as u8` — masked to
+#      0..255 before narrowing, so those specific sites are safe BY HAND-
+#      INSPECTION, but this scanner's classifier does not reason about a
+#      preceding mask op, so it reports them "assumed" like every other
+#      narrowing cast, honestly under-crediting rather than over-claiming.
+#      Site = one per occurrence of ` as <int-type>` (u8/i8/u16/i16/u32/i32/
+#      u64/i64) in a non-comment line. Always "assumed".
+#
+#   7. bounds (array/collection index bounds):
+#      Found a REAL runtime check: MIR lowering emits an explicit
+#      `bounds_check` intrinsic before every indexed access
+#      (`emit_bounds_check_for_index`, 50.mir/_MirLoweringExpr/
+#      expr_dispatch.spl:1293, called from mir_lowering_stmts.spl:1465 and
+#      expr_dispatch.spl:1609) — this IS "checked". A documented bailout
+#      exists when no length symbol can be found for the base type (the
+#      access proceeds UNCHECKED, counted via `mir_bounds_check_bailout_count`
+#      — not visible from static text, so this census reports the runtime-
+#      checked upper bound, same "checked is an upper bound" caveat WP-2
+#      uses for FLT-IMP-002). A SEPARATE real pass,
+#      `60.mir_opt/mir_opt/bounds_check_elim.spl`, statically PROVES some of
+#      these checks redundant (loop-monotone-with-guard, explicit-range-
+#      guard, constant-index patterns: `LoopBoundsProof`, `ExplicitRangeProof`,
+#      `ConstantIndexProof`) and eliminates them — a genuine "proved" bucket
+#      exists architecturally, but a text census cannot replicate its
+#      loop/range dataflow reasoning, so this scanner reports 0 "proved" for
+#      bounds and states that as a measurement gap, not a claim that no proof
+#      pass exists. Site = one per `identifier[...]` occurrence where the
+#      bracket content contains no top-level `:` (excludes slice syntax
+#      `a[lo:hi]`) and the char before `[` is an identifier char (excludes
+#      array-TYPE annotations like `: [i64]`, always preceded by a space or
+#      `->`). All such sites: "checked".
+#
+# doc/03_plan/cert/: exists (`cert_roadmap.md`, `formal_codegen_semantics_
+# plan.md`, `tool_qualification_plan.md`, `deferred_tasks_plan.md`,
+# `redeploy_selfhost_plan.md`, `sanitizer_matrix_plan.md`, `plans/`,
+# `redeploy_kit/`). Searched all of them for "AoRTE"/"obligation"/"proved"/
+# "SymbolId"/"assumed" — no obligation-table SHAPE is specified anywhere in
+# that directory (only unrelated `SymbolId` mentions in a struct-registry
+# hardening bullet, and unrelated "obligation" mentions about Translation
+# Validation obligations in formal_codegen_semantics_plan.md). This is a
+# STATED GAP: the plan references a "formal lane" target that does not yet
+# define this census's expected format. This scanner therefore follows
+# WP-2's `format_human_table`/`format_sdn` pair verbatim, matching the WP-2/
+# WP-14/WP-23 family so counts stay comparable.
+#
+# SCOPE: identical to WP-2 — `src/**/*.spl`, excluding
+#   src/compiler_rust/vendor/**, src/runtime/vendor/**
+# Only `src/` is scanned, not `test/`/`scripts/`/`doc/`.
+
+use std.nogc_sync_mut.io.dir_ops.{dir_walk}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+val SCAN_ROOT = "src"
+val VENDOR_PREFIXES = ["src/compiler_rust/vendor/", "src/runtime/vendor/"]
+
+pub val CATEGORIES = ["init", "globals", "overflow", "div", "shift", "cast", "bounds"]
+
+val INT_CAST_SUFFIXES = ["u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64"]
+
+pub struct ObligationSite:
+    """One planted/found obligation instance: which category, which
+    approximate site (path, fn_name, line — NOT a real SymbolId, see module
+    header), and the verdict."""
+    category: text
+    path: text
+    fn_name: text
+    line: i64
+    status: text  # "proved" | "checked" | "assumed"
+    detail: text
+
+struct CategoryCensus:
+    category: text
+    proved: i64
+    checked: i64
+    assumed: i64
+    checked_definition: text
+
+struct CensusReport:
+    files_scanned: i64
+    sites: [ObligationSite]
+    categories: [CategoryCensus]
+
+fn is_excluded(path: text) -> bool:
+    for prefix in VENDOR_PREFIXES:
+        if path.starts_with(prefix):
+            return true
+    false
+
+fn _indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.len() and line[n:n + 1] == " ":
+        n = n + 1
+    n
+
+fn _is_fn_decl(trimmed: text) -> bool:
+    trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn ")
+
+fn _fn_name(trimmed: text) -> text:
+    var rest = trimmed
+    if rest.starts_with("static fn "):
+        rest = rest[10:rest.len()]
+    else if rest.starts_with("me "):
+        rest = rest[3:rest.len()]
+    else if rest.starts_with("fn "):
+        rest = rest[3:rest.len()]
+    var idx = 0
+    while idx < rest.len() and rest[idx:idx + 1] != "(":
+        idx = idx + 1
+    rest[0:idx]
+
+fn _is_comment_line(trimmed: text) -> bool:
+    trimmed.starts_with("#")
+
+fn _is_ident_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+fn _contains_word(hay: text, needle: text) -> bool:
+    hay.contains(needle)
+
+# ---------------------------------------------------------------------------
+# Per-line detectors. Each returns a list of (category, status, detail) hits
+# for one already-trimmed, non-comment line.
+# ---------------------------------------------------------------------------
+
+fn _detect_globals(indent: i64, trimmed: text) -> ([text], [text]):
+    """Returns parallel (status, detail) lists — always length 0 or 1."""
+    if indent != 0:
+        return ([], [])
+    if (trimmed.starts_with("val ") or trimmed.starts_with("var ")) and trimmed.contains("="):
+        return (["assumed"], ["module-level binding; no thread-safety/init-order analysis found (searched 35.semantics, 55.borrow)"])
+    ([], [])
+
+fn _is_field_decl(trimmed: text) -> bool:
+    if trimmed == "":
+        return false
+    if _is_comment_line(trimmed):
+        return false
+    if trimmed.starts_with('"""'):
+        return false
+    for kw in ["fn ", "me ", "static ", "pub ", "impl ", "struct ", "class ", "trait ", "enum ", "match ", "if ", "else", "while ", "for ", "return", "val ", "var "]:
+        if trimmed.starts_with(kw):
+            return false
+    if not trimmed.contains(":"):
+        return false
+    # exclude method-like lines (paren before the first colon)
+    var colon_idx = 0
+    while colon_idx < trimmed.len() and trimmed[colon_idx:colon_idx + 1] != ":":
+        colon_idx = colon_idx + 1
+    val before_colon = trimmed[0:colon_idx]
+    if before_colon.contains("("):
+        return false
+    true
+
+fn _detect_overflow(trimmed: text) -> bool:
+    trimmed.contains(" + ") or trimmed.contains(" - ") or trimmed.contains(" * ")
+
+fn _detect_shift(trimmed: text) -> bool:
+    trimmed.contains(" << ") or trimmed.contains(" >> ")
+
+fn _count_cast_sites(trimmed: text) -> i64:
+    var n = 0
+    for suf in INT_CAST_SUFFIXES:
+        val marker = " as " + suf
+        var search_from = 0
+        while true:
+            val remaining = trimmed[search_from:trimmed.len()]
+            val idx = remaining.find(marker)
+            if idx < 0:
+                break
+            n = n + 1
+            search_from = search_from + idx + marker.len()
+    n
+
+fn _find_div_sites(trimmed: text, prev_trimmed: text) -> [(text, text)]:
+    """Returns (status, detail) pairs for EVERY division/modulo operator
+    occurrence on this line (not just the first per operator kind) — same
+    per-occurrence counting basis as _count_cast_sites."""
+    var out: [(text, text)] = []
+    for op in [" / ", " % "]:
+        var search_from = 0
+        while true:
+            val remaining = trimmed[search_from:trimmed.len()]
+            val op_idx = remaining.find(op)
+            if op_idx < 0:
+                break
+            var status = "assumed"
+            var detail = "variable/unknown divisor; interpreter.spl and expression_evaluator.spl DO raise Err on this path, but native/JIT lowering has no confirmed guard (weakest-engine rule)"
+            val after = remaining[op_idx + op.len():remaining.len()].trim()
+            if after.len() > 0 and after[0:1] >= "0" and after[0:1] <= "9":
+                var num_end = 0
+                while num_end < after.len() and after[num_end:num_end + 1] >= "0" and after[num_end:num_end + 1] <= "9":
+                    num_end = num_end + 1
+                val numeral = after[0:num_end]
+                if numeral != "0":
+                    status = "proved"
+                    detail = "divisor is the non-zero literal {numeral}; cannot divide by zero regardless of engine"
+            if status == "assumed":
+                val guard_here = trimmed.contains("!= 0") or trimmed.contains("> 0") or trimmed.contains("assert")
+                val guard_prev = prev_trimmed.contains("!= 0") or prev_trimmed.contains("> 0") or prev_trimmed.contains("assert")
+                if guard_here or guard_prev:
+                    status = "checked"
+                    detail = "adjacent-line zero-guard text found (\"!= 0\"/\"> 0\"/\"assert\"); textual adjacency match, not real control-flow analysis"
+            out.push((status, detail))
+            search_from = search_from + op_idx + op.len()
+    out
+
+fn _count_bounds_sites(trimmed: text) -> i64:
+    var n = 0
+    var i = 0
+    while i < trimmed.len():
+        if trimmed[i:i + 1] == "[" and i > 0 and _is_ident_char(trimmed[i - 1:i]):
+            # find matching close bracket (naive, no nesting of [ inside)
+            var depth = 1
+            var j = i + 1
+            var has_colon = false
+            while j < trimmed.len() and depth > 0:
+                val ch = trimmed[j:j + 1]
+                if ch == "[":
+                    depth = depth + 1
+                else if ch == "]":
+                    depth = depth - 1
+                else if ch == ":" and depth == 1:
+                    has_colon = true
+                j = j + 1
+            if not has_colon:
+                n = n + 1
+            i = j
+        else:
+            i = i + 1
+    n
+
+# ---------------------------------------------------------------------------
+# Whole-file scan
+# ---------------------------------------------------------------------------
+
+fn _count_occurrences(hay: text, needle: text) -> i64:
+    var n = 0
+    var search_from = 0
+    while true:
+        val remaining = hay[search_from:hay.len()]
+        val idx = remaining.find(needle)
+        if idx < 0:
+            break
+        n = n + 1
+        search_from = search_from + idx + needle.len()
+    n
+
+fn scan_file_lines(path: text, content: text) -> [ObligationSite]:
+    var sites: [ObligationSite] = []
+    val lines = content.split("\n")
+    var current_fn = ""
+    var current_container = ""  # "struct" while inside a struct/class field block
+    var in_docstring = false
+    var i = 0
+    while i < lines.len():
+        val raw = lines[i]
+        val trimmed = raw.trim()
+        val indent = _indent_of(raw)
+
+        # Docstring body lines are prose, not code — a " - " or " / " inside
+        # documentation text is not an arithmetic/div obligation site.
+        # Excluded here rather than only at _is_field_decl's narrower gate
+        # (that gate only protects the "init" category).
+        var is_doc_line = in_docstring
+        val quote_count = _count_occurrences(trimmed, '"""')
+        if quote_count > 0:
+            is_doc_line = true
+            var qi = 0
+            while qi < quote_count:
+                in_docstring = not in_docstring
+                qi = qi + 1
+
+        if indent == 0 and trimmed != "":
+            if trimmed.starts_with("struct ") or trimmed.starts_with("class "):
+                current_container = "struct"
+                current_fn = ""
+            else if _is_fn_decl(trimmed):
+                current_container = "fn"
+                current_fn = _fn_name(trimmed)
+            else:
+                current_container = ""
+                current_fn = ""
+        else if _is_fn_decl(trimmed):
+            current_fn = _fn_name(trimmed)
+
+        if trimmed != "" and not _is_comment_line(trimmed) and not is_doc_line:
+            # init: struct/class field declarations
+            if current_container == "struct" and indent > 0 and _is_field_decl(trimmed):
+                sites.push(ObligationSite(
+                    category: "init", path: path, fn_name: current_fn, line: i + 1,
+                    status: "assumed",
+                    detail: "struct/class field; no definite-assignment analysis found (searched 35.semantics, 55.borrow; unsafe.spl's ReadUninitialized is a documentation tag, not an analyzer)"))
+
+            # globals
+            val (g_status, g_detail) = _detect_globals(indent, trimmed)
+            var gi = 0
+            while gi < g_status.len():
+                sites.push(ObligationSite(
+                    category: "globals", path: path, fn_name: current_fn, line: i + 1,
+                    status: g_status[gi], detail: g_detail[gi]))
+                gi = gi + 1
+
+            # overflow
+            if _detect_overflow(trimmed):
+                sites.push(ObligationSite(
+                    category: "overflow", path: path, fn_name: current_fn, line: i + 1,
+                    status: "assumed",
+                    detail: "arithmetic operator present; no checked-arithmetic/overflow-trap wiring found in 50.mir or 70.backend for general integer binops"))
+
+            # shift
+            if _detect_shift(trimmed):
+                sites.push(ObligationSite(
+                    category: "shift", path: path, fn_name: current_fn, line: i + 1,
+                    status: "assumed",
+                    detail: "shift operator present; cranelift Shl/Shr lowering passes amount through with no masking/range guard found"))
+
+            # cast
+            val cast_n = _count_cast_sites(trimmed)
+            var ci = 0
+            while ci < cast_n:
+                sites.push(ObligationSite(
+                    category: "cast", path: path, fn_name: current_fn, line: i + 1,
+                    status: "assumed",
+                    detail: "narrowing int cast; lower_cast_expr emits a raw truncating emit_cast with no range check"))
+                ci = ci + 1
+
+            # div
+            val prev_trimmed = if i > 0: lines[i - 1].trim() else: ""
+            for pair in _find_div_sites(trimmed, prev_trimmed):
+                val (d_status, d_detail) = pair
+                sites.push(ObligationSite(
+                    category: "div", path: path, fn_name: current_fn, line: i + 1,
+                    status: d_status, detail: d_detail))
+
+            # bounds
+            val bounds_n = _count_bounds_sites(trimmed)
+            var bi = 0
+            while bi < bounds_n:
+                sites.push(ObligationSite(
+                    category: "bounds", path: path, fn_name: current_fn, line: i + 1,
+                    status: "checked",
+                    detail: "MIR lowering emits explicit bounds_check intrinsic before every indexed access (emit_bounds_check_for_index); reported count is a real-runtime-check upper bound — a documented bailout path (no len symbol) leaves some accesses unchecked, not visible from static text"))
+                bi = bi + 1
+
+        i = i + 1
+    sites
+
+pub fn scan_single_file(path: text, content: text) -> [ObligationSite]:
+    """Unit-test seam: scan a single synthetic file's content directly,
+    without touching disk."""
+    scan_file_lines(path, content)
+
+val CATEGORY_CHECKED_DEFINITIONS = [
+    ("init", "no detector exists; always assumed (no definite-assignment analysis in this tree)"),
+    ("globals", "no detector exists; always assumed (no thread-safety/init-order analysis found; val-immutability enforcement not confirmed in scope, so not upgraded to checked)"),
+    ("overflow", "no detector exists; always assumed (no checked-arithmetic/overflow-trap wiring found in 50.mir/70.backend)"),
+    ("div", "proved = divisor is a non-zero integer literal; checked = adjacent-line zero-guard text (\"!= 0\"/\"> 0\"/\"assert\"); else assumed (native/JIT path has no confirmed guard)"),
+    ("shift", "no detector exists; always assumed (cranelift Shl/Shr lowering has no shift-amount mask/guard found)"),
+    ("cast", "no detector exists; always assumed (emit_cast is a raw truncating cast with no range check)"),
+    ("bounds", "checked = MIR lowering emits a real bounds_check intrinsic before every indexed access (emit_bounds_check_for_index); proved = 0, stated measurement gap (bounds_check_elim.spl proves some checks redundant via loop/range dataflow this text census cannot replicate)"),
+]
+
+pub fn run_aorte_obligation_census() -> CensusReport:
+    """Full-`src` census. STATED LIMITATION (2026-08-07): this does NOT
+    terminate in practice under the current tooling — a real run hit the
+    documented interpreter-fallback path (`unresolved external symbol
+    'run_aorte_obligation_census'` -> whole-module demotion to the tree-walk
+    interpreter, ~100-1000x slower) and `bin/simple compile --native` fails
+    semantic resolution on this module's module-qualified import, so there is
+    no faster path available in scope. `src/app` (2.2G) and `src/runtime`
+    (1.1G) dominate the walk cost. For a run that actually completes, call
+    `run_aorte_obligation_census_under(root)` per subtree and aggregate —
+    that is how this WP's real counts were obtained (src/compiler, src/lib,
+    src/i18n)."""
+    run_aorte_obligation_census_under(SCAN_ROOT)
+
+pub fn run_aorte_obligation_census_under(root: text) -> CensusReport:
+    var sites: [ObligationSite] = []
+    var files_scanned = 0
+    for path in dir_walk(root):
+        if not path.ends_with(".spl"):
+            continue
+        if is_excluded(path):
+            continue
+        files_scanned = files_scanned + 1
+        val content = file_read(path)
+        for site in scan_file_lines(path, content):
+            sites.push(site)
+
+    var categories: [CategoryCensus] = []
+    for cat in CATEGORIES:
+        var proved = 0
+        var checked = 0
+        var assumed = 0
+        for site in sites:
+            if site.category == cat:
+                if site.status == "proved":
+                    proved = proved + 1
+                else if site.status == "checked":
+                    checked = checked + 1
+                else:
+                    assumed = assumed + 1
+        var def_text = ""
+        for pair in CATEGORY_CHECKED_DEFINITIONS:
+            val (pc, pd) = pair
+            if pc == cat:
+                def_text = pd
+        categories.push(CategoryCensus(
+            category: cat, proved: proved, checked: checked, assumed: assumed,
+            checked_definition: def_text))
+
+    CensusReport(files_scanned: files_scanned, sites: sites, categories: categories)
+
+pub fn format_human_table(report: CensusReport) -> text:
+    var lines: [text] = []
+    lines.push("AoRTE obligation census — WP-16 (init, globals, overflow, div, shift, cast, bounds)")
+    lines.push("Scope: src/**/*.spl, excluding vendor paths (see module header)")
+    lines.push("Files scanned: {report.files_scanned}")
+    lines.push("Site identity: (path, fn_name, line) approximation of SymbolId — see module header")
+    lines.push("")
+    lines.push("category   proved  checked  assumed  total  checked_definition")
+    for c in report.categories:
+        val total = c.proved + c.checked + c.assumed
+        lines.push("{c.category}  {c.proved}  {c.checked}  {c.assumed}  {total}  {c.checked_definition}")
+    lines.join("\n")
+
+pub fn format_sdn(report: CensusReport) -> text:
+    var lines: [text] = []
+    lines.push("aorte_obligation_census:")
+    lines.push("  scope: \"src/**/*.spl excluding vendor paths\"")
+    lines.push("  files_scanned: {report.files_scanned}")
+    lines.push("  site_identity: \"(path, fn_name, line) — approximation of SymbolId, not a real symbol table\"")
+    lines.push("")
+    lines.push("categories |category, proved, checked, assumed, total, checked_definition|")
+    for c in report.categories:
+        val total = c.proved + c.checked + c.assumed
+        val def_text = c.checked_definition.replace("\"", "'")
+        lines.push("  {c.category}, {c.proved}, {c.checked}, {c.assumed}, {total}, \"{def_text}\"")
+    lines.join("\n")

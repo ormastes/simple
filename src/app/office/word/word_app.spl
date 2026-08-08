@@ -1,0 +1,553 @@
+# Simple Word - Document Editor
+#
+# Rich document editor with formatting toolbar, outline sidebar, and iOS-like design.
+#
+# Dispatch note (IDE extension kernel campaign, lane L2): formatting/undo/save
+# actions route through a typed `std.editor.extensions.registry.CommandRegistry`
+# instead of a literal `match action:` dispatch. Command handlers are plain
+# module-level functions (NOT closures/lambdas over `me`) that look a WordApp
+# instance up in the module-level `_word_apps` store by id, mutate a local
+# copy, and write it back -- closures that capture a class instance (`me` or
+# any other class value) lose their mutations once invoked through
+# CommandRegistry's stored callback (verified empirically; a lambda closing
+# over `me` silently mutates a stale copy). Read-mutate-writeback through a
+# module Dict does not have this problem, matching the workaround the plan
+# anticipated ("store it as a module-level ... entry with index reassignment").
+# See .spipe/ide_extension_kernel/state.md and
+# doc/03_plan/app/ide_extension_kernel/parallel_agent_shared_foundation_plan.md §3 L2.
+
+use common.ui.builder.{column, row, panel, text_widget, label, button, scroll, tree_widget, tree_node, tree_leaf, statusbar, textarea, menubar, with_flex}
+use common.ui.ios.builder.{navigation_bar}
+use common.ui.widget.{UITree, UIEvent, WidgetNode}
+use common.ui.builder.{build_tree_with_title}
+use common.ui.theme_registry.{ThemeId, theme_id_key}
+use common.ui.ios_icons.{ios_icon}
+use common.rich_text.attributed_text.{RichDocument, DocBlock, TextSpan, InlineStyle, BlockKind, empty_document, document_word_count, document_headings, block_to_plain_text, spans_to_plain_text}
+use common.rich_text.editor.{RichTextEditor, TextCursor}
+use common.office.undo.{UndoStack, UndoEntry}
+use nogc_sync_mut.ui.theme_package.{default_theme_id, resolve_theme_alias}
+
+use std.editor.extensions.registry.{CommandRegistry}
+use std.editor.document.traits.{DocumentCodec}
+
+use app.office.word.toolbar.{build_word_toolbar}
+use app.office.word.sidebar.{build_outline_sidebar}
+use app.office.word.render.{render_block, render_document}
+
+# =========================================================================
+# Word Application
+# =========================================================================
+
+class WordApp:
+    id: i64
+    editor: RichTextEditor
+    undo_stack: UndoStack
+    sidebar_visible: bool
+    find_query: text
+    file_path: text
+    modified: bool
+    commands: CommandRegistry
+
+    static fn new() -> WordApp:
+        """Create a new Word app with an empty untitled document."""
+        val doc = empty_document("Untitled")
+        val editor = RichTextEditor.new(doc)
+        val id = _next_word_app_id
+        _next_word_app_id = _next_word_app_id + 1
+        val app = WordApp(
+            id: id,
+            editor: editor,
+            undo_stack: UndoStack.new(100),
+            sidebar_visible: true,
+            find_query: "",
+            file_path: "",
+            modified: false,
+            commands: CommandRegistry.new()
+        )
+        app._register_commands()
+        _word_apps[id] = app
+        app
+
+    static fn open(path: text, content: text) -> WordApp:
+        """Open a document from a file path and its text content.
+
+        Deserializes the content into a RichDocument by splitting on blank lines
+        into paragraph blocks."""
+        val doc = _deserialize_content(path, content)
+        val editor = RichTextEditor.new(doc)
+        val id = _next_word_app_id
+        _next_word_app_id = _next_word_app_id + 1
+        val app = WordApp(
+            id: id,
+            editor: editor,
+            undo_stack: UndoStack.new(100),
+            sidebar_visible: true,
+            find_query: "",
+            file_path: path,
+            modified: false,
+            commands: CommandRegistry.new()
+        )
+        app._register_commands()
+        _word_apps[id] = app
+        app
+
+    # =====================================================================
+    # UI Building
+    # =====================================================================
+
+    me build_ui() -> UITree:
+        """Build the full iOS-styled document editor UI tree."""
+        val nav = navigation_bar("word_nav", "Simple Word", [], [
+            button("btn_save", ios_icon("doc"), "save")
+        ])
+
+        val toolbar = me.build_toolbar()
+
+        val sidebar = with_flex(me.build_sidebar(), 1)
+        val editor_panel = with_flex(me.build_editor_panel(), 4)
+
+        var main_children: [WidgetNode] = []
+        if me.sidebar_visible:
+            main_children = main_children.push(sidebar)
+        main_children = main_children.push(editor_panel)
+        val main_row = row("word_main", main_children)
+
+        val line = me.current_line()
+        val col = me.editor.cursor.char_offset + 1
+        val wc = me.word_count()
+        val filename = _extract_filename(me.file_path)
+        val status = statusbar("word_status",
+            "Ln {line}, Col {col} | {wc} words | {filename}",
+            if me.modified: "Modified" else: "Saved"
+        )
+
+        val root = column("word_root", [
+            nav,
+            toolbar,
+            main_row,
+            status
+        ])
+
+        return build_tree_with_title(root, "Simple Word", _writer_theme_key())
+
+    me build_toolbar() -> WidgetNode:
+        """Build the formatting toolbar row."""
+        return build_word_toolbar("word_toolbar")
+
+    me build_sidebar() -> WidgetNode:
+        """Build the document outline sidebar from headings."""
+        return build_outline_sidebar(me.editor.doc)
+
+    me build_editor_content() -> [WidgetNode]:
+        """Return a list of text widgets, one per document block."""
+        return render_document(me.editor.doc.blocks)
+
+    me build_editor_panel() -> WidgetNode:
+        """Build the scrollable editor content area."""
+        val block_widgets = me.build_editor_content()
+        val scrollable = scroll("word_editor_scroll", 800, block_widgets)
+        return panel("word_editor", "Document", [scrollable])
+
+    # =====================================================================
+    # Event Handling
+    # =====================================================================
+
+    me handle_event(event: UIEvent):
+        """Dispatch UI events to the appropriate handler."""
+        match event:
+            case UIEvent.Action(name):
+                me._handle_action(name)
+            _:
+                pass_do_nothing("non-action UI events do not affect the word app")
+
+    me _register_commands():
+        """Register every writer.* command against the typed CommandRegistry.
+        Handlers are plain module-level functions (see file header) -- they
+        look this app instance up from `_word_apps[me.id]` rather than
+        closing over `me` directly."""
+        me.commands.register("word", "writer.format_bold", "Bold", _writer_cmd_format_bold)
+        me.commands.register("word", "writer.format_italic", "Italic", _writer_cmd_format_italic)
+        me.commands.register("word", "writer.format_underline", "Underline", _writer_cmd_format_underline)
+        me.commands.register("word", "writer.format_h1", "Heading 1", _writer_cmd_format_h1)
+        me.commands.register("word", "writer.format_h2", "Heading 2", _writer_cmd_format_h2)
+        me.commands.register("word", "writer.format_h3", "Heading 3", _writer_cmd_format_h3)
+        me.commands.register("word", "writer.format_bullet_list", "Bullet List", _writer_cmd_format_bullet_list)
+        me.commands.register("word", "writer.format_quote", "Quote", _writer_cmd_format_quote)
+        me.commands.register("word", "writer.toggle_outline", "Toggle Outline", _writer_cmd_toggle_outline)
+        me.commands.register("word", "writer.undo", "Undo", _writer_cmd_undo)
+        me.commands.register("word", "writer.redo", "Redo", _writer_cmd_redo)
+        me.commands.register("word", "writer.save", "Save", _writer_cmd_save)
+
+    me _handle_action(action: text):
+        """Route named actions from toolbar and sidebar buttons through the
+        typed CommandRegistry. `toggle_sidebar` and `goto_block_` navigation
+        stay as a documented fallback outside the registry -- they carry no
+        edit_ops mutation and existed before this migration."""
+        val command_id = "writer.{action}"
+        if me.commands.has(command_id):
+            _word_apps[me.id] = me
+            val result = me.commands.run(command_id, "{me.id}")
+            me._sync_from_store()
+            match result:
+                case Err(_):
+                    pass_do_nothing("unknown/failed writer command handled defensively, not crashed")
+                case Ok(_):
+                    pass_do_nothing("mutation already applied via the module-level store sync")
+        elif action == "toggle_sidebar":
+            me.sidebar_visible = not me.sidebar_visible
+        elif action.starts_with("goto_block_"):
+            val idx_str = action.slice(11, action.len())
+            val idx = _parse_int(idx_str)
+            me.editor.move_to(idx, 0)
+        else:
+            pass_do_nothing("unrecognized word action")
+
+    me _sync_from_store():
+        """Pull the post-dispatch state back from `_word_apps[me.id]` into
+        this instance. A plain field copy inside a direct method call, not a
+        stored closure, so it does not hit the class-capture hazard above."""
+        if _word_apps.contains_key(me.id):
+            val updated = _word_apps[me.id]
+            me.editor = updated.editor
+            me.undo_stack = updated.undo_stack
+            me.modified = updated.modified
+            me.file_path = updated.file_path
+            me.sidebar_visible = updated.sidebar_visible
+
+    # =====================================================================
+    # Queries
+    # =====================================================================
+
+    me save() -> text:
+        """Serialize the current document to text for saving, routed through
+        the RichDocumentCodec (std.editor.document.traits.DocumentCodec)."""
+        val content = _serialize_document(me.editor.doc)
+        val codec = RichDocumentCodec.new()
+        val result = codec.save(content)
+        match result:
+            case Ok(saved_text):
+                return saved_text
+            case Err(_):
+                return content
+
+    me word_count() -> i32:
+        """Return the total word count of the document."""
+        return document_word_count(me.editor.doc)
+
+    me current_line() -> i32:
+        """Return the current cursor line (1-based)."""
+        return me.editor.cursor.block_index + 1
+
+# =========================================================================
+# Document Codec (S3 document skeleton: std.editor.document.traits.DocumentCodec)
+# =========================================================================
+# Thin wrapper: the RichDocument <-> text conversion itself lives in
+# `_serialize_document`/`_deserialize_content` below (existing word-dir
+# serialization); the codec's `text -> text` load/save shape matches
+# PlainTextCodec's identity contract, matching the document skeleton's model.
+
+class RichDocumentCodec:
+    _marker: i32
+
+    static fn new() -> RichDocumentCodec:
+        RichDocumentCodec(_marker: 0)
+
+impl DocumentCodec for RichDocumentCodec:
+
+    fn probe(uri: text, head: text) -> i64:
+        if uri.ends_with(".rdoc"):
+            return 5
+        if head.starts_with("title: "):
+            return 3
+        1
+
+    fn load(content: text) -> Result<text, text>:
+        Ok(content)
+
+    fn save(model_text: text) -> Result<text, text>:
+        Ok(model_text)
+
+# =========================================================================
+# Module-level WordApp store + writer.* command handlers
+# =========================================================================
+# See file header: registered handlers must be plain top-level function
+# references (no captured `me`), and must mutate WordApp instances via
+# fetch-from-`_word_apps`/mutate/write-back, never via closure capture.
+
+var _word_apps: Dict<i64, WordApp> = {}
+var _next_word_app_id: i64 = 0
+
+fn _writer_app_id_from_payload(payload: text) -> i64:
+    _parse_int(payload)
+
+fn _writer_app_or_err(id: i64) -> Result<WordApp, text>:
+    if _word_apps.contains_key(id):
+        return Ok(_word_apps[id])
+    Err("no writer app registered for id {id}")
+
+fn _writer_snapshot_undo(app: WordApp, description: text):
+    """Push the current document state onto the undo stack before a mutation."""
+    val before = _serialize_document(app.editor.doc)
+    app.undo_stack.push(UndoEntry(
+        id: "{app.undo_stack.position + 1}",
+        description: description,
+        before_snapshot: before,
+        after_snapshot: ""
+    ))
+
+fn _writer_set_block_kind(app: WordApp, kind: BlockKind):
+    """Rebuild the document with block `bi`'s kind changed, then rebuild the
+    editor around it and reassign `app.editor` as a single top-level field
+    write. A 3-level nested write (`app.editor.doc.blocks[bi] = ...`) hits a
+    real interpreter limitation ("invalid assignment: nested field access
+    not fully supported"), and an intermediate `val doc = app.editor.doc`
+    binding compiles but silently mutates a disconnected copy -- see the
+    word_extension_spec.spl "format_h1" case that caught this. Single-hop
+    class-field writes on `app` are the one pattern proven to propagate
+    (see file header)."""
+    val bi = app.editor.cursor.block_index
+    val old_doc = app.editor.doc
+    if bi < 0 or bi >= old_doc.blocks.len():
+        return
+    var new_blocks: [DocBlock] = []
+    var i = 0
+    while i < old_doc.blocks.len():
+        if i == bi:
+            val block = old_doc.blocks[i]
+            new_blocks.push(DocBlock(kind: kind, spans: block.spans))
+        else:
+            new_blocks.push(old_doc.blocks[i])
+        i = i + 1
+    val new_doc = RichDocument(title: old_doc.title, blocks: new_blocks, comments: old_doc.comments, revisions: old_doc.revisions)
+    val new_editor = RichTextEditor.new(new_doc)
+    new_editor.cursor = app.editor.cursor
+    app.editor = new_editor
+
+fn _writer_apply_style_command(payload: text, description: text, style: InlineStyle) -> Result<text, text>:
+    val id = _writer_app_id_from_payload(payload)
+    val fetched = _writer_app_or_err(id)
+    match fetched:
+        case Err(msg):
+            return Err(msg)
+        case Ok(app):
+            _writer_snapshot_undo(app, description)
+            app.editor.apply_style_to_block(style)
+            app.modified = true
+            _word_apps[id] = app
+            return Ok(description)
+
+fn _writer_apply_block_command(payload: text, description: text, kind: BlockKind) -> Result<text, text>:
+    val id = _writer_app_id_from_payload(payload)
+    val fetched = _writer_app_or_err(id)
+    match fetched:
+        case Err(msg):
+            return Err(msg)
+        case Ok(app):
+            _writer_snapshot_undo(app, description)
+            _writer_set_block_kind(app, kind)
+            app.modified = true
+            _word_apps[id] = app
+            return Ok(description)
+
+fn _writer_cmd_format_bold(payload: text) -> Result<text, text>:
+    _writer_apply_style_command(payload, "Bold", InlineStyle.Bold)
+
+fn _writer_cmd_format_italic(payload: text) -> Result<text, text>:
+    _writer_apply_style_command(payload, "Italic", InlineStyle.Italic)
+
+fn _writer_cmd_format_underline(payload: text) -> Result<text, text>:
+    _writer_apply_style_command(payload, "Underline", InlineStyle.Underline)
+
+fn _writer_cmd_format_h1(payload: text) -> Result<text, text>:
+    _writer_apply_block_command(payload, "Heading 1", BlockKind.Heading1)
+
+fn _writer_cmd_format_h2(payload: text) -> Result<text, text>:
+    _writer_apply_block_command(payload, "Heading 2", BlockKind.Heading2)
+
+fn _writer_cmd_format_h3(payload: text) -> Result<text, text>:
+    _writer_apply_block_command(payload, "Heading 3", BlockKind.Heading3)
+
+fn _writer_cmd_format_bullet_list(payload: text) -> Result<text, text>:
+    _writer_apply_block_command(payload, "Bullet List", BlockKind.BulletItem)
+
+fn _writer_cmd_format_quote(payload: text) -> Result<text, text>:
+    _writer_apply_block_command(payload, "Quote", BlockKind.Quote)
+
+fn _writer_cmd_toggle_outline(payload: text) -> Result<text, text>:
+    val id = _writer_app_id_from_payload(payload)
+    val fetched = _writer_app_or_err(id)
+    match fetched:
+        case Err(msg):
+            return Err(msg)
+        case Ok(app):
+            app.sidebar_visible = not app.sidebar_visible
+            _word_apps[id] = app
+            return Ok("toggled")
+
+fn _writer_cmd_undo(payload: text) -> Result<text, text>:
+    val id = _writer_app_id_from_payload(payload)
+    val fetched = _writer_app_or_err(id)
+    match fetched:
+        case Err(msg):
+            return Err(msg)
+        case Ok(app):
+            val snap = app.undo_stack.undo()
+            if val Some(entry) = snap:
+                val doc = _deserialize_content(app.file_path, entry.before_snapshot)
+                app.editor = RichTextEditor.new(doc)
+                app.modified = true
+                _word_apps[id] = app
+                return Ok("undo")
+            return Ok("nothing to undo")
+
+fn _writer_cmd_redo(payload: text) -> Result<text, text>:
+    val id = _writer_app_id_from_payload(payload)
+    val fetched = _writer_app_or_err(id)
+    match fetched:
+        case Err(msg):
+            return Err(msg)
+        case Ok(app):
+            val snap = app.undo_stack.redo()
+            if val Some(entry) = snap:
+                val doc = _deserialize_content(app.file_path, entry.after_snapshot)
+                app.editor = RichTextEditor.new(doc)
+                app.modified = true
+                _word_apps[id] = app
+                return Ok("redo")
+            return Ok("nothing to redo")
+
+fn _writer_cmd_save(payload: text) -> Result<text, text>:
+    val id = _writer_app_id_from_payload(payload)
+    val fetched = _writer_app_or_err(id)
+    match fetched:
+        case Err(msg):
+            return Err(msg)
+        case Ok(app):
+            val content = _serialize_document(app.editor.doc)
+            val codec = RichDocumentCodec.new()
+            val saved = codec.save(content)
+            match saved:
+                case Err(msg2):
+                    return Err(msg2)
+                case Ok(saved_text):
+                    app.modified = false
+                    _word_apps[id] = app
+                    return Ok(saved_text)
+
+# =========================================================================
+# Internal Helpers
+# =========================================================================
+
+fn _writer_theme_key() -> text:
+    """Resolve the active theme via ThemeService/theme_package
+    (nogc_sync_mut.ui.theme_package), falling back to ThemeId.IOSLight only
+    if resolution comes back empty."""
+    val resolved = resolve_theme_alias(default_theme_id())
+    if resolved == "":
+        return theme_id_key(ThemeId.IOSLight)
+    resolved
+
+fn _extract_filename(path: text) -> text:
+    """Extract the filename from a path, or return 'Untitled' if empty."""
+    if path == "":
+        return "Untitled"
+    var last_sep = -1
+    var i = 0
+    for ch in path:
+        if ch == "/" or ch == "\\":
+            last_sep = i
+        i = i + 1
+    if last_sep >= 0 and last_sep + 1 < path.len():
+        return path.slice(last_sep + 1, path.len())
+    return path
+
+fn _text_block(kind: BlockKind, content: text) -> DocBlock:
+    """One plain-styled span wrapped in a block of `kind` -- the shared shape
+    both `_deserialize_content` and command handlers build blocks with."""
+    val span = TextSpan(text: content, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "")
+    DocBlock(kind: kind, spans: [span])
+
+fn _deserialize_content(path: text, content: text) -> RichDocument:
+    """Deserialize text content into a RichDocument.
+
+    Format: first line 'title: ...' sets the title, remaining non-empty
+    lines become paragraph/heading/bullet/quote blocks by prefix. Blank
+    lines are skipped."""
+    var title = _extract_filename(path)
+    val lines = content.split("\n")
+    var blocks: [DocBlock] = []
+    var first_line = true
+
+    for line in lines:
+        if first_line:
+            first_line = false
+            if line.starts_with("title: "):
+                title = line.slice(7, line.len())
+                continue
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("### "):
+            blocks = blocks.push(_text_block(BlockKind.Heading3, trimmed.slice(4, trimmed.len())))
+        elif trimmed.starts_with("## "):
+            blocks = blocks.push(_text_block(BlockKind.Heading2, trimmed.slice(3, trimmed.len())))
+        elif trimmed.starts_with("# "):
+            blocks = blocks.push(_text_block(BlockKind.Heading1, trimmed.slice(2, trimmed.len())))
+        elif trimmed.starts_with("- "):
+            blocks = blocks.push(_text_block(BlockKind.BulletItem, trimmed.slice(2, trimmed.len())))
+        elif trimmed.starts_with("> "):
+            blocks = blocks.push(_text_block(BlockKind.Quote, trimmed.slice(2, trimmed.len())))
+        else:
+            blocks = blocks.push(_text_block(BlockKind.Paragraph, trimmed))
+
+    if blocks.len() == 0:
+        blocks = blocks.push(_text_block(BlockKind.Paragraph, ""))
+
+    return RichDocument(title: title, blocks: blocks, comments: [], revisions: [])
+
+fn _serialize_document(doc: RichDocument) -> text:
+    """Inverse of `_deserialize_content`: one line per block, prefixed by
+    block kind, with a leading 'title: ...' line."""
+    var out = "title: {doc.title}"
+    for block in doc.blocks:
+        out = "{out}\n{_serialize_block(block)}"
+    out
+
+fn _serialize_block(block: DocBlock) -> text:
+    val plain = spans_to_plain_text(block.spans)
+    match block.kind:
+        case Heading1: "# {plain}"
+        case Heading2: "## {plain}"
+        case Heading3: "### {plain}"
+        case BulletItem: "- {plain}"
+        case OrderedItem: "- {plain}"
+        case Quote: "> {plain}"
+        case CodeBlock: plain
+        case FootnoteDef: plain
+        case Paragraph: plain
+
+fn _parse_int(s: text) -> i64:
+    """Parse a simple non-negative integer from a string. Returns 0 on failure."""
+    var result: i64 = 0
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            val digit = _char_digit(ch)
+            result = result * 10 + digit
+        else:
+            return result
+    return result
+
+fn _char_digit(ch: text) -> i64:
+    """Convert a single digit character to its integer value."""
+    match ch:
+        "0" => return 0
+        "1" => return 1
+        "2" => return 2
+        "3" => return 3
+        "4" => return 4
+        "5" => return 5
+        "6" => return 6
+        "7" => return 7
+        "8" => return 8
+        "9" => return 9
+        _ => return 0

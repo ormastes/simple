@@ -1,0 +1,181 @@
+# HKDF (RFC 5869) with SHA-256 — No-Alloc Baremetal Port
+#
+# Ported from src/os/tls13/hkdf.spl.
+# All heap allocations replaced with pre-sized arrays. Output buffers
+# are returned as [u8] arrays pre-allocated to the needed size.
+#
+# Provides:
+#   hkdf_extract(salt, ikm)            -> [u8]  (32 bytes)
+#   hkdf_expand(prk, info, length)     -> [u8]  (length bytes, max 32)
+#   hkdf_expand_label(secret, label, context, length) -> [u8]
+#
+# Baremetal constraint: length must be <= 32 (SHA-256 output size).
+# For longer OKM, call hkdf_expand multiple times and concatenate externally.
+
+use src.os.crypto.sha256.{sha256_hmac_with_len}
+
+extern fn rt_tls13_hkdf_extract(salt: [u8], ikm: [u8]) -> [u8]
+extern fn rt_tls13_hkdf_extract_into(salt: [u8], ikm: [u8], buf: [u8]) -> i64
+extern fn rt_tls13_hkdf_expand_into(prk: [u8], info: [u8], buf: [u8], length: i64) -> i64
+extern fn rt_tls13_hkdf_expand_label_into(secret: [u8], label: [u8], context: [u8], buf: [u8], length: i64) -> i64
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+# ============================================================================
+# Byte helpers
+# ============================================================================
+
+fn _hkdf_u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+fn _hkdf_zeros(n: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push(0x00u8)
+        i = i + 1
+    out
+
+# All labels used in TLS 1.3 key schedule (RFC 8446 §7.1)
+# Encoded as literal byte arrays to avoid rt_text_to_bytes allocation.
+fn _label_tls13_bytes(label: text) -> [u8]:
+    # Prefix "tls13 " = [0x74, 0x6c, 0x73, 0x31, 0x33, 0x20]
+    if label == "derived":
+        return [0x74u8, 0x6cu8, 0x73u8, 0x31u8, 0x33u8, 0x20u8, 0x64u8, 0x65u8, 0x72u8, 0x69u8, 0x76u8, 0x65u8, 0x64u8]
+    if label == "c hs traffic":
+        return [0x74u8, 0x6cu8, 0x73u8, 0x31u8, 0x33u8, 0x20u8, 0x63u8, 0x20u8, 0x68u8, 0x73u8, 0x20u8, 0x74u8, 0x72u8, 0x61u8, 0x66u8, 0x66u8, 0x69u8, 0x63u8]
+    if label == "s hs traffic":
+        return [0x74u8, 0x6cu8, 0x73u8, 0x31u8, 0x33u8, 0x20u8, 0x73u8, 0x20u8, 0x68u8, 0x73u8, 0x20u8, 0x74u8, 0x72u8, 0x61u8, 0x66u8, 0x66u8, 0x69u8, 0x63u8]
+    if label == "c ap traffic":
+        return [0x74u8, 0x6cu8, 0x73u8, 0x31u8, 0x33u8, 0x20u8, 0x63u8, 0x20u8, 0x61u8, 0x70u8, 0x20u8, 0x74u8, 0x72u8, 0x61u8, 0x66u8, 0x66u8, 0x69u8, 0x63u8]
+    if label == "s ap traffic":
+        return [0x74u8, 0x6cu8, 0x73u8, 0x31u8, 0x33u8, 0x20u8, 0x73u8, 0x20u8, 0x61u8, 0x70u8, 0x20u8, 0x74u8, 0x72u8, 0x61u8, 0x66u8, 0x66u8, 0x69u8, 0x63u8]
+    if label == "key":
+        return [0x74u8, 0x6cu8, 0x73u8, 0x31u8, 0x33u8, 0x20u8, 0x6bu8, 0x65u8, 0x79u8]
+    if label == "iv":
+        return [0x74u8, 0x6cu8, 0x73u8, 0x31u8, 0x33u8, 0x20u8, 0x69u8, 0x76u8]
+    if label == "finished":
+        return [0x74u8, 0x6cu8, 0x73u8, 0x31u8, 0x33u8, 0x20u8, 0x66u8, 0x69u8, 0x6eu8, 0x69u8, 0x73u8, 0x68u8, 0x65u8, 0x64u8]
+    if label == "res master":
+        return [0x74u8, 0x6cu8, 0x73u8, 0x31u8, 0x33u8, 0x20u8, 0x72u8, 0x65u8, 0x73u8, 0x20u8, 0x6du8, 0x61u8, 0x73u8, 0x74u8, 0x65u8, 0x72u8]
+    # Fallback: use rt_text_to_bytes for unknown labels
+    val prefix: [u8] = [0x74u8, 0x6cu8, 0x73u8, 0x31u8, 0x33u8, 0x20u8]
+    val suffix = rt_text_to_bytes(label)
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 6:
+        out.push(_hkdf_u8_at(prefix, i))
+        i = i + 1
+    i = 0
+    while i < suffix.len().to_u64():
+        out.push(_hkdf_u8_at(suffix, i))
+        i = i + 1
+    out
+
+fn _label_tls13_len(label: text) -> u64:
+    if label == "derived":     return 13
+    if label == "c hs traffic": return 18
+    if label == "s hs traffic": return 18
+    if label == "c ap traffic": return 18
+    if label == "s ap traffic": return 18
+    if label == "key":          return 9
+    if label == "iv":           return 8
+    if label == "finished":     return 14
+    if label == "res master":   return 16
+    label.len().to_u64() + 6
+
+# ============================================================================
+# hkdf_extract — PRK = HMAC-SHA256(salt, IKM)
+# ============================================================================
+
+fn hkdf_extract(salt: [u8], ikm: [u8]) -> [u8]:
+    """HKDF-Extract (RFC 5869 §2.2).
+
+    Returns 32-byte PRK. If salt is empty, 32 zero bytes are used as salt.
+    """
+    # Fast path: C extern
+    var out: [u8] = _hkdf_zeros(32)
+    val rc = rt_tls13_hkdf_extract_into(salt, ikm, out)
+    if rc != 0:
+        return out
+
+    # Pure-Simple fallback
+    val effective_salt = if salt.len() == 0 { _hkdf_zeros(32) } else { salt }
+    val prk = sha256_hmac_with_len(effective_salt, effective_salt.len().to_u64(), ikm, ikm.len().to_u64())
+    # Copy first 32 bytes
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        result.push(_hkdf_u8_at(prk, i))
+        i = i + 1
+    result
+
+# ============================================================================
+# hkdf_expand — OKM = T(1) || T(2) || ...  (truncated to `length` bytes)
+# ============================================================================
+
+fn hkdf_expand(prk: [u8], info: [u8], length: u64) -> [u8]:
+    """HKDF-Expand (RFC 5869 §2.3). length must be <= 32 for baremetal use."""
+    var out: [u8] = _hkdf_zeros(length)
+    val rc = rt_tls13_hkdf_expand_into(prk, info, out, length.to_i64())
+    if rc != 0:
+        return out
+
+    # Pure-Simple path: one round (length <= 32 = 1 block)
+    # T(1) = HMAC(PRK, "" || info || 0x01)
+    var input: [u8] = []
+    var i: u64 = 0
+    while i < info.len().to_u64():
+        input.push(_hkdf_u8_at(info, i))
+        i = i + 1
+    input.push(0x01u8)
+
+    val t1 = sha256_hmac_with_len(prk, 32, input, input.len().to_u64())
+    var result: [u8] = []
+    i = 0
+    while i < length:
+        result.push(_hkdf_u8_at(t1, i))
+        i = i + 1
+    result
+
+# ============================================================================
+# hkdf_expand_label — RFC 8446 §7.1 HkdfLabel encoding
+# ============================================================================
+
+fn hkdf_expand_label(secret: [u8], label: text, context: [u8], length: u64) -> [u8]:
+    """HKDF-Expand-Label (RFC 8446 §7.1).
+
+    HkdfLabel = uint16(length) || uint8(len("tls13 " + label)) || "tls13 " + label
+                || uint8(len(context)) || context
+    """
+    val label_bytes = _label_tls13_bytes(label)
+    val label_len = _label_tls13_len(label)
+    val context_len = context.len().to_u64()
+
+    # Fast path: C extern
+    var out: [u8] = _hkdf_zeros(length)
+    val rc = rt_tls13_hkdf_expand_label_into(secret, label_bytes, context, out, length.to_i64())
+    if rc != 0:
+        return out
+
+    # Pure-Simple: build HkdfLabel info struct
+    var info: [u8] = []
+    # uint16 length (big-endian)
+    info.push(((length >> 8) & 0xFF).to_u8())
+    info.push((length & 0xFF).to_u8())
+    # uint8 label length
+    info.push(label_len.to_u8())
+    # label bytes
+    var i: u64 = 0
+    while i < label_len:
+        info.push(_hkdf_u8_at(label_bytes, i))
+        i = i + 1
+    # uint8 context length
+    info.push(context_len.to_u8())
+    # context bytes
+    i = 0
+    while i < context_len:
+        info.push(_hkdf_u8_at(context, i))
+        i = i + 1
+
+    hkdf_expand(secret, info, length)

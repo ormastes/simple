@@ -1,0 +1,82 @@
+# DAP Breakpoint Management Tests
+# Feature: Debug Adapter Protocol breakpoint storage and management
+# Category: Debugger, Infrastructure
+# Status: In Progress
+#
+# Tests the breakpoint entry and storage system for the debug adapter.
+#
+# NOTE: These assertions check the real implementation source text
+# (src/lib/nogc_sync_mut/dap/breakpoints.spl) rather than instantiating the
+# classes, following the pattern already used by the sibling specs in this
+# directory (dap_spec.spl, interpreter_hooks_spec.spl,
+# server_hooks_integration_spec.spl). Each assertion is tied to a specific,
+# sabotage-provable line of the real source.
+#
+# The real manager class is named BreakpointManager, not "BreakpointStore" --
+# no BreakpointStore type exists anywhere in the DAP sources (confirmed by
+# repo-wide search). The describe block below is renamed to match reality.
+
+
+describe "BreakpointEntry":
+    # Tests for individual breakpoint entries including conditions and hit counts.
+    it "creates breakpoint entry":
+        val breakpoints = rt_file_read_text("src/lib/nogc_sync_mut/dap/breakpoints.spl")
+        expect(breakpoints).to_contain("fn new(id: Int, source_path: String, line: Int) -> BreakpointEntry:")
+        expect(breakpoints).to_contain("verified: true,  # For now, always verify")
+
+    it "adds condition to breakpoint":
+        val breakpoints = rt_file_read_text("src/lib/nogc_sync_mut/dap/breakpoints.spl")
+        expect(breakpoints).to_contain("fn with_condition(condition: String) -> BreakpointEntry:")
+        expect(breakpoints).to_contain("condition: Some(condition),")
+
+    it "adds hit condition to breakpoint":
+        # KNOWN GAP: BreakpointEntry has a hit_condition field, but unlike
+        # with_condition() there is no with_hit_condition() builder, and
+        # BreakpointManager.set_breakpoints() never populates hit_condition
+        # from the incoming SourceBreakpoint at all. Asserting the described
+        # behaviour honestly so this fails until a builder is added.
+        # See doc/08_tracking/bug/dap_spec_stubs_reported_green_without_asserting_2026-08-08.md
+        val breakpoints = rt_file_read_text("src/lib/nogc_sync_mut/dap/breakpoints.spl")
+        expect(breakpoints).to_contain("fn with_hit_condition(hit_condition: String) -> BreakpointEntry:")
+
+    it "increments hit count":
+        val breakpoints = rt_file_read_text("src/lib/nogc_sync_mut/dap/breakpoints.spl")
+        expect(breakpoints).to_contain("fn increment_hit_count(breakpoint_id: Int):")
+        expect(breakpoints).to_contain("bp.hit_count = bp.hit_count + 1")
+
+describe "BreakpointManager":
+    it "adds breakpoints":
+        val breakpoints = rt_file_read_text("src/lib/nogc_sync_mut/dap/breakpoints.spl")
+        expect(breakpoints).to_contain("fn set_breakpoints(source_path: String, source_breakpoints: [protocol.SourceBreakpoint]) -> [BreakpointEntry]:")
+        expect(breakpoints).to_contain("entries.push(entry)")
+        expect(breakpoints).to_contain("self.breakpoints[source_path] = entries")
+
+    it "removes breakpoints (setBreakpoints replaces the prior set for a source)":
+        # DAP's setBreakpoints request is idempotent-replace, not incremental
+        # add/remove: set_breakpoints() clears the source's existing entries
+        # before installing the new list, so calling it with an empty list
+        # removes all breakpoints previously set for that source.
+        val breakpoints = rt_file_read_text("src/lib/nogc_sync_mut/dap/breakpoints.spl")
+        expect(breakpoints).to_contain("self.breakpoints.remove(source_path)")
+
+    it "finds breakpoints by location":
+        val breakpoints = rt_file_read_text("src/lib/nogc_sync_mut/dap/breakpoints.spl")
+        expect(breakpoints).to_contain("fn should_stop_at_line(source_path: String, line: Int) -> Option<BreakpointEntry>:")
+        expect(breakpoints).to_contain("if bp.line == line:")
+
+    it "generates unique IDs":
+        val breakpoints = rt_file_read_text("src/lib/nogc_sync_mut/dap/breakpoints.spl")
+        expect(breakpoints).to_contain("val id = self.next_id")
+        expect(breakpoints).to_contain("self.next_id = self.next_id + 1")
+
+    it "clears all breakpoints":
+        # KNOWN GAP: clear_breakpoints(source_path) only clears the entries
+        # for ONE source path -- there is no method that clears every
+        # breakpoint across all sources in the manager. Asserting the
+        # described "clears all" behaviour honestly so this fails until such
+        # a method exists.
+        # See doc/08_tracking/bug/dap_spec_stubs_reported_green_without_asserting_2026-08-08.md
+        val breakpoints = rt_file_read_text("src/lib/nogc_sync_mut/dap/breakpoints.spl")
+        expect(breakpoints).to_contain("fn clear_all_breakpoints() -> Nil:")
+
+extern fn rt_file_read_text(path: text) -> text

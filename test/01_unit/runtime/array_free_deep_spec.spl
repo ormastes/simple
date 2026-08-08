@@ -1,0 +1,113 @@
+# Reachability + safety regression for the `rt_array_free_deep` runtime
+# primitive, continuing the ordered unblock plan in
+# doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md
+# (UPDATE 2026-08-06, steps 2 and 3).
+#
+# WHAT THIS SPEC CAN AND CANNOT PROVE -- read before adding assertions.
+#
+# Before this work the primitive existed ONLY in src/runtime/runtime_native.c:
+# no `.spl` declared it, no Rust twin existed, and `nm` on the deployed binary
+# found nothing. It was dead code no lane linked. THAT is what this spec
+# guards, and it is not observable from inside either runtime's own unit tests:
+# an extern that fails to resolve dies with
+# "semantic: unknown extern function: rt_array_free_deep" before any assertion
+# runs, which is exactly how this file failed before the seed registration
+# landed.
+#
+# What this spec deliberately does NOT assert is a positive reclaim delta. On
+# the interpreter lane an array is `Value::Array` -- a Rust Vec with no runtime
+# heap object and no registry entry behind it -- so the honest verdict there is
+# 0 (refused, nothing to free), the same way `rt_string_free` returns 0 for an
+# interpreter-native `Value::Str`. Asserting "registry shrank" would therefore
+# pass or fail on WHICH LANE happened to run, not on whether the primitive is
+# correct. The measured positive proof lives where the values are real runtime
+# objects on every lane: the nine registry-delta contract tests in
+# src/compiler_rust/runtime/src/value/collections.rs
+# (mod array_free_deep_contract_tests) and the C-side assertions around
+# src/runtime/runtime_native.c:5335.
+#
+# So the assertions below are the ones that are TRUE ON EVERY LANE and still
+# fail if the primitive misbehaves: the verdict is a strict binary, a refusal
+# never reclaims anything, and no call ever GROWS the registry.
+
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_array_free_deep(value: [text]) -> i64
+
+# Distinct, long, dynamically built strings: short strings come from the
+# process-wide SHORT_STRING_CACHE and interned literals from the literal table,
+# both of which carry RT_STRING_FLAG_SHARED and are REFUSED by design.
+fn unique_strings(count: i64) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < count:
+        out = out.push("array_free_deep_spec_unique_element_padding_padding_" + i.to_text())
+        i = i + 1
+    out
+
+describe "rt_array_free_deep":
+
+    it "is reachable from .spl on this lane":
+        # Resolving at all is the regression: this whole file failed to
+        # compile while the symbol was declared in only one of the two
+        # runtimes.
+        val empty: [text] = []
+        val verdict = rt_array_free_deep(empty)
+        expect(verdict >= 0).to_equal(true)
+        expect(verdict <= 1).to_equal(true)
+
+    it "returns a strict binary verdict, never a partial-free code":
+        # The contract's whole point is that 1 means "the entire structure is
+        # gone" and 0 means "nothing was touched". Any third value would mean a
+        # partial free had become expressible.
+        val arr = unique_strings(64)
+        val verdict = rt_array_free_deep(arr)
+        expect(verdict == 0 or verdict == 1).to_equal(true)
+
+    it "never grows the heap registry":
+        val before = rt_heap_registry_count()
+        val arr = unique_strings(32)
+        val after_fill = rt_heap_registry_count()
+        val _verdict = rt_array_free_deep(arr)
+        val after_free = rt_heap_registry_count()
+        expect(after_free <= after_fill).to_equal(true)
+        expect(after_fill >= before).to_equal(true)
+
+    it "refuses a second free of the same array and reclaims nothing more":
+        # ALL-OR-NOTHING, the direction that holds on every lane: whatever the
+        # first call did, the second must be a pure refusal. The handle is
+        # stale after a successful first free -- never read its CONTENT again;
+        # the registry membership check is what makes re-passing it safe.
+        val arr = unique_strings(32)
+        val _first = rt_array_free_deep(arr)
+        val after_first = rt_heap_registry_count()
+
+        val second = rt_array_free_deep(arr)
+        val after_second = rt_heap_registry_count()
+
+        expect(second).to_equal(0)
+        expect(after_second >= after_first).to_equal(true)
+
+    it "a verdict of 1 is backed by a real registry drop, never claimed":
+        # The one direction that is both lane-independent AND non-vacuous where
+        # it fires: a "1" that did not shrink the registry would be the
+        # primitive lying about an all-or-nothing reclaim. Measured on the JIT
+        # lane with 2000 elements: delta_free=2001 (every string plus the array
+        # header), verdict=1. On the interpreter lane the registry holds
+        # nothing to begin with and the verdict is an honest 0, so this reads
+        # as a true implication rather than a false pass.
+        val elements = 256
+        val arr = unique_strings(elements)
+        val after_fill = rt_heap_registry_count()
+        val verdict = rt_array_free_deep(arr)
+        val after_free = rt_heap_registry_count()
+        if verdict == 1:
+            expect(after_fill - after_free >= elements + 1).to_equal(true)
+        else:
+            expect(after_free).to_equal(after_fill)
+
+    it "refuses a value that is not a registered array without side effects":
+        val empty: [text] = []
+        val before = rt_heap_registry_count()
+        expect(rt_array_free_deep(empty)).to_equal(rt_array_free_deep(empty))
+        val after = rt_heap_registry_count()
+        expect(after <= before).to_equal(true)

@@ -1,0 +1,123 @@
+# Host/GPU lane MIR queue evidence adapter.
+
+use compiler.mir.mir_instructions.{MirConstValue, MirFunction, MirInstKind, MirOperand, MirOperandKind}
+
+val HOST_GPU_MIR_PACKET_BYTES_PER_INST: i64 = 64
+val HOST_GPU_MIR_DEFAULT_MAX_PACKET_BYTES: i64 = 4096
+val HOST_GPU_MIR_DEFAULT_OPERATION: text = "draw_ir_delta"
+val ENGINE2D_HOST_GPU_LANE_HOST: text = "host"
+
+struct Engine2dHostGpuQueuePacket:
+    sequence: i64
+    source_lane: text
+    target_lane: text
+    operation: text
+    packet_bytes: i64
+    max_packet_bytes: i64
+    mutates_host_semantics: bool
+    per_widget_dispatch: bool
+    strict_backend_available: bool
+    baseline_ms: i64
+
+struct Engine2dHostGpuQueueTransportEvidence:
+    packets: [Engine2dHostGpuQueuePacket]
+    packet_count: i64
+    total_packet_bytes: i64
+
+struct Engine2dHostGpuQueueSubmissionEvidence:
+    transport: Engine2dHostGpuQueueTransportEvidence
+    strict_backend_available: bool
+    device_submit_ms: i64
+    readback_ms: i64
+    readback_pixel_hash: i64
+    expected_pixel_hash: i64
+
+fn engine2d_host_gpu_queue_packet(sequence: i64, source_lane: text, target_lane: text, operation: text, packet_bytes: i64, max_packet_bytes: i64, mutates_host_semantics: bool, per_widget_dispatch: bool, strict_backend_available: bool, baseline_ms: i64) -> Engine2dHostGpuQueuePacket:
+    Engine2dHostGpuQueuePacket(sequence: sequence, source_lane: source_lane, target_lane: target_lane, operation: operation, packet_bytes: packet_bytes, max_packet_bytes: max_packet_bytes, mutates_host_semantics: mutates_host_semantics, per_widget_dispatch: per_widget_dispatch, strict_backend_available: strict_backend_available, baseline_ms: baseline_ms)
+
+fn engine2d_host_gpu_queue_transport_evidence(packets: [Engine2dHostGpuQueuePacket]) -> Engine2dHostGpuQueueTransportEvidence:
+    var total = 0
+    for packet in packets:
+        total = total + packet.packet_bytes
+    Engine2dHostGpuQueueTransportEvidence(packets: packets, packet_count: packets.len(), total_packet_bytes: total)
+
+fn engine2d_host_gpu_queue_submission_evidence(transport: Engine2dHostGpuQueueTransportEvidence, strict_backend_available: bool, device_submit_ms: i64, readback_ms: i64, readback_pixel_hash: i64, expected_pixel_hash: i64) -> Engine2dHostGpuQueueSubmissionEvidence:
+    Engine2dHostGpuQueueSubmissionEvidence(transport: transport, strict_backend_available: strict_backend_available, device_submit_ms: device_submit_ms, readback_ms: readback_ms, readback_pixel_hash: readback_pixel_hash, expected_pixel_hash: expected_pixel_hash)
+
+fn host_gpu_mir_max_packet_value(max_packet: MirOperand?) -> i64:
+    if max_packet.?:
+        val operand = max_packet.value()
+        match operand.kind:
+            case MirOperandKind.Const(value, _):
+                match value:
+                    case MirConstValue.Int(v):
+                        return v
+                    case _:
+                        pass
+            case _:
+                pass
+    HOST_GPU_MIR_DEFAULT_MAX_PACKET_BYTES
+
+fn host_gpu_mir_payload_bytes(body_instruction_count: i64) -> i64:
+    if body_instruction_count <= 0:
+        return HOST_GPU_MIR_PACKET_BYTES_PER_INST
+    body_instruction_count * HOST_GPU_MIR_PACKET_BYTES_PER_INST
+
+fn host_gpu_mir_function_queue_packets(fn_: MirFunction, strict_backend_available: bool, baseline_ms: i64) -> [Engine2dHostGpuQueuePacket]:
+    """Convert HostGpuLaneBegin/End MIR marker regions into queue packets."""
+    var packets: [Engine2dHostGpuQueuePacket] = []
+    var active = false
+    var lane = ""
+    var max_packet_bytes = HOST_GPU_MIR_DEFAULT_MAX_PACKET_BYTES
+    var body_instruction_count: i64 = 0
+    var sequence: i64 = 1
+
+    for block in fn_.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case MirInstKind.HostGpuLaneBegin(begin_lane, max_packet):
+                    active = true
+                    lane = begin_lane
+                    max_packet_bytes = host_gpu_mir_max_packet_value(max_packet)
+                    body_instruction_count = 0
+                case MirInstKind.HostGpuLaneEnd(end_lane):
+                    if active:
+                        val payload_bytes = host_gpu_mir_payload_bytes(body_instruction_count)
+                        packets.push(engine2d_host_gpu_queue_packet(
+                            sequence,
+                            ENGINE2D_HOST_GPU_LANE_HOST,
+                            end_lane,
+                            HOST_GPU_MIR_DEFAULT_OPERATION,
+                            payload_bytes,
+                            max_packet_bytes,
+                            false,
+                            false,
+                            strict_backend_available,
+                            baseline_ms
+                        ))
+                        sequence = sequence + 1
+                    active = false
+                    lane = ""
+                    body_instruction_count = 0
+                case _:
+                    if active:
+                        body_instruction_count = body_instruction_count + 1
+
+    packets
+
+fn host_gpu_mir_function_submission_evidence(fn_: MirFunction, strict_backend_available: bool, baseline_ms: i64, device_submit_ms: i64, readback_ms: i64, readback_pixel_hash: i64, expected_pixel_hash: i64) -> Engine2dHostGpuQueueSubmissionEvidence:
+    """Build queue submission/readback evidence from lowered HostGpuLane MIR markers."""
+    val packets = host_gpu_mir_function_queue_packets(fn_, strict_backend_available, baseline_ms)
+    val transport = engine2d_host_gpu_queue_transport_evidence(packets)
+    engine2d_host_gpu_queue_submission_evidence(
+        transport,
+        strict_backend_available,
+        device_submit_ms,
+        readback_ms,
+        readback_pixel_hash,
+        expected_pixel_hash
+    )
+
+export HOST_GPU_MIR_PACKET_BYTES_PER_INST, HOST_GPU_MIR_DEFAULT_MAX_PACKET_BYTES, HOST_GPU_MIR_DEFAULT_OPERATION
+export Engine2dHostGpuQueuePacket, Engine2dHostGpuQueueTransportEvidence, Engine2dHostGpuQueueSubmissionEvidence
+export host_gpu_mir_function_queue_packets, host_gpu_mir_function_submission_evidence

@@ -1,0 +1,144 @@
+# WP-17 (Ravenscar subset over existing task APIs) regression spec for
+# doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md.
+#
+# Confirmed defect this spec targets: run_one_tick() declared `any_completed`
+# but never assigned it — the poll loop body was a literal bare `0` — so the
+# function always returned false even when complete_task() genuinely
+# completed a task. Fixed with a `last_seen_mask` field that records
+# completed_mask as of the end of the *previous* run_one_tick() call: the
+# next call compares completed_mask against that boundary, so it correctly
+# reports a completion that happened since the previous tick. (A naive
+# snapshot-at-entry-of-this-call was tried first and does NOT work: in
+# interpreter mode complete_task() always runs strictly before the next
+# run_one_tick() call is even invoked, so an entry-of-this-call snapshot
+# would already include the completion and see no change.)
+#
+# Also covers the two other WP-17 acceptance items: TaskSlot gaining
+# deadline/period fields (Ravenscar subset: fixed-priority + deadline,
+# no full periodic admission control or WCET analysis — that is WP-16/WP-18,
+# explicitly out of scope here), and report-only deadline-miss detection.
+
+use std.nogc_async_mut_noalloc.async.scheduler.{NoallocScheduler}
+use std.nogc_async_mut_noalloc.async.timer.{timer_now}
+
+describe "NoallocScheduler Ravenscar subset (WP-17)":
+    """Proves run_one_tick() correctly reports completion, TaskSlot carries
+    settable/readable deadline+period fields, and a passed deadline on a
+    still-incomplete task is detected as a report-only miss."""
+
+    it "run_one_tick returns true on the tick after complete_task completes an active task, false when nothing completed":
+        val sched = NoallocScheduler.new()
+        val id = sched.spawn(42, 0)
+        expect(id).to_equal(0)
+
+        # Nothing has completed yet: a tick must report false.
+        val before = sched.run_one_tick()
+        expect(before).to_equal(false)
+
+        # complete_task() is the interpreter-mode completion path (see
+        # scheduler.spl docstring): task_fn handles can't be dispatched
+        # from within .spl, so completion is signalled externally, always
+        # strictly before the run_one_tick() call that observes it.
+        sched.complete_task(id, 99)
+
+        # The next tick after the task became complete must report true.
+        val after = sched.run_one_tick()
+        expect(after).to_equal(true)
+        expect(sched.task_result(id)).to_equal(99)
+
+        # And the tick after THAT, with nothing new completing, is false again.
+        val quiescent = sched.run_one_tick()
+        expect(quiescent).to_equal(false)
+
+    it "run_one_tick returns false on a tick where nothing completes":
+        val sched = NoallocScheduler.new()
+        sched.spawn(7, 1)
+        val r1 = sched.run_one_tick()
+        val r2 = sched.run_one_tick()
+        expect(r1).to_equal(false)
+        expect(r2).to_equal(false)
+
+    it "TaskSlot deadline and period are settable and readable through spawn_periodic":
+        val sched = NoallocScheduler.new()
+        val id = sched.spawn_periodic(1, 0, 500, 100)
+        expect(id).to_equal(0)
+        expect(sched.task_deadline(id)).to_equal(500)
+        expect(sched.task_period(id)).to_equal(100)
+
+    it "TaskSlot deadline and period are settable and readable through set_deadline on a plain spawn":
+        val sched = NoallocScheduler.new()
+        val id = sched.spawn(2, 0)
+        expect(sched.task_deadline(id)).to_equal(0)
+        expect(sched.task_period(id)).to_equal(0)
+
+        sched.set_deadline(id, 250, 50)
+        expect(sched.task_deadline(id)).to_equal(250)
+        expect(sched.task_period(id)).to_equal(50)
+
+    it "detects a deadline miss (report-only) when a task's deadline has passed while still incomplete":
+        val sched = NoallocScheduler.new()
+        val id = sched.spawn_periodic(3, 0, 1, 10)
+
+        # timer_now() is a monotonic counter that increments per call
+        # (see async/timer.spl); calling it here guarantees `now` is past
+        # the deadline of 1 set above.
+        var now = timer_now()
+        now = timer_now()
+        now = timer_now()
+
+        expect(sched.is_deadline_missed(id, now)).to_equal(true)
+        expect(sched.count_deadline_misses(now)).to_equal(1)
+
+        # Completing the task clears the miss: a complete task is not
+        # reported as missing its deadline (report-only semantics only
+        # apply while the task is still active and incomplete).
+        sched.complete_task(id, 0)
+        expect(sched.is_deadline_missed(id, now)).to_equal(false)
+        expect(sched.count_deadline_misses(now)).to_equal(0)
+
+    it "does not report a deadline miss when the deadline has not passed yet":
+        val sched = NoallocScheduler.new()
+        val id = sched.spawn_periodic(4, 0, 1000000, 0)
+        val now = timer_now()
+        expect(sched.is_deadline_missed(id, now)).to_equal(false)
+        expect(sched.count_deadline_misses(now)).to_equal(0)
+
+    it "does not report a deadline miss when no deadline was set (deadline 0)":
+        val sched = NoallocScheduler.new()
+        val id = sched.spawn(5, 0)
+        val now = timer_now()
+        expect(sched.is_deadline_missed(id, now)).to_equal(false)
+
+    it "run_one_tick still detects a completion after a slot is reused via cleanup_completed":
+        # Regression for a hole in the completed_mask fix above: cancel()
+        # and cleanup_completed() free a slot for reuse but must also clear
+        # that slot's bit out of completed_mask (and last_seen_mask) —
+        # otherwise a fresh task spawned into the same index inherits a
+        # stale set bit, the OR in complete_task() becomes a no-op, and
+        # run_one_tick() wrongly reports false on the new task's real
+        # completion.
+        val sched = NoallocScheduler.new()
+        val id1 = sched.spawn(1, 0)
+        sched.complete_task(id1, 111)
+        expect(sched.run_one_tick()).to_equal(true)
+
+        sched.cleanup_completed()
+        val id2 = sched.spawn(2, 0)
+        expect(id2).to_equal(id1)    # same slot index reused
+
+        sched.complete_task(id2, 222)
+        expect(sched.run_one_tick()).to_equal(true)
+        expect(sched.task_result(id2)).to_equal(222)
+
+    it "run_one_tick does not report a spurious completion right after cancel() clears a bit":
+        # Companion regression: clearing completed_mask on cancel() must
+        # also clear last_seen_mask, or the very next tick sees
+        # completed_mask < last_seen_mask and misreports a completion that
+        # did not happen on that tick.
+        val sched = NoallocScheduler.new()
+        val id = sched.spawn(9, 0)
+        sched.complete_task(id, 1)
+        expect(sched.run_one_tick()).to_equal(true)
+
+        sched.cancel(id)
+        expect(sched.run_one_tick()).to_equal(false)

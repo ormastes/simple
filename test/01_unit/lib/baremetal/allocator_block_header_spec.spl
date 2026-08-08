@@ -1,0 +1,82 @@
+"""
+# Bare-Metal Allocator — BlockHeader static API
+
+**Category:** Baremetal
+
+## Overview
+
+`FreeListAllocator.alloc`/`.dealloc`/`.realloc` in
+`src/lib/nogc_async_mut_noalloc/baremetal/allocator.spl` call
+`BlockHeader.header_size()` and `BlockHeader.from_addr(...)` on the class, not
+on an instance. Both were declared as instance methods (`fn`), so every one of
+those call sites died with `semantic: unknown static method header_size on
+class BlockHeader` — the whole free-list allocator, which is public API
+re-exported as `std.baremetal`, could never run.
+
+The existing `test/03_system/feature/baremetal/allocator_spec.spl` never caught
+this because it reimplements all four allocators as local stubs instead of
+importing the module.
+
+This spec pins the reachability of the two static entry points.
+"""
+
+use std.baremetal.allocator.{BlockHeader}
+
+describe "BlockHeader static API":
+    context "class-level call sites used by FreeListAllocator":
+        it "resolves header_size() as a static method":
+            # Same call shape as allocator.spl FreeListAllocator.alloc/
+            # dealloc/realloc. Reverting `static fn` to `fn` makes this
+            # example fail with "unknown static method header_size".
+            expect(BlockHeader.header_size().to_i64()).to_be_greater_than(0)
+
+        it "reports a header size that covers the next-pointer field":
+            # `next` is a u32 stored at byte offset 8, so the header cannot be
+            # smaller than 12 bytes. It used to sit at offset 5 with a declared
+            # header size of 8, which put the last byte of `next` at the same
+            # address as the first byte of the payload alloc() hands out
+            # (block + header_size) — the caller's first write corrupted the
+            # free-list link.
+            #
+            # The pin is 16, not 12: 12 clears the no-overlap floor but leaves
+            # every payload 4-aligned (see the next example). Pinned exactly
+            # rather than as a `>= 12` band, so this example stays RED for the
+            # 12-byte layout specifically.
+            expect(BlockHeader.header_size().to_i64()).to_equal(16)
+
+        it "keeps every payload 8-byte aligned":
+            # alloc() returns `block + header_size()` and advances to the next
+            # block by `header_size() + align_up(size, 8)`, so header_size()
+            # is the sole term deciding payload alignment: unless it is itself
+            # a multiple of 8, EVERY payload is misaligned no matter how well
+            # aligned the heap `base` is.
+            #
+            # This is not hypothetical bookkeeping. The first repair of the
+            # +5/size-8 overlap set header_size() to 12, which is >= 12 and
+            # satisfies the no-overlap check above, yet silently dropped
+            # payload alignment from 8 (the pre-bug value) to 4 — so a u64 or
+            # f64 store into a freshly allocated block traps on the ARM and
+            # RISC-V targets this module exists to serve. 12 fails here; 16
+            # (and 8, and 24) pass.
+            assert_equal(BlockHeader.header_size().to_i64() % 8, 0)
+
+        it "keeps the next-pointer field fully inside the header (no payload overlap)":
+            # Non-tautological version of the check above: derives from
+            # next_offset() rather than hardcoding both sides as unrelated
+            # literals. `next` is a u32 (4 bytes), so it must fit entirely
+            # before header_size(); the original defect had next_offset()==5
+            # and header_size()==8, so `5 + 4 <= 8` is false and this example
+            # would fail against the reverted code even though
+            # header_size()==12 alone would not catch it.
+            # `to_be_true()` is rejected by the runner on bool receivers
+            # (.claude/rules/testing.md), so this uses assert_true.
+            val next_end = BlockHeader.next_offset().to_i64() + 4
+            assert_true(next_end <= BlockHeader.header_size().to_i64())
+            expect(BlockHeader.next_offset().to_i64()).to_equal(8)
+
+        it "resolves from_addr() as a static method":
+            # Constructed directly (from_addr dereferences a raw address, which
+            # is only valid on a real target); this pins that the symbol
+            # resolves at class level.
+            val h = BlockHeader(size: 32u32, is_free: true, next: 0u32)
+            expect(h.size.to_i64()).to_equal(32)

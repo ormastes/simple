@@ -1,0 +1,130 @@
+# Input Event Queue — the single bounded FIFO of HostInputEvent.
+# MDSOC: feature dimension, drivers layer.
+#
+# HISTORY / WHY THIS FILE LOOKS NOTHING LIKE IT USED TO
+# -----------------------------------------------------
+# This module previously declared `KeyEvent`, `MouseEvent`, `TouchEvent`,
+# `GamepadEvent` and an `InputEventQueue` that was four counters and a handful
+# of last-seen scalars -- it stored no events at all, and had zero consumers
+# repo-wide. Its `MouseEvent` was also the SECOND same-named declaration in the
+# tree (the other is `os.drivers.input.ps2_mouse.MouseEvent`, which drivers and
+# the compositor actually use). Same-named types collapse first-wins in the
+# global registry, which is what produced the HIR error
+# `struct 'ANY' field 'left_just_pressed'` documented in the compositor header.
+#
+# Those four classes are deleted, not preserved: they were the duplicate half
+# of that bug, not "unused code worth keeping". Touch and gamepad are not lost
+# -- when a driver actually produces them they become `HostInputEvent`
+# variants, owned by `common.ui.host_input_event`, which is the sole definition
+# site for the ingress type.
+#
+# The queue is a fixed-capacity ring over a preallocated array with an explicit
+# `count` field. Two hard reasons, both load-bearing:
+#   1. It must be usable from an ISR (WS-C C2), so `push` allocates nothing and
+#      is O(1).
+#   2. `Dict.len()` returns -1 under native codegen and `.get()` on a
+#      dict-of-enum is corrupt (doc/07_guide/language/dict_native_pitfalls.md).
+#      So: no Dict anywhere, and `len()` returns the maintained counter rather
+#      than measuring anything.
+
+use common.ui.host_input_event.{HostInputEvent}
+
+val INPUT_QUEUE_CAP: i64 = 256
+
+class InputEventQueue:
+    """Single bounded FIFO of HostInputEvent.
+
+    Producers: an ISR ingest path, or a poll-drain of an `InputBackend`.
+    Consumer: the compositor / screen app. When full, `push` drops the NEW
+    event and increments `dropped` -- it never overwrites unread history and
+    never moves `head`, so a burst cannot corrupt the events already queued."""
+    buf: [HostInputEvent]
+    head: i64
+    tail: i64
+    count: i64
+    dropped: i64
+
+impl InputEventQueue:
+    static fn create() -> InputEventQueue:
+        """Create an empty queue with INPUT_QUEUE_CAP slots preallocated.
+
+        The slots are filled with a zero `Resize` placeholder purely so the
+        backing array has its final length up front; no slot is ever read
+        before it is written, because reads are gated on `count`."""
+        var slots: [HostInputEvent] = []
+        var i = 0
+        # cpu-lane-loop-ok: one-time preallocation of a fixed 256-slot ring
+        while i < INPUT_QUEUE_CAP:
+            slots = slots.push(HostInputEvent.Resize(w: 0, h: 0))
+            i = i + 1
+        InputEventQueue(buf: slots, head: 0, tail: 0, count: 0, dropped: 0)
+
+    me push(ev: HostInputEvent) -> bool:
+        """Append an event. Returns false (and counts a drop) when full."""
+        if self.count >= INPUT_QUEUE_CAP:
+            self.dropped = self.dropped + 1
+            return false
+        self.buf[self.tail] = ev
+        self.tail = (self.tail + 1) % INPUT_QUEUE_CAP
+        self.count = self.count + 1
+        true
+
+    me pop() -> HostInputEvent?:
+        """Remove and return the oldest event, or nil when empty."""
+        if self.count <= 0:
+            return nil
+        val ev = self.buf[self.head]
+        self.head = (self.head + 1) % INPUT_QUEUE_CAP
+        self.count = self.count - 1
+        ev
+
+    me len() -> i64:
+        """Number of queued events. The maintained counter, never a measurement."""
+        self.count
+
+    me is_empty() -> bool:
+        """True when there is nothing to pop."""
+        self.count <= 0
+
+    me capacity() -> i64:
+        """Fixed ring capacity."""
+        INPUT_QUEUE_CAP
+
+    me dropped_count() -> i64:
+        """How many events were discarded because the ring was full."""
+        self.dropped
+
+    me clear():
+        """Discard every queued event. Does not reset the drop counter."""
+        self.head = 0
+        self.tail = 0
+        self.count = 0
+
+    me drain() -> [HostInputEvent]:
+        """Pop everything into a list, oldest first. Allocates: not ISR-safe.
+
+        The pop logic is inlined rather than written as
+        `while val ev = self.pop():`. That form does NOT terminate here: a
+        self-mutating `me` call driving its own loop condition never observes
+        the decremented `count`, and the example died on
+        "Execution limit of 10000000 operations exceeded" instead of
+        returning. Read `count` ONCE up front and count down locally."""
+        var out: [HostInputEvent] = []
+        val n = self.count
+        var i = 0
+        # cpu-lane-loop-ok: bound is the queue count, at most INPUT_QUEUE_CAP
+        while i < n:
+            out = out.push(self.buf[self.head])
+            self.head = (self.head + 1) % INPUT_QUEUE_CAP
+            i = i + 1
+        self.count = 0
+        out
+
+    me stats() -> text:
+        """One-line summary for probe panes and serial logs."""
+        "input queue: n=" + self.count.to_text() +
+            " dropped=" + self.dropped.to_text() +
+            " cap=" + INPUT_QUEUE_CAP.to_text()
+
+export INPUT_QUEUE_CAP
+export InputEventQueue

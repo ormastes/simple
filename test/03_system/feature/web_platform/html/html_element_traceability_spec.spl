@@ -1,0 +1,594 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004
+# @req REQ-WEB-BROWSER-019 REQ-WEB-BROWSER-021
+"""# HTML Element Traceability
+
+## Overview
+
+This executable system specification traces ten HTML elements that were omitted
+or overstated by the historical inventory report. It follows each element from
+the canonical HTML tree through Web semantics, computed style, layout, Draw IR,
+and Engine2D pixels.
+
+The covered elements are `h1` through `h6`, `sub`, `sup`, `selectedcontent`,
+and `slot`. A name appearing in a source file or manifest is not enough. Every
+supported row needs semantic identity and a rendering oracle. Unsupported
+behavior needs an explicit fail-closed oracle.
+
+The scenarios use stable component IDs so a failure can be attributed to the
+tree, style, layout, Draw IR, or raster stage. They do not use screenshots,
+tolerance comparisons, or browser-dependent host fonts.
+
+**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+
+**Requirements:** doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
+
+**NFR:** doc/02_requirements/nfr/simple_web_browser_engine_production_hardening.md
+
+**Design:** N/A
+
+The exact production owners and frozen oracles are defined by the plan above.
+
+**Research:** N/A
+
+The retained WHATWG-derived corpus row and hash are embedded below.
+
+## Requirement Traceability
+
+- `REQ-WEB-BROWSER-002` requires canonical HTML tree and semantic behavior.
+- `REQ-WEB-BROWSER-004` requires Web layout to lower through Draw IR and
+  Engine2D rather than a private rendering shortcut.
+- `REQ-WEB-BROWSER-019` requires pinned corpus accounting.
+- `REQ-WEB-BROWSER-021` requires executable SSpec evidence and a current
+  generated manual.
+
+The top-level `@req` declarations bind all three scenarios to those four
+requirements. Each scenario repeats the requirement tags in its authored
+manual metadata so generated documentation remains traceable.
+
+## Canonical Production Path
+
+The semantic oracle is built by `html_tree_builder_build` and queried through
+the BeDOM accessors. The rendered oracle uses
+`simple_web_layout_render_html_draw_ir_result`.
+
+That renderer produces one shared result containing Web semantic nodes,
+computed styles, layout boxes, and `DrawIrComposition`. The test then sends the
+composition to `Engine2dCompositorBackend` for exact pixel evidence.
+
+No scenario invokes a GUI-only renderer, an HTML fallback painter, a private
+font path, or a Rust bootstrap seed. Visible content must remain attributable
+to the canonical Web-to-Draw-IR path.
+
+## Selected User-Agent Profile
+
+The selected profile uses a 16 px medium font. Relative heading sizes and
+margins use round-half-up.
+
+| Element | Font size | Block-start/end margin | Exact geometry |
+|---|---:|---:|---|
+| `h1` | 32 px | 21 px | `[0,21,96,32]` |
+| `h2` | 24 px | 20 px | `[0,20,96,24]` |
+| `h3` | 19 px | 19 px | `[0,19,96,19]` |
+| `h4` | 16 px | 21 px | `[0,21,96,16]` |
+| `h5` | 13 px | 22 px | `[0,22,96,13]` |
+| `h6` | 11 px | 26 px | `[0,26,96,11]` |
+
+The heading backgrounds use distinct colors. This makes a nonzero exact-color
+pixel count a discriminating Engine2D oracle rather than a generic
+"something rendered" check.
+
+## Inline Metric Profile
+
+The inline control uses geometry `[0,8,8,16]`. `sub` and `sup` use a 13 px
+smaller font and reset inherited non-normal line height back to `normal`.
+
+The exact subscript geometry is `[8,12,7,13]`. The exact superscript geometry
+is `[15,4,7,13]`. Their text commands have Y coordinates `12` and `4`, while
+the control text command has Y coordinate `8`.
+
+The four-pixel shifts are based on the parent font size. The separate 24 px
+parent line-height control proves that `sub` does not accidentally inherit an
+authored non-normal line height.
+
+## Customizable Select Policy
+
+`selectedcontent` is currently classified `unsupported-fail-closed`. This does
+not claim selected-option reflection.
+
+Fail-closed hiding applies only when all selected validity conditions hold:
+
+1. The parent is a `button`.
+2. The button is the first element child of a non-`multiple` `select`.
+3. The empty `selectedcontent` is the button's first child.
+
+The valid control authors a red background and dimensions. The computed style
+must still be `display:none`; no Draw IR command or red pixel may survive.
+
+Three invalid-context controls prevent an overly broad hidden-tag rule. A
+button after an option, a button in a `multiple` select, and a selectedcontent
+after another button child all retain generic inline semantics and produce
+their own Draw IR commands.
+
+## Slot Fallback Policy
+
+`slot` uses generic inline flow in this renderer. Because Shadow DOM slot
+assignment is not active in this fixture, its fallback text must remain
+visible through the ordinary Web semantic and Draw IR path.
+
+The pinned slot geometry is `[0,32,104,16]`. Its computed foreground is decimal
+ARGB `4286331629`, equivalent to `0xFF7C3AED`. The composition must contain the
+fallback text and Engine2D must produce at least one matching purple pixel.
+
+## Syntax
+
+Run this source through the repository's normal SSpec runner with the canonical
+pure-Simple target binary:
+
+```sh
+bin/release/simple test test/03_system/feature/web_platform/html/html_element_traceability_spec.spl --mode=native
+```
+
+This command is documentation only. Generated manuals do not claim execution;
+qualified runner evidence is owned by the traceability gate.
+
+To regenerate only this manual with an already-built mini docgen, provide the
+source spec and canonical `doc/06_spec` destination to that tool. Do not place
+executable `.spl` files under `doc/06_spec`.
+
+## Examples
+
+### Heading evidence
+
+Given an isolated `<h2 id='heading-h2'>H</h2>`, the semantic node remains an
+`h2` child of `body`, its computed font size is 24, both block margins are 20,
+its Draw IR geometry is `[0,20,96,24]`, and its unique background reaches the
+pixel buffer.
+
+### Inline evidence
+
+Given `A<sub>B</sub><sup>C</sup>` at 16 px, the three text-command Y coordinates
+are `[8,12,4]`. Equality is intentional: merely checking relative order could
+hide a wrong baseline magnitude.
+
+### Fail-closed evidence
+
+Given a valid empty `selectedcontent` as the first child of the first button in
+a non-multiple select, authored `display:block` and red background do not make
+it render. Moving the button or selectedcontent out of that exact context keeps
+the element inline, proving invalid uses were not globally suppressed.
+
+### Slot evidence
+
+Given `<slot id='slot'>slot-fallback</slot>`, the fallback string appears in a
+Draw IR text command and purple pixels. A semantic-only node without visible
+fallback output is a failure.
+
+## Failure Interpretation
+
+- A missing BeDOM node or wrong parent is a tokenizer/tree/semantic failure.
+- A wrong display, size, margin, line height, or vertical alignment is a style
+  default or cascade failure.
+- A wrong box or text Y coordinate is a layout failure.
+- A missing component command or computed-style property is a Draw IR lowering
+  failure.
+- A correct command with no discriminating pixel is an Engine2D failure.
+- A visible valid-context selectedcontent is a fail-closed policy failure.
+- A hidden invalid-context selectedcontent is an overmatching policy failure.
+- A corpus hash mismatch means the selected evidence row changed and requires
+  an explicit review rather than silent acceptance.
+
+## Evidence Boundaries
+
+This spec proves the selected deterministic profile only. It does not claim
+complete WHATWG rendering conformance, customizable-select reflection, Shadow
+DOM distribution, platform-native widget parity, or qualified release-runner
+admission.
+
+The embedded corpus row is dated `2026-07-29` and names the ten covered
+elements. `_expect_pinned_html_corpus` checks its SHA-256 and also checks an
+altered-row negative control.
+
+The generated manual is explanatory evidence. The executable assertions in
+this source remain authoritative.
+"""
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_tag, be_dom_path_for_route
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    HNode, SimpleWebLayoutDrawIrResult,
+    simple_web_layout_render_html_draw_ir_result
+}
+use test.system.browser_dom_identity_helpers.{system_dom_identity_index, system_dom_route}
+
+val WIDTH: i32 = 96
+val HEIGHT: i32 = 256
+val HTML_CORPUS_ROW = (
+    "whatwg-html-elements|2026-07-29|" +
+    "h1,h2,h3,h4,h5,h6,sub,sup,selectedcontent,slot|" +
+    "medium=16px;round=half-up;" +
+    "selectedcontent=unsupported-fail-closed"
+)
+val HTML_CORPUS_SHA256 = (
+    "bd8cba62a4ed894e8a5ef3636c7f657ae974ecda1eb4da401d535b5279131e84"
+)
+
+fn _node_index(nodes: [HNode], component_id: text) -> i32:
+    var index = 0
+    for node in nodes:
+        if node.id_attr == component_id:
+            return index
+        index = index + 1
+    fail("missing Web semantic node: {component_id}")
+    -1
+
+fn _command_index(
+    composition: DrawIrComposition, component_id: text
+) -> i32:
+    if composition.batches.len() == 0:
+        fail("missing Draw IR batch")
+    var index = 0
+    for command in composition.batches[0].commands:
+        if command.component_id == component_id:
+            return index
+        index = index + 1
+    -1
+
+fn _command(
+    composition: DrawIrComposition, component_id: text
+) -> DrawIrCommand:
+    val index = _command_index(composition, component_id)
+    if index < 0:
+        fail("missing Draw IR command: {component_id}")
+    composition.batches[0].commands[index]
+
+fn _has_text(composition: DrawIrComposition, value: text) -> bool:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if (
+                command.kind == "text" and
+                command.text_value.contains(value)
+            ):
+                return true
+    false
+
+fn _text_command(
+    composition: DrawIrComposition, value: text
+) -> DrawIrCommand:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if (
+                command.kind == "text" and
+                command.text_value == value
+            ):
+                return command
+    fail("missing Draw IR text command: {value}")
+    composition.batches[0].commands[0]
+
+fn _style(command: DrawIrCommand, key: text) -> text:
+    for property in command.computed_style:
+        if property.key == key:
+            return property.value
+    fail("missing Draw IR computed style: {key}")
+    ""
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+fn _expect_semantic_identity(
+    html: text, component_id: text, tag: text, parent_id: text
+):
+    val root = html_tree_builder_build(html)
+    val identity_index = system_dom_identity_index(root)
+    val path = be_dom_path_for_route(
+        root, identity_index, system_dom_route(identity_index, component_id)
+    )
+    val parent_path = be_dom_path_for_route(
+        root, identity_index, system_dom_route(identity_index, parent_id)
+    )
+    expect(path.len()).to_be_greater_than(1)
+    expect(parent_path.len()).to_be_greater_than(0)
+    val node: BeDomNode = path[path.len() - 1]
+    val parent: BeDomNode = parent_path[parent_path.len() - 1]
+    expect(be_dom_get_tag(node)).to_equal(tag)
+    expect(node.node_id).to_be_greater_than(0)
+    expect(node.parent_id).to_equal(parent.node_id)
+    expect(path[path.len() - 2].node_id).to_equal(parent.node_id)
+
+fn _expect_exact_draw_ir_geometry(
+    result: SimpleWebLayoutDrawIrResult, component_id: text,
+    parent_id: text, expected_tag: text, expected: [i32]
+):
+    if expected.len() != 4:
+        fail("expected geometry must contain x, y, width, height")
+    val node_index = _node_index(result.hit_index.nodes, component_id)
+    val parent_index = result.hit_index.nodes[node_index].parent.to_i32()
+    if parent_index < 0:
+        fail("Web semantic node has no parent: {component_id}")
+    expect(result.hit_index.nodes[parent_index].id_attr).to_equal(parent_id)
+    val command = _command(result.composition, component_id)
+    expect(command.parent_id).to_equal(parent_id)
+    expect(_style(command, "tag")).to_equal(expected_tag)
+    expect([
+        result.hit_index.boxes.bx[node_index],
+        result.hit_index.boxes.by[node_index],
+        result.hit_index.boxes.bw[node_index],
+        result.hit_index.boxes.bh[node_index]
+    ]).to_equal(expected)
+    expect([
+        command.x, command.y, command.width, command.height
+    ]).to_equal(expected)
+    expect([
+        command.clip_rect.x, command.clip_rect.y,
+        command.clip_rect.width, command.clip_rect.height
+    ]).to_equal([0, 0, WIDTH, HEIGHT])
+
+fn _render_pixels(composition: DrawIrComposition) -> [u32]:
+    val raster = Engine2dCompositorBackend.create_named(
+        WIDTH, HEIGHT, "software"
+    )
+    val rendered = raster.render_draw_ir_composition(composition, [])
+    raster.shutdown()
+    expect(rendered.skipped_command_count).to_equal(0)
+    expect(rendered.pixels.len()).to_equal(WIDTH * HEIGHT)
+    rendered.pixels
+
+fn _expect_pinned_html_corpus():
+    expect(sha256_text(HTML_CORPUS_ROW)).to_equal(HTML_CORPUS_SHA256)
+    expect(
+        sha256_text(HTML_CORPUS_ROW + "|forged") == HTML_CORPUS_SHA256
+    ).to_equal(false)
+
+describe "Production HTML element traceability":
+    # @manual: show
+    # @capture(html)
+    # @capture(protocol)
+    # @capture(gui)
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004
+    # @req REQ-WEB-BROWSER-019 REQ-WEB-BROWSER-021
+    it "should retain h1 through h6 with selected block heading metrics":
+        step("Trace HTML elements through Web semantics and Draw IR")
+        _expect_pinned_html_corpus()
+        val ids = ["h1", "h2", "h3", "h4", "h5", "h6"]
+        val tags = ["h1", "h2", "h3", "h4", "h5", "h6"]
+        val font_sizes = [32, 24, 19, 16, 13, 11]
+        val margins = [21, 20, 19, 21, 22, 26]
+        val colors = [
+            0xFFDC2626u32, 0xFFEA580Cu32, 0xFFCA8A04u32,
+            0xFF16A34Au32, 0xFF2563EBu32, 0xFF7C3AEDu32
+        ]
+        val color_hex = [
+            "dc2626", "ea580c", "ca8a04",
+            "16a34a", "2563eb", "7c3aed"
+        ]
+        var index = 0
+        while index < ids.len():
+            val html = (
+                "<style>html,body{{margin:0}}</style><body id='body'><" +
+                tags[index] + " id='" + ids[index] +
+                "' style='background:#" + color_hex[index] +
+                "'>H</" + tags[index] + "></body>"
+            )
+            val result = simple_web_layout_render_html_draw_ir_result(
+                html, WIDTH, HEIGHT
+            )
+            _expect_semantic_identity(
+                html, ids[index], tags[index], "body"
+            )
+            _expect_exact_draw_ir_geometry(
+                result, ids[index], "body", tags[index],
+                [0, margins[index], WIDTH, font_sizes[index]]
+            )
+            val node_index = _node_index(
+                result.hit_index.nodes, ids[index]
+            )
+            val style = result.hit_index.styles[node_index]
+            expect(style.display).to_equal("block")
+            expect(style.bold).to_equal(true)
+            expect(style.font_size).to_equal(font_sizes[index])
+            expect(style.margin_l).to_equal(0)
+            expect(style.margin_t).to_equal(margins[index])
+            expect(style.margin_r).to_equal(0)
+            expect(style.margin_b).to_equal(margins[index])
+            expect(_style(
+                _command(result.composition, ids[index]), "font-size"
+            )).to_equal(font_sizes[index].to_string())
+            val pixels = _render_pixels(result.composition)
+            expect(_count_color(
+                pixels, colors[index]
+            )).to_be_greater_than(0)
+            index = index + 1
+
+    # @manual: show
+    # @capture(html)
+    # @capture(protocol)
+    # @capture(gui)
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004
+    # @req REQ-WEB-BROWSER-019 REQ-WEB-BROWSER-021
+    it "should keep sub and sup in inline flow with distinct baselines":
+        step("Trace HTML elements through Web semantics and Draw IR")
+        _expect_pinned_html_corpus()
+        val html = (
+            "<style>html,body{margin:0;font-size:16px}" +
+            "body{padding-top:8px}</style><body id='body'>" +
+            "<span id='lead'>A</span>" +
+            "<sub id='sub' style='background:#dc2626'>B</sub>" +
+            "<sup id='sup' style='background:#2563eb'>C</sup></body>"
+        )
+        val result = simple_web_layout_render_html_draw_ir_result(
+            html, WIDTH, HEIGHT
+        )
+        _expect_semantic_identity(html, "sub", "sub", "body")
+        _expect_semantic_identity(html, "sup", "sup", "body")
+        _expect_exact_draw_ir_geometry(
+            result, "sub", "body", "sub", [8, 12, 7, 13]
+        )
+        _expect_exact_draw_ir_geometry(
+            result, "sup", "body", "sup", [15, 4, 7, 13]
+        )
+        val lead = _node_index(result.hit_index.nodes, "lead")
+        val sub = _node_index(result.hit_index.nodes, "sub")
+        val sup = _node_index(result.hit_index.nodes, "sup")
+        expect([
+            result.hit_index.boxes.bx[lead],
+            result.hit_index.boxes.by[lead],
+            result.hit_index.boxes.bw[lead],
+            result.hit_index.boxes.bh[lead]
+        ]).to_equal([0, 8, 8, 16])
+        expect(result.hit_index.styles[sub].display).to_equal("inline")
+        expect(result.hit_index.styles[sup].display).to_equal("inline")
+        expect(result.hit_index.styles[sub].font_size).to_equal(13)
+        expect(result.hit_index.styles[sup].font_size).to_equal(13)
+        expect(result.hit_index.styles[sub].line_height_px).to_equal(0)
+        expect(result.hit_index.styles[sup].line_height_px).to_equal(0)
+        expect(result.hit_index.styles[sub].vertical_align).to_equal("sub")
+        expect(result.hit_index.styles[sup].vertical_align).to_equal("super")
+        expect(result.hit_index.boxes.by[sub]).to_be_greater_than(
+            result.hit_index.boxes.by[lead]
+        )
+        expect(result.hit_index.boxes.by[sup]).to_be_less_than(
+            result.hit_index.boxes.by[lead]
+        )
+        val lead_text = _text_command(result.composition, "A")
+        val sub_text = _text_command(result.composition, "B")
+        val sup_text = _text_command(result.composition, "C")
+        expect([
+            lead_text.y, sub_text.y, sup_text.y
+        ]).to_equal([8, 12, 4])
+        expect(sub_text.y).to_be_greater_than(lead_text.y)
+        expect(sup_text.y).to_be_less_than(lead_text.y)
+        expect(_style(sub_text, "font-size")).to_equal("13")
+        expect(_style(sup_text, "font-size")).to_equal("13")
+        expect(_style(
+            _command(result.composition, "sub"), "display"
+        )).to_equal("inline")
+        expect(_style(
+            _command(result.composition, "sup"), "vertical-align"
+        )).to_equal("super")
+        val pixels = _render_pixels(result.composition)
+        expect(_count_color(pixels, 0xFFDC2626u32)).to_be_greater_than(0)
+        expect(_count_color(pixels, 0xFF2563EBu32)).to_be_greater_than(0)
+        val inherited_line_height_html = (
+            "<style>html,body{margin:0;font-size:16px;line-height:24px}" +
+            "</style><body id='line-height-parent'>" +
+            "<sub id='normal-line-height-sub'>B</sub></body>"
+        )
+        val inherited_line_height = simple_web_layout_render_html_draw_ir_result(
+            inherited_line_height_html, WIDTH, HEIGHT
+        )
+        val line_height_parent = _node_index(
+            inherited_line_height.hit_index.nodes, "line-height-parent"
+        )
+        val normal_line_height_sub = _node_index(
+            inherited_line_height.hit_index.nodes, "normal-line-height-sub"
+        )
+        expect(inherited_line_height.hit_index.styles[
+            line_height_parent
+        ].line_height_px).to_equal(24)
+        expect(inherited_line_height.hit_index.styles[
+            normal_line_height_sub
+        ].line_height_px).to_equal(0)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(protocol)
+    # @capture(gui)
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004
+    # @req REQ-WEB-BROWSER-019 REQ-WEB-BROWSER-021
+    it "should fail closed for unsupported selectedcontent and render slot fallback inline":
+        step("Trace HTML elements through Web semantics and Draw IR")
+        _expect_pinned_html_corpus()
+        val html = (
+            "<style>html,body{margin:0;font-size:16px;" +
+            "line-height:16px;color:#111827}" +
+            "#slot{{color:#7c3aed}}</style><body id='body'>" +
+            "<select id='select'><button id='select-button'>" +
+            "<selectedcontent id='selected' style='display:block;width:8px;" +
+            "height:8px;background:#dc2626'></selectedcontent></button>" +
+            "<option selected>Selected option</option></select>" +
+            "<select id='invalid-select'><option>Before</option>" +
+            "<button id='late-button'><selectedcontent id='invalid-selected' " +
+            "style='background:#16a34a'>" +
+            "</selectedcontent></button></select>" +
+            "<select id='multiple-select' multiple>" +
+            "<button id='multiple-button'>" +
+            "<selectedcontent id='multiple-selected' style='background:#0891b2'>" +
+            "</selectedcontent></button></select>" +
+            "<select id='late-selected-select'><button id='content-button'>" +
+            "<span id='button-prefix'></span>" +
+            "<selectedcontent id='late-selected' style='background:#ca8a04'>" +
+            "</selectedcontent></button></select>" +
+            "<div id='slot-control' style='position:absolute;left:0;" +
+            "top:32px;width:96px;height:16px'>" +
+            "<slot id='slot'>slot-fallback</slot></div></body>"
+        )
+        val result = simple_web_layout_render_html_draw_ir_result(
+            html, WIDTH, HEIGHT
+        )
+        _expect_semantic_identity(
+            html, "selected", "selectedcontent", "select-button"
+        )
+        _expect_semantic_identity(
+            html, "slot", "slot", "slot-control"
+        )
+        _expect_semantic_identity(
+            html, "invalid-selected", "selectedcontent", "late-button"
+        )
+        _expect_semantic_identity(
+            html, "multiple-selected", "selectedcontent", "multiple-button"
+        )
+        _expect_semantic_identity(
+            html, "late-selected", "selectedcontent", "content-button"
+        )
+        val selected = _node_index(result.hit_index.nodes, "selected")
+        val invalid_selected = _node_index(
+            result.hit_index.nodes, "invalid-selected"
+        )
+        val multiple_selected = _node_index(
+            result.hit_index.nodes, "multiple-selected"
+        )
+        val late_selected = _node_index(
+            result.hit_index.nodes, "late-selected"
+        )
+        val slot = _node_index(result.hit_index.nodes, "slot")
+        expect(result.hit_index.styles[selected].display).to_equal("none")
+        expect(_command_index(result.composition, "selected")).to_equal(-1)
+        expect(result.hit_index.styles[invalid_selected].display).to_equal("inline")
+        expect(result.hit_index.styles[multiple_selected].display).to_equal("inline")
+        expect(result.hit_index.styles[late_selected].display).to_equal("inline")
+        expect(_command_index(
+            result.composition, "invalid-selected"
+        )).to_be_greater_than(-1)
+        expect(_command_index(
+            result.composition, "multiple-selected"
+        )).to_be_greater_than(-1)
+        expect(_command_index(
+            result.composition, "late-selected"
+        )).to_be_greater_than(-1)
+        expect(result.hit_index.styles[slot].display).to_equal("inline")
+        _expect_exact_draw_ir_geometry(
+            result, "slot", "slot-control", "slot", [0, 32, 104, 16]
+        )
+        expect(_style(
+            _command(result.composition, "slot"), "color"
+        )).to_equal("4286331629")
+        expect(_has_text(
+            result.composition, "slot-fallback"
+        )).to_equal(true)
+        val pixels = _render_pixels(result.composition)
+        expect(_count_color(pixels, 0xFFDC2626u32)).to_equal(0)
+        expect(_count_color(pixels, 0xFF16A34Au32)).to_be_greater_than(0)
+        expect(_count_color(pixels, 0xFF7C3AEDu32)).to_be_greater_than(0)

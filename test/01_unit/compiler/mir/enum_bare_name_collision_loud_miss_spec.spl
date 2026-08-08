@@ -1,0 +1,203 @@
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_definitions.{HirEnum, HirVariant, HirVariantKind, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{SymbolId, SymbolTable}
+use compiler.mir.mir_data.{MirSignature, MirType}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.core.interpreter.eval_tables.{enum_table_register, enum_table_lookup, enum_table_reset}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+# Bare-name enum collision, step (b): the MISS IS NOW LOUD.
+#
+# `MirLowering.enum_variant_index` / `enum_variant_discriminants` are keyed by
+# the BARE enum name and written LAST-WINS, so an enum declared in another
+# module under the same bare name evicts this one's variant set. The reader
+# `enum_variant_discriminant` then returns -1, and every consumer used to emit
+# that -1 as a discriminant constant with NO diagnostic -- a silent wrong value
+# (exit 0) rather than a loud failure.
+#
+# This spec pins the loud half: the divergent overwrite is RECORDED, and the
+# miss diagnostic NAMES the enum, the variant, and the colliding owner.
+#
+# It deliberately does NOT assert any re-keying: dual-keying by runtime_name is
+# step (c) and must land only after this fallout is absorbed.
+#
+# See doc/08_tracking/bug/enum_bare_name_collision_registry_2026-08-01.md.
+
+fn make_variant(name: text, index: i64) -> HirVariant:
+    HirVariant(
+        symbol: SymbolId(id: 9000 + index),
+        name: name,
+        kind: HirVariantKind.Unit,
+        has_discriminant: false,
+        discriminant: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: Span.empty()),
+        span: Span.empty())
+
+fn make_enum(name: text, runtime_name: text, variant_names: [text]) -> HirEnum:
+    var variants: [HirVariant] = []
+    var i = 0
+    while i < variant_names.len():
+        variants = variants.push(make_variant(variant_names[i], i))
+        i = i + 1
+    HirEnum(
+        symbol: SymbolId(id: 8000),
+        name: name,
+        runtime_name: runtime_name,
+        type_params: [],
+        variants: variants,
+        visibility: Visibility.Public,
+        is_public: true,
+        doc_comment: nil,
+        span: Span.empty(),
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {})
+
+describe "enum bare-name collision produces a loud miss":
+    it "records a divergent same-bare-name registration and names both sides":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Style", "web.layout.Style", ["Bold", "Italic"]))
+        # A DIFFERENT enum sharing the bare name evicts the first one.
+        lowering.register_enum_variants(make_enum(
+            "Style", "term.render.Style", ["Plain", "Reverse"]))
+
+        expect(lowering.enum_bare_name_collisions.has("Style")).to_equal(true)
+        val recorded = lowering.enum_bare_name_collisions["Style"]
+        expect(recorded).to_contain("Bold, Italic")
+        expect(recorded).to_contain("Plain, Reverse")
+        expect(recorded).to_contain("term.render.Style")
+
+    it "stays quiet when the same enum is re-registered identically":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Colour", "ui.Colour", ["Red", "Green"]))
+        lowering.register_enum_variants(make_enum(
+            "Colour", "ui.Colour", ["Red", "Green"]))
+
+        expect(lowering.enum_bare_name_collisions.has("Colour")).to_equal(false)
+
+    it "reports a variant that survived eviction as a -1 miss":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Style", "web.layout.Style", ["Bold", "Italic"]))
+        lowering.register_enum_variants(make_enum(
+            "Style", "term.render.Style", ["Plain", "Reverse"]))
+
+        # "Bold" belonged to the evicted enum, so the bare-keyed lookup misses.
+        expect(lowering.enum_variant_discriminant("Style", "Bold")).to_equal(-1)
+        # The surviving registration still resolves.
+        expect(lowering.enum_variant_discriminant("Style", "Plain")).to_equal(0)
+
+    it "names the colliding owner in the miss detail":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Style", "web.layout.Style", ["Bold", "Italic"]))
+        lowering.register_enum_variants(make_enum(
+            "Style", "term.render.Style", ["Plain", "Reverse"]))
+
+        val detail = lowering.enum_variant_miss_detail("Style", "Bold")
+        expect(detail).to_contain("MORE THAN ONE")
+        expect(detail).to_contain("Style")
+        expect(detail).to_contain("Bold, Italic")
+
+    it "names any other registered enum that does declare the variant":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Shape", "geom.Shape", ["Circle", "Square"]))
+        lowering.register_enum_variants(make_enum(
+            "Widget", "ui.Widget", ["Button", "Slider"]))
+
+        # `Widget` has no `Circle`; the detail must point at `Shape`.
+        val detail = lowering.enum_variant_miss_detail("Widget", "Circle")
+        expect(detail).to_contain("Circle")
+        expect(detail).to_contain("Shape")
+
+    it "falls back to listing the registered variants when nothing collides":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_enum_variants(make_enum(
+            "Shape", "geom.Shape", ["Circle", "Square"]))
+
+        val detail = lowering.enum_variant_miss_detail("Shape", "Hexagon")
+        expect(detail).to_contain("Circle, Square")
+
+describe "the MIR construction sites emit the miss instead of swallowing it":
+    it "records a loud error when a construction resolves to discriminant -1":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val web_style = make_enum("Style", "web.layout.Style", ["Bold", "Italic"])
+        val term_style = make_enum("Style", "term.render.Style", ["Plain", "Reverse"])
+        lowering.register_enum_variants(web_style)
+        lowering.register_enum_runtime_id(web_style)
+        lowering.register_enum_variants(term_style)
+        lowering.register_enum_runtime_id(term_style)
+
+        var builder = lowering.builder
+        builder.begin_function(SymbolId(id: 7100), "ctor_probe", MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+        lowering.builder = builder
+
+        val before = lowering.errors.len()
+        # `Bold` belonged to the evicted declaration. This used to emit -1 as
+        # the discriminant constant with NO diagnostic whatsoever.
+        lowering.lower_enum_construct_named("Style", "Bold", [])
+        expect(lowering.errors.len()).to_be_greater_than(before)
+
+        val message = lowering.errors[lowering.errors.len() - 1].message
+        expect(message).to_contain("enum variant lookup miss")
+        expect(message).to_contain("Style")
+        expect(message).to_contain("Bold")
+        # The colliding owner must be named, not just the failure.
+        expect(message).to_contain("MORE THAN ONE")
+
+    it "stays quiet when the variant resolves normally":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val shape = make_enum("Shape", "geom.Shape", ["Circle", "Square"])
+        lowering.register_enum_variants(shape)
+        lowering.register_enum_runtime_id(shape)
+
+        var builder = lowering.builder
+        builder.begin_function(SymbolId(id: 7101), "ok_probe", MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+        lowering.builder = builder
+
+        val before = lowering.errors.len()
+        lowering.lower_enum_construct_named("Shape", "Circle", [])
+        expect(lowering.errors.len()).to_equal(before)
+
+describe "interpreter enum table reports the same collision":
+    # The interpreter keeps its OWN bare-keyed enum registry, and resolves a
+    # collision FIRST-wins -- the opposite of MIR's last-wins. Both engines are
+    # therefore silently wrong in different directions on the same source.
+    it "drops the second divergent declaration (first-wins) rather than merging":
+        enum_table_reset()
+        enum_table_register("Style", ["Bold", "Italic"])
+        enum_table_register("Style", ["Plain", "Reverse"])
+
+        # First-wins: the SECOND declaration is discarded entirely, and the
+        # variant sets are NOT merged. A `case Plain:` arm therefore matches
+        # nothing at all under the interpreter.
+        expect(enum_table_lookup("Style")).to_equal("Bold,Italic")
+
+    it "keeps an identical re-registration idempotent":
+        enum_table_reset()
+        enum_table_register("Colour", ["Red", "Green"])
+        enum_table_register("Colour", ["Red", "Green"])
+
+        expect(enum_table_lookup("Colour")).to_equal("Red,Green")
+
+    it "warns loudly on the divergent drop instead of returning silently":
+        # The drop itself is unobservable from outside the table (that is the
+        # whole defect), so pin the warning at the source. The registration path
+        # must consult the collision reporter BEFORE its early return.
+        val tables = read_source(
+            "src/compiler/10.frontend/core/interpreter/eval_tables.spl")
+
+        expect(tables).to_contain(
+            "_enum_warn_bare_name_collision(name, enum_reg_variants[idx], variants.join(\",\"))")
+        expect(tables).to_contain("compiler_enum_bare_name_collision")
+        # Divergence-gated: identical re-registrations must stay quiet.
+        expect(tables).to_contain("if existing_csv == new_csv:")

@@ -1,0 +1,113 @@
+# SimpleOS Green Task Lifecycle Contract
+#
+# Pure scheduler-facing lifecycle helpers for logical green tasks. This module
+# does not run closures; it defines how a future SimpleOS carrier bridge records
+# runnable, parked, and completed green tasks across CPU workers.
+
+use os.kernel.scheduler.green_worker.{
+    green_worker_pick_spawn_cpu,
+    green_worker_choose_wake_cpu,
+    GreenWorkerPlacement
+}
+
+pub val GREEN_TASK_RUNNABLE: text = "runnable"
+pub val GREEN_TASK_PARKED: text = "parked"
+pub val GREEN_TASK_DONE: text = "done"
+
+pub struct GreenTaskRecord:
+    """Logical green task state tracked above SimpleOS carrier workers."""
+    task_id: i64
+    home_cpu: i64
+    assigned_cpu: i64
+    affinity_mask: i64
+    state: text
+    park_reason: text
+    result: i64
+
+pub struct GreenTaskWakeDecision:
+    """Wake decision for a parked green task."""
+    task: GreenTaskRecord
+    placement: GreenWorkerPlacement
+    should_enqueue: bool
+
+pub fn green_task_new(task_id: i64, cpu_count: i64, affinity_mask: i64, load0: i64, load1: i64, load2: i64, load3: i64) -> GreenTaskRecord:
+    """Create a runnable green task on the least-loaded allowed CPU."""
+    val placement = green_worker_pick_spawn_cpu(cpu_count, affinity_mask, load0, load1, load2, load3)
+    GreenTaskRecord(
+        task_id: task_id,
+        home_cpu: placement.cpu,
+        assigned_cpu: placement.cpu,
+        affinity_mask: affinity_mask,
+        state: GREEN_TASK_RUNNABLE,
+        park_reason: "",
+        result: 0
+    )
+
+pub fn green_task_is_runnable(task: GreenTaskRecord) -> bool:
+    task.state == GREEN_TASK_RUNNABLE
+
+pub fn green_task_is_parked(task: GreenTaskRecord) -> bool:
+    task.state == GREEN_TASK_PARKED
+
+pub fn green_task_is_done(task: GreenTaskRecord) -> bool:
+    task.state == GREEN_TASK_DONE
+
+pub fn green_task_park(task: GreenTaskRecord, reason: text) -> GreenTaskRecord:
+    """Park a runnable green task without changing its home CPU."""
+    GreenTaskRecord(
+        task_id: task.task_id,
+        home_cpu: task.home_cpu,
+        assigned_cpu: task.assigned_cpu,
+        affinity_mask: task.affinity_mask,
+        state: GREEN_TASK_PARKED,
+        park_reason: reason,
+        result: task.result
+    )
+
+pub fn green_task_unpark(task: GreenTaskRecord, waker_cpu: i64, home_load: i64, waker_load: i64, wake_affine_threshold: i64) -> GreenTaskWakeDecision:
+    """Wake a parked green task and choose the carrier CPU for re-enqueue."""
+    if task.state != GREEN_TASK_PARKED:
+        GreenTaskWakeDecision(
+            task: task,
+            placement: GreenWorkerPlacement(cpu: task.assigned_cpu, reason: "not_parked"),
+            should_enqueue: false
+        )
+    else:
+        val placement = green_worker_choose_wake_cpu(
+            task.home_cpu,
+            waker_cpu,
+            task.affinity_mask,
+            home_load,
+            waker_load,
+            wake_affine_threshold
+        )
+        GreenTaskWakeDecision(
+            task: GreenTaskRecord(
+                task_id: task.task_id,
+                home_cpu: task.home_cpu,
+                assigned_cpu: placement.cpu,
+                affinity_mask: task.affinity_mask,
+                state: GREEN_TASK_RUNNABLE,
+                park_reason: "",
+                result: task.result
+            ),
+            placement: placement,
+            should_enqueue: true
+        )
+
+pub fn green_task_complete(task: GreenTaskRecord, result: i64) -> GreenTaskRecord:
+    """Mark a logical green task complete and preserve its last carrier CPU.
+    First-write-wins: if the task is already done, the existing result is
+    preserved and the call is a no-op."""
+    if task.state == GREEN_TASK_DONE:
+        task
+    else:
+        GreenTaskRecord(
+            task_id: task.task_id,
+            home_cpu: task.home_cpu,
+            assigned_cpu: task.assigned_cpu,
+            affinity_mask: task.affinity_mask,
+            state: GREEN_TASK_DONE,
+            park_reason: "",
+            result: result
+        )

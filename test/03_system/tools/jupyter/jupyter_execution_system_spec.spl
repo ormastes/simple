@@ -1,0 +1,79 @@
+# @cover src/app/jupyter_kernel/main.spl 80%
+# @cover src/app/jupyter_kernel/protocol.spl 80%
+# Jupyter Kernel Execution System Tests
+# Tests: kernel process starts and handles messages
+
+# tag: slow, system
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn send_kernel_message(msg: text) -> text:
+    val tmp = "/tmp/jupyter_test_{rt_getpid()}_{rt_time_now_unix_micros()}.txt"
+    rt_file_write_text(tmp, msg + "\n")
+    val cmd = "RUNTIME=src/compiler_rust/target/release/simple; if [ ! -x \"$RUNTIME\" ]; then RUNTIME=src/compiler_rust/target/bootstrap/simple; fi; if [ ! -x \"$RUNTIME\" ]; then RUNTIME=bin/simple; fi; cat {tmp} | timeout 5 \"$RUNTIME\" run src/app/jupyter_kernel/main.spl 2>/dev/null"
+    val (stdout, stderr, code) = rt_process_run("bash", ["-c", cmd])
+    rt_file_delete(tmp)
+    stdout
+
+describe "Jupyter Kernel Execution":
+    slow_it "should respond to kernel_info_request":
+        val msg = "{\"channel\":\"shell\",\"msg_type\":\"kernel_info_request\",\"msg_id\":\"test1\",\"session\":\"s1\",\"content\":{}}"
+        val output = send_kernel_message(msg)
+        expect(output).to_contain("kernel_info_reply")
+        expect(output).to_contain("simple")
+
+    slow_it "should respond to shutdown_request":
+        val msg = "{\"channel\":\"control\",\"msg_type\":\"shutdown_request\",\"msg_id\":\"test2\",\"session\":\"s1\",\"content\":{}}"
+        val output = send_kernel_message(msg)
+        expect(output).to_contain("shutdown_reply")
+
+    slow_it "should handle is_complete_request for complete code":
+        val msg = "{\"channel\":\"shell\",\"msg_type\":\"is_complete_request\",\"msg_id\":\"test3\",\"session\":\"s1\",\"content\":{\"code\":\"val x = 42\"}}"
+        val output = send_kernel_message(msg)
+        expect(output).to_contain("complete")
+
+    slow_it "should handle is_complete_request for incomplete code":
+        val msg = "{\"channel\":\"shell\",\"msg_type\":\"is_complete_request\",\"msg_id\":\"test4\",\"session\":\"s1\",\"content\":{\"code\":\"fn foo():\"}}"
+        val output = send_kernel_message(msg)
+        expect(output).to_contain("incomplete")
+
+    slow_it "should respond to interrupt_request on the control channel (design SS5.1)":
+        val msg = "{\"channel\":\"control\",\"msg_type\":\"interrupt_request\",\"msg_id\":\"test5\",\"session\":\"s1\",\"content\":{}}"
+        val output = send_kernel_message(msg)
+        expect(output).to_contain("interrupt_reply")
+        expect(output).to_contain("\"status\":\"ok\"")
+
+    slow_it "should reply on the simple_lane comm with the current mode (design SS5.1, SS6)":
+        val msg = "{\"channel\":\"shell\",\"msg_type\":\"comm_open\",\"msg_id\":\"test6\",\"session\":\"s1\",\"content\":{\"comm_id\":\"c1\",\"target_name\":\"simple_lane\",\"data\":{}}}"
+        val output = send_kernel_message(msg)
+        expect(output).to_contain("comm_msg")
+        expect(output).to_contain("\"comm_id\":\"c1\"")
+        expect(output).to_contain("interpreter")
+
+    slow_it "should change the session default mode via a simple_lane set_mode comm_msg":
+        val open_msg = "{\"channel\":\"shell\",\"msg_type\":\"comm_open\",\"msg_id\":\"test7a\",\"session\":\"s1\",\"content\":{\"comm_id\":\"c2\",\"target_name\":\"simple_lane\",\"data\":{}}}"
+        val set_msg = "{\"channel\":\"shell\",\"msg_type\":\"comm_msg\",\"msg_id\":\"test7b\",\"session\":\"s1\",\"content\":{\"comm_id\":\"c2\",\"data\":{\"set_mode\":\"interpreter\"}}}"
+        val combined = open_msg + "\n" + set_msg
+        val tmp = "/tmp/jupyter_test_multi_{rt_getpid()}_{rt_time_now_unix_micros()}.txt"
+        rt_file_write_text(tmp, combined + "\n")
+        val cmd = "RUNTIME=src/compiler_rust/target/release/simple; if [ ! -x \"$RUNTIME\" ]; then RUNTIME=src/compiler_rust/target/bootstrap/simple; fi; if [ ! -x \"$RUNTIME\" ]; then RUNTIME=bin/simple; fi; cat {tmp} | timeout 5 \"$RUNTIME\" run src/app/jupyter_kernel/main.spl 2>/dev/null"
+        val (output, stderr, code) = rt_process_run("bash", ["-c", cmd])
+        rt_file_delete(tmp)
+        expect(output).to_contain("\"comm_id\":\"c2\"")
+        expect(output).to_contain("\"mode\":\"interpreter\"")
+
+    slow_it "wires %reset into execute_request (P1 magics -> K1 session manager)":
+        # Regression for a real gap P3 found: main.spl never imported
+        # std.notebook.magics and always passed an empty cell-override to
+        # execute_cell, so K3's magics were dead code -- every %-line was
+        # sent straight to the interpreter as source and failed to compile.
+        val msg = "{\"channel\":\"shell\",\"msg_type\":\"execute_request\",\"msg_id\":\"test8\",\"session\":\"s1\",\"content\":{\"code\":\"%reset\"}}"
+        val output = send_kernel_message(msg)
+        expect(output).to_contain("\"status\":\"ok\"")
+        expect(output).to_contain("session reset")
+        expect(output).to_not_contain("ExecutionError")

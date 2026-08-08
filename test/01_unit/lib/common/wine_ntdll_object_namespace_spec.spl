@@ -1,0 +1,43 @@
+use common.wine_ntdll_object_namespace.{
+    wine_ntdll_execute_object_namespace,
+    wine_ntdll_object_namespace_default
+}
+
+describe "Wine NTDLL object namespace bridge":
+    it "executes bounded directory object open, query, and close":
+        val result = wine_ntdll_execute_object_namespace(
+            ["NtOpenDirectoryObject", "NtQueryDirectoryObject", "NtClose"],
+            wine_ntdll_object_namespace_default(),
+            "\\KnownDlls"
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.handle).to_equal(0x500)
+        expect(result.entries).to_equal("kernel32.dll ntdll.dll user32.dll")
+        expect(result.operations).to_equal("NtOpenDirectoryObject NtQueryDirectoryObject NtClose")
+
+    it "keeps object namespace dispatch ordered and bounded":
+        val out_of_order = wine_ntdll_execute_object_namespace(
+            ["NtQueryDirectoryObject", "NtOpenDirectoryObject", "NtClose"],
+            wine_ntdll_object_namespace_default(),
+            "\\KnownDlls"
+        )
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("ntdll-object-namespace-sequence-expected:NtOpenDirectoryObject")
+
+        val wrong_family = wine_ntdll_execute_object_namespace(
+            ["NtOpenDirectoryObject", "NtQueryDirectoryObject", "NtCreateFile"],
+            wine_ntdll_object_namespace_default(),
+            "\\KnownDlls"
+        )
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:NtCreateFile")
+
+    it "rejects unknown object directories":
+        val result = wine_ntdll_execute_object_namespace(
+            ["NtOpenDirectoryObject", "NtQueryDirectoryObject", "NtClose"],
+            wine_ntdll_object_namespace_default(),
+            "\\Missing"
+        )
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("NtOpenDirectoryObject:directory-not-found")

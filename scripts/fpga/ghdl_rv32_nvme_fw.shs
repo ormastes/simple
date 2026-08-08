@@ -1,0 +1,109 @@
+#!/bin/sh
+# GHDL SoC-sim: run the minimal NVMe self-test firmware on the rv32 soft-core.
+#
+# This is the GHDL-first ("qemu is early bug finding") stepping stone toward
+# running the firmware on the KV260 FPGA. It:
+#   1. relinks the gate's firmware objects (build/test-artifacts/nvme_fw_rv32_
+#      minimal{,_start}.o, produced by scripts/check/check-nvme-rv32-minimal-live.shs)
+#      with examples/09_embedded/fpga_riscv/rtl/nvme_fw_rv32_bram.ld, which
+#      confines .text+.rodata+stack to ONE non-aliasing 64 KB BRAM window that
+#      the soft-core's 16-bit-truncated address decoder can actually address;
+#   2. flattens the image into rv32_payload.mem (the core's init_rom file);
+#   3. analyses/elaborates the core + tb_rv32_nvme_fw_smoke and runs it;
+#   4. checks for the SAME determinate marker the QEMU gate checks
+#      ("ALL RV32 NVME FW CHECKS PASS").
+#
+# NO Vivado. GHDL simulation only.
+set -e
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+RTL_DIR="$ROOT_DIR/examples/09_embedded/fpga_riscv/rtl"
+WORK_DIR="$ROOT_DIR/build/ghdl/rv32_nvme_fw"
+LD_SCRIPT="$RTL_DIR/nvme_fw_rv32_bram.ld"
+FW_OBJ="${FW_OBJ:-$ROOT_DIR/build/test-artifacts/nvme_fw_rv32_minimal.o}"
+START_OBJ="${START_OBJ:-$ROOT_DIR/build/test-artifacts/nvme_fw_rv32_minimal_start.o}"
+PREBUILT_FW_ELF="${FW_ELF:-}"
+
+command -v ghdl >/dev/null 2>&1 || { echo "ERROR: ghdl not found in PATH"; exit 1; }
+command -v ld.lld >/dev/null 2>&1 || { echo "ERROR: ld.lld not found in PATH"; exit 1; }
+
+if [ -z "$PREBUILT_FW_ELF" ] && { [ ! -f "$FW_OBJ" ] || [ ! -f "$START_OBJ" ]; }; then
+  echo "ERROR: firmware objects missing. Run first:"
+  echo "  scripts/check/check-nvme-rv32-minimal-live.shs"
+  echo "(it native-builds $FW_OBJ and $START_OBJ)."
+  exit 1
+fi
+
+mkdir -p "$WORK_DIR"
+echo "=== GHDL RV32 NVMe firmware SoC-sim ==="
+
+# 1. Relink firmware into the single 64 KB BRAM window, or admit an already
+# linked image whose reset entry and stack are both inside that window.
+FW_ELF="$WORK_DIR/nvme_fw_rv32_bram.elf"
+if [ -n "$PREBUILT_FW_ELF" ]; then
+  [ -f "$PREBUILT_FW_ELF" ] || { echo "ERROR: prebuilt firmware ELF missing: $PREBUILT_FW_ELF"; exit 1; }
+  entry="$(llvm-nm -n "$PREBUILT_FW_ELF" | awk '$3=="_rv32_direct_entry"{print $1}')"
+  stack="$(llvm-nm -n "$PREBUILT_FW_ELF" | awk '$3=="_stack_top"{print $1}')"
+  [ "$entry" = "80000000" ] || { echo "ERROR: prebuilt reset entry is not 0x80000000: $entry"; exit 1; }
+  [ -n "$stack" ] && [ "$((0x$stack))" -le "$((0x80010000))" ] || {
+    echo "ERROR: prebuilt stack is outside 64 KiB BRAM: $stack"; exit 1;
+  }
+  cp "$PREBUILT_FW_ELF" "$FW_ELF"
+  echo "  Using prebuilt firmware ELF (entry=0x$entry stack=0x$stack)"
+else
+  FW_OBJ_LOCAL="$WORK_DIR/fw.o"
+  cp "$FW_OBJ" "$FW_OBJ_LOCAL"
+  # The firmware object defines its own _start; the assembly start-stub supplies the
+  # real one (same as the QEMU gate). Rename the object's _start out of the way.
+  llvm-objcopy --redefine-sym _start=__simple_unused_start "$FW_OBJ_LOCAL"
+  LIBGCC="$(riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -print-libgcc-file-name)"
+  printf "  Linking firmware (%s) ... " "$(basename "$LD_SCRIPT")"
+  ld.lld -m elf32lriscv -T "$LD_SCRIPT" --no-relax --gc-sections \
+    -o "$FW_ELF" "$START_OBJ" "$FW_OBJ_LOCAL" "$LIBGCC"
+  echo "OK"
+fi
+
+# 2. Flatten to the core's init_rom file (32-bit little-endian words, hex).
+llvm-objcopy -O binary "$FW_ELF" "$WORK_DIR/fw.bin"
+od -An -v -tx4 -w4 "$WORK_DIR/fw.bin" | awk '{print $1}' > "$WORK_DIR/rv32_payload.mem"
+# The core also opens a data ROM (rv32_fat32.mem); the self-test fw does not use
+# it, so a single zero word is enough to satisfy the file open.
+printf "00000000\n" > "$WORK_DIR/rv32_fat32.mem"
+echo "  Firmware image: $(wc -l < "$WORK_DIR/rv32_payload.mem") words (rv32_payload.mem)"
+
+# 3. Analyse + elaborate (core is self-contained; TB drives it directly).
+printf "  Analysing core + testbench ... "
+out="$(ghdl -a --std=08 --workdir="$WORK_DIR" \
+  "$RTL_DIR/rv32_exec_core.vhd" \
+  "$RTL_DIR/tb_rv32_nvme_fw_smoke.vhd" 2>&1)" || true
+if echo "$out" | grep -q ":error:"; then
+  echo "FAIL"; echo "$out" | tail -40; exit 1
+fi
+echo "OK"
+
+printf "  Elaborating ... "
+out="$(cd "$WORK_DIR" && ghdl -e --std=08 --workdir="$WORK_DIR" tb_rv32_nvme_fw_smoke 2>&1)" || true
+if echo "$out" | grep -qi "error"; then
+  echo "FAIL"; echo "$out" | tail -40; exit 1
+fi
+echo "OK"
+
+# 4. Run from WORK_DIR so the core's relative init_rom open finds rv32_payload.mem.
+printf "  Running simulation ... "
+sim="$(cd "$WORK_DIR" && ghdl -r --std=08 --workdir="$WORK_DIR" \
+  tb_rv32_nvme_fw_smoke --stop-time=18ms 2>&1)" || true
+echo
+echo "$sim" | grep -E "RV32_NVME_FW_(PASS|FAIL_MARKER|STUCK|TIMEOUT)" | tail -8
+if echo "$sim" | grep -q "RV32_NVME_FW_PASS" &&
+   ! echo "$sim" | grep -q "RV32_NVME_FW_TIMEOUT"; then
+  echo "STATUS: PASS ghdl-rv32-nvme-fw (firmware ran on soft-core, marker matches QEMU)"
+  exit 0
+fi
+if echo "$sim" | grep -q "RV32_NVME_FW_FAIL_MARKER"; then
+  echo "STATUS: DIVERGENCE ghdl-rv32-nvme-fw (fw ran but selftest returned nonzero on"
+  echo "        the soft-core while QEMU returns 0 — real core computation divergence)"
+  exit 2
+fi
+echo "STATUS: FAIL ghdl-rv32-nvme-fw (fw did not reach a marker — see sim log above)"
+exit 1

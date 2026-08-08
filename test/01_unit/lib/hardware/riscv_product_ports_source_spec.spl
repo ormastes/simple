@@ -1,0 +1,49 @@
+use std.spec
+use std.io.file_read_text
+
+fn expect_flat_product_ports(path: text, bus_ports: [text]):
+    val source = file_read_text(path)
+    val rvfi_ports = [
+        "rvfi_valid", "rvfi_order", "rvfi_insn", "rvfi_trap", "rvfi_halt",
+        "rvfi_intr", "rvfi_mode", "rvfi_ixl", "rvfi_rs1_addr",
+        "rvfi_rs2_addr", "rvfi_rs1_rdata", "rvfi_rs2_rdata",
+        "rvfi_rd_addr", "rvfi_rd_wdata", "rvfi_pc_rdata",
+        "rvfi_pc_wdata", "rvfi_mem_addr", "rvfi_mem_rmask",
+        "rvfi_mem_wmask", "rvfi_mem_rdata", "rvfi_mem_wdata"
+    ]
+    for port in bus_ports:
+        expect(source).to_contain("{port}:")
+    for port in rvfi_ports:
+        expect(source).to_contain("{port}:")
+
+describe "RISC-V product scalar ports":
+    it "keeps RV32 platform sampling ahead of the protected cycle":
+        val path = "src/lib/hardware/rv32i_rtl/protected_entry.spl"
+        val source = file_read_text(path)
+        expect_flat_product_ports(path, ["bus_valid", "bus_addr", "bus_size",
+            "bus_write", "bus_wdata", "bus_is_pte", "bus_atomic", "bus_lock"])
+        expect(source).to_contain("msip: bool, mtip: bool, meip: bool")
+        expect(source).to_contain("stip: bool, seip: bool, time_value: i64")
+        expect(source).to_contain("response_data: u32) -> Core32ProductPorts")
+        expect(source).to_contain("@flatten_struct_output")
+        expect(source).to_contain("rvfi_mode: u32 @bits(2)")
+        expect(source).to_contain("rvfi_rs1_addr: u32 @bits(5)")
+        expect(source).to_contain("rvfi_mem_rmask: u32 @bits(4)")
+        expect(source).to_contain("core32_set_pending_interrupts(_core32_product_state")
+        expect(source).to_contain("core32_set_supervisor_pending_interrupts(sampled")
+        expect(source).to_contain("core32_set_time_value(sampled, time_value)")
+        expect(source.index_of("core32_set_time_value(sampled, time_value)")).to_be_less_than(
+            source.index_of("core32_cycle(sampled"))
+
+    it "keeps RV64IMAC memory images and DTB outside the CPU ABI":
+        val path = "src/lib/hardware/rv64gc_rtl/imac_entry.spl"
+        val source = file_read_text(path)
+        expect_flat_product_ports(path, ["bus_valid", "bus_addr", "bus_size",
+            "bus_write", "bus_wdata", "bus_is_pte", "bus_atomic"])
+        expect(source).to_contain("response_data: i64) -> Core64ImacProductPorts")
+        expect(source).to_contain("@flatten_struct_output")
+        expect(source).to_contain("rvfi_mode: u32 @bits(2)")
+        expect(source).to_contain("rvfi_rs1_addr: u32 @bits(5)")
+        expect(source).to_contain("rvfi_mem_rmask: u32 @bits(8)")
+        expect(source).to_contain("DTB bytes and memory images belong to the SoC memory owner")
+        expect(source.contains("dtb:")).to_equal(false)

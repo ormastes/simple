@@ -1,0 +1,80 @@
+use compiler.tools.lint.main.{Linter, LintLevel, lint_cli_source}
+use compiler.semantics.lint.wide_public.{WidePublicWarning, check_wide_public_file}
+use compiler.core.ast.{ast_reset, decl_export_names}
+use compiler.core.parser.{parser_has_errors, parser_set_had_error}
+
+extern fn rt_exit(code: i32)
+
+val wide_source = "# module lint belongs at line one\n\nexport symbol00\nexport symbol01\nexport symbol02\nexport symbol03\nexport symbol04\nexport symbol05\nexport symbol06\nexport symbol07\nexport symbol08\nexport symbol09\nexport symbol10\nexport symbol11\nexport symbol12\nexport symbol13\nexport symbol14\nexport symbol15\nexport symbol16\nexport symbol17\nexport symbol18\nexport symbol19\nexport symbol20\nexport symbol21\nexport symbol22\nexport symbol23\nexport symbol24\nexport symbol25\nexport symbol26\nexport symbol27\nexport symbol28\nexport symbol29\nexport symbol30\n"
+var generic_has_wide = false
+var wide_count = 0
+var wide_line = 0
+var default_warn = false
+var message_is_clean = false
+val linter = Linter.new()
+val old_shape_warning = WidePublicWarning(
+    code: "W0404", severity: "WARNING", message: "old shape", export_count: 31, threshold: 30
+)
+
+for result in linter.lint_source("/tmp/lint_wide_generic.spl", wide_source):
+    if result.lint.code == "W0404":
+        generic_has_wide = true
+for result in lint_cli_source(linter, "/tmp/lint_wide_cli.spl", wide_source):
+    if result.lint.code == "W0404":
+        wide_count = wide_count + 1
+        wide_line = result.line
+        if result.lint.level == LintLevel.Warn and result.lint.message.contains("31 symbols"):
+            default_warn = true
+        if result.lint.message == "module exports too many public symbols (31 symbols, threshold 30)":
+            message_is_clean = true
+
+var deny_is_deny = false
+for result in lint_cli_source(linter, "/tmp/lint_wide_deny.spl", "@deny(visibility_boundary)\n" + wide_source):
+    if result.lint.code == "W0404" and result.lint.level == LintLevel.Deny:
+        deny_is_deny = true
+
+var allow_has_wide = false
+for result in lint_cli_source(linter, "/tmp/lint_wide_allow.spl", "@allow(visibility_boundary)\n" + wide_source):
+    if result.lint.code == "W0404":
+        allow_has_wide = true
+
+var init_has_wide = false
+for result in lint_cli_source(linter, "/tmp/__init__.spl", wide_source):
+    if result.lint.code == "W0404":
+        init_has_wide = true
+
+var mod_has_wide = false
+for result in lint_cli_source(linter, "/tmp/mod.spl", wide_source):
+    if result.lint.code == "W0404":
+        mod_has_wide = true
+
+var windows_facade_has_wide = false
+for result in lint_cli_source(linter, "C:\\tmp\\__init__.spl", wide_source):
+    if result.lint.code == "W0404":
+        windows_facade_has_wide = true
+for result in lint_cli_source(linter, "C:\\tmp\\mod.spl", wide_source):
+    if result.lint.code == "W0404":
+        windows_facade_has_wide = true
+
+var notmod_count = 0
+for result in lint_cli_source(linter, "/tmp/notmod.spl", wide_source):
+    if result.lint.code == "W0404":
+        notmod_count = notmod_count + 1
+
+parser_set_had_error(true)
+val _ = lint_cli_source(linter, "/tmp/lint_wide_parser_state.spl", wide_source)
+val parser_state_preserved = parser_has_errors()
+parser_set_had_error(false)
+
+ast_reset()
+val at_threshold = decl_export_names(["s00", "s01", "s02", "s03", "s04", "s05", "s06", "s07", "s08", "s09", "s10", "s11", "s12", "s13", "s14", "s15", "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23", "s24", "s25", "s26", "s27", "s28", "s29", "s00"], 0)
+val over_threshold = decl_export_names(["s00", "s01", "s02", "s03", "s04", "s05", "s06", "s07", "s08", "s09", "s10", "s11", "s12", "s13", "s14", "s15", "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23", "s24", "s25", "s26", "s27", "s28", "s29", "s30"], 0)
+val duplicate_under_threshold = check_wide_public_file([at_threshold], "/tmp/regular.spl").len() == 0
+val direct_over_threshold = check_wide_public_file([over_threshold], "/tmp/regular.spl").len() == 1
+
+if generic_has_wide or wide_count != 1 or wide_line != 1 or not default_warn or not message_is_clean or not deny_is_deny or allow_has_wide or init_has_wide or mod_has_wide or windows_facade_has_wide or notmod_count != 1 or not parser_state_preserved or old_shape_warning.line != 1 or not duplicate_under_threshold or not direct_over_threshold:
+    print "FAIL: W0404 CLI parity changed generic ownership, module line, configuration, facade, or parser state"
+    rt_exit(1)
+
+print "PASS: CLI owner adds W0404 once with module line and config parity"
+rt_exit(0)

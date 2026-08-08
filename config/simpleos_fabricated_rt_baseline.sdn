@@ -1,0 +1,223 @@
+# SimpleOS fabricated `rt_*` baseline -- SHRINK-ONLY RATCHET (task #97)
+#
+# Format: one `<entry-key> <rt_symbol>` per line. `#` starts a comment.
+# `<entry-key>` is the output binary's basename (see `simpleos_entry_key`).
+#
+# Semantics, enforced by `simpleos_check_no_fabricated_rt_stubs`:
+#   the link FAILS when an entry's fabricated set is not a SUBSET of its
+#   baseline. A missing file means an EMPTY baseline, i.e. maximum strictness --
+#   deleting this file can never weaken the gate. An entry with no rows is
+#   likewise maximally strict, so unmeasured entries are never fail-open.
+#
+# THIS IS NOT AN ALLOWLIST.
+#   allowlist = `simpleos_rt_symbol_is_optional_backend`, a permanent semantic
+#               claim that nil IS the correct answer for that symbol.
+#   baseline  = this file: dated, per-entry, shrink-only debt that must go away.
+# Never add a line here to make a new failure go away. New fabrication is the
+# exact thing this gate exists to catch; implement the symbol, or justify it in
+# the allowlist with a rationale naming the caller that treats nil as
+# "unavailable". Every remediation wave DELETES lines here in the same commit
+# that lands the implementation.
+#
+# CLASSIFY BY BODY, NEVER BY LINKAGE OR BY NAME.
+#   Weak linkage does NOT imply fabricated: `baremetal_stubs.c` defines
+#   rt_memcpy / rt_memset / rt_dma_alloc / rt_dma_phys_of / rt_dma_virt_of /
+#   rt_file_read_bytes with `__attribute__((weak))` and REAL bodies. An earlier
+#   revision built its "real" set with `extract_symbols_nm`, which drops W/w/V/v
+#   outright, so all six were permanently unclassifiable as real and the guard
+#   refused the link on the very entry its baseline was measured from. See
+#   doc/08_tracking/bug/simpleos_fabricated_rt_guard_weak_real_false_positive_2026-07-28.md
+#   Name prefixes are equally forbidden as a classifier: an `rt_simd_` prefix
+#   allowlist would have swallowed `rt_engine2d_simd_*`, the real framebuffer
+#   span blitters, which appear in the debt list below precisely because they
+#   ARE fabricated on this arch.
+#
+# REGENERATION -- this procedure MUST stay identical to what the code does.
+# (The previous mismatch between this comment and the implementation is exactly
+# how the weak-real defect hid: the procedure used plain `nm`, which SHOWS weak
+# definitions, while the code used `extract_symbols_nm`, which DROPS them.)
+# Build the entry's boot objects with the same flags as
+# `compile_simpleos_x86_64_c` (cc -c -m64 -ffreestanding -fno-pic -fno-pie
+# -mno-red-zone -ffunction-sections -fdata-sections <OPT>), where <OPT> follows
+# the LINK's opt level, not a fixed -O2: `opt_level <= 0` gives -O0, 1 gives
+# -Os, otherwise -O2. The entry measured below builds with `--opt-level=none`,
+# so its REAL_OBJS are -O0. (An earlier revision of this comment said -O2
+# unconditionally; the -O0 and -O2 shapes of a constant return differ, so the
+# wrong flag silently changes the `trivial` set.) Then:
+#
+#   REAL_OBJS = crt0.o baremetal_stubs.o type_stubs.o module_init.o
+#               (auto_stubs.o is deliberately EXCLUDED -- being satisfied only
+#                by that object is the condition being detected)
+#               module_init.o is generated per link and defines no rt_* at all,
+#               so omitting it from a manual regeneration does not move the set.
+#
+#   trivial  = `<objdump> -d -r --no-show-raw-insn REAL_OBJS` rt_* whose body is
+#              only frame setup plus a constant return
+#              (`simpleos_trivial_body_rt_symbols`)
+#              `-r` is REQUIRED and is part of the predicate, not cosmetic. A
+#              relocated immediate prints as a bare literal: the body of
+#              `rt_baremetal_heap_start` (`return (uintptr_t)_heap;`) is
+#              `movl $0x0, %eax; retq` and is indistinguishable from
+#              `return 0;` until the relocation is shown. Without `-r` this
+#              procedure reports 26 trivial symbols for the entry below; with
+#              `-r` it reports 25, and the one it drops is a real function.
+#              <objdump> may be EITHER the tool `find_objdump_portable()`
+#              selects (on Linux it prefers llvm-objdump) or the matching GNU
+#              cross-objdump: as of 2026-07-28 the classifier normalizes both
+#              the mnemonic suffix (`xorl` vs `xor`) and the operand spacing
+#              (`%eax, %eax` vs `%eax,%eax`), and the two tools are verified to
+#              produce identical verdicts on x86-64, aarch64 and riscv probe
+#              objects at -O0 and -O2. Before that fix the x86-64 branch matched
+#              GNU spacing only while the code selected llvm-objdump, so this
+#              channel detected NOTHING on x86-64 -- the arch these rows were
+#              measured on. Same class of doc-vs-code drift as the
+#              `nm`/`extract_symbols_nm` mismatch described above.
+#   real     = `nm REAL_OBJS` defined symbols at ANY binding, i.e. skipping only
+#              U/u and KEEPING W/w/V/v (`simpleos_defined_symbols_any_binding`),
+#              MINUS `trivial`;  union  `nm <user objects>` defined symbols
+#   refs     = `nm -u <user objects>` names beginning `rt_`
+#              (`simpleos_undefined_rt_symbols`)
+#
+#   channel 1 = refs - real
+#   channel 2 = trivial INTERSECT refs
+#   fabricated = (channel 1 UNION channel 2) - simpleos_rt_symbol_is_optional_backend
+#
+# --- x86_64, measured 2026-07-28 against
+# --- build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf.
+# --- Both channels measured, under the tightened allowlist in which
+# --- `rt_arm_virtio_` is a SIX-NAME exact list rather than a prefix (the three
+# --- sector-data-path symbols it used to swallow are now carried here as debt).
+# --- Reproduced identically against all three retained user-object sets
+# --- (native-objects-tJ7aAf/uSdrJr/wjwkwp, 689/679/680 objects): 55 fabricated
+# --- under the old weak-dropping semantics, 49 under body classification, the
+# --- same 6 weak-real symbols recovered each time.
+# --- CAVEAT: the ELF's own object directory was not retained by the build, so
+# --- these three 2026-07-22 object sets are the closest available proxy for the
+# --- current link. They agree with each other exactly.
+# --- Entries other than this one are not yet measured; they carry no rows and
+# --- are therefore maximally strict, which is the intended ratchet behaviour.
+#
+# --- RE-MEASURED 2026-07-28 after the x86-64 channel was un-blinded. Until that
+# --- fix `simpleos_trivial_insn_class` matched GNU objdump spelling while the
+# --- code ran llvm-objdump, so channel 2 contributed ZERO rows on x86-64 and
+# --- every row above came from channel 1 alone. Turning the channel on is a
+# --- STAGED RATCHET: the newly-visible set is locked in as baseline here and
+# --- only NEW fabrication fails the link. No pre-existing debt was required to
+# --- be fixed first, and the predicate was not weakened to shrink the number.
+# --- Fresh inputs, not the 2026-07-22 proxies: user objects came from a live
+# --- `native-build --target x86_64-unknown-none --opt-level=none` of
+# --- examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl run on
+# --- 2026-07-28 with the pure-Simple build/bootstrap/stage3 binary (exit 0,
+# --- 9674 KB kernel, 713-file staging directory snapshotted mid-link since the
+# --- build deletes it on success); REAL_OBJS rebuilt from
+# --- examples/09_embedded/simple_os/arch/x86_64/boot/{crt0.s,baremetal_stubs.c,
+# --- type_stubs.c} with the -O0 flags above.
+# --- Measured: `trivial` = 25 rt_* (26 before `-r` was added; the extra one was
+# --- rt_baremetal_heap_start, a REAL function whose relocated immediate looked
+# --- like a constant). `trivial INTERSECT refs` = 9, of which 8 were already
+# --- carried above or allowlisted. Net: exactly ONE new row,
+# --- rt_gui_simd_fill_enabled -- classified by BODY (`movl $0x1, %eax; retq`,
+# --- no relocation) and confirmed in baremetal_stubs.c as a bare `return 1;`
+# --- feature flag under `#if defined(__x86_64__)`. It is debt, not an
+# --- allowlist entry: nothing has established that a constant 1 is the correct
+# --- permanent answer for it.
+# --- KNOWN GAP, deliberately not papered over: the ELF above is produced by
+# --- native-build's own freestanding link ("Linked (freestanding) ... via clang
+# --- --target=x86_64-unknown-elf"), NOT by `link_simpleos_x86_64`, so this
+# --- guard does not actually run on that build path. These rows describe what
+# --- the guard WOULD compute for this entry; they are not yet confirmed by an
+# --- observed live refusal on x86-64.
+simpleos_wm_production_desktop.elf rt_arm_virtio_blk_dma_base
+simpleos_wm_production_desktop.elf rt_arm_virtio_blk_read_sector_direct
+simpleos_wm_production_desktop.elf rt_arm_virtio_blk_sector_bytes
+simpleos_wm_production_desktop.elf rt_arm_virtq_used_idx
+simpleos_wm_production_desktop.elf rt_array_data_ptr
+simpleos_wm_production_desktop.elf rt_array_data_ptr_text
+simpleos_wm_production_desktop.elf rt_array_last
+simpleos_wm_production_desktop.elf rt_atexit_check
+simpleos_wm_production_desktop.elf rt_atexit_install
+simpleos_wm_production_desktop.elf rt_cpu_arch_name
+simpleos_wm_production_desktop.elf rt_cstring_to_text
+simpleos_wm_production_desktop.elf rt_dma_bytes_to_array
+simpleos_wm_production_desktop.elf rt_dma_cache_line_size
+simpleos_wm_production_desktop.elf rt_dma_free
+simpleos_wm_production_desktop.elf rt_dma_sync_for_cpu
+simpleos_wm_production_desktop.elf rt_dma_sync_for_device
+simpleos_wm_production_desktop.elf rt_engine2d_simd_copy_row_u32
+simpleos_wm_production_desktop.elf rt_engine2d_simd_fill_rows_u32
+simpleos_wm_production_desktop.elf rt_engine2d_simd_fill_row_u32
+simpleos_wm_production_desktop.elf rt_file_hash
+simpleos_wm_production_desktop.elf rt_file_read_lines
+simpleos_wm_production_desktop.elf rt_file_remove
+simpleos_wm_production_desktop.elf rt_font_glyph_advance_index
+simpleos_wm_production_desktop.elf rt_font_glyph_bitmap_index
+simpleos_wm_production_desktop.elf rt_font_glyph_index
+simpleos_wm_production_desktop.elf rt_gui_get_glyph_8x16
+simpleos_wm_production_desktop.elf rt_gui_simd_fill_enabled
+simpleos_wm_production_desktop.elf rt_hlt
+simpleos_wm_production_desktop.elf rt_log_target_semihost_write_bytes
+simpleos_wm_production_desktop.elf rt_pool_safepoint
+simpleos_wm_production_desktop.elf rt_process_is_running
+simpleos_wm_production_desktop.elf rt_process_run_bounded
+simpleos_wm_production_desktop.elf rt_process_run_with_limits
+simpleos_wm_production_desktop.elf rt_process_spawn_async
+simpleos_wm_production_desktop.elf rt_reload_segments
+simpleos_wm_production_desktop.elf rt_signal_check
+simpleos_wm_production_desktop.elf rt_signal_install
+simpleos_wm_production_desktop.elf rt_simpleos_log_set_device
+simpleos_wm_production_desktop.elf rt_sleep_nanos
+simpleos_wm_production_desktop.elf rt_string_builder_finish
+simpleos_wm_production_desktop.elf rt_string_builder_free
+simpleos_wm_production_desktop.elf rt_string_builder_len
+simpleos_wm_production_desktop.elf rt_string_builder_new
+simpleos_wm_production_desktop.elf rt_string_builder_push
+simpleos_wm_production_desktop.elf rt_text_is_ascii
+simpleos_wm_production_desktop.elf rt_typed_words_u64_at
+simpleos_wm_production_desktop.elf rt_webgpu_adapter_count
+simpleos_wm_production_desktop.elf rt_webgpu_adapter_is_cpu
+simpleos_wm_production_desktop.elf rt_webgpu_adapter_name
+simpleos_wm_production_desktop.elf rt_x86_ap_trampoline_phys
+
+# --- riscv64, measured 2026-07-28, when the body classifier first became able
+# --- to see RISC-V at all. Before this the classifier knew only x86-64 and
+# --- aarch64 mnemonics, scored 0 of 4 on a probe of unambiguous RISC-V fakes,
+# --- and the rv32/rv64 link sites therefore carried NO guard call
+# --- (doc/08_tracking/bug/simpleos_fabricated_rt_guard_riscv_classifier_inert_2026-07-28.md).
+# --- It now scores 4 of 4, and 11 of 11 against the stub source that
+# --- link_simpleos_riscv64 generates. Both disassemblers agree exactly.
+#
+# --- PROVENANCE / CAVEAT -- read before trusting or extending these rows.
+# --- These were NOT taken from a completed pure-Simple link. The deployed
+# --- bin/simple is currently the Rust bootstrap seed, whose own Rust linker
+# --- handles freestanding links, so link_simpleos_riscv64 is not reachable
+# --- end-to-end from the CLI today and no live per-entry run could be made.
+# --- What WAS measured, with the code's own algorithm and flags:
+# ---   trivial = the 11 constant-return rt_* in the stub source generated by
+# ---     link_simpleos_riscv64, compiled with that function's exact flags
+# ---     (riscv64-unknown-elf-gcc -c -march=rv64gc -mabi=lp64d -ffreestanding
+# ---     -nostdlib -- note NO -O, which is why the bodies carry a full frame).
+# ---   refs = nm -u over the user objects of the riscv64 smoke_entry closure
+# ---     (--target riscv64-unknown-none, --emit-archive, 1 module).
+# ---   channel 2 = trivial INTERSECT refs = the five rows below.
+# --- Channel 1 was deliberately NOT baselined: on this entry it reports ~55
+# --- core runtime symbols (rt_alloc, rt_array_*, rt_string_*, ...) that
+# --- link_simpleos_riscv64 supplies from no object at all -- it links only
+# --- entry_o + user objects + stub_o + init_o. That is an unlinkable
+# --- configuration, not debt, and writing 55 rows here would launder a broken
+# --- route into a baseline. Fix the route, then measure channel 1.
+# --- The six other trivial stub symbols (rt_riscv_qemu_ram_base / _ram_size /
+# --- _reserved_end / _heap_start / _heap_size, rt_riscv_noalloc_pmm_init) are
+# --- NOT referenced by this entry and so are deliberately absent. The five
+# --- memory-map accessors among them are legitimate constant returns and need
+# --- a per-symbol rationale when an entry that does reference them is measured
+# --- -- do not blanket-add them.
+# --- Every other riscv entry (simpleos_riscv64_display_smoke.elf,
+# --- _host_gpu_probe.elf, _fpga.elf, _desktop_service.elf, and every riscv32
+# --- entry) carries NO rows and is therefore maximally strict. riscv32 could
+# --- not be measured at all: its closure needs --backend llvm (cranelift
+# --- refuses hosted riscv32).
+simpleos_riscv64_smf_fs.elf rt_riscv_native_gui_process_render
+simpleos_riscv64_smf_fs.elf rt_riscv_nvfs_probe
+simpleos_riscv64_smf_fs.elf rt_riscv_smf_cli_load
+simpleos_riscv64_smf_fs.elf rt_riscv_smf_cli_probe
+simpleos_riscv64_smf_fs.elf rt_riscv_smf_gui_probe

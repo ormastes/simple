@@ -1,0 +1,59 @@
+# @cover src/compiler_rust/parser/src/expressions/postfix.rs 0%
+"""
+# `expr as T else:` swallows an enclosing `if`'s `else:` — pinning spec
+
+**Feature IDs:** N/A (compiler grammar defect pin)
+**Category:** Compiler
+**Difficulty:** 2/5
+**Status:** Known bug, workaround documented
+
+## Overview
+
+`<expr> as <Type> else: <fallback>` (`CastElse`) is a dedicated postfix
+syntax form, not sugar for an `if`/`else`. When it appears as the
+then-branch of an outer `if <cond>: <expr> as T else: <fallback>` with no
+parentheses around the cast, the parser always binds the trailing `else:`
+to the cast rather than to the outer `if` — producing an `if` with only a
+then-branch. Under the interpreter this silently evaluates to `nil` instead
+of the intended `else` value when the condition is false: a real, silent,
+dual-engine correctness bug, not just a JIT HIR-lowering gap (`Expr::CastElse`
+has no lowering arm at all, so JIT hard-errors on it instead of silently
+misbehaving).
+
+Root-caused and worked around (source-side, parenthesize the cast:
+`(expr as T) else: fallback`) in
+`doc/08_tracking/bug/jit_drawirrendertarget_moduleresolver_gap_2026-07-30.md`.
+This spec pins both halves: the naked form's current wrong behavior (so a
+future parser fix is a deliberate, visible change to this test, not a
+silent one) and the parenthesized workaround's correct behavior (a real
+regression guard).
+"""
+
+use std.spipe.*
+
+# Naked form — matches the exact shape that broke ot_parser_layout.spl etc.
+# before this campaign's fix: `if cond: expr as T else: fallback`.
+fn _naked_cast_else(cond: bool, x: i64) -> i64:
+    if cond: x as i64 else: 0
+
+# Parenthesized workaround — the fix this campaign landed at the real call
+# sites: `if cond: (expr as T) else: fallback`.
+fn _parenthesized_cast_else(cond: bool, x: i64) -> i64:
+    if cond: (x as i64) else: 0
+
+describe "CastElse-swallows-outer-else grammar pin":
+    it "naked form: true branch still returns the cast value":
+        val naked_true = _naked_cast_else(true, 5)
+        expect(naked_true).to_equal(5)
+
+    it "naked form: false branch does NOT return the outer if's 0 fallback today (known bug pin — if this ever equals 0, the parser ambiguity has been fixed and this spec should be updated to assert 0 directly)":
+        val naked_false = _naked_cast_else(false, 5)
+        expect(naked_false == 0).to_equal(false)
+
+    it "parenthesized workaround: true branch returns the cast value":
+        val fixed_true = _parenthesized_cast_else(true, 5)
+        expect(fixed_true).to_equal(5)
+
+    it "parenthesized workaround: false branch correctly returns the outer if's 0 fallback":
+        val fixed_false = _parenthesized_cast_else(false, 5)
+        expect(fixed_false).to_equal(0)

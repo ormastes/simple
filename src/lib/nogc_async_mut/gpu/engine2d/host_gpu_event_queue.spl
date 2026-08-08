@@ -1,0 +1,416 @@
+"""Host/GPU event queue evidence for Engine2D.
+
+This module is intentionally pure Simple. It records the scheduling decision
+that a production queue/backend must preserve: host-owned semantic work stays
+on the host, while coarse GPU batches can be submitted as explicit queue
+packets with receipt evidence. `payload_text` is delivered through runtime
+drain receipts, while `payload_summary` is attached after submit for callers
+that need the same command text before draining.
+"""
+
+use std.nogc_async_mut.gpu.engine2d.backend_lane.{
+    ENGINE2D_HOST_GPU_EXEC_PACKET,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    Engine2dHostGpuLaneResult
+}
+use std.diag.{dbg_stage, dbg_stage_on, dbg_event_hop, dbg_events_on, dbg_count, dbg_counter_value}
+
+val ENGINE2D_HOST_GPU_RUNTIME_LANE_HOST: i64 = 1
+val ENGINE2D_HOST_GPU_RUNTIME_LANE_GPU: i64 = 2
+val ENGINE2D_HOST_GPU_RUNTIME_PHASE_BEGIN: i64 = 1
+val ENGINE2D_HOST_GPU_RUNTIME_PHASE_END: i64 = 2
+val ENGINE2D_HOST_GPU_RUNTIME_KIND_DRAW_IR: i64 = 1
+val ENGINE2D_HOST_GPU_RUNTIME_STATUS_EMPTY: i64 = 0
+val ENGINE2D_HOST_GPU_RUNTIME_STATUS_QUEUED: i64 = 1
+val ENGINE2D_HOST_GPU_RUNTIME_STATUS_SUBMITTED: i64 = 2
+val ENGINE2D_HOST_GPU_RUNTIME_STATUS_COMPLETED: i64 = 3
+val ENGINE2D_HOST_GPU_RUNTIME_STATUS_TYPED_UNAVAILABLE: i64 = 4
+
+struct Engine2dHostGpuEvent:
+    event_id: text
+    source_lane: text
+    requested_lane: text
+    operation: text
+    packet_bytes: i64
+    max_packet_bytes: i64
+    mutates_host_semantics: bool
+    stale_target_cache: bool
+    unresolved_target: bool
+    strict_backend_available: bool
+
+struct Engine2dHostGpuHandlerDecision:
+    event: Engine2dHostGpuEvent
+    target_lane: text
+    reason: text
+    queue_required: bool
+    accepted: bool
+
+struct Engine2dHostGpuQueueSubmitEvidence:
+    event_id: text
+    target_lane: text
+    execution_kind: text
+    packet_bytes: i64
+    queued: bool
+    diagnostic: text
+
+struct Engine2dHostGpuQueueReceiptEvidence:
+    event_id: text
+    target_lane: text
+    committed_on_host: bool
+    gpu_batched: bool
+    diagnostic: text
+
+struct Engine2dHostGpuRuntimeQueue:
+    backend_name: text
+    queue_handle: i64
+    backend_handle: i64
+    runtime_available: bool
+    max_packet_bytes: i64
+
+struct Engine2dHostGpuRuntimeSubmitResult:
+    submitted: bool
+    status: text
+    queue_handle: i64
+    event_id: text
+    packet_id: i64
+    packet_bytes: i64
+    payload_summary: text
+    diagnostic: text
+
+struct Engine2dHostGpuRuntimeDrainResult:
+    drained: i64
+    status: text
+    queue_handle: i64
+    last_backend_handle: i64
+    last_payload_size: i64
+    last_payload_hash: i64
+    last_payload_text: text
+    submitted_count: i64
+    completed_count: i64
+    last_status_code: i64
+    diagnostic: text
+
+struct Engine2dHostGpuRuntimePhaseResult:
+    count: i64
+    status: text
+    queue_handle: i64
+    in_flight_count: i64
+    submitted_count: i64
+    completed_count: i64
+    last_status_code: i64
+    diagnostic: text
+
+struct Engine2dHostGpuRuntimeDispatchResult:
+    dispatched: bool
+    status: text
+    backend_name: text
+    queue_handle: i64
+    backend_handle: i64
+    payload_hash: i64
+    payload_size: i64
+    payload_text: text
+    diagnostic: text
+
+struct Engine2dHostGpuPureQueueState:
+    backend_name: text
+    queue_handle: i64
+    backend_handle: i64
+    max_packet_bytes: i64
+    next_packet_id: i64
+    queued_count: i64
+    in_flight_count: i64
+    completed_pending_count: i64
+    submitted_count: i64
+    completed_count: i64
+    last_status_code: i64
+    last_backend_handle: i64
+    last_payload_size: i64
+    last_payload_hash: i64
+    last_payload_text: text
+    diagnostic: text
+
+struct Engine2dHostGpuPureQueueDrainStep:
+    state: Engine2dHostGpuPureQueueState
+    result: Engine2dHostGpuRuntimeDrainResult
+
+extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64) -> i64
+extern fn rt_host_gpu_queue_emit_payload(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64, payload_hash: i64) -> i64
+extern fn rt_host_gpu_queue_emit_payload_text(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64, payload_hash: i64, payload_text: text) -> i64
+extern fn rt_host_gpu_queue_reset()
+extern fn rt_host_gpu_queue_drain(max_packets: i64) -> i64
+extern fn rt_host_gpu_queue_submit(max_packets: i64) -> i64
+extern fn rt_host_gpu_queue_complete(max_packets: i64) -> i64
+extern fn rt_host_gpu_queue_submitted_count() -> i64
+extern fn rt_host_gpu_queue_completed_count() -> i64
+extern fn rt_host_gpu_queue_in_flight_count() -> i64
+extern fn rt_host_gpu_queue_last_status() -> i64
+extern fn rt_host_gpu_queue_last_backend_handle() -> i64
+extern fn rt_host_gpu_queue_last_payload_size() -> i64
+extern fn rt_host_gpu_queue_last_payload_hash() -> i64
+extern fn rt_host_gpu_queue_last_payload_text() -> text
+
+fn engine2d_host_gpu_event(event_id: text, requested_lane: text, operation: text, packet_bytes: i64, max_packet_bytes: i64, mutates_host_semantics: bool, stale_target_cache: bool, unresolved_target: bool, strict_backend_available: bool) -> Engine2dHostGpuEvent:
+    Engine2dHostGpuEvent(event_id: event_id, source_lane: ENGINE2D_HOST_GPU_LANE_HOST, requested_lane: requested_lane, operation: operation, packet_bytes: packet_bytes, max_packet_bytes: max_packet_bytes, mutates_host_semantics: mutates_host_semantics, stale_target_cache: stale_target_cache, unresolved_target: unresolved_target, strict_backend_available: strict_backend_available)
+
+fn engine2d_host_gpu_event_handler_decision(event: Engine2dHostGpuEvent, lane_result: Engine2dHostGpuLaneResult) -> Engine2dHostGpuHandlerDecision:
+    if event.unresolved_target:
+        return Engine2dHostGpuHandlerDecision(event: event, target_lane: ENGINE2D_HOST_GPU_LANE_HOST, reason: "unresolved event target stays on host", queue_required: false, accepted: true)
+    if event.stale_target_cache:
+        return Engine2dHostGpuHandlerDecision(event: event, target_lane: ENGINE2D_HOST_GPU_LANE_HOST, reason: "stale target cache rejected before GPU queue", queue_required: false, accepted: true)
+    if event.mutates_host_semantics:
+        return Engine2dHostGpuHandlerDecision(event: event, target_lane: ENGINE2D_HOST_GPU_LANE_HOST, reason: "host semantic mutation must commit on host", queue_required: false, accepted: true)
+    if not lane_result.ok:
+        return Engine2dHostGpuHandlerDecision(event: event, target_lane: ENGINE2D_HOST_GPU_LANE_HOST, reason: lane_result.diagnostic, queue_required: false, accepted: false)
+    Engine2dHostGpuHandlerDecision(event: event, target_lane: lane_result.target_lane, reason: lane_result.diagnostic, queue_required: lane_result.execution_kind == ENGINE2D_HOST_GPU_EXEC_PACKET, accepted: true)
+
+fn engine2d_host_gpu_event_submit(decision: Engine2dHostGpuHandlerDecision, lane_result: Engine2dHostGpuLaneResult) -> Engine2dHostGpuQueueSubmitEvidence:
+    Engine2dHostGpuQueueSubmitEvidence(event_id: decision.event.event_id, target_lane: decision.target_lane, execution_kind: lane_result.execution_kind, packet_bytes: decision.event.packet_bytes, queued: decision.accepted and decision.queue_required, diagnostic: decision.reason)
+
+fn engine2d_host_gpu_submit_summary(evidence: Engine2dHostGpuQueueSubmitEvidence) -> text:
+    "event={evidence.event_id};lane={evidence.target_lane};kind={evidence.execution_kind};queued={evidence.queued};bytes={evidence.packet_bytes};diagnostic={evidence.diagnostic}"
+
+fn engine2d_host_gpu_event_receipt(submit: Engine2dHostGpuQueueSubmitEvidence, lane_result: Engine2dHostGpuLaneResult) -> Engine2dHostGpuQueueReceiptEvidence:
+    Engine2dHostGpuQueueReceiptEvidence(event_id: submit.event_id, target_lane: submit.target_lane, committed_on_host: lane_result.committed_on_host or submit.target_lane == ENGINE2D_HOST_GPU_LANE_HOST, gpu_batched: lane_result.gpu_batched and submit.queued, diagnostic: submit.diagnostic)
+
+fn engine2d_host_gpu_receipt_summary(evidence: Engine2dHostGpuQueueReceiptEvidence) -> text:
+    "event={evidence.event_id};lane={evidence.target_lane};host_commit={evidence.committed_on_host};gpu_batched={evidence.gpu_batched};diagnostic={evidence.diagnostic}"
+
+fn engine2d_host_gpu_runtime_queue(backend_name: text, queue_handle: i64, runtime_available: bool, max_packet_bytes: i64) -> Engine2dHostGpuRuntimeQueue:
+    Engine2dHostGpuRuntimeQueue(backend_name: backend_name, queue_handle: queue_handle, backend_handle: 0, runtime_available: runtime_available, max_packet_bytes: max_packet_bytes)
+
+fn engine2d_host_gpu_runtime_queue_with_backend_handle(backend_name: text, queue_handle: i64, backend_handle: i64, runtime_available: bool, max_packet_bytes: i64) -> Engine2dHostGpuRuntimeQueue:
+    Engine2dHostGpuRuntimeQueue(backend_name: backend_name, queue_handle: queue_handle, backend_handle: backend_handle, runtime_available: runtime_available, max_packet_bytes: max_packet_bytes)
+
+fn engine2d_host_gpu_runtime_reset():
+    rt_host_gpu_queue_reset()
+
+fn engine2d_host_gpu_runtime_emit_packet(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64) -> i64:
+    rt_host_gpu_queue_emit(lane_code, kind_code, payload_size, backend_handle)
+
+fn engine2d_host_gpu_pure_queue_state(backend_name: text, queue_handle: i64, backend_handle: i64, max_packet_bytes: i64) -> Engine2dHostGpuPureQueueState:
+    Engine2dHostGpuPureQueueState(backend_name: backend_name, queue_handle: queue_handle, backend_handle: backend_handle, max_packet_bytes: max_packet_bytes, next_packet_id: 1, queued_count: 0, in_flight_count: 0, completed_pending_count: 0, submitted_count: 0, completed_count: 0, last_status_code: 0, last_backend_handle: 0, last_payload_size: 0, last_payload_hash: 0, last_payload_text: "", diagnostic: "pure queue initialized")
+
+fn engine2d_host_gpu_pure_queue_emit_payload_text(state: Engine2dHostGpuPureQueueState, decision: Engine2dHostGpuHandlerDecision, lane_result: Engine2dHostGpuLaneResult, payload_hash: i64, payload_text: text) -> Engine2dHostGpuPureQueueState:
+    if not decision.accepted:
+        return Engine2dHostGpuPureQueueState(backend_name: state.backend_name, queue_handle: state.queue_handle, backend_handle: state.backend_handle, max_packet_bytes: state.max_packet_bytes, next_packet_id: state.next_packet_id, queued_count: state.queued_count, in_flight_count: state.in_flight_count, completed_pending_count: state.completed_pending_count, submitted_count: state.submitted_count, completed_count: state.completed_count, last_status_code: 0, last_backend_handle: state.last_backend_handle, last_payload_size: state.last_payload_size, last_payload_hash: state.last_payload_hash, last_payload_text: state.last_payload_text, diagnostic: decision.reason)
+    if not decision.queue_required:
+        return Engine2dHostGpuPureQueueState(backend_name: state.backend_name, queue_handle: state.queue_handle, backend_handle: state.backend_handle, max_packet_bytes: state.max_packet_bytes, next_packet_id: state.next_packet_id, queued_count: state.queued_count, in_flight_count: state.in_flight_count, completed_pending_count: state.completed_pending_count, submitted_count: state.submitted_count, completed_count: state.completed_count, last_status_code: 0, last_backend_handle: state.last_backend_handle, last_payload_size: state.last_payload_size, last_payload_hash: state.last_payload_hash, last_payload_text: state.last_payload_text, diagnostic: decision.reason)
+    if state.queue_handle <= 0:
+        return Engine2dHostGpuPureQueueState(backend_name: state.backend_name, queue_handle: state.queue_handle, backend_handle: state.backend_handle, max_packet_bytes: state.max_packet_bytes, next_packet_id: state.next_packet_id, queued_count: state.queued_count, in_flight_count: state.in_flight_count, completed_pending_count: state.completed_pending_count, submitted_count: state.submitted_count, completed_count: state.completed_count, last_status_code: 0, last_backend_handle: state.last_backend_handle, last_payload_size: state.last_payload_size, last_payload_hash: state.last_payload_hash, last_payload_text: state.last_payload_text, diagnostic: "pure queue unavailable")
+    if state.backend_handle <= 0:
+        return Engine2dHostGpuPureQueueState(backend_name: state.backend_name, queue_handle: state.queue_handle, backend_handle: state.backend_handle, max_packet_bytes: state.max_packet_bytes, next_packet_id: state.next_packet_id, queued_count: state.queued_count, in_flight_count: state.in_flight_count, completed_pending_count: state.completed_pending_count, submitted_count: state.submitted_count, completed_count: state.completed_count, last_status_code: 0, last_backend_handle: state.last_backend_handle, last_payload_size: state.last_payload_size, last_payload_hash: state.last_payload_hash, last_payload_text: state.last_payload_text, diagnostic: "backend handle required for pure queue submit")
+    if decision.event.packet_bytes > state.max_packet_bytes:
+        return Engine2dHostGpuPureQueueState(backend_name: state.backend_name, queue_handle: state.queue_handle, backend_handle: state.backend_handle, max_packet_bytes: state.max_packet_bytes, next_packet_id: state.next_packet_id, queued_count: state.queued_count, in_flight_count: state.in_flight_count, completed_pending_count: state.completed_pending_count, submitted_count: state.submitted_count, completed_count: state.completed_count, last_status_code: 0, last_backend_handle: state.last_backend_handle, last_payload_size: state.last_payload_size, last_payload_hash: state.last_payload_hash, last_payload_text: state.last_payload_text, diagnostic: "packet exceeds pure queue limit")
+    val queued_state = Engine2dHostGpuPureQueueState(backend_name: state.backend_name, queue_handle: state.queue_handle, backend_handle: state.backend_handle, max_packet_bytes: state.max_packet_bytes, next_packet_id: state.next_packet_id + 1, queued_count: state.queued_count + 1, in_flight_count: state.in_flight_count, completed_pending_count: state.completed_pending_count, submitted_count: state.submitted_count, completed_count: state.completed_count, last_status_code: 1, last_backend_handle: state.backend_handle, last_payload_size: decision.event.packet_bytes, last_payload_hash: payload_hash, last_payload_text: payload_text, diagnostic: lane_result.diagnostic)
+    if dbg_stage_on() or dbg_events_on():
+        dbg_stage("gpu_queue", "queued")
+        dbg_event_hop(decision.event.event_id, "enqueue", "status=queued queued={queued_state.queued_count} bytes={decision.event.packet_bytes}")
+    dbg_count("host_gpu.queued", 1)
+    queued_state
+
+fn _engine2d_host_gpu_pure_take_count(available: i64, requested: i64) -> i64:
+    if requested <= 0:
+        return 0
+    if available < requested:
+        return available
+    requested
+
+fn engine2d_host_gpu_pure_queue_submit_pending(state: Engine2dHostGpuPureQueueState, max_packets: i64) -> Engine2dHostGpuPureQueueState:
+    val submitted = _engine2d_host_gpu_pure_take_count(state.queued_count, max_packets)
+    val next_state = Engine2dHostGpuPureQueueState(backend_name: state.backend_name, queue_handle: state.queue_handle, backend_handle: state.backend_handle, max_packet_bytes: state.max_packet_bytes, next_packet_id: state.next_packet_id, queued_count: state.queued_count - submitted, in_flight_count: state.in_flight_count + submitted, completed_pending_count: state.completed_pending_count, submitted_count: state.submitted_count + submitted, completed_count: state.completed_count, last_status_code: if submitted > 0: 2 else: state.last_status_code, last_backend_handle: state.last_backend_handle, last_payload_size: state.last_payload_size, last_payload_hash: state.last_payload_hash, last_payload_text: state.last_payload_text, diagnostic: if submitted > 0: "submitted pure queue" else: "pure queue empty")
+    if dbg_stage_on() or dbg_events_on():
+        dbg_stage("gpu_queue", "submitted")
+        dbg_event_hop("queue", "submit", "submitted={submitted} in_flight={next_state.in_flight_count}")
+    dbg_count("host_gpu.submitted", submitted)
+    next_state
+
+fn engine2d_host_gpu_pure_queue_complete_pending(state: Engine2dHostGpuPureQueueState, max_packets: i64) -> Engine2dHostGpuPureQueueState:
+    val completed = _engine2d_host_gpu_pure_take_count(state.in_flight_count, max_packets)
+    val next_state = Engine2dHostGpuPureQueueState(backend_name: state.backend_name, queue_handle: state.queue_handle, backend_handle: state.backend_handle, max_packet_bytes: state.max_packet_bytes, next_packet_id: state.next_packet_id, queued_count: state.queued_count, in_flight_count: state.in_flight_count - completed, completed_pending_count: state.completed_pending_count + completed, submitted_count: state.submitted_count, completed_count: state.completed_count + completed, last_status_code: if completed > 0: 3 else: state.last_status_code, last_backend_handle: state.last_backend_handle, last_payload_size: state.last_payload_size, last_payload_hash: state.last_payload_hash, last_payload_text: state.last_payload_text, diagnostic: if completed > 0: "completed pure queue" else: "pure queue empty")
+    if dbg_stage_on() or dbg_events_on():
+        dbg_stage("gpu_queue", "completed")
+        dbg_event_hop("queue", "complete", "completed={completed} completed_pending={next_state.completed_pending_count}")
+    dbg_count("host_gpu.completed", completed)
+    next_state
+
+fn engine2d_host_gpu_pure_queue_drain(state: Engine2dHostGpuPureQueueState, max_packets: i64) -> Engine2dHostGpuPureQueueDrainStep:
+    val drained = _engine2d_host_gpu_pure_take_count(state.completed_pending_count, max_packets)
+    val next_state = Engine2dHostGpuPureQueueState(backend_name: state.backend_name, queue_handle: state.queue_handle, backend_handle: state.backend_handle, max_packet_bytes: state.max_packet_bytes, next_packet_id: state.next_packet_id, queued_count: state.queued_count, in_flight_count: state.in_flight_count, completed_pending_count: state.completed_pending_count - drained, submitted_count: state.submitted_count, completed_count: state.completed_count, last_status_code: if drained > 0: 3 else: state.last_status_code, last_backend_handle: state.last_backend_handle, last_payload_size: state.last_payload_size, last_payload_hash: state.last_payload_hash, last_payload_text: state.last_payload_text, diagnostic: if drained > 0: "drained pure queue" else: "pure queue empty")
+    val result = Engine2dHostGpuRuntimeDrainResult(drained: drained, status: if drained > 0: "completed" else: "empty", queue_handle: state.queue_handle, last_backend_handle: if drained > 0: state.last_backend_handle else: 0, last_payload_size: if drained > 0: state.last_payload_size else: 0, last_payload_hash: if drained > 0: state.last_payload_hash else: 0, last_payload_text: if drained > 0: state.last_payload_text else: "", submitted_count: state.submitted_count, completed_count: state.completed_count, last_status_code: if drained > 0: 3 else: state.last_status_code, diagnostic: if drained > 0: "drained pure queue" else: "pure queue empty")
+    if dbg_stage_on() or dbg_events_on():
+        dbg_stage("gpu_queue", "drain")
+        dbg_event_hop("queue", "drain", "drained={drained} status={result.status} completed={next_state.completed_count}")
+    dbg_count("host_gpu.drained", drained)
+    Engine2dHostGpuPureQueueDrainStep(state: next_state, result: result)
+
+fn engine2d_host_gpu_pure_queue_summary(state: Engine2dHostGpuPureQueueState) -> text:
+    "queue={state.queue_handle};backend_handle={state.backend_handle};queued={state.queued_count};in_flight={state.in_flight_count};completed_pending={state.completed_pending_count};submitted={state.submitted_count};completed={state.completed_count};last_status={state.last_status_code};payload_size={state.last_payload_size};payload_hash={state.last_payload_hash};diagnostic={state.diagnostic}"
+
+fn engine2d_host_gpu_event_submit_to_runtime(queue: Engine2dHostGpuRuntimeQueue, decision: Engine2dHostGpuHandlerDecision, lane_result: Engine2dHostGpuLaneResult) -> Engine2dHostGpuRuntimeSubmitResult:
+    engine2d_host_gpu_event_submit_to_runtime_payload_hash(queue, decision, lane_result, 0)
+
+fn engine2d_host_gpu_event_submit_to_runtime_payload_hash(queue: Engine2dHostGpuRuntimeQueue, decision: Engine2dHostGpuHandlerDecision, lane_result: Engine2dHostGpuLaneResult, payload_hash: i64) -> Engine2dHostGpuRuntimeSubmitResult:
+    engine2d_host_gpu_event_submit_to_runtime_payload_text(queue, decision, lane_result, payload_hash, "")
+
+fn engine2d_host_gpu_event_submit_to_runtime_payload_text(queue: Engine2dHostGpuRuntimeQueue, decision: Engine2dHostGpuHandlerDecision, lane_result: Engine2dHostGpuLaneResult, payload_hash: i64, payload_text: text) -> Engine2dHostGpuRuntimeSubmitResult:
+    if not decision.accepted:
+        return Engine2dHostGpuRuntimeSubmitResult(submitted: false, status: "rejected", queue_handle: queue.queue_handle, event_id: decision.event.event_id, packet_id: 0, packet_bytes: decision.event.packet_bytes, payload_summary: "", diagnostic: decision.reason)
+    if not decision.queue_required:
+        return Engine2dHostGpuRuntimeSubmitResult(submitted: false, status: "host", queue_handle: queue.queue_handle, event_id: decision.event.event_id, packet_id: 0, packet_bytes: decision.event.packet_bytes, payload_summary: "", diagnostic: decision.reason)
+    if not queue.runtime_available or queue.queue_handle <= 0:
+        return Engine2dHostGpuRuntimeSubmitResult(submitted: false, status: "runtime_unavailable", queue_handle: queue.queue_handle, event_id: decision.event.event_id, packet_id: 0, packet_bytes: decision.event.packet_bytes, payload_summary: "", diagnostic: "runtime queue unavailable")
+    if queue.backend_handle <= 0:
+        return Engine2dHostGpuRuntimeSubmitResult(submitted: false, status: "invalid_backend_handle", queue_handle: queue.queue_handle, event_id: decision.event.event_id, packet_id: 0, packet_bytes: decision.event.packet_bytes, payload_summary: "", diagnostic: "backend handle required for GPU queue submit")
+    if decision.event.packet_bytes > queue.max_packet_bytes:
+        return Engine2dHostGpuRuntimeSubmitResult(submitted: false, status: "packet_too_large", queue_handle: queue.queue_handle, event_id: decision.event.event_id, packet_id: 0, packet_bytes: decision.event.packet_bytes, payload_summary: "", diagnostic: "packet exceeds runtime queue limit")
+    val packet_id = rt_host_gpu_queue_emit_payload_text(ENGINE2D_HOST_GPU_RUNTIME_LANE_GPU, ENGINE2D_HOST_GPU_RUNTIME_KIND_DRAW_IR, decision.event.packet_bytes, queue.backend_handle, payload_hash, payload_text)
+    Engine2dHostGpuRuntimeSubmitResult(submitted: packet_id > 0, status: if packet_id > 0: "submitted" else: "emit_failed", queue_handle: queue.queue_handle, event_id: decision.event.event_id, packet_id: packet_id, packet_bytes: decision.event.packet_bytes, payload_summary: "", diagnostic: decision.reason)
+
+fn engine2d_host_gpu_runtime_submit_with_payload(result: Engine2dHostGpuRuntimeSubmitResult, payload_summary: text) -> Engine2dHostGpuRuntimeSubmitResult:
+    Engine2dHostGpuRuntimeSubmitResult(submitted: result.submitted, status: result.status, queue_handle: result.queue_handle, event_id: result.event_id, packet_id: result.packet_id, packet_bytes: result.packet_bytes, payload_summary: payload_summary, diagnostic: result.diagnostic)
+
+fn engine2d_host_gpu_runtime_submit_summary(result: Engine2dHostGpuRuntimeSubmitResult) -> text:
+    "event={result.event_id};submitted={result.submitted};status={result.status};queue_handle={result.queue_handle};packet_id={result.packet_id};bytes={result.packet_bytes};payload={result.payload_summary};diagnostic={result.diagnostic}"
+
+fn engine2d_host_gpu_runtime_status_name(status_code: i64) -> text:
+    if status_code == ENGINE2D_HOST_GPU_RUNTIME_STATUS_EMPTY:
+        return "empty"
+    if status_code == ENGINE2D_HOST_GPU_RUNTIME_STATUS_QUEUED:
+        return "queued"
+    if status_code == ENGINE2D_HOST_GPU_RUNTIME_STATUS_SUBMITTED:
+        return "submitted"
+    if status_code == ENGINE2D_HOST_GPU_RUNTIME_STATUS_COMPLETED:
+        return "completed"
+    if status_code == ENGINE2D_HOST_GPU_RUNTIME_STATUS_TYPED_UNAVAILABLE:
+        return "typed_unavailable"
+    "unknown"
+
+fn engine2d_host_gpu_runtime_submit_pending(queue: Engine2dHostGpuRuntimeQueue, max_packets: i64) -> Engine2dHostGpuRuntimePhaseResult:
+    if not queue.runtime_available or queue.queue_handle <= 0:
+        return Engine2dHostGpuRuntimePhaseResult(count: 0, status: "runtime_unavailable", queue_handle: queue.queue_handle, in_flight_count: rt_host_gpu_queue_in_flight_count(), submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: rt_host_gpu_queue_last_status(), diagnostic: "runtime queue unavailable")
+    if max_packets <= 0:
+        return Engine2dHostGpuRuntimePhaseResult(count: 0, status: "empty", queue_handle: queue.queue_handle, in_flight_count: rt_host_gpu_queue_in_flight_count(), submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: rt_host_gpu_queue_last_status(), diagnostic: "no packets requested")
+    val submitted = rt_host_gpu_queue_submit(max_packets)
+    val last_status = rt_host_gpu_queue_last_status()
+    val phase = Engine2dHostGpuRuntimePhaseResult(count: submitted, status: if submitted > 0: engine2d_host_gpu_runtime_status_name(last_status) else: "empty", queue_handle: queue.queue_handle, in_flight_count: rt_host_gpu_queue_in_flight_count(), submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: last_status, diagnostic: if submitted > 0: "submitted runtime queue" else: "runtime queue empty")
+    if dbg_stage_on() or dbg_events_on():
+        dbg_stage("gpu_queue", "submitted")
+        dbg_event_hop("queue", "submit", "submitted={submitted} in_flight={phase.in_flight_count} status={phase.status}")
+    dbg_count("host_gpu.submitted", submitted)
+    phase
+
+fn engine2d_host_gpu_runtime_complete_pending(queue: Engine2dHostGpuRuntimeQueue, max_packets: i64) -> Engine2dHostGpuRuntimePhaseResult:
+    if not queue.runtime_available or queue.queue_handle <= 0:
+        return Engine2dHostGpuRuntimePhaseResult(count: 0, status: "runtime_unavailable", queue_handle: queue.queue_handle, in_flight_count: rt_host_gpu_queue_in_flight_count(), submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: rt_host_gpu_queue_last_status(), diagnostic: "runtime queue unavailable")
+    if max_packets <= 0:
+        return Engine2dHostGpuRuntimePhaseResult(count: 0, status: "empty", queue_handle: queue.queue_handle, in_flight_count: rt_host_gpu_queue_in_flight_count(), submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: rt_host_gpu_queue_last_status(), diagnostic: "no packets requested")
+    val completed = rt_host_gpu_queue_complete(max_packets)
+    val last_status = rt_host_gpu_queue_last_status()
+    val phase = Engine2dHostGpuRuntimePhaseResult(count: completed, status: if completed > 0: engine2d_host_gpu_runtime_status_name(last_status) else: "empty", queue_handle: queue.queue_handle, in_flight_count: rt_host_gpu_queue_in_flight_count(), submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: last_status, diagnostic: if completed > 0: "completed runtime queue" else: "runtime queue empty")
+    if dbg_stage_on() or dbg_events_on():
+        dbg_stage("gpu_queue", "completed")
+        dbg_event_hop("queue", "complete", "completed={completed} completed_total={phase.completed_count} status={phase.status}")
+    dbg_count("host_gpu.completed", completed)
+    phase
+
+fn engine2d_host_gpu_runtime_drain(queue: Engine2dHostGpuRuntimeQueue, max_packets: i64) -> Engine2dHostGpuRuntimeDrainResult:
+    if not queue.runtime_available or queue.queue_handle <= 0:
+        return Engine2dHostGpuRuntimeDrainResult(drained: 0, status: "runtime_unavailable", queue_handle: queue.queue_handle, last_backend_handle: 0, last_payload_size: 0, last_payload_hash: 0, last_payload_text: "", submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: rt_host_gpu_queue_last_status(), diagnostic: "runtime queue unavailable")
+    if max_packets <= 0:
+        return Engine2dHostGpuRuntimeDrainResult(drained: 0, status: "empty", queue_handle: queue.queue_handle, last_backend_handle: 0, last_payload_size: 0, last_payload_hash: 0, last_payload_text: "", submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: rt_host_gpu_queue_last_status(), diagnostic: "no packets requested")
+    val drained = rt_host_gpu_queue_drain(max_packets)
+    val last_status = rt_host_gpu_queue_last_status()
+    val status = if drained <= 0: "empty" else: engine2d_host_gpu_runtime_status_name(last_status)
+    val result = Engine2dHostGpuRuntimeDrainResult(drained: drained, status: status, queue_handle: queue.queue_handle, last_backend_handle: if drained > 0: rt_host_gpu_queue_last_backend_handle() else: 0, last_payload_size: if drained > 0: rt_host_gpu_queue_last_payload_size() else: 0, last_payload_hash: if drained > 0: rt_host_gpu_queue_last_payload_hash() else: 0, last_payload_text: if drained > 0: rt_host_gpu_queue_last_payload_text() else: "", submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: last_status, diagnostic: if drained > 0: "drained runtime queue" else: "runtime queue empty")
+    if dbg_stage_on() or dbg_events_on():
+        dbg_stage("gpu_queue", "drain")
+        dbg_event_hop("queue", "drain", "drained={drained} status={result.status} completed={result.completed_count}")
+    dbg_count("host_gpu.drained", drained)
+    result
+
+fn engine2d_host_gpu_runtime_drain_summary(result: Engine2dHostGpuRuntimeDrainResult) -> text:
+    "drained={result.drained};status={result.status};queue_handle={result.queue_handle};last_backend_handle={result.last_backend_handle};payload_size={result.last_payload_size};payload_hash={result.last_payload_hash};submitted={result.submitted_count};completed={result.completed_count};last_status={result.last_status_code};diagnostic={result.diagnostic}"
+
+fn engine2d_host_gpu_runtime_dispatch_draw_ir(queue: Engine2dHostGpuRuntimeQueue, drain: Engine2dHostGpuRuntimeDrainResult, expected_payload_hash: i64) -> Engine2dHostGpuRuntimeDispatchResult:
+    if drain.drained <= 0:
+        return Engine2dHostGpuRuntimeDispatchResult(dispatched: false, status: "empty", backend_name: queue.backend_name, queue_handle: queue.queue_handle, backend_handle: 0, payload_hash: 0, payload_size: 0, payload_text: "", diagnostic: "no drained runtime packet to dispatch")
+    if drain.status != "completed":
+        return Engine2dHostGpuRuntimeDispatchResult(dispatched: false, status: drain.status, backend_name: queue.backend_name, queue_handle: queue.queue_handle, backend_handle: drain.last_backend_handle, payload_hash: drain.last_payload_hash, payload_size: drain.last_payload_size, payload_text: drain.last_payload_text, diagnostic: "runtime packet not completed")
+    if queue.backend_handle <= 0 or drain.last_backend_handle <= 0:
+        return Engine2dHostGpuRuntimeDispatchResult(dispatched: false, status: "invalid_backend_handle", backend_name: queue.backend_name, queue_handle: queue.queue_handle, backend_handle: drain.last_backend_handle, payload_hash: drain.last_payload_hash, payload_size: drain.last_payload_size, payload_text: drain.last_payload_text, diagnostic: "positive backend handle required for Draw IR dispatch")
+    if drain.last_backend_handle != queue.backend_handle:
+        return Engine2dHostGpuRuntimeDispatchResult(dispatched: false, status: "backend_handle_mismatch", backend_name: queue.backend_name, queue_handle: queue.queue_handle, backend_handle: drain.last_backend_handle, payload_hash: drain.last_payload_hash, payload_size: drain.last_payload_size, payload_text: drain.last_payload_text, diagnostic: "runtime backend handle does not match queue backend handle")
+    if expected_payload_hash != 0 and drain.last_payload_hash != expected_payload_hash:
+        return Engine2dHostGpuRuntimeDispatchResult(dispatched: false, status: "payload_hash_mismatch", backend_name: queue.backend_name, queue_handle: queue.queue_handle, backend_handle: drain.last_backend_handle, payload_hash: drain.last_payload_hash, payload_size: drain.last_payload_size, payload_text: drain.last_payload_text, diagnostic: "runtime payload hash mismatch")
+    if drain.last_payload_text == "":
+        return Engine2dHostGpuRuntimeDispatchResult(dispatched: false, status: "missing_payload", backend_name: queue.backend_name, queue_handle: queue.queue_handle, backend_handle: drain.last_backend_handle, payload_hash: drain.last_payload_hash, payload_size: drain.last_payload_size, payload_text: drain.last_payload_text, diagnostic: "runtime Draw IR payload text missing")
+    if not drain.last_payload_text.contains("schema=simple-draw-ir-v2"):
+        return Engine2dHostGpuRuntimeDispatchResult(dispatched: false, status: "unsupported_payload", backend_name: queue.backend_name, queue_handle: queue.queue_handle, backend_handle: drain.last_backend_handle, payload_hash: drain.last_payload_hash, payload_size: drain.last_payload_size, payload_text: drain.last_payload_text, diagnostic: "runtime payload is not Draw IR v2")
+    Engine2dHostGpuRuntimeDispatchResult(dispatched: true, status: "dispatched", backend_name: queue.backend_name, queue_handle: queue.queue_handle, backend_handle: drain.last_backend_handle, payload_hash: drain.last_payload_hash, payload_size: drain.last_payload_size, payload_text: drain.last_payload_text, diagnostic: "Draw IR runtime packet dispatched to Engine2D backend")
+
+fn engine2d_host_gpu_runtime_dispatch_summary(result: Engine2dHostGpuRuntimeDispatchResult) -> text:
+    "dispatched={result.dispatched};status={result.status};backend={result.backend_name};queue_handle={result.queue_handle};backend_handle={result.backend_handle};payload_size={result.payload_size};payload_hash={result.payload_hash};diagnostic={result.diagnostic}"
+
+# Debug accessor: reads the std.diag queue counters through accessor functions
+# (module globals are only visible via accessors in the interpreter). Counters
+# only accumulate when the `timers` diag facet is enabled; otherwise this is a
+# zeroed snapshot. Honest counts only — no fabricated timing.
+fn engine2d_host_gpu_diag_summary() -> text:
+    val queued = dbg_counter_value("host_gpu.queued")
+    val submitted = dbg_counter_value("host_gpu.submitted")
+    val completed = dbg_counter_value("host_gpu.completed")
+    val drained = dbg_counter_value("host_gpu.drained")
+    val dispatched = dbg_counter_value("host_gpu.dispatched")
+    "queued={queued};submitted={submitted};completed={completed};drained={drained};dispatched={dispatched}"
+
+export Engine2dHostGpuEvent
+export Engine2dHostGpuHandlerDecision
+export Engine2dHostGpuQueueSubmitEvidence
+export Engine2dHostGpuQueueReceiptEvidence
+export Engine2dHostGpuRuntimeQueue
+export Engine2dHostGpuRuntimeSubmitResult
+export Engine2dHostGpuRuntimeDrainResult
+export Engine2dHostGpuRuntimePhaseResult
+export Engine2dHostGpuRuntimeDispatchResult
+export Engine2dHostGpuPureQueueState
+export Engine2dHostGpuPureQueueDrainStep
+export ENGINE2D_HOST_GPU_RUNTIME_LANE_HOST
+export ENGINE2D_HOST_GPU_RUNTIME_LANE_GPU
+export ENGINE2D_HOST_GPU_RUNTIME_PHASE_BEGIN
+export ENGINE2D_HOST_GPU_RUNTIME_PHASE_END
+export ENGINE2D_HOST_GPU_RUNTIME_KIND_DRAW_IR
+export ENGINE2D_HOST_GPU_RUNTIME_STATUS_EMPTY
+export ENGINE2D_HOST_GPU_RUNTIME_STATUS_QUEUED
+export ENGINE2D_HOST_GPU_RUNTIME_STATUS_SUBMITTED
+export ENGINE2D_HOST_GPU_RUNTIME_STATUS_COMPLETED
+export ENGINE2D_HOST_GPU_RUNTIME_STATUS_TYPED_UNAVAILABLE
+export engine2d_host_gpu_event
+export engine2d_host_gpu_event_handler_decision
+export engine2d_host_gpu_event_submit
+export engine2d_host_gpu_submit_summary
+export engine2d_host_gpu_event_receipt
+export engine2d_host_gpu_receipt_summary
+export engine2d_host_gpu_runtime_queue
+export engine2d_host_gpu_runtime_queue_with_backend_handle
+export engine2d_host_gpu_runtime_reset
+export engine2d_host_gpu_runtime_emit_packet
+export engine2d_host_gpu_pure_queue_state
+export engine2d_host_gpu_pure_queue_emit_payload_text
+export engine2d_host_gpu_pure_queue_submit_pending
+export engine2d_host_gpu_pure_queue_complete_pending
+export engine2d_host_gpu_pure_queue_drain
+export engine2d_host_gpu_pure_queue_summary
+export engine2d_host_gpu_event_submit_to_runtime
+export engine2d_host_gpu_event_submit_to_runtime_payload_hash
+export engine2d_host_gpu_event_submit_to_runtime_payload_text
+export engine2d_host_gpu_runtime_submit_with_payload
+export engine2d_host_gpu_runtime_submit_summary
+export engine2d_host_gpu_runtime_status_name
+export engine2d_host_gpu_runtime_submit_pending
+export engine2d_host_gpu_runtime_complete_pending
+export engine2d_host_gpu_runtime_drain
+export engine2d_host_gpu_runtime_drain_summary
+export engine2d_host_gpu_runtime_dispatch_draw_ir
+export engine2d_host_gpu_runtime_dispatch_summary
+export engine2d_host_gpu_diag_summary

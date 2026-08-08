@@ -1,0 +1,244 @@
+# AES-CTR (NIST SP 800-38A §6.5) and AES-CBC (§6.2) modes — pure Simple.
+#
+# Builds both modes on the AES block cipher in std.common.crypto.aes_gcm.
+# Supports AES-128 (16-byte key) and AES-256 (32-byte key), selected by key
+# length. The IV is the initial 128-bit counter block; for each successive
+# block the entire counter block is incremented by 1 as a big-endian integer
+# (the standard incrementing function), matching the SP 800-38A F.5 vectors
+# and SSH aes128-ctr / aes256-ctr (RFC 4344).
+#
+# All public inputs/outputs are [i64] byte lists (values 0-255). Encryption
+# and decryption are the identical XOR-keystream operation.
+
+use std.common.crypto.aes_gcm.{
+    aes128_key_expansion,
+    aes256_key_expansion,
+    aes128_encrypt_block,
+    aes256_encrypt_block,
+    aes128_decrypt_block,
+    aes256_decrypt_block
+}
+
+# Privileged native byte read (src/lib is allowed raw rt_*; mirrors aes_gcm.spl).
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+# Convert an [i64] byte list (values 0-255) into a native [u8] buffer.
+fn _i64_to_u8(arr: [i64]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    val n = arr.len()
+    while i < n:
+        out.push((arr[i] & 0xFF).to_u8())
+        i = i + 1
+    out
+
+# Big-endian increment-by-1 of a counter block (returns a fresh [i64]).
+fn _ctr_increment(counter: [i64]) -> [i64]:
+    val n = counter.len()
+    # Add the carry from the least-significant byte upward into a reversed list.
+    var rev: [i64] = []
+    var carry = 1
+    var i = n - 1
+    while i >= 0:
+        val sum = (counter[i] & 0xFF) + carry
+        rev.push(sum & 0xFF)
+        carry = (sum >> 8) & 1
+        i = i - 1
+    # Reverse back to big-endian byte order.
+    var out: [i64] = []
+    var j = rev.len() - 1
+    while j >= 0:
+        out.push(rev[j])
+        j = j - 1
+    out
+
+# AES-CTR encryption. key: 16 bytes (AES-128) or 32 bytes (AES-256).
+# iv: 16-byte initial counter block. Returns ciphertext of the same length
+# as the plaintext (the final partial block uses a truncated keystream).
+fn aes_ctr_encrypt(plaintext: [i64], key: [i64], iv: [i64]) -> [i64]:
+    val is_256 = key.len() == 32
+    val key_u8 = _i64_to_u8(key)
+    val schedule = if is_256: aes256_key_expansion(key_u8) else: aes128_key_expansion(key_u8)
+
+    # Mutable big-endian counter, initialised to the IV.
+    var counter: [i64] = []
+    var c = 0
+    while c < iv.len():
+        counter.push(iv[c])
+        c = c + 1
+
+    var out: [i64] = []
+    val n = plaintext.len()
+    var off = 0
+    while off < n:
+        val ctr_u8 = _i64_to_u8(counter)
+        val keystream = if is_256: aes256_encrypt_block(ctr_u8, schedule) else: aes128_encrypt_block(ctr_u8, schedule)
+        var b = 0
+        while b < 16 and (off + b) < n:
+            out.push(plaintext[off + b] ^ rt_bytes_u8_at(keystream, b))
+            b = b + 1
+        counter = _ctr_increment(counter)
+        off = off + 16
+    out
+
+# AES-CTR decryption is identical to encryption (XOR of the same keystream).
+fn aes_ctr_decrypt(ciphertext: [i64], key: [i64], iv: [i64]) -> [i64]:
+    aes_ctr_encrypt(ciphertext, key, iv)
+
+# ============================================================================
+# AES-CBC mode (NIST SP 800-38A §6.2) with PKCS#7 padding (RFC 5652 §6.3)
+#
+# History: until 2026-08-08 `aes_cbc_encrypt`/`aes_cbc_decrypt` were
+# undocumented aliases that simply called the CTR functions above — there was
+# no chaining and no padding, while every caller's documentation claimed
+# "AES-256-CBC with PKCS7 padding". See
+# doc/08_tracking/bug/credential_store_aes_cbc_label_is_actually_ctr_with_deterministic_iv_2026-08-07.md
+#
+# Unlike CTR, CBC changes the message length: the ciphertext is always the
+# plaintext length rounded UP to the next multiple of 16, and a plaintext that
+# is already block-aligned still gains a full block of padding (so decryption
+# can never be ambiguous about how much padding to strip).
+#
+# The IV is a caller-supplied parameter, exactly as for CTR. It MUST be
+# unpredictable and fresh for every encryption, and must be stored alongside
+# the ciphertext. Generating it is deliberately NOT this module's job:
+# src/lib/common/** is the pure tier and has no OS randomness. Callers in the
+# I/O tiers (e.g. std.terminal.credential.store) draw it from the OS CSPRNG.
+# ============================================================================
+
+# PKCS#7-pad `data` to a whole number of 16-byte blocks. A block-aligned input
+# gains a full extra block (16 bytes of 0x10), per RFC 5652 §6.3.
+fn _pkcs7_pad_16(data: [i64]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    val n = data.len()
+    while i < n:
+        out.push(data[i] & 0xFF)
+        i = i + 1
+    val pad_len = 16 - (n % 16)
+    var p = 0
+    while p < pad_len:
+        out.push(pad_len)
+        p = p + 1
+    out
+
+# Strip and VALIDATE PKCS#7 padding. Returns nil when the padding is invalid.
+#
+# This fails CLOSED on purpose: an invalid trailer is an explicit decryption
+# failure, not plaintext.
+#
+# HISTORY: this local copy was written because std.common.aes.padding
+# `pkcs7_unpad` used to return its input unchanged when validation failed,
+# which under a wrong key handed raw padding bytes back to the caller as if
+# they were plaintext. That is NO LONGER TRUE -- padding.spl now fails closed
+# too and bounds the pad length by block_size. This copy is kept because it is
+# specialised to a fixed 16-byte block and takes `[i64]`; a future consolidation
+# onto `pkcs7_unpad(data, 16)` is reasonable. Do not cite padding.spl as
+# fail-open. See doc/08_tracking/bug/jit_param_passed_list_element_read_returns_tagged_2026-08-08.md
+fn _pkcs7_unpad_16(data: [i64]) -> [i64]?:
+    val n = data.len()
+    if n == 0 or (n % 16) != 0:
+        return nil
+    val pad_len = data[n - 1] & 0xFF
+    if pad_len < 1 or pad_len > 16:
+        return nil
+    var p = 0
+    while p < pad_len:
+        if (data[n - 1 - p] & 0xFF) != pad_len:
+            return nil
+        p = p + 1
+    var out: [i64] = []
+    var i = 0
+    val keep = n - pad_len
+    while i < keep:
+        out.push(data[i] & 0xFF)
+        i = i + 1
+    out
+
+# AES-CBC encryption with PKCS#7 padding.
+# key: 16 bytes (AES-128) or 32 bytes (AES-256). iv: 16 bytes, unpredictable
+# and unique per encryption. Returns [] on invalid key/IV size.
+fn aes_cbc_encrypt(plaintext: [i64], key: [i64], iv: [i64]) -> [i64]:
+    if key.len() != 16 and key.len() != 32:
+        return []
+    if iv.len() != 16:
+        return []
+    val is_256 = key.len() == 32
+    val schedule = if is_256: aes256_key_expansion(_i64_to_u8(key)) else: aes128_key_expansion(_i64_to_u8(key))
+
+    val padded = _pkcs7_pad_16(plaintext)
+
+    # `prev` is the IV for the first block and the previous ciphertext block
+    # thereafter (the CBC chaining value).
+    var prev: [i64] = []
+    var c = 0
+    while c < 16:
+        prev.push(iv[c] & 0xFF)
+        c = c + 1
+
+    var out: [i64] = []
+    var off = 0
+    val n = padded.len()
+    while off < n:
+        # XOR the plaintext block with the chaining value, then encrypt it.
+        var block: [i64] = []
+        var b = 0
+        while b < 16:
+            block.push(padded[off + b] ^ prev[b])
+            b = b + 1
+        val enc = if is_256: aes256_encrypt_block(_i64_to_u8(block), schedule) else: aes128_encrypt_block(_i64_to_u8(block), schedule)
+        var next: [i64] = []
+        var e = 0
+        while e < 16:
+            val byte = rt_bytes_u8_at(enc, e)
+            next.push(byte)
+            out.push(byte)
+            e = e + 1
+        prev = next
+        off = off + 16
+    out
+
+# AES-CBC decryption with PKCS#7 padding validation.
+# Returns nil when the key/IV size is wrong, the ciphertext is not a non-empty
+# multiple of 16 bytes, or the recovered padding is invalid (which is what a
+# wrong key almost always produces).
+fn aes_cbc_decrypt(ciphertext: [i64], key: [i64], iv: [i64]) -> [i64]?:
+    if key.len() != 16 and key.len() != 32:
+        return nil
+    if iv.len() != 16:
+        return nil
+    val n = ciphertext.len()
+    if n == 0 or (n % 16) != 0:
+        return nil
+    val is_256 = key.len() == 32
+    val schedule = if is_256: aes256_key_expansion(_i64_to_u8(key)) else: aes128_key_expansion(_i64_to_u8(key))
+
+    var prev: [i64] = []
+    var c = 0
+    while c < 16:
+        prev.push(iv[c] & 0xFF)
+        c = c + 1
+
+    var padded: [i64] = []
+    var off = 0
+    while off < n:
+        var block: [i64] = []
+        var b = 0
+        while b < 16:
+            block.push(ciphertext[off + b] & 0xFF)
+            b = b + 1
+        # Inverse cipher, then XOR with the chaining value to undo the CBC XOR.
+        val dec = if is_256: aes256_decrypt_block(_i64_to_u8(block), schedule) else: aes128_decrypt_block(_i64_to_u8(block), schedule)
+        var d = 0
+        while d < 16:
+            padded.push(rt_bytes_u8_at(dec, d) ^ prev[d])
+            d = d + 1
+        prev = block
+        off = off + 16
+
+    _pkcs7_unpad_16(padded)
+
+export aes_ctr_encrypt
+export aes_ctr_decrypt
+export aes_cbc_encrypt
+export aes_cbc_decrypt

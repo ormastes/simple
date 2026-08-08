@@ -1,0 +1,57 @@
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.driver.driver_source_loading.{_driver_entry_import_module_paths}
+
+describe "native entry closure gate":
+    it "collects every export-use dependency from the driver facade":
+        val source = file_read("src/compiler/driver/__init__.spl")
+        val imports = _driver_entry_import_module_paths(source)
+        expect(imports.len()).to_be_greater_than(10)
+        expect(imports).to_contain("compiler.driver.driver")
+        expect(imports).to_contain("compiler.driver.driver_aot_output")
+
+    it "skips lazy, commented, and docstring imports":
+        val imports = _driver_entry_import_module_paths(
+            "use real.one\nuse lazy ignored.one\n# use ignored.two\n\"\"\"\nuse ignored.three\n\"\"\"\nuse ../../ignored_four\nimport real.two\n"
+        )
+        expect(imports.len()).to_equal(2)
+        expect(imports).to_contain("real.one")
+        expect(imports).to_contain("real.two")
+
+    it "imports the concrete driver owner instead of the ambiguous facade":
+        val source = file_read("src/compiler/80.driver/main.spl")
+        expect(source).to_contain(
+            "use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}"
+        )
+        expect(source.contains("use driver.*")).to_equal(false)
+        expect(source.contains("use compiler.driver.{")).to_equal(false)
+
+    it "reads parsed facade modules without optional value transport":
+        val output = file_read(
+            "src/compiler/80.driver/driver_aot_native_output.spl")
+        expect(output).to_contain(
+            "if ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name]):"
+        )
+        expect(output.contains("ctx.modules.get(name)")).to_equal(false)
+
+    it "gates entry closure on errors added by the closure walk":
+        val driver = file_read("src/compiler/80.driver/driver.spl")
+        val branch_start = driver.find("if nb_entry_env != \"\" and not nb_entry_closure_pre") ?? -1
+        val branch_end = driver.find("# Add core source roots only when compiling project sources") ?? -1
+        val closure = driver.substring(branch_start, branch_end)
+        val snapshot = closure.find("val closure_error_count_before = self.ctx.errors.len()") ?? -1
+        val walk = closure.find("while closure_idx < all_sources.len():") ?? -1
+        val unresolved = closure.find("self.ctx.add_error(\"unresolved import '") ?? -1
+        val empty = closure.find("self.ctx.add_error(\"import '") ?? -1
+        val success = closure.find("if self.ctx.errors.len() == closure_error_count_before:") ?? -1
+        val enable = closure.find("rt_env_set(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\", \"1\")") ?? -1
+
+        expect(branch_start).to_be_greater_than(-1)
+        expect(branch_end).to_be_greater_than(branch_start)
+        expect(snapshot).to_be_greater_than(-1)
+        expect(walk).to_be_greater_than(snapshot)
+        expect(unresolved).to_be_greater_than(walk)
+        expect(empty).to_be_greater_than(unresolved)
+        expect(success).to_be_greater_than(empty)
+        expect(enable).to_be_greater_than(success)
+        expect(closure).to_not_contain("if self.ctx.errors.len() == 0:")

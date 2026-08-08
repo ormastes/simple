@@ -1,0 +1,203 @@
+# HWIR Types — Hardware-oriented intermediate representation.
+#
+# This module defines data-only HWIR records used between MIR lowering and
+# VHDL emission.  The first production slice keeps the model explicit and
+# target-neutral so existing VHDL output can continue through the direct path.
+
+class HwPort:
+    """External hardware module port."""
+    name: text
+    direction: text
+    type_name: text
+    bit_width: i32
+    clock_domain: text
+
+    me vhdl_type() -> text:
+        if self.bit_width == 1:
+            return "std_logic"
+        return "std_logic_vector(" + (self.bit_width - 1).to_text() + " downto 0)"
+
+    static fn input(name: text, type_name: text, bit_width: i32) -> HwPort:
+        return HwPort(name: name, direction: "in", type_name: type_name, bit_width: bit_width, clock_domain: "default")
+
+    static fn output(name: text, type_name: text, bit_width: i32) -> HwPort:
+        return HwPort(name: name, direction: "out", type_name: type_name, bit_width: bit_width, clock_domain: "default")
+
+class HwSignal:
+    """Combinational signal inside an HWIR module."""
+    name: text
+    type_name: text
+    bit_width: i32
+    driver_count: i32
+    source_id: text
+
+    me has_single_driver() -> bool:
+        return self.driver_count <= 1
+
+    static fn comb(name: text, type_name: text, bit_width: i32) -> HwSignal:
+        return HwSignal(name: name, type_name: type_name, bit_width: bit_width, driver_count: 0, source_id: "")
+
+class HwRegister:
+    """Clocked register inside an HWIR module."""
+    name: text
+    type_name: text
+    bit_width: i32
+    clock_domain: text
+    reset_policy: text
+    reset_value: text
+
+    static fn create(name: text, type_name: text, bit_width: i32, clock_domain: text) -> HwRegister:
+        return HwRegister(name: name, type_name: type_name, bit_width: bit_width, clock_domain: clock_domain, reset_policy: "sync_zero", reset_value: "0")
+
+class HwCombOp:
+    """Combinational operation descriptor."""
+    op: text
+    result: text
+    lhs: text
+    rhs: text
+    bit_width: i32
+
+    me is_binary() -> bool:
+        return self.rhs != ""
+
+    static fn unary(op: text, result: text, lhs: text, bit_width: i32) -> HwCombOp:
+        return HwCombOp(op: op, result: result, lhs: lhs, rhs: "", bit_width: bit_width)
+
+    static fn binary(op: text, result: text, lhs: text, rhs: text, bit_width: i32) -> HwCombOp:
+        return HwCombOp(op: op, result: result, lhs: lhs, rhs: rhs, bit_width: bit_width)
+
+class HwMemory:
+    """Memory resource inferred or declared in hardware."""
+    name: text
+    element_type: text
+    element_width: i32
+    depth: i32
+    ports: i32
+    template_kind: text
+
+    me is_dual_port() -> bool:
+        return self.ports >= 2
+
+    static fn ram(name: text, element_type: text, element_width: i32, depth: i32, ports: i32) -> HwMemory:
+        return HwMemory(name: name, element_type: element_type, element_width: element_width, depth: depth, ports: ports, template_kind: "ram")
+
+class HwFsm:
+    """Finite-state-machine metadata."""
+    name: text
+    state_signal: text
+    state_count: i32
+    encoding: text
+    reset_state: text
+
+    static fn create(name: text, state_signal: text, state_count: i32) -> HwFsm:
+        return HwFsm(name: name, state_signal: state_signal, state_count: state_count, encoding: "auto", reset_state: "0")
+
+class HwPipeline:
+    """Pipeline metadata for scheduled hardware."""
+    name: text
+    stage_count: i32
+    initiation_interval: i32
+    hazard_policy: text
+
+    static fn combinational(name: text) -> HwPipeline:
+        return HwPipeline(name: name, stage_count: 0, initiation_interval: 0, hazard_policy: "none")
+
+class HwClockDomain:
+    """Named clock/reset domain."""
+    name: text
+    clock_signal: text
+    reset_signal: text
+    reset_active: text
+    reset_policy: text
+
+    static fn default_domain() -> HwClockDomain:
+        return HwClockDomain(name: "default", clock_signal: "clk", reset_signal: "rst", reset_active: "high", reset_policy: "sync")
+
+class HwResetPolicy:
+    """Reset policy selected for registers in a domain."""
+    kind: text
+    active_level: text
+    value_style: text
+
+    static fn sync_zero() -> HwResetPolicy:
+        return HwResetPolicy(kind: "sync", active_level: "high", value_style: "zero")
+
+class HwResourceBinding:
+    """Resource binding decision for an operation or memory."""
+    resource_id: text
+    resource_kind: text
+    profile: text
+    sharing_group: text
+    latency_cycles: i32
+
+    me is_shared() -> bool:
+        return self.sharing_group != ""
+
+    static fn lut(resource_id: text) -> HwResourceBinding:
+        return HwResourceBinding(resource_id: resource_id, resource_kind: "lut", profile: "balanced", sharing_group: "", latency_cycles: 0)
+
+class HwSourceMap:
+    """Mapping from HWIR nodes back to Simple source and MIR objects."""
+    hwir_id: text
+    mir_id: text
+    source_file: text
+    source_line: i32
+    source_column: i32
+
+    me has_source() -> bool:
+        return self.source_file != ""
+
+    static fn unknown(hwir_id: text) -> HwSourceMap:
+        return HwSourceMap(hwir_id: hwir_id, mir_id: "", source_file: "", source_line: 0, source_column: 0)
+
+class HwCostModel:
+    """Estimated hardware cost used by optimization passes."""
+    lut_count: i32
+    ff_count: i32
+    dsp_count: i32
+    bram_count: i32
+    latency_cycles: i32
+    fmax_mhz: i32
+
+    me area_score() -> i32:
+        return self.lut_count + self.ff_count + (self.dsp_count * 100) + (self.bram_count * 200)
+
+    static fn empty() -> HwCostModel:
+        return HwCostModel(lut_count: 0, ff_count: 0, dsp_count: 0, bram_count: 0, latency_cycles: 0, fmax_mhz: 0)
+
+class HwModule:
+    """Top-level HWIR module summary.
+
+    Counts are kept explicit in this first slice so lowering can construct a
+    stable module summary before bulk node storage is introduced.
+    """
+    name: text
+    profile: text
+    port_count: i32
+    signal_count: i32
+    register_count: i32
+    memory_count: i32
+    comb_op_count: i32
+    clock_domain_count: i32
+    fallback_function: text
+    cost: HwCostModel
+
+    me is_empty() -> bool:
+        return self.port_count == 0 and self.signal_count == 0 and self.register_count == 0 and self.memory_count == 0 and self.comb_op_count == 0
+
+    me preserves_direct_vhdl_fallback() -> bool:
+        return self.fallback_function != ""
+
+    static fn empty(name: text) -> HwModule:
+        return HwModule(
+            name: name,
+            profile: "balanced",
+            port_count: 0,
+            signal_count: 0,
+            register_count: 0,
+            memory_count: 0,
+            comb_op_count: 0,
+            clock_domain_count: 1,
+            fallback_function: name,
+            cost: HwCostModel.empty()
+        )

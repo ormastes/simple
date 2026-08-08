@@ -1,0 +1,90 @@
+# @cover src/lib/nogc_sync_mut/test_runner/test_runner_coverage.spl 100%
+
+use std.spec.*
+use std.test_runner.test_runner_coverage.{
+    collect_coverage,
+    check_cover_annotation_threshold,
+    record_compiler_decision_manifest_sdn,
+    record_coverage_sdn,
+    reset_coverage_state
+}
+
+fn child_decision_sdn(true_count: i64, false_count: i64) -> text:
+    "decisions |id, file, line, column, true_count, false_count|\n" +
+        "    branch-1, src/owned/frame.spl, 10, 4, {true_count}, {false_count}\n" +
+        "conditions |decision_id, condition_id, file, line, column, true_count, false_count|"
+
+fn compiler_decision_manifest_sdn(true_count: i64 = 0, false_count: i64 = 0) -> text:
+    "decisions |id, file, line, column, true_count, false_count|\n" +
+        "    branch-1, src/owned/frame.spl, 10, 4, {true_count}, {false_count}\n" +
+        "conditions |decision_id, condition_id, file, line, column, true_count, false_count|"
+
+describe "cross-process coverage aggregation":
+    it "pre-registers an untouched compiler decision before runtime outcomes merge":
+        reset_coverage_state()
+        expect(record_compiler_decision_manifest_sdn(compiler_decision_manifest_sdn())).to_be(true)
+
+        val untouched = collect_coverage()
+        expect(untouched.total_decisions).to_equal(1)
+        expect(untouched.total_decisions_covered).to_equal(0)
+        expect(untouched.decision_pct).to_equal(0)
+
+        record_coverage_sdn(child_decision_sdn(1, 0))
+        record_coverage_sdn(child_decision_sdn(0, 1))
+        val exercised = collect_coverage()
+        expect(exercised.total_decisions).to_equal(1)
+        expect(exercised.total_decisions_covered).to_equal(1)
+        expect(exercised.decision_pct).to_equal(100)
+        reset_coverage_state()
+
+    it "rejects runtime counts, event rows, and malformed compiler locations":
+        reset_coverage_state()
+        expect(record_compiler_decision_manifest_sdn(compiler_decision_manifest_sdn(1, 1))).to_be(false)
+        expect(record_compiler_decision_manifest_sdn("decision src/owned/frame.spl:10 branch-1 true")).to_be(false)
+        val malformed = compiler_decision_manifest_sdn().replace(", 10, 4,", ", nope, 4,")
+        expect(record_compiler_decision_manifest_sdn(malformed)).to_be(false)
+        val overflow = compiler_decision_manifest_sdn().replace(", 10, 4,", ", 99999999999999999999, 4,")
+        expect(record_compiler_decision_manifest_sdn(overflow)).to_be(false)
+        expect(record_compiler_decision_manifest_sdn(compiler_decision_manifest_sdn())).to_be(true)
+        val coverage = collect_coverage()
+        expect(coverage.total_decisions).to_equal(1)
+        expect(coverage.total_decisions_covered).to_equal(0)
+        reset_coverage_state()
+
+    it "merges true and false outcomes retained by separate child runs":
+        reset_coverage_state()
+        record_coverage_sdn(child_decision_sdn(1, 0))
+        record_coverage_sdn(child_decision_sdn(0, 1))
+
+        val coverage = collect_coverage()
+        expect(coverage.files.len()).to_equal(1)
+        expect(coverage.files[0].path).to_equal("src/owned/frame.spl")
+        expect(coverage.files[0].decisions_total).to_equal(1)
+        expect(coverage.files[0].decisions_covered).to_equal(1)
+        expect(coverage.files[0].decision_pct).to_equal(100)
+        expect(coverage.total_decisions).to_equal(1)
+        expect(coverage.total_decisions_covered).to_equal(1)
+        expect(coverage.decision_pct).to_equal(100)
+        reset_coverage_state()
+
+    it "rejects an owner below its annotated threshold despite 99 percent aggregate coverage":
+        reset_coverage_state()
+        var sdn = "decisions |id, file, line, column, true_count, false_count|\n"
+        var i = 0
+        while i < 100:
+            val path = if i < 2: "src/owned/frame.spl" else: "src/other/frame.spl"
+            val false_count = if i == 0: 0 else: 1
+            sdn = sdn + "    branch-{i}, {path}, {i + 1}, 4, 1, {false_count}\n"
+            i = i + 1
+        sdn = sdn + "conditions |decision_id, condition_id, file, line, column, true_count, false_count|"
+        record_coverage_sdn(sdn)
+
+        val coverage = collect_coverage()
+        expect(coverage.decision_pct).to_equal(99)
+        expect(check_cover_annotation_threshold(coverage, "src/owned/frame.spl 50%")).to_be(true)
+        expect(check_cover_annotation_threshold(coverage, "src/owned/frame.spl 100%")).to_be(false)
+        expect(check_cover_annotation_threshold(coverage, "src/missing/frame.spl 100%")).to_be(false)
+        expect(check_cover_annotation_threshold(coverage, "src/owned/frame.spl nope")).to_be(false)
+        expect(check_cover_annotation_threshold(coverage, "src/owned/frame.spl 50junk%")).to_be(false)
+        expect(check_cover_annotation_threshold(coverage, "src/owned/frame.spl 50%%")).to_be(false)
+        reset_coverage_state()

@@ -1,0 +1,43 @@
+"""
+# Claude full MCP output storage pure helpers
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.utils.mcpOutputStorage.*
+
+describe "Claude full MCP output storage helpers":
+    it "describes MCP result formats":
+        expect(getFormatDescription("toolResult", nil)).to_equal("Plain text")
+        expect(getFormatDescription("structuredContent", nil)).to_equal("JSON")
+        expect(getFormatDescription("structuredContent", Some(""))).to_equal("JSON")
+        expect(getFormatDescription("structuredContent", Some("{type:object}"))).to_equal("JSON with schema: {type:object}")
+        expect(getFormatDescription("contentArray", Some(""))).to_equal("JSON array")
+        expect(getFormatDescription("contentArray", Some("items"))).to_equal("JSON array with schema: items")
+
+    it "builds large output read instructions":
+        val text = getLargeOutputInstructions("/tmp/out.txt", 1234567, "Plain text", Some(4096))
+        expect(text).to_contain("1,234,567 characters")
+        expect(text).to_contain("Bash output is limited to 4,096 chars.")
+        expect(text).to_contain("***If you did not read the entire content, you MUST explicitly state this.***")
+
+    it "treats zero max read length like no limit":
+        val text = getLargeOutputInstructions("/tmp/out.txt", 12, "JSON", Some(0))
+        expect(text).to_contain("If you receive truncation warnings when reading the file, reduce the chunk size")
+        expect(text).to_equal(getLargeOutputInstructions("/tmp/out.txt", 12, "JSON", nil))
+
+    it "maps known mime types to read-friendly extensions":
+        expect(extensionForMimeType(Some("application/pdf; charset=binary"))).to_equal("pdf")
+        expect(extensionForMimeType(Some("IMAGE/JPEG"))).to_equal("jpg")
+        expect(extensionForMimeType(Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))).to_equal("xlsx")
+        expect(extensionForMimeType(nil)).to_equal("bin")
+
+    it "classifies text-ish content as non-binary":
+        expect(isBinaryContentType("text/plain")).to_equal(false)
+        expect(isBinaryContentType("application/activity+json")).to_equal(false)
+        expect(isBinaryContentType("application/xml")).to_equal(false)
+        expect(isBinaryContentType("application/javascript")).to_equal(false)
+        expect(isBinaryContentType("application/pdf")).to_equal(true)
+
+    it "builds saved binary blob messages":
+        val message = getBinaryBlobSavedMessage("/tmp/blob.pdf", Some("application/pdf"), 2048, "Tool result: ")
+        expect(message).to_equal("Tool result: Binary content (application/pdf, 2KB) saved to /tmp/blob.pdf")

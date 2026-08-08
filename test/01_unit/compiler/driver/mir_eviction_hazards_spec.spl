@@ -1,0 +1,114 @@
+# Regression guard for the two latent MIR-eviction hazards recorded in
+# doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md
+# (UPDATE 2026-08-06, "Four aliases that must be resolved even after the
+# primitives exist"). Both are wrong-behaviour bugs TODAY, independent of any
+# memory-freeing work:
+#
+#   hazard 1 -- `ctx.bootstrap_entry_mir` ALIASES `ctx.mir_modules[entry]`, but
+#               `evict_mir_module` only removed the dict entry. The alias was
+#               left dangling and read back by driver_aot_native_output.spl,
+#               unlike `evict_hir`, which already cleared its
+#               `bootstrap_entry_hir` twin.
+#   hazard 3 -- `--output-format both` + `--low-memory` silently lost SMF
+#               output: compile_to_native evicted every MirModule and the
+#               compile_to_smf pass that runs AFTER it re-iterates
+#               `ctx.mir_modules`, so the .smf came out empty/partial with no
+#               error reported.
+#
+# @cover src/compiler/80.driver/driver_types.spl
+# @cover src/compiler/00.common/driver_core_modes.spl
+
+use compiler.driver.driver_types.{CompileContext}
+# Import CompileOptions from its DEFINING module, not the driver_core_types
+# facade: the facade re-export resolves to a different `CompileOptions` binding
+# here and `CompileContext.create` then fails with "class `CompileOptions` has
+# no field named `mode`".
+use compiler.common.driver_compile_options.{CompileOptions, driver_core_compile_options_default}
+use compiler.common.driver_core_modes.{
+    driver_mir_eviction_enabled,
+    driver_output_format_native,
+    driver_output_format_smf,
+    driver_output_format_both,
+    driver_output_format_self_contained
+}
+use compiler.mir.mir_instructions.{MirModule}
+
+fn empty_mir(name: text) -> MirModule:
+    MirModule(name: name, functions: {}, statics: {}, constants: {}, types: {})
+
+fn fresh_context() -> CompileContext:
+    var options: CompileOptions = driver_core_compile_options_default()
+    options.input_files = ["mir_eviction_hazards_spec_input.spl"]
+    CompileContext.create(options)
+
+fn entry_alias_present(ctx: CompileContext) -> bool:
+    if val _entry = ctx.bootstrap_entry_mir:
+        true
+    else:
+        false
+
+describe "driver MIR eviction hazards":
+
+    it "clears the bootstrap entry alias when the entry module is evicted":
+        var ctx = fresh_context()
+        val entry = empty_mir("app.cli.bootstrap_main")
+        ctx.mir_modules["app.cli.bootstrap_main"] = entry
+        ctx.set_bootstrap_entry_mir("app.cli.bootstrap_main", entry)
+        expect(entry_alias_present(ctx)).to_equal(true)
+
+        ctx.evict_mir_module("app.cli.bootstrap_main")
+
+        expect(ctx.mir_modules.has("app.cli.bootstrap_main")).to_equal(false)
+        # Before the fix this stayed Some(...) -- a logical alias naming an
+        # evicted module, which is exactly what hazard 1 describes.
+        expect(entry_alias_present(ctx)).to_equal(false)
+        expect(ctx.bootstrap_entry_mir_name).to_equal("")
+
+    it "keeps the bootstrap entry alias when a DIFFERENT module is evicted":
+        var ctx = fresh_context()
+        val entry = empty_mir("app.cli.bootstrap_main")
+        ctx.mir_modules["app.cli.bootstrap_main"] = entry
+        ctx.mir_modules["std.text"] = empty_mir("std.text")
+        ctx.set_bootstrap_entry_mir("app.cli.bootstrap_main", entry)
+
+        ctx.evict_mir_module("std.text")
+
+        # Over-clearing would break the bootstrap native path, which reads the
+        # alias back after codegen. Only the entry's OWN eviction clears it.
+        expect(ctx.mir_modules.has("std.text")).to_equal(false)
+        expect(ctx.mir_modules.has("app.cli.bootstrap_main")).to_equal(true)
+        expect(entry_alias_present(ctx)).to_equal(true)
+        expect(ctx.bootstrap_entry_mir_name).to_equal("app.cli.bootstrap_main")
+
+    it "evicting a never-registered module leaves an unrelated alias alone":
+        var ctx = fresh_context()
+        val entry = empty_mir("app.cli.bootstrap_main")
+        ctx.mir_modules["app.cli.bootstrap_main"] = entry
+        ctx.set_bootstrap_entry_mir("app.cli.bootstrap_main", entry)
+
+        ctx.evict_mir_module("never.registered.module")
+
+        expect(entry_alias_present(ctx)).to_equal(true)
+
+    it "evict_hir still clears its own bootstrap entry twin":
+        # The pattern hazard 1's fix mirrors. Guarded here so the two eviction
+        # paths cannot drift apart again.
+        var ctx = fresh_context()
+        ctx.evict_hir()
+        expect(ctx.hir_modules.has("app.cli.bootstrap_main")).to_equal(false)
+
+    it "disables MIR eviction under --output-format both":
+        # hazard 3: `both` runs compile_to_smf AFTER compile_to_native over the
+        # same context, and compile_to_smf re-reads ctx.mir_modules.
+        expect(driver_mir_eviction_enabled(true, driver_output_format_both())).to_equal(false)
+
+    it "still evicts under --low-memory for every single-artifact format":
+        expect(driver_mir_eviction_enabled(true, driver_output_format_native())).to_equal(true)
+        expect(driver_mir_eviction_enabled(true, driver_output_format_smf())).to_equal(true)
+        expect(driver_mir_eviction_enabled(true, driver_output_format_self_contained())).to_equal(true)
+
+    it "never evicts without --low-memory":
+        expect(driver_mir_eviction_enabled(false, driver_output_format_native())).to_equal(false)
+        expect(driver_mir_eviction_enabled(false, driver_output_format_smf())).to_equal(false)
+        expect(driver_mir_eviction_enabled(false, driver_output_format_both())).to_equal(false)
+        expect(driver_mir_eviction_enabled(false, driver_output_format_self_contained())).to_equal(false)

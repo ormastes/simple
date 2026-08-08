@@ -1,0 +1,53 @@
+# Pure-Simple first-class closure ABI.
+
+extern fn calloc(count: i64, size: i64) -> i64
+extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
+extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+
+var closure_registry_head: i64 = 0
+
+fn closure_ptr(value: i64) -> i64:
+    if value < 4096 or (value & 7) != 1:
+        return 0
+    val candidate = value & -8
+    # Compare membership before dereferencing candidate: a raw function
+    # pointer or integer may share the heap tag bits.
+    var current = closure_registry_head
+    while current != 0:
+        if current == candidate:
+            return current
+        current = spl_load_i64(current, 24)
+    0
+
+pub fn rt_closure_new(func_ptr: i64, capture_count: i64) -> i64:
+    if func_ptr == 0 or capture_count < 0 or capture_count > 1152921504606846971:
+        return 3
+    val closure = calloc(1, 32 + capture_count * 8)
+    if closure == 0:
+        return 3
+    spl_store_u8(closure, 0, 3)
+    spl_store_i64(closure, 8, func_ptr)
+    spl_store_i64(closure, 16, capture_count)
+    spl_store_i64(closure, 24, closure_registry_head)
+    closure_registry_head = closure
+    closure | 1
+
+pub fn rt_closure_set_capture(closure: i64, index: i64, value: i64) -> i64:
+    val ptr = closure_ptr(closure)
+    if ptr == 0 or index < 0 or index >= spl_load_i64(ptr, 16):
+        return 0
+    spl_store_i64(ptr, 32 + index * 8, value)
+    1
+
+pub fn rt_closure_get_capture(closure: i64, index: i64) -> i64:
+    val ptr = closure_ptr(closure)
+    if ptr == 0 or index < 0 or index >= spl_load_i64(ptr, 16):
+        return 3
+    spl_load_i64(ptr, 32 + index * 8)
+
+pub fn rt_closure_func_ptr(closure: i64) -> i64:
+    val ptr = closure_ptr(closure)
+    if ptr == 0:
+        return 0
+    spl_load_i64(ptr, 8)

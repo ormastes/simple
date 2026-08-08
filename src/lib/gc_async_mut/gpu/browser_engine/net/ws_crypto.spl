@@ -1,0 +1,270 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+# WebSocket cryptographic helpers: key generation, SHA-1, base64, hex utilities.
+# Used by ws_handshake.spl for the RFC 6455 opening handshake.
+
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{net_ascii_lower_char}
+use std.gc_async_mut.gpu.browser_engine.net.ws_utils.{decode_byte_val, ws_substring}
+
+extern fn rt_random_hex(len: i64) -> text
+
+# WebSocket magic GUID used in Sec-WebSocket-Accept validation (RFC 6455 Section 4.2.2)
+val WS_MAGIC_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+var _ws_random_counter = 0
+
+fn generate_ws_key() -> text:
+    # Generate a random 16-byte value encoded as base64 for Sec-WebSocket-Key.
+    # The key must be a nonce consisting of a randomly selected 16-byte value
+    # that has been base64-encoded (RFC 6455 Section 4.1).
+    var bytes = ws_hex_to_bytes(rt_random_hex(16))
+    _ws_random_counter = _ws_random_counter + 1
+    bytes = ws_mix_counter(bytes, _ws_random_counter)
+    ws_base64_encode(bytes)
+
+fn compute_accept_key(key: text) -> text:
+    # Compute the expected Sec-WebSocket-Accept value.
+    # accept = base64(SHA-1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+    # RFC 6455 Section 4.2.2
+    val concatenated = key + WS_MAGIC_GUID
+    ws_base64_encode(ws_sha1(concatenated))
+
+fn generate_mask_key() -> [i64]:
+    # Generate a random 4-byte masking key for client-to-server frames.
+    # RFC 6455 Section 5.3: client MUST mask all frames.
+    var bytes = ws_hex_to_bytes(rt_random_hex(4))
+    _ws_random_counter = _ws_random_counter + 1
+    bytes = ws_mix_counter(bytes, _ws_random_counter)
+    var mask = []
+    var i = 0
+    while i < 4:
+        if i < bytes.len():
+            mask.push(bytes[i])
+        else:
+            mask.push(0)
+        i = i + 1
+    mask
+
+fn ws_base64_encode(bytes: [i64]) -> text:
+    val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    var result = ""
+    var i = 0
+    while i < bytes.len():
+        val b1 = bytes[i]
+        var b2 = 0
+        var b3 = 0
+        var has_b2 = false
+        var has_b3 = false
+        if i + 1 < bytes.len():
+            b2 = bytes[i + 1]
+            has_b2 = true
+        if i + 2 < bytes.len():
+            b3 = bytes[i + 2]
+            has_b3 = true
+
+        result = result + ws_base64_char(alphabet, b1 / 4)
+        var idx2 = (b1 % 4) * 16
+        if has_b2:
+            idx2 = idx2 + (b2 / 16)
+        result = result + ws_base64_char(alphabet, idx2)
+
+        if has_b2:
+            var idx3 = (b2 % 16) * 4
+            if has_b3:
+                idx3 = idx3 + (b3 / 64)
+            result = result + ws_base64_char(alphabet, idx3)
+        else:
+            result = result + "="
+
+        if has_b3:
+            result = result + ws_base64_char(alphabet, b3 % 64)
+        else:
+            result = result + "="
+
+        i = i + 3
+    result
+
+fn ws_base64_char(alphabet: text, index: i64) -> text:
+    ws_substring(alphabet, index, index + 1)
+
+fn ws_sha1(input: text) -> [i64]:
+    val bytes = ws_text_to_bytes(input)
+    val padded = ws_sha1_pad(bytes)
+    var h0 = 0x67452301
+    var h1 = 0xEFCDAB89
+    var h2 = 0x98BADCFE
+    var h3 = 0x10325476
+    var h4 = 0xC3D2E1F0
+    var block_idx = 0
+    val num_blocks = padded.len() / 64
+
+    while block_idx < num_blocks:
+        var block = []
+        val offset = block_idx * 64
+        var i = 0
+        while i < 64:
+            block.push(padded[offset + i])
+            i = i + 1
+
+        val hash_values = ws_sha1_process_block(block, h0, h1, h2, h3, h4)
+        h0 = hash_values[0]
+        h1 = hash_values[1]
+        h2 = hash_values[2]
+        h3 = hash_values[3]
+        h4 = hash_values[4]
+        block_idx = block_idx + 1
+
+    var result = []
+    val words = [h0, h1, h2, h3, h4]
+    var i = 0
+    while i < words.len():
+        val word_bytes = ws_word_to_bytes(words[i])
+        var j = 0
+        while j < word_bytes.len():
+            result.push(word_bytes[j])
+            j = j + 1
+        i = i + 1
+    result
+
+fn ws_text_to_bytes(input: text) -> [i64]:
+    var result = []
+    var i = 0
+    while i < input.len():
+        result.push(decode_byte_val(input, i))
+        i = i + 1
+    result
+
+fn ws_sha1_pad(bytes: [i64]) -> [i64]:
+    var result = []
+    var i = 0
+    while i < bytes.len():
+        result.push(bytes[i])
+        i = i + 1
+
+    result.push(128)
+    val msg_len_bits = bytes.len() * 8
+    val current_len = result.len()
+    val target_len = ((current_len + 8) / 64 + 1) * 64
+    while result.len() < target_len - 8:
+        result.push(0)
+
+    result.push(0)
+    result.push(0)
+    result.push(0)
+    result.push(0)
+    result.push((msg_len_bits >> 24) & 0xFF)
+    result.push((msg_len_bits >> 16) & 0xFF)
+    result.push((msg_len_bits >> 8) & 0xFF)
+    result.push(msg_len_bits & 0xFF)
+    result
+
+fn ws_sha1_process_block(block: [i64], h0: i64, h1: i64, h2: i64, h3: i64, h4: i64) -> [i64]:
+    var w = []
+    var i = 0
+    while i < 16:
+        val offset = i * 4
+        w.push(ws_bytes_to_word(block[offset], block[offset + 1], block[offset + 2], block[offset + 3]))
+        i = i + 1
+
+    while i < 80:
+        val x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]
+        w.push(ws_rotl32(x, 1))
+        i = i + 1
+
+    var a = h0
+    var b = h1
+    var c = h2
+    var d = h3
+    var e = h4
+
+    i = 0
+    while i < 80:
+        var f = 0
+        var k = 0
+        if i < 20:
+            f = (b & c) | ((~b & 0xFFFFFFFF) & d)
+            k = 0x5A827999
+        else:
+            if i < 40:
+                f = b ^ c ^ d
+                k = 0x6ED9EBA1
+            else:
+                if i < 60:
+                    f = (b & c) | (b & d) | (c & d)
+                    k = 0x8F1BBCDC
+                else:
+                    f = b ^ c ^ d
+                    k = 0xCA62C1D6
+
+        val temp = ws_u32(ws_u32(ws_u32(ws_u32(ws_rotl32(a, 5) + f) + e) + k) + w[i])
+        e = d
+        d = c
+        c = ws_rotl32(b, 30)
+        b = a
+        a = temp
+        i = i + 1
+
+    [ws_u32(h0 + a), ws_u32(h1 + b), ws_u32(h2 + c), ws_u32(h3 + d), ws_u32(h4 + e)]
+
+fn ws_rotl32(value: i64, bits: i64) -> i64:
+    ws_u32((value << bits) | ((value & 0xFFFFFFFF) >> (32 - bits)))
+
+fn ws_u32(value: i64) -> i64:
+    value & 0xFFFFFFFF
+
+fn ws_bytes_to_word(b0: i64, b1: i64, b2: i64, b3: i64) -> i64:
+    ((b0 & 0xFF) << 24) | ((b1 & 0xFF) << 16) | ((b2 & 0xFF) << 8) | (b3 & 0xFF)
+
+fn ws_word_to_bytes(word: i64) -> [i64]:
+    [(word >> 24) & 0xFF, (word >> 16) & 0xFF, (word >> 8) & 0xFF, word & 0xFF]
+
+fn ws_hex_to_bytes(hex: text) -> [i64]:
+    var bytes = []
+    var i = 0
+    while i + 1 < hex.len():
+        val hi = ws_hex_digit(hex[i])
+        val lo = ws_hex_digit(hex[i + 1])
+        if hi >= 0 and lo >= 0:
+            bytes.push(hi * 16 + lo)
+        i = i + 2
+    bytes
+
+fn ws_mix_counter(bytes: [i64], counter: i64) -> [i64]:
+    # Mix a monotonic counter into runtime-random bytes to prevent duplicate
+    # WebSocket nonces/masks if the host RNG is called faster than its source updates.
+    var result = []
+    var i = 0
+    while i < bytes.len():
+        var byte = bytes[i]
+        if i == bytes.len() - 1:
+            byte = byte ^ (counter & 0xFF)
+        else:
+            if i == bytes.len() - 2:
+                byte = byte ^ ((counter >> 8) & 0xFF)
+        result.push(byte & 0xFF)
+        i = i + 1
+    result
+
+# NOTE: uses `return -1`, not a bare trailing `-1` — the interpreter
+# silently drops a bare negative-integer literal immediately following a
+# run of single-line `if cond: return X` statements (confirmed repro; see
+# doc/08_tracking/bug/browser_net_real_site_gaps_2026-07-11.md).
+fn ws_hex_digit(ch: text) -> i64:
+    val lower = net_ascii_lower_char(ch)
+    if lower == "0": return 0
+    if lower == "1": return 1
+    if lower == "2": return 2
+    if lower == "3": return 3
+    if lower == "4": return 4
+    if lower == "5": return 5
+    if lower == "6": return 6
+    if lower == "7": return 7
+    if lower == "8": return 8
+    if lower == "9": return 9
+    if lower == "a": return 10
+    if lower == "b": return 11
+    if lower == "c": return 12
+    if lower == "d": return 13
+    if lower == "e": return 14
+    if lower == "f": return 15
+    return -1

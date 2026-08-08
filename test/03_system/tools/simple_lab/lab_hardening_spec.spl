@@ -1,0 +1,456 @@
+"""
+# Simple Lab HTTP/WS API — hardening contract (Stream H, task H1)
+
+Drives `src/app/simple_lab/lab_server.spl` as a **separate OS process** over a
+**real TCP socket**, same real-loopback subprocess pattern as
+`test/03_system/tools/simple_lab/lab_http_api_spec.spl` (L3) — an in-process
+call proves nothing about the actual wire, and the auth/origin/bounds gate
+lives in `LabServer.handle_connection`, which only a real socket exercises.
+
+Verifies design §8.1-§8.2 (`doc/05_design/app/tools/notebook_lanes_architecture.md`):
+no-token 401, bad-origin WS refused, oversized body 413, traversal path 403,
+malformed JSON 400 without panic, output-cap truncation marker. Every limit
+this spec pins is env-configurable (`app.simple_lab.lab_hardening`) — the
+values below are deliberately small so the spec doesn't need multi-megabyte
+payloads to exercise the caps.
+
+Design: doc/05_design/app/tools/notebook_lanes_architecture.md §8.1-§8.2
+Plan:   doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md (Stream H, H1)
+"""
+
+# tag: slow, system
+
+use std.spec.*
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_cwd() -> text
+extern fn rt_sleep_ms(ms: i64)
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_getpid() -> i64
+
+val SERVER_ENTRYPOINT = "src/app/simple_lab/lab_server.spl"
+val TEST_TOKEN = "h1-hardening-test-token"
+
+# ============================================================================
+# Subprocess driver — mirrors lab_http_api_spec.spl's start_lab_server, but
+# takes extra env pairs so each example can pin its own token/bounds without
+# a fresh copy of the whole helper.
+# ============================================================================
+
+fn env_or(key: text, fallback: text) -> text:
+    val v = rt_env_get(key)
+    if v == nil or v == "":
+        fallback
+    else:
+        v
+
+fn scratch_dir() -> text:
+    val t = rt_env_get("SIMPLE_TEST_SCRATCH_DIR")
+    if t != nil and t != "":
+        return t
+    val tmp = rt_env_get("TMPDIR")
+    if tmp != nil and tmp != "" and tmp.starts_with("/"):
+        return tmp
+    return "/tmp"
+
+fn repo_root() -> text:
+    val r = rt_env_get("SIMPLE_REPO_ROOT")
+    if r != nil and r != "":
+        return r
+    val c = rt_env_cwd()
+    if c == nil:
+        return "."
+    return c
+
+class LabServerProc:
+    pid: i64
+    addr: text
+    port: i64
+    portfile: text
+    notebook_root: text
+    started: bool
+
+    me stop():
+        if self.pid > 0:
+            val _ = rt_process_kill(self.pid)
+            self.pid = -1
+        if self.portfile != "":
+            val _ = rt_file_delete(self.portfile)
+
+fn start_lab_server_with_env(max_requests: i64, extra_env: [text]) -> LabServerProc:
+    val root = repo_root()
+    val stamp = rt_time_now_unix_micros()
+    val me_pid = rt_getpid()
+    val dir = scratch_dir()
+    val base = "{dir}/simple_lab_hardening_{me_pid}_{stamp}"
+    val portfile = "{base}.port"
+    val notebook_root = "{base}_notebooks"
+
+    var server = LabServerProc(pid: -1, addr: "", port: -1, portfile: portfile, notebook_root: notebook_root, started: false)
+
+    if rt_file_exists(portfile):
+        val _ = rt_file_delete(portfile)
+
+    # SIMPLE_EXECUTION_MODE=interpreter pins the server subprocess off the
+    # JIT — see lab_http_api_spec.spl for why (named-fn-as-value route
+    # handlers return garbage under the JIT).
+    var args = [
+        "SIMPLE_EXECUTION_MODE=interpreter",
+        "SIMPLE_LAB_HTTP_PORT=0",
+        "SIMPLE_LAB_HTTP_MAX={max_requests}",
+        "SIMPLE_LAB_HTTP_PORTFILE={portfile}",
+        "SIMPLE_LAB_HTTP_ACCEPT_TIMEOUT_MS=20000",
+        "SIMPLE_LAB_NOTEBOOK_ROOT={notebook_root}"
+    ]
+    for pair in extra_env:
+        args.push(pair)
+    args.push("{root}/bin/simple")
+    args.push("run")
+    args.push("{root}/{SERVER_ENTRYPOINT}")
+
+    val pid = rt_process_spawn_async("env", args)
+    if pid <= 0:
+        return server
+    server.pid = pid
+
+    # 150s budget: bin/simple run's cold-start compile+lint pass alone can
+    # take ~50s in this environment before the server subprocess even begins
+    # listening (see lab_http_api_spec.spl for the measured-live rationale).
+    var waited = 0
+    var bound = ""
+    while waited < 150000:
+        if rt_file_exists(portfile):
+            val t = rt_file_read_text(portfile)
+            if t != nil and t.trim() != "":
+                bound = t.trim()
+                waited = 150000
+        if bound == "":
+            rt_sleep_ms(50)
+            waited = waited + 50
+
+    if bound == "":
+        server.stop()
+        return server
+
+    server.addr = bound
+    server.started = true
+    val colon = bound.last_index_of(":")
+    if colon >= 0:
+        server.port = bound.substring(colon + 1, bound.len()).to_i64()
+    return server
+
+fn start_lab_server(max_requests: i64) -> LabServerProc:
+    start_lab_server_with_env(max_requests, ["SIMPLE_LAB_TOKEN={TEST_TOKEN}"])
+
+# ============================================================================
+# Minimal real HTTP/1.1 client over TcpStream (no mocks, no in-process shim).
+# ============================================================================
+
+struct HttpProbe:
+    ok: bool
+    status: i64
+    headers: text
+    body: text
+
+fn http_request_ex(addr: text, method: text, path: text, body: text, extra_headers: text) -> HttpProbe:
+    val stream_res = TcpStream.connect(addr)
+    if stream_res.is_err():
+        return HttpProbe(ok: false, status: -1, headers: "", body: "connect failed")
+    var stream = stream_res.unwrap()
+
+    val clen = body.len()
+    var req = "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {clen}\r\nContent-Type: application/json\r\n{extra_headers}Connection: close\r\n\r\n{body}"
+    val w = stream.write_text(req)
+    if w.is_err():
+        val _ = stream.close()
+        return HttpProbe(ok: false, status: -1, headers: "", body: "write failed")
+    val _f = stream.flush()
+
+    val read_res = stream.read_text()
+    val _c = stream.close()
+    if read_res.is_err():
+        return HttpProbe(ok: false, status: -1, headers: "", body: "read failed")
+    val raw = read_res.unwrap()
+
+    val split = raw.index_of("\r\n\r\n")
+    if split < 0:
+        return HttpProbe(ok: false, status: -1, headers: raw, body: "")
+    val head = raw.slice(0, split)
+    val resp_body = raw.slice(split + 4, raw.len())
+
+    var status: i64 = -1
+    val first_nl = head.index_of("\r\n")
+    val status_line = if first_nl > 0: head.slice(0, first_nl) else: head
+    val sp1 = status_line.index_of(" ")
+    if sp1 > 0:
+        val rest = status_line.slice(sp1 + 1, status_line.len())
+        val sp2 = rest.index_of(" ")
+        val code_text = if sp2 > 0: rest.slice(0, sp2) else: rest
+        status = code_text.to_i64()
+
+    HttpProbe(ok: status > 0, status: status, headers: head, body: resp_body)
+
+fn http_request(addr: text, method: text, path: text, body: text) -> HttpProbe:
+    http_request_ex(addr, method, path, body, "Authorization: Bearer {TEST_TOKEN}\r\n")
+
+fn http_request_no_auth(addr: text, method: text, path: text, body: text) -> HttpProbe:
+    http_request_ex(addr, method, path, body, "")
+
+fn http_request_bad_auth(addr: text, method: text, path: text, body: text) -> HttpProbe:
+    http_request_ex(addr, method, path, body, "Authorization: Bearer wrong-token-entirely\r\n")
+
+fn json_field(body: text, key: text) -> text:
+    val needle = "\"{key}\":\""
+    val idx = body.index_of(needle)
+    if idx < 0:
+        return ""
+    val start = idx + needle.len()
+    val rest = body.slice(start, body.len())
+    val endq = rest.index_of("\"")
+    if endq < 0:
+        return ""
+    rest.slice(0, endq)
+
+# ============================================================================
+# Minimal real WS handshake probe — returns the raw response head so a test
+# can assert "never got a 101" without needing a full frame reader.
+# ============================================================================
+
+fn ws_handshake_probe(addr: text, path: text, origin_header: text, token_qs: text) -> text:
+    val stream_res = TcpStream.connect(addr)
+    if stream_res.is_err():
+        return "CONNECT_FAILED"
+    var stream = stream_res.unwrap()
+
+    val key = "dGhlIHNhbXBsZSBub25jZQ=="
+    val full_path = if token_qs == "": path else: "{path}?token={token_qs}"
+    var req = "GET {full_path} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+    if origin_header != "":
+        req = "{req}Origin: {origin_header}\r\n"
+    req = "{req}\r\n"
+    val w = stream.write_text(req)
+    if w.is_err():
+        val _ = stream.close()
+        return "WRITE_FAILED"
+
+    var header_text = ""
+    var reading = true
+    while reading:
+        match stream.read_line():
+            Err(_):
+                reading = false
+            Ok(line):
+                val trimmed = line.trim()
+                header_text = "{header_text}{trimmed}\n"
+                if trimmed == "":
+                    reading = false
+
+    val _c = stream.close()
+    header_text
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+describe "Simple Lab hardening (H1: auth + bounds, real loopback)":
+
+    it "refuses a request with no Authorization header: 401":
+        val server = start_lab_server(20)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+
+        step("GET /api/lab/status with no bearer token")
+        val resp = http_request_no_auth(server.addr, "GET", "/api/lab/status", "")
+        expect(resp.ok).to_equal(true)
+        expect(resp.status).to_equal(401)
+        expect(resp.headers.to_lower()).to_contain("x-lab-protocol-version: 1")
+
+        step("a wrong bearer token also gets 401 (not just missing-header)")
+        val resp2 = http_request_bad_auth(server.addr, "GET", "/api/lab/status", "")
+        expect(resp2.status).to_equal(401)
+
+        step("the correct bearer token is accepted")
+        val resp3 = http_request(server.addr, "GET", "/api/lab/status", "")
+        expect(resp3.status).to_equal(200)
+
+        server.stop()
+
+    it "refuses a WebSocket upgrade from a disallowed Origin, but allows an allow-listed one":
+        val server = start_lab_server_with_env(20, [
+            "SIMPLE_LAB_TOKEN={TEST_TOKEN}",
+            "SIMPLE_LAB_ALLOWED_ORIGINS=http://allowed.example"
+        ])
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+
+        step("create a real session to have a valid events path")
+        val create_resp = http_request(server.addr, "POST", "/api/lab/sessions", "{\"default_mode\":\"interpreter\"}")
+        expect(create_resp.status).to_equal(201)
+        val session_id = json_field(create_resp.body, "id")
+
+        step("a WS upgrade from a disallowed Origin never gets a 101")
+        val bad_head = ws_handshake_probe(server.addr, "/api/lab/sessions/{session_id}/events", "http://evil.example", TEST_TOKEN)
+        expect(bad_head).to_contain("403")
+        expect(bad_head).to_not_contain("101 Switching Protocols")
+
+        step("a WS upgrade from the allow-listed Origin with the right token gets 101")
+        val good_head = ws_handshake_probe(server.addr, "/api/lab/sessions/{session_id}/events", "http://allowed.example", TEST_TOKEN)
+        expect(good_head).to_contain("101 Switching Protocols")
+
+        step("a WS upgrade from the allow-listed Origin but no token is refused (401), not upgraded")
+        val no_token_head = ws_handshake_probe(server.addr, "/api/lab/sessions/{session_id}/events", "http://allowed.example", "")
+        expect(no_token_head).to_not_contain("101 Switching Protocols")
+
+        server.stop()
+
+    it "answers 413 (not 400) when the body exceeds the configured max body size":
+        val server = start_lab_server_with_env(20, [
+            "SIMPLE_LAB_TOKEN={TEST_TOKEN}",
+            "SIMPLE_LAB_MAX_BODY_BYTES=64"
+        ])
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+
+        step("PUT a notebook body far larger than the 64-byte cap")
+        var big = ""
+        var i = 0
+        while i < 200:
+            big = "{big}x"
+            i = i + 1
+        val resp = http_request(server.addr, "PUT", "/api/lab/notebooks/too_big.snb.sdn", big)
+        expect(resp.ok).to_equal(true)
+        expect(resp.status).to_equal(413)
+        expect(resp.headers.to_lower()).to_contain("x-lab-protocol-version: 1")
+
+        step("the server is still alive and answers the next request")
+        val status_resp = http_request(server.addr, "GET", "/api/lab/status", "")
+        expect(status_resp.status).to_equal(200)
+
+        server.stop()
+
+    it "answers 413 when a single cell's source exceeds the configured max cell size":
+        val server = start_lab_server_with_env(20, [
+            "SIMPLE_LAB_TOKEN={TEST_TOKEN}",
+            "SIMPLE_LAB_MAX_CELL_BYTES=16"
+        ])
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+
+        val create_resp = http_request(server.addr, "POST", "/api/lab/sessions", "{\"default_mode\":\"interpreter\"}")
+        expect(create_resp.status).to_equal(201)
+        val session_id = json_field(create_resp.body, "id")
+
+        step("a cell source well over 16 bytes is rejected with 413")
+        val exec_resp = http_request(server.addr, "POST", "/api/lab/sessions/{session_id}/cells/c1/execute", "{\"source\":\"print(\\\"this source is much longer than sixteen bytes\\\")\"}")
+        expect(exec_resp.status).to_equal(413)
+
+        server.stop()
+
+    it "answers 403 (not the router's blanket 400) for a traversal-flavored notebook name":
+        val server = start_lab_server(20)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+
+        step("GET .../notebooks/NAME where NAME contains '..' but isn't a router-level '..' segment")
+        val resp = http_request(server.addr, "GET", "/api/lab/notebooks/..hidden", "")
+        expect(resp.ok).to_equal(true)
+        expect(resp.status).to_equal(403)
+        expect(resp.headers.to_lower()).to_contain("x-lab-protocol-version: 1")
+
+        step("same guard applies to PUT")
+        val put_resp = http_request(server.addr, "PUT", "/api/lab/notebooks/..hidden", "irrelevant body")
+        expect(put_resp.status).to_equal(403)
+
+        step("the server is still alive")
+        val status_resp = http_request(server.addr, "GET", "/api/lab/status", "")
+        expect(status_resp.status).to_equal(200)
+
+        server.stop()
+
+    it "answers 400 (not a panic/connection-drop) for a malformed JSON body on every JSON-consuming route":
+        val server = start_lab_server(20)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+
+        step("POST /api/lab/sessions with garbage JSON")
+        val create_resp = http_request(server.addr, "POST", "/api/lab/sessions", "not valid json {{{")
+        expect(create_resp.ok).to_equal(true)
+        expect(create_resp.status).to_equal(400)
+
+        step("a real session for the execute/interrupt/reset malformed-body checks")
+        val ok_create = http_request(server.addr, "POST", "/api/lab/sessions", "{\"default_mode\":\"interpreter\"}")
+        expect(ok_create.status).to_equal(201)
+        val session_id = json_field(ok_create.body, "id")
+
+        step("POST .../execute with garbage JSON")
+        val exec_resp = http_request(server.addr, "POST", "/api/lab/sessions/{session_id}/cells/c1/execute", "{{{not json")
+        expect(exec_resp.ok).to_equal(true)
+        expect(exec_resp.status).to_equal(400)
+
+        step("POST .../reset with garbage JSON")
+        val reset_resp = http_request(server.addr, "POST", "/api/lab/sessions/{session_id}/reset", "{{{not json")
+        expect(reset_resp.ok).to_equal(true)
+        expect(reset_resp.status).to_equal(400)
+
+        step("the server never panicked/dropped the connection — it is still alive and correct")
+        val status_resp = http_request(server.addr, "GET", "/api/lab/status", "")
+        expect(status_resp.ok).to_equal(true)
+        expect(status_resp.status).to_equal(200)
+
+        server.stop()
+
+    it "rejects an oversized header line with 431 instead of silently truncating it":
+        """
+        A header line longer than the runtime line reader's 8192-byte cap
+        used to be silently truncated by `read_line_chunked` (Rust runtime),
+        making `parser.spl`'s own `> max_header_line` guard structurally
+        unreachable -- the request got a 200 off a mangled header. Fixed
+        2026-08-08 in `parser.spl` (truncation-signature detection); see
+        `doc/08_tracking/bug/lab_http_parser_oversized_header_line_silently_truncated_not_rejected_2026-08-07.md`.
+        """
+        val server = start_lab_server(20)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+
+        step("build one header value well over the 8192-byte runtime line cap")
+        var big = "x"
+        while big.len() < 20000:
+            big = "{big}{big}"
+        val resp = http_request_ex(server.addr, "GET", "/api/lab/status", "", "Authorization: Bearer {TEST_TOKEN}\r\nX-Oversized: {big}\r\n")
+
+        step("the request is rejected with 431, not answered 200 off a truncated header")
+        expect(resp.ok).to_equal(true)
+        expect(resp.status).to_equal(431)
+        expect(resp.headers).to_contain("Request Header Fields Too Large")
+
+        step("the server is still alive and answers the next well-formed request")
+        val status_resp = http_request(server.addr, "GET", "/api/lab/status", "")
+        expect(status_resp.status).to_equal(200)
+
+        server.stop()
+
+    it "truncates cell output with an explicit marker once it exceeds the configured max output size":
+        val server = start_lab_server_with_env(20, [
+            "SIMPLE_LAB_TOKEN={TEST_TOKEN}",
+            "SIMPLE_LAB_MAX_OUTPUT_BYTES=8"
+        ])
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+
+        val create_resp = http_request(server.addr, "POST", "/api/lab/sessions", "{\"default_mode\":\"interpreter\"}")
+        expect(create_resp.status).to_equal(201)
+        val session_id = json_field(create_resp.body, "id")
+
+        step("a cell that prints well over 8 bytes of stdout gets a truncated, marker-annotated response")
+        val exec_resp = http_request(server.addr, "POST", "/api/lab/sessions/{session_id}/cells/c1/execute", "{\"source\":\"print(\\\"0123456789ABCDEF\\\")\"}")
+        expect(exec_resp.status).to_equal(200)
+        expect(exec_resp.body).to_contain("[truncated:")
+        expect(exec_resp.body).to_not_contain("0123456789ABCDEF")
+
+        server.stop()

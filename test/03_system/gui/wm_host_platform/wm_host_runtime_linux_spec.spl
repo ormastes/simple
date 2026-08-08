@@ -1,0 +1,187 @@
+# @cover src/os/compositor/host_compositor_core.spl 0%
+# @req REQ-WM-HOST-PLATFORM-004
+"""
+# WM/GUI Host Seam — Linux Runtime Conformance
+
+**Category:** Testing
+**Status:** In Progress
+
+## Purpose and Audience
+
+The RUNTIME-NATIVE tier of this suite. Everything here actually EXECUTES the
+2D-surface seam and the event-decode seam in-process on the host running the
+spec, and asserts observable state changes rather than return codes.
+
+## Scope and Preconditions
+
+Guarded by `host_os()`. On a non-Linux host every example short-circuits and
+makes no claim; the evidence-tier ledger
+(`wm_host_evidence_tier_spec.spl`) is what records why.
+
+## Compatibility and Limitations
+
+HONEST STATEMENT OF WHAT THIS DOES AND DOES NOT PROVE.
+
+`DISPLAY` and `WAYLAND_DISPLAY` are unset in this environment, and the winit
+path's buffer handles come from an interpreter-only extern family. So this
+file exercises the HEADLESS seam implementation
+(`HeadlessHostCompositorBackend`), which is the implementation every live
+path currently falls through to.
+
+It therefore proves: the seam's surface semantics are real — a surface handle
+is usable, drawing mutates the pixels that are read back, and presentation is
+observable and strictly advances.
+
+It does NOT prove that a pixel reached a physical screen or a display server.
+No such claim is made anywhere in this suite, on any platform.
+
+Assertions deliberately require STRICT advancement (`t1 > t0`), never
+`t1 >= t0`: a counter or clock frozen at zero satisfies `0 >= 0` and would
+make a dead implementation look alive.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{host_os}
+
+use os.compositor.host_compositor_core.{HeadlessHostCompositorBackend, headless_host_compositor_pixels, headless_host_compositor_resize}
+use os.desktop.wm_pointer_decode.{wm_pointer_button_from_code, wm_pointer_kind_from_code}
+use os.compositor.ps2_wm_key_decode.{ps2_wm_character, ps2_wm_key_name}
+
+
+fn runtime_tier_active() -> bool:
+    host_os() == "linux"
+
+
+# ============================================================================
+# 2D surface half of the seam
+# ============================================================================
+
+describe "WM host seam runtime (linux) — surface creation":
+
+    it "surface creation returns a usable handle with the requested geometry":
+        if runtime_tier_active():
+            val b = HeadlessHostCompositorBackend.new(32, 16)
+            expect(b.width()).to_equal(32)
+            expect(b.height()).to_equal(16)
+            # A usable handle must expose a real backing store, not an empty
+            # placeholder that later silently discards every draw.
+            expect(headless_host_compositor_pixels(b).len()).to_equal(32 * 16)
+
+    it "rejects a degenerate surface instead of returning a fake one":
+        if runtime_tier_active():
+            val b = HeadlessHostCompositorBackend.new(0, 0)
+            expect(headless_host_compositor_pixels(b).len()).to_equal(0)
+
+
+describe "WM host seam runtime (linux) — drawing mutates the surface":
+
+    it "clear writes the requested colour into every pixel":
+        if runtime_tier_active():
+            val b = HeadlessHostCompositorBackend.new(4, 4)
+            val before = headless_host_compositor_pixels(b)[0]
+            b.clear(0x00FF0000u32)
+            val after = headless_host_compositor_pixels(b)
+            # Value equality, not "the call returned true".
+            expect(after[0]).to_equal(0x00FF0000u32)
+            expect(after[15]).to_equal(0x00FF0000u32)
+            expect(after[0] != before).to_equal(true)
+
+    it "put_pixel affects the addressed pixel and leaves its neighbour alone":
+        if runtime_tier_active():
+            val b = HeadlessHostCompositorBackend.new(4, 4)
+            b.clear(0x00000000u32)
+            b.put_pixel(2, 1, 0x0000FF00u32)
+            val px = headless_host_compositor_pixels(b)
+            # Index arithmetic proves the write landed at the right address,
+            # which a blanket "fill everything" stub would fail.
+            expect(px[1 * 4 + 2]).to_equal(0x0000FF00u32)
+            expect(px[1 * 4 + 3]).to_equal(0x00000000u32)
+
+    it "fill_rect covers exactly the requested region":
+        if runtime_tier_active():
+            val b = HeadlessHostCompositorBackend.new(8, 8)
+            b.clear(0x00000000u32)
+            b.fill_rect(2, 2, 3, 3, 0x000000FFu32)
+            val px = headless_host_compositor_pixels(b)
+            expect(px[2 * 8 + 2]).to_equal(0x000000FFu32)
+            expect(px[4 * 8 + 4]).to_equal(0x000000FFu32)
+            # Just outside the rect must be untouched.
+            expect(px[1 * 8 + 2]).to_equal(0x00000000u32)
+            expect(px[5 * 8 + 5]).to_equal(0x00000000u32)
+
+    it "blit_pixels transfers caller pixels into the surface":
+        if runtime_tier_active():
+            val b = HeadlessHostCompositorBackend.new(4, 4)
+            b.clear(0x00000000u32)
+            val src = [0x00ABCDEFu32, 0x00ABCDEFu32, 0x00ABCDEFu32, 0x00ABCDEFu32]
+            b.blit_pixels(0, 0, 2, 2, src)
+            val px = headless_host_compositor_pixels(b)
+            expect(px[0]).to_equal(0x00ABCDEFu32)
+            expect(px[1]).to_equal(0x00ABCDEFu32)
+
+    it "resize reallocates the backing store":
+        if runtime_tier_active():
+            val b = HeadlessHostCompositorBackend.new(4, 4)
+            expect(headless_host_compositor_pixels(b).len()).to_equal(16)
+            headless_host_compositor_resize(b, 6, 5)
+            expect(b.width()).to_equal(6)
+            expect(b.height()).to_equal(5)
+            expect(headless_host_compositor_pixels(b).len()).to_equal(30)
+
+
+describe "WM host seam runtime (linux) — presentation is observable":
+
+    it "present strictly advances the presentation counter":
+        if runtime_tier_active():
+            val b = HeadlessHostCompositorBackend.new(4, 4)
+            val t0 = b.present_count
+            b.present()
+            val t1 = b.present_count
+            # STRICT: a counter frozen at 0 passes `t1 >= t0` and would make
+            # a dead present() look alive. It cannot pass `t1 > t0`.
+            expect(t1 > t0).to_equal(true)
+            b.present()
+            expect(b.present_count > t1).to_equal(true)
+
+    it "present_rect is also observable":
+        if runtime_tier_active():
+            val b = HeadlessHostCompositorBackend.new(4, 4)
+            val t0 = b.present_count
+            b.present_rect(0, 0, 2, 2)
+            expect(b.present_count > t0).to_equal(true)
+
+
+# ============================================================================
+# Event-source half of the seam
+# ============================================================================
+
+describe "WM host seam runtime (linux) — event delivery":
+
+    it "pointer button codes decode to distinct labels":
+        if runtime_tier_active():
+            expect(wm_pointer_button_from_code(1)).to_equal("left")
+            expect(wm_pointer_button_from_code(2)).to_equal("middle")
+            expect(wm_pointer_button_from_code(3)).to_equal("right")
+
+    it "an unknown pointer button decodes to none rather than a plausible lie":
+        if runtime_tier_active():
+            expect(wm_pointer_button_from_code(0)).to_equal("none")
+            expect(wm_pointer_button_from_code(99)).to_equal("none")
+
+    it "pointer event kinds decode to distinct labels":
+        if runtime_tier_active():
+            expect(wm_pointer_kind_from_code(1)).to_equal("down")
+            expect(wm_pointer_kind_from_code(2)).to_equal("up")
+            expect(wm_pointer_kind_from_code(3)).to_equal("move")
+            expect(wm_pointer_kind_from_code(0)).to_equal("none")
+
+    it "keyboard scancodes decode with shift state honoured":
+        if runtime_tier_active():
+            expect(ps2_wm_character(0x10, false)).to_equal("q")
+            expect(ps2_wm_character(0x10, true)).to_equal("Q")
+            expect(ps2_wm_character(0x02, false)).to_equal("1")
+            expect(ps2_wm_character(0x02, true)).to_equal("!")
+
+    it "decoded key names are non-empty for known scancodes":
+        if runtime_tier_active():
+            expect(ps2_wm_key_name(0x10).len() > 0).to_equal(true)
