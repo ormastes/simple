@@ -12,13 +12,20 @@
   `std.nogc_sync_mut.sffi.system.process_run`) and `format/file_capture.spl` (real file I/O
   via `std.io_runtime` + `std.common.crypto.sha256`).
 - What remains, per domain, each its own scoped sub-lane (none started):
-  - TUI: a real terminal driver feeding `terminal_grid.spl`'s `TerminalSnapshot` from an
-    actually-running TUI process, not a constructed row list. Candidate integration point:
-    `src.lib.nogc_sync_mut.ui_test.sgtti` / `SgttiTestDriver`, already used elsewhere in the
-    repo for TUI/GUI test automation — read `doc/07_guide/infra/sspec_typed_evidence.md` §3
-    and the interactive reference example
-    (`test/03_system/tools/spipe/examples/interactive_surface_manual_spec.spl`) before
-    starting; that example is explicitly fixture-driven today and documents this exact gap.
+  - TUI: **first real slice LANDED 2026-08-08** —
+    `test/03_system/tools/spipe/examples/live_terminal_capture_spec.spl` proves a real
+    subprocess's real stdout (via `process_run`, the same facade `exec_capture.spl` uses)
+    converted into a `TerminalSnapshot` via `terminal_snapshot_from_rows` and asserted
+    through the typed-evidence comparator with `check_exact` on both grid-level fields and a
+    semantic region — sabotage/revert proven, no fixture literal in the assertion path.
+    CORRECTION to this TODO's original candidate: `SgttiTestDriver`
+    (`src/lib/nogc_sync_mut/ui_test/sgtti.spl`) is NOT a process launcher — research
+    confirmed it only snapshots an already-built in-process `Compositor`/`WinTextSnapshot`
+    state and never spawns a real OS process or reads a real terminal, so it is the wrong
+    integration point. Remaining scope for this sub-lane: an actually-running INTERACTIVE
+    TUI app (not a one-shot `printf`) — keystroke dispatch, redraw settling, and multi-turn
+    state — is still open; `interactive_surface_manual_spec.spl` remains fixture-driven for
+    that harder case.
   - GUI action trace: same SGTTI driver, live dispatch instead of constructed
     `UiActionStep` records.
   - 2D/3D scene: a real Draw IR / Engine2D/Engine3D readback feeding `scene_profile.spl`,
