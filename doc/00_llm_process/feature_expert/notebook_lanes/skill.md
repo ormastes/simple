@@ -234,9 +234,37 @@ not a crash, left RED rather than weakened.
   including the two known RED items (L1's `--sdoctest` gap, H3's
   oversized-header gap) rather than hiding them.
 
-Only remaining gap: **K5-K6**, blocked on the GPU plan's D1 —
-`src/lib/common/svmg/ref_vm.spl` doesn't exist yet, so B3/B4/C3 can't land
-either. Not a gap in this plan's own execution.
+- **K6** — `src/lib/nogc_sync_mut/notebook/vulkan_exec.spl` (`VulkanExec`/
+  `VulkanExecFactory`), the `interpreter(remote(vulkan(spvNN)))` lane. Wraps
+  GPU plan C3's `VulkanLaneSession` + the checked-in `svmg_vulkan_kernel.spv`
+  shader directly rather than `VulkanVmExecutor.run_source` — that call
+  rebuilds a freshly-zeroed 128 KiB arena on every invocation (correct for
+  its own stateless conformance-vector contract, incompatible with design
+  §4.5's "arena DATA persists across dispatches" requirement for a notebook
+  session). Filed:
+  `doc/08_tracking/bug/vulkan_vm_executor_run_source_clobbers_arena_data_each_call_2026-08-08.md`.
+  `VulkanExec` instead keeps its own `last_arena: [u8]` copy across
+  `execute_cell()` calls, overlaying each cell's freshly assembled SGP
+  header+code onto a COPY of the previous dispatch's full readback (only the
+  transient sentinel/LOG/RECORD channels are reset per dispatch). A dispatch
+  error (fence timeout or `VK_ERROR_DEVICE_LOST` — `VulkanLaneSession.
+  dispatch_once` folds both into the same sentinel/error path) sets the lane
+  `blocked:` until `%reset`, which tears the old session down best-effort and
+  builds a genuinely new `VulkanLaneSession` + re-inits rather than
+  retry-looping. `interrupt()` forces the same blocked state (no async cancel
+  channel below the synchronous `dispatch_once`, same limitation `RemoteExec.
+  interrupt()` documents). There is still no Simple-source-to-SVM-G compiler,
+  so `execute_cell`'s `code` argument is literal SVM-G assembly text (D1's
+  mnemonic syntax) — the same documented-limitation class as K4's
+  `compile_remote_binary` stub, not a new gap. Verify: `test/02_integration/
+  app/tools/notebook/vulkan_exec_spec.spl` — cross-cell arena DATA
+  persistence (a store in one cell observed by a load-only later cell),
+  interrupt→blocked→reset recovery, SKIP-clean without a live Vulkan
+  ICD/device.
+
+Only remaining gap: **K5**, the CUDA sibling — being landed separately
+(GPU plan D1/B3/B4 are unblocked; K5 no longer depends on a missing
+`ref_vm.spl`). Not a gap in this plan's own execution.
 
 ## Feature Links
 
