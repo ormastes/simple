@@ -165,6 +165,31 @@ externs reading as `connected=false`). A digest/hash/checksum comparison that
 Add a compact entry here when repeated ambiguity causes an agent to choose the
 wrong repository subsystem. Link detailed guides instead of duplicating them.
 
+## Simple 2D primitive lane / host-first UI work
+
+- **Canonical map:** `doc/07_guide/app/llm/simple2d_primitive_lane_inventory.md`.
+- **Architecture/design/test plan:** `doc/04_architecture/simple2d_primitive_lane.md`,
+  `doc/05_design/simple2d_primitive_lane.md`, and
+  `doc/03_plan/sys_test/simple2d_primitive_lane.md`.
+- **Shared path:** host input -> common event normalization -> semantic hit/layout
+  owner -> `DrawIrComposition` -> Engine2D. Web, GUI, WM, and 2D must not fork
+  button, drag, scroll, layout, font, or Vulkan logic.
+- **Primitive acceptance:** click is one matched press/release action; drag owns
+  pointer capture and deterministic release; layout separates clipping from
+  scrolling; scroll clamps and invalidates; text remains semantic and lowers
+  through `FontRenderer`/transient `FontRenderBatch`.
+- **QEMU rule:** use the canonical host-GPU wrapper and require an admitted
+  pure-Simple compiler, exact argv, event/frame correlation, fenced device
+  completion, device-origin readback, exact CPU parity, font receipt, and 20
+  warm p95/RSS samples. TCG, screenshots, source checks, and phase-2 are not
+  native Vulkan proof.
+- **Deferrals:** macOS is implementation/test-only under TODO 660; UNO Q needs
+  physical enumeration and a SimpleOS-native Adreno lifecycle. Report these as
+  blocked/unsupported, never as fallback passes.
+- **Handoff:** small sidecars may inventory Web/CSS, GUI/button/key, WM/drag/scroll,
+  or 2D/font/QEMU independently. `/root` is merge owner; Sol reviews before
+  done/release claims.
+
 ## Robust lifecycle persistence
 
 - **Canonical owner:** `std.lifecycle_persistence`, implemented under

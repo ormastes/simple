@@ -24,9 +24,15 @@
 
 use std.io_runtime.{env_get, file_exists, file_read, write_file, mkdir_p}
 use common.ui.draw_ir_v3.{
-    DrawIrV3Scene, draw_ir_v3_geometry_at, draw_ir_v3_paint_at, draw_ir_v3_has_flag,
-    DRAW_IR_V3_KIND_RECT, DRAW_IR_V3_FLAG_HIDDEN, DRAW_IR_V3_NO_ID
+    DrawIrV3Scene, draw_ir_v3_geometry_at, draw_ir_v3_paint_at,
+    draw_ir_v3_text_run_at, draw_ir_v3_glyph_at, draw_ir_v3_path_span_at,
+    draw_ir_v3_path_point_at, draw_ir_v3_has_flag,
+    DRAW_IR_V3_KIND_RECT, DRAW_IR_V3_KIND_EDGE, DRAW_IR_V3_KIND_TEXT,
+    DRAW_IR_V3_KIND_PATH, DRAW_IR_V3_FLAG_HIDDEN, DRAW_IR_V3_NO_ID,
+    DRAW_IR_V3_VERB_MOVE, DRAW_IR_V3_VERB_LINE, DRAW_IR_V3_VERB_QUAD,
+    DRAW_IR_V3_VERB_CUBIC, DRAW_IR_V3_VERB_CLOSE
 }
+use common.ui.glyph_bitmap_5x7.{FONT_CHARSET, glyph_row_bits}
 use common.ui.screen_host.{ScreenHost}
 use common.ui.host_input_event.{HostInputEvent, host_input_from_wm_fs_event}
 use common.ui.wm_app_process_contract.{wm_fs_app_event_decode, wm_fs_app_event_seq_path}
@@ -50,32 +56,137 @@ fn web_color_css(argb: u32) -> text:
         alpha = "0." + digits
     "rgba({r},{g},{b},{alpha})"
 
-fn web_scene_unsupported_count(scene: DrawIrV3Scene) -> i64:
-    """Count visible DrawIR commands not owned by this projection.
+fn web_html_escape(value: text) -> text:
+    """Escape text placed in HTML text or attribute content."""
+    var out = ""
+    var segment = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if ch == "&" or ch == "<" or ch == ">" or ch == "\"" or ch == "'":
+            out = out + value.slice(segment, i)
+            if ch == "&": out = out + "&amp;"
+            elif ch == "<": out = out + "&lt;"
+            elif ch == ">": out = out + "&gt;"
+            elif ch == "\"": out = out + "&quot;"
+            else: out = out + "&#39;"
+            segment = i + 1
+        i = i + 1
+    out + value.slice(segment, value.len())
 
-    This host currently projects RECT only.  Keeping the count explicit
-    prevents a partial HTML document from being mistaken for a complete
-    scene when a producer emits text, paths, images, or groups.
+fn web_glyph_char(glyph_id: u32) -> text:
+    val id = glyph_id.to_i64()
+    if id < 0 or id >= FONT_CHARSET.len():
+        "?"
+    else:
+        FONT_CHARSET.slice(id, id + 1)
+
+fn web_text_scale(font_size_milli: i32) -> i32:
+    # The shared 5x7 face is authored at the 12px reference size.
+    val requested = font_size_milli / 1000
+    if requested < 12: 1
+    else:
+        val scale = requested / 12
+        if scale < 1: 1 else: scale
+
+fn web_glyph_html(glyph_id: u32, x: i32, baseline_y: i32, color: u32, scale: i32, cmd_index: i64) -> text:
+    val safe_scale = if scale < 1: 1 else: scale
+    val top = baseline_y - 7 * safe_scale
+    val ch = web_html_escape(web_glyph_char(glyph_id))
+    var pixels = ""
+    var row = 0
+    while row < 7:
+        val bits = glyph_row_bits(glyph_id.to_i64() as i32, row)
+        var col = 0
+        while col < 5:
+            val mask = 1 << (4 - col)
+            if (bits & mask) != 0:
+                pixels = pixels + "<i style=\"position:absolute;left:{col * safe_scale}px;top:{row * safe_scale}px;width:{safe_scale}px;height:{safe_scale}px;background:{web_color_css(color)}\"></i>"
+            col = col + 1
+        row = row + 1
+    "<span data-cmd=\"{cmd_index}\" data-glyph=\"{glyph_id}\" aria-label=\"{ch}\" style=\"position:absolute;left:{x}px;top:{top}px;width:{5 * safe_scale}px;height:{7 * safe_scale}px\">{pixels}</span>"
+
+fn web_text_html(scene: DrawIrV3Scene, cmd_index: i64) -> (text, bool):
+    val cmd = scene.commands[cmd_index]
+    val run = draw_ir_v3_text_run_at(scene.text_runs, cmd.text_run_id)
+    if not run.present or run.glyph_count == 0u32:
+        return ("", false)
+    val scale = web_text_scale(run.font_size_milli)
+    var out = ""
+    var i: i64 = 0
+    while i < run.glyph_count.to_i64():
+        val glyph = draw_ir_v3_glyph_at(scene.text_runs, run.glyph_start + i.to_u32())
+        if not glyph.present:
+            return ("", false)
+        out = out + web_glyph_html(glyph.glyph_id, glyph.x, glyph.y, run.color, scale, cmd_index)
+        i = i + 1
+    (out, true)
+
+fn web_path_d(scene: DrawIrV3Scene, path_id: u32) -> (text, bool):
+    val span = draw_ir_v3_path_span_at(scene.path_points, path_id)
+    if not span.present or span.point_count == 0u32:
+        return ("", false)
+    var d = ""
+    var i: i64 = 0
+    while i < span.point_count.to_i64():
+        val point = draw_ir_v3_path_point_at(scene.path_points, span.point_start + i.to_u32())
+        if not point.present:
+            return ("", false)
+        if point.verb == DRAW_IR_V3_VERB_MOVE:
+            d = d + "M {point.x} {point.y} "
+        elif point.verb == DRAW_IR_V3_VERB_LINE:
+            d = d + "L {point.x} {point.y} "
+        elif point.verb == DRAW_IR_V3_VERB_CLOSE:
+            d = d + "Z "
+        else:
+            # v3 stores one point per verb; quadratic/cubic control points
+            # need multiple points and cannot be guessed from this record.
+            return ("", false)
+        i = i + 1
+    (d.trim(), true)
+
+fn web_path_html(scene: DrawIrV3Scene, cmd_index: i64) -> (text, bool):
+    val cmd = scene.commands[cmd_index]
+    val (path_d, valid) = web_path_d(scene, cmd.path_span_id)
+    if not valid:
+        return ("", false)
+    val paint = draw_ir_v3_paint_at(scene.paint, cmd.paint_id)
+    if not paint.present:
+        return ("", false)
+    val stroke_width = paint.stroke_width_milli / 1000
+    val stroke = if stroke_width > 0: "stroke:{web_color_css(paint.stroke_color)};stroke-width:{stroke_width}px;" else: "stroke:none;"
+    ("<svg data-cmd=\"{cmd_index}\" style=\"position:absolute;left:0;top:0;width:100%;height:100%;overflow:visible\"><path d=\"{path_d}\" style=\"fill:{web_color_css(paint.fill_color)};{stroke}\"></path></svg>", true)
+
+fn web_scene_unsupported_count(scene: DrawIrV3Scene) -> i64:
+    """Count visible records not owned by this projection.
+
+    Valid TEXT, EDGE and line/close PATH records are projected. IMAGE remains
+    unsupported because v3 carries only a content hash, not a URI or pixels.
     """
     var count: i64 = 0
     var i: i64 = 0
     while i < scene.commands.len().to_i64():
         val cmd = scene.commands[i]
-        if not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN) and
-                cmd.kind != DRAW_IR_V3_KIND_RECT:
-            count = count + 1
+        if not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
+            if cmd.kind == DRAW_IR_V3_KIND_TEXT:
+                val (ignored_html, valid) = web_text_html(scene, i)
+                if not valid: count = count + 1
+            elif cmd.kind == DRAW_IR_V3_KIND_PATH:
+                val (ignored_path, valid) = web_path_html(scene, i)
+                if not valid: count = count + 1
+            elif cmd.kind != DRAW_IR_V3_KIND_RECT and cmd.kind != DRAW_IR_V3_KIND_EDGE:
+                count = count + 1
         i = i + 1
     count
 
 fn web_scene_to_html(scene: DrawIrV3Scene, width: i32, height: i32) -> text:
-    """Scene -> a standalone document. One absolutely positioned div per RECT
-    command, in command order, so painter's-algorithm ordering is preserved."""
+    """Scene -> standalone HTML, preserving painter's-algorithm order."""
     var body = ""
     var i: i64 = 0
     val n = scene.commands.len().to_i64()
     while i < n:
         val cmd = scene.commands[i]
-        if cmd.kind == DRAW_IR_V3_KIND_RECT and cmd.geometry_id != DRAW_IR_V3_NO_ID and
+        if (cmd.kind == DRAW_IR_V3_KIND_RECT or cmd.kind == DRAW_IR_V3_KIND_EDGE) and cmd.geometry_id != DRAW_IR_V3_NO_ID and
                 not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
             val geom = draw_ir_v3_geometry_at(scene.geometry, cmd.geometry_id)
             val paint = draw_ir_v3_paint_at(scene.paint, cmd.paint_id)
@@ -87,6 +198,12 @@ fn web_scene_to_html(scene: DrawIrV3Scene, width: i32, height: i32) -> text:
                     if geom.corner_radius > 0:
                         style = style + "border-radius:{geom.corner_radius}px;"
                 body = body + "<div data-cmd=\"{i}\" style=\"" + style + "\"></div>\n"
+        elif cmd.kind == DRAW_IR_V3_KIND_TEXT and not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
+            val (text_html, valid) = web_text_html(scene, i)
+            if valid: body = body + text_html + "\n"
+        elif cmd.kind == DRAW_IR_V3_KIND_PATH and not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
+            val (path_html, valid) = web_path_html(scene, i)
+            if valid: body = body + path_html + "\n"
         i = i + 1
     val unsupported = web_scene_unsupported_count(scene)
     var receipt = ""

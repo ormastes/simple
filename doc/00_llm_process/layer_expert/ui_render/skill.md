@@ -175,3 +175,13 @@ handoff notes. Record contract *additions* (e.g. `ScreenHost`) explicitly as
 additive so a later agent does not read them as renames.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
+
+## Primitive-lane handoff (2026-08-08)
+
+For host-first button, window-drag, CSS/layout, scroll, and font work, use
+`doc/07_guide/app/llm/simple2d_primitive_lane_inventory.md` and the linked
+architecture/design/test-plan trio. Keep Web, GUI, WM, and 2D semantics on the
+shared event -> layout -> `DrawIrComposition` path. A host test is not QEMU GPU
+evidence: the QEMU row still requires admitted pure-Simple execution, fenced
+device readback, exact parity, font provenance, and warm p95/RSS receipts.
+macOS and UNO Q are explicit deferred rows, not fallback passes.

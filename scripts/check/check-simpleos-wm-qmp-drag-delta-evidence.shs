@@ -130,6 +130,30 @@ source_contains_any() {
     return 1
 }
 
+classify_drag_geometry_receipt() {
+    drag_receipt="$1"
+    guest_drag_from_x="$(printf '%s\n' "$drag_receipt" | sed -n 's/.* from=\([-0-9][0-9]*\),\([-0-9][0-9]*\) .*/\1/p')"
+    guest_drag_from_y="$(printf '%s\n' "$drag_receipt" | sed -n 's/.* from=\([-0-9][0-9]*\),\([-0-9][0-9]*\) .*/\2/p')"
+    guest_drag_to_x="$(printf '%s\n' "$drag_receipt" | sed -n 's/.* to=\([-0-9][0-9]*\),\([-0-9][0-9]*\) .*/\1/p')"
+    guest_drag_to_y="$(printf '%s\n' "$drag_receipt" | sed -n 's/.* to=\([-0-9][0-9]*\),\([-0-9][0-9]*\) .*/\2/p')"
+    if [ "$guest_drag_from_x" = 276 ] && [ "$guest_drag_from_y" = 120 ] \
+        && [ "$guest_drag_to_x" = 76 ] && [ "$guest_drag_to_y" = 68 ] \
+        && printf '%s\n' "$drag_receipt" | grep -Fq "render_commits=1" \
+        && printf '%s\n' "$drag_receipt" | grep -Fq "geometry_changed=true"; then
+        guest_geometry_receipt_status=pass
+        guest_geometry_receipt_reason=pass
+    elif [ -z "$drag_receipt" ]; then
+        guest_geometry_receipt_status=fail
+        guest_geometry_receipt_reason=missing-real-geometry-receipt
+    elif [ -z "$guest_drag_from_x" ] || [ -z "$guest_drag_from_y" ] || [ -z "$guest_drag_to_x" ] || [ -z "$guest_drag_to_y" ]; then
+        guest_geometry_receipt_status=fail
+        guest_geometry_receipt_reason=malformed-real-geometry-receipt
+    else
+        guest_geometry_receipt_status=fail
+        guest_geometry_receipt_reason=unexpected-or-unchanged-drag-geometry
+    fi
+}
+
 classify_guest_input_contract() {
     entry_path="$1"
     guest_entry_mouse_poll_status=missing
@@ -187,6 +211,18 @@ framebuffer_delta_status=not-run
 framebuffer_delta_reason=not-run
 event_evidence_status=not-run
 event_evidence_reason=not-run
+
+if [ "${1:-}" = "--self-test" ]; then
+    classify_drag_geometry_receipt "[mdi-demo] qemu-shared-pointer-event source=wm_lifecycle_pointer_move action=drag window=2 from=276,120 to=76,68 pointer=160,80 decoded_packets=8 render_commits=1 focused=true geometry_changed=true"
+    [ "$guest_geometry_receipt_status" = pass ]
+    [ "$guest_drag_from_x,$guest_drag_from_y" = "276,120" ]
+    [ "$guest_drag_to_x,$guest_drag_to_y" = "76,68" ]
+    classify_drag_geometry_receipt "[mdi-demo] qemu-shared-pointer-event source=wm_lifecycle_pointer_move action=drag window=2 from=276,120 to=276,120 pointer=360,132 decoded_packets=4 render_commits=1 focused=true geometry_changed=false"
+    [ "$guest_geometry_receipt_status" = fail ]
+    [ "$guest_geometry_receipt_reason" = unexpected-or-unchanged-drag-geometry ]
+    echo "simpleos_wm_qmp_drag_delta_self_test=pass"
+    exit 0
+fi
 
 emit_simple_bin_failure() {
     reason="$1"
@@ -370,26 +406,7 @@ PY
         guest_mouse_packet_status=fail
         guest_mouse_packet_reason=missing-decoded-left-mouse-packet
     fi
-    guest_drag_from_x="$(printf '%s\n' "$drag_receipt" | sed -n 's/.* from=\([-0-9][0-9]*\),\([-0-9][0-9]*\) .*/\1/p')"
-    guest_drag_from_y="$(printf '%s\n' "$drag_receipt" | sed -n 's/.* from=\([-0-9][0-9]*\),\([-0-9][0-9]*\) .*/\2/p')"
-    guest_drag_to_x="$(printf '%s\n' "$drag_receipt" | sed -n 's/.* to=\([-0-9][0-9]*\),\([-0-9][0-9]*\) .*/\1/p')"
-    guest_drag_to_y="$(printf '%s\n' "$drag_receipt" | sed -n 's/.* to=\([-0-9][0-9]*\),\([-0-9][0-9]*\) .*/\2/p')"
-    if [ "$guest_drag_from_x" = 276 ] && [ "$guest_drag_from_y" = 120 ] \
-        && [ "$guest_drag_to_x" = 76 ] && [ "$guest_drag_to_y" = 68 ] \
-        && printf '%s\n' "$drag_receipt" | grep -Fq "render_commits=1" \
-        && printf '%s\n' "$drag_receipt" | grep -Fq "geometry_changed=true"; then
-        guest_geometry_receipt_status=pass
-        guest_geometry_receipt_reason=pass
-    elif [ -z "$drag_receipt" ]; then
-        guest_geometry_receipt_status=fail
-        guest_geometry_receipt_reason=missing-real-geometry-receipt
-    elif [ -z "$guest_drag_from_x" ] || [ -z "$guest_drag_from_y" ] || [ -z "$guest_drag_to_x" ] || [ -z "$guest_drag_to_y" ]; then
-        guest_geometry_receipt_status=fail
-        guest_geometry_receipt_reason=malformed-real-geometry-receipt
-    else
-        guest_geometry_receipt_status=fail
-        guest_geometry_receipt_reason=unexpected-or-unchanged-drag-geometry
-    fi
+    classify_drag_geometry_receipt "$drag_receipt"
     if [ "$drag_code" -eq 0 ]; then
         framebuffer_delta_status=pass
         framebuffer_delta_reason=pass
