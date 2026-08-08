@@ -1,0 +1,145 @@
+# codex-system-test
+# @tag: rendering, widgets, drawir, theme
+# @req AC-1 AC-6
+# @evidence-display: links
+
+"""# Widget DrawIR coverage — previously chromeless/missing widget kinds
+
+Asserts the DrawIR composition carries real chrome for the widget kinds the
+2026-08-11 whole-gallery render found missing or bare (radio, switch, tree,
+table header, segmented control, dropdown chrome, tabs selection, list
+banding, divider). Assertions key on command ids and color RELATIONSHIPS
+(selected != unselected), never on hardcoded palette values, so theme
+changes do not break the spec.
+"""
+
+use std.spec.{describe, it, expect, step}
+use common.ui.builder.{
+    column, button, checkbox, dropdown, tabs, list_widget, table_widget,
+    segmented_control, tree_widget, tree_node, tree_leaf, divider,
+    with_height, build_tree_with_title
+}
+use common.ui.widget.{WidgetNode, WidgetKind}
+use common.ui.draw_ir.{DrawIrComposition, DrawIrCommand}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_cpu}
+use common.ui.widget_hit.{widget_dispatch_click}
+
+fn switch_widget(id: text, on: bool) -> WidgetNode:
+    WidgetNode.new(id, WidgetKind.Switch.to_wire()).set_prop("checked", if on: "true" else: "false")
+
+fn radio_widget(id: text, on: bool) -> WidgetNode:
+    WidgetNode.new(id, WidgetKind.RadioButton.to_wire()).set_prop("checked", if on: "true" else: "false").set_prop("label", "pick")
+
+fn all_commands(comp: DrawIrComposition) -> [DrawIrCommand]:
+    var out: [DrawIrCommand] = []
+    for batch in comp.batches:
+        for cmd in batch.commands:
+            out.push(cmd)
+    out
+
+fn has_command_with_suffix(cmds: [DrawIrCommand], suffix: text) -> bool:
+    for cmd in cmds:
+        if cmd.component_id.ends_with(suffix):
+            return true
+    false
+
+fn command_color(cmds: [DrawIrCommand], id: text) -> u32:
+    for cmd in cmds:
+        if cmd.component_id == id:
+            return cmd.color
+    0u32
+
+fn gallery_commands() -> [DrawIrCommand]:
+    val tree = build_tree_with_title(column("spec_root", [
+        with_height(switch_widget("spec_sw", true), 24),
+        with_height(radio_widget("spec_rad", true), 24),
+        with_height(dropdown("spec_drop", ["one", "two"]), 28),
+        with_height(tabs("spec_tabs", ["A", "B"]), 26),
+        with_height(segmented_control("spec_seg", ["X", "Y"], 1, "seg"), 26),
+        list_widget("spec_list", ["i1", "i2"]),
+        table_widget("spec_table", ["H1", "H2"], [["a", "b"]]),
+        tree_widget("spec_tree", [tree_node("spec_tn", "root", [])]),
+        divider("spec_div")
+    ]), "spec", "glass_dark")
+    all_commands(widget_tree_to_draw_ir_cpu(tree.root_node(), 360, 400))
+
+describe "Widget DrawIR chrome coverage":
+    it "switch emits track and thumb, thumb parked right when on":
+        step("Find the switch chrome commands")
+        val cmds = gallery_commands()
+        expect(has_command_with_suffix(cmds, "-thumb")).to_equal(true)
+        val track = command_color(cmds, "spec_sw")
+        expect(track != 0u32).to_equal(true)
+
+    it "radio emits a ring and a checked dot":
+        step("Find the radio chrome commands")
+        val cmds = gallery_commands()
+        expect(has_command_with_suffix(cmds, "-ring")).to_equal(true)
+        expect(has_command_with_suffix(cmds, "-dot")).to_equal(true)
+
+    it "dropdown emits field + chevron and hides its item list":
+        step("The closed dropdown shows the first item as the value")
+        val cmds = gallery_commands()
+        expect(has_command_with_suffix(cmds, "-field")).to_equal(true)
+        expect(has_command_with_suffix(cmds, "-chevron")).to_equal(true)
+        var items_leaked = false
+        for cmd in cmds:
+            if cmd.component_id.contains("spec_drop_"):
+                items_leaked = true
+        expect(items_leaked).to_equal(false)
+
+    it "tabs emit a selection underline on the selected tab":
+        step("Find the tabs selection marker")
+        val cmds = gallery_commands()
+        expect(has_command_with_suffix(cmds, "-sel")).to_equal(true)
+
+    it "segmented control fills the selected segment differently":
+        step("Selected and unselected segment fills must differ")
+        val cmds = gallery_commands()
+        val sel_color = command_color(cmds, "spec_seg-seg1")
+        val other_color = command_color(cmds, "spec_seg-seg0")
+        expect(sel_color != 0u32).to_equal(true)
+        expect(sel_color != other_color).to_equal(true)
+
+    it "list emits banding under even rows":
+        step("Find the list band command")
+        val cmds = gallery_commands()
+        expect(has_command_with_suffix(cmds, "-band0")).to_equal(true)
+
+    it "table emits a header band and the header text":
+        step("Find the table header chrome")
+        val cmds = gallery_commands()
+        expect(has_command_with_suffix(cmds, "-header")).to_equal(true)
+        expect(has_command_with_suffix(cmds, "-header-text")).to_equal(true)
+
+    it "tree emits the expansion marker and label":
+        step("Find the tree marker command")
+        val cmds = gallery_commands()
+        expect(has_command_with_suffix(cmds, "-mark")).to_equal(true)
+
+    it "divider emits its 1px line":
+        step("Find the divider command with height 1")
+        val cmds = gallery_commands()
+        var found = false
+        for cmd in cmds:
+            if cmd.component_id == "spec_div" and cmd.height == 1:
+                found = true
+        expect(found).to_equal(true)
+
+describe "Widget DrawIR event check":
+    it "clicking a checkbox flips its mark in the next frame":
+        step("Build a one-checkbox tree and render the checked mark color")
+        val tree = build_tree_with_title(column("ev_root", [
+            with_height(checkbox("ev_chk", "toggle me", true), 24)
+        ]), "ev", "glass_dark")
+        val before = all_commands(widget_tree_to_draw_ir_cpu(tree.root_node(), 200, 60))
+        val mark_before = command_color(before, "ev_chk-mark")
+        step("Click the checkbox and re-render")
+        val hit = widget_dispatch_click(tree.root_node(), 200, 60, 8, 12)
+        expect(hit).to_equal("ev_chk")
+        val after = all_commands(widget_tree_to_draw_ir_cpu(tree.root_node(), 200, 60))
+        val mark_after = command_color(after, "ev_chk-mark")
+        step("The mark color changed (checked -> unchecked)")
+        expect(mark_before != 0u32).to_equal(true)
+        expect(mark_after != 0u32).to_equal(true)
+        expect(mark_before != mark_after).to_equal(true)

@@ -1031,8 +1031,15 @@ impl ExecCore {
         // (the run/JIT lane has no native_project import pass; without this,
         // same-named structs from different modules fail field resolution and
         // the whole module silently de-JITs — the GlyphBitmap gbm_width class).
-        let duplicate_structs =
-            simple_compiler::pipeline::module_loader::collect_duplicate_struct_defs(&ast);
+        // GATED behind SIMPLE_JIT_DUP_STRUCT_FEED: feeding the map lets more
+        // modules JIT, but on widget-heavy graphs the JIT'd output diverged
+        // from the interpreter (2026-08-11: ui_showcase 2D render missing
+        // widgets + lost clip groups). Default OFF keeps the safe de-JIT.
+        let duplicate_structs = if std::env::var_os("SIMPLE_JIT_DUP_STRUCT_FEED").is_some() {
+            simple_compiler::pipeline::module_loader::collect_duplicate_struct_defs(&ast)
+        } else {
+            std::collections::HashMap::new()
+        };
         let hir_module = match hir::lower_with_context_lenient_project_hint_and_duplicate_structs(
             &ast,
             path,
