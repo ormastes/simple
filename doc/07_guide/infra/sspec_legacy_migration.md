@@ -128,3 +128,27 @@ something wrong and re-run the file — exactly one example should fail with
 a `ComparisonResult.status != passed` (surfaced as `expected ... to equal
 ...` on the `EvidenceStatus.passed` assertion). Revert and re-run to confirm
 green again. Both worked examples above were verified this way.
+
+## Sweep progress
+
+Migrated so far (typed-evidence checks added, additive, all pre-existing
+assertions kept):
+
+1. `test/01_unit/app/simple_lab/lab_html_render_spec.spl`
+2. `test/01_unit/lib/common/spec/scenario_helpers_spec.spl`
+3. `test/01_unit/lib/common/spec/evidence/legacy_facade_spec.spl`
+4. `test/01_unit/lib/common/spec/scenario_evidence_spec.spl`
+
+**Corpus note (2026-08-08):** a full search of `test/01_unit/` and
+`test/02_integration/` for `scenario_helpers`/`scenario_evidence` usage turns
+up exactly 5 files total. With the 4 above migrated, only one file remains:
+`test/02_integration/app/mcp_stdio_integration_spec.spl`. It imports
+`capture_api_protocol_fields`/`capture_exec_detailed` but never calls them —
+no artifact exists there to convert — and, independent of that, the spec
+does not currently pass in this checkout (`bin/simple_mcp_server` is not
+built, so 2 of 3 examples fail before any edit, confirmed by re-running the
+unmodified file). It was rejected as a candidate rather than migrated onto a
+already-failing baseline. The next migrator should either build the MCP
+server binary and add a real `capture_exec_detailed` call there, or widen
+the search (e.g. `test/03_system/`) to find further real candidates — the
+"five more" target could not be reached from this corpus as scoped.
