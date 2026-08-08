@@ -1521,15 +1521,44 @@ filesystem, use `std.io_runtime` (`file_read`, `file_size`, `file_exists`,
 not just "the call returned ok". Grep a spec's imports for `file_ops` before
 trusting it as evidence of real IO.
 
-## Prevention mocks — what the mock library already supports (2026-08-07)
+## Prevention mocks — `prevent`/`prevent_at_most`/`prevent_file` DSL (landed 2026-08-07)
 
 A full pure-Simple mock library exists at `src/lib/nogc_sync_mut/src/testing/`
 (facade: `mocking_core.spl`): `MockFunction` with call recording
 (`mock/builder.spl`), `verify_called(mockfn, times)` / `verify_called_with` /
 `Matcher` / `CallAnalyzer` (`mock/verification.spl`), and `Spy`
-(`mock/spy.spl`). The *prevention* idiom — a mock that must NEVER be called —
-is expressible today as `verify_called(m, 0)` asserted at the end of the `it`
-block; there is no auto-verification, so a forgotten check is fail-open.
+(`mock/spy.spl`). `mock/prevention.spl` adds `ForbiddenCallGuard` +
+`check_guards(guards)`, and `src/lib/nogc_sync_mut/spec.spl` wraps those as
+first-class spec DSL: `prevent(mockfn, reason)`, `prevent_at_most(mockfn, n,
+reason)`, `prevent_file(mockfn, reason)` — one line instead of the manual
+`verify_called(m, 0)` + `expect` idiom (that manual form still works and is
+covered as a "bridges old idiom" example in
+`test/01_unit/lib/std/testing/prevention_mock_spec.spl`).
+
+**Import explicitly, fully-qualified — the wildcard alias does not resolve
+these**: `use std.nogc_sync_mut.spec.{prevent, prevent_at_most, prevent_file}`.
+`use std.spec.*` (the form the rest of the suite relies on) does not
+reliably expose every `pub fn` in `spec.spl`, including long-standing ones —
+this is a pre-existing wildcard-import gap, not specific to this DSL. Details:
+`doc/08_tracking/bug/prevention_mock_deferred_arming_impossible_2026-08-07.md`
+(Defect 3).
+
+**Ordering contract — call AFTER the code under test has run, not at the top
+of the `it` body.** The original plan called for "arm early, auto-check at
+end of `_execute_it`"; that design turned out to be impossible under this
+interpreter (a `MockFunction` stored in an array/class-field/closure is
+copied by value, so a guard armed before the forbidden call always reports
+zero calls — a fail-open DSL). All three functions instead check IMMEDIATELY
+against the mock's current state at the call site, the same mechanism as a
+failed `expect`. `prevent_file` is consequently a documented alias for
+`prevent`, not true auto-checked file scope — call it explicitly in every
+example (or from `before_each`/`after_each`) to approximate file-wide
+coverage. Full writeup:
+`doc/08_tracking/bug/prevention_mock_deferred_arming_impossible_2026-08-07.md`.
+Guide: `doc/07_guide/infra/testing/prevention_mocks.md`. Adoption examples:
+`test/01_unit/compiler/di/di_lock_spec.spl`,
+`test/01_unit/app/devhub/adapter_bitbucket_spec.spl`.
+
 Two limits to know before trusting a prevention mock as evidence:
 
 - **No interception.** A mock only sees calls routed through it by
@@ -1541,10 +1570,11 @@ Two limits to know before trusting a prevention mock as evidence:
   `doc/07_guide/infra/security/mock_policy_system_test_ban.md`. That prevents
   mocks; it does not provide fail-on-forbidden-call.
 
-First-class `prevent`/`prevent_file` DSL + a directory-wide convention are
-planned: `doc/03_plan/infra/testing/sspec_prevention_mock_plan_2026-08-07.md`.
-Directory-wide scope is NOT specifiable today (runner has only the repo-level
-`config/simple.test.sdn`; no per-dir fixture hook).
+Directory-wide scope is still NOT specifiable today (runner has only the
+repo-level `config/simple.test.sdn`; no per-dir fixture hook) — same root
+cause as the file-scope limitation above (module-level spec state does not
+persist across `it` examples). See
+`doc/08_tracking/bug/sspec_no_dir_wide_prevention_scope_2026-08-07.md`.
 
 ## Hardware-model probes (riscv / link_mux) — runner + mode rules
 
