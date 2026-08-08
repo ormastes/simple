@@ -28,6 +28,7 @@
 use std.spec.*
 use std.nogc_async_mut.http.headers.{chunked_body_end, decode_chunked}
 use std.nogc_async_mut.http_server.proxy.{async_proxy_chunked_body_complete}
+use std.nogc_async_mut.http_server.parser.{HttpRequestParser}
 
 describe "chunked_body_end — chunk-size overflow":
     it "rejects a 2^64 chunk-size instead of wrapping it to a last-chunk":
@@ -59,6 +60,27 @@ describe "async proxy — chunk-size overflow":
 
     it "still reports a genuinely terminated stream as complete":
         assert_true(async_proxy_chunked_body_complete("5\r\nhello\r\n0\r\n\r\n"))
+
+describe "HttpRequestParser — the smuggled request is rejected, not queued":
+    it "answers a framing error instead of ending the message at the wrapped size":
+        # The security property lives in the CALLER: chunked_body_end returning
+        # -2 must reach the new parser.spl branch and become a ParseError, not
+        # leave the parser sitting in Body state waiting for more data. Pre-fix
+        # the body ended at the wrapped 0-size chunk and "GET /admin ..." was
+        # read as a second, smuggled request on the same connection.
+        var p = HttpRequestParser.new()
+        val raw = "POST /a HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n10000000000000000\r\nGET /admin HTTP/1.1\r\nHost: x\r\n\r\n"
+        val r = p.feed(raw)
+        expect(r.is_ok()).to_equal(false)
+        assert_true(p.has_error())
+        assert_false(p.is_complete())
+
+    it "still completes a valid chunked request":
+        var p = HttpRequestParser.new()
+        val raw = "POST /a HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+        val r = p.feed(raw)
+        expect(r.is_ok()).to_equal(true)
+        assert_true(p.is_complete())
 
 describe "negative controls — valid sizes are untouched":
     it "accepts a normal terminated stream":
