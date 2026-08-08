@@ -298,6 +298,43 @@ impl Lowerer {
             return Ok(out);
         };
 
+        // Same-bare-name variant selection (run/JIT lane): the local registry
+        // is last-registration-wins, so `declared` may be a DIFFERENT module's
+        // layout for this name. When the duplicate-variant map records several
+        // layouts for the bare name and exactly ONE of them covers every
+        // provided named argument, that layout is the one this construction
+        // means -- use it for both the typo check below and the field order of
+        // the emitted value. Ambiguous coverage (zero or several matches)
+        // keeps the registry layout and the existing soundness gate.
+        let mut declared = declared;
+        let bare_name = name.rsplit('.').next().unwrap_or(name);
+        if let Some(variants) = self
+            .duplicate_global_struct_defs
+            .as_ref()
+            .and_then(|defs| defs.get(bare_name))
+        {
+            if variants.len() > 1 {
+                let provided_names: Vec<&str> =
+                    provided.iter().filter_map(|(n, _)| *n).collect();
+                if !provided_names.is_empty() {
+                    let mut covering = variants.iter().filter(|fields| {
+                        provided_names
+                            .iter()
+                            .all(|pn| fields.iter().any(|(fname, _)| fname == pn))
+                    });
+                    let first = covering.next();
+                    let second = covering.next();
+                    if let (Some(best), None) = (first, second) {
+                        let best_names: Vec<String> =
+                            best.iter().map(|(n, _)| n.clone()).collect();
+                        if best_names != declared {
+                            declared = best_names;
+                        }
+                    }
+                }
+            }
+        }
+
         // ROOT FIX (bug jit_named_ctor_accepts_unknown_field_name, 2026-08-08):
         // reject a named argument whose name matches NO declared field.
         //

@@ -1026,7 +1026,19 @@ impl ExecCore {
         // silently. See
         // doc/08_tracking/bug/jit_drawirrendertarget_moduleresolver_gap_2026-07-30.md.
         let project_hint = simple_compiler::pipeline::native_single_file_project_hint(path);
-        let hir_module = match hir::lower_with_context_lenient_and_project_hint(&ast, path, project_hint.as_deref())
+        // Collect duplicate struct layouts from the flattened AST so the
+        // lowerer's duplicate-variant consensus fallback has data on this lane
+        // (the run/JIT lane has no native_project import pass; without this,
+        // same-named structs from different modules fail field resolution and
+        // the whole module silently de-JITs — the GlyphBitmap gbm_width class).
+        let duplicate_structs =
+            simple_compiler::pipeline::module_loader::collect_duplicate_struct_defs(&ast);
+        let hir_module = match hir::lower_with_context_lenient_project_hint_and_duplicate_structs(
+            &ast,
+            path,
+            project_hint.as_deref(),
+            duplicate_structs,
+        )
         {
             Ok(m) => m,
             Err(e) => return Err(jit_strict_fallback_error_for("HIR lowering error", &e, Some(path))),

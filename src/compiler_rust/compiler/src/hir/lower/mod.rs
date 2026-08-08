@@ -195,5 +195,24 @@ pub fn lower_with_context_lenient_and_project_hint(
     lowerer.lower_module(module)
 }
 
+/// Same as `lower_with_context_lenient_and_project_hint`, plus a pre-collected
+/// duplicate-struct-definition map. The run/JIT lane flattens imports without
+/// the native_project import-collection pass, so without this the lowerer's
+/// duplicate-variant consensus fallback has no data and same-named structs
+/// from different modules still fail field resolution (whole-module de-JIT).
+pub fn lower_with_context_lenient_project_hint_and_duplicate_structs(
+    module: &Module,
+    current_file: &Path,
+    project_hint: Option<&Path>,
+    duplicate_struct_defs: std::collections::HashMap<String, Vec<Vec<(String, simple_parser::Type)>>>,
+) -> LowerResult<HirModule> {
+    let module_resolver = ModuleResolver::single_file_with_project_hint(current_file, project_hint);
+    let mut lowerer = Lowerer::with_module_resolver(module_resolver, current_file.to_path_buf());
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    lowerer.set_duplicate_global_struct_defs(std::sync::Arc::new(duplicate_struct_defs));
+    lowerer.lower_module(module)
+}
+
 #[cfg(test)]
 mod tests;

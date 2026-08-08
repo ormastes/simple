@@ -1304,6 +1304,44 @@ pub fn load_module_with_imports(path: &Path, visited: &mut HashSet<PathBuf>) -> 
     load_module_with_imports_for_target(path, visited, simple_common::target::TargetArch::host())
 }
 
+/// Collect same-named struct/class field-layout variants from a flattened
+/// module, keyed by bare type name.
+///
+/// The run/JIT lane (`run_file_jit`) has no import-collection pass of its
+/// own: it lowers the flattened module directly, so the HIR lowerer's global
+/// struct registries stay empty and a field read that only exists on a
+/// non-registered variant (three `GlyphBitmap` classes; only spl_fonts' has
+/// `gbm_*` fields) fails closed with "Cannot infer field type" and de-JITs
+/// the whole module (~100-1000x slowdown). The lowerer's duplicate-variant
+/// consensus fallback fixes exactly this — but only when this map is
+/// populated. Only names with two or more DISTINCT layouts are kept, matching
+/// native_project's `record_struct_fields` semantics (identical re-imports of
+/// the same layout are not collisions).
+pub fn collect_duplicate_struct_defs(
+    module: &Module,
+) -> HashMap<String, Vec<Vec<(String, Type)>>> {
+    let mut by_name: HashMap<String, Vec<Vec<(String, Type)>>> = HashMap::new();
+    for item in &module.items {
+        let (name, fields) = match item {
+            Node::Struct(s) if !s.fields.is_empty() => (
+                &s.name,
+                s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect::<Vec<_>>(),
+            ),
+            Node::Class(c) if !c.fields.is_empty() => (
+                &c.name,
+                c.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect::<Vec<_>>(),
+            ),
+            _ => continue,
+        };
+        let variants = by_name.entry(name.clone()).or_default();
+        if !variants.iter().any(|candidate| candidate == &fields) {
+            variants.push(fields);
+        }
+    }
+    by_name.into_iter().filter(|(_, v)| v.len() > 1).collect()
+}
+
+
 pub fn load_module_with_imports_for_target(
     path: &Path,
     visited: &mut HashSet<PathBuf>,

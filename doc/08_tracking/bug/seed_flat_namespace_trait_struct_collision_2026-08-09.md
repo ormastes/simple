@@ -88,6 +88,31 @@ with the existing `resolve_duplicate_global_field_variant` set-field path.
   (`.spipe/bootstrap_linux_repair/state.md`), so parity could not be checked
   this session.
 
+## 2026-08-11 run-lane fix (second session)
+
+FIXED for the `run`/JIT lane: `module_loader::collect_duplicate_struct_defs`
+now walks the flattened AST and feeds every distinct same-named struct/class
+layout to the lowerer (`set_duplicate_global_struct_defs`) via the new
+`hir::lower_with_context_lenient_project_hint_and_duplicate_structs` entry,
+wired in `run_file_jit` (driver/src/exec_core.rs). The constructor path
+(`hir/lower/expr/collections.rs::lower_struct_init_fields`) picks the unique
+variant covering every provided named argument when several layouts collide,
+so both construction order and the typo gate use the right layout.
+
+Verified: a two-module repro (two `Thing` classes with disjoint fields)
+previously de-JITted with `Cannot infer field type: struct 'Thing' field
+'alpha'`; it now JIT-compiles under SIMPLE_JIT_STRICT=1 and prints the
+correct value. The vk module graph probe (`Engine2DReadback.device_identity`)
+also JITs cleanly. No regressions: showcase_core 13/13, named_ctor 4/4,
+struct_init 5/7 (2 pre-existing reds identical on the pre-fix seed), builder
+42/45 (3 pre-existing reds identical).
+
+Remaining: modules still de-JIT when they create lambdas (closure ABI),
+reference unresolved externs (e.g. `subsys_from_scope`), or call vulkan
+externs under JIT (init reports unavailable — the JIT extern ABI family).
+Those are separate documented classes; the GUI showcase still interprets
+because of them.
+
 ## 2026-08-09 follow-up (gui/web/2D vulkan sweep): why Fix 2 does not help `simple run`
 
 `main_gui.spl` / `web_standards_showcase_gui.spl` still log the

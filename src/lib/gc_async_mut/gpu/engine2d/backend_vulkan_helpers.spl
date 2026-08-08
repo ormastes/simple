@@ -328,11 +328,24 @@ impl VulkanBackend:
         status == VK_DISPATCH_COMPLETED_INELIGIBLE
 
     me _dispatch_framebuffer_checked(pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
-        val dispatched = if self.frame_batching_enabled:
+        var dispatched = if self.frame_batching_enabled:
             self._enqueue_framebuffer_compute(pipe, push_data, gx, gy, gz)
         else:
             vulkan_dispatch_framebuffer_compute_checked(
                 self.d_framebuffer, pipe, push_data, gx, gy, gz)
+        if dispatched == 0 and self.frame_batching_enabled and self.initialized and self.d_framebuffer > 0:
+            # Hardening (2026-08-10 full-page-render sweep): long batched
+            # sessions occasionally fail one dispatch in the bind chain after
+            # ~30 command buffers (traced: rc=0 right after a healthy one on
+            # the same buffer). The frame's earlier dispatches are intact, so
+            # retry ONCE on a fresh command buffer before latching the CPU
+            # fallback -- a transient chain failure must not demote the whole
+            # lane, but a persistent one still must.
+            val flushed = self._flush_pending_compute()
+            if flushed >= 0:
+                if vulkan_order_trace_enabled():
+                    vulkan_order_trace("dispatch-retry pipe={pipe} after flush rc={flushed}")
+                dispatched = self._enqueue_framebuffer_compute(pipe, push_data, gx, gy, gz)
         # clip_* is on this line deliberately: `_pack_rect_pc` folds the clip
         # into the rect push constants, so a clip left armed from an earlier
         # Draw-IR command makes the GPU discard a primitive while the dispatch
