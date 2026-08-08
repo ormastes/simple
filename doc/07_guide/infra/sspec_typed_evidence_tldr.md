@@ -17,16 +17,21 @@ EvidenceRequest -> provider -> RawArtifact -> format adapter
                                         ManualBlock[]  -> spipe_docgen -> user / QA manual
 ```
 
-Landed: `src/lib/common/spec/evidence/model.spl` (selectors, oracle modes, manifest,
-manual blocks) and `evidence_comparator.spl` (`compare_evidence`), covered by
-`test/01_unit/lib/common/spec/evidence/typed_evidence_oracle_spec.spl` (24 examples).
+Landed 2026-08-08: `model.spl` + `evidence_comparator.spl` (contract), plus lanes E2/E2b
+(`format/terminal_grid.spl`, `action_trace.spl`), E3 (`format/text_protocol.spl`), E4
+(`format/binary_layout.spl`), E6 (`spipe_extension.spl`), E7a/E7b
+(`format/scene_profile.spl`, `format/simulation_profile.spl`), and `manual_render.spl` —
+all under `src/lib/common/spec/evidence/`, covered by 8 spec files / 124 examples in
+`test/01_unit/lib/common/spec/evidence/`.
 
 Fail-closed: parse error, unresolved selector, ambiguous cardinality, ignore without a
 reason, all-ignore vacuity, closed-mode undeclared field, and zero positive resolutions
 all FAIL. Patterns (`"hex:16"`) are anchored class tokens, never regex or substring.
+**Still open** (red-team 2026-08-08, not yet fixed): bind-only oracles pass vacuously,
+`numeric_tolerance` accepts non-numeric operands, tolerance math can overflow into a
+false pass, and manifest digests aren't checked for 64 hex chars — see guide §8a.
 
-Design-only so far: TUI cell capture, GUI action trace, format adapters, docgen wiring,
-spec-to-spipe extension, the three reference examples (lanes E2–E8 in
-`doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md`).
+Not yet implemented: `spipe_docgen` evidence wiring (E5), `sspec-maintain evidence`
+commands, any live capture provider, the three reference examples (E8) — see guide §8.
 
 Run it with `bin/simple run` — the `test` daemon path trips its 800-module import cap.
