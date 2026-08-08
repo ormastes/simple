@@ -25,6 +25,17 @@ enum Effect:
 # Effect Methods (was: impl Effect:)
 # ============================================================================
 
+fn effect_is_async(self: Effect) -> bool:
+    """Whether this effect is Async. Recovered from the call site at
+    infer_promise_type_info's `infer_function_effect(func, env).is_async()`,
+    which already assumes this method exists on this file's own bare
+    Sync/Async Effect enum."""
+    self == Effect.Async
+
+fn effect_is_sync(self: Effect) -> bool:
+    """Whether this effect is Sync. Mirrors `effect_is_async`."""
+    self == Effect.Sync
+
 # Effect environment: function name -> inferred effect
 # Using Dict<text, Effect> as EffectEnv
 
@@ -114,8 +125,9 @@ fn infer_function_effect(func: FunctionInfo, env: Dict<text, Effect>) -> Effect:
     # Calls any async function
     for callee in func.called_functions:
         val callee_effect = env_get(env, callee)
-        if callee_effect.? and callee_effect_value_is_async(callee_effect_value):
-            return Effect.Async
+        if val callee_effect_value = callee_effect.?:
+            if callee_effect_value.is_async():
+                return Effect.Async
 
     Effect.Sync
 
@@ -350,7 +362,8 @@ fn unwrap_promise(type_name: text) -> text:
 fn needs_await(callee_name: text, env: Dict<text, Effect>) -> AwaitMode:
     """Check if calling a function needs automatic await insertion."""
     val effect = env_get(env, callee_name)
-    if effect.? and effect_value_is_async(effect_value):
+    val is_async = if val effect_value = effect.?: effect_value.is_async() else: false
+    if is_async:
         AwaitMode.Implicit
     else:
         AwaitMode.None
@@ -358,7 +371,8 @@ fn needs_await(callee_name: text, env: Dict<text, Effect>) -> AwaitMode:
 fn needs_await_typed(callee_name: text, env: Dict<text, Effect>, expected_type: text?) -> TypedAwaitMode:
     """Check if expression needs await based on target type."""
     val effect = env_get(env, callee_name)
-    if not effect.? or effect_value_is_sync(effect_value):
+    val effect_value = effect ?? Effect.Sync
+    if effect_value.is_sync():
         return TypedAwaitMode.None
 
     # Expression is async call - check expected type
