@@ -2209,6 +2209,19 @@ impl Lowerer {
     /// uses the same hashed-variant-name convention as enum `match` lowering
     /// above (and as `create_enum_value` at construction) — the proven-correct
     /// path, since a hand-written `case Err(e)` always matched.
+    ///
+    /// SCOPE: `Result` ONLY. The `"Err"` discriminant above is computed from a
+    /// string literal UNCONDITIONALLY, with no branch on the subject's type, so
+    /// for an `Option` the test is false for BOTH `Some` and `None`: `None?`
+    /// neither early-returns nor yields a value that matches either variant. The
+    /// "mirrors the pure-Simple `lower_try_expr`" claim above therefore holds for
+    /// `Result` only — that lowering has a dedicated `case HirTypeKind.Optional`
+    /// arm (presence via `rt_enum_discriminant`/`rt_is_some`, both the flat-
+    /// nullable and boxed physical reps, `None`-handle promotion before the early
+    /// return) which this function has no equivalent of. Tracked in
+    /// `doc/08_tracking/bug/try_operator_on_option_no_early_return_2026-08-08.md`.
+    /// Guard for the Result half (the spec DSL cannot reach this lowering):
+    /// `scripts/check/check-try-operator-error-propagation.shs`.
     pub(super) fn lower_try(&mut self, inner: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         // Lower the inner expression once and bind it to a temp.
         let inner_hir = self.lower_expr(inner, ctx)?;
