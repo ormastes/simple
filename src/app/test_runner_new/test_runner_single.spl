@@ -280,6 +280,71 @@ fn extract_number_before(s: text, keyword: text) -> i64:
         return -1
     to_int(last)
 
+fn extract_number_after(s: text, keyword: text) -> i64:
+    """Digits immediately following `keyword` (-1 when absent/no digits).
+
+    Mirror of extract_number_before for `key=<n>` shaped fields."""
+    val idx = find_raw(s, keyword)
+    if idx < 0:
+        return -1
+    var pos = idx + keyword.len()
+    val n = s.len()
+    var value: i64 = 0
+    var digits = 0
+    while pos < n:
+        val c = s.char_code_at(pos)
+        if c >= 48 and c <= 57:
+            value = value * 10 + (c - 48)
+            digits = digits + 1
+            pos = pos + 1
+        else:
+            break
+    if digits == 0:
+        return -1
+    value
+
+fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64):
+    """Parse the driver's authoritative per-file verdict line.
+
+    `report_spec_file_verdict` (src/compiler_rust/driver/src/cli/basic.rs)
+    emits exactly one such line per spec FILE, always, on stdout, LAST:
+
+        SPEC FILE VERDICT: <path> declared>=N executed=N passed=N failed=N dropped=N
+
+    Its counts come from the interpreter's own BDD result table, not from
+    scraping display text, so it is strictly more reliable than the per-example
+    glyphs and the per-describe "N examples, M failures" lines. It deliberately
+    omits the substrings `examples, ` / `failures` so parse_child_example_summary
+    never double-counts it.
+
+    Returns (executed, passed, failed, has_verdict)."""
+    var executed = -1
+    var passed = -1
+    var failed = -1
+    val lines = output.split("\n")
+    for line in lines:
+        if line.contains("SPEC FILE VERDICT:"):
+            val e = extract_number_after(line, " executed=")
+            val p = extract_number_after(line, " passed=")
+            val f = extract_number_after(line, " failed=")
+            if e >= 0 and p >= 0 and f >= 0:
+                executed = e
+                passed = p
+                failed = f
+    if executed >= 0:
+        return (executed, passed, failed, 1)
+    (0, 0, 0, 0)
+
+fn output_was_truncated(output: text) -> bool:
+    """True when the bounded-capture reader discarded part of the child output.
+
+    rt_process_run_bounded keeps only the first and last 2MB of a >4MB stream
+    and splices in `[output truncated: N bytes omitted]` where the MIDDLE was
+    dropped (spawn_bounded_output_reader,
+    src/compiler_rust/runtime/src/value/sffi/env_process.rs). Every text-scraped
+    signal below is unreliable once this is set."""
+    output.contains("[output truncated:")
+
 fn _count_lines_containing(output: text, marker: text) -> i64:
     var count = 0
     val lines = output.split("\n")
@@ -844,6 +909,8 @@ fn main() -> i64:
     val (real_passed, real_failed) = count_real_examples(combined)
     val real_executed = real_passed + real_failed
     val (summary_passed, summary_failed, has_summary) = parse_child_example_summary(combined)
+    val (verdict_executed, verdict_passed, verdict_failed, has_verdict) = parse_spec_file_verdict(combined)
+    val was_truncated = output_was_truncated(combined)
     var failed = 0
     var passed = 0
     if code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out")):
@@ -866,6 +933,33 @@ fn main() -> i64:
     elif assert_ran:
         passed = evidence_passed
         failed = evidence_failed
+        if failed > 0:
+            print "error: test-runner: spec failed"
+    elif was_truncated and has_verdict == 1 and verdict_executed > 0 and real_executed == 0 and has_summary == 0:
+        # BUG FIX (spec_harness_truncated_output_false_red): the bounded-capture
+        # reader keeps the first and last 2MB of a >4MB child stream and DROPS
+        # THE MIDDLE. A spec that prints heavily both before its first example
+        # and after its last one pushes every ✓/✗ glyph AND every per-describe
+        # "N examples, M failures" line into that discarded middle, while the
+        # driver's SPEC FILE VERDICT line — always emitted last — survives in
+        # the retained tail. The zero-executed guard below then fail-closed on
+        # evidence that was merely DELETED, not absent, and reported
+        # "Results: 1 total, 0 passed, 1 failed" + exit 1 for a spec whose
+        # example demonstrably ran and passed (ground truth: a file written from
+        # inside the `it` body). Both surfaces contradicted each other in the
+        # same run: VERDICT said executed=1 passed=1 failed=0, Results said
+        # 1 failed. The VERDICT was the truthful one.
+        #
+        # This is NOT a weakening of the zero-executed greenwash guard: it is
+        # gated on the truncation marker actually being present (so nothing
+        # changes for any run whose output fit in the cap) AND on the
+        # authoritative verdict line reporting real executions. Absent
+        # truncation, the guard below is untouched.
+        passed = verdict_passed
+        failed = verdict_failed
+        print "warning: test-runner: child output truncated; trusting SPEC FILE VERDICT"
+        if code != 0 and failed == 0:
+            failed = 1
         if failed > 0:
             print "error: test-runner: spec failed"
     elif real_executed == 0 and (has_summary == 0 or summary_failed == 0):
