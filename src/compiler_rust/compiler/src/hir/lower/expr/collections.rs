@@ -262,12 +262,9 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<Vec<HirExpr>> {
         // `from_registry` records whether `declared` came from the LOCAL type
-        // registry (authoritative for this struct) or from the cross-module
-        // `global_struct_defs` BARE-NAME fallback. The fallback keys on the
-        // unqualified name, so two same-named structs in different modules
-        // collide and it can hand back the wrong field list -- fine as a
-        // best-effort ORDERING hint (its prior use), but not sound enough to
-        // reject a name on. Only the registry list gates the hard error below.
+        // registry (authoritative for this struct) or from the resolver-fed
+        // canonical cross-module owner. Only the registry list gates the hard
+        // error below because imported placeholders can still be incomplete.
         let mut from_registry = true;
         let declared_field_names: Option<Vec<String>> = self
             .module
@@ -280,10 +277,8 @@ impl Lowerer {
             .or_else(|| {
                 from_registry = false;
                 let bare_name = name.rsplit('.').next().unwrap_or(name);
-                self.global_struct_defs.as_ref().and_then(|defs| {
-                    defs.get(bare_name)
-                        .map(|fs| fs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>())
-                })
+                self.global_struct_fields_for_name(bare_name)
+                    .map(|fields| fields.iter().map(|(field, _)| field.clone()).collect())
             });
 
         let Some(declared) = declared_field_names else {

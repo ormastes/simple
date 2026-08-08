@@ -251,6 +251,9 @@ pub(crate) struct ModuleImports {
     /// Global struct definitions: struct_name -> [(field_name, field_type_name)].
     /// Shared across all compilation units for consistent cross-module field offsets.
     pub struct_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>>,
+    pub unique_struct_owners: std::sync::Arc<std::collections::HashMap<String, String>>,
+    pub struct_decl_owners:
+        std::sync::Arc<std::collections::HashMap<(std::path::PathBuf, String), String>>,
     /// Duplicate global struct/class definitions grouped by bare type name.
     /// Used only for bounded field-name disambiguation when `struct_defs`
     /// lost information due to same-name collisions across modules.
@@ -797,6 +800,8 @@ impl NativeProjectBuilder {
                 vtable_type_owners: std::sync::Arc::new(result.vtable_type_owners),
                 vtable_symbols: std::sync::Arc::new(result.vtable_symbols),
                 struct_defs: std::sync::Arc::new(result.struct_defs),
+                unique_struct_owners: std::sync::Arc::new(result.unique_struct_owners),
+                struct_decl_owners: std::sync::Arc::new(result.struct_decl_owners),
                 duplicate_struct_defs: std::sync::Arc::new(result.duplicate_struct_defs),
                 enum_defs: std::sync::Arc::new(result.enum_defs),
                 enum_runtime_names: std::sync::Arc::new(result.enum_runtime_names),
@@ -816,6 +821,8 @@ impl NativeProjectBuilder {
                 vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
                 vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
                 struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+                unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
+                struct_decl_owners: std::sync::Arc::new(std::collections::HashMap::new()),
                 duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),

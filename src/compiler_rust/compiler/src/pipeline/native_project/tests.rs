@@ -311,6 +311,8 @@ fn native_project_extra_provider_resolves_symbol_and_suppresses_stub() {
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_decl_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -5136,6 +5138,58 @@ fn test_duplicate_struct_sidecar_resolves_unique_compiler_context_handle() {
     assert_eq!(expr.ty, crate::hir::TypeId::I64);
 }
 
+#[test]
+fn test_qualified_nominal_layout_resolves_compute_error_and_glyph_bitmap_families() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let src = project.join("src");
+    let family = src.join("family");
+    std::fs::create_dir_all(&family).unwrap();
+    let gc = family.join("gc.spl");
+    let nogc = family.join("nogc.spl");
+    let font = family.join("font.spl");
+    let font_decoy = family.join("font_decoy.spl");
+    let consumer = src.join("consumer.spl");
+    std::fs::write(&gc, "class ComputeError:\n    kind_name: text\n    code: i64\n").unwrap();
+    std::fs::write(&nogc, "class ComputeError:\n    kind: text\n    code: i64\n\nfn make_error() -> ComputeError:\n    ComputeError(kind: \"nogc\", code: 0)\n").unwrap();
+    std::fs::write(&font, "class GlyphBitmap:\n    gbm_width: i64\n\nfn make_glyph() -> GlyphBitmap:\n    GlyphBitmap(gbm_width: 13)\n").unwrap();
+    std::fs::write(&font_decoy, "class GlyphBitmap:\n    width: i64\n").unwrap();
+    std::fs::write(&consumer, "use family.nogc.{make_error}\nuse family.font.{make_glyph}\n\nfn error_kind() -> text:\n    val error = make_error()\n    error.kind\n\nfn glyph_width() -> i64:\n    val glyph = make_glyph()\n    glyph.gbm_width\n").unwrap();
+
+    let files = [&gc, &nogc, &font, &font_decoy, &consumer].into_iter()
+        .map(|path| (path.clone(), std::fs::read_to_string(path).unwrap())).collect::<Vec<_>>();
+    let imports = super::imports::build_import_map(&files, std::slice::from_ref(&src), &src);
+    let compute_owner = format!("{}__ComputeError", module_prefix_from_path(&nogc, &src));
+    let glyph_owner = format!("{}__GlyphBitmap", module_prefix_from_path(&font, &src));
+    assert!(imports.struct_defs.contains_key(&compute_owner));
+    assert!(imports.struct_defs.contains_key(&glyph_owner));
+    assert_eq!(
+        imports.struct_decl_owners.get(&(nogc.clone(), "ComputeError".to_string())),
+        Some(&compute_owner)
+    );
+    assert_eq!(
+        imports.struct_decl_owners.get(&(font.clone(), "GlyphBitmap".to_string())),
+        Some(&glyph_owner)
+    );
+    assert!(!imports.unique_struct_owners.contains_key("ComputeError"));
+    assert!(!imports.unique_struct_owners.contains_key("GlyphBitmap"));
+
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&consumer).unwrap()).parse().unwrap();
+    let resolver = crate::module_resolver::ModuleResolver::new(project, src.clone());
+    let mut lowerer = crate::hir::Lowerer::with_module_resolver(resolver, consumer);
+    lowerer.set_global_struct_defs(std::sync::Arc::new(imports.struct_defs));
+    lowerer.set_unique_global_struct_owners(std::sync::Arc::new(imports.unique_struct_owners));
+    lowerer.set_struct_decl_owners(std::sync::Arc::new(imports.struct_decl_owners));
+    lowerer.set_duplicate_global_struct_defs(std::sync::Arc::new(imports.duplicate_struct_defs));
+    let lowered = lowerer.lower_module(&ast).expect("nominal fields must lower through their provider owner");
+    for (name, ty) in [("error_kind", crate::hir::TypeId::STRING), ("glyph_width", crate::hir::TypeId::I64)] {
+        let function = lowered.functions.iter().find(|function| function.name == name).unwrap();
+        let crate::hir::HirStmt::Expr(expr) = function.body.last().unwrap() else { panic!("{name} must end in field access") };
+        assert!(matches!(expr.kind, crate::hir::HirExprKind::FieldAccess { .. }));
+        assert_eq!(expr.ty, ty);
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_runtime_retention_symbols_leave_strong_references_to_section_gc() {
@@ -5221,6 +5275,8 @@ int main(void) { app_call(); return 0; }
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_decl_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -5333,6 +5389,8 @@ void __module_init_security_registry(void) {
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_decl_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -5473,6 +5531,8 @@ int main(int argc, char** argv) {
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_decl_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -5611,6 +5671,8 @@ int main(void) {
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_decl_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -5681,6 +5743,8 @@ int main(void) {
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_decl_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -5745,6 +5809,8 @@ int main(void) { return (int)run_check(); }
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_decl_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -6463,6 +6529,8 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
         vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_decl_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -7128,6 +7196,8 @@ fn empty_import_map_result() -> imports::ImportMapResult {
         vtable_type_owners: std::collections::HashSet::new(),
         vtable_symbols: std::collections::HashMap::new(),
         struct_defs: std::collections::HashMap::new(),
+        unique_struct_owners: std::collections::HashMap::new(),
+        struct_decl_owners: std::collections::HashMap::new(),
         duplicate_struct_defs: std::collections::HashMap::new(),
         enum_defs: std::collections::HashMap::new(),
         enum_runtime_names: std::collections::HashMap::new(),

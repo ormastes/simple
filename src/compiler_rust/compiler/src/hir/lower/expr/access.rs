@@ -511,82 +511,44 @@ impl Lowerer {
     }
 
     fn try_resolve_global_field_type_by_name(&mut self, struct_name: &str, field_name: &str) -> Option<TypeId> {
-        if let Some((_, field_ty)) = self.resolve_duplicate_global_field_variant(struct_name, field_name) {
-            return Some(field_ty);
-        }
+        let has_owner = self.global_struct_key_for_name(struct_name).is_some();
         let field_type_name = {
-            let global_defs = self.global_struct_defs.as_ref()?;
-            let fields = global_defs.get(struct_name)?;
-            fields
-                .iter()
-                .find_map(|(fname, ftype)| if fname == field_name { Some(ftype.clone()) } else { None })?
+            if let Some(fields) = self.global_struct_fields_for_name(struct_name) {
+                fields.iter().find_map(|(fname, ftype)| (fname == field_name).then_some(ftype.clone()))?
+            } else if !has_owner {
+                return self.resolve_duplicate_global_field_variant(struct_name, field_name).map(|(_, ty)| ty);
+            } else { return None; }
         };
         self.resolve_type(&field_type_name).ok()
     }
 
     fn try_resolve_global_field_index_by_name(&self, struct_name: &str, field_name: &str) -> Option<usize> {
-        if let Some((index, _)) = self
-            .duplicate_global_struct_defs
-            .as_ref()
-            .and_then(|variants| variants.get(struct_name))
-            .and_then(|variants| {
-                let mut matches = variants.iter().filter_map(|fields| {
-                    fields
-                        .iter()
-                        .enumerate()
-                        .find_map(|(idx, (fname, _))| (fname == field_name).then_some(idx))
-                });
-                let first = matches.next()?;
-                if matches.next().is_some() {
-                    None
-                } else {
-                    Some((first, ()))
-                }
-            })
-        {
-            return Some(index);
+        if let Some(fields) = self.global_struct_fields_for_name(struct_name) {
+            return fields.iter().enumerate().find_map(|(idx, (fname, _))| (fname == field_name).then_some(idx));
         }
-        let global_defs = self.global_struct_defs.as_ref()?;
-        let fields = global_defs.get(struct_name)?;
-        fields
-            .iter()
-            .enumerate()
-            .find_map(|(idx, (fname, _))| if fname == field_name { Some(idx) } else { None })
+        if self.global_struct_key_for_name(struct_name).is_some() { return None; }
+        self.duplicate_global_struct_defs.as_ref().and_then(|variants| variants.get(struct_name)).and_then(|variants| {
+            let mut matches = variants.iter().filter_map(|fields| fields.iter().enumerate().find_map(|(idx, (fname, _))| (fname == field_name).then_some(idx)));
+            let first = matches.next()?;
+            matches.next().is_none().then_some(first)
+        })
     }
 
     fn try_resolve_global_field_type_name_by_name(&self, struct_name: &str, field_name: &str) -> Option<String> {
-        let field_type_spec = self
-            .duplicate_global_struct_defs
-            .as_ref()
-            .and_then(|variants| variants.get(struct_name))
-            .and_then(|variants| {
-                let mut matches = variants.iter().filter_map(|fields| {
-                    fields
-                        .iter()
-                        .find_map(|(fname, ftype)| (fname == field_name).then_some(ftype.clone()))
-                });
-                let first = matches.next()?;
-                if matches.next().is_some() {
-                    None
-                } else {
-                    Some(first)
-                }
-            })
+        let field_type_spec = self.global_struct_fields_for_name(struct_name)
+            .and_then(|fields| fields.iter().find_map(|(fname, ftype)| (fname == field_name).then_some(ftype.clone())))
             .or_else(|| {
-                self.global_struct_defs
-                    .as_ref()
-                    .and_then(|defs| defs.get(struct_name))
-                    .and_then(|fields| {
-                        fields
-                            .iter()
-                            .find_map(|(fname, ftype)| (fname == field_name).then_some(ftype.clone()))
-                    })
+                self.global_struct_key_for_name(struct_name).is_none().then(|| ())?;
+                self.duplicate_global_struct_defs.as_ref().and_then(|variants| variants.get(struct_name)).and_then(|variants| {
+                    let mut matches = variants.iter().filter_map(|fields| fields.iter().find_map(|(fname, ftype)| (fname == field_name).then_some(ftype.clone())));
+                    let first = matches.next()?;
+                    matches.next().is_none().then_some(first)
+                })
             })?;
 
         Self::named_struct_name_from_type(&field_type_spec).and_then(|candidate| {
-            self.global_struct_defs
-                .as_ref()
-                .is_some_and(|defs| defs.contains_key(&candidate))
+            self.global_struct_key_for_name(&candidate)
+                .is_some()
                 .then_some(candidate.clone())
                 .or_else(|| {
                     self.duplicate_global_struct_defs
@@ -956,8 +918,8 @@ impl Lowerer {
                 if let HirExprKind::FieldAccess { receiver: base_hir, .. } = &recv_hir.kind {
                     let base_name = self.module.types.get_type_name(base_hir.ty).map(|s| s.to_string());
                     if let Some(base_name) = base_name {
-                        let dict_value_ast = self.global_struct_defs.as_ref().and_then(|defs| {
-                            defs.get(&base_name)?.iter().find(|(fname, _)| fname == field).and_then(
+                        let dict_value_ast = self.global_struct_fields_for_name(&base_name).and_then(|fields| {
+                            fields.iter().find(|(fname, _)| fname == field).and_then(
                                 |(_, fty)| match fty {
                                     simple_parser::Type::Generic { name, args }
                                         if name == "Dict" && args.len() == 2 =>

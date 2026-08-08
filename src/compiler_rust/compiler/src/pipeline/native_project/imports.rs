@@ -27,8 +27,14 @@ pub(crate) struct ImportMapResult {
     /// First source-order trait implementation wins, matching object
     /// construction's existing primary-vtable rule.
     pub vtable_symbols: std::collections::HashMap<String, String>,
-    /// Global struct definitions: struct_name -> field names (in order).
+    /// Canonical struct definitions: `module_prefix__Type` -> field names (in
+    /// order). A bare type name is never a nominal identity.
     pub struct_defs: std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>,
+    /// Bare spelling -> canonical owner only when it is unique in the closure.
+    pub unique_struct_owners: std::collections::HashMap<String, String>,
+    /// Resolver declaration path and bare spelling -> canonical nominal owner.
+    /// HIR consumes this identity directly; it never rebuilds it from a path.
+    pub struct_decl_owners: std::collections::HashMap<(PathBuf, String), String>,
     /// Duplicate global struct/class definitions keyed by bare type name.
     /// Each entry preserves the full field layout for every colliding
     /// definition so the HIR lowerer can disambiguate field lookups by the
@@ -241,6 +247,8 @@ pub(crate) fn build_import_map(
 
     let mut raw_to_mangled: HashMap<String, Vec<String>> = HashMap::new();
     let mut struct_defs: HashMap<String, Vec<(String, simple_parser::Type)>> = HashMap::new();
+    let mut unique_struct_owners: HashMap<String, String> = HashMap::new();
+    let mut struct_decl_owners: HashMap<(PathBuf, String), String> = HashMap::new();
     let mut duplicate_struct_defs: HashMap<String, Vec<Vec<(String, simple_parser::Type)>>> = HashMap::new();
     let mut enum_defs: HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>> = HashMap::new();
     let mut enum_runtime_names: HashMap<String, String> = HashMap::new();
@@ -262,7 +270,7 @@ pub(crate) fn build_import_map(
     let mut seen_canonical = HashSet::new();
     for (path, source) in file_sources {
         let canonical_path = safe_canonicalize(path);
-        if !seen_canonical.insert(canonical_path) {
+        if !seen_canonical.insert(canonical_path.clone()) {
             continue;
         }
         let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
@@ -321,7 +329,17 @@ pub(crate) fn build_import_map(
                         if !c.fields.is_empty() {
                             let fields: Vec<(String, simple_parser::Type)> =
                                 c.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-                            record_struct_fields(&mut struct_defs, &mut duplicate_struct_defs, &c.name, fields);
+                            record_struct_fields(
+                                &mut struct_defs,
+                                &mut unique_struct_owners,
+                                &mut struct_decl_owners,
+                                &mut duplicate_struct_defs,
+                                path,
+                                &canonical_path,
+                                &prefix,
+                                &c.name,
+                                fields,
+                            );
                         }
                         for m in &c.methods {
                             if !m.body.statements.is_empty() {
@@ -380,7 +398,17 @@ pub(crate) fn build_import_map(
                         if !s.fields.is_empty() {
                             let fields: Vec<(String, simple_parser::Type)> =
                                 s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-                            record_struct_fields(&mut struct_defs, &mut duplicate_struct_defs, &s.name, fields);
+                            record_struct_fields(
+                                &mut struct_defs,
+                                &mut unique_struct_owners,
+                                &mut struct_decl_owners,
+                                &mut duplicate_struct_defs,
+                                path,
+                                &canonical_path,
+                                &prefix,
+                                &s.name,
+                                fields,
+                            );
                         }
                         for m in &s.methods {
                             if !m.body.statements.is_empty() {
@@ -484,7 +512,17 @@ pub(crate) fn build_import_map(
                                     .filter_map(|f| f.name.as_ref().map(|n| (n.clone(), f.ty.clone())))
                                     .collect();
                                 if !named.is_empty() {
-                                    record_struct_fields(&mut struct_defs, &mut duplicate_struct_defs, &v.name, named);
+                                    record_struct_fields(
+                                        &mut struct_defs,
+                                        &mut unique_struct_owners,
+                                        &mut struct_decl_owners,
+                                        &mut duplicate_struct_defs,
+                                        path,
+                                        &canonical_path,
+                                        &prefix,
+                                        &v.name,
+                                        named,
+                                    );
                                 }
                             }
                         }
@@ -835,6 +873,8 @@ pub(crate) fn build_import_map(
         vtable_type_owners,
         vtable_symbols,
         struct_defs,
+        unique_struct_owners,
+        struct_decl_owners,
         duplicate_struct_defs,
         enum_defs,
         enum_runtime_names,
@@ -885,7 +925,12 @@ fn type_mentions_ambiguous_owner(ty: &simple_parser::Type, ambiguous: &std::coll
 
 fn record_struct_fields(
     struct_defs: &mut std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>,
+    unique_struct_owners: &mut std::collections::HashMap<String, String>,
+    struct_decl_owners: &mut std::collections::HashMap<(PathBuf, String), String>,
     duplicate_struct_defs: &mut std::collections::HashMap<String, Vec<Vec<(String, simple_parser::Type)>>>,
+    declaration_path: &Path,
+    canonical_path: &Path,
+    module_prefix: &str,
     name: &str,
     fields: Vec<(String, simple_parser::Type)>,
 ) {
@@ -893,20 +938,25 @@ fn record_struct_fields(
         return;
     }
 
-    match struct_defs.get(name) {
-        None => {
-            struct_defs.insert(name.to_string(), fields);
-        }
-        Some(existing) if *existing == fields => {}
-        Some(existing) => {
-            let variants = duplicate_struct_defs
-                .entry(name.to_string())
-                .or_insert_with(|| vec![existing.clone()]);
-            if !variants.iter().any(|candidate| candidate == &fields) {
-                variants.push(fields);
-            }
+    let owner = format!("{}__{}", module_prefix, name);
+    struct_decl_owners.insert((declaration_path.to_path_buf(), name.to_string()), owner.clone());
+    struct_decl_owners.insert((canonical_path.to_path_buf(), name.to_string()), owner.clone());
+    if struct_defs.contains_key(&owner) {
+        return;
+    }
+    if let Some(previous_owner) = unique_struct_owners.remove(name) {
+        if let Some(previous_fields) = struct_defs.get(&previous_owner).cloned() {
+            duplicate_struct_defs.entry(name.to_string()).or_insert_with(|| vec![previous_fields]);
         }
     }
+    if let Some(variants) = duplicate_struct_defs.get_mut(name) {
+        if !variants.iter().any(|candidate| candidate == &fields) {
+            variants.push(fields.clone());
+        }
+    } else {
+        unique_struct_owners.insert(name.to_string(), owner.clone());
+    }
+    struct_defs.insert(owner, fields);
 }
 
 /// Build a per-module use map from AST `use` statements.

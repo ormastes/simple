@@ -111,6 +111,7 @@ impl Lowerer {
     fn preregister_imported_type_placeholder(&mut self, item: &Node) {
         match item {
             Node::Class(class_def) => {
+                self.struct_decl_files.entry(class_def.name.clone()).or_insert_with(|| self.current_file.clone());
                 if self.module.types.lookup(&class_def.name).is_none() {
                     self.module.types.register_named(
                         class_def.name.clone(),
@@ -126,6 +127,7 @@ impl Lowerer {
                 }
             }
             Node::Struct(struct_def) => {
+                self.struct_decl_files.entry(struct_def.name.clone()).or_insert_with(|| self.current_file.clone());
                 if self.module.types.lookup(&struct_def.name).is_none() {
                     self.module.types.register_named(
                         struct_def.name.clone(),
@@ -655,7 +657,10 @@ impl Lowerer {
                 .parse()
                 .map_err(|e| LowerError::ModuleResolution(format!("Failed to parse sibling module: {}", e)))?;
 
-            imported_count += self.register_imported_symbols_from_items(&sibling_module.items, target)?;
+            let previous_file = self.current_file.replace(sibling_path.clone());
+            let registered = self.register_imported_symbols_from_items(&sibling_module.items, target);
+            self.current_file = previous_file;
+            imported_count += registered?;
         }
 
         Ok(imported_count)
@@ -769,9 +774,11 @@ impl Lowerer {
                 Err(_) => continue,
             };
 
+            let previous_file = self.current_file.replace(sibling_path.clone());
             for item in &sibling_module.items {
                 self.preregister_imported_type_placeholder(item);
             }
+            self.current_file = previous_file;
         }
 
         Ok(())

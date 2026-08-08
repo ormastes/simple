@@ -5,6 +5,29 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
 impl Lowerer {
+    /// Resolve a nominal layout through resolver-fed declaration metadata.
+    /// Bare names participate only when the import map proved one owner.
+    pub(super) fn global_struct_key_for_name(&self, name: &str) -> Option<String> {
+        if let Some(Some(path)) = self.struct_decl_files.get(name) {
+            if let Some(owner) = self
+                .struct_decl_owners
+                .as_ref()
+                .and_then(|owners| owners.get(&(path.clone(), name.to_string())))
+            {
+                return Some(owner.clone());
+            }
+        }
+        if self.global_struct_defs.as_ref().is_some_and(|defs| defs.contains_key(name)) {
+            return Some(name.to_string());
+        }
+        self.unique_global_struct_owners.as_ref().and_then(|owners| owners.get(name)).cloned()
+    }
+
+    pub(super) fn global_struct_fields_for_name(&self, name: &str) -> Option<&Vec<(String, Type)>> {
+        let owner = self.global_struct_key_for_name(name)?;
+        self.global_struct_defs.as_ref()?.get(&owner)
+    }
+
     fn resolve_self_type(&self) -> LowerResult<TypeId> {
         if let Some(class_ty) = self.current_class_type {
             Ok(class_ty)
@@ -148,23 +171,15 @@ impl Lowerer {
                 // single top-level main.spl. Registering the struct locally
                 // turns ANY-typed receivers into proper struct types so
                 // `entry.name` lowers to a FieldGet instead of a method call.
-                if let Some(ref global_defs) = self.global_struct_defs.clone() {
-                    if let Some(field_specs) = global_defs.get(name) {
-                        let hir_fields: Vec<(String, TypeId)> = field_specs
-                            .iter()
-                            .map(|(fname, _ftype)| (fname.clone(), TypeId::ANY))
-                            .collect();
-                        let struct_ty = HirType::Struct {
-                            name: name.to_string(),
-                            fields: hir_fields,
-                            has_snapshot: false,
-                            generic_params: vec![],
-                            is_generic_template: false,
-                            type_bindings: std::collections::HashMap::new(),
-                        };
-                        let id = self.module.types.register_named(name.to_string(), struct_ty);
-                        return Ok(id);
-                    }
+                if let Some(field_specs) = self.global_struct_fields_for_name(name).cloned() {
+                    let hir_fields: Vec<(String, TypeId)> = field_specs.iter().map(|(fname, _)| (fname.clone(), TypeId::ANY)).collect();
+                    let struct_ty = HirType::Struct {
+                        name: name.to_string(), fields: hir_fields, has_snapshot: false,
+                        generic_params: vec![], is_generic_template: false,
+                        type_bindings: std::collections::HashMap::new(),
+                    };
+                    let id = self.module.types.register_named(name.to_string(), struct_ty);
+                    return Ok(id);
                 }
                 // Bare type names from inference / cross-module signatures.
                 match name {
@@ -902,10 +917,9 @@ impl Lowerer {
     }
 
     fn try_resolve_global_field_for_struct(&mut self, struct_name: &str, field_name: &str) -> Option<(usize, TypeId)> {
-        let (field_index, field_type_spec) =
-            self.global_struct_defs
-                .as_ref()
-                .and_then(|defs| defs.get(struct_name))
+        let has_owner = self.global_struct_key_for_name(struct_name).is_some();
+        let (field_index, field_type_spec) = self
+            .global_struct_fields_for_name(struct_name)
                 .and_then(|fields| {
                     fields
                         .iter()
@@ -913,6 +927,7 @@ impl Lowerer {
                         .find_map(|(idx, (fname, ftype))| (fname == field_name).then_some((idx, ftype.clone())))
                 })
                 .or_else(|| {
+                    if has_owner { return None; }
                     self.duplicate_global_struct_defs
                         .as_ref()
                         .and_then(|defs| defs.get(struct_name))
