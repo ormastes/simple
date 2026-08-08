@@ -42,16 +42,19 @@ notebook lane's whole reason for using a resident/persistent-arena mode.
 does NOT call `run_source`/`run_program`. It reimplements the same
 build→write→launch→read sequence at the call site and inserts one extra
 step between `build_svmg_arena` and `session.arena_write`: it copies the
-previous cell's full output arena into the freshly-built one, at the
-*logical* DATA-region offset (`SGP_HEADER_SIZE + code.len()`, which the
-splice tracks per-cell since it shifts as code length changes) for the DATA
-region, and verbatim for the fixed-offset LOG/RECORD ring region beyond
-`ARENA_DATA_SIZE`. This is only correct because `CudaExec` owns the entire
-inter-cell sequencing itself; it does not fix `run_source`/`run_program` for
-any OTHER caller (e.g. a future non-notebook consumer, or a caller wanting
-resident's "true" ring-polling behavior once the `cuMemHostAlloc`/
-watchdog-attribute SFFI gap `cuda_resident_session.spl` already documents is
-closed).
+previous cell's full output arena into the freshly-built one, byte-for-byte
+at the SAME absolute offset, for every offset from `max(this cell's
+data_off, the previous cell's data_off)` onward (both the STORE32/STORE8
+DATA-region bytes and the LOG/RECORD ring beyond `ARENA_DATA_SIZE` use
+absolute arena addressing, confirmed against a live device — an earlier
+draft of this splice instead copied by offset RELATIVE to data_off under the
+wrong assumption that addresses shift with code length, which silently
+shifted every persisted byte by (new data_off - old data_off) and corrupted
+values). This is only correct because `CudaExec` owns the entire inter-cell
+sequencing itself; it does not fix `run_source`/`run_program` for any OTHER
+caller (e.g. a future non-notebook consumer, or a caller wanting resident's
+"true" ring-polling behavior once the `cuMemHostAlloc`/watchdog-attribute
+SFFI gap `cuda_resident_session.spl` already documents is closed).
 
 ## Suggested fix
 

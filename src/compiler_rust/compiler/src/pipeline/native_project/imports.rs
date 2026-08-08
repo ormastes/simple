@@ -27,8 +27,17 @@ pub(crate) struct ImportMapResult {
     /// First source-order trait implementation wins, matching object
     /// construction's existing primary-vtable rule.
     pub vtable_symbols: std::collections::HashMap<String, String>,
-    /// Global struct definitions: struct_name -> field names (in order).
+    /// Canonical struct definitions: `module_prefix__Type` -> field names (in
+    /// order).  This is the source of truth for cross-module layouts: a bare
+    /// type name is not a nominal identity.
     pub struct_defs: std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>,
+    /// Compatibility index for a bare type name that has exactly one owner in
+    /// the compilation closure.  Colliding names are deliberately absent.
+    pub unique_struct_owners: std::collections::HashMap<String, String>,
+    /// Resolver declaration path -> canonical module-prefix owner.  The HIR
+    /// loader records the resolved declaration path for an imported nominal
+    /// type and uses this metadata to recover its canonical layout key.
+    pub struct_module_owners: std::collections::HashMap<PathBuf, String>,
     /// Duplicate global struct/class definitions keyed by bare type name.
     /// Each entry preserves the full field layout for every colliding
     /// definition so the HIR lowerer can disambiguate field lookups by the
@@ -241,6 +250,8 @@ pub(crate) fn build_import_map(
 
     let mut raw_to_mangled: HashMap<String, Vec<String>> = HashMap::new();
     let mut struct_defs: HashMap<String, Vec<(String, simple_parser::Type)>> = HashMap::new();
+    let mut unique_struct_owners: HashMap<String, String> = HashMap::new();
+    let mut struct_module_owners: HashMap<PathBuf, String> = HashMap::new();
     let mut duplicate_struct_defs: HashMap<String, Vec<Vec<(String, simple_parser::Type)>>> = HashMap::new();
     let mut enum_defs: HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>> = HashMap::new();
     let mut enum_runtime_names: HashMap<String, String> = HashMap::new();
@@ -267,6 +278,11 @@ pub(crate) fn build_import_map(
         }
         let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
         let prefix = module_prefix_from_path(path, &per_file_root);
+        // `path` is the exact declaration identity used by the resolver in
+        // normal builds; retain its canonical spelling too for callers that
+        // canonicalize before handing it to the HIR lowerer.
+        struct_module_owners.insert(path.clone(), prefix.clone());
+        struct_module_owners.insert(canonical_path.clone(), prefix.clone());
         let runtime_module_name = enum_runtime_module_name_from_path(path, fallback_root);
         let filtered_source =
             crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, super::effective_target().arch);
@@ -321,7 +337,7 @@ pub(crate) fn build_import_map(
                         if !c.fields.is_empty() {
                             let fields: Vec<(String, simple_parser::Type)> =
                                 c.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-                            record_struct_fields(&mut struct_defs, &mut duplicate_struct_defs, &c.name, fields);
+                            record_struct_fields(&mut struct_defs, &mut unique_struct_owners, &mut duplicate_struct_defs, &prefix, &c.name, fields);
                         }
                         for m in &c.methods {
                             if !m.body.statements.is_empty() {
@@ -380,7 +396,7 @@ pub(crate) fn build_import_map(
                         if !s.fields.is_empty() {
                             let fields: Vec<(String, simple_parser::Type)> =
                                 s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-                            record_struct_fields(&mut struct_defs, &mut duplicate_struct_defs, &s.name, fields);
+                            record_struct_fields(&mut struct_defs, &mut unique_struct_owners, &mut duplicate_struct_defs, &prefix, &s.name, fields);
                         }
                         for m in &s.methods {
                             if !m.body.statements.is_empty() {
@@ -484,7 +500,7 @@ pub(crate) fn build_import_map(
                                     .filter_map(|f| f.name.as_ref().map(|n| (n.clone(), f.ty.clone())))
                                     .collect();
                                 if !named.is_empty() {
-                                    record_struct_fields(&mut struct_defs, &mut duplicate_struct_defs, &v.name, named);
+                                    record_struct_fields(&mut struct_defs, &mut unique_struct_owners, &mut duplicate_struct_defs, &prefix, &v.name, named);
                                 }
                             }
                         }
@@ -835,6 +851,8 @@ pub(crate) fn build_import_map(
         vtable_type_owners,
         vtable_symbols,
         struct_defs,
+        unique_struct_owners,
+        struct_module_owners,
         duplicate_struct_defs,
         enum_defs,
         enum_runtime_names,
@@ -885,7 +903,9 @@ fn type_mentions_ambiguous_owner(ty: &simple_parser::Type, ambiguous: &std::coll
 
 fn record_struct_fields(
     struct_defs: &mut std::collections::HashMap<String, Vec<(String, simple_parser::Type)>>,
+    unique_struct_owners: &mut std::collections::HashMap<String, String>,
     duplicate_struct_defs: &mut std::collections::HashMap<String, Vec<Vec<(String, simple_parser::Type)>>>,
+    module_prefix: &str,
     name: &str,
     fields: Vec<(String, simple_parser::Type)>,
 ) {
@@ -893,20 +913,29 @@ fn record_struct_fields(
         return;
     }
 
-    match struct_defs.get(name) {
-        None => {
-            struct_defs.insert(name.to_string(), fields);
-        }
-        Some(existing) if *existing == fields => {}
-        Some(existing) => {
-            let variants = duplicate_struct_defs
+    let owner = format!("{}__{}", module_prefix, name);
+    if struct_defs.contains_key(&owner) {
+        return;
+    }
+
+    // Preserve a bare spelling only while it names exactly one nominal owner.
+    // On the first collision, retain the old layouts solely for untyped legacy
+    // fallback; typed field resolution must use `owner` instead.
+    if let Some(previous_owner) = unique_struct_owners.remove(name) {
+        if let Some(previous_fields) = struct_defs.get(&previous_owner).cloned() {
+            duplicate_struct_defs
                 .entry(name.to_string())
-                .or_insert_with(|| vec![existing.clone()]);
-            if !variants.iter().any(|candidate| candidate == &fields) {
-                variants.push(fields);
-            }
+                .or_insert_with(|| vec![previous_fields]);
         }
     }
+    if let Some(variants) = duplicate_struct_defs.get_mut(name) {
+        if !variants.iter().any(|candidate| candidate == &fields) {
+            variants.push(fields.clone());
+        }
+    } else {
+        unique_struct_owners.insert(name.to_string(), owner.clone());
+    }
+    struct_defs.insert(owner, fields);
 }
 
 /// Build a per-module use map from AST `use` statements.

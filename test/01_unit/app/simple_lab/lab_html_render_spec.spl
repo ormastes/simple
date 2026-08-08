@@ -134,10 +134,17 @@ describe "Simple Lab notebook page after running a cell":
         val app = open_notebook_page()
         type_into_cell(app, "cell_0_editor", "print(\"42 from Simple Lab\")")
 
-        step("Render the page before running — the output area is still empty")
+        step("Render the page before running — the output element is present but empty")
         val before_html = render_page(app)
         val before_evidence = capture_html_text("Simple Lab cell before run", before_html, "")
-        expect(check_html_contains_visible_text(before_html, "42 from Simple Lab")).to_equal(false)
+        # `cell_0_output` is an always-present `<div id="cell_0_output">` (see
+        # main.spl's unconditional `text_widget("cell_{index}_output", ...)`),
+        # so its PRESENCE doesn't distinguish before/after run. And the typed
+        # source itself contains the literal string "42 from Simple Lab" (the
+        # print() argument), so whole-page visible text isn't a reliable
+        # signal either. The real pre-run signal is that this element's own
+        # content is still empty.
+        expect(cell_output_element_text(before_html, 0)).to_equal("")
 
         step("Run the first cell through the same action the Run button dispatches")
         run_cell_action(app, "cell_run_0")
@@ -150,13 +157,25 @@ describe "Simple Lab notebook page after running a cell":
             "42 from Simple Lab"
         )
         expect(output_check.passed).to_equal(true)
-        expect(html_output_element_present(after_html)).to_equal(true)
+        expect(cell_output_element_text(after_html, 0).contains("42 from Simple Lab")).to_equal(true)
 
         step("Confirm the lane status indicator moved from 'not run' to 'available'")
         expect(check_html_contains_visible_text(after_html, "available")).to_equal(true)
 
-fn html_output_element_present(html: text) -> bool:
-    html.contains("id=\"cell_0_output\"")
+fn cell_output_element_text(html: text, cell_index: i64) -> text:
+    """Extract the inner text of `<div id="cell_{cell_index}_output">...</div>`
+    (render_html_text's flat, non-nested output shape) — a whole-page
+    visible-text search can't distinguish this element's own content from
+    unrelated text elsewhere on the page (e.g. the editor's source code)."""
+    val marker = "id=\"cell_{cell_index}_output\">"
+    val after_marker = html.split(marker)
+    if after_marker.len() < 2:
+        return ""
+    val tail = after_marker[1]
+    val before_close = tail.split("</div>")
+    if before_close.len() < 1:
+        return ""
+    before_close[0]
 
 
 # ============================================================================

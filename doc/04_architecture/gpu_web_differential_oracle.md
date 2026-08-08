@@ -113,6 +113,7 @@ before any comparison. Initial profiles:
 | `simpleos-qemu-aarch64-vulkan-virtio` | `virtio-gpu-mmio`; same required feature conjunction | same device/oracle/readback/fallback evidence |
 | `simpleos-qemu-riscv64-vulkan-virtio` | `virtio-gpu-mmio`; same required feature conjunction | same device/oracle/readback/fallback evidence |
 | `host-vulkan-oracle` | loader ABI/symbols, selected ICD, queue/extension facts | independent reference readback and normalized trace |
+| `macos-emulator-vulkan-drawir` | HVF/MoltenVK, DrawIR animation, Ctrl+Alt input, font, audio, fence/readback/no-fallback and a measured performance receipt | prepared macOS-host trace normalized through the test-only dynamic oracle; unavailable evidence remains blocked, never synthetic |
 | `chrome-web-oracle` | browser build/viewport/fixture and renderer-stage capture | semantic layout/paint trace plus reviewed exact bitmap artifact |
 
 Initial unit profile bounds are <=16 events and <=1 microsecond of normalized

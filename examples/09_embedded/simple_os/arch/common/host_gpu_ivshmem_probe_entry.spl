@@ -93,6 +93,9 @@ fn _host_gpu_probe_negotiation_done(isa: text, result: text, backend: text, atte
     serial_println("HOST_GPU_NEGOTIATION_DONE scope=probe isa={isa} result={result} backend={backend} attempts={attempts} first_generation={first_generation} final_generation={final_generation} elapsed_us={elapsed_us} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={reason}")
 
 pub fn host_gpu_ivshmem_probe_main():
+    host_gpu_ivshmem_probe_main_profile(SIMPLEOS_HOST_GPU_BACKEND_METAL, false)
+
+pub fn host_gpu_ivshmem_probe_main_profile(preferred_backend_code: i64, backend_required: bool):
     val mapped_slot = map_qemu_host_gpu_ivshmem_bar2()
     if mapped_slot <= 0:
         _host_gpu_probe_fail(_host_gpu_probe_isa(), "map-bar2-{mapped_slot}")
@@ -101,15 +104,15 @@ pub fn host_gpu_ivshmem_probe_main():
     # The boot probe stays in the initial address space, where crt0 identity-maps
     # this MMIO window. Unlike the canonical alias, this value fits Simple's
     # tagged integer ABI when passed through the guest bridge.
-    _host_gpu_probe_main_at(_host_gpu_probe_window_base(device), device, "ivshmem-bar2")
+    _host_gpu_probe_main_at(_host_gpu_probe_window_base(device), device, "ivshmem-bar2", preferred_backend_code, backend_required)
 
 # The file-backed-RAM-tail entry is selected only by the macOS AArch64 QEMU
 # wrapper.  It reuses the exact bounded wire protocol; it is not a VirtIO-GPU
 # or guest-native Vulkan path.
 pub fn host_gpu_file_backed_ram_tail_probe_main():
-    _host_gpu_probe_main_at(0x5F800000u64, 1, "file-backed-ram-tail")
+    _host_gpu_probe_main_at(0x5F800000u64, 1, "file-backed-ram-tail", SIMPLEOS_HOST_GPU_BACKEND_METAL, true)
 
-fn _host_gpu_probe_main_at(base: u64, device: i64, transport: text):
+fn _host_gpu_probe_main_at(base: u64, device: i64, transport: text, preferred_backend_code: i64, backend_required: bool):
     val isa = _host_gpu_probe_isa()
     boot_monotonic_prepare()
     val negotiation_started_us = boot_monotonic_now_us()
@@ -118,10 +121,13 @@ fn _host_gpu_probe_main_at(base: u64, device: i64, transport: text):
     serial_println("HOST_GPU_TRANSPORT isa={isa} transport={transport} base={base}")
 
     var hello_generation = _host_gpu_probe_generation() - 1
-    var render_backend = "metal"
-    var render_backend_code = SIMPLEOS_HOST_GPU_BACKEND_METAL
-    var render_backend_mask = SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
-    var processing_mask = SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
+    var render_backend = simpleos_host_gpu_backend_name(preferred_backend_code)
+    var render_backend_code = preferred_backend_code
+    var render_backend_mask = simpleos_host_gpu_backend_mask(preferred_backend_code)
+    var processing_mask = if preferred_backend_code == SIMPLEOS_HOST_GPU_BACKEND_METAL:
+        SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
+    else:
+        SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA
     var attempts = 0
     var first_generation = 0
     var final_generation = 0
@@ -137,7 +143,7 @@ fn _host_gpu_probe_main_at(base: u64, device: i64, transport: text):
         first_generation = hello_generation
         final_generation = hello_generation
         attempts = attempts + 1
-    if not _host_gpu_probe_hello_valid(hello, render_backend_mask, processing_mask) and _host_gpu_probe_hello_retryable(hello) and negotiation_elapsed_us > 0 and negotiation_elapsed_us < SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US:
+    if not backend_required and preferred_backend_code == SIMPLEOS_HOST_GPU_BACKEND_METAL and not _host_gpu_probe_hello_valid(hello, render_backend_mask, processing_mask) and _host_gpu_probe_hello_retryable(hello) and negotiation_elapsed_us > 0 and negotiation_elapsed_us < SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US:
         hello_generation = hello_generation + 1
         render_backend = "directx"
         render_backend_code = SIMPLEOS_HOST_GPU_BACKEND_DIRECTX
@@ -157,7 +163,7 @@ fn _host_gpu_probe_main_at(base: u64, device: i64, transport: text):
             _host_gpu_probe_negotiation_done(isa, "fallback", "software", attempts, first_generation, final_generation, negotiation_elapsed_us, SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION)
             _host_gpu_probe_fail(isa, "hello-generation")
             return
-    if not _host_gpu_probe_hello_valid(hello, render_backend_mask, processing_mask) and _host_gpu_probe_hello_retryable(hello) and negotiation_elapsed_us > 0 and negotiation_elapsed_us < SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US:
+    if not backend_required and preferred_backend_code != SIMPLEOS_HOST_GPU_BACKEND_VULKAN and not _host_gpu_probe_hello_valid(hello, render_backend_mask, processing_mask) and _host_gpu_probe_hello_retryable(hello) and negotiation_elapsed_us > 0 and negotiation_elapsed_us < SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US:
         hello_generation = hello_generation + 1
         render_backend = "vulkan"
         render_backend_code = SIMPLEOS_HOST_GPU_BACKEND_VULKAN

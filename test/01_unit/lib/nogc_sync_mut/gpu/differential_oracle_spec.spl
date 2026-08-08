@@ -10,6 +10,7 @@ use std.test.differential_conformance.{
     trace_comparison_policy_semantic,
     trace_satisfies_environment_profile,
     simpleos_qemu_gpu_environment_profiles,
+    macos_emulator_vulkan_draw_ir_environment_profile,
     reference_oracle_adapter_valid,
 }
 
@@ -50,6 +51,41 @@ fn complete_trace() -> NormalizedTrace:
         event(4, "vulkan_api", "device_readback", "guest-image", "guest-command", "pixels=4"),
     ])
 
+fn macos_event(sequence: i64, layer: text, operation: text) -> TraceEvent:
+    TraceEvent(
+        schema_version: 1, run_id: "macos-emulator-fixture", sequence: sequence,
+        monotonic_ns: sequence * 10, layer_id: layer, operation: operation,
+        object_id: "macos-object-{sequence}", parent_id: "macos-parent",
+        result_class: "ok", error_class: "", payload_digest: "digest-{sequence}",
+        scalar_fields: "receipt=present", environment_profile_id: "macos-emulator-vulkan-drawir",
+    )
+
+fn macos_emulator_trace() -> NormalizedTrace:
+    NormalizedTrace(
+        schema_version: 1, run_id: "macos-emulator-fixture",
+        environment_profile_id: "macos-emulator-vulkan-drawir",
+        ui_environment_profile_id: "macos-host-aarch64-emulated", arch: "aarch64",
+        transport: "hvf-moltenvk",
+        enabled_features: [
+            "draw-ir", "animation", "pointer-keyboard-modifiers", "font",
+            "audio", "device-readback", "no-fallback", "perf-receipt"
+        ],
+        venus_version: "n/a", device_identity: "moltenvk-device",
+        oracle_identity: "macos-vulkan-dynload-oracle", device_origin_readback: true,
+        fallback_used: false, dropped_events: 0, complete: true,
+        events: [
+            macos_event(0, "draw_ir", "compose"),
+            macos_event(1, "draw_ir", "animation_frame"),
+            macos_event(2, "draw_ir", "input_ctrl_alt"),
+            macos_event(3, "draw_ir", "font"),
+            macos_event(4, "draw_ir", "audio"),
+            macos_event(5, "vulkan_api", "submit"),
+            macos_event(6, "vulkan_api", "fence"),
+            macos_event(7, "vulkan_api", "device_readback"),
+            macos_event(8, "vulkan_api", "perf_receipt"),
+        ],
+    )
+
 describe "normalized GPU/web differential oracle":
     it "exports unique concrete SimpleOS QEMU GPU expectation profiles":
         val profiles = simpleos_qemu_gpu_environment_profiles()
@@ -65,6 +101,32 @@ describe "normalized GPU/web differential oracle":
         expect(profiles[1].requires_fence).to_equal(true)
         expect(profiles[2].requires_device_origin_readback).to_equal(true)
         expect(profiles[0].requires_no_fallback).to_equal(true)
+
+    it "keeps macOS emulator DrawIR evidence incomplete until dynamic-oracle and all receipt facts exist":
+        val profile = macos_emulator_vulkan_draw_ir_environment_profile()
+        expect(profile.id).to_equal("macos-emulator-vulkan-drawir")
+        expect(profile.ui_environment_profile_id).to_equal("macos-host-aarch64-emulated")
+        expect(profile.expected_transport).to_equal("hvf-moltenvk")
+        expect(profile.max_elapsed_ns).to_equal(0)
+        expect(profile.requires_device_origin_readback).to_equal(true)
+        expect(profile.requires_no_fallback).to_equal(true)
+        val complete = macos_emulator_trace()
+        expect(trace_satisfies_environment_profile(complete, profile).matched).to_equal(true)
+        var missing_audio = macos_emulator_trace()
+        missing_audio.events = [
+            missing_audio.events[0], missing_audio.events[1], missing_audio.events[2],
+            missing_audio.events[3], missing_audio.events[5], missing_audio.events[6],
+            missing_audio.events[7], missing_audio.events[8],
+        ]
+        expect(trace_satisfies_environment_profile(missing_audio, profile).reason).to_equal("required-operation-missing")
+        var fallback = macos_emulator_trace()
+        fallback.fallback_used = true
+        expect(trace_satisfies_environment_profile(fallback, profile).reason).to_equal("fallback-forbidden")
+        val adapter = ReferenceOracleAdapter(
+            name: "macos-vulkan-dynload-oracle", library_name: "libvulkan.1.dylib",
+            abi_version: 1, required_symbols: ["vkGetInstanceProcAddr"], test_only: true,
+        )
+        expect(reference_oracle_adapter_valid(adapter)).to_equal(true)
 
     it "compares transformed object identifiers semantically, not as raw handles":
         val candidate = complete_trace()

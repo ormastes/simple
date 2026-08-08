@@ -13,6 +13,8 @@ use crate::module_resolver::ModuleResolver;
 use crate::type_inference_config::TypeInferenceConfig;
 
 type GlobalStructDefs = std::sync::Arc<HashMap<String, Vec<(String, Type)>>>;
+type UniqueStructOwners = std::sync::Arc<HashMap<String, String>>;
+type StructModuleOwners = std::sync::Arc<HashMap<PathBuf, String>>;
 type DuplicateGlobalStructDefs = std::sync::Arc<HashMap<String, Vec<Vec<(String, Type)>>>>;
 type AmbiguousFieldNames = std::sync::Arc<HashSet<String>>;
 type GlobalEnumDefs = std::sync::Arc<HashMap<String, Vec<(String, Option<Vec<Type>>)>>>;
@@ -123,8 +125,13 @@ pub struct Lowerer {
     pub(super) extern_fn_names: HashSet<String>,
     /// Function names imported via `use` statements (should not become globals in MIR)
     pub(super) imported_function_names: HashSet<String>,
-    /// Global struct definitions from all compilation units for cross-module field resolution.
+    /// Canonical `module_prefix__Type` layouts from all compilation units.
     pub(super) global_struct_defs: Option<GlobalStructDefs>,
+    /// Bare names that have exactly one canonical nominal owner.  This is a
+    /// compatibility index, never an identity source for colliding types.
+    pub(super) unique_global_struct_owners: Option<UniqueStructOwners>,
+    /// Resolver declaration path -> canonical module owner metadata.
+    pub(super) struct_module_owners: Option<StructModuleOwners>,
     /// Duplicate struct/class definitions keyed by bare type name. Each value
     /// preserves all colliding layouts so field fallback can pick a unique
     /// variant by field name without merging incompatible offsets.
@@ -206,6 +213,8 @@ impl Lowerer {
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
+            unique_global_struct_owners: None,
+            struct_module_owners: None,
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             ambiguous_field_names: None,
@@ -257,6 +266,8 @@ impl Lowerer {
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
+            unique_global_struct_owners: None,
+            struct_module_owners: None,
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             ambiguous_field_names: None,
@@ -331,6 +342,8 @@ impl Lowerer {
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
+            unique_global_struct_owners: None,
+            struct_module_owners: None,
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             ambiguous_field_names: None,
@@ -405,6 +418,14 @@ impl Lowerer {
     /// isn't in the per-file registry.
     pub fn set_global_struct_defs(&mut self, defs: GlobalStructDefs) {
         self.global_struct_defs = Some(defs);
+    }
+
+    pub fn set_unique_global_struct_owners(&mut self, owners: UniqueStructOwners) {
+        self.unique_global_struct_owners = Some(owners);
+    }
+
+    pub fn set_struct_module_owners(&mut self, owners: StructModuleOwners) {
+        self.struct_module_owners = Some(owners);
     }
 
     /// Set the whole-program free-function return-type map (see field doc).

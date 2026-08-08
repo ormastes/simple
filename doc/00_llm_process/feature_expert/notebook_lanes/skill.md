@@ -6,18 +6,19 @@ Own feature-specific process knowledge for lane-aware notebooks: the Simple Jupy
 kernel, the (to-be-recreated) Python ZMQ transport wrapper, the JupyterLab extension, and
 the Simple Lab web notebook surface.
 
-## Status (2026-08-07)
+## Status (2026-08-08)
 
-Plan complete: 23 of 24 tasks landed via parallel-agent execution against
+Plan complete: 24 of 24 tasks landed via parallel-agent execution against
 `doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md` (P0-P3,
-X1-X4, K1-K4, L1-L4, H1-H3, E1-E2, plus a critical dead-code magics-wiring fix
+X1-X4, K1-K6, L1-L4, H1-H3, E1-E2, plus a critical dead-code magics-wiring fix
 and a critical server-crashing `TcpStream.read_bytes` fix found along the
 way). Update: the GPU plan's D1/B3/B4/C3 blockers that previously blocked
 K5/K6 have since landed (`src/lib/common/svmg/*`, `src/lib/gc_async_mut/
-gpu_lane/{cuda_vm_executor,vulkan_vm_executor}.spl`); **K6 has now landed**
-(see the K6 entry below). E2's CI workflow ships a documented, honest
-placeholder for the K5/K6 GPU-fixture jobs rather than inventing coverage —
-still accurate until those jobs are re-pointed at the new executors. Landed:
+gpu_lane/{cuda_vm_executor,cuda_resident_session,vulkan_vm_executor}.spl`);
+**both K5 and K6 have now landed** (see their entries below). E2's CI
+workflow ships a documented, honest placeholder for the K5/K6 GPU-fixture
+jobs rather than inventing coverage — still accurate until those jobs are
+re-pointed at the new executors. Landed:
 
 - **P0** — `tools/jupyter/` (Python ZMQ transport wrapper, kernelspec, installer)
   recreated and verified: live `jupyter_client` round trip + `bin/simple test
@@ -262,9 +263,46 @@ not a crash, left RED rather than weakened.
   interrupt→blocked→reset recovery, SKIP-clean without a live Vulkan
   ICD/device.
 
-Only remaining gap: **K5**, the CUDA sibling — being landed separately
-(GPU plan D1/B3/B4 are unblocked; K5 no longer depends on a missing
-`ref_vm.spl`). Not a gap in this plan's own execution.
+- **K5** — `src/lib/nogc_sync_mut/notebook/cuda_exec.spl` (`CudaExec`/
+  `CudaExecFactory`), the `interpreter(remote(cuda(smNN[(resident)])))` lane.
+  Wraps GPU plan B3's `CudaVmExecutor`/`CudaLaneSession` and B4's
+  `ResidentSession` watchdog refusal gate per design §4.4. Both submodes
+  share one dispatch path (`run_program_with_persistence`); resident vs
+  per-launch differs only in whether the watchdog gate is checked at
+  `start()` and whether output goes to `display_data` (`mime: "stream"`) vs
+  `stdout_delta`. Found and fixed the CUDA sibling of K6's bug:
+  `CudaVmExecutor.run_source` (and therefore `ResidentSession.run_program`,
+  which calls it) rebuilds the whole arena from a zeroed buffer every call,
+  discarding any SVM-G `STORE32`/`STORE8` global or LOG/RECORD output a
+  previous cell wrote — contradicting design §4.4's "state persists via the
+  arena" promise. Filed:
+  `doc/08_tracking/bug/cuda_resident_session_run_program_discards_arena_data_region_state_2026-08-08.md`.
+  `CudaExec` works around it (not a fix to the shared executors) with a
+  host-side byte splice between `build_svmg_arena` and `session.arena_write`
+  that carries the previous cell's output arena forward byte-for-byte at
+  matching ABSOLUTE offsets — STORE32/STORE8 addresses and the LOG/RECORD
+  ring are absolute arena offsets, confirmed live on real hardware; an
+  earlier draft that shifted the copy by each cell's own SGP `data_off`
+  under the wrong assumption of data_off-relative addressing silently
+  corrupted persisted values by that per-cell shift, caught by the
+  integration spec before landing. `jit(remote(cuda(...)))` is out of scope
+  (the only landed JIT-lane executor, `cuda_jit_lane_executor.spl` Task B2,
+  hardcodes one fixed kernel, not the cell's source) — `CudaExec` reports
+  this honestly as `blocked:`, filed:
+  `doc/08_tracking/bug/notebook_cuda_exec_jit_lane_not_implemented_2026-08-08.md`.
+  Verify: `test/02_integration/app/tools/notebook/cuda_exec_spec.spl` — 4/4 on
+  a live dual-GPU CUDA host (RTX A6000 + TITAN RTX), incl. real cross-cell
+  `STORE32`(cell1)/`LOAD32`+`SYS_RESULT`(cell2) global persistence and
+  interrupt→`blocked:`→`%reset`→recovery, SKIP-clean without CUDA. That same
+  host also intermittently hits the pre-existing, already-filed
+  `doc/08_tracking/bug/cuda_lane_probe_misses_device_unavailable_2026-08-08.md`
+  (`probe()` reports available, `init()` then fails with
+  `cuda-lane-device-identity-unavailable`) — `CudaExec` surfaces that as
+  `blocked:` rather than masking it, and the spec's lenient
+  `is_ok() or error != ""` assertions (same convention as K4's
+  `remote_exec_qemu_rv32_spec.spl`) pass either way.
+
+K5/K6 are both now landed; no remaining gap in this plan's own execution.
 
 ## Feature Links
 
@@ -289,15 +327,15 @@ Only remaining gap: **K5**, the CUDA sibling — being landed separately
   contract spec `test/system/ui/shared_ui_contract_spec.spl`.
 - LSP backend: `src/app/lsp/main.spl`; editor grammar donor: `src/app/vscode_extension/`.
 - Landed: `src/lib/nogc_sync_mut/notebook/{session_manager,executor,types,ipynb,
-  snb_sdn,magics,lane_locks,remote_exec,local_exec,lsp_bridge,vulkan_exec}.spl`
-  (K1-K4/L1/H2/P1/K2/K6); `src/app/simple_lab/{export_sdoctest,main,lab_executor,
-  lab_server}.spl` (L1/L2/L3); `tools/jupyter/kernel_wrapper.py` (Python ZMQ
-  transport, P0); `tools/jupyter/labextension/` (CM6 grammar, X1) with generator
-  `scripts/gen_cm6_grammar.mjs`. K2's shared `local_exec.spl` has landed but
-  is NOT yet wired into Simple Lab — `main.spl` and `lab_server.spl` both
-  still construct `lab_executor.spl`'s `LabLocalExecFactory`; retiring it is
-  still open. Not yet landed: K5 (CUDA, in progress separately), L4 (protocol
-  contract).
+  snb_sdn,magics,lane_locks,remote_exec,local_exec,lsp_bridge,vulkan_exec,
+  cuda_exec}.spl` (K1-K6/L1/H2/P1/K2); `src/app/simple_lab/{export_sdoctest,main,
+  lab_executor,lab_server}.spl` (L1/L2/L3); `tools/jupyter/kernel_wrapper.py`
+  (Python ZMQ transport, P0); `tools/jupyter/labextension/` (CM6 grammar, X1)
+  with generator `scripts/gen_cm6_grammar.mjs`. K2's shared `local_exec.spl`
+  has landed but is NOT yet wired into Simple Lab — `main.spl` and
+  `lab_server.spl` both still construct `lab_executor.spl`'s
+  `LabLocalExecFactory`; retiring it is still open. Not yet landed: L4
+  (protocol contract).
 
 ## Known Constraints
 
