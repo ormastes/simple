@@ -98,15 +98,124 @@ fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> 
     else:
         ""
 
+fn driver_native_leading_spaces(line: text) -> i64:
+    var i: i64 = 0
+    val n = line.len()
+    while i < n and line.char_code_at(i) == 32:
+        i = i + 1
+    i
+
+fn driver_native_count_char(s: text, code: i64) -> i64:
+    var count: i64 = 0
+    var i: i64 = 0
+    val n = s.len()
+    while i < n:
+        if s.char_code_at(i) == code:
+            count = count + 1
+        i = i + 1
+    count
+
+fn driver_native_is_def_start(trimmed: text) -> bool:
+    # Ordered so more-specific modifier prefixes are checked before the bare
+    # "fn "/"me " fallback (a modifier prefix does not itself start with
+    # "fn " or "me ", so order between the two groups does not matter, but
+    # listing the longer forms first keeps intent obvious).
+    (trimmed.starts_with("extern fn ") or trimmed.starts_with("pub async fn ") or
+        trimmed.starts_with("pub static fn ") or trimmed.starts_with("pub fn ") or
+        trimmed.starts_with("static fn ") or trimmed.starts_with("async fn ") or
+        trimmed.starts_with("fn ") or trimmed.starts_with("pub me ") or
+        trimmed.starts_with("me "))
+
+pub fn driver_native_source_interface_text(content: text) -> text:
+    """Extract the public-interface surface of a module's source: struct /
+    enum / bitfield / class / trait / impl headers, field and variant lines,
+    use/export/extern/const lines, and function/method SIGNATURE lines --
+    with function and method BODIES dropped.
+
+    Used to build the native-build cache-scope fingerprint so a body-only
+    edit (behaviour change with no ABI-visible change) does not evict every
+    OTHER module's cached object, while still failing closed: any change to
+    a struct/enum layout, a function/method signature, or a use/export line
+    anywhere in the loaded closure still changes this text and therefore
+    still evicts the whole scope, exactly like the previous whole-file-content
+    fingerprint. The module's OWN object is independently gated by
+    BuildCache's per-source FileFingerprint (full file content hash, see
+    incremental.spl), so a body-only edit to THIS module still forces a
+    rebuild of THIS module's object -- only siblings are spared.
+
+    A function/method signature's extent is tracked by parenthesis balance
+    (not "ends with a bare fn keyword") so both single-line and wrapped
+    multi-line parameter lists are captured in full: once parens rebalance,
+    a trailing ":" means a block (body) follows and gets skipped up to the
+    next line at or above the signature's own indent; no trailing ":" means
+    a bodyless declaration (extern fn, trait method stub) and nothing is
+    skipped. Any line this heuristic fails to recognize as pure body content
+    is captured (over-inclusion), never dropped (under-inclusion) -- the
+    failure mode is "fingerprint changes when it didn't strictly need to"
+    (a safe, if coarser, cache miss), never "fingerprint stayed the same
+    when the ABI changed" (unsound stale reuse).
+    """
+    val lines = content.split("\n")
+    var out: [text] = []
+    var mode_capturing_sig = false
+    var sig_indent: i64 = 0
+    var paren_depth: i64 = 0
+    var skip_until_indent: i64 = -1
+    for line in lines:
+        val trimmed = line.trim()
+        if mode_capturing_sig:
+            out = out.push(line)
+            paren_depth = paren_depth + driver_native_count_char(trimmed, 40) - driver_native_count_char(trimmed, 41)
+            if paren_depth <= 0:
+                mode_capturing_sig = false
+                if trimmed.ends_with(":"):
+                    skip_until_indent = sig_indent
+            continue
+        if skip_until_indent >= 0:
+            if trimmed == "":
+                continue
+            val indent = driver_native_leading_spaces(line)
+            if indent > skip_until_indent:
+                continue
+            skip_until_indent = -1
+            # fall through: this line is at/above the signature's indent,
+            # so it is the next real declaration, not part of the body.
+        if trimmed == "":
+            out = out.push(line)
+            continue
+        if driver_native_is_def_start(trimmed):
+            out = out.push(line)
+            sig_indent = driver_native_leading_spaces(line)
+            paren_depth = driver_native_count_char(trimmed, 40) - driver_native_count_char(trimmed, 41)
+            if paren_depth <= 0:
+                if trimmed.ends_with(":"):
+                    skip_until_indent = sig_indent
+            else:
+                mode_capturing_sig = true
+            continue
+        out = out.push(line)
+    out.join("\n")
+
 pub fn driver_native_sources_fingerprint(sources: [SourceFile]) -> text:
-    # Conservative dependency closure: any loaded source change gets a new
-    # object-cache scope. Hash content into compact length-prefixed rows so the
-    # pass stays linear and path/module boundaries are unambiguous. Source
-    # order changes only cause a safe cache miss.
+    # Interface-surface closure: hashes only the ABI-visible portion of each
+    # loaded source (see driver_native_source_interface_text) rather than the
+    # entire file, so a body-only edit to one module does not change this
+    # fingerprint and therefore does not evict every OTHER module's cached
+    # object from the scope directory named by this hash. A change to any
+    # struct/enum/signature/use/export line anywhere in the closure still
+    # changes the fingerprint and evicts the whole scope -- same fail-closed
+    # behaviour as before, just scoped to the part that can actually affect
+    # dependents. The edited module's OWN object is independently gated by
+    # BuildCache's full-file-content FileFingerprint, so body-only edits to
+    # THIS module still force a rebuild of THIS module's object.
+    # Hash content into compact length-prefixed rows so the pass stays linear
+    # and path/module boundaries are unambiguous. Source order changes only
+    # cause a safe cache miss.
     var rows: [text] = []
     for source in sources:
-        val content_hash = rt_hash_text(source.content)
-        rows = rows.push("{source.path.len()}:{source.path}{source.module_name.len()}:{source.module_name}{source.content.len()}:{content_hash}")
+        val interface_text = driver_native_source_interface_text(source.content)
+        val content_hash = rt_hash_text(interface_text)
+        rows = rows.push("{source.path.len()}:{source.path}{source.module_name.len()}:{source.module_name}{interface_text.len()}:{content_hash}")
     val manifest = rows.join("\n")
     "{rt_hash_text(manifest)}n{sources.len()}"
 
