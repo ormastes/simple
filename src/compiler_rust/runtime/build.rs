@@ -24,6 +24,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_db.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memtrack.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_simd_dispatch.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_packed_span.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_packed_span.h");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_native_gpu_stub.c");
     println!("cargo:rerun-if-changed=../../runtime/hosted_win32.c");
     println!("cargo:rerun-if-changed=../../runtime/hosted_cocoa.c");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
@@ -134,6 +137,10 @@ fn compile_c_runtime_sources() {
         "runtime_hosted_fs.c",
         "runtime_font.c",
         "runtime_memtrack.c",
+        // SimplePackedSpanV1 C resolve (F2). Self-contained: its bytes-basis
+        // accessors are weak, so in this list (which has no runtime_native.c)
+        // it links and fails CLOSED with NO_BASE instead of fabricating a base.
+        "runtime_packed_span.c",
         "runtime_simd_dispatch.c",
         // rt_opengl_* / rt_oneapi_* (interpreter_extern_registration_lanes.md,
         // lane R2): both families were entirely absent from this list, so the
@@ -304,8 +311,13 @@ fn collect_c_runtime_exports(
         "runtime_hosted_fs.c",
         "runtime_font.c",
         "runtime_memtrack.c",
+        // SimplePackedSpanV1 C resolve (F2). Self-contained: its bytes-basis
+        // accessors are weak, so in this list (which has no runtime_native.c)
+        // it links and fails CLOSED with NO_BASE instead of fabricating a base.
+        "runtime_packed_span.c",
         "runtime_simd_dispatch.c",
         "hosted_win32.c",
+        "runtime_native_gpu_stub.c",
     ];
     for source in LINKED_C_SOURCES {
         if *source == "hosted_win32.c" && (target_os == "windows" || native_all_provider) {

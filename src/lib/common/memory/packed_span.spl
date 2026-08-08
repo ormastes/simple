@@ -42,6 +42,41 @@
 # packed pointer over `[u32]` is one runtime function away — it is not.
 # See doc/09_report/render_pipeline_profile_2026-08-06.md.
 
+# NATIVE HALF (F2, landed 2026-08-08): `src/runtime/runtime_packed_span.c`
+# now implements the `SimplePackedSpanV1` resolve described in
+# doc/05_design/ui/perf/packed_span_v1_c_resolve_abi_2026-08-08.md. C turns an
+# already-OK registry verdict into a real base pointer over a BYTES-basis
+# array; it never sees `object_slot` / `object_generation`, because generation
+# lifetime is a language-level ownership fact, not a memory fact. The registry
+# verdict plus the C resolve together are the ONE check per submitted batch.
+#
+# C verdict codes are these codes NEGATED (one table, two sides), plus three
+# C-only refusals: -6 WRONG_BASIS (backing is not a bytes array), -7 NO_BASE
+# (this engine has no contiguous buffer to expose — the tree-walk interpreter
+# boxes `[u8]` elements), -8 BAD_ARGS.
+extern fn rt_bytes_alloc(len: i64) -> [u8]
+extern fn rt_packed_span_v1_resolve_base(arr: [u8], byte_offset: u32, byte_length: u32, element_count: u32, element_stride: u32) -> i64
+extern fn rt_packed_span_v1_probe_verdict(basis_len: i64, byte_offset: u32, byte_length: u32, element_count: u32, element_stride: u32) -> i64
+extern fn rt_packed_span_v1_flags_bits() -> i64
+extern fn rt_packed_span_v1_last_verdict() -> i64
+extern fn rt_packed_span_v1_last_rejection() -> i64
+extern fn rt_packed_span_v1_rejected_count() -> i64
+extern fn rt_packed_span_v1_struct_size() -> i64
+
+# C-side verdicts (negated Simple codes, plus the C-only refusals).
+val PACKED_SPAN_C_OK: i64 = 0
+val PACKED_SPAN_C_OUT_OF_BOUNDS: i64 = -3
+val PACKED_SPAN_C_BAD_STRIDE: i64 = -4
+val PACKED_SPAN_C_EMPTY: i64 = -5
+val PACKED_SPAN_C_WRONG_BASIS: i64 = -6
+val PACKED_SPAN_C_NO_BASE: i64 = -7
+
+# `SimplePackedSpanV1` flag bits. Bit 2 (SIMD_SAFE) is COMPUTED by C from the
+# real base alignment and length — never asserted by a caller.
+val PACKED_SPAN_FLAG_CONTIGUOUS: i64 = 1
+val PACKED_SPAN_FLAG_WRITABLE: i64 = 2
+val PACKED_SPAN_FLAG_SIMD_SAFE: i64 = 4
+
 # Verdict codes (plain integers — see the enum-match engine-divergence bugs
 # filed 2026-08-06; integer codes behave identically on every engine).
 val PACKED_SPAN_OK: i64 = 0
@@ -169,17 +204,81 @@ fn packed_span_make(slot: i64, generation: u32, byte_offset: u32, element_count:
         element_count: element_count,
         element_stride: element_stride)
 
-# Which backend an OK verdict actually authorises. There is NO native
-# `SimplePackedSpanV1` resolve in `src/runtime/` (verified absent repo-wide
-# 2026-08-08), so an OK verdict authorises checked indexed access via the
-# scalar oracle and NOTHING MORE. This function must keep returning
-# "scalar-oracle" until a real C resolve lands — it exists so no caller can
-# quietly start claiming SIMD execution the runtime cannot deliver.
-# Design for the missing C half:
-# doc/05_design/ui/perf/packed_span_v1_c_resolve_abi_2026-08-08.md
+# Turn an already-OK registry verdict into a real base address, or 0.
+#
+# The caller MUST have obtained PACKED_SPAN_OK from `registry.resolve(r)`
+# first: this function performs the MEMORY half of the check (basis, bounds,
+# stride, emptiness, alignment) and deliberately not the OWNERSHIP half
+# (slot liveness, generation). Calling it without the registry verdict skips
+# the stale-generation gate, which C cannot see.
+#
+# Returns 0 on any refusal. A refusal is never silent: read
+# `packed_span_last_verdict()` for the typed code and
+# `packed_span_rejected_count()` for the counter.
+fn packed_span_resolve_base(backing: [u8], r: BufferSpanRef) -> i64:
+    rt_packed_span_v1_resolve_base(backing, r.byte_offset, r.byte_length, r.element_count, r.element_stride)
+
+# Allocate a zeroed BYTES-BASIS buffer for probes and specs.
+#
+# MEASURED 2026-08-08 on the native engine (native-build, real C runtime): a
+# `[u8]` built by `var buf: [u8] = []` + `push` is NOT a bytes-basis array —
+# the C resolve refuses it with -6 WRONG_BASIS. Only `rt_bytes_alloc` produces
+# the elem_size-1 storage the packed span ABI requires. This is the same
+# representation trap already recorded for `[u32]`
+# (doc/08_tracking/bug/rt_typed_words_u32_is_not_a_packed_pixel_basis_2026-08-06.md),
+# now confirmed to extend to push-built `[u8]`. Do not "simplify" this back to
+# a push loop: it silently turns every resolve into a refusal.
+fn packed_span_probe_bytes(n: i64) -> [u8]:
+    rt_bytes_alloc(n)
+
+# Adjudicate a window against a declared basis length with NO base pointer.
+# `basis_len < 0` means "not a bytes basis" (verdict -6). This can never return
+# OK — the best verdict reachable is -7 NO_BASE — so it is a verdict oracle,
+# never a way to obtain a pointer.
+fn packed_span_probe_verdict(basis_len: i64, byte_offset: u32, byte_length: u32, element_count: u32, element_stride: u32) -> i64:
+    rt_packed_span_v1_probe_verdict(basis_len, byte_offset, byte_length, element_count, element_stride)
+
+fn packed_span_last_verdict() -> i64:
+    rt_packed_span_v1_last_verdict()
+
+fn packed_span_last_rejection() -> i64:
+    rt_packed_span_v1_last_rejection()
+
+fn packed_span_rejected_count() -> i64:
+    rt_packed_span_v1_rejected_count()
+
+fn packed_span_flags() -> i64:
+    rt_packed_span_v1_flags_bits()
+
+# sizeof(SimplePackedSpanV1). 40 on LP64 — asserted by the spec so a silent
+# layout change cannot slip through.
+fn packed_span_abi_struct_size() -> i64:
+    rt_packed_span_v1_struct_size()
+
+# Which backend an OK verdict actually authorises — MEASURED, never asserted.
+#
+# This is deliberately a live probe and not a constant: the C resolve exists
+# now (src/runtime/runtime_packed_span.c), but the ENGINE decides whether it
+# can hand back a real base. The tree-walk interpreter boxes `[u8]` elements
+# and has no contiguous buffer, so it gets verdict -7 NO_BASE and this
+# function keeps saying "scalar-oracle" there. Only an engine that actually
+# returns a non-zero base gets to claim "native-packed-v1".
+#
+# This is the repo rule "never enable an optimization because a capability bit
+# exists" made executable: the capability is proven per call, per engine.
 fn packed_span_backend_name() -> text:
+    val probe = packed_span_probe_bytes(64)
+    val base = rt_packed_span_v1_resolve_base(probe, 0, 64, 16, 4)
+    if base != 0:
+        return "native-packed-v1"
     "scalar-oracle"
 
 export PackedSpanRegistry, BufferSpanRef, packed_span_make, packed_span_backend_name
+export packed_span_resolve_base, packed_span_last_verdict, packed_span_last_rejection
+export packed_span_probe_bytes, packed_span_probe_verdict
+export packed_span_rejected_count, packed_span_flags, packed_span_abi_struct_size
 export PACKED_SPAN_OK, PACKED_SPAN_STALE_GENERATION, PACKED_SPAN_BAD_SLOT
 export PACKED_SPAN_OUT_OF_BOUNDS, PACKED_SPAN_BAD_STRIDE, PACKED_SPAN_EMPTY
+export PACKED_SPAN_C_OK, PACKED_SPAN_C_OUT_OF_BOUNDS, PACKED_SPAN_C_BAD_STRIDE
+export PACKED_SPAN_C_EMPTY, PACKED_SPAN_C_WRONG_BASIS, PACKED_SPAN_C_NO_BASE
+export PACKED_SPAN_FLAG_CONTIGUOUS, PACKED_SPAN_FLAG_WRITABLE, PACKED_SPAN_FLAG_SIMD_SAFE

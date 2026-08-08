@@ -5825,6 +5825,28 @@ int64_t rt_array_len_safe(int64_t value) {
     return rt_array_len((SplArray*)(uintptr_t)value);
 }
 
+/* Bytes-basis accessors for runtime_packed_span.c (SimplePackedSpanV1, F2).
+ * They live here because RtCoreArray is private to this translation unit.
+ *
+ * They are deliberately STRICTER than rt_array_data_ptr_u8, which falls back
+ * to a thread-local scratch COPY for non-bytes arrays: for a packed-span base
+ * pointer that fallback would be a plausible-looking pointer into memory the
+ * caller does not own, i.e. exactly the fail-open the span ABI forbids. Here a
+ * non-bytes array is reported as "not a basis" (-1) and refused. */
+int64_t rt_array_bytes_basis_len(SplArray* a) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return -1;
+    if (!(array->flags & RT_CORE_ARRAY_FLAG_BYTES)) return -1;
+    return array->len;
+}
+
+int64_t rt_array_bytes_basis_ptr(SplArray* a) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array || !array->data) return 0;
+    if (!(array->flags & RT_CORE_ARRAY_FLAG_BYTES)) return 0;
+    return (int64_t)(uintptr_t)array->data;
+}
+
 int64_t rt_array_get(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 3;

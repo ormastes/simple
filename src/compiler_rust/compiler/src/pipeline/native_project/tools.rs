@@ -303,8 +303,13 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // engine2d SIMD row kernels (C/NEON) backing rt_engine2d_simd_*_row_u32;
         // replaces the Rust-seed engine2d_simd_ops backing for native builds.
         "runtime_simd_dispatch.c",
+        // SimplePackedSpanV1 C resolve (F2) — the one runtime surface that
+        // hands a raw base pointer to Simple code. Kept a separate TU so it
+        // stays auditable in isolation.
+        "runtime_packed_span.c",
         "runtime_value.h",
         "runtime.h",
+        "runtime_packed_span.h",
         "runtime_fork.h",
         "runtime_memtrack.h",
         "runtime_simd_dispatch.h",
