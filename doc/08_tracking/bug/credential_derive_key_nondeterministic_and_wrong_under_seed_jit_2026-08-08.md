@@ -3,9 +3,13 @@
 - **Filed:** 2026-08-08
 - **Severity:** CRITICAL (the credential-store KDF is not a function of its
   inputs under the JIT; a key derived at generate time cannot be reproduced)
-- **Status:** OPEN. Root cause is a compiler/JIT defect, not a `.spl` spelling
-  issue — see "What was tried and REFUTED" below. No source change is shipped
-  with this doc, because no candidate edit produced a positive control.
+- **Status:** OPEN. See the CORRECTION section: the container-spelling defect IS
+  real for cross-module params (an earlier claim in this doc that it was refuted
+  is withdrawn). The NON-DETERMINISM documented here is a separate, still-unroot-
+  caused compiler/JIT defect, not a `.spl` spelling
+  issue — see "What was tried, and what that ruled out" below. No source change
+  is shipped with this doc, because no candidate edit produced a positive
+  control for the non-determinism.
 - **Component:** `src/lib/nogc_sync_mut/terminal/credential/store.spl`
   (`credential_derive_key`), seed JIT (Cranelift path)
 
@@ -62,6 +66,14 @@ So the composite is non-deterministic while every part of it is deterministic.
 That is the shape of a codegen/dispatch defect in the composed frame, not a
 logic bug in any one function.
 
+**Caveat on that table:** each callee was probed by calling it twice *in
+isolation*, with no intervening `credential_derive_key` call. So it establishes
+determinism for repeated-call-in-isolation only — it does NOT rule out that the
+192 `blowfish_encrypt_block` invocations inside one derive leave residue that
+perturbs the next derive. The obvious next probe is to call `eksblowfish_setup`,
+then run a full `credential_derive_key`, then call `eksblowfish_setup` again with
+the same arguments and compare.
+
 ## Likely mechanism (not yet proven)
 
 Compiling the module set that `store.spl` pulls in emits, from the compiler
@@ -83,24 +95,68 @@ observed call-order dependence. This is a hypothesis: substituting the
 `text_to_bytes` call out of the KDF path (see below) did NOT fix it, so if this
 is the mechanism it is acting through one of the other colliding symbols.
 
-## What was tried and REFUTED
+## CORRECTION (2026-08-08, same day): the container-spelling defect is REAL
 
-The prevailing theory handed to this lane was that the KDF input path was
-corrupted by container spelling — that `list` / `list<i64>` params read elements
-shifted left by 3 under the JIT, and only `[T]` is safe. **That theory does not
-explain this defect, and its supporting measurements were an artefact.**
+An earlier revision of this doc claimed the container-spelling defect was
+refuted outright. **That claim was wrong and is withdrawn.** It over-generalised
+from a probe that measured the wrong thing. The corrected finding:
 
-1. **The 4-row spelling table came from a stale stdlib.** `bin/simple run`
-   resolves `use std.…` **relative to the script's directory**, walking up for a
-   `src/lib/`. A probe run from a scratchpad path silently bound to a stale
-   `src/lib` copy left there by an earlier lane (blob `fd32d22c`, dated Aug 7,
-   the pre-fix `bytes_to_hex(bytes: list)`). Against that tree the probe reported
-   `list`/`list<i64>`/`list[i64]` = shifted (diff 455) and `[i64]` = correct.
-   Re-run from **inside the repo tree**, with the same probe file and the real
-   `src/lib`, **every spelling reads correctly (diff 0)**, including
-   `list<list<i64>>`. The shift-left-3 reading is a property of the stale copy,
-   not of the deployed toolchain.
-2. **Rewriting the KDF path to `[T]` did not fix it.** Changing
+**The `list` / `list<i64>` element-read corruption is real, but only for
+parameters of functions called ACROSS A MODULE BOUNDARY. A `list`-spelled
+parameter on a function defined in the same file as its caller reads correctly.**
+That cross-module/same-file distinction is the discriminating condition, and it
+is what the withdrawn claim missed: the probe that reported "every spelling is
+fine" declared its `list`-param functions *inside the probe file*, so it never
+exercised the failing case at all.
+
+Re-measured with markers planted in the library files and held present through
+every arm (so edit-visibility is proven *during* the toggle, not merely before
+it), cwd = repo root, single variable = the parameter spelling:
+
+| arm | `bytes_to_hex` / `bcrypt_encode_base64` param | AES roundtrip | bcrypt `mismatch_count` | local same-file `list` param |
+|---|---|---|---|---|
+| 1 | `list` / `list<i64>` | **BROKEN** `0088109820a8…` | **15** | 0 (correct) |
+| 2 | `[i64]` / `[i64]` | ok, exact identity | **0** | 0 (correct) |
+| 3 | `list<i64>` / `list<i64>` | **BROKEN** | **15** | 0 (correct) |
+
+Markers `recon_marker_5501` (aes) and `recon_marker_9931` (bcrypt) printed their
+sentinel values in all three arms, so every arm is known-live. RED→GREEN→RED.
+The bcrypt `mismatch_count` of 15 reproduces the independently-measured value
+from the bcrypt lane's own probe (landed `5d8e53fa16e`), from a different probe
+file and a different oracle.
+
+Consequences for the rest of this doc:
+
+- `list<i64>` is fully typed and breaks **identically** to bare `list` — the
+  original guidance ("only `[T]` is safe") stands for cross-module params.
+- The bcrypt-tree and `aes/utilities.spl` `[i64]` fixes are correct and should
+  stay.
+- One thing remains **unreproduced**: an early probe run from a scratchpad path
+  reported diff 455 for *same-file* `list` params. In-repo, same-file params
+  read correctly under every module set tried. That reading is not explained and
+  should not be relied on.
+- **Still open for the KDF path specifically:** `credential_derive_key` takes
+  `salt: list[i64]` and `credential_key_file_salt` returns `list[i64]`, and
+  `hex_to_bytes` returns bare `list` — all consumed across module boundaries.
+  Under the corrected model these are exactly the failing shape. They were
+  toggled during the investigation below without fixing the *non-determinism*,
+  but that does not clear them of the *corruption* defect; they warrant a
+  dedicated re-test with the marker-during-toggle method.
+
+## What was tried, and what that ruled out
+
+The container-spelling theory (see the CORRECTION above — it is real, and the
+"refuted" framing here is withdrawn) does not by itself explain the
+**non-determinism**, which is the finding this doc is about:
+
+1. `bin/simple run` resolves `use std.…` **relative to the script's directory**,
+   walking up for a `src/lib/`. A probe run from a scratchpad path silently
+   bound to a stale `src/lib` copy left there by an earlier lane (blob
+   `fd32d22c`, dated Aug 7, the pre-fix `bytes_to_hex(bytes: list)`). This is a
+   real and reusable hazard — it is how an earlier lane measured a live-looking
+   result against dead code — but it is **not** grounds for dismissing the
+   spelling defect, which reproduces in-repo (CORRECTION above).
+2. **Rewriting the KDF path to `[T]` did not fix the non-determinism.** Changing
    `credential_derive_key`'s `salt: list[i64] -> [i64]`, its return type,
    `magic_words: list[list[i64]] -> [[i64]]`, and `ikm: list[i64] -> [i64]`
    changed the returned values but left the call-order dependence intact
@@ -123,6 +179,15 @@ was shipped. Both files are at their origin blobs:
   `bytes_to_hex` was **invisible** from a scratchpad path and **visible** from
   `build/kdfprobe/` inside the repo. Always sabotage first, from the exact path
   you intend to measure from.
+- **Prove visibility DURING the toggle, not once beforehand.** Keep a marker
+  function in the edited library file and print it in *every* arm of the A/B.
+  Proving visibility once and then measuring lets a later arm silently bind
+  elsewhere. This is the method that settled the CORRECTION above; the withdrawn
+  claim came from the weaker prove-once-then-measure design.
+- **Test the failing shape, not a convenient stand-in.** The withdrawn claim
+  measured `list`-spelled params on functions declared *inside the probe file*.
+  Same-file params are not affected. The defect only appears across a module
+  boundary, so the probe must call a real library function.
 - **The stale `scratchpad/src/lib` tree is a live footgun** for every lane that
   runs `bin/simple run` on a scratchpad script. It is the direct cause of the
   mis-scoped spelling table above.
