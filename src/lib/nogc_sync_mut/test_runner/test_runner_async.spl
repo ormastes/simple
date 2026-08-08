@@ -49,11 +49,20 @@ fn _get_temp_dir() -> text:
     """Get platform-appropriate temp directory"""
     val os = host_os()
     if os == "windows":
-        val temp_env = env_get("TEMP").trim()
+        # NIL-GUARD: `std.nogc_sync_mut.io.env_ops.env_get` is declared `-> text`
+        # but is a bare `rt_env_get(key)` passthrough, and the runtime returns
+        # nil for an UNSET variable. Calling `.trim()` on that aborts the whole
+        # enclosing function -- `_get_temp_dir` never reached ANY return, so
+        # every temp-file creation in the async runner died silently. TMPDIR is
+        # unset on a stock Linux shell, i.e. this was the DEFAULT path.
+        # `?? ""` is the codebase's dominant idiom (282 sites) and is proven to
+        # coalesce nil correctly. The wrapper itself cannot be guarded: 36 call
+        # sites rely on the nil leak to apply a NON-EMPTY `??` default.
+        val temp_env = (env_get("TEMP") ?? "").trim()
         if temp_env != "":
             return temp_env
         return "C:\\Temp"
-    val tmpdir = env_get("TMPDIR").trim()
+    val tmpdir = (env_get("TMPDIR") ?? "").trim()
     if tmpdir != "":
         return tmpdir
     "/tmp"

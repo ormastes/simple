@@ -104,3 +104,100 @@ turns a silent whole class into a build-time error.
 `ant-trace`/`ant_trace`, `CompiledSymbolKind`, `Engine2D` across tiers,
 `MouseEvent` (ps2_mouse vs input_event), and now `env_get` (`text` vs `text?`).
 Same root habit: one name, several definitions, silently diverged.
+
+---
+
+## 2026-08-08 sweep — a THIRD contract shape, and the silent-abort half
+
+The 2026-07-25 table above lists two shapes (`text` and `text?`). Measurement on
+the deployed `bin/release/x86_64-unknown-linux-gnu/simple` shows there are
+**three**, and the missing one is where the damage is:
+
+| shape | behaviour for an UNSET var | `?? default` | `.method()` |
+|---|---|---|---|
+| **A. `-> text`, nil-GUARDED** | `""` | **DEAD** (yields `""`) — the 07-25 bug | safe |
+| **B. `-> text`, UNGUARDED passthrough** | **`nil`** | **works** | **ABORTS the enclosing fn** |
+| **C. honest `text?`** | `nil` | works | aborts unless unwrapped |
+
+Shape B is `fn env_get(key: text) -> text: rt_env_get(key)` — the declaration
+lies, and the interpreter does not enforce it. A and B are indistinguishable at
+a call site; which one you get depends purely on your `use` line.
+
+### The silent-abort half (this is the dangerous part)
+
+Calling a text method on a shape-B result aborts the **whole enclosing
+function** — it never reaches ANY return. Sometimes with
+`semantic: method 'trim' not found on type 'nil'`, and sometimes — measured
+2026-08-08 — with **no diagnostic at all**: the call expression just evaluates
+empty and execution continues. An aborted function and a correct one are
+therefore indistinguishable from outside. This is the same mechanism root-caused
+for `credential_kdf_cost` in `282cda42f`.
+
+### Enumeration (unbounded; `/usr/bin/grep`, not the .gitignore-honouring wrapper)
+
+17 `fn env_get(key)` definitions. **Guarded (A):** `io_runtime.spl:177`,
+`nogc_sync_mut/env/variables.spl:11`, `nogc_async_mut/env/variables.spl:11`.
+**Honest (C):** `nogc_sync_mut/src/config.spl:764`,
+`gc_async_mut/env/variables.spl:8`. **Unguarded (B), 8:**
+`compiler/00.common/config.spl:8`, `compiler/80.driver/build_log.spl:22`,
+`compiler/90.tools/header_gen/shared_lib_flags.spl:16`,
+`nogc_sync_mut/ffi/system.spl:26`, `nogc_sync_mut/io/mod_stub.spl:46`,
+`nogc_sync_mut/io/env_ops.spl:36`, `nogc_sync_mut/sffi/system.spl:26`,
+`nogc_async_mut/io/mod_stub.spl:72`, plus `os/port/llvm/build.spl:25`.
+
+`env_ops.spl` is the widest blast radius — 20+ importers across compiler, CLI
+and test-runner.
+
+### Call-site family: 15 grep hits, 13 already safe, 2 genuinely broken
+
+`env_get\([^()]*\)\.[a-z_]` returns 15 sites. Resolving each `use` line to its
+definition:
+
+- **10 safe** — `src/app/ui_showcase/hosts/{main_2d,main_gui,main_wm,main_web,host_wm}.spl`
+  all import `std.io_runtime.env_get`, which **guards** (shape A). Measured
+  `REACHED_wrapper=[]`. *The 15-site figure was a false family.*
+- **2 safe** — `nogc_sync_mut/env/platform.spl:93,105` import
+  `std.env.variables.env_get` (shape A).
+- **1 safe** — `compiler/70.backend/backend/runtime_compiler.spl:54` already
+  checks `!= nil` explicitly.
+- **2 BROKEN** — `nogc_sync_mut/test_runner/test_runner_async.spl:52,56`
+  (`_get_temp_dir`) import shape-B `io.env_ops.env_get`. **FIXED 2026-08-08.**
+
+`_get_temp_dir` aborted before any return whenever `TMPDIR` was unset — the
+DEFAULT state of a stock Linux shell — so every temp-file creation in the async
+test runner died silently. Guarded with the `?? ""` idiom (the codebase's
+dominant form, 282 sites).
+
+Note the chain-grep cannot see two-step usage (`val v = env_get(K)` then
+`v.trim()` on a later line); the counts above are a lower bound.
+
+### Why the ROOT was NOT changed — and this is the key constraint
+
+Making shape B return `""` (or fixing `rt_env_get`) looks like the right root
+fix and is **not safe**: **36 call sites rely on the nil leak to apply a
+NON-EMPTY `??` default** — e.g. `env_get("SIMPLE_BINARY") ?? "bin/simple"`,
+`env_get("CLAUDE_BASE_API_URL") ?? "https://api.anthropic.com"`,
+`env_get("PWD") ?? "."`. Guarding the wrapper silently turns all 36 into `""`.
+
+So the two halves of this bug pull in **opposite directions**: the 07-25 half
+wants shape B everywhere (so `??` lives), the abort half wants shape A
+everywhere (so `.method()` is safe). Neither can be applied globally. That is
+why option 2 above (**rename so the two shapes cannot be confused**) is the only
+fix that resolves both, and it remains the recommendation.
+
+Until then: fix the reachable abort sites individually with `?? ""`, and treat
+any `env_get(...) ?? "non-empty"` as suspect until its `use` line is resolved.
+
+### Positive control
+
+`scripts/check/check-env-get-nil-abort-guard.shs` — 5 assertions, exit 0 = safe.
+Because the failure is a SILENT abort, it asserts the probe function **reached
+its return** via a `REACHED_` marker emitted on the line *after* the method call
+(an abort cannot forge it), and it asserts the unguarded form still **does**
+abort, so the control cannot go vacuous. Verified RED when the fix is reverted
+(2 of 5 fail), GREEN when restored.
+
+Edit-visibility for every measurement above was proven by injecting a
+`SABOTAGE_MARKER_Q7` into `io_runtime.spl`'s guard and observing it in probe
+output (then reverting; blob restored to `f47b2a2715d0`) — ruling out the
+bundled-stdlib trap.
