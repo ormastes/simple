@@ -22,7 +22,16 @@ use common.ui.theme_draw_ir_material.{
     theme_draw_ir_surface_initializer_color,
     theme_draw_ir_surface_style
 }
-use common.ui.wm_chrome_theme.{WmChromeColors, wm_chrome_theme}
+use common.ui.wm_chrome_theme.{WmChromeColors, wm_chrome_theme, wm_chrome_colors_from_gui_tokens}
+use common.ui.style.{UITheme}
+use common.ui.glass.theme.{
+    aqua_dark,
+    aqua_light,
+    glass_dark,
+    glass_light,
+    glass_obsidian_dark,
+    glass_obsidian_light
+}
 use common.ui.draw_ir.{
     DRAW_IR_BACKEND_CPU,
     DrawIrBatch,
@@ -109,6 +118,45 @@ fn _widget_draw_ir_theme_from_wm_chrome(chrome: WmChromeColors) -> WidgetDrawIrT
         status_warning: chrome.accent,
         status_error: chrome.accent
     )
+
+fn _widget_draw_ir_theme_from_ui_theme(ui_theme: UITheme) -> WidgetDrawIrTheme:
+    # Project a named UITheme's CSS tokens through the shared GUI->WM bridge
+    # so this pipeline speaks the same palette as the chrome pipelines.
+    val colors = ui_theme.colors
+    _widget_draw_ir_theme_from_wm_chrome(wm_chrome_colors_from_gui_tokens(
+        colors.background.to_css(),
+        colors.foreground.to_css(),
+        colors.accent.to_css(),
+        colors.panel_bg,
+        colors.hover_bg,
+        colors.error.to_css()
+    ))
+
+fn _widget_draw_ir_theme_from_name(theme_name: text) -> WidgetDrawIrTheme:
+    # Canonical name -> palette dispatch for this pipeline (same role as
+    # glass/theme.spl's is_glass_theme; literals here are the mapping, not
+    # call-site usage). Unknown names keep the installed wm_chrome palette.
+    if theme_name == "glass_light":
+        return _widget_draw_ir_theme_from_ui_theme(glass_light())
+    if theme_name == "glass_dark":
+        return _widget_draw_ir_theme_from_ui_theme(glass_dark())
+    if theme_name == "glass_obsidian_dark":
+        return _widget_draw_ir_theme_from_ui_theme(glass_obsidian_dark())
+    if theme_name == "glass_obsidian_light":
+        return _widget_draw_ir_theme_from_ui_theme(glass_obsidian_light())
+    if theme_name == "aqua_light":
+        return _widget_draw_ir_theme_from_ui_theme(aqua_light())
+    if theme_name == "aqua_dark":
+        return _widget_draw_ir_theme_from_ui_theme(aqua_dark())
+    _widget_draw_ir_theme_from_wm_chrome(wm_chrome_theme())
+
+fn _widget_draw_ir_theme_for_root(root: WidgetNode) -> WidgetDrawIrTheme:
+    # UITree.with_theme stores the requested theme name on the root node;
+    # honor it when present, keep the installed wm_chrome palette otherwise.
+    val theme_name = root.get_prop("ui_tree_theme")
+    if theme_name == "":
+        return _widget_draw_ir_theme_from_wm_chrome(wm_chrome_theme())
+    _widget_draw_ir_theme_from_name(theme_name)
 
 val GLYPH_ADVANCE: i32 = 7
 
@@ -290,6 +338,13 @@ fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32,
         val value = node.get_prop("value")
         if value != "":
             result.push(_default_text_centered(node, "{rect.id}-value", x + 5, mid_y, y, rect.h, value, theme.text_primary))
+        else:
+            # Empty field: show the placeholder so the widget's purpose is
+            # visible before first input (previously nothing was emitted and
+            # the field read as a bare box).
+            val placeholder = node.get_prop("placeholder")
+            if placeholder != "":
+                result.push(_default_text_centered(node, "{rect.id}-placeholder", x + 5, mid_y, y, rect.h, placeholder, theme.text_secondary))
         if node.get_prop("ui_focus") == "true":
             val caret = _prop_int(node, "caret")
             val prefix = if caret > 0 and caret < value.len(): value.slice(0, caret) elif caret >= value.len(): value else: ""
@@ -343,6 +398,24 @@ fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32,
             "{rect.id}-scrollbar-thumb",
             x + rect.w - bar_w, thumb_y, bar_w, thumb_h, theme.accent
         ))
+    elif kind == "menubar":
+        # Explicit bar fill; item text is emitted by the walk (children are
+        # `text` widgets, spread horizontally by the builder's hbox layout).
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, theme.track))
+    elif kind == "statusbar":
+        # The statusbar stores its text in `left`/`right` props, not `label`,
+        # so the generic walk never drew it: the bar rendered as an empty
+        # strip. Emit both sections here; the right section is right-aligned
+        # using the measured text width (same probe pattern as the caret).
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, theme.track))
+        val left_text = node.get_prop("left")
+        if left_text != "":
+            result.push(_default_text_centered(node, "{rect.id}-left", x + 6, mid_y, y, rect.h, left_text, theme.text_primary))
+        val right_text = node.get_prop("right")
+        if right_text != "":
+            val probe = _default_text(node, "{rect.id}-right-metrics", 0, 0, right_text, theme.text_primary)
+            val right_w = if probe.computed_style.len() > 0: probe.width else: right_text.len() * GLYPH_ADVANCE
+            result.push(_default_text_centered(node, "{rect.id}-right", x + rect.w - right_w - 6, mid_y, y, rect.h, right_text, theme.text_primary))
     else:
         # container / panel / unknown -> background surface
         result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, theme.surface))
@@ -492,7 +565,7 @@ fn widget_tree_to_draw_ir_with_theme(root: WidgetNode, w: i32, h: i32, backend: 
     draw_ir_composition("widget-composition", "widget:{w}x{h}", backend, batches)
 
 fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> DrawIrComposition:
-    val theme = _widget_draw_ir_theme_from_wm_chrome(wm_chrome_theme())
+    val theme = _widget_draw_ir_theme_for_root(root)
     val rects = compute_layout(root, 0, 0, w, h)
     var main_cmds: [DrawIrCommand] = []
     main_cmds = _walk_main(root, rects, main_cmds, theme)
