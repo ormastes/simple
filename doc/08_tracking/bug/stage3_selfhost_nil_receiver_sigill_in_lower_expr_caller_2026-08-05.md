@@ -350,3 +350,111 @@ correctness fix, one instrumentation gap closed) with a passing regression
 spec, but the SIGILL itself remains unreproduced and unverified this session.
 Treat prior POSTPONED status as superseded by this more specific one, not as
 "fixed."
+
+## 2026-08-08 update (later same day) — verification attempt run; outcome (c), unrelated NEW blocker, now earlier than Stage 3
+
+**What was verified first (do not re-check):** the `ByteOrder` blocker
+described as the thing standing in front of this bug is genuinely fixed at
+`origin/main`. `git log --all --oneline | grep -i byteorder` finds
+`9ad6aea9d34 test(compiler): add regression spec for ByteOrder
+lazy-import-registration fix` and `9bb8727cbc3 fix(compiler): Stage3
+self-host blockers - missing ByteOrder import + Effect facade collision`,
+both ancestors of `origin/main` HEAD `663fce69eb3` (`git fetch origin main`
+run first). Disk checked before the build: `df -h /` reported 119G free /
+97% used on `/` — tight but sufficient; no `git prune`/`git gc` run, per
+T11.
+
+**Command run** (full env + command, per `.claude/rules/bootstrap.md` and
+the task's Step 5), output redirected outside the repo tree per T12:
+
+```
+SIMPLE_MIR_STMT_CALLER_DEBUG=1 SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1 \
+  sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy \
+  --output=/home/ormastes/dev/pub/simple-build-out/stage3-nilrecv-20260808 --progress
+```
+
+Started 13:59:30 UTC, finished 14:15:41 UTC (~16 minutes total — a real
+`cargo` seed rebuild, `Finished \`bootstrap\` profile [optimized] target(s)
+in 5m 53s`, so this was not a truncated/killed run; it ran to a real,
+attributed compile-error termination, not a timeout or a signal).
+
+**Outcome: (c) — an unrelated, NEW blocker, and it now fires at Stage 2, one
+stage EARLIER than the previously-recorded Stage 3 ByteOrder/SIGILL chain.**
+Stage 2 (`seed -> bootstrap_main.spl`) itself failed to native-build with 4
+files rejected on the SAME diagnosis, none of them consistent with either
+the ByteOrder import defect or the nil-receiver SIGILL this doc tracks:
+
+```
+FAILED FILES (4):
+  - src/compiler/30.types/type_infer/inference_expr.spl : hir: Unsupported
+    feature: `case Str:` is not a variant of the matched enum, so it is an
+    irrefutable BINDING that matches every remaining value and makes every
+    later arm (including `case _:`) unreachable. Use a qualified variant
+    (`case Enum.Str:`), or a lowercase name if a binding was really
+    intended.
+  - src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl : same
+    diagnosis, `case Str:`
+  - src/compiler/70.backend/backend/cuda/ptx_builder.spl : same diagnosis,
+    `case Bool:`
+  - src/compiler/70.backend/backend/vhdl/vhdl_design_catalog.spl : same
+    diagnosis, `case Struct:`
+
+Build failed: native-build aborted: 4 file(s) failed to compile
+```
+
+Full text: `stage2-native-build.log` under
+`/home/ormastes/dev/pub/simple-build-out/stage3-nilrecv-20260808/logs/x86_64-unknown-linux-gnu/`
+(build output, gitignored, not committed). The wrapper then correctly
+refused Stage 3 and the seed-fallback CLI build:
+
+```
+warning: stage2 native-build failed (exit 1); Stage 3/full CLI unavailable
+Stage 3: stage2 -> bootstrap_main.spl (self-host)
+  warning: stage3 self-host failed (exit 1); Stage 4 unavailable
+  warning: Stage 2 native-build capability failed; using seed for stage 4
+warning: stage2 binary was not produced; Stage 3/full CLI unavailable
+Stage 3 unavailable — no provenance-verified compiler for Stage 4
+error: full CLI build requires a verified pure-Simple stage2/stage3 compiler; refusing seed fallback
+```
+
+**This run did NOT reach the MIR-lowering region this bug is about at
+all** — it failed in the self-hosted HIR/type-checker's exhaustiveness
+diagnostic during Stage 2, before Stage 3 (where the nil-receiver SIGILL
+previously occurred) ever started for real. `SIMPLE_MIR_STMT_CALLER_DEBUG=1`
+and `SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1` produced **zero** matching probe
+lines in the 30-line captured log — there is no `[mir-stmt-caller]` or
+`garbage-expr-kind` output to read, because MIR lowering of the stage-3
+source tree was never reached. Do not misattribute this to Rank 2/Rank 4 of
+this doc; it is a different failure mode (self-hosted exhaustiveness check
+on a bare lowercase-looking `case Str:`/`case Bool:`/`case Struct:` arm
+being treated as an irrefutable binding, not a variant match) in different
+files, three of which (`30.types/type_infer/inference_expr.spl`,
+`70.backend/backend/cuda/ptx_builder.spl`,
+`70.backend/backend/vhdl/vhdl_design_catalog.spl`) are entirely outside this
+task's `src/compiler/50.mir/**` scope, so no fix was attempted here. Only
+`50.mir/_MirLoweringExpr/method_calls_literals.spl` is in-scope by path, but
+fixing one of four co-failing files would not unblock the build (the other
+three are out of scope), so no partial fix was applied either — a partial
+fix here would be a wasted/misleading edit against a still-red Stage 2.
+
+This is consequently also a **regression relative to the 2026-08-06 record**
+in the ByteOrder doc, which reported Stage 2 passing cleanly before Stage 3
+hit the ByteOrder error; Stage 2 no longer passes as of this run, on
+`origin/main` `663fce69eb3` plus local worktree state at time of this run.
+Whether this is a genuine new regression in `origin/main` or an artifact of
+this specific working tree was not established here — that determination,
+and the fix itself, is out of scope for this bug (which is specifically
+about the Stage 3 nil-receiver SIGILL) and should be filed/tracked
+separately if not already covered by an existing `case <Ident>:`
+irrefutable-binding bug doc.
+
+**Status: STILL NOT RESOLVED, and NOT RE-VERIFIABLE right now.** The Rank 2
+fix and Rank 4 probe from the prior update remain landed and unreverted (not
+re-diffed this pass, no reason to suspect otherwise), but this bug's actual
+claim — whether the nil-receiver SIGILL still reproduces past the
+now-fixed ByteOrder blocker — is **blocked by a different, earlier,
+newly-observed Stage 2 failure** and was not exercised at all this run.
+Next lane must clear the `case Str:`/`case Bool:`/`case Struct:`
+irrefutable-binding Stage 2 failures (or confirm they're a working-tree
+artifact and not present on a clean `origin/main` checkout) before this
+bug's own verification can proceed.
