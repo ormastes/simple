@@ -200,6 +200,8 @@ fn _lab_authorized_ws(req: HttpRequest) -> bool:
 fn _lab_status_from_parser_error(e: text) -> HttpStatus:
     if e.starts_with("413"):
         return HttpStatus.PayloadTooLarge
+    if e.starts_with("431"):
+        return HttpStatus.RequestHeaderFieldsTooLarge
     if e.starts_with("501"):
         return HttpStatus.NotImplemented
     HttpStatus.BadRequest
@@ -246,10 +248,37 @@ fn _lab_test_api_should_rebuild(event: UIEvent) -> bool:
         _:
             false
 
+fn _lab_test_api_app_event(event: UIEvent) -> UIEvent:
+    """Resolve the shared contract's semantic click action into the app's own
+    action vocabulary before forwarding to `SimpleLabApp.handle_event`.
+
+    `/api/test/click {"id":X}` arrives as `Action("click_<widget_id>")`
+    (`semantic_contract.spl` convention; `_handle_click` in
+    `app.ui.test_api.handler`), but `SimpleLabApp.handle_action` matches the
+    button's *declared* action name (`builder.button`'s third argument, e.g.
+    id `lab_add_cell` -> action "lab_add_cell", id `cell_0_run` -> action
+    "cell_run_0"). Look the widget up in the live tree and substitute its
+    `action` prop; anything unresolvable passes through unchanged."""
+    match event:
+        UIEvent.Action(name):
+            if not name.starts_with("click_"):
+                return event
+            val widget_id = name.substring(6, name.length())
+            val found = LAB_UI_SESSION.current_state().tree.find_widget(widget_id)
+            if found == nil:
+                return event
+            val action_name = found.get_prop("action")
+            if action_name == "":
+                return event
+            return UIEvent.Action(name: action_name)
+        _:
+            return event
+    event
+
 fn lab_test_api_inject_event(event: UIEvent):
     LAB_UI_SESSION.dispatch(event)
     if _lab_test_api_should_rebuild(event):
-        LAB_UI_APP.handle_event(event)
+        LAB_UI_APP.handle_event(_lab_test_api_app_event(event))
         LAB_UI_SESSION.update_tree(LAB_UI_APP.build_ui())
 
 fn _lab_test_api_protocol_header(content_type: text, body: text) -> text:

@@ -3,6 +3,24 @@
 **Found:** 2026-08-07, during notebook-lanes H3 verification
 (`test/03_system/tools/simple_lab/lab_robustness_spec.spl`, fuzz-lite corpus).
 
+**Status: RESOLVED 2026-08-08** — fixed in pure Simple at the parser layer, no
+runtime change needed. The truncation IS detectable from the caller side:
+`TcpStream.read_line()` returns the line *including* its terminating newline,
+so a runtime-truncated line has a unique signature — raw length >= the
+runtime's 8192-byte cap AND no trailing `\n` (a legitimate at-cap line ends in
+`\n`; a short EOF-cut line is under the cap). `parser.spl` now checks
+`line_truncated_by_runtime(raw)` on both the request line and every header
+line before trimming, and rejects with `431 ... truncated at 8192 bytes
+without a newline`. Supporting changes: `HttpStatus.RequestHeaderFieldsTooLarge`
+(431) added to `src/lib/nogc_sync_mut/http_server/types.spl`, and
+`lab_server.spl`'s `_lab_status_from_parser_error` maps the `431` prefix to it
+(previously fell through to 400). Verified over real loopback:
+`test/03_system/tools/simple_lab/lab_hardening_spec.spl` ("rejects an
+oversized header line with 431 instead of silently truncating it") — 8/8
+green; the `lab_robustness_spec.spl` fuzz-lite example's formerly-RED 4xx
+assertion now expects 431. `TcpStream`/`read_line` semantics unchanged for all
+other callers.
+
 ## Symptom
 
 `GET /api/lab/status` with one header line ~20000 bytes long (well over the
