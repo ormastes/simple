@@ -892,6 +892,27 @@ Full external-standard imports follow the shared `spec-to-spipe` architecture
 (`spec-to-sspec` is a compatibility name) and retain source-ledger coverage;
 the maintenance scaffold alone is not a lossless importer.
 
+## Typed evidence (Modern SSpec)
+
+An **observation** is what the capture recorded; an **oracle** is the typed
+check that decides pass/fail — never assert on a string built from the
+observation itself. Modules: `src/lib/common/spec/evidence/model.spl`
+(selectors, `OracleCheck`, `OracleSpec`, `check_exact`/`check_full_pattern`/
+`check_ignore`/`check_multiset`/`check_bind`/`check_same_as`, `oracle_spec`)
+and `evidence_comparator.spl` (`compare_evidence`).
+
+**Fail-closed rules:** parse error fails · unresolved selector fails ·
+ambiguous cardinality fails · `check_ignore` without a reason fails · a spec
+where every check is `ignore` (no positive oracle) fails · closed-mode
+(`oracle_spec`, not `oracle_spec_open`) rejects undeclared fields · bind-only
+specs with no comparing check are vacuity-fail · non-numeric tolerance fails ·
+tolerance overflow fails · an unchecked manifest digest fails. The last four
+(bind-only vacuity, non-numeric tolerance, tolerance overflow, unchecked
+manifest digest) were red-team findings, all now fixed — see
+`doc/08_tracking/audit/modern_sspec_evidence_contract_redteam_2026-08-08.md`.
+
+Guide: `doc/07_guide/infra/sspec_typed_evidence.md`.
+
 
 ## Bootstrap platform handoff readiness
 
