@@ -84,3 +84,49 @@ belongs with the parser work already in flight (`parser_framework`), not in a
 test-repair lane. The narrow fix — treat `case` as a soft keyword recognised
 only in match-arm position — is the same change `literal` needs, so the two
 should land together.
+
+## Re-triage 2026-08-08 — STILL REPRODUCES; and it is BOTH front ends, not one
+
+Binary: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple` (Rust
+bootstrap-seed banner).
+
+Standalone repro, no spec file involved:
+
+```simple
+fn main():
+    var t = 0
+    for case in [1, 2, 3]:
+        t = t + case
+    print "sum={t}"
+main()
+```
+
+    error: compile failed: parse: Unexpected token: expected pattern, found Case
+
+Identical to the 2026-08-04 transcript, so nothing has changed. Note the JIT
+does not even get to try — it reports `JIT compilation failed, falling back to
+interpreter: module load error: parse: ... expected pattern, found Case`, and
+the interpreter then fails on the same parse. A parse error is engine-agnostic,
+which is why this one reproduces everywhere.
+
+**New fact worth recording, because it changes the scope estimate.** The report
+above attributes the reservation to the seed lexer. It is a hard keyword in the
+**pure-Simple** front end as well — `KwCase` is a distinct token kind in
+`src/compiler/10.frontend` (token-kind table entry `KwCase  # case`, and it
+appears in the keyword group alongside `KwIf | KwElse | KwElif | KwMatch |
+KwFor | KwWhile`). So the soft-keyword change has to land in both front ends to
+actually free the identifier; fixing only one leaves the other rejecting the
+same file. That is a further argument for landing it with the `parser_framework`
+work rather than as a drive-by.
+
+**Secondary finding confirmed:** the reserved-word list in
+`.claude/rules/language.md` still reads `gen`, `val`, `def`, `exists`, `actor`,
+`assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn` — `case` is not on
+it, and neither is `match`, `literal`, or the other hard keywords the lexer
+actually reserves. The list is not a list of reserved words; it is a list of
+*surprising* reserved words that has fallen out of date. Until the soft-keyword
+change lands, `case` belongs on it, since being absent from that list is what
+made this cost a whole file.
+
+**Not fixed here** (unchanged from the original disposition): the grammar is
+untouched, and the rename in `sfnt_spec.spl:147` remains the only mitigation.

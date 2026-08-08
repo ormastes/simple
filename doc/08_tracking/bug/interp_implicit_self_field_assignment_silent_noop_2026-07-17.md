@@ -1,7 +1,11 @@
 # Implicit-self field ASSIGNMENT in `me` methods silently no-ops — while the linter recommends it
 
 **Date:** 2026-07-17
-**Status:** OPEN
+**Status:** PARTIALLY FIXED (re-triaged 2026-08-08). The **interpreter lane is
+FIXED** via fix direction 2 — a bare field assignment inside a `me` method is
+now a hard semantic error with an on-point diagnostic, so the silent data loss
+is gone there. The **seed JIT lane still silently no-ops** with no diagnostic.
+Do not close until the JIT lane agrees. Evidence: "Re-triage 2026-08-08" below.
 **Severity:** high (silent data-loss class; the tooling actively steers users into it)
 
 ## Symptom
@@ -107,3 +111,43 @@ Regression spec:
 instead of erroring, and a plain undeclared read/assign round-trip yields `0`
 where the interpreter yields `7`. That is a JIT lenient-lowering divergence,
 not this bug.
+
+## Re-triage 2026-08-08 — interpreter FIXED, seed JIT still silently no-ops
+
+Repro is this report's own `class C` with `me set_it()` (implicit `flag = true`)
+and `me set_it_explicit()` (`self.flag = true`), constructed with
+`C(flag: false)` and printed after the call.
+
+Binary: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`, which
+prints the Rust bootstrap-seed banner. No pure-Simple self-hosted binary is
+deployed on this host, so both lanes below are seed lanes and the self-hosted
+lane is untested.
+
+**Interpreter** (`SIMPLE_EXECUTION_MODE=interpreter bin/simple run`) — FIXED:
+
+    error: semantic: invalid assignment: `flag` is a field of `C`; a bare
+    `flag = ...` creates a new local and leaves `self.flag` unchanged
+
+That is fix direction 2 from this report, and the message names the field, the
+class, and the exact consequence. The silent-data-loss failure mode is gone on
+this lane, and it is the lane `bin/simple test` runs on.
+
+**Seed JIT** (`bin/simple run`, the default for ordinary programs) — STILL
+BROKEN, unchanged from the original report:
+
+    implicit -> false
+    explicit -> true
+
+No error, no warning. The implicit assignment is still silently discarded.
+
+So the defect now has the shape of an engine divergence rather than a universal
+silent no-op: the engine the spec suite exercises rejects the code, while the
+engine ordinary `run` uses accepts it and loses the write. That is worse for
+discovery than either lane alone, because a spec cannot catch what only the
+JIT does — the same structural hazard catalogued in
+`run_vs_test_harness_divergence_2026-07-28.md`.
+
+**Remaining work to close:** make the seed JIT lowering raise the same semantic
+error. Since the diagnostic already exists on the interpreter side, the durable
+fix is to move the check into a front-end/semantic pass that runs before either
+lowering, so both engines inherit it rather than each implementing it.

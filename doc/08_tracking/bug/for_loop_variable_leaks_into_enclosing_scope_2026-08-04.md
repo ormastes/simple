@@ -82,3 +82,39 @@ variable before it can land safely.
 
 Landing it in this lane would also require rebuilding and redeploying the seed
 while several sessions are live and one is mid-rebase.
+
+## Re-triage 2026-08-08 — STILL REPRODUCES, both seed lanes, unchanged
+
+Binary: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple` (Rust
+bootstrap-seed banner). No pure-Simple self-hosted binary is deployed on this
+host, so the self-hosted lane remains untested.
+
+This report's minimal repro, run verbatim:
+
+```simple
+fn main():
+    val x = 100
+    for x in [1, 2, 3]:
+        pass
+    print "after loop x = {x}"
+main()
+```
+
+    bin/simple run                              -> after loop x = 3
+    SIMPLE_EXECUTION_MODE=interpreter bin/simple run -> after loop x = 3
+
+Expected `after loop x = 100`. Both lanes still leak, and both still overwrite
+an immutable outer `val`. No behavioural change since 2026-08-04.
+
+**Confirming, not fixing, and the reason is a repo rule rather than difficulty.**
+The root cause this report identifies is in `src/compiler_rust/compiler/src/
+interpreter_control.rs` — the Rust seed, which is bootstrap-only per CLAUDE.md,
+so a triage lane cannot legitimately patch it. The durable fix belongs in the
+pure-Simple lowering lane. That does not make the report stale: the pre-existing
+spec `test/03_system/feature/interpreter/control_flow_spec.spl:82`
+(`it "creates new scope for loop variable"`) is correct and correctly RED, and
+must stay that way.
+
+The blocking concern already recorded above still stands and is the real reason
+this is not a quick fix: an unknown amount of tree code reads a loop variable
+after its loop, so the audit — not the scope push — is the work.

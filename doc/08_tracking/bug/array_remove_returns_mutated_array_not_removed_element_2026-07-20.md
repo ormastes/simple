@@ -1,5 +1,9 @@
 # `array.remove(index)` returns the mutated array, not the removed element
 
+**Status:** OPEN — reconfirmed 2026-07-20 shape on 2026-08-08. The interpreter
+still returns the mutated array. The seed JIT is WORSE and was not previously
+recorded: it returns `nil` **and does not mutate the array at all**. See
+"Re-triage 2026-08-08" below.
 **Date:** 2026-07-20
 **Component:** Array `.remove(index)` builtin method (interpreter),
 exercised via `test/feature/usage/mutable_by_default_spec.spl`.
@@ -87,3 +91,48 @@ different.
 Verified with:
 `SIMPLE_RUST_SEED_WARNING=0 timeout 90 bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/mutable_by_default_spec.spl --no-session-daemon 2>&1 | sed 's/\x1b\[[0-9;]*m//g'`
 → `Passed: 21, Failed: 3`
+
+## Re-triage 2026-08-08 — still OPEN, and the JIT lane is worse than filed
+
+Binary: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`, which
+prints the Rust bootstrap-seed banner. No pure-Simple self-hosted binary is
+deployed on this host, so both lanes below are seed lanes.
+
+This report's own minimal repro, run unchanged:
+
+```simple
+fn main():
+    var arr = [1, 2, 3]
+    val removed = arr.remove(1)
+    print "removed={removed}"
+    print "arr={arr}"
+main()
+```
+
+| lane | `removed` | `arr` after |
+|------|-----------|-------------|
+| interpreter (`SIMPLE_EXECUTION_MODE=interpreter bin/simple run`) | `[1, 3]` | `[1, 3]` |
+| seed JIT (`bin/simple run`, the default) | `nil` | `[1, 2, 3]` |
+
+**Interpreter:** exactly as filed — the return value is the mutated array
+instead of the removed element `2`, while the mutation itself is correct. No
+change since 2026-07-20.
+
+**Seed JIT — new, not in the original report:** `.remove(index)` returns `nil`
+*and the array is not mutated at all*. So on the engine ordinary programs run
+on, `arr.remove(1)` is a complete no-op that also discards the element it was
+supposed to return. That is strictly worse than the interpreter behaviour and
+is a second, independent defect in the same builtin.
+
+Note the discovery asymmetry: `bin/simple test` runs the interpreter, so the
+three RED examples in `mutable_by_default_spec.spl` document only the return
+value bug. Nothing in the spec corpus can observe the JIT no-op, because the
+suite cannot reach that engine — the structural gap catalogued in
+`run_vs_test_harness_divergence_2026-07-28.md`.
+
+**Still not fixed here, and the spec stays RED.** Per this repo's testing rule
+a correct spec that fails is a legitimate artifact; `expect removed == 2` is the
+right assertion and must not be weakened. Closing this needs a decision on the
+contract (return the removed element, as the spec and the `Vec::remove` /
+`list.pop(index)` convention say) applied to BOTH lanes, plus the JIT mutation
+fix which is a separate, larger problem.
