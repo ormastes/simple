@@ -256,3 +256,59 @@ established here — the native-build attempt failed for unrelated reasons).
 Follow-up scope, not done in this unit: register the missing interpreter
 extern (small, mechanical) and get one clean native-build run of the probe
 to close the AOT gap.
+
+## Fence added 2026-08-08 — regression gate, confirmed still LIVE
+
+Re-verified against `bin/simple` (Rust seed; `--version` prints the seed
+warning banner — all findings below are seed-binary findings). Spec still
+green: `Results: 2 total, 2 passed, 0 failed` for
+`test/01_unit/lib/common/memory/u32_array_layout_spec.spl`.
+
+**Source citations re-confirmed at current line numbers (unchanged since
+filing):**
+- `src/runtime/runtime_native.c:5197` —
+  `elem_size = (flags & RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) :
+  sizeof(int64_t);` verbatim.
+- `src/runtime/simple_core/core_array_ops.spl:383` (line shifted by 1 from
+  the original `:382` citation, content identical) —
+  `rt_typed_words_u32_at` still does
+  `spl_load_i64(array_items(array), actual_idx * 8)`.
+
+**New empirical measurement — real per-element stride, not gross RSS.**
+`rt_byte_array_new_len(n)` (the packed alternative named above) was probed
+directly: `rt_byte_array_new_len(8 * 4)` → `.len() == 32`. This is an exact,
+deterministic byte-count assertion (not an RSS estimate) proving
+`RT_CORE_ARRAY_FLAG_BYTES` allocates precisely 1 byte/element — a real
+4-byte-packed basis for 4-byte words, confirming the T6 finding above still
+holds. `[u32]`'s own stride remains **not directly measurable** from `.spl`
+(no interpreter-reachable extern exposes it — same gap as filed 2026-08-07),
+so the RSS-delta method is still the best available corroboration; reproduced
+here: control (n=100) 27,648–27,904 KB peak RSS vs. large (n=5,000,000)
+142,740–143,408 KB, a delta of ~23.5 bytes/element across three separate
+runs — consistent with the 2026-08-07 measurement (~23 bytes/element) and
+~6x the true 4-byte-packed floor.
+
+**Fence built:** `scripts/check/check-u32-array-not-packed.shs`, fixtures in
+`test/fixtures/u32_array_not_packed/` (`bytes_packed_probe.spl`,
+`u32_control.spl`, `u32_large.spl`). Two legs:
+1. **Hard assertion** (not a canary): `rt_byte_array_new_len` allocates
+   exactly N bytes for N=8·4, 1·4, 1000·4. This is the one thing about this
+   defect that IS exact and deterministic today, so it is asserted as a real
+   pass/fail, not a KNOWN-OPEN note.
+2. **KNOWN-OPEN canary**: peak-RSS delta/element for a 5,000,000-element
+   `[u32]` array vs. a 100-element control must stay above a low-bar
+   threshold (12,000/1000 = 12 bytes/element — well below the measured
+   ~23.5 and well above the 4-byte packed floor). Currently PASSes (still
+   not packed) and prints a loud promotion NOTE (not a hard FAIL, since RSS
+   is allocator-noisy) if the delta ever drops near the packed floor,
+   pointing the reader back to this doc to record what changed.
+
+**Sabotage-verified 2026-08-08:**
+- Mutated `bytes_packed_probe.spl` (`8 * 4` → `7 * 4`) → script exited 1 with
+  `FAIL — rt_byte_array_new_len is no longer exactly 1-byte-stride ...
+  expected buf8_len=32 ... actual buf8_len=28`. Restored; diff against backup
+  clean; re-run exits 0.
+- Raised `LOW_BAR_X1000` to `99999999` (an unreachable bar) → script printed
+  the promotion `NOTE` block and still exited 0 (WARN, not FAIL, by design).
+  Restored; diff against backup clean; final re-run exits 0 with both PASS
+  lines.

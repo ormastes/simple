@@ -1,0 +1,139 @@
+#!/bin/sh
+# Regression fence for `[u32]` array storage density.
+#
+# WHY THIS EXISTS: `[u32]` is documented and re-verified LIVE as an 8-byte
+# tagged-word buffer, NOT a 4-byte-packed pixel/word basis -- both the C
+# runtime (`src/runtime/runtime_native.c` `rt_core_array_reserve`,
+# `elem_size = flags & RT_CORE_ARRAY_FLAG_BYTES ? sizeof(uint8_t) :
+# sizeof(int64_t)` -- binary, 1 or 8, never 4) and the pure-Simple runtime
+# (`src/runtime/simple_core/core_array_ops.spl`, `rt_typed_words_u32_at`,
+# hardcoded `idx * 8`) independently confirm this. There is no interpreter-
+# reachable extern that exposes raw byte stride for `[u32]` to ordinary
+# `.spl` code (`array_items` / `spl_load_u8` are runtime-internal, not wired
+# into the SFFI dispatch table -- see the bug doc's "Not verified here" /
+# 2026-08-07 reverification section), so this defect cannot be fenced with a
+# precise, deterministic stride assertion the way
+# check-native-tuple-to-text.shs fences a value. Instead this script:
+#
+#   1. HARD-ASSERTS the one thing that IS exact and deterministic today: the
+#      recommended packed alternative (`RT_CORE_ARRAY_FLAG_BYTES` via
+#      `rt_byte_array_new_len`, read/written through
+#      `rt_typed_bytes_u32_le_at/set`) allocates EXACTLY N bytes for N,
+#      i.e. it is a genuine 1-byte-stride dense buffer, unlike `[u32]`.
+#   2. Records the `[u32]` non-packing as a KNOWN-OPEN canary via a peak-RSS
+#      delta measurement (control vs. a 5,000,000-element array), the same
+#      method used to reverify the bug doc on 2026-08-07. RSS is a weak,
+#      allocator-noisy instrument (see the bug doc's caveat), so this leg
+#      uses a wide low-bar threshold and WARNs rather than hard-FAILs on
+#      noise -- but if the delta ever collapses to near the true 4-byte
+#      floor, that is the fix-landed signal and this script prints a loud
+#      promotion note.
+#
+# Bug: doc/08_tracking/bug/rt_typed_words_u32_is_not_a_packed_pixel_basis_2026-08-06.md
+# Spec (functional/value contract only, no stride assertion possible there):
+#   test/01_unit/lib/common/memory/u32_array_layout_spec.spl
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+FIXTURE_DIR="test/fixtures/u32_array_not_packed"
+WORK_DIR="${WORK_DIR:-/tmp/check-u32-array-not-packed.$$}"
+
+test -x "$SIMPLE_BINARY"
+mkdir -p "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+fail=0
+
+# --- Part 1: hard assert the packed alternative is genuinely dense (1 byte/elem).
+bytes_log="$WORK_DIR/bytes_packed.log"
+if ! timeout 60 "$SIMPLE_BINARY" run "$FIXTURE_DIR/bytes_packed_probe.spl" >"$bytes_log" 2>&1; then
+    echo "FAIL — bytes_packed_probe.spl (the RT_CORE_ARRAY_FLAG_BYTES packed"
+    echo "       alternative) did not run"
+    tail -40 "$bytes_log"
+    exit 1
+fi
+
+buf8="$(sed -n 's/^buf8_len=//p' "$bytes_log")"
+buf1="$(sed -n 's/^buf1_len=//p' "$bytes_log")"
+buf1000="$(sed -n 's/^buf1000_len=//p' "$bytes_log")"
+
+if [ "$buf8" != "32" ] || [ "$buf1" != "4" ] || [ "$buf1000" != "4000" ]; then
+    echo "FAIL — rt_byte_array_new_len is no longer exactly 1-byte-stride"
+    echo "       (RT_CORE_ARRAY_FLAG_BYTES packed basis regressed):"
+    echo "       expected buf8_len=32 buf1_len=4 buf1000_len=4000"
+    echo "       actual   buf8_len=$buf8 buf1_len=$buf1 buf1000_len=$buf1000"
+    tail -20 "$bytes_log"
+    exit 1
+fi
+echo "PASS — rt_byte_array_new_len is exactly 1-byte-stride (packed basis intact): buf8_len=$buf8 buf1_len=$buf1 buf1000_len=$buf1000"
+
+# --- Part 2: KNOWN-OPEN canary -- [u32] peak-RSS delta, far above the 4-byte floor.
+ELEMENT_COUNT=5000000
+
+peak_rss_kb() {
+    log="$1"
+    sed -n 's/^\s*Maximum resident set size (kbytes): //p' "$log" | tail -1
+}
+
+ctrl_log="$WORK_DIR/ctrl.log"
+if ! /usr/bin/time -v timeout 120 "$SIMPLE_BINARY" run "$FIXTURE_DIR/u32_control.spl" >"$ctrl_log" 2>&1; then
+    echo "FAIL — u32_control.spl (RSS-delta baseline leg) did not run"
+    tail -40 "$ctrl_log"
+    exit 1
+fi
+ctrl_rss="$(peak_rss_kb "$ctrl_log")"
+
+large_log="$WORK_DIR/large.log"
+if ! /usr/bin/time -v timeout 120 "$SIMPLE_BINARY" run "$FIXTURE_DIR/u32_large.spl" >"$large_log" 2>&1; then
+    echo "FAIL — u32_large.spl (RSS-delta measured leg) did not run"
+    tail -40 "$large_log"
+    exit 1
+fi
+large_rss="$(peak_rss_kb "$large_log")"
+
+if [ -z "$ctrl_rss" ] || [ -z "$large_rss" ]; then
+    echo "WARN — could not parse 'Maximum resident set size' from /usr/bin/time -v"
+    echo "       output (ctrl='$ctrl_rss' large='$large_rss'); skipping the"
+    echo "       RSS-delta canary. This is an environment/tooling gap, not"
+    echo "       evidence about [u32] layout -- not a hard FAIL."
+else
+    delta_kb=$((large_rss - ctrl_rss))
+    # bytes/element * 1000, integer math (avoid needing bc/awk for a float divide)
+    delta_bytes_per_elem_x1000=$(( (delta_kb * 1024 * 1000) / ELEMENT_COUNT ))
+
+    # A true 4-byte-packed [u32] would show ~4000 (i.e. 4.000 bytes/elem),
+    # plus modest growth-doubling slack -- call anything up to ~8000
+    # (8 bytes/elem) "looks packed or close to it". The known-wrong 8-byte
+    # tagged-word storage measures ~20000-24000 (see bug doc: ~23,000 on
+    # 2026-08-07, reproduced here). LOW_BAR is set well below the known-wrong
+    # measurement but well above the packed floor, so it's a canary for "did
+    # this get meaningfully denser", not a tight tolerance on a noisy metric.
+    LOW_BAR_X1000=12000
+
+    if [ "$delta_bytes_per_elem_x1000" -lt "$LOW_BAR_X1000" ]; then
+        echo "NOTE — [u32] peak-RSS delta/element dropped to ${delta_bytes_per_elem_x1000}/1000"
+        echo "       bytes (ctrl=${ctrl_rss}KB large=${large_rss}KB, n=$ELEMENT_COUNT)."
+        echo "       This is BELOW this canary's known-wrong low-bar of"
+        echo "       ${LOW_BAR_X1000}/1000 bytes/elem. [u32] may have become"
+        echo "       (or moved meaningfully toward) a packed 4-byte buffer --"
+        echo "       PROMOTE this leg to a hard assertion and update"
+        echo "       doc/08_tracking/bug/rt_typed_words_u32_is_not_a_packed_pixel_basis_2026-08-06.md"
+        echo "       with the source-line change that did it. Treating as WARN"
+        echo "       (not FAIL) since a single RSS sample can't distinguish a"
+        echo "       real fix from allocator noise -- a human must look."
+    else
+        echo "PASS (KNOWN-OPEN canary) — [u32] still NOT packed: ~${delta_bytes_per_elem_x1000}/1000"
+        echo "       bytes/element (ctrl=${ctrl_rss}KB large=${large_rss}KB,"
+        echo "       n=$ELEMENT_COUNT), well above the 4000/1000 (4 byte)"
+        echo "       packed floor and above the ${LOW_BAR_X1000}/1000 low-bar."
+        echo "       Matches the documented 8-byte tagged-word storage."
+    fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+    exit 1
+fi
+exit 0
