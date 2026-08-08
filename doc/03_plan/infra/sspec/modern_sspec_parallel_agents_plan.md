@@ -31,7 +31,7 @@ Merge gate: E0+E1 agree on schema, failure semantics, deliberate-red fixtures. N
 | E3 Text protocol | text parser, grammar adapter, selectors, structural comparator | **LANDED** — `src/lib/common/spec/evidence/format/text_protocol.spl`, spec `text_protocol_spec.spl` (7 examples) |
 | E4 Binary layout | BinaryLayoutIR, PTE accessor adapter, RegisterIR/struct bridges | **LANDED** — `src/lib/common/spec/evidence/format/binary_layout.spl`, spec `binary_layout_spec.spl` (9 examples), mirrors `src/os/kernel/types/bitfield.spl` |
 | E5 Docgen skeleton | SOLE `spipe_docgen` owner: evidence loader + generic ManualBlock renderer | **LANDED** — `src/app/spipe_docgen/spipe_docgen/evidence_loader.spl` reads an optional `<spec>.evidence.sdn` sidecar and calls `manual_render.render_blocks`; `generator.spl` appends a `## Typed Evidence` section only when the sidecar produced blocks, proven byte-identical-output-when-absent by `test/02_integration/app/spipe_docgen_evidence_wiring_spec.spl` (2 examples) |
-| E6 Spec-to-SPipe bridge | `simple.sspec.evidence.v1` extension namespace + emitter integration (frozen Phase-0 core untouched) | **LANDED** (namespace only) — `src/lib/common/spec/evidence/spipe_extension.spl` defines `SPIPE_EVIDENCE_EXTENSION_NAMESPACE`; no spec file found under this exact name, verify emitter-integration coverage before citing it as fully done |
+| E6 Spec-to-SPipe bridge | `simple.sspec.evidence.ext.v1` extension namespace + emitter integration (frozen Phase-0 core untouched) | **LANDED** — `src/lib/common/spec/evidence/spipe_extension.spl` (namespace + records) plus `src/app/spec_to_sspec/spipe_evidence_emit.spl`, wired into `main.spl`'s real `--apply`/`-o` write path (6 examples, `spipe_evidence_emit_spec.spl`). Caveat: `main.spl` is a line-scanning text modernizer with no semantic node model, so there is no manifest field to write an extension value into — the adapter instead writes an additive `<path>.spipe-evidence.txt` sidecar via `extension_lines`. Genuinely wired into live emitter output, not a manifest-field write, because no manifest exists here. |
 
 ### Wave 2 — reference profiles + examples
 
@@ -44,7 +44,7 @@ stats, ML) deps E0 + relevant adapters — **partially landed**:
 |---|---|---|
 | E7a 2D/3D scene | draw-node trees, 3D scene-graph assets | **LANDED** — `src/lib/common/spec/evidence/format/scene_profile.spl`, spec `scene_profile_spec.spl` (19 examples) |
 | E7b Simulation/stats | timeline, invariants, KPI tolerances, sample distributions | **LANDED** — `src/lib/common/spec/evidence/format/simulation_profile.spl`, spec `simulation_profile_spec.spl` (13 examples) |
-| E7 audio / ML profiles | — | **OPEN** — no `audio_profile.spl` / `ml_profile.spl` or equivalent found under `src/lib/common/spec/evidence/format/` |
+| E7 audio / ML profiles | — | **LANDED** — `format/audio_profile.spl` (RMS/peak/silence-ratio, pure-integer isqrt, no f64; 8 examples) and `format/ml_profile.spl` (dataset/model hash + seed mandatory, tolerance-needs-reason, empty-set refused; 13 examples), each with sabotage/revert proof. |
 
 E6 lands generated SSpec/evidence/manual fixtures — **OPEN**, no such generated fixtures found.
 
@@ -52,7 +52,7 @@ E6 lands generated SSpec/evidence/manual fixtures — **OPEN**, no such generate
 
 | Lane | Deliverable | Status |
 |---|---|---|
-| E8 Migration/examples | three runnable reference specs, byte-identical regeneration, legacy adapter migration; never hand-edits generated manuals | **OPEN** — not implemented |
+| E8 Migration/examples | three runnable reference specs, byte-identical regeneration, legacy adapter migration; never hand-edits generated manuals | **PARTIAL** — the three reference example manuals landed (interactive/protocol/binary, `test/03_system/tools/spipe/examples/`, all fixture-driven with an honest docstring saying so). `format/exec_capture.spl` is the FIRST module that captures from an ACTUALLY RUNNING process rather than constructed input (proven with `true`/`false`/`echo`/a nonexistent command; 6 examples). Every other module remains fixture-driven. Legacy adapter migration and byte-identical regeneration gating are still open. |
 | E9 Docs/skills | requirements/design/plan/guide/skills/templates refresh (list below) in the SAME change as the executable workflow | **OPEN** — this plan and the guide were refreshed 2026-08-08, but the requirements/design/skills/template documents listed below were not audited as part of this pass |
 | E1 Final verification | independent deliberate-red + freshness review; no stale/missing/aspirational example accepted | **IN PROGRESS** — the 2026-08-08 red-team pass (see E1 above) is one such review and found 4 open defects; final sign-off still pending a fix + re-verify cycle |
 
