@@ -18,6 +18,7 @@ pub use compiler.driver.driver_public_compile.{
 }
 
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.backend.sdn.{SdnBackendImpl}
 use lazy compiler.backend.backend_types.{BackendResult}
 use compiler.driver.driver_types.{CompileContext}
 pub use compiler.driver.driver_compiler_type.{CompilerDriver}
@@ -49,12 +50,23 @@ impl CompilerDriver:
     # --------------------------------------------------------------------------
 
     fn process_sdn() -> CompileResult:
-        val backend_port = self.ctx.backend
+        # ponytail: bypass the BackendPort.run_fn closure for the SDN backend,
+        # same reason as interpret_pipeline below: calling a closure stored in
+        # a struct field (`BackendPort.run_fn: any`) through
+        # `backend_port.run_fn(hir_module)` mis-lowers under native-build
+        # codegen into a direct call to a global symbol literally named
+        # `run_fn`, which no object file defines -- link fails with
+        # "undefined reference to `run_fn'" in CompilerDriver.process_sdn.
+        # See doc/08_tracking/bug/
+        # stage2_native_build_run_fn_undefined_reference_link_failure_2026-08-08.md.
+        # Constructing a fresh concrete SdnBackendImpl and calling
+        # process_module directly avoids the closure-field call entirely.
+        val sdn_impl = SdnBackendImpl()
         var results: Dict<text, Any> = {}
 
         for name in self.ctx.hir_modules.keys():
             val hir_module = self.ctx.hir_modules[name]
-            match backend_port.run_fn(hir_module):
+            match sdn_impl.process_module(hir_module):
                 case Ok(value):
                     results[name] = value
                 case Err(e):
