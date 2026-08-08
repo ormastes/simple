@@ -1,0 +1,101 @@
+"""Relocations embedded in an SMF module must come from `.rela.text` only.
+
+`extract_elf_relocations` is documented to extract `.rela.text`, and its
+callers (`build_smf_with_relocations`) apply the returned entries to the
+`.text` bytes at load time. A synthetic ELF64 object that carries
+`.rela.rodata` *before* `.rela.text` proves whether the section is matched by
+its full name or merely by a `.rela` prefix.
+"""
+
+use compiler.driver.smf_elf_parser.{extract_elf_relocations}
+
+fn u16b(v: i64) -> [u8]:
+    [(v & 0xFF) as u8, ((v >> 8) & 0xFF) as u8]
+
+fn u32b(v: i64) -> [u8]:
+    [(v & 0xFF) as u8, ((v >> 8) & 0xFF) as u8, ((v >> 16) & 0xFF) as u8, ((v >> 24) & 0xFF) as u8]
+
+fn u64b(v: i64) -> [u8]:
+    u32b(v) + u32b((v >> 32) & 0xFFFFFFFF)
+
+fn zeros(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(0)
+        i = i + 1
+    out
+
+# ELF64 section header: 64 bytes.
+fn sec_hdr(name_idx: i64, sh_type: i64, off: i64, size: i64) -> [u8]:
+    var h: [u8] = []
+    h = h + u32b(name_idx)   # sh_name
+    h = h + u32b(sh_type)    # sh_type
+    h = h + u64b(0)          # sh_flags
+    h = h + u64b(0)          # sh_addr
+    h = h + u64b(off)        # sh_offset
+    h = h + u64b(size)       # sh_size
+    h = h + u32b(0)          # sh_link
+    h = h + u32b(0)          # sh_info
+    h = h + u64b(1)          # sh_addralign
+    h = h + u64b(24)         # sh_entsize
+    h
+
+fn rela(off: i64, info: i64, addend: i64) -> [u8]:
+    u64b(off) + u64b(info) + u64b(addend)
+
+# Layout: ehdr @0 (64) | 3 section headers @64 (192) | shstrtab @256 (25)
+#         | pad to 288 | .rela.rodata @288 (24) | .rela.text @312 (24)
+fn build_object_with_rodata_relocs_first() -> [u8]:
+    var b: [u8] = []
+    b = b + [0x7F as u8, 0x45 as u8, 0x4C as u8, 0x46 as u8, 2 as u8, 1 as u8, 1 as u8, 0 as u8]
+    b = b + zeros(8)
+    b = b + u16b(1)          # e_type = ET_REL
+    b = b + u16b(62)         # e_machine = EM_X86_64
+    b = b + u32b(1)          # e_version
+    b = b + u64b(0)          # e_entry
+    b = b + u64b(0)          # e_phoff
+    b = b + u64b(64)         # e_shoff
+    b = b + u32b(0)          # e_flags
+    b = b + u16b(64)         # e_ehsize
+    b = b + u16b(0)          # e_phentsize
+    b = b + u16b(0)          # e_phnum
+    b = b + u16b(64)         # e_shentsize
+    b = b + u16b(3)          # e_shnum
+    b = b + u16b(0)          # e_shstrndx -> section 0
+
+    b = b + sec_hdr(0, 3, 256, 25)    # .shstrtab   (SHT_STRTAB)
+    b = b + sec_hdr(1, 4, 288, 24)    # .rela.rodata (SHT_RELA) -- decoy, listed first
+    b = b + sec_hdr(14, 4, 312, 24)   # .rela.text   (SHT_RELA) -- the real one
+
+    # ".shstrtab" contents: NUL + ".rela.rodata" + NUL + ".rela.text" + NUL
+    b.push(0)
+    b = b + [0x2E as u8, 0x72 as u8, 0x65 as u8, 0x6C as u8, 0x61 as u8, 0x2E as u8,
+             0x72 as u8, 0x6F as u8, 0x64 as u8, 0x61 as u8, 0x74 as u8, 0x61 as u8]
+    b.push(0)
+    b = b + [0x2E as u8, 0x72 as u8, 0x65 as u8, 0x6C as u8, 0x61 as u8, 0x2E as u8,
+             0x74 as u8, 0x65 as u8, 0x78 as u8, 0x74 as u8]
+    b.push(0)
+    b = b + zeros(288 - 281)
+
+    b = b + rela(0xAAAA, 0, 0)                # .rela.rodata entry
+    b = b + rela(0xBBBB, (1 << 32) | 2, 7)    # .rela.text entry
+    b
+
+describe "SMF ELF relocation extraction":
+    it "returns exactly one entry":
+        val relocs = extract_elf_relocations(build_object_with_rodata_relocs_first())
+        assert_equal(relocs.len(), 1)
+
+    it "returns the .rela.text offset, not that of an earlier .rela.* section":
+        val relocs = extract_elf_relocations(build_object_with_rodata_relocs_first())
+        assert_equal(relocs[0].offset, 0xBBBB)
+
+    it "returns the .rela.text symbol index and type":
+        val relocs = extract_elf_relocations(build_object_with_rodata_relocs_first())
+        assert_equal(relocs[0].sym_idx, 1)
+        assert_equal(relocs[0].reloc_type, 2)
+
+    it "returns the .rela.text addend":
+        val relocs = extract_elf_relocations(build_object_with_rodata_relocs_first())
+        assert_equal(relocs[0].addend, 7)
