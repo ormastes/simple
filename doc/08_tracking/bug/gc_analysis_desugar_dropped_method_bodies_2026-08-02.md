@@ -1,7 +1,12 @@
 # gc_analysis: desugaring dropped method bodies, whole subsystem is non-executable
 
 - **Date:** 2026-08-02
-- **Status:** OPEN
+- **Status:** OPEN — `escape.spl`, `roots.spl`, `barriers.spl` (incl.
+  `BarrierAnalysis.analyze()`, fixed 2026-08-08) are now executable and
+  covered; `mod.spl` (`RootAnalysis.create`/`BarrierAnalysis.create` TAB-named
+  args, `_1` closure placeholder, empty `GcSafetyReport` methods) is still
+  broken, and 41 of the other 45 `(was: impl ...)` deleted blocks tree-wide
+  are unfixed. See "Repair status" and "OPEN DEFECT 2" below.
 - **Severity:** HIGH — the GC safety analysis (escape analysis, write barriers,
   root tracking) cannot run at all. Any pass that depends on it is silently
   getting nothing.
@@ -245,16 +250,24 @@ replaced by `GcRoot?`; `RootError.root` restored to a genuine optional; all
 mangled call sites unmangled; dict reads via `contains_key`, counts via
 `keys().len()`.
 
-**`barriers.spl`: PARTIALLY FIXED.** `BarrierKind.to_text()` and
-`.is_required()` restored, all mangled call sites unmangled, and the
-unconstructible `is_young_gen: fn(i64) -> bool` field removed — the only
-constructor never set it and no code ever read it, so the struct could not be
-built. `BarrierAnalysis.analyze()` is still blocked; see OPEN DEFECT 2.
+**`barriers.spl`: FIXED and proved executable (2026-08-08).**
+`BarrierKind.to_text()` and `.is_required()` restored, all mangled call sites
+unmangled, and the unconstructible `is_young_gen: fn(i64) -> bool` field
+removed — the only constructor never set it and no code ever read it, so the
+struct could not be built. `BarrierAnalysis.analyze()`, previously blocked by
+OPEN DEFECT 2, is fixed — see that section for the root cause (parenthesized
+field-call syntax) and the one-line-per-call fix.
 
-`test/01_unit/compiler/semantics/gc_roots_barriers_spec.spl` is new: 20
-examples, all green, covering `RootKind`, `GcRoot`, `RootSet`, `RootError`,
-`BarrierKind`, `WriteSite` and `BarrierError`. Non-vacuity proved by four
-sabotages of the restored code:
+`test/01_unit/compiler/semantics/gc_roots_barriers_spec.spl` grew from 20 to
+39 examples, all green, covering `RootKind`, `GcRoot`, `RootSet`, `RootError`,
+`BarrierKind`, `WriteSite`, `BarrierError`, and now also the full
+`BarrierAnalysis` surface (`create`, `record_write`, `analyze` across all
+four `GcStrategy` variants, `needs_barrier`, `verify_barriers` including a
+missing-barrier and a wrong-kind-emitted case), `GcPoint`
+(`gcpoint_call`/`gcpoint_allocation`), and the full `RootAnalysis` surface
+(`create`, `record_root`, `record_gc_point`, `propagate_roots` with
+live-range filtering, `verify_gc_points` both passing and producing a
+`RootError`). Non-vacuity proved by five sabotages of the restored code:
 
 | sabotage | failing examples |
 |---|---|
@@ -262,6 +275,7 @@ sabotages of the restored code:
 | `GcRoot.is_live_at()` always `true` | 2 |
 | `rooterror_unrooted` attaches a root instead of `nil` | 1 |
 | `BarrierKind.to_text()` collapses two names | 1 |
+| revert `BarrierAnalysis.analyze_write` to `(self.is_gc_type)(...)` | 9 |
 | *(restored baseline)* | **0** |
 
 **`mod.spl`: STILL BROKEN.** It carries a further damage class not present
@@ -287,32 +301,56 @@ Reproduce with `bin/simple run` on
 `[jit-fallback]` line. This is a compiler gap, not porter damage, and it is why
 the specs above are interpreter-only evidence.
 
-## OPEN DEFECT 2 — `BarrierAnalysis.analyze()` fails semantic analysis
+## OPEN DEFECT 2 — `BarrierAnalysis.analyze()` fails semantic analysis — FIXED 2026-08-08
 
     error: semantic: unknown symbol self.is_gc_type
 
 raised from `analyze()` to `analyze_write()` at
-`val target_is_gc = (self.is_gc_type)(site.target_type)`. Reproduce:
+`val target_is_gc = (self.is_gc_type)(site.target_type)`.
 
-    use compiler.borrow.gc_analysis.barriers.{GcStrategy, BarrierAnalysis, writesite_field_write}
-    fn gc_all(t: i64) -> bool:
-        true
-    fn main():
-        var b = BarrierAnalysis.create(GcStrategy.Incremental, gc_all)
-        b.record_write(writesite_field_write(5, 1, 0, 2))
-        print(b.analyze().to_text())
+**Root cause found and reduced to a minimal, general repro (2026-08-08):**
+the parenthesized-field-call form `(self.field)(args)` fails semantic
+resolution for *any* class with a `fn(...)->T`-typed field, called from *any*
+`me` method — not something specific to `BarrierAnalysis`. Minimal repro:
 
-`create` and `record_write` both succeed; only `analyze` fails. NOT yet reduced
-to a minimal case: five targeted repros all PASSED, so the trigger is not any
-of them. Refuted as the cause: calling a function-typed field as
-`(self.f)(x)` or `self.f(x)`; doing so from a `me` method; a `create` parameter
-sharing the field's name; a `match` expression on an enum field in the same
-function; and iterating `self.<array field>` to call another `me` method that
-uses the function field. Each of those works standalone.
+    class Foo:
+        pred: fn(i64) -> bool
+        static fn create(pred: fn(i64) -> bool) -> Foo:
+            Foo(pred: pred)
+        me check(x: i64):
+            val r = (self.pred)(x)   # FAILS: "unknown symbol self.pred"
+            print(r.to_text())
 
-This is left failing loudly. A hardcoded `true`/`false` in place of the
-predicate would make the barrier analysis silently emit wrong barrier
-requirements, which is far worse than an unrunnable `analyze()`.
+Changing the last call site to the equivalent, un-parenthesized
+`self.pred(x)` resolves and runs correctly (proved with the same class,
+swapping only that one line). The 2026-08-02 note above that "`(self.f)(x)` or
+`self.f(x)`... each of those works standalone" was based on repros that did
+not isolate the parenthesized form on its own class-field combination; this
+narrower repro reproduces reliably (5/5 attempts, including with the
+`WriteSite` struct-typed argument `BarrierAnalysis.analyze_write` actually
+uses).
+
+**Fix:** `src/compiler/55.borrow/gc_analysis/barriers.spl`
+`BarrierAnalysis.analyze_write()` now calls `self.is_gc_type(site.target_type)`
+and `self.is_gc_type(site.source_type)` (no wrapping parens) instead of
+`(self.is_gc_type)(...)`. No other file in `gc_analysis/` used the
+parenthesized-field-call form. `roots.spl`'s `RootAnalysis.is_gc_type` field
+is stored but never called, so `roots.spl` was unaffected by this defect.
+
+**This is a real, narrower compiler defect independent of the 2025
+desugarer damage** (the desugarer never generated `(self.f)(x)` call syntax —
+this form was hand-written by the person restoring the method body from its
+call site on 2026-08-02, and it happened to hit an unrelated, pre-existing
+semantic-analysis gap in parenthesized field-call resolution). It is not
+tracked as its own bug because the fix here (drop the parens) is complete for
+this module; the general semantic-analysis gap in resolving `(self.field)(x)`
+may still affect other code — a targeted grep for `(self\.[a-zA-Z_]+)\(` across
+the tree, and a compiler-level fix, is unclaimed follow-up.
+
+Non-vacuity: reverting the two-line fix and re-running
+`test/01_unit/compiler/semantics/gc_roots_barriers_spec.spl` turns 9 of the 11
+new `BarrierAnalysis` examples RED (`declared>=39 executed=39 passed=30
+failed=9`); restoring the fix returns it to `passed=39 failed=0`.
 
 ## TODO — generational young-gen classification is unimplemented
 

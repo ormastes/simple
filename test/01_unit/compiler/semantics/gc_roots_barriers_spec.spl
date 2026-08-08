@@ -12,27 +12,47 @@
 #
 # See doc/08_tracking/bug/gc_analysis_desugar_dropped_method_bodies_2026-08-02.md
 #
-# This file covers the surface that executes. BarrierAnalysis.analyze() is
-# deliberately NOT covered: it still fails semantic analysis with
-# "unknown symbol self.is_gc_type", which is filed in the bug above and left
-# failing loudly rather than stubbed. Do NOT pad this file with `pass`.
+# BarrierAnalysis.analyze() previously failed semantic analysis with "unknown
+# symbol self.is_gc_type": the two-arg calls `(self.is_gc_type)(x)` in
+# analyze_write used the parenthesized-field-call form, which fails semantic
+# resolution generally (reduced to a minimal repro: any class with a
+# fn(...)->T field called as `(self.field)(args)` from a `me` method fails
+# with "unknown symbol self.field"; the equivalent `self.field(args)` form
+# resolves correctly). Fixed by rewriting to `self.is_gc_type(x)`. See the
+# 2026-08-06 update in the bug doc above for the isolated repro. RootAnalysis
+# never calls its `is_gc_type` field, so it was unaffected.
 
 use std.spec
 use compiler.borrow.gc_analysis.roots.{
     RootKind,
     GcRoot,
     RootSet,
+    RootAnalysis,
+    GcPoint,
+    GcPointKind,
     gcroot_local,
     gcroot_parameter,
+    gcpoint_call,
+    gcpoint_allocation,
     rooterror_unrooted,
     rooterror_dangling
 }
 use compiler.borrow.gc_analysis.barriers.{
     BarrierKind,
+    GcStrategy,
+    BarrierAnalysis,
     writesite_field_write,
     writesite_array_write,
     barriererror_missing
 }
+
+fn is_gc_type_1(t: i64) -> bool:
+    """Test predicate: only type id 1 is GC-managed."""
+    t == 1
+
+fn is_gc_type_all(t: i64) -> bool:
+    """Test predicate: every type id is GC-managed."""
+    true
 
 describe "RootKind":
     it "keys every variant distinctly, including the payload":
@@ -168,3 +188,139 @@ describe "BarrierError":
         expect(e.message).to_equal("Missing post-write barrier at write site")
         expect(e.missing_barrier == BarrierKind.PostWrite).to_equal(true)
         expect(e.write_site.program_point).to_equal(5)
+
+describe "BarrierAnalysis":
+    it "starts with no requirements and no errors":
+        val b = BarrierAnalysis.create(GcStrategy.Incremental, is_gc_type_all)
+        expect(b.get_requirements().len()).to_equal(0)
+        expect(b.get_errors().len()).to_equal(0)
+
+    it "StopTheWorld never requires a barrier even for GC-typed writes":
+        var b = BarrierAnalysis.create(GcStrategy.StopTheWorld, is_gc_type_all)
+        b.record_write(writesite_field_write(1, 1, 0, 1))
+        expect(b.analyze()).to_equal(true)
+        expect(b.get_requirements().len()).to_equal(0)
+
+    it "a write between two non-GC types never requires a barrier":
+        var b = BarrierAnalysis.create(GcStrategy.Concurrent, is_gc_type_1)
+        b.record_write(writesite_field_write(1, 9, 0, 9))
+        expect(b.analyze()).to_equal(true)
+        expect(b.get_requirements().len()).to_equal(0)
+
+    it "Incremental requires a post-write barrier when the source is GC-managed":
+        var b = BarrierAnalysis.create(GcStrategy.Incremental, is_gc_type_1)
+        b.record_write(writesite_field_write(3, 9, 0, 1))
+        expect(b.analyze()).to_equal(true)
+        expect(b.needs_barrier(3) == BarrierKind.PostWrite).to_equal(true)
+
+    it "Incremental requires nothing when only the target is GC-managed":
+        var b = BarrierAnalysis.create(GcStrategy.Incremental, is_gc_type_1)
+        b.record_write(writesite_field_write(3, 1, 0, 9))
+        expect(b.analyze()).to_equal(true)
+        expect(b.needs_barrier(3) == BarrierKind.None_).to_equal(true)
+
+    it "Generational requires a generational barrier only when both sides are GC-managed":
+        var b = BarrierAnalysis.create(GcStrategy.Generational, is_gc_type_1)
+        b.record_write(writesite_field_write(4, 1, 0, 1))
+        expect(b.analyze()).to_equal(true)
+        expect(b.needs_barrier(4) == BarrierKind.Generational).to_equal(true)
+
+    it "Concurrent requires a pre-write barrier when the source is GC-managed":
+        var b = BarrierAnalysis.create(GcStrategy.Concurrent, is_gc_type_1)
+        b.record_write(writesite_field_write(5, 9, 0, 1))
+        expect(b.analyze()).to_equal(true)
+        expect(b.needs_barrier(5) == BarrierKind.PreWrite).to_equal(true)
+
+    it "needs_barrier reports None_ for a program point with no recorded write":
+        var b = BarrierAnalysis.create(GcStrategy.Concurrent, is_gc_type_1)
+        b.record_write(writesite_field_write(5, 9, 0, 1))
+        expect(b.needs_barrier(999) == BarrierKind.None_).to_equal(true)
+
+    it "verify_barriers fails when a required barrier was never emitted":
+        var b = BarrierAnalysis.create(GcStrategy.Incremental, is_gc_type_1)
+        b.record_write(writesite_field_write(3, 9, 0, 1))
+        b.analyze()
+        val emitted: Dict<i64, BarrierKind> = {}
+        expect(b.verify_barriers(emitted)).to_equal(false)
+        expect(b.get_errors().len()).to_equal(1)
+        expect(b.get_errors()[0].missing_barrier == BarrierKind.PostWrite).to_equal(true)
+
+    it "verify_barriers fails when the wrong barrier kind was emitted":
+        var b = BarrierAnalysis.create(GcStrategy.Incremental, is_gc_type_1)
+        b.record_write(writesite_field_write(3, 9, 0, 1))
+        b.analyze()
+        var emitted: Dict<i64, BarrierKind> = {}
+        emitted[3] = BarrierKind.CardMark
+        expect(b.verify_barriers(emitted)).to_equal(false)
+        expect(b.get_errors().len()).to_equal(1)
+
+    it "verify_barriers succeeds when the correct barrier was emitted":
+        var b = BarrierAnalysis.create(GcStrategy.Incremental, is_gc_type_1)
+        b.record_write(writesite_field_write(3, 9, 0, 1))
+        b.analyze()
+        var emitted: Dict<i64, BarrierKind> = {}
+        emitted[3] = BarrierKind.PostWrite
+        expect(b.verify_barriers(emitted)).to_equal(true)
+        expect(b.get_errors().len()).to_equal(0)
+
+describe "GcPoint":
+    it "builds a call safepoint with no required roots":
+        val p = gcpoint_call(7)
+        expect(p.program_point).to_equal(7)
+        expect(p.required_roots.len()).to_equal(0)
+
+    it "builds an allocation safepoint with no required roots":
+        val p = gcpoint_allocation(8)
+        expect(p.program_point).to_equal(8)
+        expect(p.required_roots.len()).to_equal(0)
+
+describe "RootAnalysis":
+    it "starts with no gc points, no roots, and no errors":
+        val a = RootAnalysis.create(is_gc_type_1)
+        expect(a.get_gc_points().len()).to_equal(0)
+        expect(a.get_roots_at(0).len()).to_equal(0)
+        expect(a.get_errors().len()).to_equal(0)
+
+    it "records a root at a program point and retrieves it":
+        var a = RootAnalysis.create(is_gc_type_1)
+        a.record_root(10, gcroot_local(1, 99))
+        expect(a.get_roots_at(10).len()).to_equal(1)
+        expect(a.get_roots_at(10)[0].kind.to_text()).to_equal("local:1")
+
+    it "records a GC safepoint":
+        var a = RootAnalysis.create(is_gc_type_1)
+        a.record_gc_point(gcpoint_call(4))
+        expect(a.get_gc_points().len()).to_equal(1)
+        expect(a.get_gc_points()[0].program_point).to_equal(4)
+
+    it "propagates only roots still live at the destination point":
+        var a = RootAnalysis.create(is_gc_type_1)
+        a.record_root(0, gcroot_local(1, 99))       # live_range (0, 0)
+        a.record_root(0, gcroot_parameter(0, 99))    # live for the whole function
+        a.propagate_roots(0, 5)
+        val at5 = a.get_roots_at(5)
+        expect(at5.len()).to_equal(1)
+        expect(at5[0].kind.to_text()).to_equal("param:0")
+
+    it "verify_gc_points passes when every required root is present":
+        var a = RootAnalysis.create(is_gc_type_1)
+        a.record_root(4, gcroot_parameter(0, 99))
+        a.record_gc_point(GcPoint(
+            kind: GcPointKind.Call,
+            program_point: 4,
+            required_roots: [RootKind.Parameter(0)]
+        ))
+        expect(a.verify_gc_points()).to_equal(true)
+        expect(a.get_errors().len()).to_equal(0)
+
+    it "verify_gc_points fails and records a RootError when a required root is missing":
+        var a = RootAnalysis.create(is_gc_type_1)
+        a.record_gc_point(GcPoint(
+            kind: GcPointKind.Call,
+            program_point: 4,
+            required_roots: [RootKind.Parameter(0)]
+        ))
+        expect(a.verify_gc_points()).to_equal(false)
+        expect(a.get_errors().len()).to_equal(1)
+        expect(a.get_errors()[0].point).to_equal(4)
+        expect(a.get_errors()[0].root == nil).to_equal(true)
