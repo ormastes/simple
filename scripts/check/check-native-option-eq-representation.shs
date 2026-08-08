@@ -15,18 +15,15 @@
 # side, so rt_native_eq compared mismatched physical representations and the
 # equality spuriously returned false).
 #
-# The original repro used a struct method (SdnRow.get). This fixture keeps
-# the same Option<text>-equality shape but uses a free function instead: as
-# of 2026-08-08 ANY struct/impl-method (even a trivial zero-arg one with no
-# Option involved at all) crashes native-build with
-# "semantic: undefined field 'kind': cannot access field on value of type
-# 'nil'" -- reproduced both on this fixture AND on the pre-existing reference
-# fixture `test/fixtures/compiler/native_immutable_fn_receiver.spl` (driven
-# via `scripts/check/check-native-immutable-fn-receiver.shs`), so it is not
-# specific to this defect or this fixture. That crash is a separate, more
-# severe, currently-unfenced blocker -- see the bug doc for details -- and it
-# means the struct-method variant of THIS defect could not be re-verified
-# today. Only the free-function shape below is gated.
+# The original repro used a struct method (SdnRow.get). From 2026-08-06 to
+# 2026-08-08 that shape could not be re-verified because ANY struct/
+# impl-method call crashed native-build with "semantic: undefined field
+# 'kind': cannot access field on value of type 'nil'" (a receiver-type-
+# inference bug, method_calls_literals.spl:940, unrelated to this
+# Option-representation defect). That crash was fixed same-day by
+# `100a9aadcc4`, so this gate now checks BOTH shapes: the original
+# free-function fixture (main.spl) and a struct-method fixture
+# (struct_method_main.spl) added once the crash stopped blocking it.
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -35,7 +32,9 @@ cd "$ROOT_DIR"
 SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
 WORK_DIR="${WORK_DIR:-/tmp/check-native-option-eq-representation.$$}"
 FIXTURE="test/fixtures/native_option_eq_representation/main.spl"
+STRUCT_FIXTURE="test/fixtures/native_option_eq_representation/struct_method_main.spl"
 EXPECTED="hit=match miss=no-match none=match"
+EXPECTED_STRUCT="hit=match miss=no-match none=match"
 
 test -x "$SIMPLE_BINARY"
 mkdir -p "$WORK_DIR"
@@ -52,10 +51,27 @@ env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
 out="$(timeout 60 "$binary" 2>>"$log")"
 
 if [ "$out" != "$EXPECTED" ]; then
-    echo "FAIL — native-build inlined Option<text> equality regressed"
+    echo "FAIL — native-build inlined Option<text> equality regressed (free-function shape)"
     echo "  expected: $EXPECTED"
     echo "  actual:   $out"
     exit 1
 fi
 
-echo "PASS — native-build inlined Option<text> equality: hit/miss/none all correct (free-function shape)"
+struct_binary="$WORK_DIR/option-eq-representation-struct"
+struct_log="$WORK_DIR/option-eq-representation-struct.log"
+
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+    "$SIMPLE_BINARY" native-build \
+    --source test/fixtures --entry-closure --entry "$STRUCT_FIXTURE" \
+    --cache-dir "$WORK_DIR/cache-struct" --output "$struct_binary" >"$struct_log" 2>&1
+
+struct_out="$(timeout 60 "$struct_binary" 2>>"$struct_log")"
+
+if [ "$struct_out" != "$EXPECTED_STRUCT" ]; then
+    echo "FAIL — native-build inlined Option<text> equality regressed (struct-method shape)"
+    echo "  expected: $EXPECTED_STRUCT"
+    echo "  actual:   $struct_out"
+    exit 1
+fi
+
+echo "PASS — native-build inlined Option<text> equality: hit/miss/none all correct (free-function and struct-method shapes)"

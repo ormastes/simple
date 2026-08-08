@@ -60,42 +60,97 @@ fn lookup(id: text) -> Option<text>:
 2026-08-08: mutating the expected literal flips the gate to `FAIL` with a
 literal diff, restoring it flips back to `PASS`).
 
-**Struct-method shape: UNVERIFIED, blocked by a separate crash.** The
-original repro used a struct method (`SdnRow.get(...)`), not a free
-function. Today, ANY struct/`impl`-block method — even a trivial
-`fn always_run() -> i64: 99` with no `Option` and no field access at all —
-crashes `native-build` with:
-```
-error: semantic: undefined field 'kind': cannot access field on value of type 'nil'
-```
-This reproduced on multiple from-scratch minimal fixtures (isolated
-single-file, isolated two-file cross-module, inline-in-class-body, and
-`impl`-block forms) AND on the pre-existing, previously-passing reference
-fixture `test/fixtures/compiler/native_immutable_fn_receiver.spl` (driven
-via `scripts/check/check-native-immutable-fn-receiver.shs`), using both the
-default (LLVM) and `--backend cranelift` paths, with `bin/simple` (confirmed
-by ELF/`--version` check to be the Rust seed at
-`bin/release/x86_64-unknown-linux-gnu/simple`, not a stale artifact —
-`src/compiler` mtimes are hours older than the binary, so this is not a
-concurrent-edit artifact either) and with the pure-Simple stage3 binary
-(`bootstrap/stage3/x86_64-unknown-linux-gnu/simple`, which instead segfaults
-on this repo's full `--source test/fixtures` tree — a different, also
-open, failure mode not further investigated here).
+**2026-08-08 re-re-verification: the blocking crash is FIXED; struct-method
+`==` shape is now VERIFIED CORRECT; a separate, narrower native-only
+divergence remains OPEN on the pattern-bind/unwrap surface.**
 
-Because this crash blocks compilation before any method body executes, it is
-NOT proof this specific representation-mismatch defect is fixed for the
-struct-method shape that originally found it — it just means that shape
-cannot be tested at all right now. This crash is a strictly more severe,
-currently-unfenced blocker (it breaks essentially all struct-method
-`native-build` compiles, not just Option-returning ones) and deserves its
-own bug doc / triage; it was not filed separately here per scope, but is
-recorded so it isn't lost. A matching guarded-but-narrower case already
-exists in
-`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:1596-1618`
-(`receiver_declared_type`'s doc comment references the identical
-`"undefined field 'kind': cannot access field on value of type 'nil'"`
-message for a narrower `?`-operator/mutable-var shape) — the guard there
-evidently does not cover the plain-method-call shape hit here.
+The `undefined field 'kind'` crash described in the previous note was fixed
+same-day by `100a9aadcc4` ("fix(mir): stop wrapping an already-optional
+receiver type in Some()"): `method_calls_literals.spl:940` was wrapping the
+already-Option-desugared `receiver.type_` in an extra `Some(...)`, turning an
+absent type into `Some(nil)` instead of `None`; the callee
+`mir_hir_type_is_shared_resource` (`mir_lowering_stmts.spl:103-127`) matched
+`case Some(ht)` with `ht == nil` and dereferenced `ht.kind`. (The earlier
+note's pointer to `switch_operators_calls.spl:1596-1618` was a *sibling*,
+narrower guard for a different `?`-operator/mutable-var shape — not the
+actual fix site; correcting that here so the pointer isn't propagated
+further.)
+
+With the crash gone, the struct-method `==` shape was re-verified today with
+a fresh minimal fixture
+(`test/fixtures/native_option_eq_representation/struct_method_main.spl`,
+same hit/miss/none shape as the free-function fixture but using
+`Lookup(id: ...).get() -> Option<text>` as an instance method):
+`native-build` succeeds (rc=0, zero occurrences of `undefined field 'kind'`
+in the build log) and the binary prints
+`hit=match miss=no-match none=match` — all three cases correct, matching the
+interpreter reference. **This shape is now gated** by
+`scripts/check/check-native-option-eq-representation.shs` (extended today
+with a second build+run for the struct-method fixture, run separately from
+the free-function build so a regression in either shape is attributed
+correctly; sabotage verification recorded further down this doc once run).
+
+A **different, still-open** native-only divergence was found on the
+pattern-bind/unwrap surface for the same struct method — this is squarely
+inside this bug's own repair criterion above ("pattern matching … `?` …
+unwrap"), so it is recorded here rather than closing the doc:
+```simple
+class Box:
+    v: i64
+
+impl Box:
+    fn label() -> Option<text>:
+        if self.v > 0:
+            return Some("positive")
+        None
+
+fn main() -> i64:
+    val b = Box(v: 42)
+    val r = b.label()
+    if val lbl = r:
+        if lbl != "positive":
+            return 1
+    else:
+        return 2
+    print("option-struct-method-ok")
+    0
+```
+Under `SIMPLE_EXECUTION_MODE=interpret bin/simple run`, this prints
+`option-struct-method-ok` and exits 0 (correct — `lbl` binds to `"positive"`,
+`lbl != "positive"` is false). Under `native-build` (default LLVM backend,
+`--entry-closure`), the build succeeds (rc=0, no crash) but the binary exits
+1 with no stdout — meaning `if val lbl = r:` bound (else branch, `return 2`,
+was not taken) but `lbl != "positive"` incorrectly evaluated true. This is
+consistent with the same class of representation mismatch this doc tracks,
+now visible on the `if val` unwrap path specifically rather than blocked by
+the crash. Not yet root-caused or fenced; not gated by the check script
+(gating only the verified-correct `==` shape per this doc's own rule that a
+red case must not be folded into a script required to exit 0).
+
+**A separate, unrelated finding surfaced while investigating the same
+lane's claim that the pre-existing `native_immutable_fn_receiver.spl`
+fixture reproduces the `'kind'` crash: it does not.** The script
+`scripts/check/check-native-immutable-fn-receiver.shs` requires a
+self-hosted `SIMPLE_BIN` (it explicitly rejects the Rust seed) plus
+`--backend cranelift`; the only self-hosted binary available today
+(`bootstrap/stage3/x86_64-unknown-linux-gnu/simple`) segfaults (rc=139)
+compiling this repo's full `--source test/fixtures` tree, a pre-existing,
+separately known issue not further investigated here — so the script's exact
+combination could not be run end-to-end. Using the script's *source-root and
+entry arguments* (`--source test/fixtures/compiler --entry-closure`,
+`SIMPLE_LIB` set) but the Rust seed binary and its default (LLVM) backend
+instead, the build produces **zero** occurrences of `undefined field 'kind'`
+in the log; it exits 1 with a *different* error, `MIR lowering error:
+unresolved method call: read` (cross-module `impl`-block method resolution).
+`unresolved method call` is raised during MIR lowering, before backend
+selection, so it is not expected to be backend-specific — but this was not
+independently confirmed on a self-hosted binary. Net: the other lane's
+specific claim — that this fixture reproduces the `'kind'` crash — is not
+supported by any run performed today; a nonzero exit was evidently read as
+confirmation without checking the error text, the same mistake this
+re-verification pass was launched to correct. The `unresolved method call:
+read` failure is real (reproduced on the seed) and worth its own look, but
+it is not this bug and not the `'kind'` crash either.
 
 **False-green spec.** No spec asserts the exact `== Some(...)` shape named
 in this doc. The closest real candidate exercising `SdnRow.get()`'s

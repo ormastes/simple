@@ -1,0 +1,101 @@
+#!/bin/sh
+# Regression gate for AOT (`native-build`) `Option<bool>` equality against a
+# raw bool/nil LITERAL (as opposed to Option-vs-Option equality, which
+# already works -- see check-native-option-eq-representation.shs).
+#
+# WHY THIS EXISTS: `bin/simple test` hard-defaults to the tree-walk
+# interpreter and has no AOT mode, so a spec can only ever prove the
+# interpreter lane. This defect is silent-wrong (returns "no-match" for a
+# logically-true comparison) and was found incidentally by another lane,
+# never chased until now.
+#
+# Bug: doc/08_tracking/bug/native_option_bool_eq_against_raw_literal_2026-08-08.md
+# Root cause: src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl,
+# `bin_is_enum_eq` (line ~2567-2594) requires BOTH operands of `==`/`!=` to
+# resolve to the same enum id via `local_enum_type_id`. A raw bool/nil
+# literal never resolves to the `Option` enum id, so the comparison falls
+# through to a representation-blind raw compare between the boxed
+# `Option<bool>` and the raw scalar -- which can never match, regardless of
+# logical equality.
+#
+# This gate hard-asserts the rows that already agree across interpret/JIT/
+# native (miss1-4: comparisons whose correct answer is already "no-match",
+# where the bug happens to not matter). The rows where native is currently
+# WRONG (hit1-3: correct answer is "match") are reported as KNOWN-OPEN with
+# the expected-correct value stated, so a future compiler fix announces
+# itself here instead of needing to be rediscovered.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+WORK_DIR="${WORK_DIR:-/tmp/check-native-option-bool-eq-vs-literal.$$}"
+FIXTURE="test/fixtures/native_option_bool_eq_vs_literal/main.spl"
+
+test -x "$SIMPLE_BINARY"
+mkdir -p "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+binary="$WORK_DIR/option-bool-eq-vs-literal"
+log="$WORK_DIR/option-bool-eq-vs-literal.log"
+
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+    "$SIMPLE_BINARY" native-build \
+    --source test/fixtures --entry-closure --entry "$FIXTURE" \
+    --cache-dir "$WORK_DIR/cache" --output "$binary" >"$log" 2>&1
+
+out="$(timeout 60 "$binary" 2>>"$log")"
+
+get() {
+    printf '%s\n' "$out" | sed -n "s/.*\b$1=\([a-z-]*\).*/\1/p"
+}
+
+hit1="$(get hit1)"
+hit2="$(get hit2)"
+hit3="$(get hit3)"
+miss1="$(get miss1)"
+miss2="$(get miss2)"
+miss3="$(get miss3)"
+miss4="$(get miss4)"
+
+# --- Hard-asserted regression fence: these already agree on all three
+# engines (interp/jit/native), so a change here IS a regression. ---
+fail=0
+check_hard() {
+    name="$1"; actual="$2"; expected="$3"
+    if [ "$actual" != "$expected" ]; then
+        echo "FAIL — native-build $name regressed (was already correct)"
+        echo "  expected: $expected"
+        echo "  actual:   $actual"
+        fail=1
+    fi
+}
+check_hard "nil == true (miss1)" "$miss1" "no-match"
+check_hard "nil == false (miss2)" "$miss2" "no-match"
+check_hard "Some(true) == false (miss3)" "$miss3" "no-match"
+check_hard "Some(false) == true (miss4)" "$miss4" "no-match"
+
+if [ "$fail" -ne 0 ]; then
+    exit 1
+fi
+echo "PASS — native-build Option<bool>-vs-literal already-correct rows (miss1-4) unchanged"
+
+# --- KNOWN-OPEN: native currently returns the WRONG answer here. Report,
+# don't hard-fail -- but announce loudly the moment it starts passing. ---
+open_still_open=1
+if [ "$hit1" = "match" ] && [ "$hit2" = "match" ] && [ "$hit3" = "match" ]; then
+    open_still_open=0
+fi
+
+if [ "$open_still_open" -eq 1 ]; then
+    echo "KNOWN-OPEN — native-build Option<bool> == raw literal returns wrong answer"
+    echo "  Some(true) == true  : expected match, got hit1=$hit1"
+    echo "  Some(false) == false: expected match, got hit2=$hit2"
+    echo "  nil == nil           : expected match, got hit3=$hit3"
+    echo "  See doc/08_tracking/bug/native_option_bool_eq_against_raw_literal_2026-08-08.md"
+else
+    echo "hit1=$hit1 hit2=$hit2 hit3=$hit3"
+    echo "FAIL — KNOWN-OPEN defect appears FIXED: update this script to hard-assert hit1/hit2/hit3 == match and drop the KNOWN-OPEN branch"
+    exit 1
+fi

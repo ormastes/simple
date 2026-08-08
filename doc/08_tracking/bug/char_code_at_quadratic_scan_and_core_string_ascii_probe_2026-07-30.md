@@ -560,3 +560,238 @@ The migration criteria in this document remain the gate for touching those call
 sites. Do not start the migration until the Rust seed JIT/native lane described
 in that bug is closed — `for ch in <text>` is still wrong there, so migrating a
 caller off `char_code_at` today would regress it on the engine most people run.
+
+## 2026-08-08 — re-verify + reachability probe for the `.spl` lane
+
+**Load caveat:** host `uptime` load average was ~21-22 on 32 cores for the
+entire session (concurrent native-builds). Absolute wall times below are
+therefore inflated and noisy; conclusions rest on **ratios within the same
+run**, which are much more robust to contention than absolute numbers — a
+loaded host multiplies both arms of a comparison, it does not manufacture
+growth in one arm while leaving the other flat.
+
+### Scaling re-measurement (clean method: doubling string construction)
+
+Original method (`bench_nonascii.spl`, build-by-repeated-concat) was
+discarded after noticing the construction loop itself is `s = s + unit`
+repeated N times — an *independent* O(n²) cost that confounds the
+`char_code_at` measurement. Replaced with `s = s + s` doubling (O(n) total
+construction cost), isolating the scan loop as the dominant cost at scale.
+`bin/simple run <probe>.spl`, `/usr/bin/time -f wall=%e`, one process per
+size, non-ASCII payload `"héllo中"`, ASCII payload `"abcdefghij"`:
+
+| doublings | non-ASCII bytes | non-ASCII wall | ASCII bytes | ASCII wall |
+|---|---|---|---|---|
+| 12 | ~84.7M "chars" scanned (string ~1.2MB) | 0.09s | ~4.2MB | 0.03s |
+| 13 | (2x) | 0.50s (~5.5x) | (2x) | 0.02s |
+| 14 | (4x from d=12) | 1.47s (~2.9x from d=13) | (4x) | 0.04s |
+| 15 | (8x from d=12) | 6.62s (~4.5x from d=14) | (8x) | 0.03s |
+
+Non-ASCII: each size doubling costs roughly 3-5.5x wall time (quadratic
+predicts ~4x) — **quadratic scaling reconfirmed**, consistent with the
+2026-08-07 finding. ASCII: flat at 0.02-0.04s across an 8x size range —
+**ASCII memoization still holds**. Because ASCII stayed flat across the same
+loaded window that non-ASCII grew ~280x (0.09s→6.62s doubled 3x = 8x size),
+the growth cannot be attributed to load alone.
+
+Probe files (kept for reproduction, not committed):
+`/tmp/claude-1000/.../scratchpad/bench2_nonascii_{12,13,14,15}.spl` and
+`bench2_ascii_{12,13,14,15}.spl` (doubling construction + scan loop).
+
+### Per-lane provenance (file:line), established empirically this pass
+
+- **Rust seed interpreter** (`SIMPLE_EXECUTION_MODE=interpret`):
+  `src/compiler_rust/compiler/src/interpreter_method/string.rs:441-464`
+  (`"char_code_at" =>` arm). This file **already carries** an ASCII-prefix
+  short-circuit (`first_non_ascii(bytes) > idx`) with `shared_text_is_ascii`
+  memoization — the 2026-07-30 doc's line/behavior citation (`:404`,
+  `.chars().nth(idx)` unconditionally) is now stale; `.chars().nth(idx)` is
+  only reached as the **fallback** once the index is past the ASCII prefix.
+  Interpret-mode d=14 non-ASCII probe: 1.85s (vs default-mode 1.24s at the
+  same size — see below).
+- **JIT / native AOT** (`bin/simple run` default, and `native-build`):
+  MIR/LLVM/Cranelift lowering (`src/compiler_rust/compiler/src/codegen/**`,
+  e.g. `codegen/llvm/functions/calls.rs:1941`,
+  `codegen/instr/closures_structs.rs:1528`) all lower `.char_code_at(i)` to a
+  call to the C symbol `rt_string_char_code_at`, defined at
+  `src/runtime/runtime_native.c:2423-2477`. That C implementation now also
+  carries the same ASCII-prefix short-circuit (`SIMD_CACHE_FLAG_IS_ASCII`
+  cache + `rt_str_first_non_ascii` prefix scan at :2440-2450) with a full
+  O(index) walk as fallback at :2456-2472 — this is what's actually linked
+  into `libsimple_runtime.a` (confirmed via `nm bin/release/.../libsimple_runtime.a
+  | grep rt_string_char_code_at` → defined, `T` in the `.a`'s C-compiled
+  object). Default-mode d=14 non-ASCII probe: 1.24s, same order of magnitude
+  as interpret-mode (1.85s) — both fall back to the walk for this payload,
+  as expected since `"héllo中"` has non-ASCII bytes early in every repeat
+  unit, so no call in the loop stays inside a growing ASCII prefix.
+  Also note: `src/compiler_rust/runtime/src/value/collections.rs:3443-3477`
+  has an **independent third copy** of this exact ASCII-prefix logic in the
+  runtime *crate* (Rust, not C) — not confirmed which lane actually calls
+  this one vs the C one; recorded for completeness, not exercised directly.
+- **Freestanding `core_string.spl`** (SimpleOS / `--runtime-bundle=simple-core`
+  native-build lane): `src/runtime/simple_core/core_string.spl:296-330`. This
+  file **also already has the same ASCII-prefix idea** but, unlike the C/Rust
+  lanes, the probe loop itself (`while probe <= index and ...: probe += 1`
+  at :309-311) is **still O(index) per call even for pure ASCII** because
+  there is no per-string memoization — the in-file comment (:288-295)
+  explicitly says so: "this freestanding lane does NOT cache the all-ASCII
+  result in the string header... stays O(index) per call rather than
+  becoming O(1)... Filed as follow-up." This is Defect 2, still open, and is
+  the smaller of the two residual issues (still linear per full scan, not
+  quadratic, since the probe re-derives ASCII-ness on every call rather than
+  caching it — but it is a repeated O(index) probe, which is wasted work the
+  hosted lanes no longer pay).
+
+### Is the `.spl` lane reachable/verifiable without a bootstrap rebuild? — NO, empirically
+
+Landed an unconditional marker (`rt_stderr_write("MARKER_CCA_SPL_LANE_LIVE\n")`
+as the first line of `rt_string_char_code_at` in `core_string.spl`) and ran:
+
+```
+bin/simple native-build <probe>.spl -o <bin> --runtime-bundle=simple-core
+```
+
+Build succeeded (exit 0) and the resulting binary ran and printed the
+correct answer (20013, the codepoint for 中), but the marker **never
+appeared** in stdout/stderr, and — decisively — the marker string is **absent
+from the binary entirely**: `strings -n 3 <bin> | grep MARKER` found nothing,
+while a positive control (`strings -n 3 <bin> | grep abc`, the ASCII test
+literal from the same source file) **did** find the literal, so the
+string-detection method itself works and the absence is real, not a
+false negative. `nm` confirms a `T rt_string_char_code_at` symbol is defined
+in the binary — i.e. *some* implementation got linked — just not the edited
+`.spl` one. `--runtime-bundle=simple-core` did not cause the freshly-edited
+`core_string.spl` to be recompiled and linked; `find_simple_core_runtime_library()`
+(`src/compiler_rust/compiler/src/pipeline/native_project/tools.rs:479-506`)
+looks for a **prebuilt** `<exe_dir>/simple-core/libsimple_runtime.a` (or
+`$SIMPLE_SIMPLE_CORE_PATH`), neither of which existed near
+`bin/release/x86_64-unknown-linux-gnu/`, so the build silently fell back to
+a different runtime lane instead of failing loud.
+
+Attempted the documented rebuild path
+(`doc/08_tracking/bug/simple_core_pure_simple_archive_builder.md`,
+`scripts/check/check-simple-core-runtime-smoke.shs`): building even a single
+source file from the tree as a standalone archive part —
+`bin/simple native-build --source src/runtime/simple_core --entry-closure
+--entry src/runtime/simple_core/core_string.spl --no-mangle --emit-archive
+--output ... --clean` — pulled in and started compiling the **entire
+compiler codebase** (SFFI, backend, driver modules — visible from
+cross-module symbol-collision warnings for `compile_native`,
+`compiler_infer_types`, `dir_remove_all`, etc., none of which belong to
+`core_string.spl`), and did not finish inside a 300s timeout. This is
+consistent with the `.spl` lane needing a bootstrap-rebuild-scale operation
+to verify, matching this doc's original 2026-07-30 scope decision.
+
+**Verdict: the `.spl` lane (`core_string.spl`) is NOT reachable/verifiable
+today without a costly (bootstrap-scale, >5 min, likely >20 min given 18
+source files and current host load) rebuild.** No fix was applied to
+`core_string.spl` this pass (the marker was landed, confirmed absent from
+every build artifact produced, then removed — verified removed via
+`/usr/bin/grep -n MARKER_CCA src/runtime/simple_core/core_string.spl`,
+exit 1, no match).
+
+**Unblock condition:** either (a) a prebuilt, ABI-complete
+`libsimple_runtime.a` built from `src/runtime/simple_core/*.spl` exists at
+`<exe_dir>/simple-core/libsimple_runtime.a` or is pointed at via
+`SIMPLE_SIMPLE_CORE_PATH`/`SIMPLE_CORE_RUNTIME_PATH`, freshly rebuilt after
+any `.spl` edit (i.e. `scripts/check/check-simple-core-runtime-smoke.shs`
+run to completion, currently untimed but bounded well past this task's
+budget), or (b) the self-hosted `70.backend` native-build linker path
+(which is what `bin/simple native-build` actually dispatches to — a
+separate, pure-Simple reimplementation of the Rust `native_project`
+config/linking logic examined above, not confirmed to share its runtime-bundle
+selection logic) is confirmed to pick up a freshly-built simple-core archive.
+Neither was exercised to completion this pass; both are out of scope for a
+non-bootstrap task.
+
+### Fix status
+
+No source fix applied. The standard remedy (index→byte-offset cursor
+memoized per string, replacing the O(index) probe/walk on every call) remains
+correct and unimplemented in all three lanes for the full non-ASCII case, and
+additionally unimplemented for the ASCII case specifically in
+`core_string.spl` (Defect 2). Per the reachability finding above, only the
+`core_string.spl` copy is a legitimate `.spl`-only fix; the C
+(`runtime_native.c`) and interpreter (`string.rs`) copies are out of the
+"fix .spl, not Rust" scope by policy, and the Rust runtime crate copy
+(`collections.rs:3443`) is likewise Rust.
+
+### Fence — not added
+
+Per the existing 2026-08-07 rationale (still valid): a non-ASCII scaling-ratio
+assertion would be asserting a known-open defect (a red fence is worse than
+none), and a fence on the ASCII arm's flatness was considered but not added
+this pass — it would need to be proven stable across at least two runs under
+present load before landing, which was not done given the time already spent
+on the reachability probe above. Left as a follow-up, not fabricated.
+
+## 2026-08-08 (later pass) — independent re-confirmation, no fix applied, second blocker found
+
+Assigned to re-attempt the `.spl`-lane fix from scratch. Before touching
+anything, re-checked the state left by the reachability-probe pass directly
+above (same date): `/usr/bin/grep -n "MARKER_CCA"
+src/runtime/simple_core/core_string.spl` → no match (marker confirmed
+removed), and the live `rt_string_char_code_at` body
+(`src/runtime/simple_core/core_string.spl:296-330`) was read in full and
+matches this doc's citation exactly — ASCII probe still `while probe <=
+index and (spl_load_u8(data, probe) & 255) < 128: probe += 1` (byte-0 walk,
+no cache), same "awkward to set safely from Simple" comment at :288-295,
+general decode walk still starts `byte_index = 0`. No partial fix was left
+on disk. Host load this pass: `70.96, 61.66, 46.14` (1/5/15-min) — over 3x
+the ~21-22 load the reachability probe ran under, reinforcing that the
+bootstrap-scale verification path (`>5min, likely >20min` per that pass)
+was, if anything, further out of budget, not closer.
+
+**Conclusion: same verdict independently reached — do not blind-edit.** The
+`.spl` lane cannot be verified without a bootstrap-scale rebuild
+(`--runtime-bundle=simple-core` links a prebuilt archive, not the edited
+source; the standalone single-file archive build pulls in the entire
+compiler and does not finish in 300s), and that path is out of scope here.
+
+**Second, independent blocker found while re-deriving the fix design (not
+previously stated as a *structural* blocker in this doc — worth recording
+even though no rebuild was attempted to confirm it empirically):** the
+resume-cursor remedy in (e) requires a place to persist per-string mutable
+state (`last_char_index`, `last_byte_offset`) across calls. In this lane
+there is no safe home for it even before the verification problem:
+
+- The header bit the hosted C/Rust lanes use for their ASCII-cache flag is
+  bit 31 of the `reserved` field, which lands on the sign bit of the i64
+  header word at offset 0 — already documented in-file (:288-295) as
+  "awkward to set safely from Simple," and the same obstacle blocks storing
+  a byte-offset cursor there too (a cursor needs more than 1 bit, so it's
+  strictly harder than the flag that was already rejected).
+- The only alternative, a module-level pointer-keyed memo (mirroring the
+  Rust seed's 4-slot thread-local `Arc`-identity memo), is foreclosed by a
+  standing repo defect: `Dict` is broken under native codegen (`.len()`
+  always returns -1, `.get()` on a struct/enum/non-scalar value is
+  corrupt/segfaulting) — see `.claude/rules/code-style.md` "Native-Codegen
+  Dict Pitfalls" and `doc/07_guide/language/dict_native_pitfalls.md` — and
+  native codegen is exactly the lane `core_string.spl` compiles into.
+
+So the remedy this doc has specified since 2026-07-30 needs a **new header
+word** added to the string layout (to host both the ASCII flag and the
+cursor, sidestepping the sign-bit hazard) before it is landable as a
+`.spl`-only change here at all — a prerequisite independent of, and prior
+to, the verification blocker. This is the concrete unblock condition to add
+alongside the existing one: (a) a prebuilt, freshly-rebuilt
+`libsimple_runtime.a` reachable for verification, **and** (b) a string
+header layout change to hold the per-string cursor.
+
+Also confirmed explicitly, since a narrower fix is tempting when a full one
+is blocked: word-at-a-time-ing the existing ASCII probe (a stateless,
+purely-local change, ~8x on the probe's own constant factor per (e)(2))
+remains available and safe to land independently, but per this task's own
+framing it is **not a fix** — it does not touch the non-ASCII decode walk,
+which is where the quadratic behavior actually lives (Defect 1's O(index)
+cost class is unchanged by a faster O(index) probe). Not applied, to avoid
+it being mistaken for progress on the tracked defect.
+
+The other `.spl` site, `_EvalOps/access_literal_assign_eval.spl:78-84`, was
+also re-checked: it still delegates straight to `s.char_code_at(idx)` (the
+(f) correctness fix from 2026-08-01 remains in place) and carries no
+independent scan of its own to fix — it simply inherits whichever runtime
+lane it is linked/interpreted against.
+
+No source edit was made this pass; nothing was reverted (there was nothing
+to revert).

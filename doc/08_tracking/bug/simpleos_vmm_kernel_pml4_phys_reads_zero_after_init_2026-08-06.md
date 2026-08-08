@@ -1,7 +1,16 @@
 # `vmm_kernel_pml4_phys()` reads 0 after a SUCCESSFUL vmm_init — blocks every FS-exec ring-3 spawn
 
 - **ID:** simpleos-vmm-kernel-pml4-phys-reads-zero-2026-08-06
-- **Status:** FIXED 2026-08-06 — verified by a positive in-guest marker (below)
+- **Status:** FIXED 2026-08-06 — verified by a positive in-guest marker (below);
+  **re-confirmed 2026-08-08 by re-reading 4 independent 2026-08-06 post-fix
+  serial logs** (not a fresh live run — see 2026-08-08 section), each bearing
+  the anti-fabrication `[VMM] portable VMM published kernel PML4 ...` marker
+  followed by `[spawn] user AS ready (private low) root=...`: general FS-exec
+  ring-3 spawn no longer returns `rc=-1`. The narrower Lane-B3 `SpawnWait`
+  harness is separately blocked: its entry `.spl` file was never committed to
+  `HEAD`'s history (confirmed via `git cat-file -e HEAD:<path>` /
+  `git rev-list -1 HEAD -- <path>`, both empty) — a build-system gap, not a
+  VMM/PML4 recurrence — see 2026-08-08 section below.
 - **Severity:** CRITICAL — blocks in-guest execution of BOTH the clang toolchain
   and the Simple compiler payload. Gates AC-4..AC-8 of the migration campaign.
 - **Owner path:** `src/os/kernel/memory/vmm_core.spl`,
@@ -208,6 +217,109 @@ construction. Making `create_user_address_space` proceed anyway converts a clean
   Tasks, and adds a `SpawnWait` primitive that is blocked by this same defect.
 - `doc/07_guide/os/baremetal_simple_codegen_landmines.md` — freestanding
   codegen landmine catalog.
+
+## Re-check 2026-08-08 — PML4 fix IS effective; general FS-exec ring-3 spawn now succeeds; the SpawnWait (Lane B3) harness is separately blocked by a missing source file
+
+Triggered by project memory still listing "every FS-exec ring-3 spawn returns
+`rc=-1`" as **THE blocker**, despite the 2026-08-07 spec addition. Re-checked
+whether that claim is still true.
+
+**Verdict: the PML4 fix is effective and general ring-3 spawn is UNBLOCKED.**
+Evidence — four independent POST-fix serial logs (all after commit
+`4575b4ce88d`, 2026-08-06 05:52:34, which added
+`vmm_publish_kernel_pml4`/`paging.spl:239`), spanning 2026-08-06 06:11 through
+13:56:
+
+- `build/os/ssh_lld_link_uefi.serial.log:60` — `[VMM] portable VMM published
+  kernel PML4 0x402718720`, then `:707` `[spawn] user AS ready (private low)
+  root=402755584`, PT_LOAD mapped, stack/heap mapped. **No `FAIL user-AS`, no
+  `rc=-1`.**
+- `build/os/scp_retrieve_over_ssh_uefi.serial.log:714` — same pattern, spawning
+  `/usr/bin/clang` (127 MB image, the exact scenario in the original evidence
+  block above).
+- `build/os/ssh_b1_witness_uefi.serial.log:755` — same pattern.
+- `build/os/ssh_simple_hello_uefi.serial.log:585-593` — same pattern, spawning
+  `/usr/bin/simple`; the spawned process reaches `[spawn] entering user cs=0x2b
+  ... rip=0x1073741824`, then genuinely runs in ring 3 (`open path=/hello.spl`,
+  `NVMe read 39 bytes`, `phase=post-read cs=0x2b cpl=3`) before faulting later
+  (see below) — this is a downstream, unrelated bug, not the PML4/spawn-setup
+  defect.
+
+`/usr/bin/grep -c rc=-1` is 0 in every one of these four logs, but that is a
+secondary check, not the proof — the load-bearing evidence is the POSITIVE
+`portable VMM published kernel PML4` marker itself (the doc's own
+anti-fabrication design: a stubbed accessor prints nothing), confirmed
+single-boot in the checked log
+(`/usr/bin/grep -c 'BdsDxe: starting Boot0001' ssh_simple_hello_uefi.serial.log`
+= 1, ruling out the marker and the success line coming from two different
+boots concatenated in one file). The guard at `vmm_address_space.spl:75/:91/:119`
+is passing in all four logs. **The headline finding from the memory note is
+stale**: this specific defect was fixed and general FS-exec ring-3 spawn (the
+clang/lld/simple-interpreter payloads) has not returned `rc=-1` on the general
+path since — as of the 2026-08-06 logs re-read on 2026-08-08; not re-run live
+today (see budget note below).
+
+**However, one specific harness regressed independently and is currently
+unbuildable — not for a VMM reason.** `scripts/os/build_spawn_wait_ring3.shs`
+(Lane B3, the `SpawnWait`/syscall-120 nested-spawn primitive; see
+`doc/08_tracking/bug/fs_exec_ring3_fork_unreachable_spawnwait_2026-08-06.md`)
+references entry file
+`examples/09_embedded/simple_os/arch/x86_64/fs_exec_spawn_wait_ring3_entry.spl`.
+That file **does not exist on disk** (`git status --porcelain` shows the build
+script `A`dded but not this entry file; `find` over the whole tree finds no
+file by this name anywhere). A live rebuild attempt today
+(`SKIP_PAYLOAD=1 BOOT_WAIT=60 timeout 500 sh scripts/os/build_spawn_wait_ring3.shs`)
+failed immediately at the kernel-build step:
+`Build failed: failed to read .../fs_exec_spawn_wait_ring3_entry.spl: No such
+file or directory (os error 2)` — never reached QEMU. The stale
+`build/os/spawn_wait_ring3.serial.log` (mtime 2026-08-06 05:31:15, **21 minutes
+before** the 05:52:34 fix commit) still shows the old `FAIL user-AS
+... rc=-1` failure — that is pre-fix evidence, not current status; it should
+not be read as still-reproducing.
+
+**Recoverability checked and ruled out via git — not just inferred:**
+`git cat-file -e HEAD:<path>` fails ("does not exist in 'HEAD'"), and
+`git rev-list -1 HEAD -- <path>` returns nothing, i.e. **no commit reachable
+from HEAD ever touched this path** — it was never committed, not deleted in a
+later commit. (`jj file show <path>` could not be used to cross-check further:
+the jj workspace itself is stale — "not updated since operation
+f1204fdea46d" — a separate, already-known issue, not investigated here.) So
+this is not a small "restore a lost commit" fix; the file must be
+reconstructed from scratch (the 2026-08-06 write-up documents its role and the
+harness reaching D6 with it in place that day, so its intended content is
+known, but recreating and re-verifying it is a real implementation task, not a
+one-line recovery — left out of scope for this investigation per the "no large
+kernel fix" instruction).
+
+**Board-runnable check:** `build_spawn_wait_ring3.shs` uses OVMF pflash
+(`OVMF_CODE_4M.fd`/`OVMF_VARS_4M.fd`) and explicitly documents "NEVER
+`-kernel`" per the board-runnable rule; no `-kernel` usage found in the script
+itself. **But the C source it links against, `baremetal_stubs.c`, still has
+several unconditional `outb(0xF4, ...)` ("isa-debug-exit") calls on ring-3
+exit paths** (e.g. `:16917`, `:17553`, plus two bare `for(;;) outb(0xF4, 0)`
+loops at `:647`/`:700`), including the `_bare_exec_handle` case-0
+`exit(status)` path the B3 lane's own doc names as the halt-on-exit hazard.
+This is a *documented*, not silent, gap — the code has adjacent comments
+acknowledging it (`:14904-14906` "If isa-debug-exit is not present the write
+is ignored"; `:16749-16753` "also not board-runnable — isa-debug-exit does not
+exist outside QEMU's ISA bus"; `:17419-17420` shows the intended pattern, QEMU
+`outb` then a board-safe `for(;;) cli;hlt` fallback) — but not every site
+below those comments has that fallback, so on real hardware a ring-3
+`exit(status)` write to port 0xF4 is a harmless no-op (unmapped I/O port,
+silently dropped) rather than a crash, yet the process does not cleanly signal
+its exit status to anything watching the board the way QEMU's isa-debug-exit
+does. Flagging per the board-runnable rule rather than fixing — it predates
+this investigation and is not part of the PML4/spawn defect.
+
+**New, separate downstream finding (not this bug):** in
+`ssh_simple_hello_uefi.serial.log`, after ring-3 spawn fully succeeds and the
+spawned `/usr/bin/simple` interpreter opens and reads `/hello.spl` (39 bytes),
+it hits a ring-3 page fault: `errcode=0x...5` (present, ring3-cpl, non-write —
+protection violation), `cs=0x2b` (still ring 3), `cr2=0x0` (faulting address
+NULL). This looks like a null-pointer dereference inside the spawned `simple`
+interpreter after the file read, unrelated to VMM/PML4/spawn setup. Not
+investigated further here — flagging for whoever picks up the in-guest
+`simple`-interpreter lane next.
 
 ## Correction to the record
 
