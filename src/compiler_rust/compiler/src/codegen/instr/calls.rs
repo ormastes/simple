@@ -2554,6 +2554,24 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // those the `runtime_funcs` branch is never taken and these entries
         // would be dead. See
         // doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md
+        // Fast in-memory DB (runtime_db.c). These were the last entries in
+        // text_cstr_arg_indices, which passed rt_string_data as a bare
+        // `const char*`. That is unsound: alloc_runtime_string allocates
+        // size_of::<RuntimeString>() + len with NO trailing NUL, so the C side's
+        // strlen/strdup read past the end of the allocation and only appeared to
+        // work on allocator luck. Converted to the repo's (ptr, len) convention
+        // together with runtime_db.c's boxed-RuntimeValue int ABI, which had
+        // also never matched generated code. See doc/08_tracking/bug/
+        // rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md
+        "rt_db_table_create" => Some(&[0]),   // name
+        "rt_db_put" => Some(&[1]),            // pk
+        "rt_db_get" => Some(&[1]),            // pk
+        "rt_db_delete" => Some(&[1]),         // pk
+        "rt_db_put_row3" => Some(&[1]),       // pk
+        "rt_db_get_int_by_pk" => Some(&[1]),  // pk
+        "rt_db_update_int" => Some(&[1]),     // pk
+        "rt_db_update_text" => Some(&[1, 3]), // pk, value
+        "rt_db_put_value_text" => Some(&[3]), // value
         // rt_package_sha256 joined the family once its `*mut c_char` RETURN was
         // changed to a RuntimeValue text (an arg table cannot fix a return type).
         "rt_package_sha256"
@@ -2717,16 +2735,19 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // NOTE: rt_cuda_launch_kernel, rt_cuda_module_load, rt_cuda_module_load_data,
         // and rt_profiler_record_call are in text_arg_indices now (not text_cstr)
         // because they take (ptr, len) pairs; see doc/08_tracking/bug/extern_text_cchar_abi_family_sweep_2026-07-29.md
-        // Fast in-memory DB: C functions accept const char* for string params
-        "rt_db_table_create" => Some(&[0]),   // name
-        "rt_db_put" => Some(&[1]),            // pk_text
-        "rt_db_get" => Some(&[1]),            // pk_text
-        "rt_db_delete" => Some(&[1]),         // pk_text
-        "rt_db_put_row3" => Some(&[1]),       // pk
-        "rt_db_get_int_by_pk" => Some(&[1]),  // pk
-        "rt_db_update_int" => Some(&[1]),     // pk
-        "rt_db_update_text" => Some(&[1, 3]), // pk, value
-        "rt_db_put_value_text" => Some(&[3]), // value
+        // THIS TABLE IS NOW EMPTY, AND MUST STAY EMPTY.
+        // The rt_db_* family was the last occupant and has moved to
+        // text_arg_indices. There is no sound way to satisfy a `*const c_char`
+        // parameter from generated code: alloc_runtime_string allocates
+        // size_of::<RuntimeString>() + len with NO trailing NUL, so the pointer
+        // rt_string_data hands out is never null-terminated and any CStr /
+        // strlen / strdup on the callee side reads past the allocation. It only
+        // ever appeared to work on allocator luck.
+        //
+        // Do NOT add entries here. Give the runtime function an explicit
+        // (ptr, len) pair and list it in text_arg_indices instead. The function
+        // is kept (rather than deleted with its call site) so that this
+        // reasoning stays attached to the mechanism it is about.
         _ => None,
     }
 }

@@ -68,6 +68,24 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 
         // Package SFFI — parity with the Cranelift table. See
         // doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md
+        // Fast in-memory DB (runtime_db.c). These were the last entries in
+        // text_cstr_arg_indices, which passed rt_string_data as a bare
+        // `const char*`. That is unsound: alloc_runtime_string allocates
+        // size_of::<RuntimeString>() + len with NO trailing NUL, so the C side's
+        // strlen/strdup read past the end of the allocation and only appeared to
+        // work on allocator luck. Converted to the repo's (ptr, len) convention
+        // together with runtime_db.c's boxed-RuntimeValue int ABI, which had
+        // also never matched generated code. See doc/08_tracking/bug/
+        // rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md
+        "rt_db_table_create" => Some(&[0]),   // name
+        "rt_db_put" => Some(&[1]),            // pk
+        "rt_db_get" => Some(&[1]),            // pk
+        "rt_db_delete" => Some(&[1]),         // pk
+        "rt_db_put_row3" => Some(&[1]),       // pk
+        "rt_db_get_int_by_pk" => Some(&[1]),  // pk
+        "rt_db_update_int" => Some(&[1]),     // pk
+        "rt_db_update_text" => Some(&[1, 3]), // pk, value
+        "rt_db_put_value_text" => Some(&[3]), // value
         // rt_package_sha256 joined the family once its `*mut c_char` RETURN was
         // changed to a RuntimeValue text (an arg table cannot fix a return type).
         "rt_package_sha256"

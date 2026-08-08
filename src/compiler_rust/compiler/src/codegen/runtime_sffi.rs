@@ -331,24 +331,24 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // Fast DB operations (runtime_db.c)
     // =========================================================================
-    RuntimeFuncSpec::new("rt_db_table_create", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_table_create", &[I64, I64, I64, I64], &[I64]), // name(ptr,len), num_cols, pk_col
     RuntimeFuncSpec::new("rt_db_table_destroy", &[I64], &[]),
-    RuntimeFuncSpec::new("rt_db_put", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_put", &[I64, I64, I64, I64], &[I64]), // handle, pk(ptr,len), num_values
     RuntimeFuncSpec::new("rt_db_put_value_int", &[I64, I64, I64, I64], &[]),
-    RuntimeFuncSpec::new("rt_db_put_value_text", &[I64, I64, I64, I64], &[]),
-    RuntimeFuncSpec::new("rt_db_get", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_put_value_text", &[I64, I64, I64, I64, I64], &[]), // handle, row, col, value(ptr,len)
+    RuntimeFuncSpec::new("rt_db_get", &[I64, I64, I64], &[I64]), // handle, pk(ptr,len)
     RuntimeFuncSpec::new("rt_db_get_int", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_db_get_text", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_get_text", &[I64, I64, I64], &[I64]), // handle, row, col -> RuntimeValue(text)
     RuntimeFuncSpec::new("rt_db_scan_range", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_scan_result", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_db_delete", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_delete", &[I64, I64, I64], &[I64]), // handle, pk(ptr,len)
     RuntimeFuncSpec::new("rt_db_row_count", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_col_count", &[I64], &[I64]),
     // Batched DB operations (reduce extern call overhead)
-    RuntimeFuncSpec::new("rt_db_put_row3", &[I64, I64, I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_db_get_int_by_pk", &[I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_db_update_int", &[I64, I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_db_update_text", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_db_put_row3", &[I64, I64, I64, I64, I64, I64, I64], &[I64]), // handle, pk(ptr,len), mask, v0..v2
+    RuntimeFuncSpec::new("rt_db_get_int_by_pk", &[I64, I64, I64, I64, I64], &[I64]), // handle, pk(ptr,len), col, default
+    RuntimeFuncSpec::new("rt_db_update_int", &[I64, I64, I64, I64, I64], &[I64]), // handle, pk(ptr,len), col, value
+    RuntimeFuncSpec::new("rt_db_update_text", &[I64, I64, I64, I64, I64, I64], &[I64]), // handle, pk(ptr,len), col, value(ptr,len)
     // Integer-PK DB operations (zero string alloc from caller)
     RuntimeFuncSpec::new("rt_db_iput3", &[I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_db_iget_int", &[I64, I64, I64, I64], &[I64]),
