@@ -1,7 +1,14 @@
 # T3 full-bootstrap redeploy blocked: Stage 3 self-host fails, `unresolved type: ByteOrder` in `cache_validator.spl`
 
-Status: OPEN — blocks task "Bootstrap redeploy to get a genuine pure-Simple
-binary" (session tracker #18).
+Status: RESOLVED (this symptom) — the `unresolved type: ByteOrder` /
+`try_register_bootstrap_global_symbol` lazy-import-registration defect
+described below is fixed at `origin/main` (BGS1 fix,
+`module_lowering.spl:952-955`) and is now covered by a regression spec:
+`test/01_unit/compiler/hir/hir_lazy_import_registration_flag_regression_spec.spl`
+(RED confirmed with the fix reverted, GREEN with it restored). Task #18
+overall remains blocked by a DIFFERENT, later-discovered issue — see the
+"live head is now a vacuous binary" update at the bottom of this file, which
+is out of scope for this ByteOrder-specific fix and owned by a separate lane.
 Date: 2026-08-06
 Area: compiler / self-hosted HIR type resolution (`src/compiler`), bootstrap
 pipeline (`scripts/bootstrap/bootstrap-from-scratch.sh`)
