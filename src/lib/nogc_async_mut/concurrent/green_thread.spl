@@ -31,10 +31,25 @@
 # is unchanged (pre-computed values use value_mode:1, always consistent).
 
 class GreenScheduler:
-    """Encapsulated scheduler state for the cooperative green-thread queue."""
+    """Encapsulated scheduler state for the cooperative green-thread queue.
+
+    `ready_count`/`done_count` are AGGREGATE counters over both task classes
+    (deferred closures from green_spawn and pre-computed value slots from
+    green_spawn_value); green_ready_count() reports the outstanding total from
+    them.
+
+    `value_ready`/`value_done` count ONLY the pre-computed value slots. A value
+    handle's completion is its position in the value sequence, so it must be
+    compared against `value_done`, never against the aggregate `done_count` —
+    otherwise running an unrelated deferred task (which bumps `done_count`)
+    flips an untouched value handle to is_done()==true while
+    green_ready_count() still reports it outstanding.
+    """
     next_id: usize
     ready_count: usize
     done_count: usize
+    value_ready: usize
+    value_done: usize
 
 class GreenTask:
     """A pending deferred task stored in the module-level task table."""
@@ -57,7 +72,7 @@ class GreenThreadHandle:
 
     fn is_done() -> bool:
         if self.value_mode == 1:
-            return self.value_order <= GREEN_SCHEDULER.done_count
+            return self.value_order <= GREEN_SCHEDULER.value_done
         if self.value_mode == 2:
             var i: usize = 0
             while i < GREEN_TASKS.len():
@@ -83,7 +98,7 @@ class GreenThreadHandle:
             return 0
         0
 
-var GREEN_SCHEDULER: GreenScheduler = GreenScheduler(next_id: 1, ready_count: 0, done_count: 0)
+var GREEN_SCHEDULER: GreenScheduler = GreenScheduler(next_id: 1, ready_count: 0, done_count: 0, value_ready: 0, value_done: 0)
 var GREEN_TASKS: [GreenTask] = []
 
 export GreenThreadHandle
@@ -114,7 +129,10 @@ fn green_spawn_value(result: i64) -> GreenThreadHandle:
     """Schedule an already computed result on the cooperative queue."""
     val task_id = GREEN_SCHEDULER.next_id
     GREEN_SCHEDULER.next_id = GREEN_SCHEDULER.next_id + 1
-    val value_order = GREEN_SCHEDULER.ready_count + 1
+    # Position in the VALUE sequence — not in the aggregate ready sequence, so
+    # that deferred-task completions never satisfy this handle's is_done().
+    val value_order = GREEN_SCHEDULER.value_ready + 1
+    GREEN_SCHEDULER.value_ready = GREEN_SCHEDULER.value_ready + 1
     GREEN_SCHEDULER.ready_count = GREEN_SCHEDULER.ready_count + 1
     GreenThreadHandle(task_id: task_id, value_mode: 1, value_order: value_order, value_result: result)
 
@@ -171,8 +189,11 @@ fn green_run_one() -> bool:
         GREEN_SCHEDULER.done_count = GREEN_SCHEDULER.done_count + 1
         return true
     # No deferred tasks; advance a pre-computed slot if any remain.
+    # This is the ONLY site that may advance `value_done` — deferred-task
+    # completions above bump the aggregate `done_count` alone.
     if GREEN_SCHEDULER.done_count < GREEN_SCHEDULER.ready_count:
         GREEN_SCHEDULER.done_count = GREEN_SCHEDULER.done_count + 1
+        GREEN_SCHEDULER.value_done = GREEN_SCHEDULER.value_done + 1
         return true
     false
 
