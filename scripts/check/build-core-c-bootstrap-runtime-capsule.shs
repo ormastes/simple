@@ -200,6 +200,7 @@ printf '%s\n' "$RUNTIME_DIR/test/rt_transient_heap_scope_selfcheck.c" >>"$LOCAL_
 printf '%s\n' "$RUNTIME_DIR/test/rt_mem_guard_native_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_mem_guard_stale_slot_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_mem_guard_after_sweep_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
+printf '%s\n' "$RUNTIME_DIR/test/rt_tls13_sha256_sleep_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 sort -u -o "$LOCAL_INPUTS_FILE" "$LOCAL_INPUTS_FILE"
 
 ARCHIVE="$TMP_DIR/libsimple_runtime.a"
@@ -282,6 +283,14 @@ record_check
 nm_has_text_symbol "$TMP_DIR/runtime_native.nm.txt" rt_string_free ||
     die "runtime-native-rt-string-free-provider-missing"
 record_check
+for symbol in rt_tls13_sha256 rt_sleep_nanos; do
+    nm_has_text_symbol "$TMP_DIR/archive.nm.txt" "$symbol" ||
+        die "archive-$symbol-provider-missing"
+    record_check
+    nm_has_text_symbol "$TMP_DIR/runtime_native.nm.txt" "$symbol" ||
+        die "runtime-native-$symbol-provider-missing"
+    record_check
+done
 # Contract-check ABI moved out of runtime_native.c into its own archive member
 # (see the note in src/runtime/runtime_native.c); assert it there, not in
 # runtime_native.o.
@@ -413,10 +422,23 @@ grep -q '^SELFCHECK PASSED (0 failures)$' "$MEM_GUARD_AFTER_SWEEP_SELF_CHECK_LOG
     die "rt-mem-guard-after-sweep-selfcheck-receipt-missing"
 record_check
 
+HOST_PRIMITIVE_SELF_CHECK_BIN="$TMP_DIR/rt_tls13_sha256_sleep_selfcheck"
+HOST_PRIMITIVE_SELF_CHECK_LOG="$TMP_DIR/rt_tls13_sha256_sleep_selfcheck.out"
+# shellcheck disable=SC2086
+"$CC_PATH" -std=gnu11 -O1 \
+    "$RUNTIME_DIR/test/rt_tls13_sha256_sleep_selfcheck.c" \
+    "$ARCHIVE" $SELF_CHECK_LIBS -o "$HOST_PRIMITIVE_SELF_CHECK_BIN" ||
+    die "rt-tls13-sha256-sleep-selfcheck-link-failed"
+"$HOST_PRIMITIVE_SELF_CHECK_BIN" >"$HOST_PRIMITIVE_SELF_CHECK_LOG" 2>&1 ||
+    die "rt-tls13-sha256-sleep-selfcheck-failed"
+grep -q '^SELFCHECK PASSED (0 failures)$' "$HOST_PRIMITIVE_SELF_CHECK_LOG" ||
+    die "rt-tls13-sha256-sleep-selfcheck-receipt-missing"
+record_check
+
 # A run that reached here having executed fewer checks than the capsule
 # declares is a vacuous pass, not a pass. The floor is raised whenever a
 # check is added; it is never lowered to make a run green.
-CHECKS_EXPECTED=28
+CHECKS_EXPECTED=33
 [ "$CHECKS_RUN" -ge "$CHECKS_EXPECTED" ] ||
     die "checks-executed-below-floor:$CHECKS_RUN/$CHECKS_EXPECTED"
 
@@ -469,6 +491,10 @@ MANIFEST="$TMP_DIR/capsule.manifest"
     echo "rt_mem_guard_stale_slot_selfcheck_output_sha256=$(hash_file "$MEM_GUARD_STALE_SLOT_SELF_CHECK_LOG")"
     echo "rt_mem_guard_after_sweep_selfcheck=pass"
     echo "rt_mem_guard_after_sweep_selfcheck_output_sha256=$(hash_file "$MEM_GUARD_AFTER_SWEEP_SELF_CHECK_LOG")"
+    echo "rt_tls13_sha256_provider=runtime_native.o"
+    echo "rt_sleep_nanos_provider=runtime_native.o"
+    echo "rt_tls13_sha256_sleep_selfcheck=pass"
+    echo "rt_tls13_sha256_sleep_selfcheck_output_sha256=$(hash_file "$HOST_PRIMITIVE_SELF_CHECK_LOG")"
     echo "simple_contract_check_archive_symbol=T"
     echo "simple_contract_check_provider=runtime_contracts.o"
     echo "simple_contract_check_msg_archive_symbol=T"

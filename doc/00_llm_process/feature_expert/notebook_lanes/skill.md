@@ -289,14 +289,15 @@ Only remaining gap: **K5**, the CUDA sibling — being landed separately
   contract spec `test/system/ui/shared_ui_contract_spec.spl`.
 - LSP backend: `src/app/lsp/main.spl`; editor grammar donor: `src/app/vscode_extension/`.
 - Landed: `src/lib/nogc_sync_mut/notebook/{session_manager,executor,types,ipynb,
-  snb_sdn,magics,lane_locks,remote_exec,local_exec,lsp_bridge}.spl` (K1-K4/L1/H2/P1/K2);
-  `src/app/simple_lab/{export_sdoctest,main,lab_executor,lab_server}.spl`
-  (L1/L2/L3); `tools/jupyter/kernel_wrapper.py` (Python ZMQ transport, P0);
-  `tools/jupyter/labextension/` (CM6 grammar, X1) with generator
+  snb_sdn,magics,lane_locks,remote_exec,local_exec,lsp_bridge,vulkan_exec}.spl`
+  (K1-K4/L1/H2/P1/K2/K6); `src/app/simple_lab/{export_sdoctest,main,lab_executor,
+  lab_server}.spl` (L1/L2/L3); `tools/jupyter/kernel_wrapper.py` (Python ZMQ
+  transport, P0); `tools/jupyter/labextension/` (CM6 grammar, X1) with generator
   `scripts/gen_cm6_grammar.mjs`. K2's shared `local_exec.spl` has landed but
   is NOT yet wired into Simple Lab — `main.spl` and `lab_server.spl` both
   still construct `lab_executor.spl`'s `LabLocalExecFactory`; retiring it is
-  still open. Not yet landed: K5-K6 (GPU-dependent), L4 (protocol contract).
+  still open. Not yet landed: K5 (CUDA, in progress separately), L4 (protocol
+  contract).
 
 ## Known Constraints
 
